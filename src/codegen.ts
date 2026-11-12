@@ -2,18 +2,20 @@ import { bodyOf, type Arenas, type InstanceId, type LocalId } from "./arenas.ts"
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
 import { formatPlan, printStream, integerMethod, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.ts";
-import { compile as compileRegex, parsePattern } from "./regex.ts";
+import { compile as compileRegex, parsePattern, type RegexTables } from "./regex.ts";
 import { ASSIGNMENTS } from "./operators.ts";
 import { lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { CheckedHost, comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
 import { print, RUNTIME, write } from "./runtime.ts";
-import type { BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
+import type { ArithmeticOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, compound, conversions, layoutOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { EMBEDDED, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
-import { forEachChild, NodeMap, walkWhile, type AnyNode } from "./nodes.ts";
+import { EMBEDDED, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
+import { forEachChild, NodeMap, walkWhile, type AnyNode, type NodeSet } from "./nodes.ts";
+import type { Tables } from "./compilation.ts";
+import type { Kind, Verdict } from "./narrow.ts";
 
 // Every instance to compile, as records.
 export const compiledOf = ({ instances, tables }: Checked): Instance[] => instances.map((i) => tables.arenas.instanceOf(i));
@@ -191,239 +193,497 @@ type Share = { template: Instance; at: Set<usize>; code: Map<usize, InstanceId |
 const PAIR = "{ ptr, ptr }";
 export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; debug?: boolean; failed?: string[] };
 
+// A `finally` region being emitted: the block its `finally` starts, the slot naming the way
+// control left, each way out with how to resume it, the labels made before the region, and
+// how many catches and scopes enclosed it.
+type Region = { label: string; chosen: string; exits: { key: string; resume: () => void }[]; start: usize; handlers: usize; depth: usize; floor: usize; slots: Map<string, { slot: string; type: Type }> };
+
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
 // Release builds wrap on overflow; debug builds panic.
-export function codegen(checked: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false, debug = false, failed }: Options): string {
-  const { tables: noted } = checked;
-  const instances = compiledOf(checked);
-  const {
-    asserts, computed, jsAccessors, jsCalls, jsEmptyTests, jsEvaluations, jsExports, jsMembers,
-    jsMethods, jsNews, jsOptionalOf, jsStatics, timerCalls, restStarts, stringBuilds,
-    syncFileCalls, combinedCalls, formatCalls, inspectCalls, equalities, jsonCalls, dynCalls,
-    dynMembers, boxedMembers, fixedFills, printCalls, clocks, fileCalls, lengthChecks, maths, parses,
-    fixedPrints, regexCalls, regexNews, regexStringCalls, selfCalls, kindTests, keyTests, typing, regex: regexTables,
-    joinCalls, integerCalls, optionalCalls, presenceTests, arenas,
-  } = noted;
-  const localOf = (id: LocalId): Local => arenas.localOf(id);
-  const llvm = layoutOf(typing);
-  let names = symbolNames(arenas);
-  // Instances made while compiling, as comptime makes, are named once they are met.
-  const symbol = (a: Ref<Arenas>, i: Instance): string => {
-    if (!names.has(i.id)) names = symbolNames(a);
-    return symbolIn(a, i, names);
-  };
-  const recOf = <T extends Type>(t: T | undefined) => (t === undefined || typeof t === "string" ? undefined : typing.rec(t as Exclude<T, string>));
-  const isRef = (t: Type) => recOf(t)?.kind === "ref";
-  const isArray = (t: Type): t is ArrayType => recOf(t)?.kind === "array";
-  // Whether indexing a value reads an element: an array's, or a fixed array's, through a
-  // reference too.
-  const indexes = (t: Type): boolean => {
-    const held = referent(t);
-    const kind = recOf(held)?.kind;
-    return kind === "array" || kind === "fixed";
-  };
-  const isDyn = (t: Type): t is DynType => recOf(t)?.kind === "dyn";
-  const relays = (from: Type, to: DynType) => isDyn(from) && typing.callableOf.has(typing.rec(from).of) && typing.callableOf.has(typing.rec(to).of) && !typing.sameCallable(from, to);
-  // What a reference points to, or the type itself.
-  const referent = (t: Type): Type => {
-    if (typeof t === "string") return t;
-    const r = typing.rec(t);
-    return r.kind === "ref" ? r.to : t;
-  };
-  // Whether a value of the type holds a Rust handle, which only moves.
-  const holdsRust = (t: Type) => typing.holdsPart(t, (u) => rustClassOf(typing, u) !== undefined);
-  const unwinds = panic === "abort" ? "uwtable" : UNWINDS;
-  // In a debug or `--leaks` build each of the program's own functions keeps a frame on the
-  // runtime's shadow stack, `{ site, name, prev }`, for a panic's backtrace and a leak's site:
-  // `framing` is the body of the one being emitted, and `site` the expression or statement whose
-  // calls it is making.
-  let framing: string[] | undefined;
-  let site: Span | undefined;
-  // In a `-g` build, the body of the program's own function being emitted, and the site last marked in it.
-  let debugging: string[] | undefined;
-  let marked: Span | undefined;
-  let frames = false;
-  const globals: string[] = [];
-  const regexes = new Map<string, string>();
-  const out: string[] = [];
-  // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
-  let allocas: string[] = [];
-  let body: string[] = [];
-  let temps = 0;
-  let labels = 0;
-  // Each variable's number in the function being emitted, which tells apart two of one name.
-  // Counted per function, so a function's IR doesn't change with the program around it.
-  let numbered = new Map<LocalId, usize>();
-  // The label of the block being emitted into, which a phi names as its predecessor.
-  let block = "entry";
-  // The instance being emitted, and the tables its checking produced.
-  let current = instances[0]!;
-  let { types, locals, calls, setters, coercions, jumps } = current;
-  const localAt = (n: Expr | Stmt | Param | ObjectProp) => arenas.localOf(locals.get(n));
-  const callOf = (e: Expr) => arenas.instanceOf(calls.get(e));
-  const setterOf = (e: Expr) => arenas.instanceOf(setters.get(e));
-  // The class of the constructor or method being emitted, whose instance `%this` points to.
-  let self: ClassType | undefined;
-  // In a closure, where each variable it captures lives, loaded from its environment.
-  let captured = new Map<LocalId, string>();
-  // The value of an Option an optional chain's link has already evaluated, to read through.
-  const known = new NodeMap<Expr, string>();
-  // The catch blocks enclosing the code being emitted, innermost last: where each starts, and
-  // the slot its error goes in.
-  const handlers: { label: string; slot: string; depth: usize; floor: usize }[] = [];
-  // The `finally` regions enclosing the code being emitted, innermost last.
-  const finallies: Region[] = [];
-  // Where a `break` and a `continue` go for each statement they can name.
-  const exits = new NodeMap<Stmt, { exit: string; next?: string; depth: usize }>();
-  // Values the statement being emitted made and nothing took over, released when it ends.
-  // Each keeps a slot it is stored in across a call that may panic, for its landing pad.
-  let pending: { v: string; type: Type; slot?: string }[] = [];
-  // Where the statement being lowered starts in `pending`: a statement in a match arm's block
-  // runs inside an expression whose own values are pending below it.
-  let floor = 0;
-  // The scopes matches and pipes open for themselves.
-  const transient = new WeakSet<object>();
-  // The slot each C string in a loop's condition or update was given when the loop began.
-  const reserved = new NodeMap<Expr, string>();
-  // The generator being emitted: its type, its frame's LLVM type, the block each `yield`
-  // resumes at in order, where it starts, and where it gives that it has finished.
-  let resuming: { type: GeneratorType | FutureType; frame: string; resumes: string[]; start: string; done: string } | undefined;
-  // Slots that are fields of a generator's frame: they outlive one `next()` and start empty.
-  let framed = new Set<string>();
-  // Where a `return` in each match arm's block puts the value it gives, when the match gives one.
-  const arms = new NodeMap<Stmt, { slot: string; type: Type } | undefined>();
-  // What each enclosing scope owns, outermost first, dropped as it ends or is left.
-  let scopes: { slot: string; type: Type }[][] = [];
-  // Receivers copied into slots for owning methods, whose leftovers drop after the call.
-  const spills: { slot: string; type: Type; copy: { v: string; type: Type } }[] = [];
-  // The index values an assignment ran ahead of its value, by index expression.
-  const fixed = new NodeMap<Expr, string>();
-  // Each literal's string block, made once.
-  const texts = new Map<string, string>();
-  const bigConstants = new Map<bigint, string>();
-  const cStrings = new Map<string, string>();
-  const tables = new Set<string>();
-  // The function dropping, or copying, what a value of each type owns, made once.
-  const glue = { drop: new TypeMap<Type, string>(), copy: new TypeMap<Type, string>() };
-  // The function comparing two values of each compound type, made once.
-  const comparers = new TypeMap<Type, string>();
-  const jsonWriters = new TypeMap<Type, string>();
-  const jsonReaders = new TypeMap<Type, string>();
-  const inspectors = new TypeMap<Type, string>();
-  // Each async instance's awaits, by the state it is paused in at each: the frame field the
-  // awaited future is in, and its type, for cancelling it there.
-  const awaitsOf = new Map<InstanceId, { state: usize; field: usize; type: Type }[]>();
-  // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
-  // cancel function is wanted for.
-  const combinePolls = new TypeMap<FutureType, string>();
-  const cancelled = new Set<InstanceId>();
-  // The functions writing String(x) of a value with parts, by its type.
-  const stringers = new TypeMap<Type, string>();
-  // The global each top-level const holding an aggregate lives in.
-  const constantGlobals = new Map<InstanceId, string>();
-  // The thunks copying a Dyn that can't be copied that are made, by the Rust type they name or
-  // "" for the general one, and whether the one dropping a settled JS promise's output is.
-  const uncopyable = new Set<string>();
-  let settledOutput = false;
-  const elementDrops = new TypeMap<Type, string>();
-  // The functions JS calls a Fish callback through, by its type and where it was given, and the
-  // tasks settling the JS promises Fish futures are given to JS as.
-  const callbacks = new Map<string, string>();
-  const settlers = new Map<string, [string, string]>();
-  // Where a value going to JS is given, for a callback's panics to name.
-  let jsSite: Expr | undefined;
-  const vtables = new Map<string, string>();
-  // The functions `sort` compares through: one per comparator, and one per element type for the
-  // default order.
-  const orders = new Map<string, string>();
-  const builder = { typing, emit, temp, label, startBlock, cString, alloca, text, mayPanic: (call: string) => unwinding(call), deep: (a: string, b: string, type: Type) => deepEquals(a, b, type), inspect: (v: string, type: Type) => inspected(v, type) };
-  const intrinsics = new Set<string>();
-  // The C functions the program declares itself, which the libm functions Math uses may be.
-  const foreign = new Set<string>();
-  // The shim functions declared, each once however many declarations name its Rust function,
-  // and the drop functions of the Rust types the program drops.
-  const declaredRust = new Set<string>();
-  const rustDrops = new Set<string>();
-  const { operate, arithmetic, panicIf, method: integerLowering } = lowering(builder, where, release, intrinsics);
-  const { convert, test, equals, unionField, holds, holdsWhere, eachMember } = conversions(builder, kindTests, keyTests);
+class Codegen {
+  checked: Checked;
+  src: string;
+  file: string;
+  release: boolean;
+  panic: "unwind" | "abort";
+  library: boolean;
+  sources: Source[];
+  harness: boolean;
+  leaks: boolean;
+  debug: boolean;
+  failed: string[] | undefined;
+  noted: Tables;
+  instances: Instance[];
+  asserts: NodeMap<Expr, string>;
+  computed: NodeSet<Expr>;
+  jsAccessors: NodeSet<Expr>;
+  jsCalls: NodeMap<Expr, JsName>;
+  jsEmptyTests: NodeMap<Expr, [Expr, "undefined" | "null"]>;
+  jsEvaluations: NodeSet<Expr>;
+  jsExports: NodeMap<Expr, JsName>;
+  jsMembers: NodeSet<Expr>;
+  jsMethods: NodeSet<Expr>;
+  jsNews: NodeMap<Expr, JsName>;
+  jsOptionalOf: NodeMap<Expr, boolean[]>;
+  jsStatics: NodeMap<Expr, JsName>;
+  timerCalls: NodeMap<Expr, "timerSet" | "timerNext" | "timerClear">;
+  restStarts: NodeMap<Expr, number>;
+  stringBuilds: NodeMap<Expr, "units" | "points">;
+  syncFileCalls: NodeMap<Expr, string>;
+  combinedCalls: NodeSet<Expr>;
+  formatCalls: NodeSet<Expr>;
+  inspectCalls: NodeSet<Expr>;
+  equalities: TypeMap<ClassType, InstanceId>;
+  jsonCalls: NodeMap<Expr, "stringify" | "parse">;
+  dynCalls: NodeMap<Expr, { index: usize; mutable: boolean; owned: boolean; callable?: Expr; }>;
+  dynMembers: Map<string, DynTable>;
+  boxedMembers: NodeMap<Expr, DynType>;
+  fixedFills: NodeSet<Expr>;
+  printCalls: NodeSet<Expr>;
+  clocks: NodeMap<Expr, "Date.now" | "performance.now" | "Math.random">;
+  fileCalls: NodeSet<Expr>;
+  lengthChecks: NodeSet<Expr>;
+  maths: NodeSet<Expr>;
+  parses: NodeMap<Expr, "parseInt" | "parseFloat" | "Number">;
+  fixedPrints: NodeSet<Expr>;
+  regexCalls: NodeMap<Expr, "test" | "exec">;
+  regexNews: NodeSet<Expr>;
+  regexStringCalls: NodeMap<Expr, string>;
+  selfCalls: NodeSet<Expr>;
+  kindTests: NodeMap<Expr, Kind>;
+  keyTests: NodeMap<Expr, TypeMap<Type, Verdict>>;
+  typing: Typing;
+  regexTables: RegexTables;
+  joinCalls: NodeSet<Expr>;
+  integerCalls: NodeSet<Expr>;
+  optionalCalls: NodeSet<Expr>;
+  presenceTests: NodeMap<Expr, { object: Expr; name: string; when: boolean; }>;
+  arenas: Arenas;
+  localOf: (id: LocalId) => Local;
+  llvm: (t: Type) => string;
+  names: Map<InstanceId, string>;
+  symbol: (a: Ref<Arenas>, i: Instance) => string;
+  recOf: <T extends Type>(t: T | undefined) => RecordOf<Exclude<T, string>> | undefined;
+  isRef: (t: Type) => boolean;
+  isArray: (t: Type) => t is ArrayType;
+  indexes: (t: Type) => boolean;
+  isDyn: (t: Type) => t is DynType;
+  relays: (from: Type, to: DynType) => boolean;
+  referent: (t: Type) => Type;
+  holdsRust: (t: Type) => boolean;
+  unwinds: "uwtable" | "uwtable personality ptr @__gcc_personality_v0";
+  framing: string[] | undefined;
+  site: Span | undefined;
+  debugging: string[] | undefined;
+  marked: Span | undefined;
+  frames: boolean;
+  globals: string[];
+  regexes: Map<string, string>;
+  out: string[];
+  allocas: string[];
+  body: string[];
+  temps: number;
+  labels: number;
+  numbered: Map<LocalId, number>;
+  block: string;
+  current: Instance;
+  types: NodeMap<Expr, Type>;
+  locals: NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>;
+  calls: NodeMap<Expr, InstanceId>;
+  setters: NodeMap<Expr, InstanceId>;
+  coercions: NodeMap<Expr, Type>;
+  jumps: NodeMap<Stmt, Stmt>;
+  localAt: (n: Expr | Stmt | Param | ObjectProp) => Local | undefined;
+  callOf: (e: Expr) => Instance | undefined;
+  setterOf: (e: Expr) => Instance | undefined;
+  self: ClassType | undefined;
+  captured: Map<LocalId, string>;
+  known: NodeMap<Expr, string>;
+  handlers: { label: string; slot: string; depth: usize; floor: usize }[];
+  finallies: Region[];
+  exits: NodeMap<Stmt, { exit: string; next?: string; depth: usize; }>;
+  pending: { v: string; type: Type; slot?: string }[];
+  floor: number;
+  transient: WeakSet<object>;
+  reserved: NodeMap<Expr, string>;
+  resuming: { type: GeneratorType | FutureType; frame: string; resumes: string[]; start: string; done: string } | undefined;
+  framed: Set<string>;
+  arms: NodeMap<Stmt, { slot: string; type: Type; } | undefined>;
+  scopes: { slot: string; type: Type }[][];
+  spills: { slot: string; type: Type; copy: { v: string; type: Type } }[];
+  fixed: NodeMap<Expr, string>;
+  texts: Map<string, string>;
+  bigConstants: Map<bigint, string>;
+  cStrings: Map<string, string>;
+  tables: Set<string>;
+  glue: { drop: TypeMap<Type, string>; copy: TypeMap<Type, string>; };
+  comparers: TypeMap<Type, string>;
+  jsonWriters: TypeMap<Type, string>;
+  jsonReaders: TypeMap<Type, string>;
+  inspectors: TypeMap<Type, string>;
+  awaitsOf: Map<InstanceId, { state: usize; field: usize; type: Type; }[]>;
+  combinePolls: TypeMap<FutureType, string>;
+  cancelled: Set<InstanceId>;
+  stringers: TypeMap<Type, string>;
+  constantGlobals: Map<InstanceId, string>;
+  uncopyable: Set<string>;
+  settledOutput: boolean;
+  elementDrops: TypeMap<Type, string>;
+  callbacks: Map<string, string>;
+  settlers: Map<string, [string, string]>;
+  jsSite: Expr | undefined;
+  vtables: Map<string, string>;
+  orders: Map<string, string>;
+  builder: { typing: Typing; emit: (line: string) => void; temp: () => string; label: () => string; startBlock: (name: string) => void; cString: (s: string) => string; alloca: (type: string) => string; text: (value: string) => string; mayPanic: (call: string) => void; deep: (a: string, b: string, type: Type) => string; inspect: (v: string, type: Type) => string; };
+  intrinsics: Set<string>;
+  foreign: Set<string>;
+  declaredRust: Set<string>;
+  rustDrops: Set<string>;
+  operate: (op: BinaryOp, a: string, b: string, at: Span, type: Integer) => string;
+  arithmetic: (op: ArithmeticOp, a: string, b: string, at: Span, type: Integer, verb?: string) => string;
+  panicIf: (condition: string, reason: string, at: Span) => void;
+  integerLowering: (family: string, operation: string, a: string, b: string, at: Span, type: Integer) => [string, string?];
+  convert: (v: string, from: Type, to: Type) => string;
+  test: (e: Expr, value: (e: Expr) => string, typeOf: (e: Expr) => Type) => string | undefined;
+  equals: (a: string, aType: Type, b: string, bType: Type) => string;
+  unionField: (v: string, union: UnionType, name: string, to: Type) => string;
+  holds: (v: string, union: UnionType, members: Type[]) => string;
+  holdsWhere: (v: string, type: Type, wanted: (m: Type) => boolean) => string;
+  eachMember: (v: string, union: UnionType, to: Type, make: (part: string, member: Type) => string) => string;
+  generatorOf: TypeMap<GeneratorType, Instance>;
+  futureOf: TypeMap<FutureType, Instance>;
+  taken: Map<string, unknown>;
+  glued: TypeSet<FutureType>;
+  shares: Map<InstanceId, Share>;
+  pairs: Map<LocalId, string>;
+  main: Instance;
+  start: string[];
+  filled: string[];
+  result: string;
 
-  // The instance each generator type resumes, and each future type polls.
-  const generatorOf = new TypeMap(instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
-  const futureOf = new TypeMap(instances.flatMap((i) => (i.future ? [[i.future, i] as const] : [])));
-  // Each generated name in each family and what it stands for, so two things described alike
-  // are never given one name.
-  const taken = new Map<string, unknown>();
-  // The future types whose task glue is made.
-  const glued = new TypeSet<FutureType>();
+  constructor(checked: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false, debug = false, failed }: Options) {
+    this.checked = checked;
+    this.src = src;
+    this.file = file;
+    this.release = release;
+    this.panic = panic;
+    this.library = library;
+    this.sources = sources;
+    this.harness = harness;
+    this.leaks = leaks;
+    this.debug = debug;
+    this.failed = failed;
 
-  // Top-level consts and comptime blocks run while compiling, every one of them, so one that
-  // fails is reported even when nothing reads it; none is compiled.
-  for (const instance of instances) {
-    if (!bodyOf(noted.arenas, instance).comptime || !instance.concrete) continue;
-    if (bodyOf(noted.arenas, instance).comptime === "const") bakeable(instance.returns, bodyOf(noted.arenas, instance), true);
-    comptimeBody(new CheckedHost(noted), instance.id);
+    ({ tables: this.noted } = this.checked);
+
+    this.instances = compiledOf(this.checked);
+
+    ({ asserts: this.asserts, computed: this.computed, jsAccessors: this.jsAccessors, jsCalls: this.jsCalls, jsEmptyTests: this.jsEmptyTests, jsEvaluations: this.jsEvaluations, jsExports: this.jsExports, jsMembers: this.jsMembers, jsMethods: this.jsMethods, jsNews: this.jsNews, jsOptionalOf: this.jsOptionalOf, jsStatics: this.jsStatics, timerCalls: this.timerCalls, restStarts: this.restStarts, stringBuilds: this.stringBuilds, syncFileCalls: this.syncFileCalls, combinedCalls: this.combinedCalls, formatCalls: this.formatCalls, inspectCalls: this.inspectCalls, equalities: this.equalities, jsonCalls: this.jsonCalls, dynCalls: this.dynCalls, dynMembers: this.dynMembers, boxedMembers: this.boxedMembers, fixedFills: this.fixedFills, printCalls: this.printCalls, clocks: this.clocks, fileCalls: this.fileCalls, lengthChecks: this.lengthChecks, maths: this.maths, parses: this.parses, fixedPrints: this.fixedPrints, regexCalls: this.regexCalls, regexNews: this.regexNews, regexStringCalls: this.regexStringCalls, selfCalls: this.selfCalls, kindTests: this.kindTests, keyTests: this.keyTests, typing: this.typing, regex: this.regexTables, joinCalls: this.joinCalls, integerCalls: this.integerCalls, optionalCalls: this.optionalCalls, presenceTests: this.presenceTests, arenas: this.arenas } = this.noted);
+
+    this.localOf = (id: LocalId): Local => this.arenas.localOf(id);
+
+    this.llvm = layoutOf(this.typing);
+
+    this.names = symbolNames(this.arenas);
+
+    // Instances made while compiling, as comptime makes, are named once they are met.
+    this.symbol = (a: Ref<Arenas>, i: Instance): string => {
+      if (!this.names.has(i.id)) this.names = symbolNames(a);
+      return symbolIn(a, i, this.names);
+    };
+
+    this.recOf = <T extends Type>(t: T | undefined) => (t === undefined || typeof t === "string" ? undefined : this.typing.rec(t as Exclude<T, string>));
+
+    this.isRef = (t: Type) => this.recOf(t)?.kind === "ref";
+
+    this.isArray = (t: Type): t is ArrayType => this.recOf(t)?.kind === "array";
+
+    // Whether indexing a value reads an element: an array's, or a fixed array's, through a
+    // reference too.
+    this.indexes = (t: Type): boolean => {
+      const held = this.referent(t);
+      const kind = this.recOf(held)?.kind;
+      return kind === "array" || kind === "fixed";
+    };
+
+    this.isDyn = (t: Type): t is DynType => this.recOf(t)?.kind === "dyn";
+
+    this.relays = (from: Type, to: DynType) => this.isDyn(from) && this.typing.callableOf.has(this.typing.rec(from).of) && this.typing.callableOf.has(this.typing.rec(to).of) && !this.typing.sameCallable(from, to);
+
+    // What a reference points to, or the type itself.
+    this.referent = (t: Type): Type => {
+      if (typeof t === "string") return t;
+      const r = this.typing.rec(t);
+      return r.kind === "ref" ? r.to : t;
+    };
+
+    // Whether a value of the type holds a Rust handle, which only moves.
+    this.holdsRust = (t: Type) => this.typing.holdsPart(t, (u) => rustClassOf(this.typing, u) !== undefined);
+
+    this.unwinds = this.panic === "abort" ? "uwtable" : UNWINDS;
+
+    // In a debug or `--leaks` build each of the program's own functions keeps a frame on the
+    // runtime's shadow stack, `{ site, name, prev }`, for a panic's backtrace and a leak's site:
+    // `framing` is the body of the one being emitted, and `site` the expression or statement whose
+    // calls it is making.
+  
+
+  
+
+    // In a `-g` build, the body of the program's own function being emitted, and the site last marked in it.
+  
+
+  
+
+    this.frames = false;
+
+    this.globals = [];
+
+    this.regexes = new Map<string, string>();
+
+    this.out = [];
+
+    // Allocas go in the entry block, where mem2reg promotes them and loops don't grow the stack.
+    this.allocas = [];
+
+    this.body = [];
+
+    this.temps = 0;
+
+    this.labels = 0;
+
+    // Each variable's number in the function being emitted, which tells apart two of one name.
+    // Counted per function, so a function's IR doesn't change with the program around it.
+    this.numbered = new Map<LocalId, usize>();
+
+    // The label of the block being emitted into, which a phi names as its predecessor.
+    this.block = "entry";
+
+    // The instance being emitted, and the tables its checking produced.
+    this.current = this.instances[0]!;
+
+    ({ types: this.types, locals: this.locals, calls: this.calls, setters: this.setters, coercions: this.coercions, jumps: this.jumps } = this.current);
+
+    this.localAt = (n: Expr | Stmt | Param | ObjectProp) => this.arenas.localOf(this.locals.get(n));
+
+    this.callOf = (e: Expr) => this.arenas.instanceOf(this.calls.get(e));
+
+    this.setterOf = (e: Expr) => this.arenas.instanceOf(this.setters.get(e));
+
+    // The class of the constructor or method being emitted, whose instance `%this` points to.
+  
+
+    // In a closure, where each variable it captures lives, loaded from its environment.
+    this.captured = new Map<LocalId, string>();
+
+    // The value of an Option an optional chain's link has already evaluated, to read through.
+    this.known = new NodeMap<Expr, string>();
+
+    // The catch blocks enclosing the code being emitted, innermost last: where each starts, and
+    // the slot its error goes in.
+    this.handlers = [];
+
+    // The `finally` regions enclosing the code being emitted, innermost last.
+    this.finallies = [];
+
+    // Where a `break` and a `continue` go for each statement they can name.
+    this.exits = new NodeMap<Stmt, { exit: string; next?: string; depth: usize }>();
+
+    // Values the statement being emitted made and nothing took over, released when it ends.
+    // Each keeps a slot it is stored in across a call that may panic, for its landing pad.
+    this.pending = [];
+
+    // Where the statement being lowered starts in `pending`: a statement in a match arm's block
+    // runs inside an expression whose own values are pending below it.
+    this.floor = 0;
+
+    // The scopes matches and pipes open for themselves.
+    this.transient = new WeakSet<object>();
+
+    // The slot each C string in a loop's condition or update was given when the loop began.
+    this.reserved = new NodeMap<Expr, string>();
+
+    // The generator being emitted: its type, its frame's LLVM type, the block each `yield`
+    // resumes at in order, where it starts, and where it gives that it has finished.
+  
+
+    // Slots that are fields of a generator's frame: they outlive one `next()` and start empty.
+    this.framed = new Set<string>();
+
+    // Where a `return` in each match arm's block puts the value it gives, when the match gives one.
+    this.arms = new NodeMap<Stmt, { slot: string; type: Type } | undefined>();
+
+    // What each enclosing scope owns, outermost first, dropped as it ends or is left.
+    this.scopes = [];
+
+    // Receivers copied into slots for owning methods, whose leftovers drop after the call.
+    this.spills = [];
+
+    // The index values an assignment ran ahead of its value, by index expression.
+    this.fixed = new NodeMap<Expr, string>();
+
+    // Each literal's string block, made once.
+    this.texts = new Map<string, string>();
+
+    this.bigConstants = new Map<bigint, string>();
+
+    this.cStrings = new Map<string, string>();
+
+    this.tables = new Set<string>();
+
+    // The function dropping, or copying, what a value of each type owns, made once.
+    this.glue = { drop: new TypeMap<Type, string>(), copy: new TypeMap<Type, string>() };
+
+    // The function comparing two values of each compound type, made once.
+    this.comparers = new TypeMap<Type, string>();
+
+    this.jsonWriters = new TypeMap<Type, string>();
+
+    this.jsonReaders = new TypeMap<Type, string>();
+
+    this.inspectors = new TypeMap<Type, string>();
+
+    // Each async instance's awaits, by the state it is paused in at each: the frame field the
+    // awaited future is in, and its type, for cancelling it there.
+    this.awaitsOf = new Map<InstanceId, { state: usize; field: usize; type: Type }[]>();
+
+    // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
+    // cancel function is wanted for.
+    this.combinePolls = new TypeMap<FutureType, string>();
+
+    this.cancelled = new Set<InstanceId>();
+
+    // The functions writing String(x) of a value with parts, by its type.
+    this.stringers = new TypeMap<Type, string>();
+
+    // The global each top-level const holding an aggregate lives in.
+    this.constantGlobals = new Map<InstanceId, string>();
+
+    // The thunks copying a Dyn that can't be copied that are made, by the Rust type they name or
+    // "" for the general one, and whether the one dropping a settled JS promise's output is.
+    this.uncopyable = new Set<string>();
+
+    this.settledOutput = false;
+
+    this.elementDrops = new TypeMap<Type, string>();
+
+    // The functions JS calls a Fish callback through, by its type and where it was given, and the
+    // tasks settling the JS promises Fish futures are given to JS as.
+    this.callbacks = new Map<string, string>();
+
+    this.settlers = new Map<string, [string, string]>();
+
+    // Where a value going to JS is given, for a callback's panics to name.
+  
+
+    this.vtables = new Map<string, string>();
+
+    // The functions `sort` compares through: one per comparator, and one per element type for the
+    // default order.
+    this.orders = new Map<string, string>();
+
+    this.builder = { typing: this.typing, emit: (line) => this.emit(line), temp: () => this.temp(), label: () => this.label(), startBlock: (name) => this.startBlock(name), cString: (s) => this.cString(s), alloca: (type) => this.alloca(type), text: (value) => this.text(value), mayPanic: (call: string) => this.unwinding(call), deep: (a: string, b: string, type: Type) => this.deepEquals(a, b, type), inspect: (v: string, type: Type) => this.inspected(v, type) };
+
+    this.intrinsics = new Set<string>();
+
+    // The C functions the program declares itself, which the libm functions Math uses may be.
+    this.foreign = new Set<string>();
+
+    // The shim functions declared, each once however many declarations name its Rust function,
+    // and the drop functions of the Rust types the program drops.
+    this.declaredRust = new Set<string>();
+
+    this.rustDrops = new Set<string>();
+
+    ({ operate: this.operate, arithmetic: this.arithmetic, panicIf: this.panicIf, method: this.integerLowering } = lowering(this.builder, ((at) => this.where(at)), this.release, this.intrinsics));
+
+    ({ convert: this.convert, test: this.test, equals: this.equals, unionField: this.unionField, holds: this.holds, holdsWhere: this.holdsWhere, eachMember: this.eachMember } = conversions(this.builder, this.kindTests, this.keyTests));
+
+
+    // The instance each generator type resumes, and each future type polls.
+    this.generatorOf = new TypeMap(this.instances.flatMap((i) => (i.generator ? [[i.generator, i] as const] : [])));
+
+    this.futureOf = new TypeMap(this.instances.flatMap((i) => (i.future ? [[i.future, i] as const] : [])));
+
+    // Each generated name in each family and what it stands for, so two things described alike
+    // are never given one name.
+    this.taken = new Map<string, unknown>();
+
+    // The future types whose task glue is made.
+    this.glued = new TypeSet<FutureType>();
+
+
+    // Top-level consts and comptime blocks run while compiling, every one of them, so one that
+    // fails is reported even when nothing reads it; none is compiled.
+    for (const instance of this.instances) {
+      if (!bodyOf(this.noted.arenas, instance).comptime || !instance.concrete) continue;
+      if (bodyOf(this.noted.arenas, instance).comptime === "const") this.bakeable(instance.returns, bodyOf(this.noted.arenas, instance), true);
+      comptimeBody(new CheckedHost(this.noted), instance.id);
   }
 
-  const shares = sharing();
+
+  this.shares = this.sharing();
+
   // The current function's parameters taken as a closure's address and code, by their slots.
-  let pairs = new Map<LocalId, string>();
-  for (const instance of instances) {
-    if (bodyOf(noted.arenas, instance).comptime) continue;
+  this.pairs = new Map<LocalId, string>();
+
+  for (const instance of this.instances) {
+    if (bodyOf(this.noted.arenas, instance).comptime) continue;
     try {
       // A copy compiled as another instance of its function has no code of its own.
-      if (shares.has(instance.id) && shares.get(instance.id)!.template !== instance) continue;
+      if (this.shares.has(instance.id) && this.shares.get(instance.id)!.template !== instance) continue;
       // A C function is declared under its own name, unless the runtime already declares it.
-      if (bodyOf(noted.arenas, instance).foreign) {
-        foreign.add(bodyOf(noted.arenas, instance).name);
-        if (bodyOf(noted.arenas, instance).rust) {
+      if (bodyOf(this.noted.arenas, instance).foreign) {
+        this.foreign.add(bodyOf(this.noted.arenas, instance).name);
+        if (bodyOf(this.noted.arenas, instance).rust) {
           // A Rust function's shim takes its handle first when it is a method, then its parameters
           // as they cross, the slot for the rest of what it gives, and where it puts a panic's message.
-          const rust = symbol(noted.arenas, instance);
-          if (declaredRust.has(rust)) continue;
-          declaredRust.add(rust);
-          const self = bodyOf(noted.arenas, instance).self && !bodyOf(noted.arenas, instance).self!.constructor ? ["ptr"] : [];
-          const gives = shimGives(llvm, rustGiven(noted.typing, noted.arenas, instance));
-          const params = [...self, ...instance.signature!.flatMap((t) => shimParams(llvm, rustCrossing(typing, t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
-          out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`, "");
+          const rust = this.symbol(this.noted.arenas, instance);
+          if (this.declaredRust.has(rust)) continue;
+          this.declaredRust.add(rust);
+          const self = bodyOf(this.noted.arenas, instance).self && !bodyOf(this.noted.arenas, instance).self!.constructor ? ["ptr"] : [];
+          const gives = shimGives(this.llvm, rustGiven(this.noted.typing, this.noted.arenas, instance));
+          const params = [...self, ...instance.signature!.flatMap((t) => shimParams(this.llvm, rustCrossing(this.typing, t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
+          this.out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`, "");
           continue;
         }
-        if (!DECLARED.has(bodyOf(noted.arenas, instance).name)) out.push(`declare ${crossed(llvm, instance.returns)} ${symbol(noted.arenas, instance)}(${instance.signature!.map((t) => crossing(llvm, t)).join(", ")})`, "");
+        if (!DECLARED.has(bodyOf(this.noted.arenas, instance).name)) this.out.push(`declare ${crossed(this.llvm, instance.returns)} ${this.symbol(this.noted.arenas, instance)}(${instance.signature!.map((t) => crossing(this.llvm, t)).join(", ")})`, "");
         continue;
       }
-      current = instance;
-      ({ types, locals, calls, setters, coercions, jumps } = instance);
-      const f = bodyOf(noted.arenas, instance);
-      self = f.self?.type;
-      allocas = [];
-      body = [];
-      temps = 0;
-      labels = 0;
-      numbered = new Map();
-      block = "entry";
-      pending = [];
-      floor = 0;
-      reserved.clear();
-      scopes = [[]];
+      this.current = instance;
+      ({ types: this.types, locals: this.locals, calls: this.calls, setters: this.setters, coercions: this.coercions, jumps: this.jumps } = instance);
+      const f = bodyOf(this.noted.arenas, instance);
+      this.self = f.self?.type;
+      this.allocas = [];
+      this.body = [];
+      this.temps = 0;
+      this.labels = 0;
+      this.numbered = new Map();
+      this.block = "entry";
+      this.pending = [];
+      this.floor = 0;
+      this.reserved.clear();
+      this.scopes = [[]];
       const type = instance.returns;
-      framed = new Set();
+      this.framed = new Set();
       // std's functions, its built-in modules' included, keep no frame, as Rust's short backtrace
       // hides std's internals; nor do the arrows the checker wraps around a callback.
-      const from = sourceOf(src, file, f.start, sources).file;
-      const ours = f.start < STD_BASE && !BUILT_IN.test(from) && !(harness && from === file) && !f.closure?.made;
-      framing = (!release || leaks) && !library && ours ? body : undefined;
-      site = undefined;
-      debugging = debug && f.start < STD_BASE && !BUILT_IN.test(from) ? body : undefined;
-      marked = undefined;
-      if (debugging) allocas.push(`  ;fsh.fn ${f.start}`);
+      const from = sourceOf(this.src, this.file, f.start, this.sources).file;
+      const ours = f.start < STD_BASE && !BUILT_IN.test(from) && !(this.harness && from === this.file) && !f.closure?.made;
+      this.framing = (!this.release || this.leaks) && !this.library && ours ? this.body : undefined;
+      this.site = undefined;
+      this.debugging = this.debug && f.start < STD_BASE && !BUILT_IN.test(from) ? this.body : undefined;
+      this.marked = undefined;
+      if (this.debugging) this.allocas.push(`  ;fsh.fn ${f.start}`);
       const machine = instance.generator ?? instance.future;
-      resuming = machine && { type: machine, frame: llvm(machine), resumes: [], start: label(), done: label() };
+      this.resuming = machine && { type: machine, frame: this.llvm(machine), resumes: [], start: this.label(), done: this.label() };
       // A generator's variables, and its loops' state, are fields of the frame each `next()` is
       // given, which already holds its parameters.
-      if (resuming) {
+      if (this.resuming) {
         const field = (at: string, i: usize) => {
-          allocas.push(`  ${at} = getelementptr ${resuming!.frame}, ptr %frame, i32 0, i32 ${i}`);
-          framed.add(at);
+          this.allocas.push(`  ${at} = getelementptr ${this.resuming!.frame}, ptr %frame, i32 0, i32 ${i}`);
+          this.framed.add(at);
         };
         field("%state", 0);
         // An async arrow's captures are its frame's copy of the closure; an async method's object is
@@ -431,157 +691,168 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         if (f.closure) {
           field("%env", 1);
           // Its copy of the captures is the future's own, dropped once the body is done.
-          own("%env", instance.closure!);
+          this.own("%env", instance.closure!);
         }
         if (f.self && !f.self.constructor) {
           if (f.self.owned) field("%this", 1);
-          else allocas.push(`  %this.at = getelementptr ${resuming.frame}, ptr %frame, i32 0, i32 1`, "  %this = load ptr, ptr %this.at");
+          else this.allocas.push(`  %this.at = getelementptr ${this.resuming.frame}, ptr %frame, i32 0, i32 1`, "  %this = load ptr, ptr %this.at");
         }
-        for (const [local, i] of instance.frame!.locals) field(slot(localOf(local)), i);
+        for (const [local, i] of instance.frame!.locals) field(this.slot(this.localOf(local)), i);
         // A `for await` loop's third field is the future it awaits.
         for (const [s, i] of instance.frame!.loops) [i, i + 1, ...((s as { await?: boolean }).await ? [i + 2] : [])].forEach((j) => field(`%loop${j}`, j));
         for (const i of instance.frame!.awaits.values()) field(`%await${i}`, i);
-        startBlock(resuming.start);
+        this.startBlock(this.resuming.start);
         // The first `next`'s value has no `yield` to go to.
-        dropSent();
+        this.dropSent();
       }
       // Parameters are copied into slots like any other binding. One taken as a closure's address
       // and code is the caller's to drop.
-      pairs = new Map();
-      const shared = shares.get(instance.id);
+      this.pairs = new Map();
+      const shared = this.shares.get(instance.id);
       const params = f.params.flatMap((p, k) => {
-        const local = resolved(p);
+        const local = this.resolved(p);
         if (shared?.at.has(k)) {
           const at = `%"${local.name}.pair.${local.id}"`;
-          allocas.push(`  ${at} = alloca ${PAIR}`);
-          emit(`store ${PAIR} %"${local.name}.arg", ptr ${at}`);
-          pairs.set(local.localId, at);
+          this.allocas.push(`  ${at} = alloca ${PAIR}`);
+          this.emit(`store ${PAIR} %"${local.name}.arg", ptr ${at}`);
+          this.pairs.set(local.localId, at);
           return [`${PAIR} %"${local.name}.arg"`];
         }
-        reserve(local);
-        own(slot(local), local.type);
-        if (resuming) return [""];
+        this.reserve(local);
+        this.own(this.slot(local), local.type);
+        if (this.resuming) return [""];
         // A comptime parameter isn't passed: its instance knows its value.
-        if (p.comptime) return void emit(`store ${llvm(local.type)} ${bake(comptimeParameter(noted, instance, p), local.type)}, ptr ${slot(local)}`), [];
-        emit(`store ${llvm(local.type)} %"${local.name}.arg", ptr ${slot(local)}`);
-        return [`${llvm(local.type)} %"${local.name}.arg"`];
+        if (p.comptime) return void this.emit(`store ${this.llvm(local.type)} ${this.bake(comptimeParameter(this.noted, instance, p), local.type)}, ptr ${this.slot(local)}`), [];
+        this.emit(`store ${this.llvm(local.type)} %"${local.name}.arg", ptr ${this.slot(local)}`);
+        return [`${this.llvm(local.type)} %"${local.name}.arg"`];
       });
       // A constructor or method works on its instance through a pointer, and a closure on what
       // it captured.
       if (f.self) params.unshift("ptr %this");
       if (f.closure) params.unshift("ptr %env");
       // A method owning its object drops it, unless the object moves out first.
-      if (f.self?.owned) own("%this", f.self.type, false);
-      captured = new Map();
+      if (f.self?.owned) this.own("%this", f.self.type, false);
+      this.captured = new Map();
       // A capture the closure holds lives in its environment; a borrowed one, where it points.
       [...(instance.captures ?? [])].forEach(([alias, from], i) => {
-        const at = temp();
+        const at = this.temp();
         // In a future the entry block is the only one every poll passes through.
-        const line = `${at} = getelementptr ${llvm(instance.closure!)}, ptr %env, i32 0, i32 ${i}`;
-        if (resuming) allocas.push(`  ${line}`);
-        else emit(line);
-        if (!isRef(typing.rec(instance.closure!).fields[i]!.type)) return captured.set(alias, at);
-        const pointer = from === "this" ? "%this" : temp();
+        const line = `${at} = getelementptr ${this.llvm(instance.closure!)}, ptr %env, i32 0, i32 ${i}`;
+        if (this.resuming) this.allocas.push(`  ${line}`);
+        else this.emit(line);
+        if (!this.isRef(this.typing.rec(instance.closure!).fields[i]!.type)) return this.captured.set(alias, at);
+        const pointer = from === "this" ? "%this" : this.temp();
         const load = `${pointer} = load ptr, ptr ${at}`;
-        if (resuming) allocas.push(`  ${load}`);
-        else emit(load);
-        captured.set(alias, pointer);
+        if (this.resuming) this.allocas.push(`  ${load}`);
+        else this.emit(load);
+        this.captured.set(alias, pointer);
       });
-      if (f.closure) self = selfOf(arenas, f)?.type;
-      f.body.forEach(statement);
+      if (f.closure) this.self = selfOf(this.arenas, f)?.type;
+      f.body.forEach(((s) => this.statement(s)));
       // Falling off the end drops what the body holds there, at its closing brace.
-      site = { start: f.end - 1, end: f.end };
+      this.site = { start: f.end - 1, end: f.end };
       // The last block is unreachable when every path returned; the checker guarantees it for values.
-      if (type === "void" || resuming) leave(undefined);
-      else emit("unreachable");
-      if (resuming) {
+      if (type === "void" || this.resuming) this.leave(undefined);
+      else this.emit("unreachable");
+      if (this.resuming) {
         // Each `next()` or poll goes on from where the last stopped: the start, a `yield` or an
         // `await`, or the end. A finished future is never polled again.
         // Advancing a generator already finished drops what was sent; one finishing in this very
         // call has dropped or taken it already, and comes to `done` directly.
-        const sent = recOf(resuming.type);
-        const finished = sent?.kind === "generator" && sent.sends && needsDrop(sent.sends) ? label() : resuming.done;
-        if (finished !== resuming.done) {
-          startBlock(finished);
-          dropSent();
-          emit(`br label %${resuming.done}`);
+        const sent = this.recOf(this.resuming.type);
+        const finished = sent?.kind === "generator" && sent.sends && this.needsDrop(sent.sends) ? this.label() : this.resuming.done;
+        if (finished !== this.resuming.done) {
+          this.startBlock(finished);
+          this.dropSent();
+          this.emit(`br label %${this.resuming.done}`);
         }
-        startBlock(resuming.done);
-        const resumed = typing.rec(resuming.type);
-        if (resumed.kind === "generator") emit(`ret ${resultType(instance)} ${yieldedAs(answer(undefined, resumed.yields))}`);
-        else emit("unreachable");
-        const resumes = [resuming.start, ...resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
-        allocas.push(...pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${finished} [ ${resumes} ]`);
+        this.startBlock(this.resuming.done);
+        const resumed = this.typing.rec(this.resuming.type);
+        if (resumed.kind === "generator") this.emit(`ret ${this.resultType(instance)} ${this.yieldedAs(this.answer(undefined, resumed.yields))}`);
+        else this.emit("unreachable");
+        const resumes = [this.resuming.start, ...this.resuming.resumes].map((at, i) => `i32 ${i}, label %${at}`).join(" ");
+        this.allocas.push(...this.pushFrame(instance), "  %resumed = load i32, ptr %state", `  switch i32 %resumed, label %${finished} [ ${resumes} ]`);
         // A generator taking values through `next(x)` is given one, and whether it was.
         const sends = resumed.kind === "generator" ? resumed.sends : undefined;
-        const takes = resumed.kind === "future" || resumed.async ? "ptr %frame, ptr %cx" : sends ? `ptr %frame, ${llvm(sends)} %sent, i1 %sent.has` : "ptr %frame";
-        out.push(`define internal ${resultType(instance)} ${symbol(noted.arenas, instance)}(${takes}) ${unwinds} {`, "entry:", ...allocas, ...popFrame(body), "}", "");
+        const takes = resumed.kind === "future" || resumed.async ? "ptr %frame, ptr %cx" : sends ? `ptr %frame, ${this.llvm(sends)} %sent, i1 %sent.has` : "ptr %frame";
+        this.out.push(`define internal ${this.resultType(instance)} ${this.symbol(this.noted.arenas, instance)}(${takes}) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.popFrame(this.body), "}", "");
         continue;
       }
       // Fish's own functions stay inside this module, so two libraries never clash over them.
-      out.push(`define internal ${resultType(instance)} ${symbol(noted.arenas, instance)}(${params.join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...pushFrame(instance), ...popFrame(body), "}", "");
+      this.out.push(`define internal ${this.resultType(instance)} ${this.symbol(this.noted.arenas, instance)}(${params.join(", ")}) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.pushFrame(instance), ...this.popFrame(this.body), "}", "");
     } catch (e) {
-      if (failed === undefined) throw e;
-      failed.push(`${instance.symbol}: ${e instanceof Error ? e.message : String(e)}`);
-      out.push(`declare void ${symbol(noted.arenas, instance)}()`, "");
+      if (this.failed === undefined) throw e;
+      this.failed.push(`${instance.symbol}: ${e instanceof Error ? e.message : String(e)}`);
+      this.out.push(`declare void ${this.symbol(this.noted.arenas, instance)}()`, "");
     }
   }
-  framing = undefined;
-  debugging = undefined;
-  if (frames) globals.push("@fsh_rt_frames = external thread_local global ptr");
+
+  this.framing = undefined;
+
+  this.debugging = undefined;
+
+  if (this.frames) this.globals.push("@fsh_rt_frames = external thread_local global ptr");
+
   // A cancel function wanted while making one may want another.
-  for (const done = new Set<InstanceId>(); done.size < cancelled.size;) {
-    for (const i of [...cancelled]) {
+  for (const done = new Set<InstanceId>(); done.size < this.cancelled.size;) {
+    for (const i of [...this.cancelled]) {
       if (done.has(i)) continue;
       done.add(i);
-      cancelFunction(arenas.instanceOf(i));
+      this.cancelFunction(this.arenas.instanceOf(i));
     }
   }
-  const main = instances.find((i) => i.symbol === "main")!;
+
+  this.main = this.instances.find((i) => i.symbol === "main")!;
+
   // Built before the module is put together, since its message adds a global.
-  const start = library ? instances.filter((i) => bodyOf(noted.arenas, i).exported).flatMap(exported) : entry();
-  const filled = fillConstants();
+  this.start = this.library ? this.instances.filter((i) => bodyOf(this.noted.arenas, i).exported).flatMap(((i) => this.exported(i))) : this.entry();
+
+  this.filled = this.fillConstants();
+
 
   // Definitions in order of their names, rather than of when they were made, so a function
   // has the same place among them whatever the program around it.
-  return [
-    ...globals.toSorted(),
+  this.result = [
+    ...this.globals.toSorted(),
     // The runtime reads which way a panic goes. A library leaves it to the runtime's default, so
     // two libraries in one program don't both define it; its exports abort on a panic anyway.
-    ...(library ? [] : [`@fsh_panic_abort = constant i32 ${panic === "abort" ? 1 : 0}`]),
+    ...(this.library ? [] : [`@fsh_panic_abort = constant i32 ${this.panic === "abort" ? 1 : 0}`]),
     "",
     ...RUNTIME,
-    ...[...intrinsics].filter((line) => !foreign.has(/@([\w.]+)\(/.exec(line)![1]!)),
-    ...[...rustDrops].map((name) => `declare void ${name}(ptr, ptr)`),
+    ...[...this.intrinsics].filter((line) => !this.foreign.has(/@([\w.]+)\(/.exec(line)![1]!)),
+    ...[...this.rustDrops].map((name) => `declare void ${name}(ptr, ptr)`),
     "",
-    ...byName(out),
-    ...start,
-    ...filled,
+    ...byName(this.out),
+    ...this.start,
+    ...this.filled,
     "",
   ].join("\n");
+  }
+
 
   // A framed function's entry pushes its frame: a generator or future's on each resume, since it
   // pops at every suspend, so an `await` chain or a generator's resumer is the stack below it.
   // The record is `{ site, name, prev }`, the site first so each call's store is to the slot
   // itself; nothing else outlives the entry block, so unoptimized code spills nothing more.
-  function pushFrame(i: Instance): string[] {
-    if (body !== framing) return [];
-    frames = true;
+  pushFrame(this: Mut<this>, i: Instance): string[] {
+    if (this.body !== this.framing) return [];
+    this.frames = true;
     return [
       `  %fsh.site = alloca ${FRAME}`,
       `  %fsh.name = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 1`,
       `  %fsh.link = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`,
       "  %fsh.prev = load ptr, ptr @fsh_rt_frames",
       "  store ptr null, ptr %fsh.site",
-      `  store ptr ${cString(frameName(i))}, ptr %fsh.name`,
+      `  store ptr ${this.cString(this.frameName(i))}, ptr %fsh.name`,
       "  store ptr %fsh.prev, ptr %fsh.link",
       "  store ptr %fsh.site, ptr @fsh_rt_frames",
     ];
   }
 
+
   // Every return pops it; an unwinding panic leaves it, for the runtime to reset.
-  function popFrame(lines: string[]): string[] {
-    if (lines !== framing) return lines;
+  popFrame(this: Mut<this>, lines: string[]): string[] {
+    if (lines !== this.framing) return lines;
     let n = 0;
     return lines.flatMap((line) => {
       if (!line.startsWith("  ret ")) return [line];
@@ -590,33 +861,34 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     });
   }
 
+
   // A frame's name: the function as written, a generic one's instance without its number, a
   // nested function by its name and an arrow by where it starts.
   // Instances of one function that differ only in the closures given to parameters it only calls,
   // or hands on to itself at the same place, are compiled once: each such parameter is passed as
   // the closure's address and its body's code, and the caller drops the closure once the call
   // returns. A walker given a different closure by every caller is otherwise copied for each.
-  function sharing(): Map<InstanceId, Share> {
+  sharing(this: Mut<this>): Map<InstanceId, Share> {
     const groups = new Map<string, InstanceId[]>();
     const found = new Map<InstanceId, Set<usize>>();
-    for (const i of instances) {
-      const at = callbacksOnlyCalled(i);
+    for (const i of this.instances) {
+      const at = this.callbacksOnlyCalled(i);
       if (at.size === 0) continue;
       found.set(i.id, at);
-      const b = bodyOf(arenas, i);
-      const parts = [`${b.name}@${b.start}`, typing.keyOf(i.returns), i.throws === undefined ? "" : typing.keyOf(i.throws)];
+      const b = bodyOf(this.arenas, i);
+      const parts = [`${b.name}@${b.start}`, this.typing.keyOf(i.returns), i.throws === undefined ? "" : this.typing.keyOf(i.throws)];
       b.params.forEach((p, k) => {
-        const local = localOf(i.locals.get(p)!);
-        if (!at.has(k)) return void parts.push(typing.keyOf(local.type));
+        const local = this.localOf(i.locals.get(p)!);
+        if (!at.has(k)) return void parts.push(this.typing.keyOf(local.type));
         // What calling it gives and takes, which every instance sharing the code must agree on: as
         // types, since one IR shape can hold values that are dropped or dispatched differently.
-        const target = calledThrough(i, p.pattern.kind === "ident" ? p.pattern.name : "");
-        parts.push(target === undefined ? "*" : `*${target.throws === undefined ? "" : typing.keyOf(target.throws)}*${typing.keyOf(target.returns)}(${bodyOf(arenas, target).params.map((q) => typing.keyOf(localOf(target.locals.get(q)!).type)).join(",")})`);
+        const target = this.calledThrough(i, p.pattern.kind === "ident" ? p.pattern.name : "");
+        parts.push(target === undefined ? "*" : `*${target.throws === undefined ? "" : this.typing.keyOf(target.throws)}*${this.typing.keyOf(target.returns)}(${bodyOf(this.arenas, target).params.map((q) => this.typing.keyOf(this.localOf(target.locals.get(q)!).type)).join(",")})`);
       });
       for (const [name, t] of [...i.bindings].sort(([a], [b]) => (a < b ? -1 : 1))) {
         const k = name.startsWith("#") ? Number(name.slice(1)) : -1;
         if (k >= 0 && at.has(k)) continue;
-        parts.push(`${name}=${typing.keyOf(t)}`);
+        parts.push(`${name}=${this.typing.keyOf(t)}`);
       }
       const key = parts.join("|");
       let group = groups.get(key);
@@ -626,29 +898,30 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     const out = new Map<InstanceId, Share>();
     for (const group of groups.values()) {
       if (group.length < 2) continue;
-      const template = group.map((id) => arenas.instanceOf(id)).toSorted((a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0))[0]!;
+      const template = group.map((id) => this.arenas.instanceOf(id)).toSorted((a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0))[0]!;
       for (const id of group) {
-        const i = arenas.instanceOf(id);
-        const b = bodyOf(arenas, i);
+        const i = this.arenas.instanceOf(id);
+        const b = bodyOf(this.arenas, i);
         const code = new Map<usize, InstanceId | undefined>();
-        for (const k of found.get(i.id)!) code.set(k, calledThrough(i, (b.params[k]!.pattern as { name: string }).name)?.id);
+        for (const k of found.get(i.id)!) code.set(k, this.calledThrough(i, (b.params[k]!.pattern as { name: string }).name)?.id);
         out.set(i.id, { template, at: found.get(i.id)!, code });
       }
     }
     return out;
   }
 
+
   // The parameters of a plain function holding a closure that its body only calls, or hands on
   // to the same function at the same place; one read anywhere else, a nested function's included,
   // is used some other way.
-  function callbacksOnlyCalled(i: Instance): Set<usize> {
-    const b = bodyOf(arenas, i);
+  callbacksOnlyCalled(this: Mut<this>, i: Instance): Set<usize> {
+    const b = bodyOf(this.arenas, i);
     const at = new Set<usize>();
     if (b.self || b.closure || b.generator || b.async || b.foreign || b.rust || b.js || b.exported || b.comptime || i.symbol === "main") return at;
     if (b.params.some((p) => p.comptime || p.rest)) return at;
     b.params.forEach((p, k) => {
       if (p.pattern.kind !== "ident" || p.optional || p.default !== undefined) return;
-      if (recOf(localOf(i.locals.get(p)!).type)?.kind !== "closure") return;
+      if (this.recOf(this.localOf(i.locals.get(p)!).type)?.kind !== "closure") return;
       const name = p.pattern.name;
       let uses = 0;
       let calls = 0;
@@ -667,7 +940,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
               if (target !== undefined) runs.add(target);
             }
             e.args.forEach((a, j) => {
-              if (a.kind === "ident" && a.name === name && j === k && target !== undefined && sameFunction(arenas.instanceOf(target), i)) calls++;
+              if (a.kind === "ident" && a.name === name && j === k && target !== undefined && this.sameFunction(this.arenas.instanceOf(target), i)) calls++;
             });
           }
         }
@@ -678,7 +951,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       // A call through the pair passes an environment and builds no frame, so it can only run a
       // plain closure: a generic function value's instance takes no environment.
       const plain = [...runs].every((r) => {
-        const called = bodyOf(arenas, arenas.instanceOf(r));
+        const called = bodyOf(this.arenas, this.arenas.instanceOf(r));
         return called.closure && !called.async && !called.generator;
       });
       if (uses > 0 && uses === calls && runs.size <= 1 && plain) at.add(k);
@@ -686,94 +959,101 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     return at;
   }
 
-  function sameFunction(a: Instance, b: Instance): boolean {
-    const x = bodyOf(arenas, a);
-    const y = bodyOf(arenas, b);
+
+  sameFunction(this: Mut<this>, a: Instance, b: Instance): boolean {
+    const x = bodyOf(this.arenas, a);
+    const y = bodyOf(this.arenas, b);
     return x.name === y.name && x.start === y.start;
   }
 
+
   // The closure's body a call of the parameter `name` runs, in `i`.
-  function calledThrough(i: Instance, name: string): Instance | undefined {
+  calledThrough(this: Mut<this>, i: Instance, name: string): Instance | undefined {
     let found: Instance | undefined;
     const visit = (n: AnyNode) => {
       if (found !== undefined) return;
       if (n.of === "expr" && n.node.kind === "call" && n.node.callee.kind === "ident" && n.node.callee.name === name) {
         const target = i.calls.get(n.node);
-        if (target !== undefined) found = arenas.instanceOf(target);
+        if (target !== undefined) found = this.arenas.instanceOf(target);
       }
       forEachChild(n, visit);
     };
-    for (const st of bodyOf(arenas, i).body) visit({ of: "stmt", node: st });
+    for (const st of bodyOf(this.arenas, i).body) visit({ of: "stmt", node: st });
     return found;
   }
 
-  function frameName(i: Instance): string {
-    const closure = bodyOf(noted.arenas, i).closure;
-    if (closure) return closure.self ?? `<arrow ${where(bodyOf(noted.arenas, i)).split(":").slice(-2).join(":")}>`;
+
+  frameName(this: Mut<this>, i: Instance): string {
+    const closure = bodyOf(this.noted.arenas, i).closure;
+    if (closure) return closure.self ?? `<arrow ${this.where(bodyOf(this.noted.arenas, i)).split(":").slice(-2).join(":")}>`;
     // A generic instance ends in `#<id>`, which no frame shows; a private name is `#name` after a
     // dot or space, renamed `#name@Class` when a base declares one too.
     return shortened(i.symbol).replace(/(?<![.\s])#\w+$/, "").replace(/(#\w+)@[^.#\s]+/g, "$1");
   }
 
+
   // The part of a generated symbol telling `owner` apart in its family: a hash of its description
   // rather than a count, so it is the same in every program making it. Owners described alike
   // get numbered suffixes.
-  function stableId(family: string, description: string, owner: unknown = description): string {
+  stableId(this: Mut<this>, family: string, description: string, owner: unknown = description): string {
     const stem = digest(description);
     let id = stem;
-    for (let n = 1; taken.has(`${family} ${id}`) && taken.get(`${family} ${id}`) !== owner; n++) id = `${stem}.${n}`;
-    taken.set(`${family} ${id}`, owner);
+    for (let n = 1; this.taken.has(`${family} ${id}`) && this.taken.get(`${family} ${id}`) !== owner; n++) id = `${stem}.${n}`;
+    this.taken.set(`${family} ${id}`, owner);
     return id;
   }
 
+
   // A top-level const holding an aggregate lives in a global, filled once before main runs (or
   // as a library loads) and only ever read; its arrays and strings are never freed.
-  function constantGlobal(c: Instance): string {
-    const made = constantGlobals.get(c.id);
+  constantGlobal(this: Mut<this>, c: Instance): string {
+    const made = this.constantGlobals.get(c.id);
     if (made) return made;
-    const name = `@"fsh.const.${bodyOf(noted.arenas, c).name.slice("const ".length)}"`;
-    constantGlobals.set(c.id, name);
-    globals.push(`${name} = internal global ${llvm(c.returns)} zeroinitializer`);
+    const name = `@"fsh.const.${bodyOf(this.noted.arenas, c).name.slice("const ".length)}"`;
+    this.constantGlobals.set(c.id, name);
+    this.globals.push(`${name} = internal global ${this.llvm(c.returns)} zeroinitializer`);
     return name;
   }
 
+
   // The globals are filled before main; the runtime drops them at exit, before its leak check.
-  function fillConstants(): string[] {
-    if (constantGlobals.size === 0) return [];
+  fillConstants(this: Mut<this>): string[] {
+    if (this.constantGlobals.size === 0) return [];
     const made = (name: string, fill: () => void) => {
-      const saved = { allocas, body, temps, labels, block, pending, scopes };
-      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
+      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
       fill();
-      emit("ret void");
-      const lines = [`define internal void ${name}() {`, "entry:", ...allocas, ...body, "}", ""];
-      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+      this.emit("ret void");
+      const lines = [`define internal void ${name}() {`, "entry:", ...this.allocas, ...this.body, "}", ""];
+      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
       return lines;
     };
     const filler = made('@"fsh.constants"', () => {
-      for (const [c, name] of [...constantGlobals].map(([i, name]) => [arenas.instanceOf(i), name] as const)) emit(`store ${llvm(c.returns)} ${bake(comptimeBody(new CheckedHost(noted), c.id), c.returns)}, ptr ${name}`);
-      emit('call void @fsh_rt_constants(ptr @"fsh.constants.drop")');
+      for (const [c, name] of [...this.constantGlobals].map(([i, name]) => [this.arenas.instanceOf(i), name] as const)) this.emit(`store ${this.llvm(c.returns)} ${this.bake(comptimeBody(new CheckedHost(this.noted), c.id), c.returns)}, ptr ${name}`);
+      this.emit('call void @fsh_rt_constants(ptr @"fsh.constants.drop")');
     });
     const dropper = made('@"fsh.constants.drop"', () => {
-      for (const [c, name] of [...constantGlobals].map(([i, name]) => [arenas.instanceOf(i), name] as const)) {
-        const v = temp();
-        emit(`${v} = load ${llvm(c.returns)}, ptr ${name}`);
-        dispose(v, c.returns);
+      for (const [c, name] of [...this.constantGlobals].map(([i, name]) => [this.arenas.instanceOf(i), name] as const)) {
+        const v = this.temp();
+        this.emit(`${v} = load ${this.llvm(c.returns)}, ptr ${name}`);
+        this.dispose(v, c.returns);
       }
     });
     return [...filler, ...dropper, '@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @"fsh.constants", ptr null }]'];
   }
 
+
   // Comptime gives what can be built into the program: numbers, booleans, strings, and arrays,
   // Maps, Sets, objects, instances, unions and enums of them; a top-level const may also hold an Atomic or
   // a Lock.
-  function bakeable(type: Type, at: Span, constant = false) {
+  bakeable(this: Mut<this>, type: Type, at: Span, constant = false) {
     // The first part of a type comptime can't make, or undefined.
     const fault = (t: Type): Type | undefined => {
       if (typeof t === "string") return t === "void" ? t : undefined;
-      const r = typing.rec(t);
+      const r = this.typing.rec(t);
       if (r.kind === "literal" || r.kind === "regex") return undefined;
       // A type holding itself isn't built into the program.
-      if (typing.tiedBy(t)) return t;
+      if (this.typing.tiedBy(t)) return t;
       const parts = r.kind === "union" ? r.members : r.kind === "array" ? [r.element] : r.kind === "object" || r.kind === "variant" ? r.fields.map((f) => f.type)
         : r.kind === "class" ? [...(r.base ? [r.base] : []), ...r.fields.map((f) => f.type)] : r.kind === "map" ? (r.set ? [r.key] : [r.key, r.value]) : r.kind === "interior" && constant && r.which !== "Cell" ? [r.of] : undefined;
       if (!parts) return t;
@@ -785,136 +1065,143 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     };
     const part = fault(type);
     if (!part) return;
-    const inside = part === type ? "" : ` (in '${typing.show(type)}')`;
-    const what = isRef(type) ? "a top-level const is already computed while compiling; read it without 'comptime'" : `'${typing.show(part)}'${inside} can't be computed while compiling: comptime makes numbers, booleans, strings, and arrays, Maps, Sets, objects, instances, unions and enums of them`;
+    const inside = part === type ? "" : ` (in '${this.typing.show(type)}')`;
+    const what = this.isRef(type) ? "a top-level const is already computed while compiling; read it without 'comptime'" : `'${this.typing.show(part)}'${inside} can't be computed while compiling: comptime makes numbers, booleans, strings, and arrays, Maps, Sets, objects, instances, unions and enums of them`;
     throw new CompileError("E1102", what, at.start, at.end);
   }
+
 
   // Two numbers of different types, as an instance's argument and a value of its bound may be,
   // equal by value: as f64 when either is a float, as JavaScript's numbers are, else as i128.
   // ponytail: a u128 beside a signed type compares as i128, wrong past i128's range.
-  function mixedNumbers(a: string, aType: Type, b: string, bType: Type): string | undefined {
+  mixedNumbers(this: Mut<this>, a: string, aType: Type, b: string, bType: Type): string | undefined {
     const number = (t: Type): [Numeric, string | undefined] | undefined => {
-      const r = recOf(t);
-      const base = r?.kind === "literal" ? typing.baseOf(t as LiteralType) : t;
+      const r = this.recOf(t);
+      const base = r?.kind === "literal" ? this.typing.baseOf(t as LiteralType) : t;
       return base !== undefined && isNumeric(base) ? [base, r?.kind === "literal" ? String(r.value) : undefined] : undefined;
     };
     const [x, y] = [number(aType), number(bType)];
     if (!x || !y || x[0] === y[0]) return undefined;
     const common: Numeric = isFloat(x[0]) || isFloat(y[0]) ? "f64" : x[0] === "u128" && y[0] === "u128" ? "u128" : "i128";
-    const side = ([type, constant]: [Numeric, string | undefined], v: string) => (constant !== undefined ? (isFloat(common) && !constant.includes(".") ? `${constant}.0` : constant) : cast(v, type, common));
+    const side = ([type, constant]: [Numeric, string | undefined], v: string) => (constant !== undefined ? (isFloat(common) && !constant.includes(".") ? `${constant}.0` : constant) : this.cast(v, type, common));
     const [l, r] = [side(x, a), side(y, b)];
-    const result = temp();
-    emit(`${result} = ${isFloat(common) ? "fcmp oeq" : "icmp eq"} ${llvm(common)} ${l}, ${r}`);
+    const result = this.temp();
+    this.emit(`${result} = ${isFloat(common) ? "fcmp oeq" : "icmp eq"} ${this.llvm(common)} ${l}, ${r}`);
     return result;
   }
+
 
   // Rust's `as`: integers truncate or extend by the source's signedness, floats round toward
   // zero into integers, saturating with NaN as 0, and widen or narrow between themselves.
-  function cast(v: string, from: Type, to: Numeric): string {
-    if (from === to || llvm(from) === llvm(to) && isInteger(from) && isInteger(to)) return v;
-    const result = temp();
-    const [a, b] = [llvm(from), llvm(to)];
-    if (from === "boolean") emit(`${result} = zext i1 ${v} to ${b}`);
+  cast(this: Mut<this>, v: string, from: Type, to: Numeric): string {
+    if (from === to || this.llvm(from) === this.llvm(to) && isInteger(from) && isInteger(to)) return v;
+    const result = this.temp();
+    const [a, b] = [this.llvm(from), this.llvm(to)];
+    if (from === "boolean") this.emit(`${result} = zext i1 ${v} to ${b}`);
     else if (isInteger(from) && isInteger(to)) {
       const [wide, narrow] = [INTEGERS[from].bits, INTEGERS[to].bits];
-      emit(`${result} = ${narrow < wide ? "trunc" : INTEGERS[from].signed ? "sext" : "zext"} ${a} ${v} to ${b}`);
-    } else if (isInteger(from)) emit(`${result} = ${INTEGERS[from].signed ? "sitofp" : "uitofp"} ${a} ${v} to ${b}`);
+      this.emit(`${result} = ${narrow < wide ? "trunc" : INTEGERS[from].signed ? "sext" : "zext"} ${a} ${v} to ${b}`);
+    } else if (isInteger(from)) this.emit(`${result} = ${INTEGERS[from].signed ? "sitofp" : "uitofp"} ${a} ${v} to ${b}`);
     else if (isInteger(to)) {
       const intrinsic = `@llvm.fpto${INTEGERS[to].signed ? "s" : "u"}i.sat.${b}.${a === "double" ? "f64" : "f32"}`;
-      intrinsics.add(`declare ${b} ${intrinsic}(${a})`);
-      emit(`${result} = call ${b} ${intrinsic}(${a} ${v})`);
-    } else emit(`${result} = ${to === "f64" ? "fpext" : "fptrunc"} ${a} ${v} to ${b}`);
+      this.intrinsics.add(`declare ${b} ${intrinsic}(${a})`);
+      this.emit(`${result} = call ${b} ${intrinsic}(${a} ${v})`);
+    } else this.emit(`${result} = ${to === "f64" ? "fpext" : "fptrunc"} ${a} ${v} to ${b}`);
     return result;
   }
 
+
   // A binary operator on numbers: floats never overflow, and integers are checked as Rust's are.
-  function numeric(op: BinaryOp, a: string, b: string, at: Expr, type: Type): string {
-    if (type === "bigint") return bigOperate(op, a, b, at);
-    if (!isFloat(type)) return operate(op, a, b, at, type as Integer);
-    const result = temp();
+  numeric(this: Mut<this>, op: BinaryOp, a: string, b: string, at: Expr, type: Type): string {
+    if (type === "bigint") return this.bigOperate(op, a, b, at);
+    if (!isFloat(type)) return this.operate(op, a, b, at, type as Integer);
+    const result = this.temp();
     // `**` is `Math.pow`; an f32 one is worked in f64 and rounded back.
     if (op === "**") {
-      intrinsics.add("declare double @fsh_math_pow(double, double)");
+      this.intrinsics.add("declare double @fsh_math_pow(double, double)");
       if (type === "f64") {
-        emit(`${result} = call double @fsh_math_pow(double ${a}, double ${b})`);
+        this.emit(`${result} = call double @fsh_math_pow(double ${a}, double ${b})`);
         return result;
       }
-      const [x, y, wide] = [temp(), temp(), temp()];
-      emit(`${x} = fpext float ${a} to double`);
-      emit(`${y} = fpext float ${b} to double`);
-      emit(`${wide} = call double @fsh_math_pow(double ${x}, double ${y})`);
-      emit(`${result} = fptrunc double ${wide} to float`);
+      const [x, y, wide] = [this.temp(), this.temp(), this.temp()];
+      this.emit(`${x} = fpext float ${a} to double`);
+      this.emit(`${y} = fpext float ${b} to double`);
+      this.emit(`${wide} = call double @fsh_math_pow(double ${x}, double ${y})`);
+      this.emit(`${result} = fptrunc double ${wide} to float`);
       return result;
     }
-    emit(`${result} = ${FLOAT_ARITHMETIC[op]} ${llvm(type)} ${a}, ${b}`);
+    this.emit(`${result} = ${FLOAT_ARITHMETIC[op]} ${this.llvm(type)} ${a}, ${b}`);
     return result;
   }
+
 
   // A bigint as a number: an integer from its low bits, a float rounded to the nearest; another
   // bigint is another reference to it.
-  function bigTo(v: string, to: Type): string {
+  bigTo(this: Mut<this>, v: string, to: Type): string {
     if (to === "bigint") return v;
-    const result = temp();
+    const result = this.temp();
     if (isFloat(to)) {
-      emit(`${result} = call double @fsh_rt_big_f64(ptr ${v})`);
+      this.emit(`${result} = call double @fsh_rt_big_f64(ptr ${v})`);
       if (to === "f64") return result;
-      const narrow = temp();
-      emit(`${narrow} = fptrunc double ${result} to float`);
+      const narrow = this.temp();
+      this.emit(`${narrow} = fptrunc double ${result} to float`);
       return narrow;
     }
-    emit(`${result} = call i128 @fsh_rt_big_low(ptr ${v})`);
+    this.emit(`${result} = call i128 @fsh_rt_big_low(ptr ${v})`);
     const { bits } = INTEGERS[to as Integer];
     if (bits === 128) return result;
-    const narrow = temp();
-    emit(`${narrow} = trunc i128 ${result} to i${bits}`);
+    const narrow = this.temp();
+    this.emit(`${narrow} = trunc i128 ${result} to i${bits}`);
     return narrow;
   }
 
+
   // Whether an 'as' widens to a type that isn't a number, rather than converting a number or
   // checking a union's tag.
-  function widens(e: Extract<Expr, { kind: "as" | "satisfies" }>): boolean {
-    const [from, to] = [valueType(e.expr), types.get(e)!];
-    if (recOf(from)?.kind === "union" && from !== to && !typing.fits(from, to)) return false;
-    return !isNumeric(to) && to !== "bigint" && recOf(to)?.kind !== "pointer";
+  widens(this: Mut<this>, e: Extract<Expr, { kind: "as" | "satisfies" }>): boolean {
+    const [from, to] = [this.valueType(e.expr), this.types.get(e)!];
+    if (this.recOf(from)?.kind === "union" && from !== to && !this.typing.fits(from, to)) return false;
+    return !isNumeric(to) && to !== "bigint" && this.recOf(to)?.kind !== "pointer";
   }
 
+
   // A new bigint from an operator on two, made by the runtime.
-  function bigOperate(op: BinaryOp, a: string, b: string, at: Expr): string {
-    const result = temp();
+  bigOperate(this: Mut<this>, op: BinaryOp, a: string, b: string, at: Expr): string {
+    const result = this.temp();
     // Division, powers and shifts may panic, unwinding what the statement holds.
-    const call = (line: string, panics = false) => (panics ? unwinding(`call ptr ${line}`, result) : emit(`${result} = call ptr ${line}`));
+    const call = (line: string, panics = false) => (panics ? this.unwinding(`call ptr ${line}`, result) : this.emit(`${result} = call ptr ${line}`));
     switch (op) {
       case "+": call(`@fsh_rt_big_add(ptr ${a}, ptr ${b})`); break;
       case "-": call(`@fsh_rt_big_sub(ptr ${a}, ptr ${b})`); break;
       case "*": call(`@fsh_rt_big_mul(ptr ${a}, ptr ${b})`); break;
-      case "/": case "%": call(`@fsh_rt_big_div(ptr ${a}, ptr ${b}, i32 ${op === "%" ? 1 : 0}, ptr ${panicAt(at)})`, true); break;
-      case "**": call(`@fsh_rt_big_pow(ptr ${a}, ptr ${b}, ptr ${panicAt(at)})`, true); break;
-      case "<<": case ">>": call(`@fsh_rt_big_shift(ptr ${a}, ptr ${b}, i32 ${op === ">>" ? 1 : 0}, ptr ${panicAt(at)})`, true); break;
+      case "/": case "%": call(`@fsh_rt_big_div(ptr ${a}, ptr ${b}, i32 ${op === "%" ? 1 : 0}, ptr ${this.panicAt(at)})`, true); break;
+      case "**": call(`@fsh_rt_big_pow(ptr ${a}, ptr ${b}, ptr ${this.panicAt(at)})`, true); break;
+      case "<<": case ">>": call(`@fsh_rt_big_shift(ptr ${a}, ptr ${b}, i32 ${op === ">>" ? 1 : 0}, ptr ${this.panicAt(at)})`, true); break;
       case "&": case "|": case "^": call(`@fsh_rt_big_bitwise(ptr ${a}, ptr ${b}, i32 ${["&", "|", "^"].indexOf(op)})`); break;
       default: throw new Error(`internal error: no bigint '${op}'`);
     }
     return result;
   }
 
+
   // `Math` on f64 lowers to LLVM's intrinsics or to the runtime's functions; `abs`, `sign`, `min`
   // and `max` keep their numeric type, a float `min` or `max` giving NaN for any NaN and telling
   // -0 from 0, as JavaScript does.
-  function mathCall(e: Extract<Expr, { kind: "call" }>): string {
+  mathCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): string {
     const name = (e.callee as Extract<Expr, { kind: "member" }>).name;
-    const type = types.get(e) as Numeric;
-    const t = llvm(type);
-    const args = e.args.map((a) => value(a));
-    const r = () => temp();
+    const type = this.types.get(e) as Numeric;
+    const t = this.llvm(type);
+    const args = e.args.map((a) => this.value(a));
+    const r = () => this.temp();
     const call = (fn: string, xs: string[], of: string = t) => {
       const result = r();
-      intrinsics.add(`declare ${of} ${fn}(${xs.map(() => of).join(", ")})`);
-      emit(`${result} = call ${of} ${fn}(${xs.map((x) => `${of} ${x}`).join(", ")})`);
+      this.intrinsics.add(`declare ${of} ${fn}(${xs.map(() => of).join(", ")})`);
+      this.emit(`${result} = call ${of} ${fn}(${xs.map((x) => `${of} ${x}`).join(", ")})`);
       return result;
     };
     const op = (line: string) => {
       const result = r();
-      emit(`${result} = ${line}`);
+      this.emit(`${result} = ${line}`);
       return result;
     };
     if (MATH_INTRINSICS.has(name)) return call(`@llvm.${name}.f64`, args);
@@ -935,13 +1222,13 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       if (float) return call(`@llvm.fabs.${type}`, [x]);
       if (!signed) return x;
       const negative = op(`icmp slt ${t} ${x}, 0`);
-      const [neg, done, start] = [label(), label(), block];
-      emit(`br i1 ${negative}, label %${neg}, label %${done}`);
-      startBlock(neg);
-      const negated = arithmetic("-", "0", x, e, type as Integer, "negate");
-      const from = block;
-      emit(`br label %${done}`);
-      startBlock(done);
+      const [neg, done, start] = [this.label(), this.label(), this.block];
+      this.emit(`br i1 ${negative}, label %${neg}, label %${done}`);
+      this.startBlock(neg);
+      const negated = this.arithmetic("-", "0", x, e, type as Integer, "negate");
+      const from = this.block;
+      this.emit(`br label %${done}`);
+      this.startBlock(done);
       return op(`phi ${t} [ ${x}, %${start} ], [ ${negated}, %${from} ]`);
     }
     if (name === "sign") {
@@ -960,3027 +1247,3150 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     });
   }
 
+
   // `x.toFixed(digits)`: a float from its exact value, an integer exactly; digits past 100
   // panic, as JavaScript throws a RangeError.
-  function toFixed(e: Extract<Expr, { kind: "call" }>): string {
+  toFixed(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): string {
+    const op = (line: string) => {
+      const v = this.temp();
+      this.emit(`${v} = ${line}`);
+      return v;
+    };
     const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
-    const type = typing.lower(valueType(object)) as Numeric;
-    const x = value(object);
-    const digits = e.args[0] ? value(e.args[0]) : "0";
-    if (e.args[0]) panicIf(op(`icmp ugt i64 ${digits}, 100`), "toFixed() digits argument must be between 0 and 100", e.args[0]);
-    const result = temp();
+    const type = this.typing.lower(this.valueType(object)) as Numeric;
+    const x = this.value(object);
+    const digits = e.args[0] ? this.value(e.args[0]) : "0";
+    if (e.args[0]) this.panicIf(op(`icmp ugt i64 ${digits}, 100`), "toFixed() digits argument must be between 0 and 100", e.args[0]);
+    const result = this.temp();
     if (isFloat(type)) {
       const wide = type === "f32" ? op(`fpext float ${x} to double`) : x;
-      emit(`${result} = call ptr @fsh_rt_to_fixed(double ${wide}, i64 ${digits})`);
+      this.emit(`${result} = call ptr @fsh_rt_to_fixed(double ${wide}, i64 ${digits})`);
     } else {
       const { signed, bits } = INTEGERS[type as Integer];
-      const wide = bits === 64 ? x : op(`${signed ? "sext" : "zext"} ${llvm(type)} ${x} to i64`);
-      emit(`${result} = call ptr @fsh_rt_int_to_fixed(i64 ${wide}, i32 ${signed ? 1 : 0}, i64 ${digits})`);
+      const wide = bits === 64 ? x : op(`${signed ? "sext" : "zext"} ${this.llvm(type)} ${x} to i64`);
+      this.emit(`${result} = call ptr @fsh_rt_int_to_fixed(i64 ${wide}, i32 ${signed ? 1 : 0}, i64 ${digits})`);
     }
-    if (!types.has(e)) pending.push({ v: result, type: "string" });
+    if (!this.types.has(e)) this.pending.push({ v: result, type: "string" });
     return result;
-
-    function op(line: string) {
-      const v = temp();
-      emit(`${v} = ${line}`);
-      return v;
-    }
   }
+
 
   // `x.checkedAdd(y)` and its kin: checked gives null when the operation overflowed, and
   // overflowing pairs the wrapped value with whether it did, the intrinsic's own `{ iN, i1 }`.
-  function integerMethodCall(e: Extract<Expr, { kind: "call" }>): string {
+  integerMethodCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): string {
     const callee = e.callee as Extract<Expr, { kind: "member" }>;
-    const type = typing.lower(valueType(callee.object)) as Integer;
+    const type = this.typing.lower(this.valueType(callee.object)) as Integer;
     const [family, operation] = integerMethod(callee.name)!;
-    const a = value(callee.object);
-    const [v, over] = integerLowering(family, operation, a, e.args[0] ? value(e.args[0]) : "", e, type);
-    const t = llvm(type);
-    const result = temp();
+    const a = this.value(callee.object);
+    const [v, over] = this.integerLowering(family, operation, a, e.args[0] ? this.value(e.args[0]) : "", e, type);
+    const t = this.llvm(type);
+    const result = this.temp();
     if (family === "checked") {
-      const option = typing.unionType([type, "null"]);
-      emit(`${result} = select i1 ${over}, ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ${llvm(option)} ${convert(v, type, option)}`);
+      const option = this.typing.unionType([type, "null"]);
+      this.emit(`${result} = select i1 ${over}, ${this.llvm(option)} ${this.convert("zeroinitializer", "null", option)}, ${this.llvm(option)} ${this.convert(v, type, option)}`);
       return result;
     }
     if (family !== "overflowing") return v;
-    const pair = temp();
-    emit(`${pair} = insertvalue { ${t}, i1 } undef, ${t} ${v}, 0`);
-    emit(`${result} = insertvalue { ${t}, i1 } ${pair}, i1 ${over}, 1`);
+    const pair = this.temp();
+    this.emit(`${pair} = insertvalue { ${t}, i1 } undef, ${t} ${v}, 0`);
+    this.emit(`${result} = insertvalue { ${t}, i1 } ${pair}, i1 ${over}, 1`);
     return result;
   }
+
 
   // An assertion: a panic at the call when it is false, giving its message, or else
   // `assertion failed: ` and its condition as written. The message is made only then, as Rust's is.
-  function assertCall(e: Extract<Expr, { kind: "call" }>): undefined {
-    const holds = value(e.args[0]!);
-    const [fail, ok] = [label(), label()];
-    emit(`br i1 ${holds}, label %${ok}, label %${fail}`);
-    startBlock(fail);
+  assertCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): undefined {
+    const holds = this.value(e.args[0]!);
+    const [fail, ok] = [this.label(), this.label()];
+    this.emit(`br i1 ${holds}, label %${ok}, label %${fail}`);
+    this.startBlock(fail);
     if (e.args[1]) {
       // The message is handed over owned, and what making it left pending released first.
-      const mark = pending.length;
-      const message = owned(e.args[1]);
-      settle(mark);
-      unwinding(`call void @fsh_rt_panic_assert(ptr ${panicAt(e)}, ptr ${message})`);
-    } else unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nassertion failed: ${asserts.get(e)}\n`)})`);
-    emit("unreachable");
-    startBlock(ok);
+      const mark = this.pending.length;
+      const message = this.owned(e.args[1]);
+      this.settle(mark);
+      this.unwinding(`call void @fsh_rt_panic_assert(ptr ${this.panicAt(e)}, ptr ${message})`);
+    } else this.unwinding(`call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where(e)}:\nassertion failed: ${this.asserts.get(e)}\n`)})`);
+    this.emit("unreachable");
+    this.startBlock(ok);
     return undefined;
   }
 
+
   // A number parsed by the runtime, or null where JavaScript would give NaN.
-  function parseCall(e: Extract<Expr, { kind: "call" }>, name: "parseInt" | "parseFloat" | "Number"): string {
+  parseCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, name: "parseInt" | "parseFloat" | "Number"): string {
     const number = name === "parseInt" ? "i64" : "f64";
-    const s = operand(e.args[0]!, e.args.slice(1));
-    const radix = e.args[1] ? value(e.args[1]) : "0";
-    const [out, ok, read, found] = [alloca(llvm(number)), temp(), temp(), temp()];
+    const s = this.operand(e.args[0]!, e.args.slice(1));
+    const radix = e.args[1] ? this.value(e.args[1]) : "0";
+    const [out, ok, read, found] = [this.alloca(this.llvm(number)), this.temp(), this.temp(), this.temp()];
     const args = name === "parseInt" ? `ptr ${s}, i64 ${radix}, ptr ${out}` : `ptr ${s}, ptr ${out}`;
-    emit(`${ok} = call i32 @fsh_rt_parse_${name === "Number" ? "number" : name === "parseInt" ? "int" : "float"}(${args})`);
-    emit(`${read} = load ${llvm(number)}, ptr ${out}`);
-    emit(`${found} = icmp ne i32 ${ok}, 0`);
-    const type = types.get(e) ?? typing.unionType([number, "null"]);
-    const result = temp();
-    emit(`${result} = select i1 ${found}, ${llvm(type)} ${convert(read, number, type)}, ${llvm(type)} ${convert("zeroinitializer", "null", type)}`);
+    this.emit(`${ok} = call i32 @fsh_rt_parse_${name === "Number" ? "number" : name === "parseInt" ? "int" : "float"}(${args})`);
+    this.emit(`${read} = load ${this.llvm(number)}, ptr ${out}`);
+    this.emit(`${found} = icmp ne i32 ${ok}, 0`);
+    const type = this.types.get(e) ?? this.typing.unionType([number, "null"]);
+    const result = this.temp();
+    this.emit(`${result} = select i1 ${found}, ${this.llvm(type)} ${this.convert(read, number, type)}, ${this.llvm(type)} ${this.convert("zeroinitializer", "null", type)}`);
     return result;
   }
 
-  function emit(line: string) {
-    if (body === debugging && site && site !== marked) {
-      body.push(`  ;fsh.at ${site.start}`);
-      marked = site;
+
+  emit(this: Mut<this>, line: string) {
+    if (this.body === this.debugging && this.site && this.site !== this.marked) {
+      this.body.push(`  ;fsh.at ${this.site.start}`);
+      this.marked = this.site;
     }
-    const callee = body === framing && site ? CALLEE.exec(line)?.[1] : undefined;
-    if (callee && !QUIET.test(callee)) body.push(`  store ptr ${cString(where(site!))}, ptr %fsh.site`);
-    body.push(`  ${line}`);
+    const callee = this.body === this.framing && this.site ? CALLEE.exec(line)?.[1] : undefined;
+    if (callee && !QUIET.test(callee)) this.body.push(`  store ptr ${this.cString(this.where(this.site!))}, ptr %fsh.site`);
+    this.body.push(`  ${line}`);
   }
 
-  function alloca(type: string): string {
-    const slot = temp();
-    allocas.push(`  ${slot} = alloca ${type}`);
+
+  alloca(this: Mut<this>, type: string): string {
+    const slot = this.temp();
+    this.allocas.push(`  ${slot} = alloca ${type}`);
     return slot;
   }
 
-  function temp(): string {
-    return `%t${temps++}`;
+
+  temp(this: Mut<this>): string {
+    return `%t${this.temps++}`;
   }
 
-  function label(): string {
-    return `L${labels++}`;
+
+  label(this: Mut<this>): string {
+    return `L${this.labels++}`;
   }
 
-  function startBlock(name: string) {
-    body.push(`${name}:`);
-    block = name;
+
+  startBlock(this: Mut<this>, name: string) {
+    this.body.push(`${name}:`);
+    this.block = name;
   }
+
 
   // A pipe's hidden topic is named `%`, which an LLVM name can't start with.
   // A loop's condition and update run again after its body, which may leave first: each C
   // string they make gets its slot in the loop's scope up front, so every way out drops it.
-  function reserveC(e: Expr | undefined) {
+  reserveC(this: Mut<this>, e: Expr | undefined) {
     if (!e) return;
     walkWhile({ of: "expr", node: e }, ({ of, node: call }) => {
       if (of !== "expr") return true;
       if (call.kind === "arrow") return false;
-      if (call.kind === "call" && call.callee.kind === "ident" && call.callee.name === "cString" && !calls.has(call) && !reserved.has(call)) {
-        const held = alloca(ARRAY);
-        allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
-        scopes.at(-1)!.push({ slot: held, type: typing.arrayType("u8") });
-        reserved.set(call, held);
+      if (call.kind === "call" && call.callee.kind === "ident" && call.callee.name === "cString" && !this.calls.has(call) && !this.reserved.has(call)) {
+        const held = this.alloca(ARRAY);
+        this.allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
+        this.scopes.at(-1)!.push({ slot: held, type: this.typing.arrayType("u8") });
+        this.reserved.set(call, held);
       }
       return true;
     });
   }
 
+
   // A scope a match or a pipe opens for itself, which ends with the expression.
-  function passing(scope: { slot: string; type: Type }[]) {
-    transient.add(scope);
+  passing(this: Mut<this>, scope: { slot: string; type: Type }[]) {
+    this.transient.add(scope);
     return scope;
   }
+
 
   // A C string's buffer, owned by the enclosing block as an array of bytes it frees at its end;
   // a scope a match or a pipe opens isn't a block. A loop's condition makes one each time round,
   // so the slot drops what it holds first. C would read only up to a NUL inside, so a string
   // holding one can't cross, as Rust's `CString` refuses it.
-  function forC(s: string, at: Expr): string {
-    const [made, old, refused] = [temp(), temp(), temp()];
-    unwinding(`call ptr @fsh_rt_str_cstring(ptr ${s})`, made);
-    emit(`${refused} = icmp eq ptr ${made}, null`);
-    panicIf(refused, "a string holding NUL can't cross to C, which would read only up to it", at);
-    let held = reserved.get(at);
+  forC(this: Mut<this>, s: string, at: Expr): string {
+    const [made, old, refused] = [this.temp(), this.temp(), this.temp()];
+    this.unwinding(`call ptr @fsh_rt_str_cstring(ptr ${s})`, made);
+    this.emit(`${refused} = icmp eq ptr ${made}, null`);
+    this.panicIf(refused, "a string holding NUL can't cross to C, which would read only up to it", at);
+    let held = this.reserved.get(at);
     if (!held) {
-      held = alloca(ARRAY);
-      allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
-      scopes.findLast((scope) => !transient.has(scope))!.push({ slot: held, type: typing.arrayType("u8") });
+      held = this.alloca(ARRAY);
+      this.allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
+      this.scopes.findLast((scope) => !this.transient.has(scope))!.push({ slot: held, type: this.typing.arrayType("u8") });
     }
-    emit(`${old} = load ${ARRAY}, ptr ${held}`);
-    dispose(old, typing.arrayType("u8"));
-    const array = temp();
-    emit(`${array} = insertvalue ${ARRAY} zeroinitializer, ptr ${made}, 0`);
-    emit(`store ${ARRAY} ${array}, ptr ${held}`);
+    this.emit(`${old} = load ${ARRAY}, ptr ${held}`);
+    this.dispose(old, this.typing.arrayType("u8"));
+    const array = this.temp();
+    this.emit(`${array} = insertvalue ${ARRAY} zeroinitializer, ptr ${made}, 0`);
+    this.emit(`store ${ARRAY} ${array}, ptr ${held}`);
     return made;
   }
 
+
   // A raw pointer's method: a load or a store of what it points at, the address `n` elements
   // along, or whether it is null.
-  function pointerCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
-    const p = valueType(callee.object) as PointerType;
-    const at = value(callee.object);
-    const result = temp();
+  pointerCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+    const p = this.valueType(callee.object) as PointerType;
+    const at = this.value(callee.object);
+    const result = this.temp();
     switch (callee.name) {
       case "read":
-        emit(`${result} = load ${llvm(typing.rec(p).to)}, ptr ${at}`);
+        this.emit(`${result} = load ${this.llvm(this.typing.rec(p).to)}, ptr ${at}`);
         return result;
       case "write":
-        emit(`store ${llvm(typing.rec(p).to)} ${value(e.args[0]!)}, ptr ${at}`);
+        this.emit(`store ${this.llvm(this.typing.rec(p).to)} ${this.value(e.args[0]!)}, ptr ${at}`);
         return undefined;
       case "offset":
-        emit(`${result} = getelementptr ${llvm(typing.rec(p).to)}, ptr ${at}, i64 ${value(e.args[0]!)}`);
+        this.emit(`${result} = getelementptr ${this.llvm(this.typing.rec(p).to)}, ptr ${at}, i64 ${this.value(e.args[0]!)}`);
         return result;
       default:
-        emit(`${result} = icmp eq ptr ${at}, null`);
+        this.emit(`${result} = icmp eq ptr ${at}, null`);
         return result;
     }
   }
 
+
   // A new Atomic, Cell, Lock or RwLock: what it holds, a boolean widened to a byte in an Atomic,
   // and a lock's word unlocked.
-  function interiorNew(e: Extract<Expr, { kind: "new" }>, t: InteriorType): string {
-    const v = owned(e.args![0]!);
-    const result = temp();
-    if (isLock(typing.rec(t))) emit(`${result} = insertvalue ${llvm(t)} { i32 0, ${llvm(typing.rec(t).of)} poison }, ${llvm(typing.rec(t).of)} ${v}, 1`);
-    else if (llvm(t) !== llvm(typing.rec(t).of)) emit(`${result} = zext i1 ${v} to i8`);
+  interiorNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, t: InteriorType): string {
+    const v = this.owned(e.args![0]!);
+    const result = this.temp();
+    if (isLock(this.typing.rec(t))) this.emit(`${result} = insertvalue ${this.llvm(t)} { i32 0, ${this.llvm(this.typing.rec(t).of)} poison }, ${this.llvm(this.typing.rec(t).of)} ${v}, 1`);
+    else if (this.llvm(t) !== this.llvm(this.typing.rec(t).of)) this.emit(`${result} = zext i1 ${v} to i8`);
     else return v;
     return result;
   }
 
+
   // An Atomic's method, as one sequentially consistent atomic instruction on where it lives.
-  function atomicCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
-    const t = referent(valueType(callee.object)) as InteriorType;
-    const at = receiver(callee.object);
-    if (typing.rec(t).which === "Cell") return cellCall(e, callee, t, at);
-    if (isLock(typing.rec(t))) return lockUpdate(e, t, at);
-    const ty = llvm(t);
+  atomicCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+    const t = this.referent(this.valueType(callee.object)) as InteriorType;
+    const at = this.receiver(callee.object);
+    if (this.typing.rec(t).which === "Cell") return this.cellCall(e, callee, t, at);
+    if (isLock(this.typing.rec(t))) return this.lockUpdate(e, t, at);
+    const ty = this.llvm(t);
     const align = `align ${ty === "i8" ? 1 : ty === "i16" ? 2 : ty === "i32" ? 4 : 8}`;
-    const byte = ty !== llvm(typing.rec(t).of);
+    const byte = ty !== this.llvm(this.typing.rec(t).of);
     const args = e.args.map((a) => {
-      const v = value(a);
+      const v = this.value(a);
       if (!byte) return v;
-      const wide = temp();
-      emit(`${wide} = zext i1 ${v} to i8`);
+      const wide = this.temp();
+      this.emit(`${wide} = zext i1 ${v} to i8`);
       return wide;
     });
-    const result = temp();
+    const result = this.temp();
     switch (callee.name) {
       case "load":
-        emit(`${result} = load atomic ${ty}, ptr ${at} seq_cst, ${align}`);
+        this.emit(`${result} = load atomic ${ty}, ptr ${at} seq_cst, ${align}`);
         break;
       case "store":
-        emit(`store atomic ${ty} ${args[0]}, ptr ${at} seq_cst, ${align}`);
+        this.emit(`store atomic ${ty} ${args[0]}, ptr ${at} seq_cst, ${align}`);
         return undefined;
       case "compareExchange": {
-        const pair = temp();
-        emit(`${pair} = cmpxchg ptr ${at}, ${ty} ${args[0]}, ${ty} ${args[1]} seq_cst seq_cst`);
-        emit(`${result} = extractvalue { ${ty}, i1 } ${pair}, 0`);
+        const pair = this.temp();
+        this.emit(`${pair} = cmpxchg ptr ${at}, ${ty} ${args[0]}, ${ty} ${args[1]} seq_cst seq_cst`);
+        this.emit(`${result} = extractvalue { ${ty}, i1 } ${pair}, 0`);
         break;
       }
       default: {
         const op = { add: "add", sub: "sub", exchange: "xchg" }[callee.name]!;
-        emit(`${result} = atomicrmw ${op} ptr ${at}, ${ty} ${args[0]} seq_cst`);
+        this.emit(`${result} = atomicrmw ${op} ptr ${at}, ${ty} ${args[0]} seq_cst`);
       }
     }
     if (!byte) return result;
-    const narrow = temp();
-    emit(`${narrow} = trunc i8 ${result} to i1`);
+    const narrow = this.temp();
+    this.emit(`${narrow} = trunc i8 ${result} to i1`);
     return narrow;
   }
 
+
   // Gives up a shared value's count; the last drops the value and frees the block. An Rc's last
   // strong count gives up the strongs' weak count instead, which frees it once no Weak is left.
-  function dropShared(t: SharedType) {
-    const which = typing.rec(t).which;
-    if (which === "Weak") return void emit("call void @fsh_rt_weak_release(ptr %v)");
-    const [last, held, at, value] = [temp(), temp(), temp(), temp()];
-    const [free, done] = [label(), label()];
-    emit(`${last} = call i32 @fsh_rt_${which === "Rc" ? "rc" : "shared"}_release(ptr %v)`);
-    emit(`${held} = icmp ne i32 ${last}, 0`);
-    emit(`br i1 ${held}, label %${free}, label %${done}`);
-    startBlock(free);
-    emit(`${at} = getelementptr ${sharedBlock(t)}, ptr %v, i32 0, i32 1, i32 1`);
-    emit(`${value} = load ${llvm(typing.rec(t).of)}, ptr ${at}`);
-    dispose(value, typing.rec(t).of);
-    emit(which === "Rc" ? "call void @fsh_rt_weak_release(ptr %v)" : "call void @fsh_rt_free(ptr %v)");
-    emit(`br label %${done}`);
-    startBlock(done);
+  dropShared(this: Mut<this>, t: SharedType) {
+    const which = this.typing.rec(t).which;
+    if (which === "Weak") return void this.emit("call void @fsh_rt_weak_release(ptr %v)");
+    const [last, held, at, value] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    const [free, done] = [this.label(), this.label()];
+    this.emit(`${last} = call i32 @fsh_rt_${which === "Rc" ? "rc" : "shared"}_release(ptr %v)`);
+    this.emit(`${held} = icmp ne i32 ${last}, 0`);
+    this.emit(`br i1 ${held}, label %${free}, label %${done}`);
+    this.startBlock(free);
+    this.emit(`${at} = getelementptr ${this.sharedBlock(t)}, ptr %v, i32 0, i32 1, i32 1`);
+    this.emit(`${value} = load ${this.llvm(this.typing.rec(t).of)}, ptr ${at}`);
+    this.dispose(value, this.typing.rec(t).of);
+    this.emit(which === "Rc" ? "call void @fsh_rt_weak_release(ptr %v)" : "call void @fsh_rt_free(ptr %v)");
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
   }
+
 
   // Takes a lock word, panicking if this thread already holds it, which would wait forever, or
   // if a task panicked holding it, which leaves it held over a value it may have half changed.
-  function takeLock(word: string, at: Span, take = "fsh_rt_lock") {
-    const [taken, held, poisoned] = [temp(), temp(), temp()];
-    emit(`${taken} = call i32 @${take}(ptr ${word})`);
-    emit(`${held} = icmp eq i32 ${taken}, 1`);
+  takeLock(this: Mut<this>, word: string, at: Span, take = "fsh_rt_lock") {
+    const [taken, held, poisoned] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${taken} = call i32 @${take}(ptr ${word})`);
+    this.emit(`${held} = icmp eq i32 ${taken}, 1`);
     const holder = take === "fsh_rt_lock" ? "an `update`" : "a `read` or an `update`";
-    panicIf(held, `this lock is already held by ${holder} running here; use the value its callback is given`, at);
-    emit(`${poisoned} = icmp eq i32 ${taken}, 2`);
-    panicIf(poisoned, "a task panicked while holding this lock, so the value it guards may be half changed", at);
+    this.panicIf(held, `this lock is already held by ${holder} running here; use the value its callback is given`, at);
+    this.emit(`${poisoned} = icmp eq i32 ${taken}, 2`);
+    this.panicIf(poisoned, "a task panicked while holding this lock, so the value it guards may be half changed", at);
   }
 
+
   // Marks an Rc's value read or changed for a callback, panicking where the two would overlap.
-  function borrowRc(word: string, at: Span, reading: boolean) {
-    const [taken, changing, read] = [temp(), temp(), temp()];
-    emit(`${taken} = call i32 @fsh_rt_rc_${reading ? "read" : "write"}(ptr ${word})`);
-    emit(`${changing} = icmp eq i32 ${taken}, 1`);
-    panicIf(changing, reading ? "this Rc's value is being changed by an `update` running here, so it can't be read until that returns" : "this Rc's value is already being changed by an `update` running here; use the value its callback is given", at);
+  borrowRc(this: Mut<this>, word: string, at: Span, reading: boolean) {
+    const [taken, changing, read] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${taken} = call i32 @fsh_rt_rc_${reading ? "read" : "write"}(ptr ${word})`);
+    this.emit(`${changing} = icmp eq i32 ${taken}, 1`);
+    this.panicIf(changing, reading ? "this Rc's value is being changed by an `update` running here, so it can't be read until that returns" : "this Rc's value is already being changed by an `update` running here; use the value its callback is given", at);
     if (reading) return;
-    emit(`${read} = icmp eq i32 ${taken}, 2`);
-    panicIf(read, "this Rc's value is being read by a `read` or a method running here, so `update` can't change it until that returns", at);
+    this.emit(`${read} = icmp eq i32 ${taken}, 2`);
+    this.panicIf(read, "this Rc's value is being read by a `read` or a method running here, so `update` can't change it until that returns", at);
   }
+
 
   // 'AbortSignal.any's handles and their count: a literal's, lent one by one, in a stack array,
   // and otherwise the borrowed array's own buffer.
-  function signalList(list: Expr): string {
+  signalList(this: Mut<this>, list: Expr): string {
     if (list.kind !== "array") {
-      const [array, whole, buffer, length] = [value(list), temp(), temp(), temp()];
-      emit(`${whole} = load ${ARRAY}, ptr ${array}`);
-      emit(`${buffer} = extractvalue ${ARRAY} ${whole}, 0`);
-      emit(`${length} = extractvalue ${ARRAY} ${whole}, 1`);
+      const [array, whole, buffer, length] = [this.value(list), this.temp(), this.temp(), this.temp()];
+      this.emit(`${whole} = load ${ARRAY}, ptr ${array}`);
+      this.emit(`${buffer} = extractvalue ${ARRAY} ${whole}, 0`);
+      this.emit(`${length} = extractvalue ${ARRAY} ${whole}, 1`);
       return `ptr ${buffer}, i64 ${length}`;
     }
     const n = list.elements.length;
-    const handles = alloca(`[${Math.max(n, 1)} x ptr]`);
+    const handles = this.alloca(`[${Math.max(n, 1)} x ptr]`);
     list.elements.forEach((x, i) => {
-      const [handle, at] = [temp(), temp()];
-      emit(`${handle} = load ptr, ptr ${value(x!)}`);
-      emit(`${at} = getelementptr [${Math.max(n, 1)} x ptr], ptr ${handles}, i32 0, i32 ${i}`);
-      emit(`store ptr ${handle}, ptr ${at}`);
+      const [handle, at] = [this.temp(), this.temp()];
+      this.emit(`${handle} = load ptr, ptr ${this.value(x!)}`);
+      this.emit(`${at} = getelementptr [${Math.max(n, 1)} x ptr], ptr ${handles}, i32 0, i32 ${i}`);
+      this.emit(`store ptr ${handle}, ptr ${at}`);
     });
     return `ptr ${handles}, i64 ${n}`;
   }
 
+
   // A wait's frame given an AbortSignal, its last argument: a count on it goes in the frame.
-  function signalled(e: Extract<Expr, { kind: "call" }>, future: FutureType, frame: string): string {
-    if (!typing.leafOf.get(future)?.signal) return frame;
-    const [handle, next] = [temp(), temp()];
-    emit(`${handle} = load ptr, ptr ${value(e.args.at(-1)!)}`);
-    emit(`${next} = insertvalue ${llvm(future)} ${frame}, ptr ${copied(handle, typing.blockType("AbortSignal"))}, ${typing.rec(future).frame.length - 2}`);
+  signalled(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, future: FutureType, frame: string): string {
+    if (!this.typing.leafOf.get(future)?.signal) return frame;
+    const [handle, next] = [this.temp(), this.temp()];
+    this.emit(`${handle} = load ptr, ptr ${this.value(e.args.at(-1)!)}`);
+    this.emit(`${next} = insertvalue ${this.llvm(future)} ${frame}, ptr ${this.copied(handle, this.typing.blockType("AbortSignal"))}, ${this.typing.rec(future).frame.length - 2}`);
     return next;
   }
 
+
   // A new `AbortError`, its message a literal.
-  function abortError(type: Type): string {
-    const made = temp();
-    emit(`${made} = insertvalue ${llvm(type)} zeroinitializer, ptr ${text("This operation was aborted")}, 0`);
+  abortError(this: Mut<this>, type: Type): string {
+    const made = this.temp();
+    this.emit(`${made} = insertvalue ${this.llvm(type)} zeroinitializer, ptr ${this.text("This operation was aborted")}, 0`);
     return made;
   }
 
+
   // `c.signal`, another handle to a controller's signal, and `signal.aborted`.
-  function blockProperty(e: Extract<Expr, { kind: "member" }>): string {
-    const holder = types.get(e.object)!;
-    const handle = isRef(holder) ? temp() : value(e.object);
-    if (isRef(holder)) emit(`${handle} = load ptr, ptr ${value(e.object)}`);
-    if (e.name === "signal") return copied(handle, types.get(e)!);
+  blockProperty(this: Mut<this>, e: Extract<Expr, { kind: "member" }>): string {
+    const holder = this.types.get(e.object)!;
+    const handle = this.isRef(holder) ? this.temp() : this.value(e.object);
+    if (this.isRef(holder)) this.emit(`${handle} = load ptr, ptr ${this.value(e.object)}`);
+    if (e.name === "signal") return this.copied(handle, this.types.get(e)!);
     if (e.name === "port") {
-      const port = temp();
-      emit(`${port} = call i64 @fsh_rt_tcp_port(ptr ${handle})`);
+      const port = this.temp();
+      this.emit(`${port} = call i64 @fsh_rt_tcp_port(ptr ${handle})`);
       return port;
     }
-    const [aborted, yes] = [temp(), temp()];
-    emit(`${aborted} = call i32 @fsh_rt_signal_aborted(ptr ${handle})`);
-    emit(`${yes} = icmp ne i32 ${aborted}, 0`);
+    const [aborted, yes] = [this.temp(), this.temp()];
+    this.emit(`${aborted} = call i32 @fsh_rt_signal_aborted(ptr ${handle})`);
+    this.emit(`${yes} = icmp ne i32 ${aborted}, 0`);
     return yes;
   }
 
+
   // `new Semaphore(n)` and `new Channel<T>(capacity)`: a block in the runtime with one count.
-  function blockNew(e: Extract<Expr, { kind: "new" }>, t: BlockType): string {
-    const made = temp();
-    if (typing.rec(t).which === "AbortController") {
-      emit(`${made} = call ptr @fsh_rt_signal_new()`);
+  blockNew(this: Mut<this>, e: Extract<Expr, { kind: "new" }>, t: BlockType): string {
+    const made = this.temp();
+    if (this.typing.rec(t).which === "AbortController") {
+      this.emit(`${made} = call ptr @fsh_rt_signal_new()`);
       return made;
     }
-    const n = value(e.args![0]!);
-    if (typing.rec(t).which === "Semaphore") {
-      const negative = temp();
-      emit(`${negative} = icmp slt i64 ${n}, 0`);
-      panicIf(negative, "a semaphore's number of slots can't be negative", e);
-      emit(`${made} = call ptr @fsh_rt_semaphore_new(i64 ${n})`);
+    const n = this.value(e.args![0]!);
+    if (this.typing.rec(t).which === "Semaphore") {
+      const negative = this.temp();
+      this.emit(`${negative} = icmp slt i64 ${n}, 0`);
+      this.panicIf(negative, "a semaphore's number of slots can't be negative", e);
+      this.emit(`${made} = call ptr @fsh_rt_semaphore_new(i64 ${n})`);
       return made;
     }
-    const small = temp();
-    emit(`${small} = icmp slt i64 ${n}, 1`);
-    panicIf(small, "a channel's capacity must be at least 1", e);
+    const small = this.temp();
+    this.emit(`${small} = icmp slt i64 ${n}, 1`);
+    this.panicIf(small, "a channel's capacity must be at least 1", e);
     // The ring is allocated whole, so its size in bytes must fit.
     // ponytail: the ring is allocated up front, grow it on demand if large capacities matter
-    const [end, size, wide, most, large] = [temp(), temp(), temp(), temp(), temp()];
-    emit(`${end} = getelementptr ${llvm(typing.rec(t).of)}, ptr null, i64 1`);
-    emit(`${size} = ptrtoint ptr ${end} to i64`);
-    emit(`${wide} = icmp eq i64 ${size}, 0`);
-    emit(`${most} = select i1 ${wide}, i64 1, i64 ${size}`);
-    const limit = temp();
-    emit(`${limit} = udiv i64 ${(1n << 47n).toString()}, ${most}`);
-    emit(`${large} = icmp sgt i64 ${n}, ${limit}`);
-    panicIf(large, "a channel's capacity is too large to allocate", e);
-    emit(`${made} = call ptr @fsh_rt_channel_new(i64 ${n}, i64 ${size}, ptr ${elementDrop(typing.rec(t).of)})`);
+    const [end, size, wide, most, large] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${end} = getelementptr ${this.llvm(this.typing.rec(t).of)}, ptr null, i64 1`);
+    this.emit(`${size} = ptrtoint ptr ${end} to i64`);
+    this.emit(`${wide} = icmp eq i64 ${size}, 0`);
+    this.emit(`${most} = select i1 ${wide}, i64 1, i64 ${size}`);
+    const limit = this.temp();
+    this.emit(`${limit} = udiv i64 ${(1n << 47n).toString()}, ${most}`);
+    this.emit(`${large} = icmp sgt i64 ${n}, ${limit}`);
+    this.panicIf(large, "a channel's capacity is too large to allocate", e);
+    this.emit(`${made} = call ptr @fsh_rt_channel_new(i64 ${n}, i64 ${size}, ptr ${this.elementDrop(this.typing.rec(t).of)})`);
     return made;
   }
 
+
   // A map's entry: its state, hash and key bits for the runtime, then its key and value.
-  function entryType(t: MapType): string {
-    return `{ i64, i64, i64, ${llvm(typing.rec(t).key)}, ${typing.rec(t).set ? "{}" : llvm(typing.rec(t).value)} }`;
+  entryType(this: Mut<this>, t: MapType): string {
+    return `{ i64, i64, i64, ${this.llvm(this.typing.rec(t).key)}, ${this.typing.rec(t).set ? "{}" : this.llvm(this.typing.rec(t).value)} }`;
   }
 
+
   // The byte offset of part `i` of an LLVM struct type, or with no `i`, the type's size.
-  function offsetOf(type: string, i?: usize): string {
-    const [at, n] = [temp(), temp()];
-    emit(i === undefined ? `${at} = getelementptr ${type}, ptr null, i64 1` : `${at} = getelementptr ${type}, ptr null, i64 0, i32 ${i}`);
-    emit(`${n} = ptrtoint ptr ${at} to i64`);
+  offsetOf(this: Mut<this>, type: string, i?: usize): string {
+    const [at, n] = [this.temp(), this.temp()];
+    this.emit(i === undefined ? `${at} = getelementptr ${type}, ptr null, i64 1` : `${at} = getelementptr ${type}, ptr null, i64 0, i32 ${i}`);
+    this.emit(`${n} = ptrtoint ptr ${at} to i64`);
     return n;
   }
 
+
   // A float key as JavaScript's SameValueZero sees it: `-0` becomes `+0`, which adding `+0` does.
-  function sameValueZero(v: string, key: Type): string {
-    const k = typing.lower(key);
+  sameValueZero(this: Mut<this>, v: string, key: Type): string {
+    const k = this.typing.lower(key);
     if (!isFloat(k)) return v;
-    const zeroed = temp();
-    emit(`${zeroed} = fadd ${llvm(k)} ${v}, 0.0`);
+    const zeroed = this.temp();
+    this.emit(`${zeroed} = fadd ${this.llvm(k)} ${v}, 0.0`);
     return zeroed;
   }
 
+
   // A key as the runtime hashes and compares it: a string's pointer, an integer widened to 64
   // bits, a float's bits with every NaN one NaN, or a union's member index.
-  function keyBits(v: string, key: Type): string {
-    const k = typing.lower(key);
+  keyBits(this: Mut<this>, v: string, key: Type): string {
+    const k = this.typing.lower(key);
     if (isFloat(k)) {
-      const [wide, raw, nan, bits] = [k === "f64" ? sameValueZero(v, key) : temp(), temp(), temp(), temp()];
-      if (k === "f32") emit(`${wide} = fpext float ${sameValueZero(v, key)} to double`);
-      emit(`${raw} = bitcast double ${wide} to i64`);
-      emit(`${nan} = fcmp uno double ${wide}, 0.0`);
-      emit(`${bits} = select i1 ${nan}, i64 ${0x7ff8000000000000n}, i64 ${raw}`);
+      const [wide, raw, nan, bits] = [k === "f64" ? this.sameValueZero(v, key) : this.temp(), this.temp(), this.temp(), this.temp()];
+      if (k === "f32") this.emit(`${wide} = fpext float ${this.sameValueZero(v, key)} to double`);
+      this.emit(`${raw} = bitcast double ${wide} to i64`);
+      this.emit(`${nan} = fcmp uno double ${wide}, 0.0`);
+      this.emit(`${bits} = select i1 ${nan}, i64 ${0x7ff8000000000000n}, i64 ${raw}`);
       return bits;
     }
     if (k === "string") {
-      const bits = temp();
-      emit(`${bits} = ptrtoint ptr ${v} to i64`);
+      const bits = this.temp();
+      this.emit(`${bits} = ptrtoint ptr ${v} to i64`);
       return bits;
     }
     if (isInteger(k)) {
       if (INTEGERS[k].bits === 64) return v;
-      const bits = temp();
-      emit(`${bits} = ${INTEGERS[k].signed ? "sext" : "zext"} ${llvm(k)} ${v} to i64`);
+      const bits = this.temp();
+      this.emit(`${bits} = ${INTEGERS[k].signed ? "sext" : "zext"} ${this.llvm(k)} ${v} to i64`);
       return bits;
     }
-    if (recOf(k)?.kind === "union") {
-      const [tag, bits] = [temp(), temp()];
-      emit(`${tag} = extractvalue ${llvm(k)} ${v}, 0`);
-      emit(`${bits} = zext i32 ${tag} to i64`);
+    if (this.recOf(k)?.kind === "union") {
+      const [tag, bits] = [this.temp(), this.temp()];
+      this.emit(`${tag} = extractvalue ${this.llvm(k)} ${v}, 0`);
+      this.emit(`${bits} = zext i32 ${tag} to i64`);
       return bits;
     }
     return "0";
   }
 
+
   // `new Map<K, V>()` and `new Set<T>()`: an empty table, told how to drop its keys and values.
   // With `from`, the array whose pairs or members it takes over, a later key replacing an earlier.
-  function mapNew(t: MapType, from: Expr | undefined): string {
+  mapNew(this: Mut<this>, t: MapType, from: Expr | undefined): string {
     // The array runs first, so a panic in it has no table to leave behind.
-    const whole = from && owned(from);
-    const made = emptyMap(t);
+    const whole = from && this.owned(from);
+    const made = this.emptyMap(t);
     if (!from || !whole) return made;
-    const array = typing.rec((coercions.get(from) ?? types.get(from)) as ArrayType);
-    const et = llvm(array.element);
-    const [data, length] = [temp(), temp()];
-    emit(`${data} = extractvalue ${ARRAY} ${whole}, 0`);
-    emit(`${length} = extractvalue ${ARRAY} ${whole}, 1`);
-    elements(array.element, data, length, (at) => {
-      const element = temp();
-      emit(`${element} = load ${et}, ptr ${at}`);
-      if (typing.rec(t).set) return inserted(t, made, element);
-      const [key, v] = [temp(), temp()];
-      emit(`${key} = extractvalue ${et} ${element}, 0`);
-      emit(`${v} = extractvalue ${et} ${element}, 1`);
-      inserted(t, made, key, v);
+    const array = this.typing.rec((this.coercions.get(from) ?? this.types.get(from)) as ArrayType);
+    const et = this.llvm(array.element);
+    const [data, length] = [this.temp(), this.temp()];
+    this.emit(`${data} = extractvalue ${ARRAY} ${whole}, 0`);
+    this.emit(`${length} = extractvalue ${ARRAY} ${whole}, 1`);
+    this.elements(array.element, data, length, (at) => {
+      const element = this.temp();
+      this.emit(`${element} = load ${et}, ptr ${at}`);
+      if (this.typing.rec(t).set) return this.inserted(t, made, element);
+      const [key, v] = [this.temp(), this.temp()];
+      this.emit(`${key} = extractvalue ${et} ${element}, 0`);
+      this.emit(`${v} = extractvalue ${et} ${element}, 1`);
+      this.inserted(t, made, key, v);
     });
-    emit(`call void @fsh_rt_free(ptr ${data})`);
+    this.emit(`call void @fsh_rt_free(ptr ${data})`);
     return made;
   }
 
-  function emptyMap(t: MapType): string {
-    const entry = entryType(t);
-    const [size, keyAt, valueAt] = [offsetOf(entry), offsetOf(entry, 3), offsetOf(entry, 4)];
-    const drop = (part: Type) => (needsDrop(part) ? elementDrop(part) : "null");
-    const made = temp();
-    emit(`${made} = call ptr @fsh_rt_map_new(i64 ${size}, i64 ${keyAt}, i64 ${valueAt}, i32 ${typing.lower(typing.rec(t).key) === "string" ? 1 : 0}, ptr ${drop(typing.rec(t).key)}, ptr ${typing.rec(t).set ? "null" : drop(typing.rec(t).value)})`);
+
+  emptyMap(this: Mut<this>, t: MapType): string {
+    const entry = this.entryType(t);
+    const [size, keyAt, valueAt] = [this.offsetOf(entry), this.offsetOf(entry, 3), this.offsetOf(entry, 4)];
+    const drop = (part: Type) => (this.needsDrop(part) ? this.elementDrop(part) : "null");
+    const made = this.temp();
+    this.emit(`${made} = call ptr @fsh_rt_map_new(i64 ${size}, i64 ${keyAt}, i64 ${valueAt}, i32 ${this.typing.lower(this.typing.rec(t).key) === "string" ? 1 : 0}, ptr ${drop(this.typing.rec(t).key)}, ptr ${this.typing.rec(t).set ? "null" : drop(this.typing.rec(t).value)})`);
     return made;
   }
+
 
   // Puts an owned key, and for a Map its owned value, into the table: a key already there keeps
   // its first copy and its place in the order, as JavaScript's does, and its old value is dropped.
-  function inserted(t: MapType, map: string, key: string, v?: string) {
-    const entry = entryType(t);
-    const [kt, vt] = [llvm(typing.rec(t).key), llvm(typing.rec(t).value)];
+  inserted(this: Mut<this>, t: MapType, map: string, key: string, v?: string) {
+    const entry = this.entryType(t);
+    const [kt, vt] = [this.llvm(this.typing.rec(t).key), this.llvm(this.typing.rec(t).value)];
     const valueAt = (at: string) => {
-      const slot = temp();
-      emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
+      const slot = this.temp();
+      this.emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
       return slot;
     };
-    const [found, at, was, there, replace, fresh, done] = [alloca("i32"), temp(), temp(), temp(), label(), label(), label()];
-    emit(`${at} = call ptr @fsh_rt_map_insert(ptr ${map}, i64 ${keyBits(key, typing.rec(t).key)}, ptr ${found})`);
-    emit(`${was} = load i32, ptr ${found}`);
-    emit(`${there} = icmp ne i32 ${was}, 0`);
-    emit(`br i1 ${there}, label %${replace}, label %${fresh}`);
-    startBlock(replace);
-    dispose(key, typing.rec(t).key);
+    const [found, at, was, there, replace, fresh, done] = [this.alloca("i32"), this.temp(), this.temp(), this.temp(), this.label(), this.label(), this.label()];
+    this.emit(`${at} = call ptr @fsh_rt_map_insert(ptr ${map}, i64 ${this.keyBits(key, this.typing.rec(t).key)}, ptr ${found})`);
+    this.emit(`${was} = load i32, ptr ${found}`);
+    this.emit(`${there} = icmp ne i32 ${was}, 0`);
+    this.emit(`br i1 ${there}, label %${replace}, label %${fresh}`);
+    this.startBlock(replace);
+    this.dispose(key, this.typing.rec(t).key);
     if (v !== undefined) {
-      const [slot, old] = [valueAt(at), temp()];
-      emit(`${old} = load ${vt}, ptr ${slot}`);
-      dispose(old, typing.rec(t).value);
-      emit(`store ${vt} ${v}, ptr ${slot}`);
+      const [slot, old] = [valueAt(at), this.temp()];
+      this.emit(`${old} = load ${vt}, ptr ${slot}`);
+      this.dispose(old, this.typing.rec(t).value);
+      this.emit(`store ${vt} ${v}, ptr ${slot}`);
     }
-    emit(`br label %${done}`);
-    startBlock(fresh);
-    const keySlot = temp();
-    emit(`${keySlot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
-    emit(`store ${kt} ${sameValueZero(key, typing.rec(t).key)}, ptr ${keySlot}`);
-    if (v !== undefined) emit(`store ${vt} ${v}, ptr ${valueAt(at)}`);
-    emit(`br label %${done}`);
-    startBlock(done);
+    this.emit(`br label %${done}`);
+    this.startBlock(fresh);
+    const keySlot = this.temp();
+    this.emit(`${keySlot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
+    this.emit(`store ${kt} ${this.sameValueZero(key, this.typing.rec(t).key)}, ptr ${keySlot}`);
+    if (v !== undefined) this.emit(`store ${vt} ${v}, ptr ${valueAt(at)}`);
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
   }
+
 
   // A copy of the map in %v: the table copied whole, then each live entry's value and key copied
   // in place. A value's copy may panic, and the copy so far goes with it.
-  function copyMap(t: MapType): string {
-    const entry = entryType(t);
-    const [copy, used, index] = [temp(), temp(), alloca("i64")];
-    emit(`${copy} = call ptr @fsh_rt_map_copy(ptr %v)`);
-    emit(`${used} = call i64 @fsh_rt_map_used(ptr ${copy})`);
-    emit(`store i64 0, ptr ${index}`);
-    const [head, body, live, next, done] = [label(), label(), label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${more} = icmp ult i64 ${i}, ${used}`);
-    emit(`br i1 ${more}, label %${body}, label %${done}`);
-    startBlock(body);
-    const [at, state, copying] = [temp(), temp(), temp()];
-    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${copy}, i64 ${i})`);
-    emit(`${state} = load i64, ptr ${at}`);
-    emit(`${copying} = icmp eq i64 ${state}, 3`);
-    emit(`br i1 ${copying}, label %${live}, label %${next}`);
-    startBlock(live);
-    if (!typing.rec(t).set && needsDrop(typing.rec(t).value)) {
-      const [slot, v, made] = [temp(), temp(), temp()];
-      const vt = llvm(typing.rec(t).value);
-      emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
-      emit(`${v} = load ${vt}, ptr ${slot}`);
-      const held = recOf(typing.rec(t).value);
+  copyMap(this: Mut<this>, t: MapType): string {
+    const entry = this.entryType(t);
+    const [copy, used, index] = [this.temp(), this.temp(), this.alloca("i64")];
+    this.emit(`${copy} = call ptr @fsh_rt_map_copy(ptr %v)`);
+    this.emit(`${used} = call i64 @fsh_rt_map_used(ptr ${copy})`);
+    this.emit(`store i64 0, ptr ${index}`);
+    const [head, body, live, next, done] = [this.label(), this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [i, more] = [this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp ult i64 ${i}, ${used}`);
+    this.emit(`br i1 ${more}, label %${body}, label %${done}`);
+    this.startBlock(body);
+    const [at, state, copying] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${at} = call ptr @fsh_rt_map_at(ptr ${copy}, i64 ${i})`);
+    this.emit(`${state} = load i64, ptr ${at}`);
+    this.emit(`${copying} = icmp eq i64 ${state}, 3`);
+    this.emit(`br i1 ${copying}, label %${live}, label %${next}`);
+    this.startBlock(live);
+    if (!this.typing.rec(t).set && this.needsDrop(this.typing.rec(t).value)) {
+      const [slot, v, made] = [this.temp(), this.temp(), this.temp()];
+      const vt = this.llvm(this.typing.rec(t).value);
+      this.emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
+      this.emit(`${v} = load ${vt}, ptr ${slot}`);
+      const held = this.recOf(this.typing.rec(t).value);
       if (held !== undefined && held.kind !== "handle" && held.kind !== "interior") {
-        unwinding(`call ${vt} ${helper("copy", typing.rec(t).value as Exclude<Type, string>)}(${vt} ${v})`, made, () => emit(`call void @fsh_rt_map_free(ptr ${copy})`));
-        emit(`store ${vt} ${made}, ptr ${slot}`);
-      } else emit(`store ${vt} ${copied(v, typing.rec(t).value)}, ptr ${slot}`);
+        this.unwinding(`call ${vt} ${this.helper("copy", this.typing.rec(t).value as Exclude<Type, string>)}(${vt} ${v})`, made, () => this.emit(`call void @fsh_rt_map_free(ptr ${copy})`));
+        this.emit(`store ${vt} ${made}, ptr ${slot}`);
+      } else this.emit(`store ${vt} ${this.copied(v, this.typing.rec(t).value)}, ptr ${slot}`);
     }
-    const [keySlot, k] = [temp(), temp()];
-    const kt = llvm(typing.rec(t).key);
-    emit(`${keySlot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
-    emit(`${k} = load ${kt}, ptr ${keySlot}`);
-    const key = copied(k, typing.rec(t).key);
-    emit(`store ${kt} ${key}, ptr ${keySlot}`);
-    emit(`call void @fsh_rt_map_copied(ptr ${copy}, i64 ${i}, i64 ${keyBits(key, typing.rec(t).key)})`);
-    emit(`br label %${next}`);
-    startBlock(next);
-    const after = temp();
-    emit(`${after} = add i64 ${i}, 1`);
-    emit(`store i64 ${after}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
+    const [keySlot, k] = [this.temp(), this.temp()];
+    const kt = this.llvm(this.typing.rec(t).key);
+    this.emit(`${keySlot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
+    this.emit(`${k} = load ${kt}, ptr ${keySlot}`);
+    const key = this.copied(k, this.typing.rec(t).key);
+    this.emit(`store ${kt} ${key}, ptr ${keySlot}`);
+    this.emit(`call void @fsh_rt_map_copied(ptr ${copy}, i64 ${i}, i64 ${this.keyBits(key, this.typing.rec(t).key)})`);
+    this.emit(`br label %${next}`);
+    this.startBlock(next);
+    const after = this.temp();
+    this.emit(`${after} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${after}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
     return copy;
   }
 
+
   // A Map's or a Set's method on the table its receiver holds. `set` and `add` give the receiver
   // back, a `Mut` borrow of where the table lives.
-  function mapCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
-    const t = valueType(callee.object) as MapType;
-    const entry = entryType(t);
-    const at = receiver(callee.object);
-    const map = temp();
-    emit(`${map} = load ptr, ptr ${at}`);
-    const [kt, vt] = [llvm(typing.rec(t).key), typing.rec(t).set ? "{}" : llvm(typing.rec(t).value)];
+  mapCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+    const t = this.valueType(callee.object) as MapType;
+    const entry = this.entryType(t);
+    const at = this.receiver(callee.object);
+    const map = this.temp();
+    this.emit(`${map} = load ptr, ptr ${at}`);
+    const [kt, vt] = [this.llvm(this.typing.rec(t).key), this.typing.rec(t).set ? "{}" : this.llvm(this.typing.rec(t).value)];
     const part = (e: string, i: 3 | 4) => {
-      const slot = temp();
-      emit(`${slot} = getelementptr ${entry}, ptr ${e}, i64 0, i32 ${i}`);
+      const slot = this.temp();
+      this.emit(`${slot} = getelementptr ${entry}, ptr ${e}, i64 0, i32 ${i}`);
       return slot;
     };
     const load = (type: string, slot: string) => {
-      const v = temp();
-      emit(`${v} = load ${type}, ptr ${slot}`);
+      const v = this.temp();
+      this.emit(`${v} = load ${type}, ptr ${slot}`);
       return v;
     };
     const name = callee.name;
     if (name === "clear") {
-      emit(`call void @fsh_rt_map_clear(ptr ${map})`);
+      this.emit(`call void @fsh_rt_map_clear(ptr ${map})`);
       return undefined;
     }
-    if (name === "keys" || name === "values" || name === "entries") return listed(e, name, t, map);
-    if (name === "forEach") return eachEntry(e, t, map);
+    if (name === "keys" || name === "values" || name === "entries") return this.listed(e, name, t, map);
+    if (name === "forEach") return this.eachEntry(e, t, map);
     // The key is owned for the call: kept when it goes in, dropped once it has been looked up.
     // A panic in the value's argument drops the key made before it.
-    const [key, given] = delivered((hand) => [hand(owned(e.args[0]!), typing.rec(t).key), name === "set" ? hand(owned(e.args[1]!), typing.rec(t).value) : undefined]);
+    const [key, given] = this.delivered((hand) => [hand(this.owned(e.args[0]!), this.typing.rec(t).key), name === "set" ? hand(this.owned(e.args[1]!), this.typing.rec(t).value) : undefined]);
     if (name === "set" || name === "add") {
-      inserted(t, map, key, given);
+      this.inserted(t, map, key, given);
       return at;
     }
-    const bits = keyBits(key, typing.rec(t).key);
+    const bits = this.keyBits(key, this.typing.rec(t).key);
     if (name === "delete") {
-      const [gone, removed, drop, done] = [temp(), temp(), label(), label()];
-      emit(`${gone} = call ptr @fsh_rt_map_remove(ptr ${map}, i64 ${bits})`);
-      dispose(key, typing.rec(t).key);
-      emit(`${removed} = icmp ne ptr ${gone}, null`);
-      emit(`br i1 ${removed}, label %${drop}, label %${done}`);
-      startBlock(drop);
-      dispose(load(kt, part(gone, 3)), typing.rec(t).key);
-      if (!typing.rec(t).set) dispose(load(vt, part(gone, 4)), typing.rec(t).value);
-      emit(`br label %${done}`);
-      startBlock(done);
+      const [gone, removed, drop, done] = [this.temp(), this.temp(), this.label(), this.label()];
+      this.emit(`${gone} = call ptr @fsh_rt_map_remove(ptr ${map}, i64 ${bits})`);
+      this.dispose(key, this.typing.rec(t).key);
+      this.emit(`${removed} = icmp ne ptr ${gone}, null`);
+      this.emit(`br i1 ${removed}, label %${drop}, label %${done}`);
+      this.startBlock(drop);
+      this.dispose(load(kt, part(gone, 3)), this.typing.rec(t).key);
+      if (!this.typing.rec(t).set) this.dispose(load(vt, part(gone, 4)), this.typing.rec(t).value);
+      this.emit(`br label %${done}`);
+      this.startBlock(done);
       return removed;
     }
-    const [i, there] = [temp(), temp()];
-    emit(`${i} = call i64 @fsh_rt_map_find(ptr ${map}, i64 ${bits})`);
-    dispose(key, typing.rec(t).key);
-    emit(`${there} = icmp sge i64 ${i}, 0`);
+    const [i, there] = [this.temp(), this.temp()];
+    this.emit(`${i} = call i64 @fsh_rt_map_find(ptr ${map}, i64 ${bits})`);
+    this.dispose(key, this.typing.rec(t).key);
+    this.emit(`${there} = icmp sge i64 ${i}, 0`);
     if (name === "has") return there;
-    const [hit, miss, done] = [label(), label(), label()];
+    const [hit, miss, done] = [this.label(), this.label(), this.label()];
     // `update(k, f)`: the arrow called once with the value to change, when the key is there.
     if (name === "update") {
       const callback = e.args[1]!;
-      const closure = types.get(callback) as ClosureType;
-      const env = alloca(llvm(closure));
-      emit(`store ${llvm(closure)} ${owned(callback)}, ptr ${env}`);
-      const drop = () => needsDrop(closure) && dispose(unstash(env, closure), closure);
-      emit(`br i1 ${there}, label %${hit}, label %${done}`);
-      startBlock(hit);
-      const found = temp();
-      emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
-      const target = callOf(callback)!;
-      const gives = invoke(target, env, [`ptr ${part(found, 4)}`].slice(0, bodyOf(noted.arenas, target).params.length), e, undefined, drop);
-      if (gives !== undefined && needsDrop(typing.rec(closure).returns)) dispose(gives, typing.rec(closure).returns);
-      emit(`br label %${done}`);
-      startBlock(done);
+      const closure = this.types.get(callback) as ClosureType;
+      const env = this.alloca(this.llvm(closure));
+      this.emit(`store ${this.llvm(closure)} ${this.owned(callback)}, ptr ${env}`);
+      const drop = () => this.needsDrop(closure) && this.dispose(this.unstash(env, closure), closure);
+      this.emit(`br i1 ${there}, label %${hit}, label %${done}`);
+      this.startBlock(hit);
+      const found = this.temp();
+      this.emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+      const target = this.callOf(callback)!;
+      const gives = this.invoke(target, env, [`ptr ${part(found, 4)}`].slice(0, bodyOf(this.noted.arenas, target).params.length), e, undefined, drop);
+      if (gives !== undefined && this.needsDrop(this.typing.rec(closure).returns)) this.dispose(gives, this.typing.rec(closure).returns);
+      this.emit(`br label %${done}`);
+      this.startBlock(done);
       drop();
       return there;
     }
     // `get`: a clone of the value, or nothing.
-    const option = typing.unionType([typing.rec(t).value, "null"]);
-    const out = alloca(llvm(option));
-    emit(`br i1 ${there}, label %${hit}, label %${miss}`);
-    startBlock(hit);
-    const found = temp();
-    emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
-    emit(`store ${llvm(option)} ${convert(copied(load(vt, part(found, 4)), typing.rec(t).value), typing.rec(t).value, option)}, ptr ${out}`);
-    emit(`br label %${done}`);
-    startBlock(miss);
-    emit(`store ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ptr ${out}`);
-    emit(`br label %${done}`);
-    startBlock(done);
-    const v = load(llvm(option), out);
-    if (!types.has(e) && needsDrop(option)) pending.push({ v, type: option });
+    const option = this.typing.unionType([this.typing.rec(t).value, "null"]);
+    const out = this.alloca(this.llvm(option));
+    this.emit(`br i1 ${there}, label %${hit}, label %${miss}`);
+    this.startBlock(hit);
+    const found = this.temp();
+    this.emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    this.emit(`store ${this.llvm(option)} ${this.convert(this.copied(load(vt, part(found, 4)), this.typing.rec(t).value), this.typing.rec(t).value, option)}, ptr ${out}`);
+    this.emit(`br label %${done}`);
+    this.startBlock(miss);
+    this.emit(`store ${this.llvm(option)} ${this.convert("zeroinitializer", "null", option)}, ptr ${out}`);
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
+    const v = load(this.llvm(option), out);
+    if (!this.types.has(e) && this.needsDrop(option)) this.pending.push({ v, type: option });
     return v;
   }
+
 
   // `for...of` over a Map's entries or a Set's members, in insertion order. The table's pointer
   // and the entry reached live in slots, so a generator's loop may stop at a `yield`; the loop
   // owns the table only when it was made for it.
-  function mapLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, t: MapType) {
-    const local = resolved(s.left as Stmt);
-    const entry = entryType(t);
-    scopes.push([]);
-    const [held, counter] = [loopSlot(s, 0, "ptr"), loopSlot(s, 1, "i64")];
-    const kept = resuming && typing.rec(resuming.type).frame[current.frame!.loops.get(s)!]!.type;
-    if (kept ? recOf(kept)?.kind === "map" : fresh(s.right)) {
-      own(held, t);
-      emit(`store ptr ${owned(s.right)}, ptr ${held}`);
-    } else emit(`store ptr ${value(s.right)}, ptr ${held}`);
-    settle();
-    emit(`store i64 0, ptr ${counter}`);
-    const [test, live, loop, next, end] = [label(), label(), label(), label(), label()];
-    emit(`br label %${test}`);
-    startBlock(test);
-    const [i, map, used, more] = [temp(), temp(), temp(), temp()];
-    emit(`${i} = load i64, ptr ${counter}`);
-    emit(`${map} = load ptr, ptr ${held}`);
-    emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
-    emit(`${more} = icmp slt i64 ${i}, ${used}`);
-    emit(`br i1 ${more}, label %${live}, label %${end}`);
-    startBlock(live);
-    const [at, state, alive] = [temp(), temp(), temp()];
-    emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
-    emit(`${state} = load i64, ptr ${at}`);
-    emit(`${alive} = icmp eq i64 ${state}, 1`);
-    emit(`br i1 ${alive}, label %${loop}, label %${next}`);
-    startBlock(loop);
-    exits.set(s, { exit: end, next, depth: scopes.length });
-    scopes.push([]);
-    reserve(local);
-    own(slot(local), local.type);
+  mapLoop(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, t: MapType) {
+    const local = this.resolved(s.left as Stmt);
+    const entry = this.entryType(t);
+    this.scopes.push([]);
+    const [held, counter] = [this.loopSlot(s, 0, "ptr"), this.loopSlot(s, 1, "i64")];
+    const kept = this.resuming && this.typing.rec(this.resuming.type).frame[this.current.frame!.loops.get(s)!]!.type;
+    if (kept ? this.recOf(kept)?.kind === "map" : this.fresh(s.right)) {
+      this.own(held, t);
+      this.emit(`store ptr ${this.owned(s.right)}, ptr ${held}`);
+    } else this.emit(`store ptr ${this.value(s.right)}, ptr ${held}`);
+    this.settle();
+    this.emit(`store i64 0, ptr ${counter}`);
+    const [test, live, loop, next, end] = [this.label(), this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${test}`);
+    this.startBlock(test);
+    const [i, map, used, more] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${counter}`);
+    this.emit(`${map} = load ptr, ptr ${held}`);
+    this.emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
+    this.emit(`${more} = icmp slt i64 ${i}, ${used}`);
+    this.emit(`br i1 ${more}, label %${live}, label %${end}`);
+    this.startBlock(live);
+    const [at, state, alive] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${at} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
+    this.emit(`${state} = load i64, ptr ${at}`);
+    this.emit(`${alive} = icmp eq i64 ${state}, 1`);
+    this.emit(`br i1 ${alive}, label %${loop}, label %${next}`);
+    this.startBlock(loop);
+    this.exits.set(s, { exit: end, next, depth: this.scopes.length });
+    this.scopes.push([]);
+    this.reserve(local);
+    this.own(this.slot(local), local.type);
     // Each part is a pointer into the entry, or a copy when it copies.
     const piece = (i: 3 | 4, type: Type, given: Type) => {
-      const part = temp();
-      emit(`${part} = getelementptr ${entry}, ptr ${at}, i64 0, i32 ${i}`);
-      if (isRef(given)) return part;
-      const v = temp();
-      emit(`${v} = load ${llvm(type)}, ptr ${part}`);
-      return copied(v, type);
+      const part = this.temp();
+      this.emit(`${part} = getelementptr ${entry}, ptr ${at}, i64 0, i32 ${i}`);
+      if (this.isRef(given)) return part;
+      const v = this.temp();
+      this.emit(`${v} = load ${this.llvm(type)}, ptr ${part}`);
+      return this.copied(v, type);
     };
-    if (typing.rec(t).set) emit(`store ${llvm(local.type)} ${piece(3, typing.rec(t).key, local.type)}, ptr ${slot(local)}`);
+    if (this.typing.rec(t).set) this.emit(`store ${this.llvm(local.type)} ${piece(3, this.typing.rec(t).key, local.type)}, ptr ${this.slot(local)}`);
     else {
-      const [k, v] = typing.elementsOf(local.type as ObjectType);
-      const [first, pair] = [temp(), temp()];
-      emit(`${first} = insertvalue ${llvm(local.type)} undef, ${llvm(k!)} ${piece(3, typing.rec(t).key, k!)}, 0`);
-      emit(`${pair} = insertvalue ${llvm(local.type)} ${first}, ${llvm(v!)} ${piece(4, typing.rec(t).value, v!)}, 1`);
-      emit(`store ${llvm(local.type)} ${pair}, ptr ${slot(local)}`);
+      const [k, v] = this.typing.elementsOf(local.type as ObjectType);
+      const [first, pair] = [this.temp(), this.temp()];
+      this.emit(`${first} = insertvalue ${this.llvm(local.type)} undef, ${this.llvm(k!)} ${piece(3, this.typing.rec(t).key, k!)}, 0`);
+      this.emit(`${pair} = insertvalue ${this.llvm(local.type)} ${first}, ${this.llvm(v!)} ${piece(4, this.typing.rec(t).value, v!)}, 1`);
+      this.emit(`store ${this.llvm(local.type)} ${pair}, ptr ${this.slot(local)}`);
     }
-    s.body.forEach(statement);
-    drop(scopes.length - 1);
-    scopes.pop();
-    emit(`br label %${next}`);
-    startBlock(next);
-    const [now, after] = [temp(), temp()];
-    emit(`${now} = load i64, ptr ${counter}`);
-    emit(`${after} = add i64 ${now}, 1`);
-    emit(`store i64 ${after}, ptr ${counter}`);
-    emit(`br label %${test}`);
-    startBlock(end);
-    drop(scopes.length - 1);
-    scopes.pop();
+    s.body.forEach(((s) => this.statement(s)));
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
+    this.emit(`br label %${next}`);
+    this.startBlock(next);
+    const [now, after] = [this.temp(), this.temp()];
+    this.emit(`${now} = load i64, ptr ${counter}`);
+    this.emit(`${after} = add i64 ${now}, 1`);
+    this.emit(`store i64 ${after}, ptr ${counter}`);
+    this.emit(`br label %${test}`);
+    this.startBlock(end);
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
   }
 
+
   // Runs the body for each live entry of a map, in insertion order, with a pointer to it.
-  function entriesLoop(t: MapType, map: string, each: (entry: string) => void) {
-    const [used, index] = [temp(), alloca("i64")];
-    const order = dictOrder(t, map);
-    emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
-    emit(`store i64 0, ptr ${index}`);
-    const [head, body, live, next, done] = [label(), label(), label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${more} = icmp slt i64 ${i}, ${used}`);
-    emit(`br i1 ${more}, label %${body}, label %${done}`);
-    startBlock(body);
-    const [at, state, alive] = [temp(), temp(), temp()];
-    emit(`${at} = ${entryAt(map, order, i)}`);
-    emit(`${state} = load i64, ptr ${at}`);
-    emit(`${alive} = icmp eq i64 ${state}, 1`);
-    emit(`br i1 ${alive}, label %${live}, label %${next}`);
-    startBlock(live);
+  entriesLoop(this: Mut<this>, t: MapType, map: string, each: (entry: string) => void) {
+    const [used, index] = [this.temp(), this.alloca("i64")];
+    const order = this.dictOrder(t, map);
+    this.emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
+    this.emit(`store i64 0, ptr ${index}`);
+    const [head, body, live, next, done] = [this.label(), this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [i, more] = [this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp slt i64 ${i}, ${used}`);
+    this.emit(`br i1 ${more}, label %${body}, label %${done}`);
+    this.startBlock(body);
+    const [at, state, alive] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${at} = ${this.entryAt(map, order, i)}`);
+    this.emit(`${state} = load i64, ptr ${at}`);
+    this.emit(`${alive} = icmp eq i64 ${state}, 1`);
+    this.emit(`br i1 ${alive}, label %${live}, label %${next}`);
+    this.startBlock(live);
     each(at);
-    emit(`br label %${next}`);
-    startBlock(next);
-    const after = temp();
-    emit(`${after} = add i64 ${i}, 1`);
-    emit(`store i64 ${after}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
-    if (order) emit(`call void @fsh_rt_free(ptr ${order})`);
+    this.emit(`br label %${next}`);
+    this.startBlock(next);
+    const after = this.temp();
+    this.emit(`${after} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${after}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
+    if (order) this.emit(`call void @fsh_rt_free(ptr ${order})`);
   }
+
 
   // A dictionary's entries are read in the order JavaScript gives an object's keys, which the
   // runtime works out for each read of them all; a Map's in the order they were made.
-  function dictOrder(t: MapType, map: string): string | undefined {
-    if (!typing.rec(t).dict) return undefined;
-    const order = temp();
-    emit(`${order} = call ptr @fsh_rt_dict_order(ptr ${map})`);
+  dictOrder(this: Mut<this>, t: MapType, map: string): string | undefined {
+    if (!this.typing.rec(t).dict) return undefined;
+    const order = this.temp();
+    this.emit(`${order} = call ptr @fsh_rt_dict_order(ptr ${map})`);
     return order;
   }
 
-  function entryAt(map: string, order: string | undefined, i: string): string {
+
+  entryAt(this: Mut<this>, map: string, order: string | undefined, i: string): string {
     return order ? `call ptr @fsh_rt_dict_at(ptr ${map}, ptr ${order}, i64 ${i})` : `call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`;
   }
 
+
   // `keys()`, `values()` and `entries()`: arrays of clones, in insertion order. A Set's values
   // are its members, and its entries pair each member with itself, as JavaScript's do.
-  function listed(e: Extract<Expr, { kind: "call" }>, name: string, t: MapType, map: string): string {
-    const result = types.get(e) as ArrayType;
-    const out = alloca(ARRAY);
-    emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
-    const entry = entryType(t);
+  listed(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, name: string, t: MapType, map: string): string {
+    const result = this.types.get(e) as ArrayType;
+    const out = this.alloca(ARRAY);
+    this.emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    const entry = this.entryType(t);
     const read = (at: string, i: 3 | 4, type: Type) => {
-      const [slot, v] = [temp(), temp()];
-      emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 ${i}`);
-      emit(`${v} = load ${llvm(type)}, ptr ${slot}`);
-      return copied(v, type);
+      const [slot, v] = [this.temp(), this.temp()];
+      this.emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 ${i}`);
+      this.emit(`${v} = load ${this.llvm(type)}, ptr ${slot}`);
+      return this.copied(v, type);
     };
-    entriesLoop(t, map, (at) => {
-      if (name === "keys" || (name === "values" && typing.rec(t).set)) return appended(out, typing.rec(t).key, read(at, 3, typing.rec(t).key));
-      if (name === "values") return appended(out, typing.rec(t).value, read(at, 4, typing.rec(t).value));
-      const pair = typing.rec(result).element;
-      const [k, v] = [read(at, 3, typing.rec(t).key), typing.rec(t).set ? read(at, 3, typing.rec(t).key) : read(at, 4, typing.rec(t).value)];
-      const [first, both] = [temp(), temp()];
-      emit(`${first} = insertvalue ${llvm(pair)} undef, ${llvm(typing.rec(t).key)} ${k}, 0`);
-      emit(`${both} = insertvalue ${llvm(pair)} ${first}, ${typing.rec(t).set ? llvm(typing.rec(t).key) : llvm(typing.rec(t).value)} ${v}, 1`);
-      appended(out, pair, both);
+    this.entriesLoop(t, map, (at) => {
+      if (name === "keys" || (name === "values" && this.typing.rec(t).set)) return this.appended(out, this.typing.rec(t).key, read(at, 3, this.typing.rec(t).key));
+      if (name === "values") return this.appended(out, this.typing.rec(t).value, read(at, 4, this.typing.rec(t).value));
+      const pair = this.typing.rec(result).element;
+      const [k, v] = [read(at, 3, this.typing.rec(t).key), this.typing.rec(t).set ? read(at, 3, this.typing.rec(t).key) : read(at, 4, this.typing.rec(t).value)];
+      const [first, both] = [this.temp(), this.temp()];
+      this.emit(`${first} = insertvalue ${this.llvm(pair)} undef, ${this.llvm(this.typing.rec(t).key)} ${k}, 0`);
+      this.emit(`${both} = insertvalue ${this.llvm(pair)} ${first}, ${this.typing.rec(t).set ? this.llvm(this.typing.rec(t).key) : this.llvm(this.typing.rec(t).value)} ${v}, 1`);
+      this.appended(out, pair, both);
     });
-    const v = temp();
-    emit(`${v} = load ${ARRAY}, ptr ${out}`);
-    if (!types.has(e)) pending.push({ v, type: result });
+    const v = this.temp();
+    this.emit(`${v} = load ${ARRAY}, ptr ${out}`);
+    if (!this.types.has(e)) this.pending.push({ v, type: result });
     return v;
   }
 
+
   // `forEach(f)`: the arrow called with each value and its key, or each member, borrowed or copied.
-  function eachEntry(e: Extract<Expr, { kind: "call" }>, t: MapType, map: string): undefined {
-    const entry = entryType(t);
+  eachEntry(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, t: MapType, map: string): undefined {
+    const entry = this.entryType(t);
     const callback = e.args[0]!;
-    const closure = types.get(callback) as ClosureType;
-    const target = callOf(callback)!;
-    const env = alloca(llvm(closure));
-    emit(`store ${llvm(closure)} ${owned(callback)}, ptr ${env}`);
-    const parts: [3 | 4, Type][] = typing.rec(t).set ? [[3, typing.rec(t).key], [3, typing.rec(t).key]] : [[4, typing.rec(t).value], [3, typing.rec(t).key]];
-    entriesLoop(t, map, (at) => {
-      const passed = parts.slice(0, typing.rec(closure).params.length).map(([i, type], n) => {
-        const slot = temp();
-        emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 ${i}`);
-        const given = typing.rec(closure).params[n]!;
-        if (isRef(given)) return `ptr ${slot}`;
-        const v = temp();
-        emit(`${v} = load ${llvm(type)}, ptr ${slot}`);
-        return `${llvm(given)} ${convert(copied(v, type), type, given)}`;
+    const closure = this.types.get(callback) as ClosureType;
+    const target = this.callOf(callback)!;
+    const env = this.alloca(this.llvm(closure));
+    this.emit(`store ${this.llvm(closure)} ${this.owned(callback)}, ptr ${env}`);
+    const parts: [3 | 4, Type][] = this.typing.rec(t).set ? [[3, this.typing.rec(t).key], [3, this.typing.rec(t).key]] : [[4, this.typing.rec(t).value], [3, this.typing.rec(t).key]];
+    this.entriesLoop(t, map, (at) => {
+      const passed = parts.slice(0, this.typing.rec(closure).params.length).map(([i, type], n) => {
+        const slot = this.temp();
+        this.emit(`${slot} = getelementptr ${entry}, ptr ${at}, i64 0, i32 ${i}`);
+        const given = this.typing.rec(closure).params[n]!;
+        if (this.isRef(given)) return `ptr ${slot}`;
+        const v = this.temp();
+        this.emit(`${v} = load ${this.llvm(type)}, ptr ${slot}`);
+        return `${this.llvm(given)} ${this.convert(this.copied(v, type), type, given)}`;
       });
       const unwound = () => {
-        if (needsDrop(closure)) dispose(unstash(env, closure), closure);
+        if (this.needsDrop(closure)) this.dispose(this.unstash(env, closure), closure);
       };
-      const gives = invoke(target, env, passed.slice(0, bodyOf(noted.arenas, target).params.length), e, undefined, unwound);
-      if (gives !== undefined && needsDrop(typing.rec(closure).returns)) dispose(gives, typing.rec(closure).returns);
+      const gives = this.invoke(target, env, passed.slice(0, bodyOf(this.noted.arenas, target).params.length), e, undefined, unwound);
+      if (gives !== undefined && this.needsDrop(this.typing.rec(closure).returns)) this.dispose(gives, this.typing.rec(closure).returns);
     });
-    if (needsDrop(closure)) dispose(unstash(env, closure), closure);
+    if (this.needsDrop(closure)) this.dispose(this.unstash(env, closure), closure);
     return undefined;
   }
 
+
   // An export of one of the program's packages, as a JsValue. The bundle is defined once the
   // packages the program reaches are bundled.
-  function jsExport(name: JsName, at: Expr): string {
-    const box = temp();
-    unwinding(`call ptr @fsh_rt_js_export(ptr @fsh.js.bundle, i64 ${name.package}, ptr ${cString(name.name)}, ptr ${panicAt(at)})`, box);
+  jsExport(this: Mut<this>, name: JsName, at: Expr): string {
+    const box = this.temp();
+    this.unwinding(`call ptr @fsh_rt_js_export(ptr @fsh.js.bundle, i64 ${name.package}, ptr ${this.cString(name.name)}, ptr ${this.panicAt(at)})`, box);
     return box;
   }
 
+
   // A call of a package's function: each argument converted into a new JS value, and the result
   // read back as its declaration says.
-  function jsCall(e: Extract<Expr, { kind: "call" }>, name: JsName, target: Instance): string | undefined {
-    const fn = jsExport(name, e);
-    const argv = jsArgv(e.args, (i) => bodyOf(noted.arenas, target).params[i]?.optional === true);
-    const result = temp();
-    unwinding(`call ptr @fsh_rt_js_call(ptr ${fn}, ptr null, i64 ${e.args.length}, ptr ${argv}, ptr ${panicAt(e)})`, result);
-    const gives = types.get(e) ?? (target.returns === "void" ? undefined : target.returns);
-    if (gives === undefined) return void emit(`call void @fsh_rt_js_release(ptr ${result})`);
-    return fromJs(result, gives, `'${name.name}' from '${name.module}' gave`, e);
+  jsCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, name: JsName, target: Instance): string | undefined {
+    const fn = this.jsExport(name, e);
+    const argv = this.jsArgv(e.args, (i) => bodyOf(this.noted.arenas, target).params[i]?.optional === true);
+    const result = this.temp();
+    this.unwinding(`call ptr @fsh_rt_js_call(ptr ${fn}, ptr null, i64 ${e.args.length}, ptr ${argv}, ptr ${this.panicAt(e)})`, result);
+    const gives = this.types.get(e) ?? (target.returns === "void" ? undefined : target.returns);
+    if (gives === undefined) return void this.emit(`call void @fsh_rt_js_release(ptr ${result})`);
+    return this.fromJs(result, gives, `'${name.name}' from '${name.module}' gave`, e);
   }
+
 
   // Arguments going to JS, each a new JS value in a buffer of boxes the call gives up; `optional`
   // says which parameters JS may leave out, so an empty value is undefined there.
-  function jsArgv(args: Expr[], optional: (i: usize) => boolean): string {
+  jsArgv(this: Mut<this>, args: Expr[], optional: (i: usize) => boolean): string {
     const boxes = args.map((a, i) => {
-      jsSite = a;
-      const to = coercions.get(a);
+      this.jsSite = a;
+      const to = this.coercions.get(a);
       // A callback is handed over to JS, which keeps it, as the stored callable it meets, and a
       // future as the stored Promise, which a task awaits; one read from a place moves out of it.
-      const held = to ?? types.get(a)!;
-      if (isCallback(held) || isPromised(held)) return toJs(owned(a), held, optional(i) ? "undefined" : "null");
-      return toJs(jsOperand(a), types.get(a)!, optional(i) ? "undefined" : "null", coercions.get(a));
+      const held = to ?? this.types.get(a)!;
+      if (this.isCallback(held) || this.isPromised(held)) return this.toJs(this.owned(a), held, optional(i) ? "undefined" : "null");
+      return this.toJs(this.jsOperand(a), this.types.get(a)!, optional(i) ? "undefined" : "null", this.coercions.get(a));
     });
-    const argv = alloca(`[${Math.max(boxes.length, 1)} x ptr]`);
+    const argv = this.alloca(`[${Math.max(boxes.length, 1)} x ptr]`);
     boxes.forEach((box, i) => {
-      const at = temp();
-      emit(`${at} = getelementptr [${boxes.length} x ptr], ptr ${argv}, i32 0, i32 ${i}`);
-      emit(`store ptr ${box}, ptr ${at}`);
+      const at = this.temp();
+      this.emit(`${at} = getelementptr [${boxes.length} x ptr], ptr ${argv}, i32 0, i32 ${i}`);
+      this.emit(`store ptr ${box}, ptr ${at}`);
     });
     return argv;
   }
 
+
   // A value going to JS, as its own type rather than one it meets, as JS takes any; one made
   // for the statement is dropped once it ends.
-  function jsOperand(a: Expr): string {
-    const v = known.get(a) ?? evaluate(a);
-    if (fresh(a) && !known.has(a)) pending.push({ v, type: types.get(a)! });
+  jsOperand(this: Mut<this>, a: Expr): string {
+    const v = this.known.get(a) ?? this.evaluate(a);
+    if (this.fresh(a) && !this.known.has(a)) this.pending.push({ v, type: this.types.get(a)! });
     return v;
   }
 
+
   // A handle's box, read through a reference to it.
-  function jsHandle(object: Expr): string {
-    const v = value(object);
-    if (!isRef(valueType(object))) return v;
-    const box = temp();
-    emit(`${box} = load ptr, ptr ${v}`);
+  jsHandle(this: Mut<this>, object: Expr): string {
+    const v = this.value(object);
+    if (!this.isRef(this.valueType(object))) return v;
+    const box = this.temp();
+    this.emit(`${box} = load ptr, ptr ${v}`);
     return box;
   }
 
+
   // Which parameters of the method, constructor or static a call takes are written with `?`.
-  function optionalAt(call: Expr): (i: usize) => boolean {
-    const optional = jsOptionalOf.get(call) ?? [];
+  optionalAt(this: Mut<this>, call: Expr): (i: usize) => boolean {
+    const optional = this.jsOptionalOf.get(call) ?? [];
     return (i) => optional[i] === true;
   }
 
+
   // A property of a JS object read as its declaration says: a handle's, or a class's static.
-  function jsGet(object: string, name: string, type: Type, what: string, at: Expr): string {
-    const box = temp();
-    unwinding(`call ptr @fsh_rt_js_get(ptr ${object}, ptr ${text(name)}, ptr ${panicAt(at)})`, box);
-    return fromJs(box, type, what, at);
+  jsGet(this: Mut<this>, object: string, name: string, type: Type, what: string, at: Expr): string {
+    const box = this.temp();
+    this.unwinding(`call ptr @fsh_rt_js_get(ptr ${object}, ptr ${this.text(name)}, ptr ${this.panicAt(at)})`, box);
+    return this.fromJs(box, type, what, at);
   }
+
 
   // A method of a JS object called with it as `this`, its result read as `gives` says, or
   // dropped when the call's value goes unused.
-  function jsMethod(object: string, name: string, args: Expr[], gives: Type | undefined, what: string, at: Expr): string | undefined {
-    const fn = temp();
-    unwinding(`call ptr @fsh_rt_js_get(ptr ${object}, ptr ${text(name)}, ptr ${panicAt(at)})`, fn);
-    emit(`call void @fsh_rt_block_retain(ptr ${object})`);
-    const argv = jsArgv(args, optionalAt(at));
-    const result = temp();
-    unwinding(`call ptr @fsh_rt_js_call(ptr ${fn}, ptr ${object}, i64 ${args.length}, ptr ${argv}, ptr ${panicAt(at)})`, result);
-    if (gives === undefined || gives === "void") return void emit(`call void @fsh_rt_js_release(ptr ${result})`);
-    return fromJs(result, gives, what, at);
+  jsMethod(this: Mut<this>, object: string, name: string, args: Expr[], gives: Type | undefined, what: string, at: Expr): string | undefined {
+    const fn = this.temp();
+    this.unwinding(`call ptr @fsh_rt_js_get(ptr ${object}, ptr ${this.text(name)}, ptr ${this.panicAt(at)})`, fn);
+    this.emit(`call void @fsh_rt_block_retain(ptr ${object})`);
+    const argv = this.jsArgv(args, this.optionalAt(at));
+    const result = this.temp();
+    this.unwinding(`call ptr @fsh_rt_js_call(ptr ${fn}, ptr ${object}, i64 ${args.length}, ptr ${argv}, ptr ${this.panicAt(at)})`, result);
+    if (gives === undefined || gives === "void") return void this.emit(`call void @fsh_rt_js_release(ptr ${result})`);
+    return this.fromJs(result, gives, what, at);
   }
 
+
   // A package's class's static member, read or called on the class itself.
-  function jsStatic(e: Expr, name: JsName): string | undefined {
-    const c = jsExport(name, e);
+  jsStatic(this: Mut<this>, e: Expr, name: JsName): string | undefined {
+    const c = this.jsExport(name, e);
     let result: string | undefined;
-    if (e.kind === "member") result = jsGet(c, e.name, types.get(e)!, `'${name.name}.${e.name}' is`, e);
+    if (e.kind === "member") result = this.jsGet(c, e.name, this.types.get(e)!, `'${name.name}.${e.name}' is`, e);
     else {
       const call = e as Extract<Expr, { kind: "call" }>;
       const method = (call.callee as Extract<Expr, { kind: "member" }>).name;
-      result = jsMethod(c, method, call.args, types.get(call), `'${name.name}.${method}' gave`, call);
+      result = this.jsMethod(c, method, call.args, this.types.get(call), `'${name.name}.${method}' gave`, call);
     }
-    emit(`call void @fsh_rt_js_release(ptr ${c})`);
+    this.emit(`call void @fsh_rt_js_release(ptr ${c})`);
     return result;
   }
 
+
   // A stored callable, which crosses into JS as a function.
-  function isCallback(t: Type): boolean {
+  isCallback(this: Mut<this>, t: Type): boolean {
     if (typeof t === "string") return false;
-    const r = typing.rec(t);
-    return r.kind === "dyn" && typing.callableOf.has(r.of);
+    const r = this.typing.rec(t);
+    return r.kind === "dyn" && this.typing.callableOf.has(r.of);
   }
 
+
   // A stored Promise, which crosses into JS as a promise.
-  function isPromised(t: Type): boolean {
+  isPromised(this: Mut<this>, t: Type): boolean {
     if (typeof t === "string") return false;
-    const r = typing.rec(t);
-    return r.kind === "dyn" && typing.promiseElement(r.of) !== undefined;
+    const r = this.typing.rec(t);
+    return r.kind === "dyn" && this.typing.promiseElement(r.of) !== undefined;
   }
+
 
   // The task settling a JS promise with what a stored Promise gives, given at `at`: its poll,
   // awaiting the Promise and resolving the JS promise with its value made a JS value, and the
   // drop of a frame never finished. The frame holds the Promise and the settling functions.
-  function jsSettler(type: DynType, at: Expr): [string, string] {
-    const key = `${typing.keyOf(type)} ${at.start}`;
-    const made = settlers.get(key);
+  jsSettler(this: Mut<this>, type: DynType, at: Expr): [string, string] {
+    const key = `${this.typing.keyOf(type)} ${at.start}`;
+    const made = this.settlers.get(key);
     if (made) return made;
-    const n = stableId("js.settle", `${typing.described(type)} ${at.start}`, key);
+    const n = this.stableId("js.settle", `${this.typing.described(type)} ${at.start}`, key);
     const names: [string, string] = [`@fsh.js.settle.${n}`, `@fsh.js.settle.drop.${n}`];
-    settlers.set(key, names);
+    this.settlers.set(key, names);
     const frame = `{ ${DYN}, ptr }`;
-    const saved = { allocas, body, temps, labels, block, pending, scopes, jsSite };
-    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-    const [innerAt, settleAt, settle] = [temp(), temp(), temp()];
-    emit(`${innerAt} = getelementptr ${frame}, ptr %frame, i32 0, i32 0`);
-    emit(`${settleAt} = getelementptr ${frame}, ptr %frame, i32 0, i32 1`);
-    emit(`${settle} = load ptr, ptr ${settleAt}`);
-    const step = pollStep(type, innerAt, at);
-    startBlock(step.waiting);
-    emit("ret i32 0");
-    startBlock(step.failed);
-    emit("unreachable");
-    startBlock(step.ready);
-    const gives = typing.promiseElement(typing.rec(type).of)!;
+    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes, jsSite: this.jsSite };
+    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const [innerAt, settleAt, settle] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${innerAt} = getelementptr ${frame}, ptr %frame, i32 0, i32 0`);
+    this.emit(`${settleAt} = getelementptr ${frame}, ptr %frame, i32 0, i32 1`);
+    this.emit(`${settle} = load ptr, ptr ${settleAt}`);
+    const step = this.pollStep(type, innerAt, at);
+    this.startBlock(step.waiting);
+    this.emit("ret i32 0");
+    this.startBlock(step.failed);
+    this.emit("unreachable");
+    this.startBlock(step.ready);
+    const gives = this.typing.promiseElement(this.typing.rec(type).of)!;
     const v = step.value();
-    jsSite = at;
-    const box = gives === "void" || v === undefined ? temp() : toJs(v, gives, "null");
-    if (gives === "void" || v === undefined) emit(`${box} = call ptr @fsh_rt_js_of_empty(i32 1)`);
-    emit(`call void @fsh_rt_js_settle(ptr ${settle}, ptr ${box})`);
-    if (v !== undefined && gives !== "void") dispose(v, gives);
-    const old = temp();
-    emit(`${old} = load ${DYN}, ptr ${innerAt}`);
-    dispose(old, type);
-    emit("ret i32 1");
-    out.push(`define internal i32 ${names[0]}(ptr %cx, ptr %frame) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-    const [promise, held] = [temp(), temp()];
-    emit(`${promise} = load ${DYN}, ptr %frame`);
-    dispose(promise, type);
-    const at1 = temp();
-    emit(`${at1} = getelementptr ${frame}, ptr %frame, i32 0, i32 1`);
-    emit(`${held} = load ptr, ptr ${at1}`);
-    emit(`call void @fsh_rt_js_release(ptr ${held})`);
-    emit("ret void");
-    out.push(`define internal void ${names[1]}(ptr %frame) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    if (!settledOutput) {
-      settledOutput = true;
-      out.push(`define internal void @"fsh.js.settled.output"(ptr %out) {`, "entry:", "  ret void", "}", "");
+    this.jsSite = at;
+    const box = gives === "void" || v === undefined ? this.temp() : this.toJs(v, gives, "null");
+    if (gives === "void" || v === undefined) this.emit(`${box} = call ptr @fsh_rt_js_of_empty(i32 1)`);
+    this.emit(`call void @fsh_rt_js_settle(ptr ${settle}, ptr ${box})`);
+    if (v !== undefined && gives !== "void") this.dispose(v, gives);
+    const old = this.temp();
+    this.emit(`${old} = load ${DYN}, ptr ${innerAt}`);
+    this.dispose(old, type);
+    this.emit("ret i32 1");
+    this.out.push(`define internal i32 ${names[0]}(ptr %cx, ptr %frame) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
+    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const [promise, held] = [this.temp(), this.temp()];
+    this.emit(`${promise} = load ${DYN}, ptr %frame`);
+    this.dispose(promise, type);
+    const at1 = this.temp();
+    this.emit(`${at1} = getelementptr ${frame}, ptr %frame, i32 0, i32 1`);
+    this.emit(`${held} = load ptr, ptr ${at1}`);
+    this.emit(`call void @fsh_rt_js_release(ptr ${held})`);
+    this.emit("ret void");
+    this.out.push(`define internal void ${names[1]}(ptr %frame) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
+    if (!this.settledOutput) {
+      this.settledOutput = true;
+      this.out.push(`define internal void @"fsh.js.settled.output"(ptr %out) {`, "entry:", "  ret void", "}", "");
     }
-    ({ allocas, body, temps, labels, block, pending, scopes, jsSite } = saved);
+    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes, jsSite: this.jsSite } = saved);
     return names;
   }
+
 
   // The function JS calls a callback of this type through, given at `at`: what JS gives it read
   // as its parameters say, the callable called, and what it gives made a JS value. Called with a
   // count below zero, as JS's garbage collector drops the function, it drops the callable.
-  function jsCallback(type: DynType, at: Expr): string {
-    const key = `${typing.keyOf(type)} ${at.start}`;
-    const made = callbacks.get(key);
+  jsCallback(this: Mut<this>, type: DynType, at: Expr): string {
+    const key = `${this.typing.keyOf(type)} ${at.start}`;
+    const made = this.callbacks.get(key);
     if (made) return made;
-    const name = `@fsh.js.callback.${stableId("js.callback", `${typing.described(type)} ${at.start}`, key)}`;
-    callbacks.set(key, name);
-    const saved = { allocas, body, temps, labels, block, pending, scopes, jsSite };
-    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-    const fn = typing.callableOf.get(typing.rec(type).of)!;
-    const [dropping, drop, call] = [temp(), label(), label()];
-    emit(`${dropping} = icmp slt i64 %argc, 0`);
-    emit(`br i1 ${dropping}, label %${drop}, label %${call}`);
-    startBlock(drop);
-    const [half, whole] = [temp(), temp()];
-    emit(`${half} = insertvalue ${DYN} undef, ptr %data, 0`);
-    emit(`${whole} = insertvalue ${DYN} ${half}, ptr %table, 1`);
-    dispose(whole, type);
-    emit("ret ptr null");
-    startBlock(call);
-    const args = typing.rec(fn).params.map((p, i) => {
-      const [slot, box] = [temp(), temp()];
-      emit(`${slot} = getelementptr ptr, ptr %argv, i64 ${i}`);
-      emit(`${box} = load ptr, ptr ${slot}`);
-      return `, ${llvm(p)} ${fromJs(box, p, `a callback was given`, at)}`;
+    const name = `@fsh.js.callback.${this.stableId("js.callback", `${this.typing.described(type)} ${at.start}`, key)}`;
+    this.callbacks.set(key, name);
+    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes, jsSite: this.jsSite };
+    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const fn = this.typing.callableOf.get(this.typing.rec(type).of)!;
+    const [dropping, drop, call] = [this.temp(), this.label(), this.label()];
+    this.emit(`${dropping} = icmp slt i64 %argc, 0`);
+    this.emit(`br i1 ${dropping}, label %${drop}, label %${call}`);
+    this.startBlock(drop);
+    const [half, whole] = [this.temp(), this.temp()];
+    this.emit(`${half} = insertvalue ${DYN} undef, ptr %data, 0`);
+    this.emit(`${whole} = insertvalue ${DYN} ${half}, ptr %table, 1`);
+    this.dispose(whole, type);
+    this.emit("ret ptr null");
+    this.startBlock(call);
+    const args = this.typing.rec(fn).params.map((p, i) => {
+      const [slot, box] = [this.temp(), this.temp()];
+      this.emit(`${slot} = getelementptr ptr, ptr %argv, i64 ${i}`);
+      this.emit(`${box} = load ptr, ptr ${slot}`);
+      return `, ${this.llvm(p)} ${this.fromJs(box, p, `a callback was given`, at)}`;
     });
-    const callee = vslot("%table", 0);
-    const result = typing.rec(fn).returns === "void" ? undefined : temp();
-    unwinding(`call ${typing.rec(fn).returns === "void" ? "void" : llvm(typing.rec(fn).returns)} ${callee}(ptr %data${args.join("")})`, result);
-    if (result === undefined) emit("ret ptr null");
+    const callee = this.vslot("%table", 0);
+    const result = this.typing.rec(fn).returns === "void" ? undefined : this.temp();
+    this.unwinding(`call ${this.typing.rec(fn).returns === "void" ? "void" : this.llvm(this.typing.rec(fn).returns)} ${callee}(ptr %data${args.join("")})`, result);
+    if (result === undefined) this.emit("ret ptr null");
     else {
-      jsSite = at;
-      const box = toJs(result, typing.rec(fn).returns, "null");
-      dispose(result, typing.rec(fn).returns);
-      emit(`ret ptr ${box}`);
+      this.jsSite = at;
+      const box = this.toJs(result, this.typing.rec(fn).returns, "null");
+      this.dispose(result, this.typing.rec(fn).returns);
+      this.emit(`ret ptr ${box}`);
     }
-    out.push(`define internal ptr ${name}(ptr %data, ptr %table, i64 %argc, ptr %argv) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    ({ allocas, body, temps, labels, block, pending, scopes, jsSite } = saved);
+    this.out.push(`define internal ptr ${name}(ptr %data, ptr %table, i64 %argc, ptr %argv) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
+    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes, jsSite: this.jsSite } = saved);
     return name;
   }
 
+
   // The shape an object is given as: a package's, or an object type, through an Option.
-  function jsShapeOf(t: Type): ObjectType | InterfaceType | undefined {
+  jsShapeOf(this: Mut<this>, t: Type): ObjectType | InterfaceType | undefined {
     if (typeof t === "string") return undefined;
-    const r = typing.rec(t);
-    if (r.kind === "union") return r.members.map(jsShapeOf).find((s) => s !== undefined);
-    return typing.jsShape(t) ?? (r.kind === "object" ? (t as ObjectType) : undefined);
+    const r = this.typing.rec(t);
+    if (r.kind === "union") return r.members.map(((t) => this.jsShapeOf(t))).find((s) => s !== undefined);
+    return this.typing.jsShape(t) ?? (r.kind === "object" ? (t as ObjectType) : undefined);
   }
+
 
   // A Fish value as a new JS value, in a box of its own; empty is `undefined` for a parameter
   // written with `?`, which JS may leave out, and `null` otherwise. A field an object leaves out
   // isn't there in JS either.
-  function toJs(v: string, type: Type, empty: "undefined" | "null", declared?: Type): string {
-    const r = recOf(type);
-    if (r?.kind === "param") return toJs(v, r.concrete!, empty, declared);
-    const box = temp();
-    if (isRef(type)) {
-      const loaded = temp();
-      emit(`${loaded} = load ${llvm(referent(type))}, ptr ${v}`);
-      return toJs(loaded, referent(type), empty);
+  toJs(this: Mut<this>, v: string, type: Type, empty: "undefined" | "null", declared?: Type): string {
+    const r = this.recOf(type);
+    if (r?.kind === "param") return this.toJs(v, r.concrete!, empty, declared);
+    const box = this.temp();
+    if (this.isRef(type)) {
+      const loaded = this.temp();
+      this.emit(`${loaded} = load ${this.llvm(this.referent(type))}, ptr ${v}`);
+      return this.toJs(loaded, this.referent(type), empty);
     }
     if (r?.kind === "block") {
-      emit(`call void @fsh_rt_block_retain(ptr ${v})`);
+      this.emit(`call void @fsh_rt_block_retain(ptr ${v})`);
       return v;
     }
-    if (r?.kind === "union") return eachMember(v, type as UnionType, typing.blockType("JsValue"), (part, m) => toJs(part, m, empty, declared));
+    if (r?.kind === "union") return this.eachMember(v, type as UnionType, this.typing.blockType("JsValue"), (part, m) => this.toJs(part, m, empty, declared));
     // A Fish future as a JS promise, settled by a task that awaits it, spawned now.
-    if (isPromised(type)) {
-      const [settleAt, frame] = [alloca("ptr"), alloca(`{ ${DYN}, ptr }`)];
-      emit(`${box} = call ptr @fsh_rt_js_promise(ptr ${settleAt})`);
-      const [settle, innerAt, heldAt, task] = [temp(), temp(), temp(), temp()];
-      emit(`${settle} = load ptr, ptr ${settleAt}`);
-      emit(`${innerAt} = getelementptr { ${DYN}, ptr }, ptr ${frame}, i32 0, i32 0`);
-      emit(`store ${DYN} ${v}, ptr ${innerAt}`);
-      emit(`${heldAt} = getelementptr { ${DYN}, ptr }, ptr ${frame}, i32 0, i32 1`);
-      emit(`store ptr ${settle}, ptr ${heldAt}`);
-      const [poll, drop] = jsSettler(type as DynType, jsSite!);
-      unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr @"fsh.js.settled.output", ptr ${frame}, i64 ${sizeOf(`{ ${DYN}, ptr }`)}, i64 8)`, task);
-      emit(`call void @fsh_rt_handle_drop(ptr ${task})`);
+    if (this.isPromised(type)) {
+      const [settleAt, frame] = [this.alloca("ptr"), this.alloca(`{ ${DYN}, ptr }`)];
+      this.emit(`${box} = call ptr @fsh_rt_js_promise(ptr ${settleAt})`);
+      const [settle, innerAt, heldAt, task] = [this.temp(), this.temp(), this.temp(), this.temp()];
+      this.emit(`${settle} = load ptr, ptr ${settleAt}`);
+      this.emit(`${innerAt} = getelementptr { ${DYN}, ptr }, ptr ${frame}, i32 0, i32 0`);
+      this.emit(`store ${DYN} ${v}, ptr ${innerAt}`);
+      this.emit(`${heldAt} = getelementptr { ${DYN}, ptr }, ptr ${frame}, i32 0, i32 1`);
+      this.emit(`store ptr ${settle}, ptr ${heldAt}`);
+      const [poll, drop] = this.jsSettler(type as DynType, this.jsSite!);
+      this.unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr @"fsh.js.settled.output", ptr ${frame}, i64 ${this.sizeOf(`{ ${DYN}, ptr }`)}, i64 8)`, task);
+      this.emit(`call void @fsh_rt_handle_drop(ptr ${task})`);
       return box;
     }
     // A callback as a JS function that owns it.
-    if (isCallback(type)) {
-      const [data, table] = [temp(), temp()];
-      emit(`${data} = extractvalue ${DYN} ${v}, 0`);
-      emit(`${table} = extractvalue ${DYN} ${v}, 1`);
-      emit(`${box} = call ptr @fsh_rt_js_function(ptr ${data}, ptr ${table}, ptr ${jsCallback(type as DynType, jsSite!)}, i32 ${typing.rec(typing.callableOf.get(typing.rec(type as DynType).of)!).params.length})`);
+    if (this.isCallback(type)) {
+      const [data, table] = [this.temp(), this.temp()];
+      this.emit(`${data} = extractvalue ${DYN} ${v}, 0`);
+      this.emit(`${table} = extractvalue ${DYN} ${v}, 1`);
+      this.emit(`${box} = call ptr @fsh_rt_js_function(ptr ${data}, ptr ${table}, ptr ${this.jsCallback(type as DynType, this.jsSite!)}, i32 ${this.typing.rec(this.typing.callableOf.get(this.typing.rec(type as DynType).of)!).params.length})`);
       return box;
     }
     // An array or a tuple as a new JS array, and an object as a new JS object, each part
     // converted in turn.
     if (r?.kind === "array" || r?.kind === "fixed" || (r?.kind === "object" && r.tuple)) {
-      emit(`${box} = call ptr @fsh_rt_js_array()`);
-      const push = (part: string, t: Type) => emit(`call void @fsh_rt_js_push(ptr ${box}, ptr ${toJs(part, t, "null")})`);
+      this.emit(`${box} = call ptr @fsh_rt_js_array()`);
+      const push = (part: string, t: Type) => this.emit(`call void @fsh_rt_js_push(ptr ${box}, ptr ${this.toJs(part, t, "null")})`);
       if (r.kind === "array" && r.element === "never") return box;
       if (r.kind === "array") {
-        const [data, length] = [temp(), temp()];
-        emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
-        emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
-        elements(r.element, data, length, (at) => {
-          const part = temp();
-          emit(`${part} = load ${llvm(r.element)}, ptr ${at}`);
+        const [data, length] = [this.temp(), this.temp()];
+        this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+        this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+        this.elements(r.element, data, length, (at) => {
+          const part = this.temp();
+          this.emit(`${part} = load ${this.llvm(r.element)}, ptr ${at}`);
           push(part, r.element);
         });
       } else {
-        const parts = r.kind === "fixed" ? Array.from({ length: r.size }, () => r.element) : typing.elementsOf(type as ObjectType);
+        const parts = r.kind === "fixed" ? Array.from({ length: r.size }, () => r.element) : this.typing.elementsOf(type as ObjectType);
         parts.forEach((t, i) => {
-          const part = temp();
-          emit(`${part} = extractvalue ${llvm(type)} ${v}, ${r.kind === "fixed" ? i : typing.fieldPath(type as ObjectType, String(i)).join(", ")}`);
+          const part = this.temp();
+          this.emit(`${part} = extractvalue ${this.llvm(type)} ${v}, ${r.kind === "fixed" ? i : this.typing.fieldPath(type as ObjectType, String(i)).join(", ")}`);
           push(part, t);
         });
       }
       return box;
     }
     if (r?.kind === "object") {
-      emit(`${box} = call ptr @fsh_rt_js_object()`);
+      this.emit(`${box} = call ptr @fsh_rt_js_object()`);
       // The shape the object is given as says which properties are written with `?`.
-      const shape = declared === undefined ? undefined : jsShapeOf(referent(declared));
+      const shape = declared === undefined ? undefined : this.jsShapeOf(this.referent(declared));
       for (const f of r.fields) {
-        const [part, into] = [temp(), recOf(shape)?.fields.find((g) => g.name === f.name)];
-        emit(`${part} = extractvalue ${llvm(type)} ${v}, ${typing.fieldPath(type as ObjectType, f.name).join(", ")}`);
-        emit(`call void @fsh_rt_js_put(ptr ${box}, ptr ${cString(f.name)}, ptr ${toJs(part, f.type, into?.optional ? "undefined" : "null", into?.type)})`);
+        const [part, into] = [this.temp(), this.recOf(shape)?.fields.find((g) => g.name === f.name)];
+        this.emit(`${part} = extractvalue ${this.llvm(type)} ${v}, ${this.typing.fieldPath(type as ObjectType, f.name).join(", ")}`);
+        this.emit(`call void @fsh_rt_js_put(ptr ${box}, ptr ${this.cString(f.name)}, ptr ${this.toJs(part, f.type, into?.optional ? "undefined" : "null", into?.type)})`);
       }
       return box;
     }
     if (r?.kind === "literal") {
       const value = r.value;
-      if (typeof value === "string") emit(`${box} = call ptr @fsh_rt_js_of_string(ptr ${text(value)})`);
-      else if (typeof value === "boolean") emit(`${box} = call ptr @fsh_rt_js_of_boolean(i32 ${value ? 1 : 0})`);
-      else emit(`${box} = call ptr @fsh_rt_js_of_number(double ${floatConstant(Number(value), "f64")})`);
+      if (typeof value === "string") this.emit(`${box} = call ptr @fsh_rt_js_of_string(ptr ${this.text(value)})`);
+      else if (typeof value === "boolean") this.emit(`${box} = call ptr @fsh_rt_js_of_boolean(i32 ${value ? 1 : 0})`);
+      else this.emit(`${box} = call ptr @fsh_rt_js_of_number(double ${floatConstant(Number(value), "f64")})`);
       return box;
     }
-    if (type === "string") emit(`${box} = call ptr @fsh_rt_js_of_string(ptr ${v})`);
+    if (type === "string") this.emit(`${box} = call ptr @fsh_rt_js_of_string(ptr ${v})`);
     else if (type === "boolean") {
-      const word = temp();
-      emit(`${word} = zext i1 ${v} to i32`);
-      emit(`${box} = call ptr @fsh_rt_js_of_boolean(i32 ${word})`);
-    } else if (type === "null") emit(`${box} = call ptr @fsh_rt_js_of_empty(i32 ${empty === "undefined" ? 1 : 0})`);
-    else emit(`${box} = call ptr @fsh_rt_js_of_number(double ${type === "f64" ? v : cast(v, type, "f64")})`);
+      const word = this.temp();
+      this.emit(`${word} = zext i1 ${v} to i32`);
+      this.emit(`${box} = call ptr @fsh_rt_js_of_boolean(i32 ${word})`);
+    } else if (type === "null") this.emit(`${box} = call ptr @fsh_rt_js_of_empty(i32 ${empty === "undefined" ? 1 : 0})`);
+    else this.emit(`${box} = call ptr @fsh_rt_js_of_number(double ${type === "f64" ? v : this.cast(v, type, "f64")})`);
     return box;
   }
 
+
   // A JsValue read as the type its declaration gives it, checked, giving up its box: `what` says
   // what gave it, as "'f' from 'pkg' gave". A union takes the first member the JS value is.
-  function fromJs(box: string, type: Type, what: string, at: Expr): string {
-    const r = recOf(type);
-    if (r?.kind === "param") return fromJs(box, r.concrete!, what, at);
-    if (typing.isPlainJs(type)) return box;
-    const checked = (call: string) => `${call}(ptr ${box}, ptr ${cString(what)}, ptr ${cString(typing.show(type))}, ptr ${panicAt(at)})`;
+  fromJs(this: Mut<this>, box: string, type: Type, what: string, at: Expr): string {
+    const r = this.recOf(type);
+    if (r?.kind === "param") return this.fromJs(box, r.concrete!, what, at);
+    if (this.typing.isPlainJs(type)) return box;
+    const checked = (call: string) => `${call}(ptr ${box}, ptr ${this.cString(what)}, ptr ${this.cString(this.typing.show(type))}, ptr ${this.panicAt(at)})`;
     // Panics unless the JS value is what the declaration says, by the test `jsMatches` makes.
     const expect = (test: string) => {
-      const [yes, no] = [label(), label()];
-      emit(`br i1 ${test}, label %${yes}, label %${no}`);
-      startBlock(no);
-      unwinding(`call void ${checked("@fsh_rt_js_mismatch")}`);
-      emit("unreachable");
-      startBlock(yes);
+      const [yes, no] = [this.label(), this.label()];
+      this.emit(`br i1 ${test}, label %${yes}, label %${no}`);
+      this.startBlock(no);
+      this.unwinding(`call void ${checked("@fsh_rt_js_mismatch")}`);
+      this.emit("unreachable");
+      this.startBlock(yes);
     };
-    if (r?.kind === "union") return jsUnion(box, type as UnionType, what, at);
+    if (r?.kind === "union") return this.jsUnion(box, type as UnionType, what, at);
     // A promise is awaited as a future holding it, which reads what it settles with then.
     if (r?.kind === "future") {
-      const frame = temp();
-      emit(`${frame} = insertvalue ${llvm(type)} zeroinitializer, ptr ${box}, 1`);
+      const frame = this.temp();
+      this.emit(`${frame} = insertvalue ${this.llvm(type)} zeroinitializer, ptr ${box}, 1`);
       return frame;
     }
     // A handle of a declared shape holds an object.
     if (r?.kind === "block") {
-      unwinding(`call void ${checked("@fsh_rt_js_object_is")}`);
+      this.unwinding(`call void ${checked("@fsh_rt_js_object_is")}`);
       return box;
     }
     if (type === "string" || type === "f64" || type === "boolean") {
       const [result, read] = type === "string" ? ["ptr", "string"] : type === "f64" ? ["double", "number"] : ["i32", "boolean"];
-      const v = temp();
-      unwinding(`call ${result} ${checked(`@fsh_rt_js_as_${read}`)}`, v);
+      const v = this.temp();
+      this.unwinding(`call ${result} ${checked(`@fsh_rt_js_as_${read}`)}`, v);
       if (type !== "boolean") return v;
-      const yes = temp();
-      emit(`${yes} = icmp ne i32 ${v}, 0`);
+      const yes = this.temp();
+      this.emit(`${yes} = icmp ne i32 ${v}, 0`);
       return yes;
     }
     // Another number type takes a JS number it holds exactly.
     if (isFloat(type) || isInteger(type)) {
-      const [d, v] = [temp(), temp()];
+      const [d, v] = [this.temp(), this.temp()];
       if (isFloat(type)) {
-        unwinding(`call double ${checked("@fsh_rt_js_as_number")}`, d);
-        emit(`${v} = fptrunc double ${d} to float`);
+        this.unwinding(`call double ${checked("@fsh_rt_js_as_number")}`, d);
+        this.emit(`${v} = fptrunc double ${d} to float`);
         return v;
       }
       const { bits, signed } = INTEGERS[type as Integer];
       // The bound past the largest value, which a double holds exactly where the largest isn't.
       const [min, past] = signed ? [-(2 ** (bits - 1)), 2 ** (bits - 1)] : [0, 2 ** bits];
-      unwinding(`call double @fsh_rt_js_as_integer(ptr ${box}, double ${floatConstant(min, "f64")}, double ${floatConstant(past, "f64")}, ptr ${cString(what)}, ptr ${cString(typing.show(type))}, ptr ${panicAt(at)})`, d);
-      emit(`${v} = ${signed ? "fptosi" : "fptoui"} double ${d} to ${llvm(type)}`);
+      this.unwinding(`call double @fsh_rt_js_as_integer(ptr ${box}, double ${floatConstant(min, "f64")}, double ${floatConstant(past, "f64")}, ptr ${this.cString(what)}, ptr ${this.cString(this.typing.show(type))}, ptr ${this.panicAt(at)})`, d);
+      this.emit(`${v} = ${signed ? "fptosi" : "fptoui"} double ${d} to ${this.llvm(type)}`);
       return v;
     }
     // Empty, and a literal, hold nothing once they are known to be what the declaration says.
     if (type === "null" || r?.kind === "literal") {
-      expect(jsMatches(box, type));
-      emit(`call void @fsh_rt_js_release(ptr ${box})`);
+      expect(this.jsMatches(box, type));
+      this.emit(`call void @fsh_rt_js_release(ptr ${box})`);
       return "zeroinitializer";
     }
     if (r === undefined) throw new Error(`internal error: no reading of a '${type}' out of JS`);
     // A JS array as a new Fish array, each element read as the declaration says; a fixed array
     // takes exactly its length, and a tuple its elements by their places.
     if (r.kind === "array" || r.kind === "fixed" || (r.kind === "object" && r.tuple)) {
-      const length = temp();
-      unwinding(`call i64 ${checked("@fsh_rt_js_length")}`, length);
+      const length = this.temp();
+      this.unwinding(`call i64 ${checked("@fsh_rt_js_length")}`, length);
       // ponytail: an element that isn't what its declaration says panics leaving the elements read
       // so far, and the array's box, unfreed; free them on the way out if a panic stops being final
       const read = (i: string, element: Type) => {
-        const part = temp();
-        unwinding(`call ptr @fsh_rt_js_at(ptr ${box}, i64 ${i}, ptr ${panicAt(at)})`, part);
-        return fromJs(part, element, `${what} an array holding`, at);
+        const part = this.temp();
+        this.unwinding(`call ptr @fsh_rt_js_at(ptr ${box}, i64 ${i}, ptr ${this.panicAt(at)})`, part);
+        return this.fromJs(part, element, `${what} an array holding`, at);
       };
       if (r.kind === "array") {
-        const data = temp();
-        emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes(r.element, length)})`);
-        elements(r.element, data, length, (slot, i) => emit(`store ${llvm(r.element)} ${read(i, r.element)}, ptr ${slot}`));
-        emit(`call void @fsh_rt_js_release(ptr ${box})`);
-        return built(data, length, length);
+        const data = this.temp();
+        this.emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${this.bytes(r.element, length)})`);
+        this.elements(r.element, data, length, (slot, i) => this.emit(`store ${this.llvm(r.element)} ${read(i, r.element)}, ptr ${slot}`));
+        this.emit(`call void @fsh_rt_js_release(ptr ${box})`);
+        return this.built(data, length, length);
       }
-      const parts = r.kind === "fixed" ? Array.from({ length: r.size }, () => r.element) : typing.elementsOf(type as ObjectType);
-      const enough = temp();
-      emit(`${enough} = icmp ${r.kind === "fixed" ? "eq" : "sge"} i64 ${length}, ${parts.filter((p) => r.kind === "fixed" || !typing.isOption(p)).length}`);
+      const parts = r.kind === "fixed" ? Array.from({ length: r.size }, () => r.element) : this.typing.elementsOf(type as ObjectType);
+      const enough = this.temp();
+      this.emit(`${enough} = icmp ${r.kind === "fixed" ? "eq" : "sge"} i64 ${length}, ${parts.filter((p) => r.kind === "fixed" || !this.typing.isOption(p)).length}`);
       expect(enough);
       let made = "zeroinitializer";
       parts.forEach((element, i) => {
-        const next = temp();
-        emit(`${next} = insertvalue ${llvm(type)} ${made}, ${llvm(element)} ${read(String(i), element)}, ${r.kind === "fixed" ? i : typing.fieldPath(type as ObjectType, String(i)).join(", ")}`);
+        const next = this.temp();
+        this.emit(`${next} = insertvalue ${this.llvm(type)} ${made}, ${this.llvm(element)} ${read(String(i), element)}, ${r.kind === "fixed" ? i : this.typing.fieldPath(type as ObjectType, String(i)).join(", ")}`);
         made = next;
       });
-      emit(`call void @fsh_rt_js_release(ptr ${box})`);
+      this.emit(`call void @fsh_rt_js_release(ptr ${box})`);
       return made;
     }
     // A JS object as a new Fish object of its declared shape, each property read in turn.
     if (r.kind === "object") {
-      expect(jsMatches(box, type));
+      expect(this.jsMatches(box, type));
       let made = "zeroinitializer";
       for (const f of r.fields) {
-        const next = temp();
-        const v = jsGet(box, f.name, f.type, `${what} an object whose '${f.name}' is`, at);
-        emit(`${next} = insertvalue ${llvm(type)} ${made}, ${llvm(f.type)} ${v}, ${typing.fieldPath(type as ObjectType, f.name).join(", ")}`);
+        const next = this.temp();
+        const v = this.jsGet(box, f.name, f.type, `${what} an object whose '${f.name}' is`, at);
+        this.emit(`${next} = insertvalue ${this.llvm(type)} ${made}, ${this.llvm(f.type)} ${v}, ${this.typing.fieldPath(type as ObjectType, f.name).join(", ")}`);
         made = next;
       }
-      emit(`call void @fsh_rt_js_release(ptr ${box})`);
+      this.emit(`call void @fsh_rt_js_release(ptr ${box})`);
       return made;
     }
-    throw new Error(`internal error: no reading of a '${typing.show(type)}' out of JS`);
+    throw new Error(`internal error: no reading of a '${this.typing.show(type)}' out of JS`);
   }
+
 
   // A JS value read as the first member of a union it is: literals tried first, then the rest,
   // a plain JsValue last as it takes anything.
-  function jsUnion(box: string, type: UnionType, what: string, at: Expr): string {
-    const rank = (m: Type) => (recOf(m)?.kind === "literal" ? 0 : typing.isPlainJs(m) ? 2 : 1);
-    const order = [...typing.rec(type).members].sort((a, b) => rank(a) - rank(b));
-    const [slot, done] = [alloca(llvm(type)), label()];
+  jsUnion(this: Mut<this>, box: string, type: UnionType, what: string, at: Expr): string {
+    const rank = (m: Type) => (this.recOf(m)?.kind === "literal" ? 0 : this.typing.isPlainJs(m) ? 2 : 1);
+    const order = [...this.typing.rec(type).members].sort((a, b) => rank(a) - rank(b));
+    const [slot, done] = [this.alloca(this.llvm(type)), this.label()];
     for (const m of order) {
-      const [yes, no] = [label(), label()];
-      emit(`br i1 ${jsMatches(box, m)}, label %${yes}, label %${no}`);
-      startBlock(yes);
-      emit(`store ${llvm(type)} ${convert(fromJs(box, m, what, at), m, type)}, ptr ${slot}`);
-      emit(`br label %${done}`);
-      startBlock(no);
+      const [yes, no] = [this.label(), this.label()];
+      this.emit(`br i1 ${this.jsMatches(box, m)}, label %${yes}, label %${no}`);
+      this.startBlock(yes);
+      this.emit(`store ${this.llvm(type)} ${this.convert(this.fromJs(box, m, what, at), m, type)}, ptr ${slot}`);
+      this.emit(`br label %${done}`);
+      this.startBlock(no);
     }
-    unwinding(`call void @fsh_rt_js_mismatch(ptr ${box}, ptr ${cString(what)}, ptr ${cString(typing.show(type))}, ptr ${panicAt(at)})`);
-    emit("unreachable");
-    startBlock(done);
-    const out = temp();
-    emit(`${out} = load ${llvm(type)}, ptr ${slot}`);
+    this.unwinding(`call void @fsh_rt_js_mismatch(ptr ${box}, ptr ${this.cString(what)}, ptr ${this.cString(this.typing.show(type))}, ptr ${this.panicAt(at)})`);
+    this.emit("unreachable");
+    this.startBlock(done);
+    const out = this.temp();
+    this.emit(`${out} = load ${this.llvm(type)}, ptr ${slot}`);
     return out;
   }
+
 
   // Whether a JS value is of a declared type, as an `i1`: a literal by its value, an array or a
   // tuple by each element, an object by each property, and a handle's shape by having each
   // property it can't leave out, its literal properties matching. Nothing it reads throws.
-  function jsMatches(box: string, m: Type): string {
+  jsMatches(this: Mut<this>, box: string, m: Type): string {
     const is = (kind: i32, s = "null", d = "0.0") => {
-      const [r, b] = [temp(), temp()];
-      emit(`${r} = call i32 @fsh_rt_js_is(ptr ${box}, i32 ${kind}, ptr ${s}, double ${d})`);
-      emit(`${b} = icmp ne i32 ${r}, 0`);
+      const [r, b] = [this.temp(), this.temp()];
+      this.emit(`${r} = call i32 @fsh_rt_js_is(ptr ${box}, i32 ${kind}, ptr ${s}, double ${d})`);
+      this.emit(`${b} = icmp ne i32 ${r}, 0`);
       return b;
     };
-    if (typing.isPlainJs(m)) return "true";
+    if (this.typing.isPlainJs(m)) return "true";
     if (m === "null") return is(1);
     if (m === "string") return is(2);
     if (m === "boolean") return is(4);
     if (isFloat(m) || isInteger(m)) return is(3);
     if (typeof m === "string") return "false";
-    const r = typing.rec(m);
-    if (r.kind === "literal") return is(...jsLiteral(r.value));
-    if (r.kind === "param") return jsMatches(box, r.concrete!);
+    const r = this.typing.rec(m);
+    if (r.kind === "literal") return is(...this.jsLiteral(r.value));
+    if (r.kind === "param") return this.jsMatches(box, r.concrete!);
     if (r.kind === "union") {
       // Any member, the rest tried only while none has matched.
       const [first, ...rest] = r.members;
       return rest.reduce((any, member) => {
-        const none = temp();
-        emit(`${none} = xor i1 ${any}, true`);
-        const later = both(none, () => jsMatches(box, member));
-        const v = temp();
-        emit(`${v} = or i1 ${any}, ${later}`);
+        const none = this.temp();
+        this.emit(`${none} = xor i1 ${any}, true`);
+        const later = this.both(none, () => this.jsMatches(box, member));
+        const v = this.temp();
+        this.emit(`${v} = or i1 ${any}, ${later}`);
         return v;
-      }, jsMatches(box, first!));
+      }, this.jsMatches(box, first!));
     }
-    if (r.kind === "array" || r.kind === "fixed" || (r.kind === "object" && r.tuple)) return jsArrayMatches(box, m as ArrayType | FixedType | ObjectType, is(10));
+    if (r.kind === "array" || r.kind === "fixed" || (r.kind === "object" && r.tuple)) return this.jsArrayMatches(box, m as ArrayType | FixedType | ObjectType, is(10));
     if (r.kind === "object") {
       let all = is(9);
-      for (const f of r.fields) all = both(all, () => jsPart(box, cString(f.name), "-1", (part) => jsMatches(part, f.type)));
+      for (const f of r.fields) all = this.both(all, () => this.jsPart(box, this.cString(f.name), "-1", (part) => this.jsMatches(part, f.type)));
       return all;
     }
-    const shape = r.kind === "block" ? typing.jsShape(m as BlockType) : undefined;
+    const shape = r.kind === "block" ? this.typing.jsShape(m as BlockType) : undefined;
     let all = is(9);
-    for (const f of recOf(shape)?.fields ?? []) {
-      if (typing.isOption(f.type)) continue;
-      const ft = typeof f.type === "string" ? undefined : typing.rec(f.type);
-      const [kind, s, d] = ft?.kind === "literal" ? jsLiteral(ft.value) : [11, "null", "0.0"] as const;
-      const [r, b, both] = [temp(), temp(), temp()];
-      emit(`${r} = call i32 @fsh_rt_js_field_is(ptr ${box}, ptr ${cString(f.name)}, i32 ${kind}, ptr ${s}, double ${d})`);
-      emit(`${b} = icmp ne i32 ${r}, 0`);
-      emit(`${both} = and i1 ${all}, ${b}`);
+    for (const f of this.recOf(shape)?.fields ?? []) {
+      if (this.typing.isOption(f.type)) continue;
+      const ft = typeof f.type === "string" ? undefined : this.typing.rec(f.type);
+      const [kind, s, d] = ft?.kind === "literal" ? this.jsLiteral(ft.value) : [11, "null", "0.0"] as const;
+      const [r, b, both] = [this.temp(), this.temp(), this.temp()];
+      this.emit(`${r} = call i32 @fsh_rt_js_field_is(ptr ${box}, ptr ${this.cString(f.name)}, i32 ${kind}, ptr ${s}, double ${d})`);
+      this.emit(`${b} = icmp ne i32 ${r}, 0`);
+      this.emit(`${both} = and i1 ${all}, ${b}`);
       all = both;
     }
     return all;
   }
 
+
   // `first`, and then, only where it holds, what `then` tests, as an `i1`.
-  function both(first: string, then: () => string): string {
-    const [more, done, from] = [label(), label(), block];
-    emit(`br i1 ${first}, label %${more}, label %${done}`);
-    startBlock(more);
+  both(this: Mut<this>, first: string, then: () => string): string {
+    const [more, done, from] = [this.label(), this.label(), this.block];
+    this.emit(`br i1 ${first}, label %${more}, label %${done}`);
+    this.startBlock(more);
     const second = then();
-    const after = block;
-    emit(`br label %${done}`);
-    startBlock(done);
-    const v = temp();
-    emit(`${v} = phi i1 [ false, %${from} ], [ ${second}, %${after} ]`);
+    const after = this.block;
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
+    const v = this.temp();
+    this.emit(`${v} = phi i1 [ false, %${from} ], [ ${second}, %${after} ]`);
     return v;
   }
+
 
   // What `test` says of a property, by name, or an element, by index, of a JS value, read
   // without throwing: one that throws as it is read is undefined.
-  function jsPart(box: string, name: string, index: string, test: (part: string) => string): string {
-    const part = temp();
-    emit(`${part} = call ptr @fsh_rt_js_peek(ptr ${box}, ptr ${name === "null" ? "null" : name}, i64 ${index})`);
+  jsPart(this: Mut<this>, box: string, name: string, index: string, test: (part: string) => string): string {
+    const part = this.temp();
+    this.emit(`${part} = call ptr @fsh_rt_js_peek(ptr ${box}, ptr ${name === "null" ? "null" : name}, i64 ${index})`);
     const v = test(part);
-    emit(`call void @fsh_rt_js_release(ptr ${part})`);
+    this.emit(`call void @fsh_rt_js_release(ptr ${part})`);
     return v;
   }
 
+
   // Whether a JS array holds what an array, fixed array or tuple type says, every element of it.
-  function jsArrayMatches(box: string, m: Type, isArray: string): string {
+  jsArrayMatches(this: Mut<this>, box: string, m: Type, isArray: string): string {
     if (typeof m === "string") return "false";
-    const r = typing.rec(m);
-    return both(isArray, () => {
-      const length = temp();
-      emit(`${length} = call i64 @fsh_rt_js_count(ptr ${box})`);
+    const r = this.typing.rec(m);
+    return this.both(isArray, () => {
+      const length = this.temp();
+      this.emit(`${length} = call i64 @fsh_rt_js_count(ptr ${box})`);
       if (r.kind === "object") {
-        const parts = typing.elementsOf(m as ObjectType);
-        const enough = temp();
-        emit(`${enough} = icmp sge i64 ${length}, ${parts.filter((p) => !typing.isOption(p)).length}`);
-        return parts.reduce((all, element, i) => both(all, () => jsPart(box, "null", String(i), (part) => jsMatches(part, element))), enough);
+        const parts = this.typing.elementsOf(m as ObjectType);
+        const enough = this.temp();
+        this.emit(`${enough} = icmp sge i64 ${length}, ${parts.filter((p) => !this.typing.isOption(p)).length}`);
+        return parts.reduce((all, element, i) => this.both(all, () => this.jsPart(box, "null", String(i), (part) => this.jsMatches(part, element))), enough);
       }
       const element = (r as ArrayRecord | FixedRecord).element;
-      const fits = r.kind === "fixed" ? temp() : "true";
-      if (r.kind === "fixed") emit(`${fits} = icmp eq i64 ${length}, ${r.size}`);
-      return both(fits, () => {
+      const fits = r.kind === "fixed" ? this.temp() : "true";
+      if (r.kind === "fixed") this.emit(`${fits} = icmp eq i64 ${length}, ${r.size}`);
+      return this.both(fits, () => {
         // Each element in turn, until one doesn't match.
-        const [i, ok] = [alloca("i64"), alloca("i1")];
-        emit(`store i64 0, ptr ${i}`);
-        emit(`store i1 true, ptr ${ok}`);
-        const [test, body, next, end] = [label(), label(), label(), label()];
-        emit(`br label %${test}`);
-        startBlock(test);
-        const [at, more] = [temp(), temp()];
-        emit(`${at} = load i64, ptr ${i}`);
-        emit(`${more} = icmp slt i64 ${at}, ${length}`);
-        emit(`br i1 ${more}, label %${body}, label %${end}`);
-        startBlock(body);
-        const matched = jsPart(box, "null", at, (part) => jsMatches(part, element));
-        emit(`br i1 ${matched}, label %${next}, label %${end}`);
-        startBlock(next);
-        const step = temp();
-        emit(`${step} = add i64 ${at}, 1`);
-        emit(`store i64 ${step}, ptr ${i}`);
-        emit(`br label %${test}`);
-        startBlock(end);
-        const [reached, all] = [temp(), temp()];
-        emit(`${reached} = load i64, ptr ${i}`);
-        emit(`${all} = icmp eq i64 ${reached}, ${length}`);
+        const [i, ok] = [this.alloca("i64"), this.alloca("i1")];
+        this.emit(`store i64 0, ptr ${i}`);
+        this.emit(`store i1 true, ptr ${ok}`);
+        const [test, body, next, end] = [this.label(), this.label(), this.label(), this.label()];
+        this.emit(`br label %${test}`);
+        this.startBlock(test);
+        const [at, more] = [this.temp(), this.temp()];
+        this.emit(`${at} = load i64, ptr ${i}`);
+        this.emit(`${more} = icmp slt i64 ${at}, ${length}`);
+        this.emit(`br i1 ${more}, label %${body}, label %${end}`);
+        this.startBlock(body);
+        const matched = this.jsPart(box, "null", at, (part) => this.jsMatches(part, element));
+        this.emit(`br i1 ${matched}, label %${next}, label %${end}`);
+        this.startBlock(next);
+        const step = this.temp();
+        this.emit(`${step} = add i64 ${at}, 1`);
+        this.emit(`store i64 ${step}, ptr ${i}`);
+        this.emit(`br label %${test}`);
+        this.startBlock(end);
+        const [reached, all] = [this.temp(), this.temp()];
+        this.emit(`${reached} = load i64, ptr ${i}`);
+        this.emit(`${all} = icmp eq i64 ${reached}, ${length}`);
         return all;
       });
     });
   }
 
+
   // What `fsh_rt_js_is` takes to test for a literal: its kind, and its text or number.
-  function jsLiteral(value: string | bigint | boolean): [i32, string, string] {
-    if (typeof value === "string") return [5, text(value), "0.0"];
+  jsLiteral(this: Mut<this>, value: string | bigint | boolean): [i32, string, string] {
+    if (typeof value === "string") return [5, this.text(value), "0.0"];
     if (typeof value === "boolean") return [value ? 7 : 6, "null", "0.0"];
     return [8, "null", floatConstant(Number(value), "f64")];
   }
 
+
   // A JsValue narrowed to a string, number or boolean, read out of JS.
-  function jsRead(box: string, as: Type): string {
-    const [read, v] = [temp(), temp()];
-    if (as === "string") return emit(`${read} = call ptr @fsh_rt_js_string(ptr ${box})`), read;
-    if (as === "f64") return emit(`${read} = call double @fsh_rt_js_number(ptr ${box})`), read;
-    emit(`${read} = call i32 @fsh_rt_js_boolean(ptr ${box})`);
-    emit(`${v} = icmp ne i32 ${read}, 0`);
+  jsRead(this: Mut<this>, box: string, as: Type): string {
+    const [read, v] = [this.temp(), this.temp()];
+    if (as === "string") return this.emit(`${read} = call ptr @fsh_rt_js_string(ptr ${box})`), read;
+    if (as === "f64") return this.emit(`${read} = call double @fsh_rt_js_number(ptr ${box})`), read;
+    this.emit(`${read} = call i32 @fsh_rt_js_boolean(ptr ${box})`);
+    this.emit(`${v} = icmp ne i32 ${read}, 0`);
     return v;
   }
 
+
   // A Semaphore's or Channel's method, or a JsValue's. Those that wait give a future holding a
   // count on the block, and for `send` the value going in.
-  function blockCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
-    const t = referent(valueType(callee.object)) as BlockType;
-    const handle = temp();
-    emit(`${handle} = load ptr, ptr ${receiver(callee.object)}`);
-    if (jsMethods.has(e)) return jsMethod(handle, callee.name, e.args, types.get(e), `'${callee.name}' of '${typing.show(t)}' gave`, e);
-    if (jsAccessors.has(e)) {
-      const [made, has] = [temp(), temp()];
-      const at = callee.name === "at" ? `i64 ${value(e.args[0]!)}` : `ptr ${value(e.args[0]!)}`;
-      unwinding(`call ${callee.name === "has" ? "i32" : "ptr"} @fsh_rt_js_${callee.name}(ptr ${handle}, ${at}, ptr ${panicAt(e)})`, made);
+  blockCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+    const t = this.referent(this.valueType(callee.object)) as BlockType;
+    const handle = this.temp();
+    this.emit(`${handle} = load ptr, ptr ${this.receiver(callee.object)}`);
+    if (this.jsMethods.has(e)) return this.jsMethod(handle, callee.name, e.args, this.types.get(e), `'${callee.name}' of '${this.typing.show(t)}' gave`, e);
+    if (this.jsAccessors.has(e)) {
+      const [made, has] = [this.temp(), this.temp()];
+      const at = callee.name === "at" ? `i64 ${this.value(e.args[0]!)}` : `ptr ${this.value(e.args[0]!)}`;
+      this.unwinding(`call ${callee.name === "has" ? "i32" : "ptr"} @fsh_rt_js_${callee.name}(ptr ${handle}, ${at}, ptr ${this.panicAt(e)})`, made);
       if (callee.name !== "has") return made;
-      emit(`${has} = icmp ne i32 ${made}, 0`);
+      this.emit(`${has} = icmp ne i32 ${made}, 0`);
       return has;
     }
-    if (callee.name === "abort") return void emit(`call void @fsh_rt_signal_abort(ptr ${handle})`);
+    if (callee.name === "abort") return void this.emit(`call void @fsh_rt_signal_abort(ptr ${handle})`);
     if (callee.name === "throwIfAborted") {
-      const [aborted, yes, stop, fine] = [temp(), temp(), label(), label()];
-      emit(`${aborted} = call i32 @fsh_rt_signal_aborted(ptr ${handle})`);
-      emit(`${yes} = icmp ne i32 ${aborted}, 0`);
-      emit(`br i1 ${yes}, label %${stop}, label %${fine}`);
-      startBlock(stop);
-      raised(e, abortError(current.raises.get(e)!.from));
-      startBlock(fine);
+      const [aborted, yes, stop, fine] = [this.temp(), this.temp(), this.label(), this.label()];
+      this.emit(`${aborted} = call i32 @fsh_rt_signal_aborted(ptr ${handle})`);
+      this.emit(`${yes} = icmp ne i32 ${aborted}, 0`);
+      this.emit(`br i1 ${yes}, label %${stop}, label %${fine}`);
+      this.startBlock(stop);
+      this.raised(e, this.abortError(this.current.raises.get(e)!.from));
+      this.startBlock(fine);
       return undefined;
     }
     // A settle the cell no longer takes leaves its value here to drop.
     if (callee.name === "settle") {
-      const of = typing.lower(typing.rec(t).of);
-      const [slot, taken, kept, drop, done] = [alloca(llvm(of)), temp(), temp(), label(), label()];
-      emit(`store ${llvm(of)} ${owned(e.args[0]!)}, ptr ${slot}`);
-      emit(`${taken} = call i32 @fsh_rt_channel_settle(ptr ${handle}, ptr ${slot})`);
-      const no = temp();
-      emit(`${no} = icmp eq i32 ${taken}, 0`);
-      emit(`br i1 ${no}, label %${drop}, label %${done}`);
-      startBlock(drop);
-      emit(`${kept} = load ${llvm(of)}, ptr ${slot}`);
-      dispose(kept, of);
-      emit(`br label %${done}`);
-      startBlock(done);
+      const of = this.typing.lower(this.typing.rec(t).of);
+      const [slot, taken, kept, drop, done] = [this.alloca(this.llvm(of)), this.temp(), this.temp(), this.label(), this.label()];
+      this.emit(`store ${this.llvm(of)} ${this.owned(e.args[0]!)}, ptr ${slot}`);
+      this.emit(`${taken} = call i32 @fsh_rt_channel_settle(ptr ${handle}, ptr ${slot})`);
+      const no = this.temp();
+      this.emit(`${no} = icmp eq i32 ${taken}, 0`);
+      this.emit(`br i1 ${no}, label %${drop}, label %${done}`);
+      this.startBlock(drop);
+      this.emit(`${kept} = load ${this.llvm(of)}, ptr ${slot}`);
+      this.dispose(kept, of);
+      this.emit(`br label %${done}`);
+      this.startBlock(done);
       return undefined;
     }
     if (callee.name === "startTls" || callee.name === "listenTls") {
-      const made = temp();
-      emit(`${made} = call ptr @fsh_rt_tls_${callee.name === "startTls" ? "client" : "listen"}(ptr ${handle}, ptr ${value(e.args[0]!)}, ptr ${value(e.args[1]!)})`);
-      if (!types.has(e)) pending.push({ v: made, type: "string" });
+      const made = this.temp();
+      this.emit(`${made} = call ptr @fsh_rt_tls_${callee.name === "startTls" ? "client" : "listen"}(ptr ${handle}, ptr ${this.value(e.args[0]!)}, ptr ${this.value(e.args[1]!)})`);
+      if (!this.types.has(e)) this.pending.push({ v: made, type: "string" });
       return made;
     }
     if (callee.name === "available" || callee.name === "close") {
-      const result = temp();
-      if (callee.name === "close") return void emit(`call void @fsh_rt_channel_close(ptr ${handle})`);
-      emit(`${result} = call i64 @fsh_rt_semaphore_available(ptr ${handle})`);
+      const result = this.temp();
+      if (callee.name === "close") return void this.emit(`call void @fsh_rt_channel_close(ptr ${handle})`);
+      this.emit(`${result} = call i64 @fsh_rt_semaphore_available(ptr ${handle})`);
       return result;
     }
-    const future = types.get(e) as FutureType;
-    if (typing.rec(t).which === "UdpSocket") return udpFrame(e, handle, future);
+    const future = this.types.get(e) as FutureType;
+    if (this.typing.rec(t).which === "UdpSocket") return this.udpFrame(e, handle, future);
     // What a send, read or write carries: the value going in, the most bytes, or the bytes.
-    const carried = ["send", "read", "write"].includes(callee.name) ? typing.rec(future).frame[2]!.type : undefined;
-    const given = carried === undefined ? undefined : carried === "i64" ? value(e.args[0]!) : owned(e.args[0]!);
-    let frame = temp();
-    emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${copied(handle, t)}, 1`);
+    const carried = ["send", "read", "write"].includes(callee.name) ? this.typing.rec(future).frame[2]!.type : undefined;
+    const given = carried === undefined ? undefined : carried === "i64" ? this.value(e.args[0]!) : this.owned(e.args[0]!);
+    let frame = this.temp();
+    this.emit(`${frame} = insertvalue ${this.llvm(future)} zeroinitializer, ptr ${this.copied(handle, t)}, 1`);
     if (given !== undefined) {
-      const next = temp();
-      emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${llvm(carried!)} ${given}, 2`);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${this.llvm(future)} ${frame}, ${this.llvm(carried!)} ${given}, 2`);
       frame = next;
     }
-    return signalled(e, future, frame);
+    return this.signalled(e, future, frame);
   }
+
 
   // A UdpSocket's wait: a count on the socket, then what its leaf's frame carries in order, the
   // bytes and address of a send, a connect's address, or nothing for a receive.
-  function udpFrame(e: Extract<Expr, { kind: "call" }>, handle: string, future: FutureType): string {
-    let frame = temp();
-    emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${copied(handle, typing.blockType("UdpSocket"))}, 1`);
+  udpFrame(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, handle: string, future: FutureType): string {
+    let frame = this.temp();
+    this.emit(`${frame} = insertvalue ${this.llvm(future)} zeroinitializer, ptr ${this.copied(handle, this.typing.blockType("UdpSocket"))}, 1`);
     const name = (e.callee as Extract<Expr, { kind: "member" }>).name;
     const args = e.args.slice(0, { sendTo: 3, connect: 2, send: 1 }[name] ?? 0);
     args.forEach((arg, i) => {
-      const type = typing.rec(future).frame[2 + i]!.type;
-      const [v, next] = [type === "i64" ? value(arg) : owned(arg), temp()];
-      emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${llvm(type)} ${v}, ${2 + i}`);
+      const type = this.typing.rec(future).frame[2 + i]!.type;
+      const [v, next] = [type === "i64" ? this.value(arg) : this.owned(arg), this.temp()];
+      this.emit(`${next} = insertvalue ${this.llvm(future)} ${frame}, ${this.llvm(type)} ${v}, ${2 + i}`);
       frame = next;
     });
-    return signalled(e, future, frame);
+    return this.signalled(e, future, frame);
   }
+
 
   // A new block for a Dyn's value. At least a byte, so an empty class has an address of its own.
   // A shared Dyn's block is counted: the runtime keeps its count in 16 bytes before the value.
-  function dynBlock(type: Type, counted = false): string {
-    const [end, size, empty, some, block] = [temp(), temp(), temp(), temp(), temp()];
-    emit(`${end} = getelementptr ${llvm(type)}, ptr null, i64 1`);
-    emit(`${size} = ptrtoint ptr ${end} to i64`);
-    emit(`${empty} = icmp eq i64 ${size}, 0`);
-    emit(`${some} = select i1 ${empty}, i64 1, i64 ${size}`);
-    emit(`${block} = call ptr @${counted ? "fsh_rt_dyn_alloc" : "fsh_rt_alloc"}(i64 ${some})`);
+  dynBlock(this: Mut<this>, type: Type, counted = false): string {
+    const [end, size, empty, some, block] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${end} = getelementptr ${this.llvm(type)}, ptr null, i64 1`);
+    this.emit(`${size} = ptrtoint ptr ${end} to i64`);
+    this.emit(`${empty} = icmp eq i64 ${size}, 0`);
+    this.emit(`${some} = select i1 ${empty}, i64 1, i64 ${size}`);
+    this.emit(`${block} = call ptr @${counted ? "fsh_rt_dyn_alloc" : "fsh_rt_alloc"}(i64 ${some})`);
     return block;
   }
 
+
   // A value moved into a new Dyn's block, with the vtable of its type for the Dyn's interface.
-  function box(v: string, type: Type, to: DynType): string {
-    const [made, dyn] = [temp(), temp()];
-    const block = dynBlock(type, typing.sharesDyn(to));
-    emit(`store ${llvm(type)} ${v}, ptr ${block}`);
-    emit(`${made} = insertvalue ${DYN} undef, ptr ${block}, 0`);
-    emit(`${dyn} = insertvalue ${DYN} ${made}, ptr ${vtable(type, to)}, 1`);
+  box(this: Mut<this>, v: string, type: Type, to: DynType): string {
+    const [made, dyn] = [this.temp(), this.temp()];
+    const block = this.dynBlock(type, this.typing.sharesDyn(to));
+    this.emit(`store ${this.llvm(type)} ${v}, ptr ${block}`);
+    this.emit(`${made} = insertvalue ${DYN} undef, ptr ${block}, 0`);
+    this.emit(`${dyn} = insertvalue ${DYN} ${made}, ptr ${this.vtable(type, to)}, 1`);
     return dyn;
   }
+
 
   // The vtable of a type for an interface: drop the block, copy it (the compiler's copies),
   // clone it as '.clone()' would (null when the type can't be), then a slot per member. A
   // shared Dyn's copy and clone count the block again and its drop gives a count up. Any other
   // Dyn's copy is its clone, so state it holds in an Atomic or a Lock is never split in two.
-  function vtable(type: Type, to: DynType): string {
-    const key = `${typing.keyOf(type)} ${typing.keyOf(to)}`;
-    const made = vtables.get(key);
+  vtable(this: Mut<this>, type: Type, to: DynType): string {
+    const key = `${this.typing.keyOf(type)} ${this.typing.keyOf(to)}`;
+    const made = this.vtables.get(key);
     if (made) return made;
-    const n = stableId("vtable", `${typing.described(type)} as ${typing.described(to)}`, key);
+    const n = this.stableId("vtable", `${this.typing.described(type)} as ${this.typing.described(to)}`, key);
     const name = `@fsh.vtable.${n}`;
-    vtables.set(key, name);
-    const table = dynMembers.get(key)!;
+    this.vtables.set(key, name);
+    const table = this.dynMembers.get(key)!;
     let slots: string[];
-    if (typing.sharesDyn(to)) {
+    if (this.typing.sharesDyn(to)) {
       // A shared Dyn's '.clone()' runs its class's own clone when it has one, and otherwise shares.
       const own = table.clone && table.clone !== "copy";
-      slots = [dynRelease(type, n), "@fsh_rt_dyn_retain", own ? dynClone(type, n, table, true) : "@fsh_rt_dyn_retain"];
+      slots = [this.dynRelease(type, n), "@fsh_rt_dyn_retain", own ? this.dynClone(type, n, table, true) : "@fsh_rt_dyn_retain"];
     } else {
       // A Rust value is never copied, so a Dyn holding one panics if it ever is.
       let rust: string | undefined;
-      typing.holdsPart(type, (u) => (rust ??= rustClassOf(typing, u)?.name) !== undefined);
-      const copied = rust !== undefined ? dynUncopyable(rust) : dynCopy(type, n);
-      const cloned = table.clone === "copy" ? copied : dynClone(type, n, table);
+      this.typing.holdsPart(type, (u) => (rust ??= rustClassOf(this.typing, u)?.name) !== undefined);
+      const copied = rust !== undefined ? this.dynUncopyable(rust) : this.dynCopy(type, n);
+      const cloned = table.clone === "copy" ? copied : this.dynClone(type, n, table);
       // A value holding nothing pinned copies as the compiler copies, its own Dyns through their
       // own vtables; one that does would split that state, so its copy panics.
-      const pinned = typing.holdsPart(type, (u) => {
+      const pinned = this.typing.holdsPart(type, (u) => {
         if (typeof u === "string") return false;
-        const r = typing.rec(u);
+        const r = this.typing.rec(u);
         return (r.kind === "interior" && r.which !== "Cell") || (r.kind === "block" && (r.which === "Semaphore" || r.which === "Permit")) || r.kind === "handle" || r.kind === "generator";
       });
-      const copy = !pinned || typing.promiseElement(typing.rec(to).of) !== undefined ? copied : table.clone ? cloned : dynUncopyable();
-      slots = [dynDrop(type, n), copy, cloned];
+      const copy = !pinned || this.typing.promiseElement(this.typing.rec(to).of) !== undefined ? copied : table.clone ? cloned : this.dynUncopyable();
+      slots = [this.dynDrop(type, n), copy, cloned];
     }
-    slots.push(...dynSlots(type, n, to, table));
+    slots.push(...this.dynSlots(type, n, to, table));
     // An error-like value boxed as a cause keeps how it prints, so an Error prints its cause
     // chain as Node does.
-    if (typing.rec(typing.rec(to).of).name === "ErrorLike") slots.push(inspectThunk(type, n));
-    globals.push(`${name} = internal constant [${slots.length} x ptr] [${slots.map((s) => `ptr ${s}`).join(", ")}]`);
+    if (this.typing.rec(this.typing.rec(to).of).name === "ErrorLike") slots.push(this.inspectThunk(type, n));
+    this.globals.push(`${name} = internal constant [${slots.length} x ptr] [${slots.map((s) => `ptr ${s}`).join(", ")}]`);
     return name;
   }
 
+
   // Emits a thunk taking the pointer to a Dyn's block, then `params`, its body from `fill`. It
   // is a function of its own, so nothing the function being emitted holds drops in it.
-  function thunk(name: string, returns: string, fill: () => void, params: string[] = []) {
-    const saved = { allocas, body, temps, labels, block, pending, scopes };
-    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+  thunk(this: Mut<this>, name: string, returns: string, fill: () => void, params: string[] = []) {
+    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
+    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
     fill();
-    out.push(`define internal ${returns} ${name}(${["ptr %p", ...params].join(", ")}) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    this.out.push(`define internal ${returns} ${name}(${["ptr %p", ...params].join(", ")}) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
+    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
   }
 
+
   // A boxed value's inspect tree at a depth, as console.log would make it for its own type.
-  function inspectThunk(type: Type, n: string): string {
+  inspectThunk(this: Mut<this>, type: Type, n: string): string {
     const name = `@fsh.dyn.inspect.${n}`;
-    thunk(name, "ptr", () => {
-      const v = temp();
-      emit(`${v} = load ${llvm(type)}, ptr %p`);
-      emit(`ret ptr ${inspectTree(v, type, "%d")}`);
+    this.thunk(name, "ptr", () => {
+      const v = this.temp();
+      this.emit(`${v} = load ${this.llvm(type)}, ptr %p`);
+      this.emit(`ret ptr ${this.inspectTree(v, type, "%d")}`);
     }, ["i64 %d"]);
     return name;
   }
 
+
   // A shared Dyn's drop: the last count drops the value and frees its block.
-  function dynRelease(type: Type, n: string): string {
+  dynRelease(this: Mut<this>, type: Type, n: string): string {
     const name = `@fsh.dyn.release.${n}`;
-    thunk(name, "void", () => {
-      const [last, gone, kept, v] = [temp(), label(), label(), temp()];
-      emit(`${last} = call i1 @fsh_rt_dyn_release(ptr %p)`);
-      emit(`br i1 ${last}, label %${gone}, label %${kept}`);
-      startBlock(gone);
-      emit(`${v} = load ${llvm(type)}, ptr %p`);
-      dispose(v, type);
-      emit("call void @fsh_rt_dyn_free(ptr %p)");
-      emit(`br label %${kept}`);
-      startBlock(kept);
-      emit("ret void");
+    this.thunk(name, "void", () => {
+      const [last, gone, kept, v] = [this.temp(), this.label(), this.label(), this.temp()];
+      this.emit(`${last} = call i1 @fsh_rt_dyn_release(ptr %p)`);
+      this.emit(`br i1 ${last}, label %${gone}, label %${kept}`);
+      this.startBlock(gone);
+      this.emit(`${v} = load ${this.llvm(type)}, ptr %p`);
+      this.dispose(v, type);
+      this.emit("call void @fsh_rt_dyn_free(ptr %p)");
+      this.emit(`br label %${kept}`);
+      this.startBlock(kept);
+      this.emit("ret void");
     });
     return name;
   }
 
+
   // The copy of a Dyn whose value can't be cloned: it panics rather than split state in two,
   // naming the Rust type when a Rust value is what can't be copied.
-  function dynUncopyable(rust = ""): string {
+  dynUncopyable(this: Mut<this>, rust = ""): string {
     const name = rust ? `@"fsh.dyn.uncopyable.${rust}"` : `@"fsh.dyn.uncopyable"`;
-    if (!uncopyable.has(rust)) {
-      uncopyable.add(rust);
+    if (!this.uncopyable.has(rust)) {
+      this.uncopyable.add(rust);
       const why = rust
         ? `its value holds a Rust '${rust}', which is moved, never copied; await the futures holding one, or move them rather than copy them`
         : "its value holds an Atomic, a Lock, a JoinHandle, a Rust value or something else changed or awaited in one place, so it can't be copied; keep it in a shared value, or give its interface no methods that change it";
-      thunk(name, "ptr", () => {
-        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked while copying a Dyn:\n${why}\n`)})`);
-        emit("unreachable");
+      this.thunk(name, "ptr", () => {
+        this.unwinding(`call void @fsh_rt_panic(ptr ${this.cString(`panicked while copying a Dyn:\n${why}\n`)})`);
+        this.emit("unreachable");
       });
     }
     return name;
   }
 
-  function dynDrop(type: Type, n: string): string {
+
+  dynDrop(this: Mut<this>, type: Type, n: string): string {
     const name = `@fsh.dyn.drop.${n}`;
-    thunk(name, "void", () => {
-      const v = temp();
-      emit(`${v} = load ${llvm(type)}, ptr %p`);
-      dispose(v, type);
-      emit("call void @fsh_rt_free(ptr %p)");
-      emit("ret void");
+    this.thunk(name, "void", () => {
+      const v = this.temp();
+      this.emit(`${v} = load ${this.llvm(type)}, ptr %p`);
+      this.dispose(v, type);
+      this.emit("call void @fsh_rt_free(ptr %p)");
+      this.emit("ret void");
     });
     return name;
   }
 
+
   // A new block holding the compiler's copy of the value: what its copies and drops balance on.
-  function dynCopy(type: Type, n: string): string {
+  dynCopy(this: Mut<this>, type: Type, n: string): string {
     const name = `@fsh.dyn.copy.${n}`;
-    thunk(name, "ptr", () => {
-      const v = temp();
-      emit(`${v} = load ${llvm(type)}, ptr %p`);
+    this.thunk(name, "ptr", () => {
+      const v = this.temp();
+      this.emit(`${v} = load ${this.llvm(type)}, ptr %p`);
       // Copied before its block is made, since a copy may panic part way.
-      const made = copied(v, type);
-      const block = dynBlock(type);
-      emit(`store ${llvm(type)} ${made}, ptr ${block}`);
-      emit(`ret ptr ${block}`);
+      const made = this.copied(v, type);
+      const block = this.dynBlock(type);
+      this.emit(`store ${this.llvm(type)} ${made}, ptr ${block}`);
+      this.emit(`ret ptr ${block}`);
     });
     return name;
   }
+
 
   // What a Dyn's '.clone()' runs when the class has its own `clone`: a new block holding what
   // it gives. Null when the type can't be cloned, which the call panics on.
-  function dynClone(type: Type, n: string, table: DynTable, counted = false): string {
+  dynClone(this: Mut<this>, type: Type, n: string, table: DynTable, counted = false): string {
     if (!table.clone || table.clone === "copy") return "null";
     const own = table.clone;
     const name = `@fsh.dyn.clone.${n}`;
-    thunk(name, "ptr", () => {
-      const made = invoke(arenas.instanceOf(own), "%p", [])!;
-      const block = dynBlock(type, counted);
-      emit(`store ${llvm(type)} ${made}, ptr ${block}`);
-      emit(`ret ptr ${block}`);
+    this.thunk(name, "ptr", () => {
+      const made = this.invoke(this.arenas.instanceOf(own), "%p", [])!;
+      const block = this.dynBlock(type, counted);
+      this.emit(`store ${this.llvm(type)} ${made}, ptr ${block}`);
+      this.emit(`ret ptr ${block}`);
     });
     return name;
   }
+
 
   // A slot per interface member: each method, then each field. A method giving an interface
   // type can't be called through a Dyn, so its slot is null.
-  function dynSlots(type: Type, n: string, to: DynType, { methods, fields }: DynTable): string[] {
+  dynSlots(this: Mut<this>, type: Type, n: string, to: DynType, { methods, fields }: DynTable): string[] {
     // A boxed future's slots are its poll, which takes its frame as the block, and its cancel.
-    if (typing.promiseElement(typing.rec(to).of) !== undefined) {
-      if (typing.leafOf.get(type as FutureType)?.method === "next") return nextSlots(type as FutureType, n);
-      const instance = futureOf.get(type as FutureType)!;
-      cancelled.add(instance.id);
-      return [symbol(noted.arenas, instance), cancelSymbol(instance)];
+    if (this.typing.promiseElement(this.typing.rec(to).of) !== undefined) {
+      if (this.typing.leafOf.get(type as FutureType)?.method === "next") return this.nextSlots(type as FutureType, n);
+      const instance = this.futureOf.get(type as FutureType)!;
+      this.cancelled.add(instance.id);
+      return [this.symbol(this.noted.arenas, instance), this.cancelSymbol(instance)];
     }
-    if (isDyn(type)) return [relayThunk(`@"fsh.dyn.${n}.call"`, type, typing.rec(typing.rec(to).of).methods[0]!)];
-    const r = recOf(type);
-    if (r?.kind === "generator") return [generatorNext(type as GeneratorType, n)];
-    const abstract = (t: Type) => recOf(t)?.kind === "interface" && typing.promiseElement(t) === undefined;
-    const made = typing.rec(typing.rec(to).of).methods.map((m, i) => (abstract(m.returns) || !methods[i] ? "null" : methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, arenas.instanceOf(methods[i]!))));
-    return [...made, ...typing.rec(typing.rec(to).of).fields.map((f, i) => fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, arenas.instanceOf(fields[i])))];
+    if (this.isDyn(type)) return [this.relayThunk(`@"fsh.dyn.${n}.call"`, type, this.typing.rec(this.typing.rec(to).of).methods[0]!)];
+    const r = this.recOf(type);
+    if (r?.kind === "generator") return [this.generatorNext(type as GeneratorType, n)];
+    const abstract = (t: Type) => this.recOf(t)?.kind === "interface" && this.typing.promiseElement(t) === undefined;
+    const made = this.typing.rec(this.typing.rec(to).of).methods.map((m, i) => (abstract(m.returns) || !methods[i] ? "null" : this.methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, this.arenas.instanceOf(methods[i]!))));
+    return [...made, ...this.typing.rec(this.typing.rec(to).of).fields.map((f, i) => this.fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, this.arenas.instanceOf(fields[i])))];
   }
 
+
   // A boxed async generator's `next()`: its future, borrowing the generator in the block, boxed.
-  function generatorNext(type: GeneratorType, n: string): string {
+  generatorNext(this: Mut<this>, type: GeneratorType, n: string): string {
     const name = `@"fsh.dyn.${n}.next"`;
-    thunk(name, DYN, () => {
-      const future = typing.leafFuture("next", type);
-      const made = temp();
-      emit(`${made} = insertvalue ${llvm(future)} zeroinitializer, ptr %p, 1`);
-      emit(`ret ${DYN} ${box(made, future, typing.lentPromise(typing.nextResult(typing.rec(type).yields)))}`);
+    this.thunk(name, DYN, () => {
+      const future = this.typing.leafFuture("next", type);
+      const made = this.temp();
+      this.emit(`${made} = insertvalue ${this.llvm(future)} zeroinitializer, ptr %p, 1`);
+      this.emit(`ret ${DYN} ${this.box(made, future, this.typing.lentPromise(this.typing.nextResult(this.typing.rec(type).yields)))}`);
     });
     return name;
   }
 
+
   // A boxed `next()` future's poll and cancel: the generator's own, through the pointer to it.
-  function nextSlots(future: FutureType, n: string): string[] {
-    const target = generatorOf.get(typing.leafOf.get(future)!.of as GeneratorType)!;
-    cancelled.add(target.id);
+  nextSlots(this: Mut<this>, future: FutureType, n: string): string[] {
+    const target = this.generatorOf.get(this.typing.leafOf.get(future)!.of as GeneratorType)!;
+    this.cancelled.add(target.id);
     const generator = () => {
-      const [slot, p] = [temp(), temp()];
-      emit(`${slot} = getelementptr ${llvm(future)}, ptr %p, i32 0, i32 1`);
-      emit(`${p} = load ptr, ptr ${slot}`);
+      const [slot, p] = [this.temp(), this.temp()];
+      this.emit(`${slot} = getelementptr ${this.llvm(future)}, ptr %p, i32 0, i32 1`);
+      this.emit(`${p} = load ptr, ptr ${slot}`);
       return p;
     };
     const poll = `@"fsh.dyn.${n}.poll"`;
-    thunk(poll, pollType(future), () => {
-      const result = temp();
-      emit(`${result} = call ${pollType(future)} ${symbol(noted.arenas, target)}(ptr ${generator()}, ptr %cx)`);
-      emit(`ret ${pollType(future)} ${result}`);
+    this.thunk(poll, this.pollType(future), () => {
+      const result = this.temp();
+      this.emit(`${result} = call ${this.pollType(future)} ${this.symbol(this.noted.arenas, target)}(ptr ${generator()}, ptr %cx)`);
+      this.emit(`ret ${this.pollType(future)} ${result}`);
     }, ["ptr %cx"]);
     const cancel = `@"fsh.dyn.${n}.cancel"`;
-    thunk(cancel, "void", () => {
-      emit(`call void ${cancelSymbol(target)}(ptr ${generator()}, ptr %cx)`);
-      emit("ret void");
+    this.thunk(cancel, "void", () => {
+      this.emit(`call void ${this.cancelSymbol(target)}(ptr ${generator()}, ptr %cx)`);
+      this.emit("ret void");
     }, ["ptr %cx"]);
     return [poll, cancel];
   }
+
 
   // A method's slot: the type's method run on the block, its result as the interface gives it.
   // Through a method declaring `this: Own<this>` the Dyn is given up: its block is freed after,
   // and its value dropped first unless the type's method took it over.
   // A throwing callable's slot gives whether the call failed, then its value and its error, as
   // its function type has them; a closure throwing nothing never fails.
-  function methodThunk(name: string, type: Type, m: Method, target: Instance): string {
-    if (typing.promiseElement(m.returns) !== undefined) return futureThunk(name, type, m, target);
-    const returns = m.throws ? throwing(m.returns, m.throws) : m.returns === "void" ? "void" : llvm(m.returns);
-    thunk(name, returns, () => {
-      const owner = bodyOf(noted.arenas, target).owner;
-      const r = recOf(type);
+  methodThunk(this: Mut<this>, name: string, type: Type, m: Method, target: Instance): string {
+    if (this.typing.promiseElement(m.returns) !== undefined) return this.futureThunk(name, type, m, target);
+    const returns = m.throws ? this.throwing(m.returns, m.throws) : m.returns === "void" ? "void" : this.llvm(m.returns);
+    this.thunk(name, returns, () => {
+      const owner = bodyOf(this.noted.arenas, target).owner;
+      const r = this.recOf(type);
       const upcasts = r?.kind === "class" && owner !== undefined && owner !== type;
-      const self = upcasts ? upcast("%p", type as ClassType, owner) : "%p";
+      const self = upcasts ? this.upcast("%p", type as ClassType, owner) : "%p";
       // Given up, the block is freed once the method returns or unwinds: its value dropped first,
       // or for a base's owning method, the derived fields it doesn't know of.
       const giveUp = !m.owned ? undefined : () => {
-        if (!bodyOf(noted.arenas, target).self?.owned) {
-          const v = temp();
-          emit(`${v} = load ${llvm(type)}, ptr %p`);
-          dispose(v, type);
+        if (!bodyOf(this.noted.arenas, target).self?.owned) {
+          const v = this.temp();
+          this.emit(`${v} = load ${this.llvm(type)}, ptr %p`);
+          this.dispose(v, type);
         } else if (upcasts) {
-          for (let t = type as ClassType; t !== owner; t = typing.rec(t).base!) {
-            const at = upcast("%p", type as ClassType, t);
-            for (const [part, i] of parts(t)) {
-              if (i === 0 || !needsDrop(part)) continue;
-              const [slot, v] = [temp(), temp()];
-              emit(`${slot} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
-              emit(`${v} = load ${llvm(part)}, ptr ${slot}`);
-              dispose(v, part);
+          for (let t = type as ClassType; t !== owner; t = this.typing.rec(t).base!) {
+            const at = this.upcast("%p", type as ClassType, t);
+            for (const [part, i] of this.parts(t)) {
+              if (i === 0 || !this.needsDrop(part)) continue;
+              const [slot, v] = [this.temp(), this.temp()];
+              this.emit(`${slot} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
+              this.emit(`${v} = load ${this.llvm(part)}, ptr ${slot}`);
+              this.dispose(v, part);
             }
           }
         }
-        emit("call void @fsh_rt_free(ptr %p)");
+        this.emit("call void @fsh_rt_free(ptr %p)");
       };
       // A closure may take fewer parameters than its callable passes: the rest are dropped here.
-      const taken = bodyOf(noted.arenas, target).closure ? bodyOf(noted.arenas, target).params.length : m.params.length;
-      m.params.slice(taken).forEach((p, i) => dispose(`%a${taken + i}`, p));
-      const args = m.params.slice(0, taken).map((p, i) => `${llvm(p)} %a${i}`);
-      const give = (v: string | undefined) => (m.throws ? succeeded(m, v) : emit(v === undefined ? "ret void" : `ret ${returns} ${v}`));
+      const taken = bodyOf(this.noted.arenas, target).closure ? bodyOf(this.noted.arenas, target).params.length : m.params.length;
+      m.params.slice(taken).forEach((p, i) => this.dispose(`%a${taken + i}`, p));
+      const args = m.params.slice(0, taken).map((p, i) => `${this.llvm(p)} %a${i}`);
+      const give = (v: string | undefined) => (m.throws ? this.succeeded(m, v) : this.emit(v === undefined ? "ret void" : `ret ${returns} ${v}`));
       let result: string | undefined;
       if (m.throws && target.throws) {
-        const shape = resultType(target);
-        const raw = temp();
-        unwinding(`call ${shape} ${symbol(noted.arenas, target)}(${[`ptr ${self}`, ...args].join(", ")})`, raw, giveUp);
+        const shape = this.resultType(target);
+        const raw = this.temp();
+        this.unwinding(`call ${shape} ${this.symbol(this.noted.arenas, target)}(${[`ptr ${self}`, ...args].join(", ")})`, raw, giveUp);
         giveUp?.();
-        result = failedOut(shape, raw, target.returns, target.throws, m);
-      } else result = invoke(target, self, args, undefined, giveUp);
+        result = this.failedOut(shape, raw, target.returns, target.throws, m);
+      } else result = this.invoke(target, self, args, undefined, giveUp);
       if (result === undefined || m.returns === "void") {
-        if (result !== undefined) dispose(result, target.returns);
+        if (result !== undefined) this.dispose(result, target.returns);
         return give(undefined);
       }
       // A result narrowed to what the interface gives drops the parts it leaves out.
-      if (needsDrop(target.returns) && !keepsAll(target.returns, m.returns)) {
-        const kept = copied(convert(result, target.returns, m.returns), m.returns);
-        dispose(result, target.returns);
+      if (this.needsDrop(target.returns) && !this.keepsAll(target.returns, m.returns)) {
+        const kept = this.copied(this.convert(result, target.returns, m.returns), m.returns);
+        this.dispose(result, target.returns);
         return give(kept);
       }
-      give(convert(result, target.returns, m.returns));
-    }, m.params.map((p, i) => `${llvm(p)} %a${i}`));
+      give(this.convert(result, target.returns, m.returns));
+    }, m.params.map((p, i) => `${this.llvm(p)} %a${i}`));
     return name;
   }
+
 
   // A throwing slot's result once its call gave `raw`, of `shape`: a failure returns at once,
   // its error converted to the slot's; otherwise its value is left for the slot to give.
-  function failedOut(shape: string, raw: string, gives: Type, thrown: Type, m: Method): string | undefined {
-    const returns = throwing(m.returns, m.throws!);
-    const [failed, bad, ok, error, failure, made] = [temp(), label(), label(), temp(), temp(), temp()];
-    emit(`${failed} = extractvalue ${shape} ${raw}, 0`);
-    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
-    startBlock(bad);
-    emit(`${error} = extractvalue ${shape} ${raw}, 2`);
-    emit(`${failure} = insertvalue ${returns} undef, i1 true, 0`);
-    emit(`${made} = insertvalue ${returns} ${failure}, ${llvm(m.throws!)} ${convert(error, thrown, m.throws!)}, 2`);
-    emit(`ret ${returns} ${made}`);
-    startBlock(ok);
+  failedOut(this: Mut<this>, shape: string, raw: string, gives: Type, thrown: Type, m: Method): string | undefined {
+    const returns = this.throwing(m.returns, m.throws!);
+    const [failed, bad, ok, error, failure, made] = [this.temp(), this.label(), this.label(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${failed} = extractvalue ${shape} ${raw}, 0`);
+    this.emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    this.startBlock(bad);
+    this.emit(`${error} = extractvalue ${shape} ${raw}, 2`);
+    this.emit(`${failure} = insertvalue ${returns} undef, i1 true, 0`);
+    this.emit(`${made} = insertvalue ${returns} ${failure}, ${this.llvm(m.throws!)} ${this.convert(error, thrown, m.throws!)}, 2`);
+    this.emit(`ret ${returns} ${made}`);
+    this.startBlock(ok);
     if (gives === "void") return undefined;
-    const got = temp();
-    emit(`${got} = extractvalue ${shape} ${raw}, 1`);
+    const got = this.temp();
+    this.emit(`${got} = extractvalue ${shape} ${raw}, 1`);
     return got;
   }
 
+
   // Returns from a throwing slot with a value, or none, that didn't fail.
-  function succeeded(m: Method, v: string | undefined) {
-    const returns = throwing(m.returns, m.throws!);
-    let made = temp();
-    emit(`${made} = insertvalue ${returns} undef, i1 false, 0`);
+  succeeded(this: Mut<this>, m: Method, v: string | undefined) {
+    const returns = this.throwing(m.returns, m.throws!);
+    let made = this.temp();
+    this.emit(`${made} = insertvalue ${returns} undef, i1 false, 0`);
     if (v !== undefined) {
-      const next = temp();
-      emit(`${next} = insertvalue ${returns} ${made}, ${llvm(m.returns)} ${v}, 1`);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${returns} ${made}, ${this.llvm(m.returns)} ${v}, 1`);
       made = next;
     }
-    emit(`ret ${returns} ${made}`);
+    this.emit(`ret ${returns} ${made}`);
   }
+
 
   // The slot of a stored callable held in one that throws more: the held one's call, its result
   // or its error passed on as this one's.
-  function relayThunk(name: string, inner: DynType, m: Method): string {
-    const held = typing.rec(typing.rec(inner).of).methods[0]!;
-    thunk(name, throwing(m.returns, m.throws!), () => {
-      const [dyn, data, table] = [temp(), temp(), temp()];
-      emit(`${dyn} = load ${DYN}, ptr %p`);
-      emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
-      emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
-      const fn = vslot(table, 0);
-      const shape = held.throws ? throwing(held.returns, held.throws) : held.returns === "void" ? "void" : llvm(held.returns);
-      const raw = shape === "void" ? undefined : temp();
-      unwinding(`call ${shape} ${fn}(ptr ${data}${m.params.map((p, i) => `, ${llvm(p)} %a${i}`).join("")})`, raw);
-      const got = held.throws ? failedOut(shape, raw!, held.returns, held.throws, m) : raw;
-      succeeded(m, got === undefined || m.returns === "void" ? undefined : convert(got, held.returns, m.returns));
-    }, m.params.map((p, i) => `${llvm(p)} %a${i}`));
+  relayThunk(this: Mut<this>, name: string, inner: DynType, m: Method): string {
+    const held = this.typing.rec(this.typing.rec(inner).of).methods[0]!;
+    this.thunk(name, this.throwing(m.returns, m.throws!), () => {
+      const [dyn, data, table] = [this.temp(), this.temp(), this.temp()];
+      this.emit(`${dyn} = load ${DYN}, ptr %p`);
+      this.emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+      this.emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+      const fn = this.vslot(table, 0);
+      const shape = held.throws ? this.throwing(held.returns, held.throws) : held.returns === "void" ? "void" : this.llvm(held.returns);
+      const raw = shape === "void" ? undefined : this.temp();
+      this.unwinding(`call ${shape} ${fn}(ptr ${data}${m.params.map((p, i) => `, ${this.llvm(p)} %a${i}`).join("")})`, raw);
+      const got = held.throws ? this.failedOut(shape, raw!, held.returns, held.throws, m) : raw;
+      this.succeeded(m, got === undefined || m.returns === "void" ? undefined : this.convert(got, held.returns, m.returns));
+    }, m.params.map((p, i) => `${this.llvm(p)} %a${i}`));
     return name;
   }
 
+
   // A slot giving a `Promise<T>`: the future the method or async arrow makes, its frame holding
   // the block (a method's object, borrowed) or a copy of the closure, then the arguments, boxed.
-  function futureThunk(name: string, type: Type, m: Method, target: Instance): string {
-    const closure = bodyOf(noted.arenas, target).closure !== undefined;
-    const to = closure ? (typing.stored(m.returns) as DynType) : typing.lentPromise(typing.promiseElement(m.returns)!);
-    const params = m.params.map((p, i) => `${llvm(p)} %a${i}`);
-    thunk(name, DYN, () => {
-      const taken = closure ? bodyOf(noted.arenas, target).params.length : m.params.length;
-      m.params.slice(taken).forEach((p, i) => dispose(`%a${taken + i}`, p));
+  futureThunk(this: Mut<this>, name: string, type: Type, m: Method, target: Instance): string {
+    const closure = bodyOf(this.noted.arenas, target).closure !== undefined;
+    const to = closure ? (this.typing.stored(m.returns) as DynType) : this.typing.lentPromise(this.typing.promiseElement(m.returns)!);
+    const params = m.params.map((p, i) => `${this.llvm(p)} %a${i}`);
+    this.thunk(name, DYN, () => {
+      const taken = closure ? bodyOf(this.noted.arenas, target).params.length : m.params.length;
+      m.params.slice(taken).forEach((p, i) => this.dispose(`%a${taken + i}`, p));
       let made: string;
       let future: FutureType;
       if (target.future) {
         future = target.future;
-        let frame = temp();
+        let frame = this.temp();
         if (closure) {
-          const env = temp();
-          emit(`${env} = load ${llvm(target.closure!)}, ptr %p`);
-          emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ${llvm(target.closure!)} ${copied(env, target.closure!)}, 1`);
+          const env = this.temp();
+          this.emit(`${env} = load ${this.llvm(target.closure!)}, ptr %p`);
+          this.emit(`${frame} = insertvalue ${this.llvm(future)} zeroinitializer, ${this.llvm(target.closure!)} ${this.copied(env, target.closure!)}, 1`);
         } else {
-          const owner = bodyOf(noted.arenas, target).owner;
-          const r = recOf(type);
-          const self = r?.kind === "class" && owner && owner !== type ? upcast("%p", type as ClassType, owner) : "%p";
-          emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${self}, 1`);
+          const owner = bodyOf(this.noted.arenas, target).owner;
+          const r = this.recOf(type);
+          const self = r?.kind === "class" && owner && owner !== type ? this.upcast("%p", type as ClassType, owner) : "%p";
+          this.emit(`${frame} = insertvalue ${this.llvm(future)} zeroinitializer, ptr ${self}, 1`);
         }
         params.slice(0, taken).forEach((p, i) => {
-          const next = temp();
-          emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${p}, ${i + 2}`);
+          const next = this.temp();
+          this.emit(`${next} = insertvalue ${this.llvm(future)} ${frame}, ${p}, ${i + 2}`);
           frame = next;
         });
         made = frame;
       } else {
         future = (target.returns as FutureType);
-        made = invoke(target, "%p", params.slice(0, taken))!;
+        made = this.invoke(target, "%p", params.slice(0, taken))!;
       }
-      emit(`ret ${DYN} ${box(made, future, to)}`);
+      this.emit(`ret ${DYN} ${this.box(made, future, to)}`);
     }, params);
     return name;
   }
 
+
   // A field's slot: a copy of the field, or what the getter supplying it gives.
-  function fieldThunk(name: string, type: Type, f: Field, getter: Instance | undefined): string {
-    thunk(name, llvm(f.type), () => {
+  fieldThunk(this: Mut<this>, name: string, type: Type, f: Field, getter: Instance | undefined): string {
+    this.thunk(name, this.llvm(f.type), () => {
       if (getter) {
-        const owner = bodyOf(noted.arenas, getter).owner;
-        const r = recOf(type);
-        const self = r?.kind === "class" && owner && owner !== type ? upcast("%p", type as ClassType, owner) : "%p";
-        emit(`ret ${llvm(f.type)} ${convert(invoke(getter, self, [])!, getter.returns, f.type)}`);
+        const owner = bodyOf(this.noted.arenas, getter).owner;
+        const r = this.recOf(type);
+        const self = r?.kind === "class" && owner && owner !== type ? this.upcast("%p", type as ClassType, owner) : "%p";
+        this.emit(`ret ${this.llvm(f.type)} ${this.convert(this.invoke(getter, self, [])!, getter.returns, f.type)}`);
         return;
       }
       const holder = type as ObjectType | ClassType;
-      const own = typing.field(holder, f.name)!.type;
-      const [at, v] = [temp(), temp()];
-      emit(`${at} = getelementptr ${llvm(holder)}, ptr %p, i32 0, ${typing.fieldPath(holder, f.name).map((i) => `i32 ${i}`).join(", ")}`);
-      emit(`${v} = load ${llvm(own)}, ptr ${at}`);
-      emit(`ret ${llvm(f.type)} ${convert(copied(v, own), own, f.type)}`);
+      const own = this.typing.field(holder, f.name)!.type;
+      const [at, v] = [this.temp(), this.temp()];
+      this.emit(`${at} = getelementptr ${this.llvm(holder)}, ptr %p, i32 0, ${this.typing.fieldPath(holder, f.name).map((i) => `i32 ${i}`).join(", ")}`);
+      this.emit(`${v} = load ${this.llvm(own)}, ptr ${at}`);
+      this.emit(`ret ${this.llvm(f.type)} ${this.convert(this.copied(v, own), own, f.type)}`);
     });
     return name;
   }
 
+
   // `d.clone()`: a new Dyn with the clone its vtable gives, or a panic when its value can't be.
-  function dynCloned(e: Expr, object: Expr): string {
-    const dyn = temp();
-    emit(`${dyn} = load ${DYN}, ptr ${receiver(object)}`);
-    const [data, table, at, fn, none, made, copy, result] = [temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp()];
-    emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
-    emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
-    emit(`${at} = getelementptr ptr, ptr ${table}, i64 2`);
-    emit(`${fn} = load ptr, ptr ${at}`);
-    emit(`${none} = icmp eq ptr ${fn}, null`);
-    panicIf(none, "this Dyn's value can't be cloned: its type holds an Atomic, a Lock, a JoinHandle or something else changed or awaited in one place", e);
+  dynCloned(this: Mut<this>, e: Expr, object: Expr): string {
+    const dyn = this.temp();
+    this.emit(`${dyn} = load ${DYN}, ptr ${this.receiver(object)}`);
+    const [data, table, at, fn, none, made, copy, result] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+    this.emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+    this.emit(`${at} = getelementptr ptr, ptr ${table}, i64 2`);
+    this.emit(`${fn} = load ptr, ptr ${at}`);
+    this.emit(`${none} = icmp eq ptr ${fn}, null`);
+    this.panicIf(none, "this Dyn's value can't be cloned: its type holds an Atomic, a Lock, a JoinHandle or something else changed or awaited in one place", e);
     // A class's own clone may panic.
-    unwinding(`call ptr ${fn}(ptr ${data})`, made);
-    emit(`${copy} = insertvalue ${DYN} ${dyn}, ptr ${made}, 0`);
-    emit(`${result} = insertvalue ${DYN} ${copy}, ptr ${table}, 1`);
+    this.unwinding(`call ptr ${fn}(ptr ${data})`, made);
+    this.emit(`${copy} = insertvalue ${DYN} ${dyn}, ptr ${made}, 0`);
+    this.emit(`${result} = insertvalue ${DYN} ${copy}, ptr ${table}, 1`);
     return result;
   }
 
+
   // A Dyn's block and vtable, for a call or a field read through it.
-  function opened(object: Expr, take: boolean): [string, string] {
-    const dyn = take ? owned(object) : temp();
-    if (!take) emit(`${dyn} = load ${DYN}, ptr ${receiver(object)}`);
-    const [data, table] = [temp(), temp()];
-    emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
-    emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+  opened(this: Mut<this>, object: Expr, take: boolean): [string, string] {
+    const dyn = take ? this.owned(object) : this.temp();
+    if (!take) this.emit(`${dyn} = load ${DYN}, ptr ${this.receiver(object)}`);
+    const [data, table] = [this.temp(), this.temp()];
+    this.emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+    this.emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
     return [data, table];
   }
 
+
   // The function in a vtable's slot after its drop, copy and clone.
-  function vslot(table: string, i: usize): string {
-    const [at, fn] = [temp(), temp()];
-    emit(`${at} = getelementptr ptr, ptr ${table}, i64 ${3 + i}`);
-    emit(`${fn} = load ptr, ptr ${at}`);
+  vslot(this: Mut<this>, table: string, i: usize): string {
+    const [at, fn] = [this.temp(), this.temp()];
+    this.emit(`${at} = getelementptr ptr, ptr ${table}, i64 ${3 + i}`);
+    this.emit(`${fn} = load ptr, ptr ${at}`);
     return fn;
   }
 
+
   // A method call through a Dyn: one taking its object over takes the Dyn.
   // A stored callable's call is its one method's, on the callee itself.
-  function dynCall(e: Extract<Expr, { kind: "call" }>, callee: Expr): string | undefined {
-    const info = dynCalls.get(e)!;
+  dynCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, callee: Expr): string | undefined {
+    const info = this.dynCalls.get(e)!;
     const object = info.callable ?? (callee as Extract<Expr, { kind: "member" }>).object;
-    const t = referent(valueType(object)) as DynType;
-    const m = typing.rec(typing.rec(t).of).methods[info.index]!;
-    const [data, table] = opened(object, info.owned);
-    const fn = vslot(table, info.index);
+    const t = this.referent(this.valueType(object)) as DynType;
+    const m = this.typing.rec(this.typing.rec(t).of).methods[info.index]!;
+    const [data, table] = this.opened(object, info.owned);
+    const fn = this.vslot(table, info.index);
     const called = () => {
-      const args = e.args.map((a, i) => `, ${llvm(m.params[i]!)} ${owned(a)}`).join("");
+      const args = e.args.map((a, i) => `, ${this.llvm(m.params[i]!)} ${this.owned(a)}`).join("");
       // A `Promise<T>` comes back as its boxed future.
-      const gives = typing.promiseElement(m.returns) !== undefined ? types.get(e)! : m.returns;
-      const returns = m.throws ? throwing(gives, m.throws) : gives === "void" ? "void" : llvm(gives);
-      const made = returns === "void" ? undefined : temp();
-      unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, made);
-      const result = m.throws ? unpacked(returns, made!, gives, e) : made;
-      if (result && !types.has(e) && needsDrop(gives)) pending.push({ v: result, type: gives });
+      const gives = this.typing.promiseElement(m.returns) !== undefined ? this.types.get(e)! : m.returns;
+      const returns = m.throws ? this.throwing(gives, m.throws) : gives === "void" ? "void" : this.llvm(gives);
+      const made = returns === "void" ? undefined : this.temp();
+      this.unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, made);
+      const result = m.throws ? this.unpacked(returns, made!, gives, e) : made;
+      if (result && !this.types.has(e) && this.needsDrop(gives)) this.pending.push({ v: result, type: gives });
       return result;
     };
-    return optionalCalls.has(e) ? slotted(e, fn, m.returns, called) : called();
+    return this.optionalCalls.has(e) ? this.slotted(e, fn, m.returns, called) : called();
   }
+
 
   // Whether an optional method is there: known for a type parameter's instance, and through a
   // Dyn, whether its slot is filled.
-  function presence(e: Expr): string {
-    const { object, name, when } = presenceTests.get(e)!;
-    const t = referent(valueType(object));
-    if (recOf(t)?.kind !== "dyn") {
-      ranFor(object);
-      return String(current.absent?.has(e) ? !when : when);
+  presence(this: Mut<this>, e: Expr): string {
+    const { object, name, when } = this.presenceTests.get(e)!;
+    const t = this.referent(this.valueType(object));
+    if (this.recOf(t)?.kind !== "dyn") {
+      this.ranFor(object);
+      return String(this.current.absent?.has(e) ? !when : when);
     }
-    const [, table] = opened(object, false);
-    const fn = vslot(table, typing.rec(typing.rec(t as DynType).of).methods.findIndex((m) => m.name === name));
-    const result = temp();
-    emit(`${result} = icmp ${when ? "ne" : "eq"} ptr ${fn}, null`);
+    const [, table] = this.opened(object, false);
+    const fn = this.vslot(table, this.typing.rec(this.typing.rec(t as DynType).of).methods.findIndex((m) => m.name === name));
+    const result = this.temp();
+    this.emit(`${result} = icmp ${when ? "ne" : "eq"} ptr ${fn}, null`);
     return result;
   }
+
 
   // A receiver whose method is known present or absent still runs, as JavaScript reads it, unless
   // it is a place, whose reading does nothing; a value it makes is dropped.
-  function ranFor(object: Expr) {
+  ranFor(this: Mut<this>, object: Expr) {
     const place = (x: Expr): boolean => x.kind === "ident" || x.kind === "this" || (x.kind === "member" && !x.optional && place(x.object));
     if (place(object)) return;
-    const v = evaluate(object);
-    if (fresh(object)) pending.push({ v, type: types.get(object)! });
+    const v = this.evaluate(object);
+    if (this.fresh(object)) this.pending.push({ v, type: this.types.get(object)! });
   }
+
 
   // `d.m?.()` through a Dyn: the empty Option when the type left the method out, its slot empty.
-  function slotted(e: Expr, fn: string, gives: Type, called: () => string | undefined): string | undefined {
-    const [some, none, end, missing] = [label(), label(), label(), temp()];
-    emit(`${missing} = icmp eq ptr ${fn}, null`);
-    emit(`br i1 ${missing}, label %${none}, label %${some}`);
-    startBlock(some);
-    const mark = pending.length;
+  slotted(this: Mut<this>, e: Expr, fn: string, gives: Type, called: () => string | undefined): string | undefined {
+    const [some, none, end, missing] = [this.label(), this.label(), this.label(), this.temp()];
+    this.emit(`${missing} = icmp eq ptr ${fn}, null`);
+    this.emit(`br i1 ${missing}, label %${none}, label %${some}`);
+    this.startBlock(some);
+    const mark = this.pending.length;
     const got = called();
-    const type = types.get(e);
-    const wrapped = got !== undefined && type ? convert(got, gives, type) : undefined;
-    settle(mark);
-    const someEnd = block;
-    emit(`br label %${end}`);
-    startBlock(none);
-    const empty = wrapped !== undefined && type ? convert("zeroinitializer", "null", type) : undefined;
-    const noneEnd = block;
-    emit(`br label %${end}`);
-    startBlock(end);
+    const type = this.types.get(e);
+    const wrapped = got !== undefined && type ? this.convert(got, gives, type) : undefined;
+    this.settle(mark);
+    const someEnd = this.block;
+    this.emit(`br label %${end}`);
+    this.startBlock(none);
+    const empty = wrapped !== undefined && type ? this.convert("zeroinitializer", "null", type) : undefined;
+    const noneEnd = this.block;
+    this.emit(`br label %${end}`);
+    this.startBlock(end);
     if (wrapped === undefined || !type || empty === undefined) return undefined;
-    const result = temp();
-    emit(`${result} = phi ${llvm(type)} [ ${wrapped}, %${someEnd} ], [ ${empty}, %${noneEnd} ]`);
+    const result = this.temp();
+    this.emit(`${result} = phi ${this.llvm(type)} [ ${wrapped}, %${someEnd} ], [ ${empty}, %${noneEnd} ]`);
     return result;
   }
+
 
   // A field read through a Dyn: a copy, through its slot after the methods'.
-  function dynField(e: Extract<Expr, { kind: "member" }>): string {
-    const t = referent(types.get(e.object)!) as DynType;
-    const [data, table] = opened(e.object, false);
-    const fn = vslot(table, typing.rec(typing.rec(t).of).methods.length + typing.rec(typing.rec(t).of).fields.findIndex((f) => f.name === e.name));
-    const result = temp();
-    emit(`${result} = call ${llvm(types.get(e)!)} ${fn}(ptr ${data})`);
+  dynField(this: Mut<this>, e: Extract<Expr, { kind: "member" }>): string {
+    const t = this.referent(this.types.get(e.object)!) as DynType;
+    const [data, table] = this.opened(e.object, false);
+    const fn = this.vslot(table, this.typing.rec(this.typing.rec(t).of).methods.length + this.typing.rec(this.typing.rec(t).of).fields.findIndex((f) => f.name === e.name));
+    const result = this.temp();
+    this.emit(`${result} = call ${this.llvm(this.types.get(e)!)} ${fn}(ptr ${data})`);
     return result;
   }
 
+
   // A function dropping one value where it lives, for a channel to drop what it still holds.
-  function elementDrop(type: Type): string {
-    const made = elementDrops.get(type);
+  elementDrop(this: Mut<this>, type: Type): string {
+    const made = this.elementDrops.get(type);
     if (made) return made;
-    const name = `@fsh.element.drop.${stableId("element.drop", typing.described(type), type)}`;
-    elementDrops.set(type, name);
-    const saved = { allocas, body, temps, labels, block };
-    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
-    const v = temp();
-    emit(`${v} = load ${llvm(type)}, ptr %p`);
-    dispose(v, type);
-    emit("ret void");
-    out.push(`define internal void ${name}(ptr %p) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    ({ allocas, body, temps, labels, block } = saved);
+    const name = `@fsh.element.drop.${this.stableId("element.drop", this.typing.described(type), type)}`;
+    this.elementDrops.set(type, name);
+    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block };
+    [this.allocas, this.body, this.temps, this.labels, this.block] = [[], [], 0, 0, "entry"];
+    const v = this.temp();
+    this.emit(`${v} = load ${this.llvm(type)}, ptr %p`);
+    this.dispose(v, type);
+    this.emit("ret void");
+    this.out.push(`define internal void ${name}(ptr %p) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
+    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block } = saved);
     return name;
   }
 
+
   // A shared value's block: its count, an Rc's its strong and weak counts, then what a Lock of
   // its value would be.
-  function sharedBlock(t: SharedType): string {
-    return `{ ${typing.rec(t).which === "shared" ? "i64" : "[2 x i64]"}, ${llvm(typing.interiorType("Lock", typing.rec(t).of))} }`;
+  sharedBlock(this: Mut<this>, t: SharedType): string {
+    return `{ ${this.typing.rec(t).which === "shared" ? "i64" : "[2 x i64]"}, ${this.llvm(this.typing.interiorType("Lock", this.typing.rec(t).of))} }`;
   }
 
+
   // `shared(v)` or `new Rc(v)`: a new block with one count, holding v. `new Weak<T>()` has none.
-  function sharedNew(e: Extract<Expr, { kind: "call" | "new" }>, t: SharedType): string {
-    if (typing.rec(t).which === "Weak") return "null";
-    const v = owned(e.args![0]!);
-    const [end, size, block, at] = [temp(), temp(), temp(), temp()];
-    emit(`${end} = getelementptr ${sharedBlock(t)}, ptr null, i64 1`);
-    emit(`${size} = ptrtoint ptr ${end} to i64`);
-    emit(`${block} = call ptr @fsh_rt_${typing.rec(t).which === "Rc" ? "rc" : "shared"}_new(i64 ${size})`);
-    emit(`${at} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1, i32 1`);
-    emit(`store ${llvm(typing.rec(t).of)} ${v}, ptr ${at}`);
+  sharedNew(this: Mut<this>, e: Extract<Expr, { kind: "call" | "new" }>, t: SharedType): string {
+    if (this.typing.rec(t).which === "Weak") return "null";
+    const v = this.owned(e.args![0]!);
+    const [end, size, block, at] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${end} = getelementptr ${this.sharedBlock(t)}, ptr null, i64 1`);
+    this.emit(`${size} = ptrtoint ptr ${end} to i64`);
+    this.emit(`${block} = call ptr @fsh_rt_${this.typing.rec(t).which === "Rc" ? "rc" : "shared"}_new(i64 ${size})`);
+    this.emit(`${at} = getelementptr ${this.sharedBlock(t)}, ptr ${block}, i32 0, i32 1, i32 1`);
+    this.emit(`store ${this.llvm(this.typing.rec(t).of)} ${v}, ptr ${at}`);
     return block;
   }
 
+
   // `rc.downgrade()`, a Weak sharing the block, and `w.upgrade()`, an Rc of it while its value
   // is alive, or else null.
-  function countedCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string {
-    const block = temp();
-    emit(`${block} = load ptr, ptr ${receiver(callee.object)}`);
+  countedCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string {
+    const block = this.temp();
+    this.emit(`${block} = load ptr, ptr ${this.receiver(callee.object)}`);
     if (callee.name === "downgrade") {
-      emit(`call void @fsh_rt_weak_retain(ptr ${block})`);
+      this.emit(`call void @fsh_rt_weak_retain(ptr ${block})`);
       return block;
     }
-    const option = types.get(e) as UnionType;
-    const [rc, alive, result] = [temp(), temp(), temp()];
-    emit(`${rc} = call ptr @fsh_rt_rc_upgrade(ptr ${block})`);
-    emit(`${alive} = icmp ne ptr ${rc}, null`);
-    const some = convert(rc, typing.rec(option).members.find((m) => m !== "null")!, option);
-    const none = convert("zeroinitializer", "null", option);
-    emit(`${result} = select i1 ${alive}, ${llvm(option)} ${some}, ${llvm(option)} ${none}`);
+    const option = this.types.get(e) as UnionType;
+    const [rc, alive, result] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${rc} = call ptr @fsh_rt_rc_upgrade(ptr ${block})`);
+    this.emit(`${alive} = icmp ne ptr ${rc}, null`);
+    const some = this.convert(rc, this.typing.rec(option).members.find((m) => m !== "null")!, option);
+    const none = this.convert("zeroinitializer", "null", option);
+    this.emit(`${result} = select i1 ${alive}, ${this.llvm(option)} ${some}, ${this.llvm(option)} ${none}`);
     return result;
   }
+
 
   // `update`: the callback runs with a pointer to what the Lock holds, between taking and
   // releasing its word; an RwLock's `read` or `update` takes its word's read or write side.
   // The callback's captures are made before the lock is taken.
-  function lockUpdate(e: Extract<Expr, { kind: "call" }>, t: InteriorType, at: string, rc = false): string | undefined {
+  lockUpdate(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, t: InteriorType, at: string, rc = false): string | undefined {
     const callback = e.args[0]!;
     // The callback's value lives in a slot it is called through; what it leaves of its captures
     // is dropped after it, as at any closure's call.
-    const made = types.get(callback)!;
-    const env = alloca(llvm(made));
-    emit(`store ${llvm(made)} ${owned(callback)}, ptr ${env}`);
-    const leftovers = needsDrop(made) ? () => dispose(unstash(env, made), made) : undefined;
+    const made = this.types.get(callback)!;
+    const env = this.alloca(this.llvm(made));
+    this.emit(`store ${this.llvm(made)} ${this.owned(callback)}, ptr ${env}`);
+    const leftovers = this.needsDrop(made) ? () => this.dispose(this.unstash(env, made), made) : undefined;
     const reading = e.callee.kind === "member" && e.callee.name === "read";
-    if (rc) borrowRc(at, e, reading);
-    else takeLock(at, e, typing.rec(t).which === "Lock" ? "fsh_rt_lock" : reading ? "fsh_rt_read_lock" : "fsh_rt_write_lock");
-    const inside = temp();
-    emit(`${inside} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 1`);
-    const target = callOf(callback)!;
-    const result = invoke(target, env, bodyOf(noted.arenas, target).params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
-    emit(`call void @${rc ? (reading ? "fsh_rt_rc_read_end" : "fsh_rt_rc_write_end") : reading ? "fsh_rt_read_unlock" : "fsh_rt_unlock"}(ptr ${at})`);
-    if (result && !types.has(e) && needsDrop(target.returns)) pending.push({ v: result, type: target.returns });
+    if (rc) this.borrowRc(at, e, reading);
+    else this.takeLock(at, e, this.typing.rec(t).which === "Lock" ? "fsh_rt_lock" : reading ? "fsh_rt_read_lock" : "fsh_rt_write_lock");
+    const inside = this.temp();
+    this.emit(`${inside} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 1`);
+    const target = this.callOf(callback)!;
+    const result = this.invoke(target, env, bodyOf(this.noted.arenas, target).params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
+    this.emit(`call void @${rc ? (reading ? "fsh_rt_rc_read_end" : "fsh_rt_rc_write_end") : reading ? "fsh_rt_read_unlock" : "fsh_rt_unlock"}(ptr ${at})`);
+    if (result && !this.types.has(e) && this.needsDrop(target.returns)) this.pending.push({ v: result, type: target.returns });
     return result;
   }
 
+
   // A Cell's method: a plain load or store where it lives, which only one thread can reach.
-  function cellCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>, t: InteriorType, at: string): string | undefined {
-    const ty = llvm(typing.rec(t).of);
+  cellCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>, t: InteriorType, at: string): string | undefined {
+    const ty = this.llvm(this.typing.rec(t).of);
     // The argument runs first: it may use the same Cell.
-    const given = callee.name === "get" ? undefined : owned(e.args[0]!);
-    const old = temp();
-    emit(`${old} = load ${ty}, ptr ${at}`);
-    if (given === undefined) return copied(old, typing.rec(t).of);
-    emit(`store ${ty} ${given}, ptr ${at}`);
+    const given = callee.name === "get" ? undefined : this.owned(e.args[0]!);
+    const old = this.temp();
+    this.emit(`${old} = load ${ty}, ptr ${at}`);
+    if (given === undefined) return this.copied(old, this.typing.rec(t).of);
+    this.emit(`store ${ty} ${given}, ptr ${at}`);
     if (callee.name === "replace") return old;
-    dispose(old, typing.rec(t).of);
+    this.dispose(old, this.typing.rec(t).of);
     return undefined;
   }
 
+
   // Part `i` of a loop's state: an alloca, or in a generator, the frame's field for it.
-  function loopSlot(s: Stmt, i: usize, type: string): string {
-    return resuming ? `%loop${current.frame!.loops.get(s)! + i}` : alloca(type);
+  loopSlot(this: Mut<this>, s: Stmt, i: usize, type: string): string {
+    return this.resuming ? `%loop${this.current.frame!.loops.get(s)! + i}` : this.alloca(type);
   }
+
 
   // `for...of` over a fixed array: each element where it lives, as an array's loop gives them;
   // a temporary is held in a slot of the loop's own.
-  function fixedLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, type: FixedType) {
-    const local = resolved(s.left as Stmt);
-    scopes.push([]);
+  fixedLoop(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, type: FixedType) {
+    const local = this.resolved(s.left as Stmt);
+    this.scopes.push([]);
     // Where the array lives is kept in the loop's slot, and read again each pass, as a
     // generator's or an async function's loop may be resumed in a later call.
     // In a resumable body the frame decides: its slot is a pointer exactly when the source is a
     // place to point at.
-    const kept = resuming && typing.rec(resuming.type).frame[current.frame!.loops.get(s)!]!.type;
-    const lent = kept ? isRef(kept) : isRef(types.get(s.right)!) || lendable(s.right);
-    const held = loopSlot(s, 0, lent ? "ptr" : llvm(type));
-    if (lent) emit(`store ptr ${isRef(types.get(s.right)!) ? evaluate(s.right) : address(s.right)}, ptr ${held}`);
+    const kept = this.resuming && this.typing.rec(this.resuming.type).frame[this.current.frame!.loops.get(s)!]!.type;
+    const lent = kept ? this.isRef(kept) : this.isRef(this.types.get(s.right)!) || this.lendable(s.right);
+    const held = this.loopSlot(s, 0, lent ? "ptr" : this.llvm(type));
+    if (lent) this.emit(`store ptr ${this.isRef(this.types.get(s.right)!) ? this.evaluate(s.right) : this.address(s.right)}, ptr ${held}`);
     else {
-      own(held, type);
-      emit(`store ${llvm(type)} ${owned(s.right)}, ptr ${held}`);
+      this.own(held, type);
+      this.emit(`store ${this.llvm(type)} ${this.owned(s.right)}, ptr ${held}`);
     }
-    settle();
-    const counter = loopSlot(s, 1, "i64");
-    emit(`store i64 0, ptr ${counter}`);
-    const [test, loop, next, end] = [label(), label(), label(), label()];
-    emit(`br label %${test}`);
-    startBlock(test);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${counter}`);
-    emit(`${more} = icmp ult i64 ${i}, ${typing.rec(type).size}`);
-    emit(`br i1 ${more}, label %${loop}, label %${end}`);
-    startBlock(loop);
-    exits.set(s, { exit: end, next, depth: scopes.length });
-    scopes.push([]);
-    reserve(local);
-    own(slot(local), local.type);
+    this.settle();
+    const counter = this.loopSlot(s, 1, "i64");
+    this.emit(`store i64 0, ptr ${counter}`);
+    const [test, loop, next, end] = [this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${test}`);
+    this.startBlock(test);
+    const [i, more] = [this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${counter}`);
+    this.emit(`${more} = icmp ult i64 ${i}, ${this.typing.rec(type).size}`);
+    this.emit(`br i1 ${more}, label %${loop}, label %${end}`);
+    this.startBlock(loop);
+    this.exits.set(s, { exit: end, next, depth: this.scopes.length });
+    this.scopes.push([]);
+    this.reserve(local);
+    this.own(this.slot(local), local.type);
     let base = held;
     if (lent) {
-      base = temp();
-      emit(`${base} = load ptr, ptr ${held}`);
+      base = this.temp();
+      this.emit(`${base} = load ptr, ptr ${held}`);
     }
-    const at = temp();
-    emit(`${at} = getelementptr ${llvm(type)}, ptr ${base}, i64 0, i64 ${i}`);
-    if (isRef(local.type)) emit(`store ptr ${at}, ptr ${slot(local)}`);
+    const at = this.temp();
+    this.emit(`${at} = getelementptr ${this.llvm(type)}, ptr ${base}, i64 0, i64 ${i}`);
+    if (this.isRef(local.type)) this.emit(`store ptr ${at}, ptr ${this.slot(local)}`);
     else {
-      const v = temp();
-      emit(`${v} = load ${llvm(typing.rec(type).element)}, ptr ${at}`);
-      emit(`store ${llvm(local.type)} ${copied(v, typing.rec(type).element)}, ptr ${slot(local)}`);
+      const v = this.temp();
+      this.emit(`${v} = load ${this.llvm(this.typing.rec(type).element)}, ptr ${at}`);
+      this.emit(`store ${this.llvm(local.type)} ${this.copied(v, this.typing.rec(type).element)}, ptr ${this.slot(local)}`);
     }
-    s.body.forEach(statement);
-    drop(scopes.length - 1);
-    scopes.pop();
-    emit(`br label %${next}`);
-    startBlock(next);
-    const [now, after] = [temp(), temp()];
-    emit(`${now} = load i64, ptr ${counter}`);
-    emit(`${after} = add i64 ${now}, 1`);
-    emit(`store i64 ${after}, ptr ${counter}`);
-    emit(`br label %${test}`);
-    startBlock(end);
-    drop(scopes.length - 1);
-    scopes.pop();
+    s.body.forEach(((s) => this.statement(s)));
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
+    this.emit(`br label %${next}`);
+    this.startBlock(next);
+    const [now, after] = [this.temp(), this.temp()];
+    this.emit(`${now} = load i64, ptr ${counter}`);
+    this.emit(`${after} = add i64 ${now}, 1`);
+    this.emit(`store i64 ${after}, ptr ${counter}`);
+    this.emit(`br label %${test}`);
+    this.startBlock(end);
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
   }
+
 
   // `for...of` over a string: each code point as a new string, until the runtime gives none. The
   // loop holds a reference to the string, so changing the variable it came from changes nothing.
-  function stringLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>) {
-    const local = resolved(s.left as Stmt);
-    scopes.push([]);
-    const [held, offset] = [loopSlot(s, 0, "ptr"), loopSlot(s, 1, "i64")];
-    const text = fresh(s.right) ? owned(s.right) : copied(value(s.right), "string");
-    own(held, "string");
-    emit(`store ptr ${text}, ptr ${held}`);
-    settle();
-    emit(`store i64 0, ptr ${offset}`);
-    const [test, loop, next, end] = [label(), label(), label(), label()];
-    emit(`br label %${test}`);
-    startBlock(test);
-    const [string, point, done] = [temp(), temp(), temp()];
-    emit(`${string} = load ptr, ptr ${held}`);
-    emit(`${point} = call ptr @fsh_rt_str_next(ptr ${string}, ptr ${offset})`);
-    emit(`${done} = icmp eq ptr ${point}, null`);
-    emit(`br i1 ${done}, label %${end}, label %${loop}`);
-    startBlock(loop);
-    exits.set(s, { exit: end, next, depth: scopes.length });
-    scopes.push([]);
-    reserve(local);
-    own(slot(local), "string");
-    emit(`store ptr ${point}, ptr ${slot(local)}`);
-    s.body.forEach(statement);
-    drop(scopes.length - 1);
-    scopes.pop();
-    emit(`br label %${next}`);
-    startBlock(next);
-    emit(`br label %${test}`);
-    startBlock(end);
-    drop(scopes.length - 1);
-    scopes.pop();
+  stringLoop(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>) {
+    const local = this.resolved(s.left as Stmt);
+    this.scopes.push([]);
+    const [held, offset] = [this.loopSlot(s, 0, "ptr"), this.loopSlot(s, 1, "i64")];
+    const text = this.fresh(s.right) ? this.owned(s.right) : this.copied(this.value(s.right), "string");
+    this.own(held, "string");
+    this.emit(`store ptr ${text}, ptr ${held}`);
+    this.settle();
+    this.emit(`store i64 0, ptr ${offset}`);
+    const [test, loop, next, end] = [this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${test}`);
+    this.startBlock(test);
+    const [string, point, done] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${string} = load ptr, ptr ${held}`);
+    this.emit(`${point} = call ptr @fsh_rt_str_next(ptr ${string}, ptr ${offset})`);
+    this.emit(`${done} = icmp eq ptr ${point}, null`);
+    this.emit(`br i1 ${done}, label %${end}, label %${loop}`);
+    this.startBlock(loop);
+    this.exits.set(s, { exit: end, next, depth: this.scopes.length });
+    this.scopes.push([]);
+    this.reserve(local);
+    this.own(this.slot(local), "string");
+    this.emit(`store ptr ${point}, ptr ${this.slot(local)}`);
+    s.body.forEach(((s) => this.statement(s)));
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
+    this.emit(`br label %${next}`);
+    this.startBlock(next);
+    this.emit(`br label %${test}`);
+    this.startBlock(end);
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
   }
+
 
   // `for...of` over a generator: each `next()` gives the variable its value, until it finishes.
   // The loop owns a generator it was given, and drops it once the loop ends however it ends; one
   // it borrows through a `Mut` stays with its owner.
-  function generatorLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, iterated: Type, right: Expr = s.right) {
-    const local = resolved(s.left as Stmt);
-    const generator = referent(iterated) as GeneratorType;
-    scopes.push([]);
-    const held = loopSlot(s, 0, llvm(iterated));
-    if (isRef(iterated)) emit(`store ptr ${value(right)}, ptr ${held}`);
+  generatorLoop(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, iterated: Type, right: Expr = s.right) {
+    const local = this.resolved(s.left as Stmt);
+    const generator = this.referent(iterated) as GeneratorType;
+    this.scopes.push([]);
+    const held = this.loopSlot(s, 0, this.llvm(iterated));
+    if (this.isRef(iterated)) this.emit(`store ptr ${this.value(right)}, ptr ${held}`);
     else {
-      own(held, generator);
-      emit(`store ${llvm(generator)} ${owned(right)}, ptr ${held}`);
+      this.own(held, generator);
+      this.emit(`store ${this.llvm(generator)} ${this.owned(right)}, ptr ${held}`);
     }
-    settle();
-    const [test, loop, end] = [label(), label(), label()];
-    emit(`br label %${test}`);
-    startBlock(test);
+    this.settle();
+    const [test, loop, end] = [this.label(), this.label(), this.label()];
+    this.emit(`br label %${test}`);
+    this.startBlock(test);
     let at = held;
-    if (isRef(iterated)) {
-      at = temp();
-      emit(`${at} = load ptr, ptr ${held}`);
+    if (this.isRef(iterated)) {
+      at = this.temp();
+      this.emit(`${at} = load ptr, ptr ${held}`);
     }
-    const result = resume(generator, at, right);
-    const [finished, more] = nextShapes(typing.rec(generator).yields);
-    emit(`br i1 ${holds(result, typing.nextResult(typing.rec(generator).yields) as UnionType, [finished])}, label %${end}, label %${loop}`);
-    startBlock(loop);
-    exits.set(s, { exit: end, next: test, depth: scopes.length });
-    scopes.push([]);
-    reserve(local);
-    own(slot(local), local.type);
-    const [shaped, v] = [convert(result, typing.nextResult(typing.rec(generator).yields), more), temp()];
-    emit(`${v} = extractvalue ${llvm(more)} ${shaped}, 1`);
-    emit(`store ${llvm(local.type)} ${v}, ptr ${slot(local)}`);
-    s.body.forEach(statement);
-    drop(scopes.length - 1);
-    scopes.pop();
-    emit(`br label %${test}`);
-    startBlock(end);
-    drop(scopes.length - 1);
-    scopes.pop();
+    const result = this.resume(generator, at, right);
+    const [finished, more] = this.nextShapes(this.typing.rec(generator).yields);
+    this.emit(`br i1 ${this.holds(result, this.typing.nextResult(this.typing.rec(generator).yields) as UnionType, [finished])}, label %${end}, label %${loop}`);
+    this.startBlock(loop);
+    this.exits.set(s, { exit: end, next: test, depth: this.scopes.length });
+    this.scopes.push([]);
+    this.reserve(local);
+    this.own(this.slot(local), local.type);
+    const [shaped, v] = [this.convert(result, this.typing.nextResult(this.typing.rec(generator).yields), more), this.temp()];
+    this.emit(`${v} = extractvalue ${this.llvm(more)} ${shaped}, 1`);
+    this.emit(`store ${this.llvm(local.type)} ${v}, ptr ${this.slot(local)}`);
+    s.body.forEach(((s) => this.statement(s)));
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
+    this.emit(`br label %${test}`);
+    this.startBlock(end);
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
   }
+
 
   // `for await`: each pass awaits the next value in the loop's await slot, an async generator's
   // `next()` or a Channel's `receive()`, until the generator finishes or the channel is closed
   // and drained. The loop owns a generator it was given, as a generator's loop does, and a count
   // on its channel.
-  function awaitLoop(s: Extract<Stmt, { kind: "forIn" | "forOf" }>, iterated: Type) {
-    const local = resolved(s.left as Stmt);
-    const base = current.frame!.loops.get(s)!;
+  awaitLoop(this: Mut<this>, s: Extract<Stmt, { kind: "forIn" | "forOf" }>, iterated: Type) {
+    const local = this.resolved(s.left as Stmt);
+    const base = this.current.frame!.loops.get(s)!;
     const [held, at] = [`%loop${base}`, `%loop${base + 2}`];
-    const kept = typing.rec(resuming!.type).frame[base]!.type;
-    const awaited = typing.rec(resuming!.type).frame[base + 2]!.type as FutureType | DynType;
-    const boxed = typing.rec(awaited).kind === "dyn" ? awaited : undefined;
+    const kept = this.typing.rec(this.resuming!.type).frame[base]!.type;
+    const awaited = this.typing.rec(this.resuming!.type).frame[base + 2]!.type as FutureType | DynType;
+    const boxed = this.typing.rec(awaited).kind === "dyn" ? awaited : undefined;
     const future = awaited as FutureType;
-    const keptRec = recOf(kept);
+    const keptRec = this.recOf(kept);
     const channel = keptRec?.kind === "block" ? (kept as BlockType) : undefined;
-    scopes.push([]);
+    this.scopes.push([]);
     if (channel) {
-      let handle = value(s.right);
-      if (isRef(iterated)) {
-        handle = temp();
-        emit(`${handle} = load ptr, ptr ${value(s.right)}`);
+      let handle = this.value(s.right);
+      if (this.isRef(iterated)) {
+        handle = this.temp();
+        this.emit(`${handle} = load ptr, ptr ${this.value(s.right)}`);
       }
-      own(held, channel);
-      emit(`store ptr ${copied(handle, channel)}, ptr ${held}`);
-    } else if (isRef(kept)) emit(`store ptr ${value(s.right)}, ptr ${held}`);
+      this.own(held, channel);
+      this.emit(`store ptr ${this.copied(handle, channel)}, ptr ${held}`);
+    } else if (this.isRef(kept)) this.emit(`store ptr ${this.value(s.right)}, ptr ${held}`);
     else {
-      own(held, kept);
-      emit(`store ${llvm(kept)} ${owned(s.right)}, ptr ${held}`);
+      this.own(held, kept);
+      this.emit(`store ${this.llvm(kept)} ${this.owned(s.right)}, ptr ${held}`);
     }
-    settle();
-    scopes.at(-1)!.push({ slot: at, type: awaited });
-    const [test, loop, end] = [label(), label(), label()];
-    emit(`br label %${test}`);
-    startBlock(test);
+    this.settle();
+    this.scopes.at(-1)!.push({ slot: at, type: awaited });
+    const [test, loop, end] = [this.label(), this.label(), this.label()];
+    this.emit(`br label %${test}`);
+    this.startBlock(test);
     let source = held;
-    if (channel || isRef(kept)) {
-      source = temp();
-      emit(`${source} = load ptr, ptr ${held}`);
+    if (channel || this.isRef(kept)) {
+      source = this.temp();
+      this.emit(`${source} = load ptr, ptr ${held}`);
     }
     if (boxed) {
       // A boxed generator's `next()` is its vtable's first slot after drop, copy and clone.
-      const [dyn, data, table] = [temp(), temp(), temp()];
-      emit(`${dyn} = load ${DYN}, ptr ${source}`);
-      emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
-      emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
-      const made = temp();
-      unwinding(`call ${DYN} ${vslot(table, 0)}(ptr ${data})`, made);
-      emit(`store ${DYN} ${made}, ptr ${at}`);
+      const [dyn, data, table] = [this.temp(), this.temp(), this.temp()];
+      this.emit(`${dyn} = load ${DYN}, ptr ${source}`);
+      this.emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+      this.emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+      const made = this.temp();
+      this.unwinding(`call ${DYN} ${this.vslot(table, 0)}(ptr ${data})`, made);
+      this.emit(`store ${DYN} ${made}, ptr ${at}`);
     } else {
-      const frame = temp();
-      emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${channel ? copied(source, channel) : source}, 1`);
-      emit(`store ${llvm(future)} ${frame}, ptr ${at}`);
+      const frame = this.temp();
+      this.emit(`${frame} = insertvalue ${this.llvm(future)} zeroinitializer, ptr ${channel ? this.copied(source, channel) : source}, 1`);
+      this.emit(`store ${this.llvm(future)} ${frame}, ptr ${at}`);
     }
-    const result = suspend(awaited, at, base + 2, s.right)!;
-    const gives = (boxed ? typing.promiseElement(typing.rec(boxed as DynType).of)! : typing.rec(future).gives) as UnionType;
+    const result = this.suspend(awaited, at, base + 2, s.right)!;
+    const gives = (boxed ? this.typing.promiseElement(this.typing.rec(boxed as DynType).of)! : this.typing.rec(future).gives) as UnionType;
     let v: string;
     if (channel) {
-      emit(`br i1 ${holds(result, gives, ["null"])}, label %${end}, label %${loop}`);
-      startBlock(loop);
-      v = convert(result, gives, local.type);
+      this.emit(`br i1 ${this.holds(result, gives, ["null"])}, label %${end}, label %${loop}`);
+      this.startBlock(loop);
+      v = this.convert(result, gives, local.type);
     } else {
-      const [finished, more] = nextShapes(local.type);
-      emit(`br i1 ${holds(result, gives, [finished])}, label %${end}, label %${loop}`);
-      startBlock(loop);
-      v = temp();
-      emit(`${v} = extractvalue ${llvm(more)} ${convert(result, gives, more)}, 1`);
+      const [finished, more] = this.nextShapes(local.type);
+      this.emit(`br i1 ${this.holds(result, gives, [finished])}, label %${end}, label %${loop}`);
+      this.startBlock(loop);
+      v = this.temp();
+      this.emit(`${v} = extractvalue ${this.llvm(more)} ${this.convert(result, gives, more)}, 1`);
     }
-    exits.set(s, { exit: end, next: test, depth: scopes.length });
-    scopes.push([]);
-    reserve(local);
-    own(slot(local), local.type);
-    emit(`store ${llvm(local.type)} ${v}, ptr ${slot(local)}`);
-    s.body.forEach(statement);
-    drop(scopes.length - 1);
-    scopes.pop();
-    emit(`br label %${test}`);
-    startBlock(end);
-    drop(scopes.length - 1);
-    scopes.pop();
+    this.exits.set(s, { exit: end, next: test, depth: this.scopes.length });
+    this.scopes.push([]);
+    this.reserve(local);
+    this.own(this.slot(local), local.type);
+    this.emit(`store ${this.llvm(local.type)} ${v}, ptr ${this.slot(local)}`);
+    s.body.forEach(((s) => this.statement(s)));
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
+    this.emit(`br label %${test}`);
+    this.startBlock(end);
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
   }
 
+
   // The two shapes `next()` gives: finished, and holding a value.
-  function nextShapes(yields: Type): [ObjectType, ObjectType] {
-    const members = typing.rec(typing.nextResult(yields) as UnionType).members as ObjectType[];
-    const finished = members.find((m) => typing.rec(m).fields.length === 1)!;
+  nextShapes(this: Mut<this>, yields: Type): [ObjectType, ObjectType] {
+    const members = this.typing.rec(this.typing.nextResult(yields) as UnionType).members as ObjectType[];
+    const finished = members.find((m) => this.typing.rec(m).fields.length === 1)!;
     return [finished, members.find((m) => m !== finished)!];
   }
 
+
   // What `next()` gives: `v`, or that the generator has finished. `done` is a literal, which
   // takes no room: the union's tag tells the two apart.
-  function answer(v: string | undefined, yields: Type): string {
-    const [finished, more] = nextShapes(yields);
-    if (v === undefined) return convert("zeroinitializer", finished, typing.nextResult(yields));
-    const made = temp();
-    emit(`${made} = insertvalue ${llvm(more)} zeroinitializer, ${llvm(yields)} ${v}, 1`);
-    return convert(made, more, typing.nextResult(yields));
+  answer(this: Mut<this>, v: string | undefined, yields: Type): string {
+    const [finished, more] = this.nextShapes(yields);
+    if (v === undefined) return this.convert("zeroinitializer", finished, this.typing.nextResult(yields));
+    const made = this.temp();
+    this.emit(`${made} = insertvalue ${this.llvm(more)} zeroinitializer, ${this.llvm(yields)} ${v}, 1`);
+    return this.convert(made, more, this.typing.nextResult(yields));
   }
+
 
   // Runs a generator to its next `yield`, through a pointer to it. An error it throws is
   // raised at `raising`.
   // `sent` is the value `next(x)` gives it, for one taking values.
-  function resume(generator: GeneratorType, at: string, raising: Expr, sent?: string): string {
-    const target = generatorOf.get(generator)!;
-    const result = temp();
-    const g = typing.rec(generator);
-    const given = g.sends ? `, ${llvm(g.sends)} ${sent ?? "zeroinitializer"}, i1 ${sent !== undefined}` : "";
-    unwinding(`call ${resultType(target)} ${symbol(noted.arenas, target)}(ptr ${at}${given})`, result);
-    return g.throws ? unpacked(resultType(target), result, typing.nextResult(g.yields), raising)! : result;
+  resume(this: Mut<this>, generator: GeneratorType, at: string, raising: Expr, sent?: string): string {
+    const target = this.generatorOf.get(generator)!;
+    const result = this.temp();
+    const g = this.typing.rec(generator);
+    const given = g.sends ? `, ${this.llvm(g.sends)} ${sent ?? "zeroinitializer"}, i1 ${sent !== undefined}` : "";
+    this.unwinding(`call ${this.resultType(target)} ${this.symbol(this.noted.arenas, target)}(ptr ${at}${given})`, result);
+    return g.throws ? this.unpacked(this.resultType(target), result, this.typing.nextResult(g.yields), raising)! : result;
   }
+
 
   // `yield v`: the value goes back to `next()`'s caller, and the next call goes on from here.
   // As a statement, it drops what `next(x)` sent; as a value, it gives it.
-  function yielded(e: Extract<Expr, { kind: "yield" }>, used = false): string {
-    const g = resuming!;
-    const v = owned(e.value!);
-    settle();
-    const result = answer(v, typing.rec(g.type as GeneratorType).yields);
-    const at = label();
+  yielded(this: Mut<this>, e: Extract<Expr, { kind: "yield" }>, used = false): string {
+    const g = this.resuming!;
+    const v = this.owned(e.value!);
+    this.settle();
+    const result = this.answer(v, this.typing.rec(g.type as GeneratorType).yields);
+    const at = this.label();
     g.resumes.push(at);
-    emit(`store i32 ${g.resumes.length}, ptr %state`);
-    emit(`ret ${resultType(current)} ${yieldedAs(result)}`);
-    startBlock(at);
+    this.emit(`store i32 ${g.resumes.length}, ptr %state`);
+    this.emit(`ret ${this.resultType(this.current)} ${this.yieldedAs(result)}`);
+    this.startBlock(at);
     if (!used) {
-      dropSent();
+      this.dropSent();
       return "";
     }
     // JavaScript gives `undefined` when nothing was sent, which no Fish type holds.
-    const [fail, ok] = [label(), label()];
-    emit(`br i1 %sent.has, label %${ok}, label %${fail}`);
-    startBlock(fail);
-    unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\ngenerator resumed without a value\n`)})`);
-    emit("unreachable");
-    startBlock(ok);
+    const [fail, ok] = [this.label(), this.label()];
+    this.emit(`br i1 %sent.has, label %${ok}, label %${fail}`);
+    this.startBlock(fail);
+    this.unwinding(`call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where(e)}:\ngenerator resumed without a value\n`)})`);
+    this.emit("unreachable");
+    this.startBlock(ok);
     return "%sent";
   }
 
+
   // Drops a value `next(x)` sent that nothing takes.
-  function dropSent() {
-    const sends = current.generator === undefined ? undefined : typing.rec(current.generator).sends;
-    if (!sends || !needsDrop(sends)) return;
-    const [drop, on] = [label(), label()];
-    emit(`br i1 %sent.has, label %${drop}, label %${on}`);
-    startBlock(drop);
-    dispose("%sent", sends);
-    emit(`br label %${on}`);
-    startBlock(on);
+  dropSent(this: Mut<this>) {
+    const sends = this.current.generator === undefined ? undefined : this.typing.rec(this.current.generator).sends;
+    if (!sends || !this.needsDrop(sends)) return;
+    const [drop, on] = [this.label(), this.label()];
+    this.emit(`br i1 %sent.has, label %${drop}, label %${on}`);
+    this.startBlock(drop);
+    this.dispose("%sent", sends);
+    this.emit(`br label %${on}`);
+    this.startBlock(on);
   }
+
 
   // A variable's slot: an alloca, or in a generator, the frame's field, reached on entry.
-  function reserve(local: Local) {
-    if (!framed.has(slot(local))) allocas.push(`  ${slot(local)} = alloca ${llvm(local.type)}`);
+  reserve(this: Mut<this>, local: Local) {
+    if (!this.framed.has(this.slot(local))) this.allocas.push(`  ${this.slot(local)} = alloca ${this.llvm(local.type)}`);
   }
 
-  function slot(local: Local): string {
-    const at = captured.get(local.localId);
+
+  slot(this: Mut<this>, local: Local): string {
+    const at = this.captured.get(local.localId);
     if (at) return at;
-    let n = numbered.get(local.localId);
-    if (n === undefined) numbered.set(local.localId, (n = numbered.size));
+    let n = this.numbered.get(local.localId);
+    if (n === undefined) this.numbered.set(local.localId, (n = this.numbered.size));
     // Its number follows a dot, as no other name in a function's IR puts one. Quoted unless
     // plain, so any name a variable may have, `café` or a pattern's `[a, b]`, is a valid one.
     const name = `${local.name === "%" ? "topic" : local.name}.${n}`;
     return /^[-\w$.]+$/.test(name) ? `%${name}` : `%"${name}"`;
   }
 
-  function resolved(node: Expr | Stmt | Param | ObjectProp): Local {
-    const local = localAt(node);
+
+  resolved(this: Mut<this>, node: Expr | Stmt | Param | ObjectProp): Local {
+    const local = this.localAt(node);
     if (!local) throw new Error("internal error: unresolved name");
     return local;
   }
 
-  function statement(s: Stmt) {
-    if (current.unreached?.has(s)) return;
-    const outer = site;
-    site = s;
-    lowerStatement(s);
-    site = outer;
+
+  statement(this: Mut<this>, s: Stmt) {
+    if (this.current.unreached?.has(s)) return;
+    const outer = this.site;
+    this.site = s;
+    this.lowerStatement(s);
+    this.site = outer;
   }
 
-  function lowerStatement(s: Stmt) {
+
+  lowerStatement(this: Mut<this>, s: Stmt) {
     switch (s.kind) {
       case "expr":
-        if (s.expr.kind === "yield") return void yielded(s.expr);
-        effect(s.expr);
-        settle();
+        if (s.expr.kind === "yield") return void this.yielded(s.expr);
+        this.effect(s.expr);
+        this.settle();
         return;
       case "block":
       case "unsafe":
-        scoped(s.body);
+        this.scoped(s.body);
         return;
       // A comptime block runs while compiling and leaves nothing to run.
       case "comptime":
-        comptimeBlock(new CheckedHost(noted), current.id, s);
+        comptimeBlock(new CheckedHost(this.noted), this.current.id, s);
         return;
       case "if": {
-        const cond = value(s.cond);
-        settle();
-        const then = label();
-        const otherwise = s.else ? label() : undefined;
-        const end = label();
-        emit(`br i1 ${cond}, label %${then}, label %${otherwise ?? end}`);
-        startBlock(then);
-        scoped(s.then);
-        emit(`br label %${end}`);
+        const cond = this.value(s.cond);
+        this.settle();
+        const then = this.label();
+        const otherwise = s.else ? this.label() : undefined;
+        const end = this.label();
+        this.emit(`br i1 ${cond}, label %${then}, label %${otherwise ?? end}`);
+        this.startBlock(then);
+        this.scoped(s.then);
+        this.emit(`br label %${end}`);
         if (s.else && otherwise) {
-          startBlock(otherwise);
-          scoped(s.else);
-          emit(`br label %${end}`);
+          this.startBlock(otherwise);
+          this.scoped(s.else);
+          this.emit(`br label %${end}`);
         }
-        startBlock(end);
+        this.startBlock(end);
         return;
       }
       case "while": {
-        reserveC(s.cond);
-        const test = label();
-        const loop = label();
-        const end = label();
-        emit(`br label %${test}`);
-        startBlock(test);
-        const cond = value(s.cond);
-        settle();
-        emit(`br i1 ${cond}, label %${loop}, label %${end}`);
-        startBlock(loop);
-        exits.set(s, { exit: end, next: test, depth: scopes.length });
-        scoped(s.body);
-        emit(`br label %${test}`);
-        startBlock(end);
+        this.reserveC(s.cond);
+        const test = this.label();
+        const loop = this.label();
+        const end = this.label();
+        this.emit(`br label %${test}`);
+        this.startBlock(test);
+        const cond = this.value(s.cond);
+        this.settle();
+        this.emit(`br i1 ${cond}, label %${loop}, label %${end}`);
+        this.startBlock(loop);
+        this.exits.set(s, { exit: end, next: test, depth: this.scopes.length });
+        this.scoped(s.body);
+        this.emit(`br label %${test}`);
+        this.startBlock(end);
         return;
       }
       case "for": {
         // The initializer's variables last for the whole loop.
-        scopes.push([]);
-        if (s.init) statement(s.init);
-        reserveC(s.test);
-        reserveC(s.update);
-        const [test, loop, next, end] = [label(), label(), label(), label()];
-        emit(`br label %${test}`);
-        startBlock(test);
-        const cond = s.test ? value(s.test) : undefined;
-        settle();
-        emit(cond ? `br i1 ${cond}, label %${loop}, label %${end}` : `br label %${loop}`);
-        startBlock(loop);
-        exits.set(s, { exit: end, next, depth: scopes.length });
-        scoped(s.body);
-        emit(`br label %${next}`);
-        startBlock(next);
-        if (s.update) effect(s.update);
-        settle();
-        emit(`br label %${test}`);
-        startBlock(end);
-        drop(scopes.length - 1);
-        scopes.pop();
+        this.scopes.push([]);
+        if (s.init) this.statement(s.init);
+        this.reserveC(s.test);
+        this.reserveC(s.update);
+        const [test, loop, next, end] = [this.label(), this.label(), this.label(), this.label()];
+        this.emit(`br label %${test}`);
+        this.startBlock(test);
+        const cond = s.test ? this.value(s.test) : undefined;
+        this.settle();
+        this.emit(cond ? `br i1 ${cond}, label %${loop}, label %${end}` : `br label %${loop}`);
+        this.startBlock(loop);
+        this.exits.set(s, { exit: end, next, depth: this.scopes.length });
+        this.scoped(s.body);
+        this.emit(`br label %${next}`);
+        this.startBlock(next);
+        if (s.update) this.effect(s.update);
+        this.settle();
+        this.emit(`br label %${test}`);
+        this.startBlock(end);
+        this.drop(this.scopes.length - 1);
+        this.scopes.pop();
         return;
       }
       // The array is read once; one the loop made itself is owned by the loop until it ends.
       // Each pass gives the variable a pointer to its element, or a copy of a Copy one.
       case "forOf": {
-        const via = current.iterators?.get(s);
-        if (via) return generatorLoop(s, types.get(via)!, via);
-        const iterated = types.get(s.right)!;
-        if (s.await) return awaitLoop(s, iterated);
-        const yielding = referent(iterated);
-        if (recOf(yielding)?.kind === "generator") {
-          return generatorLoop(s, iterated);
+        const via = this.current.iterators?.get(s);
+        if (via) return this.generatorLoop(s, this.types.get(via)!, via);
+        const iterated = this.types.get(s.right)!;
+        if (s.await) return this.awaitLoop(s, iterated);
+        const yielding = this.referent(iterated);
+        if (this.recOf(yielding)?.kind === "generator") {
+          return this.generatorLoop(s, iterated);
         }
-        if (typing.lower(valueType(s.right)) === "string") return stringLoop(s);
-        const inline = referent(types.get(s.right)!);
-        const ir = recOf(inline);
-        if (ir?.kind === "fixed") return fixedLoop(s, inline as FixedType);
-        if (ir?.kind === "map") return mapLoop(s, inline as MapType);
-        const type = valueType(s.right) as ArrayType;
-        const local = resolved(s.left as Stmt);
-        scopes.push([]);
+        if (this.typing.lower(this.valueType(s.right)) === "string") return this.stringLoop(s);
+        const inline = this.referent(this.types.get(s.right)!);
+        const ir = this.recOf(inline);
+        if (ir?.kind === "fixed") return this.fixedLoop(s, inline as FixedType);
+        if (ir?.kind === "map") return this.mapLoop(s, inline as MapType);
+        const type = this.valueType(s.right) as ArrayType;
+        const local = this.resolved(s.left as Stmt);
+        this.scopes.push([]);
         // The array, and the position reached, live in slots: a generator's loop may stop at a
         // `yield` and go on in a later call.
-        const [held, counter] = [loopSlot(s, 0, ARRAY), loopSlot(s, 1, "i64")];
+        const [held, counter] = [this.loopSlot(s, 0, ARRAY), this.loopSlot(s, 1, "i64")];
         // In a generator, the frame says whether the loop owns its array.
-        const kept = resuming && typing.rec(resuming.type).frame[current.frame!.loops.get(s)!]!.type;
-        if (kept ? recOf(kept)?.kind === "array" : fresh(s.right)) {
-          own(held, type);
-          emit(`store ${ARRAY} ${owned(s.right)}, ptr ${held}`);
-        } else emit(`store ${ARRAY} ${value(s.right)}, ptr ${held}`);
-        settle();
-        emit(`store i64 0, ptr ${counter}`);
-        const [test, loop, next, end] = [label(), label(), label(), label()];
-        emit(`br label %${test}`);
-        startBlock(test);
-        const [i, more, array, length, data] = [temp(), temp(), temp(), temp(), temp()];
-        emit(`${i} = load i64, ptr ${counter}`);
-        emit(`${array} = load ${ARRAY}, ptr ${held}`);
-        emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
-        emit(`${more} = icmp ult i64 ${i}, ${length}`);
-        emit(`br i1 ${more}, label %${loop}, label %${end}`);
-        startBlock(loop);
-        exits.set(s, { exit: end, next, depth: scopes.length });
-        scopes.push([]);
-        reserve(local);
-        own(slot(local), local.type);
-        const at = temp();
-        emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
-        emit(`${at} = getelementptr ${llvm(typing.rec(type).element)}, ptr ${data}, i64 ${i}`);
+        const kept = this.resuming && this.typing.rec(this.resuming.type).frame[this.current.frame!.loops.get(s)!]!.type;
+        if (kept ? this.recOf(kept)?.kind === "array" : this.fresh(s.right)) {
+          this.own(held, type);
+          this.emit(`store ${ARRAY} ${this.owned(s.right)}, ptr ${held}`);
+        } else this.emit(`store ${ARRAY} ${this.value(s.right)}, ptr ${held}`);
+        this.settle();
+        this.emit(`store i64 0, ptr ${counter}`);
+        const [test, loop, next, end] = [this.label(), this.label(), this.label(), this.label()];
+        this.emit(`br label %${test}`);
+        this.startBlock(test);
+        const [i, more, array, length, data] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+        this.emit(`${i} = load i64, ptr ${counter}`);
+        this.emit(`${array} = load ${ARRAY}, ptr ${held}`);
+        this.emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
+        this.emit(`${more} = icmp ult i64 ${i}, ${length}`);
+        this.emit(`br i1 ${more}, label %${loop}, label %${end}`);
+        this.startBlock(loop);
+        this.exits.set(s, { exit: end, next, depth: this.scopes.length });
+        this.scopes.push([]);
+        this.reserve(local);
+        this.own(this.slot(local), local.type);
+        const at = this.temp();
+        this.emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
+        this.emit(`${at} = getelementptr ${this.llvm(this.typing.rec(type).element)}, ptr ${data}, i64 ${i}`);
         // A reference element is itself the loop's value; any other reference borrows the slot.
-        if (isRef(local.type) && !isRef(typing.rec(type).element)) emit(`store ptr ${at}, ptr ${slot(local)}`);
+        if (this.isRef(local.type) && !this.isRef(this.typing.rec(type).element)) this.emit(`store ptr ${at}, ptr ${this.slot(local)}`);
         else {
-          const v = temp();
-          emit(`${v} = load ${llvm(typing.rec(type).element)}, ptr ${at}`);
-          emit(`store ${llvm(local.type)} ${copied(v, typing.rec(type).element)}, ptr ${slot(local)}`);
+          const v = this.temp();
+          this.emit(`${v} = load ${this.llvm(this.typing.rec(type).element)}, ptr ${at}`);
+          this.emit(`store ${this.llvm(local.type)} ${this.copied(v, this.typing.rec(type).element)}, ptr ${this.slot(local)}`);
         }
-        s.body.forEach(statement);
-        drop(scopes.length - 1);
-        scopes.pop();
-        emit(`br label %${next}`);
-        startBlock(next);
-        const [now, after] = [temp(), temp()];
-        emit(`${now} = load i64, ptr ${counter}`);
-        emit(`${after} = add i64 ${now}, 1`);
-        emit(`store i64 ${after}, ptr ${counter}`);
-        emit(`br label %${test}`);
-        startBlock(end);
-        drop(scopes.length - 1);
-        scopes.pop();
+        s.body.forEach(((s) => this.statement(s)));
+        this.drop(this.scopes.length - 1);
+        this.scopes.pop();
+        this.emit(`br label %${next}`);
+        this.startBlock(next);
+        const [now, after] = [this.temp(), this.temp()];
+        this.emit(`${now} = load i64, ptr ${counter}`);
+        this.emit(`${after} = add i64 ${now}, 1`);
+        this.emit(`store i64 ${after}, ptr ${counter}`);
+        this.emit(`br label %${test}`);
+        this.startBlock(end);
+        this.drop(this.scopes.length - 1);
+        this.scopes.pop();
         return;
       }
       case "doWhile": {
-        reserveC(s.cond);
-        const [loop, test, end] = [label(), label(), label()];
-        emit(`br label %${loop}`);
-        startBlock(loop);
-        exits.set(s, { exit: end, next: test, depth: scopes.length });
-        scoped(s.body);
-        emit(`br label %${test}`);
-        startBlock(test);
-        const cond = value(s.cond);
-        settle();
-        emit(`br i1 ${cond}, label %${loop}, label %${end}`);
-        startBlock(end);
+        this.reserveC(s.cond);
+        const [loop, test, end] = [this.label(), this.label(), this.label()];
+        this.emit(`br label %${loop}`);
+        this.startBlock(loop);
+        this.exits.set(s, { exit: end, next: test, depth: this.scopes.length });
+        this.scoped(s.body);
+        this.emit(`br label %${test}`);
+        this.startBlock(test);
+        const cond = this.value(s.cond);
+        this.settle();
+        this.emit(`br i1 ${cond}, label %${loop}, label %${end}`);
+        this.startBlock(end);
         return;
       }
       case "switch": {
-        const subject = operand(s.discriminant, s.cases.flatMap((c) => (c.test ? [c.test] : [])));
+        const subject = this.operand(s.discriminant, s.cases.flatMap((c) => (c.test ? [c.test] : [])));
         // A subject the switch made is released on the way into the body that runs, and stays
         // pending through the tests, so an error raised in one drops it too.
-        const held = pending.slice(floor);
+        const held = this.pending.slice(this.floor);
         const enter = (body: string) => {
           if (held.length === 0) return body;
-          const via = label();
+          const via = this.label();
           entries.push([via, body]);
           return via;
         };
         const entries: [string, string][] = [];
-        const subjectType = valueType(s.discriminant);
-        const type = llvm(subjectType);
-        const bodies = s.cases.map(() => label());
-        const end = label();
-        exits.set(s, { exit: end, depth: scopes.length });
+        const subjectType = this.valueType(s.discriminant);
+        const type = this.llvm(subjectType);
+        const bodies = s.cases.map(() => this.label());
+        const end = this.label();
+        this.exits.set(s, { exit: end, depth: this.scopes.length });
         // The cases share one scope.
-        scopes.push([]);
+        this.scopes.push([]);
         // The tests run in order; when none matches, control goes to `default`, wherever it sits.
         s.cases.forEach((c, i) => {
           if (!c.test) return;
-          const test = value(c.test);
+          const test = this.value(c.test);
           // Anything but two values of one primitive type, such as a union or an enum member,
           // compares by value.
-          const testType = valueType(c.test);
+          const testType = this.valueType(c.test);
           const primitive = typeof subjectType === "string" && testType === subjectType && subjectType !== "string" && subjectType !== "bigint";
-          const equal = primitive ? compare(type, subject, test) : equals(subject, subjectType, test, testType);
-          settle(floor + held.length);
-          const next = label();
-          emit(`br i1 ${equal}, label %${enter(bodies[i]!)}, label %${next}`);
-          startBlock(next);
+          const equal = primitive ? this.compare(type, subject, test) : this.equals(subject, subjectType, test, testType);
+          this.settle(this.floor + held.length);
+          const next = this.label();
+          this.emit(`br i1 ${equal}, label %${enter(bodies[i]!)}, label %${next}`);
+          this.startBlock(next);
         });
         const fallback = s.cases.findIndex((c) => !c.test);
-        emit(`br label %${enter(fallback < 0 ? end : bodies[fallback]!)}`);
-        pending.length = floor;
+        this.emit(`br label %${enter(fallback < 0 ? end : bodies[fallback]!)}`);
+        this.pending.length = this.floor;
         for (const [via, body] of entries) {
-          startBlock(via);
-          for (const { v, type } of held) dispose(v, type);
-          emit(`br label %${body}`);
+          this.startBlock(via);
+          for (const { v, type } of held) this.dispose(v, type);
+          this.emit(`br label %${body}`);
         }
         s.cases.forEach((c, i) => {
-          startBlock(bodies[i]!);
-          c.body.forEach(statement);
-          emit(`br label %${bodies[i + 1] ?? end}`);
+          this.startBlock(bodies[i]!);
+          c.body.forEach(((s) => this.statement(s)));
+          this.emit(`br label %${bodies[i + 1] ?? end}`);
         });
-        startBlock(end);
-        drop(scopes.length - 1);
-        scopes.pop();
+        this.startBlock(end);
+        this.drop(this.scopes.length - 1);
+        this.scopes.pop();
         return;
       }
       case "labeled": {
-        const end = label();
-        exits.set(s, { exit: end, depth: scopes.length });
-        statement(s.body);
-        emit(`br label %${end}`);
-        startBlock(end);
+        const end = this.label();
+        this.exits.set(s, { exit: end, depth: this.scopes.length });
+        this.statement(s.body);
+        this.emit(`br label %${end}`);
+        this.startBlock(end);
         return;
       }
       case "break":
       case "continue": {
-        const target = exits.get(jumps.get(s)!)!;
-        jump(s.kind === "break" ? target.exit : target.next!, target.depth);
-        startBlock(label());
+        const target = this.exits.get(this.jumps.get(s)!)!;
+        this.jump(s.kind === "break" ? target.exit : target.next!, target.depth);
+        this.startBlock(this.label());
         return;
       }
       case "return":
-        if (jumps.has(s)) {
-          given(s, jumps.get(s)!);
-        } else if (s.value && (current.future ? typing.rec(current.future).gives : current.returns) === "void") {
+        if (this.jumps.has(s)) {
+          this.given(s, this.jumps.get(s)!);
+        } else if (s.value && (this.current.future ? this.typing.rec(this.current.future).gives : this.current.returns) === "void") {
           // An arrow's expression body may be a call returning nothing.
-          effect(s.value);
-          settle();
-          leave(undefined);
+          this.effect(s.value);
+          this.settle();
+          this.leave(undefined);
         } else {
           // A future's inferred result is widened from what its returns give, as a `let` is.
-          const v = s.value ? (current.future ? convert(owned(s.value), valueType(s.value), typing.rec(current.future).gives) : owned(s.value)) : undefined;
-          settle();
-          leave(v);
+          const v = s.value ? (this.current.future ? this.convert(this.owned(s.value), this.valueType(s.value), this.typing.rec(this.current.future).gives) : this.owned(s.value)) : undefined;
+          this.settle();
+          this.leave(v);
         }
         // Anything after a return goes in a fresh block that nothing branches to.
-        startBlock(label());
+        this.startBlock(this.label());
         return;
       case "throw":
-        raised(s, owned(s.value));
-        pending.length = floor;
-        startBlock(label());
+        this.raised(s, this.owned(s.value));
+        this.pending.length = this.floor;
+        this.startBlock(this.label());
         return;
       // An error raised in the block is stored where the catch reads it, and the catch runs.
       // A `finally` runs however the two are left, then carries on the way they were left.
       case "try": {
-        const region = s.finalizer ? enter() : undefined;
-        const after = label();
-        const done = () => (region ? exit(region, "normal", () => emit(`br label %${after}`)) : emit(`br label %${after}`));
+        const region = s.finalizer ? this.enter() : undefined;
+        const after = this.label();
+        const done = () => (region ? this.exit(region, "normal", () => this.emit(`br label %${after}`)) : this.emit(`br label %${after}`));
         if (!s.handler) {
-          scoped(s.block);
+          this.scoped(s.block);
           done();
         } else {
-          const local = s.param ? resolved(s) : undefined;
-          const type = current.caught.get(s)!;
-          const handler = { label: label(), slot: alloca(llvm(type)), depth: scopes.length, floor };
-          handlers.push(handler);
-          scoped(s.block);
-          handlers.pop();
+          const local = s.param ? this.resolved(s) : undefined;
+          const type = this.current.caught.get(s)!;
+          const handler = { label: this.label(), slot: this.alloca(this.llvm(type)), depth: this.scopes.length, floor: this.floor };
+          this.handlers.push(handler);
+          this.scoped(s.block);
+          this.handlers.pop();
           done();
-          startBlock(handler.label);
-          scopes.push([]);
-          const caught = temp();
-          emit(`${caught} = load ${llvm(type)}, ptr ${handler.slot}`);
+          this.startBlock(handler.label);
+          this.scopes.push([]);
+          const caught = this.temp();
+          this.emit(`${caught} = load ${this.llvm(type)}, ptr ${handler.slot}`);
           // The catch's variable owns the error; with none, the error is dropped here.
           if (local) {
-            reserve(local);
-            own(slot(local), local.type);
-            emit(`store ${llvm(type)} ${caught}, ptr ${slot(local)}`);
-          } else dispose(caught, type);
-          s.handler.forEach(statement);
-          drop(scopes.length - 1);
-          scopes.pop();
+            this.reserve(local);
+            this.own(this.slot(local), local.type);
+            this.emit(`store ${this.llvm(type)} ${caught}, ptr ${this.slot(local)}`);
+          } else this.dispose(caught, type);
+          s.handler.forEach(((s) => this.statement(s)));
+          this.drop(this.scopes.length - 1);
+          this.scopes.pop();
           done();
         }
         if (region) {
-          finallies.pop();
-          startBlock(region.label);
+          this.finallies.pop();
+          this.startBlock(region.label);
           // What a way out keeps while the finally runs is dropped if the finally leaves its own way.
-          scopes.push([]);
-          for (const { slot, type } of region.slots.values()) own(slot, type);
-          scoped(s.finalizer!);
-          const chosen = temp();
-          emit(`${chosen} = load i32, ptr ${region.chosen}`);
-          const targets = region.exits.map(() => label());
-          emit(`switch i32 ${chosen}, label %${targets[0]} [ ${targets.map((t, i) => `i32 ${i}, label %${t}`).join(" ")} ]`);
+          this.scopes.push([]);
+          for (const { slot, type } of region.slots.values()) this.own(slot, type);
+          this.scoped(s.finalizer!);
+          const chosen = this.temp();
+          this.emit(`${chosen} = load i32, ptr ${region.chosen}`);
+          const targets = region.exits.map(() => this.label());
+          this.emit(`switch i32 ${chosen}, label %${targets[0]} [ ${targets.map((t, i) => `i32 ${i}, label %${t}`).join(" ")} ]`);
           region.exits.forEach((e, i) => {
-            startBlock(targets[i]!);
+            this.startBlock(targets[i]!);
             e.resume();
           });
-          scopes.pop();
+          this.scopes.pop();
         }
-        startBlock(after);
+        this.startBlock(after);
         return;
       }
       case "let": {
-        const local = resolved(s);
-        reserve(local);
-        own(slot(local), local.type);
+        const local = this.resolved(s);
+        this.reserve(local);
+        this.own(this.slot(local), local.type);
         // A variable declared without a value starts empty, as a moved-out one is.
         const init = s.declarations[0]!.init;
-        emit(`store ${llvm(local.type)} ${init ? owned(init) : "zeroinitializer"}, ptr ${slot(local)}`);
-        settle();
+        this.emit(`store ${this.llvm(local.type)} ${init ? this.owned(init) : "zeroinitializer"}, ptr ${this.slot(local)}`);
+        this.settle();
         return;
       }
     }
   }
 
+
   // Emits a call that may panic, assigning its result to `result` when given. Unwinding, with
   // anything live here, it is an invoke whose landing pad drops the statement's values and every
   // scope's variables, runs `cleanup` for what the call itself held, and lets the unwind go on.
   // Variables not yet set, or already dropped, are empty, so dropping every scope is safe.
-  function unwinding(call: string, result?: string, cleanup?: () => void) {
+  unwinding(this: Mut<this>, call: string, result?: string, cleanup?: () => void) {
     const assign = result ? `${result} = ` : "";
-    const live = pending.some((p) => needsDrop(p.type)) || scopes.some((s) => s.length > 0);
-    if (panic === "abort" || (!live && !cleanup)) return emit(assign + call);
+    const live = this.pending.some((p) => this.needsDrop(p.type)) || this.scopes.some((s) => s.length > 0);
+    if (this.panic === "abort" || (!live && !cleanup)) return this.emit(assign + call);
     // A landing pad reads the statement's values back from slots: at -O0 on AArch64, LLVM loses
     // the second register of a two-register value carried into one. Each call stores them
     // again, since a value may reach it along a path no earlier store was on.
-    const held = pending.filter((p) => needsDrop(p.type));
+    const held = this.pending.filter((p) => this.needsDrop(p.type));
     for (const p of held) {
-      p.slot ??= alloca(llvm(p.type));
-      emit(`store ${llvm(p.type)} ${p.v}, ptr ${p.slot}`);
+      p.slot ??= this.alloca(this.llvm(p.type));
+      this.emit(`store ${this.llvm(p.type)} ${p.v}, ptr ${p.slot}`);
     }
-    const [ok, pad, caught] = [label(), label(), temp()];
-    emit(`${assign}invoke ${call.slice("call ".length)} to label %${ok} unwind label %${pad}`);
-    startBlock(pad);
-    emit(`${caught} = landingpad { ptr, i32 } cleanup`);
+    const [ok, pad, caught] = [this.label(), this.label(), this.temp()];
+    this.emit(`${assign}invoke ${call.slice("call ".length)} to label %${ok} unwind label %${pad}`);
+    this.startBlock(pad);
+    this.emit(`${caught} = landingpad { ptr, i32 } cleanup`);
     cleanup?.();
     for (const p of held.reverse()) {
-      const v = temp();
-      emit(`${v} = load ${llvm(p.type)}, ptr ${p.slot}`);
-      dispose(v, p.type);
+      const v = this.temp();
+      this.emit(`${v} = load ${this.llvm(p.type)}, ptr ${p.slot}`);
+      this.dispose(v, p.type);
     }
-    drop(0);
-    emit(`resume { ptr, i32 } ${caught}`);
-    startBlock(ok);
+    this.drop(0);
+    this.emit(`resume { ptr, i32 } ${caught}`);
+    this.startBlock(ok);
   }
+
 
   // A match: the subject is read once, then each arm's pattern is tested in order; a match binds
   // its names and runs its guard, and a failing guard drops what it bound and tries the next arm.
   // The checker made sure some arm matches. As a value, each arm gives one of its own. A value
   // the match made is its own, in a slot its bindings move parts out of, dropped with what is
   // left once the match ends; a place is read where it lives, and bindings point into it.
-  function lowerMatch(e: Extract<Expr, { kind: "match" }>, wanted: boolean): string | undefined {
-    const type = valueType(e.subject);
-    scopes.push(passing([]));
+  lowerMatch(this: Mut<this>, e: Extract<Expr, { kind: "match" }>, wanted: boolean): string | undefined {
+    const type = this.valueType(e.subject);
+    this.scopes.push(this.passing([]));
     let subject: string;
     let at: string | undefined;
-    const owning = made(e.subject) && fresh(e.subject);
+    const owning = made(e.subject) && this.fresh(e.subject);
     if (owning) {
-      subject = value(e.subject, true);
-      at = alloca(llvm(type));
-      own(at, type);
-      emit(`store ${llvm(type)} ${subject}, ptr ${at}`);
+      subject = this.value(e.subject, true);
+      at = this.alloca(this.llvm(type));
+      this.own(at, type);
+      this.emit(`store ${this.llvm(type)} ${subject}, ptr ${at}`);
     } else {
-      subject = value(e.subject);
-      at = lendable(e.subject) && !coercions.has(e.subject) && stored(e.subject) === type ? address(e.subject) : undefined;
+      subject = this.value(e.subject);
+      at = this.lendable(e.subject) && !this.coercions.has(e.subject) && this.stored(e.subject) === type ? this.address(e.subject) : undefined;
     }
-    const result = wanted ? types.get(e) : undefined;
-    const slot = result && alloca(llvm(result));
-    const end = label();
+    const result = wanted ? this.types.get(e) : undefined;
+    const slot = result && this.alloca(this.llvm(result));
+    const end = this.label();
     for (const arm of e.arms) {
-      const next = label();
-      tested(arm.pattern, subject, next);
-      scopes.push(passing([]));
+      const next = this.label();
+      this.tested(arm.pattern, subject, next);
+      this.scopes.push(this.passing([]));
       // A guarded arm copies what it binds, since a failing guard moves on to arms that may bind
       // the same parts.
-      bindAll(arm.pattern, subject, at, owning && !arm.guard);
+      this.bindAll(arm.pattern, subject, at, owning && !arm.guard);
       if (arm.guard) {
-        const mark = pending.length;
-        const ok = value(arm.guard);
-        settle(mark);
-        const [body, failed] = [label(), label()];
-        emit(`br i1 ${ok}, label %${body}, label %${failed}`);
-        startBlock(failed);
-        drop(scopes.length - 1);
-        emit(`br label %${next}`);
-        startBlock(body);
+        const mark = this.pending.length;
+        const ok = this.value(arm.guard);
+        this.settle(mark);
+        const [body, failed] = [this.label(), this.label()];
+        this.emit(`br i1 ${ok}, label %${body}, label %${failed}`);
+        this.startBlock(failed);
+        this.drop(this.scopes.length - 1);
+        this.emit(`br label %${next}`);
+        this.startBlock(body);
       }
-      const mark = pending.length;
+      const mark = this.pending.length;
       if (arm.body.kind === "block") {
-        const given = label();
-        exits.set(arm.body, { exit: given, depth: scopes.length });
-        arms.set(arm.body, result && slot ? { slot, type: result } : undefined);
-        const outer = floor;
-        floor = mark;
-        statement(arm.body);
-        floor = outer;
-        emit(`br label %${given}`);
-        startBlock(given);
+        const given = this.label();
+        this.exits.set(arm.body, { exit: given, depth: this.scopes.length });
+        this.arms.set(arm.body, result && slot ? { slot, type: result } : undefined);
+        const outer = this.floor;
+        this.floor = mark;
+        this.statement(arm.body);
+        this.floor = outer;
+        this.emit(`br label %${given}`);
+        this.startBlock(given);
       } else {
-        if (result && slot) emit(`store ${llvm(result)} ${needsDrop(result) ? owned(arm.body) : value(arm.body)}, ptr ${slot}`);
-        else effect(arm.body);
-        settle(mark);
+        if (result && slot) this.emit(`store ${this.llvm(result)} ${this.needsDrop(result) ? this.owned(arm.body) : this.value(arm.body)}, ptr ${slot}`);
+        else this.effect(arm.body);
+        this.settle(mark);
       }
-      drop(scopes.length - 1);
-      scopes.pop();
-      emit(`br label %${end}`);
-      startBlock(next);
+      this.drop(this.scopes.length - 1);
+      this.scopes.pop();
+      this.emit(`br label %${end}`);
+      this.startBlock(next);
     }
-    emit("unreachable");
-    startBlock(end);
-    drop(scopes.length - 1);
-    scopes.pop();
+    this.emit("unreachable");
+    this.startBlock(end);
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
     if (!result || !slot) return undefined;
-    const v = temp();
-    emit(`${v} = load ${llvm(result)}, ptr ${slot}`);
+    const v = this.temp();
+    this.emit(`${v} = load ${this.llvm(result)}, ptr ${slot}`);
     return v;
   }
+
 
   // A pipe over a value: the value lives in the topic's slot while the right side runs, and is
   // dropped after it unless the right side moved it out.
-  function lowerPipe(e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): string | undefined {
-    const local = localAt(e)!;
-    scopes.push(passing([]));
-    reserve(local);
-    own(slot(local), local.type);
-    emit(`store ${llvm(local.type)} ${owned(e.value)}, ptr ${slot(local)}`);
-    const mark = pending.length;
-    const type = types.get(e);
+  lowerPipe(this: Mut<this>, e: Extract<Expr, { kind: "pipe" }>, wanted: boolean): string | undefined {
+    const local = this.localAt(e)!;
+    this.scopes.push(this.passing([]));
+    this.reserve(local);
+    this.own(this.slot(local), local.type);
+    this.emit(`store ${this.llvm(local.type)} ${this.owned(e.value)}, ptr ${this.slot(local)}`);
+    const mark = this.pending.length;
+    const type = this.types.get(e);
     let v: string | undefined;
-    if (wanted && type) v = needsDrop(type) ? owned(e.body) : value(e.body);
-    else effect(e.body);
-    settle(mark);
-    drop(scopes.length - 1);
-    scopes.pop();
+    if (wanted && type) v = this.needsDrop(type) ? this.owned(e.body) : this.value(e.body);
+    else this.effect(e.body);
+    this.settle(mark);
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
     return v;
   }
 
+
   // A `return` in a match arm's block: its value goes where the match keeps what it gives, and
   // control leaves the arm, dropping what the scopes inside it own.
-  function given(s: Extract<Stmt, { kind: "return" }>, arm: Stmt) {
-    const into = arms.get(arm);
-    if (s.value && into) emit(`store ${llvm(into.type)} ${needsDrop(into.type) ? owned(s.value) : value(s.value)}, ptr ${into.slot}`);
-    else if (s.value) effect(s.value);
-    settle();
-    const target = exits.get(arm)!;
-    jump(target.exit, target.depth);
+  given(this: Mut<this>, s: Extract<Stmt, { kind: "return" }>, arm: Stmt) {
+    const into = this.arms.get(arm);
+    if (s.value && into) this.emit(`store ${this.llvm(into.type)} ${this.needsDrop(into.type) ? this.owned(s.value) : this.value(s.value)}, ptr ${into.slot}`);
+    else if (s.value) this.effect(s.value);
+    this.settle();
+    const target = this.exits.get(arm)!;
+    this.jump(target.exit, target.depth);
   }
+
 
   // Tests a value against a pattern, going on when it matches and to `no` when it doesn't. A
   // payload is only read once its member's tag is known.
-  function tested(p: Pattern, v: string, no: string) {
-    const info = current.patterns.get(p)!;
+  tested(this: Mut<this>, p: Pattern, v: string, no: string): void {
+    const info = this.current.patterns.get(p)!;
     const pass = (condition: string) => {
-      const ok = label();
-      emit(`br i1 ${condition}, label %${ok}, label %${no}`);
-      startBlock(ok);
+      const ok = this.label();
+      this.emit(`br i1 ${condition}, label %${ok}, label %${no}`);
+      this.startBlock(ok);
     };
-    const matched = typeof info.type === "string" ? undefined : typing.rec(info.type);
+    const matched = typeof info.type === "string" ? undefined : this.typing.rec(info.type);
     const union = matched?.kind === "union" ? (info.type as UnionType) : undefined;
     switch (info.kind) {
       case "any":
         return;
       case "literal":
-        return pass(info.member ? equals(v, info.type, "zeroinitializer", info.member) : equals(v, info.type, value((p as Extract<Pattern, { kind: "literal" }>).value), valueType((p as Extract<Pattern, { kind: "literal" }>).value)));
+        return pass(info.member ? this.equals(v, info.type, "zeroinitializer", info.member) : this.equals(v, info.type, this.value((p as Extract<Pattern, { kind: "literal" }>).value), this.valueType((p as Extract<Pattern, { kind: "literal" }>).value)));
       case "none":
-        return pass(union ? holds(v, union, ["null"]) : "true");
+        return pass(union ? this.holds(v, union, ["null"]) : "true");
       case "some": {
-        const empty = temp();
-        emit(`${empty} = xor i1 ${holds(v, union!, ["null"])}, true`);
+        const empty = this.temp();
+        this.emit(`${empty} = xor i1 ${this.holds(v, union!, ["null"])}, true`);
         pass(empty);
-        return tested(info.arg, convert(v, info.type, info.inner), no);
+        return this.tested(info.arg, this.convert(v, info.type, info.inner), no);
       }
       case "variant": {
-        if (union) pass(holds(v, union, [info.variant]));
-        const payload = union ? convert(v, info.type, info.variant) : v;
+        if (union) pass(this.holds(v, union, [info.variant]));
+        const payload = union ? this.convert(v, info.type, info.variant) : v;
         info.args.forEach((arg, i) => {
-          const field = temp();
-          emit(`${field} = extractvalue ${llvm(info.variant)} ${payload}, ${i}`);
-          tested(arg, field, no);
+          const field = this.temp();
+          this.emit(`${field} = extractvalue ${this.llvm(info.variant)} ${payload}, ${i}`);
+          this.tested(arg, field, no);
         });
         return;
       }
       case "object": {
-        if (union) pass(holds(v, union, info.shapes));
-        const holder = shapeOf(info);
-        const held = union ? convert(v, info.type, holder) : v;
-        for (const [key, sub, type] of info.fields) tested(sub, fieldOf(held, holder, key, type), no);
+        if (union) pass(this.holds(v, union, info.shapes));
+        const holder = this.shapeOf(info);
+        const held = union ? this.convert(v, info.type, holder) : v;
+        for (const [key, sub, type] of info.fields) this.tested(sub, this.fieldOf(held, holder, key, type), no);
         return;
       }
       case "array": {
-        const [length, data, same] = [temp(), temp(), temp()];
-        emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
-        emit(`${same} = icmp eq i64 ${length}, ${info.items.length}`);
+        const [length, data, same] = [this.temp(), this.temp(), this.temp()];
+        this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+        this.emit(`${same} = icmp eq i64 ${length}, ${info.items.length}`);
         pass(same);
-        emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
-        info.items.forEach((item, i) => tested(item, loadElement(data, info.element, i).v, no));
+        this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+        info.items.forEach((item, i) => this.tested(item, this.loadElement(data, info.element, i).v, no));
         return;
       }
       case "or": {
-        const yes = label();
+        const yes = this.label();
         info.alternatives.forEach((alt, i) => {
-          const next = i < info.alternatives.length - 1 ? label() : no;
-          tested(alt, v, next);
-          emit(`br label %${yes}`);
-          if (next !== no) startBlock(next);
+          const next = i < info.alternatives.length - 1 ? this.label() : no;
+          this.tested(alt, v, next);
+          this.emit(`br label %${yes}`);
+          if (next !== no) this.startBlock(next);
         });
-        startBlock(yes);
+        this.startBlock(yes);
         return;
       }
     }
   }
 
+
   // Binds the names a pattern gives, in the arm's scope: a pointer into where the value lives,
   // for a borrowing binding; otherwise the value, moved out of a temporary the match owns, or a
   // copy. A part with no place of its own to point at is pointed at in a copy of its bits.
-  function bindAll(p: Pattern, v: string, at: string | undefined, move: boolean) {
-    const info = current.patterns.get(p)!;
+  bindAll(this: Mut<this>, p: Pattern, v: string, at: string | undefined, move: boolean) {
+    const info = this.current.patterns.get(p)!;
     if (info.kind === "any" && p.kind === "ident") {
-      const local = resolved(p as Expr);
-      reserve(local);
+      const local = this.resolved(p as Expr);
+      this.reserve(local);
       // A binding borrowing the part points where it lives; one of a part that is itself a
       // reference, like a `Mut` field, holds that reference.
-      if (isRef(local.type) && local.type !== info.type) {
+      if (this.isRef(local.type) && local.type !== info.type) {
         let pointer = at;
         if (!pointer) {
-          pointer = alloca(llvm(info.type));
-          emit(`store ${llvm(info.type)} ${v}, ptr ${pointer}`);
+          pointer = this.alloca(this.llvm(info.type));
+          this.emit(`store ${this.llvm(info.type)} ${v}, ptr ${pointer}`);
         }
-        emit(`store ptr ${pointer}, ptr ${slot(local)}`);
+        this.emit(`store ptr ${pointer}, ptr ${this.slot(local)}`);
         return;
       }
-      own(slot(local), local.type);
-      const taken = move && at && needsDrop(info.type);
-      if (taken) emit(`store ${llvm(info.type)} zeroinitializer, ptr ${at}`);
-      emit(`store ${llvm(local.type)} ${taken ? v : copied(v, info.type)}, ptr ${slot(local)}`);
+      this.own(this.slot(local), local.type);
+      const taken = move && at && this.needsDrop(info.type);
+      if (taken) this.emit(`store ${this.llvm(info.type)} zeroinitializer, ptr ${at}`);
+      this.emit(`store ${this.llvm(local.type)} ${taken ? v : this.copied(v, info.type)}, ptr ${this.slot(local)}`);
       return;
     }
     if (info.kind === "variant") {
       const inUnion = info.type !== info.variant;
-      const payload = inUnion ? convert(v, info.type, info.variant) : v;
-      const payloadAt = at && inUnion ? partAt(llvm(info.type), at, 1) : at;
+      const payload = inUnion ? this.convert(v, info.type, info.variant) : v;
+      const payloadAt = at && inUnion ? this.partAt(this.llvm(info.type), at, 1) : at;
       info.args.forEach((arg, i) => {
-        const field = temp();
-        emit(`${field} = extractvalue ${llvm(info.variant)} ${payload}, ${i}`);
-        bindAll(arg, field, payloadAt && partAt(llvm(info.variant), payloadAt, i), move);
+        const field = this.temp();
+        this.emit(`${field} = extractvalue ${this.llvm(info.variant)} ${payload}, ${i}`);
+        this.bindAll(arg, field, payloadAt && this.partAt(this.llvm(info.variant), payloadAt, i), move);
       });
       return;
     }
     if (info.kind === "object") {
       // One shape has its fields in place; several have no one place to point into.
-      const holder = shapeOf(info);
+      const holder = this.shapeOf(info);
       const union = info.type !== holder;
-      const held = union ? convert(v, info.type, holder) : v;
-      const shape = recOf(holder);
+      const held = union ? this.convert(v, info.type, holder) : v;
+      const shape = this.recOf(holder);
       const single = shape?.kind === "object" || shape?.kind === "class" ? (holder as ObjectType | ClassType) : undefined;
-      const holderAt = at && single ? (union ? partAt(llvm(info.type), at, 1) : at) : undefined;
+      const holderAt = at && single ? (union ? this.partAt(this.llvm(info.type), at, 1) : at) : undefined;
       for (const [key, sub, type] of info.fields) {
         let fieldAt: string | undefined;
         if (holderAt && single) {
-          fieldAt = temp();
-          emit(`${fieldAt} = getelementptr ${llvm(single)}, ptr ${holderAt}, i32 0, ${typing.fieldPath(single, key).map((i) => `i32 ${i}`).join(", ")}`);
+          fieldAt = this.temp();
+          this.emit(`${fieldAt} = getelementptr ${this.llvm(single)}, ptr ${holderAt}, i32 0, ${this.typing.fieldPath(single, key).map((i) => `i32 ${i}`).join(", ")}`);
         }
-        bindAll(sub, fieldOf(held, holder, key, type), fieldAt, move && fieldAt !== undefined);
+        this.bindAll(sub, this.fieldOf(held, holder, key, type), fieldAt, move && fieldAt !== undefined);
       }
       return;
     }
     if (info.kind === "array") {
-      const data = temp();
-      emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+      const data = this.temp();
+      this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
       info.items.forEach((item, i) => {
-        const { v: element, at: elementAt } = loadElement(data, info.element, i);
-        bindAll(item, element, elementAt, move);
+        const { v: element, at: elementAt } = this.loadElement(data, info.element, i);
+        this.bindAll(item, element, elementAt, move);
       });
       return;
     }
     if (info.kind === "some") {
       // Only an Option of one member keeps that member in place as its payload.
-      const alone = typing.rec(info.type as UnionType).members.length === 2;
-      const innerAt = at && alone ? partAt(llvm(info.type), at, 1) : undefined;
-      bindAll(info.arg, convert(v, info.type, info.inner), innerAt, move && innerAt !== undefined);
+      const alone = this.typing.rec(info.type as UnionType).members.length === 2;
+      const innerAt = at && alone ? this.partAt(this.llvm(info.type), at, 1) : undefined;
+      this.bindAll(info.arg, this.convert(v, info.type, info.inner), innerAt, move && innerAt !== undefined);
     }
   }
+
 
   // What an object pattern meets once its member is known: its one shape, or the union of them.
-  function shapeOf(info: Extract<PatternInfo, { kind: "object" }>): Type {
-    return info.shapes.length === 1 ? info.shapes[0]! : typing.unionType(info.shapes);
+  shapeOf(this: Mut<this>, info: Extract<PatternInfo, { kind: "object" }>): Type {
+    return info.shapes.length === 1 ? info.shapes[0]! : this.typing.unionType(info.shapes);
   }
+
 
   // A field of a value, read as `type`: from an object or instance, or a union's members.
-  function fieldOf(v: string, holder: Type, key: string, type: Type): string {
-    const held = typing.rec(holder as Exclude<Type, string>);
-    if (held.kind === "union") return unionField(v, holder as Exclude<Type, string> as UnionType, key, type);
+  fieldOf(this: Mut<this>, v: string, holder: Type, key: string, type: Type): string {
+    const held = this.typing.rec(holder as Exclude<Type, string>);
+    if (held.kind === "union") return this.unionField(v, holder as Exclude<Type, string> as UnionType, key, type);
     if (held.kind === "recursive") {
-      const loaded = temp();
-      emit(`${loaded} = load ${llvm(held.of)}, ptr ${v}`);
-      return fieldOf(loaded, held.of, key, type);
+      const loaded = this.temp();
+      this.emit(`${loaded} = load ${this.llvm(held.of)}, ptr ${v}`);
+      return this.fieldOf(loaded, held.of, key, type);
     }
     const shape = holder as ObjectType | ClassType;
-    const read = temp();
-    emit(`${read} = extractvalue ${llvm(shape)} ${v}, ${typing.fieldPath(shape, key).join(", ")}`);
-    return convert(read, typing.field(shape, key)!.type, type);
+    const read = this.temp();
+    this.emit(`${read} = extractvalue ${this.llvm(shape)} ${v}, ${this.typing.fieldPath(shape, key).join(", ")}`);
+    return this.convert(read, this.typing.field(shape, key)!.type, type);
   }
 
+
   // An array's element `i`, and where it lives.
-  function loadElement(data: string, element: Type, i: usize): { v: string; at: string } {
-    const [at, v] = [temp(), temp()];
-    emit(`${at} = getelementptr ${llvm(element)}, ptr ${data}, i64 ${i}`);
-    emit(`${v} = load ${llvm(element)}, ptr ${at}`);
+  loadElement(this: Mut<this>, data: string, element: Type, i: usize): { v: string; at: string } {
+    const [at, v] = [this.temp(), this.temp()];
+    this.emit(`${at} = getelementptr ${this.llvm(element)}, ptr ${data}, i64 ${i}`);
+    this.emit(`${v} = load ${this.llvm(element)}, ptr ${at}`);
     return { v, at };
   }
 
+
   // A pointer to part `i` of an aggregate in memory.
-  function partAt(type: string, at: string, i: usize): string {
-    const part = temp();
-    emit(`${part} = getelementptr ${type}, ptr ${at}, i32 0, i32 ${i}`);
+  partAt(this: Mut<this>, type: string, at: string, i: usize): string {
+    const part = this.temp();
+    this.emit(`${part} = getelementptr ${type}, ptr ${at}, i32 0, i32 ${i}`);
     return part;
   }
 
+
   // An expression run for its effect, dropping any value it makes.
-  function effect(e: Expr) {
-    if (e.kind === "match") return void lowerMatch(e, false);
-    if (e.kind === "pipe") return void lowerPipe(e, false);
+  effect(this: Mut<this>, e: Expr) {
+    if (e.kind === "match") return void this.lowerMatch(e, false);
+    if (e.kind === "pipe") return void this.lowerPipe(e, false);
     if (e.kind === "unary" && e.op === "await") {
-      const v = awaitFuture(e);
-      const gives = typing.rec(valueType(e.operand) as FutureType).gives;
-      if (v !== undefined && needsDrop(gives)) dispose(v, gives);
+      const v = this.awaitFuture(e);
+      const gives = this.typing.rec(this.valueType(e.operand) as FutureType).gives;
+      if (v !== undefined && this.needsDrop(gives)) this.dispose(v, gives);
       return;
     }
-    if (e.kind !== "call") return void value(e);
-    const result = call(e);
+    if (e.kind !== "call") return void this.value(e);
+    const result = this.call(e);
     // A call whose value goes unused has no type of its own recorded.
-    const type = types.get(e) ?? callOf(e)?.returns;
-    if (result !== undefined && type) dispose(result, type);
+    const type = this.types.get(e) ?? this.callOf(e)?.returns;
+    if (result !== undefined && type) this.dispose(result, type);
   }
+
 
   // Whether a value of the type owns memory it gives back when dropped: a string, or anything
   // holding one by value.
-  function needsDrop(type: Type | undefined): boolean {
-    if (type === "string" || type === "bigint" || (type !== undefined && rustClassOf(typing, type))) return true;
+  needsDrop(this: Mut<this>, type: Type | undefined): boolean {
+    if (type === "string" || type === "bigint" || (type !== undefined && rustClassOf(this.typing, type))) return true;
     if (type === undefined || typeof type === "string") return false;
-    const r = typing.rec(type);
+    const r = this.typing.rec(type);
     if (r.kind === "handle") return true;
-    if (r.kind === "union") return r.members.some(needsDrop);
+    if (r.kind === "union") return r.members.some(((type) => this.needsDrop(type)));
     if (r.kind === "array" || r.kind === "map" || r.kind === "shared" || r.kind === "block" || r.kind === "dyn" || r.kind === "recursive") return true;
-    if (r.kind === "fixed") return r.size > 0 && needsDrop(r.element);
-    if (r.kind === "interior" && !isLock(r)) return needsDrop(r.of);
-    return parts(type).some(([t]) => needsDrop(t));
+    if (r.kind === "fixed") return r.size > 0 && this.needsDrop(r.element);
+    if (r.kind === "interior" && !isLock(r)) return this.needsDrop(r.of);
+    return this.parts(type).some(([t]) => this.needsDrop(t));
   }
+
 
   // The parts of an aggregate value, each with its index: an instance's embedded base, then its
   // fields; an object's or a closure's fields.
-  function parts(type: Exclude<Type, string>): [Type, usize][] {
-    const r = typing.rec(type);
+  parts(this: Mut<this>, type: Exclude<Type, string>): [Type, usize][] {
+    const r = this.typing.rec(type);
     // A lock is its word, then what it holds.
     if (r.kind === "interior") return isLock(r) ? [[r.of, 1]] : [];
     if (r.kind !== "object" && r.kind !== "class" && r.kind !== "closure" && r.kind !== "variant" && r.kind !== "generator" && r.kind !== "future") return [];
@@ -3988,587 +4398,612 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     return [...base, ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.fields).map((f, i): [Type, usize] => [f.type, i + base.length])];
   }
 
+
   // A copy of a value, holding its own reference to each string in it.
-  function copied(v: string, type: Type): string {
-    if (holdsRust(type)) throw new Error(`internal error: a '${typing.show(type)}' holds a Rust handle, which is moved, never copied`);
-    const r = recOf(type);
-    if (r?.kind === "interior" && !isLock(r)) return copied(v, r.of);
-    if (!needsDrop(type)) return v;
+  copied(this: Mut<this>, v: string, type: Type): string {
+    if (this.holdsRust(type)) throw new Error(`internal error: a '${this.typing.show(type)}' holds a Rust handle, which is moved, never copied`);
+    const r = this.recOf(type);
+    if (r?.kind === "interior" && !isLock(r)) return this.copied(v, r.of);
+    if (!this.needsDrop(type)) return v;
     if (type === "string") {
-      emit(`call void @fsh_rt_str_retain(ptr ${v})`);
+      this.emit(`call void @fsh_rt_str_retain(ptr ${v})`);
       return v;
     }
     if (type === "bigint") {
-      emit(`call void @fsh_rt_big_retain(ptr ${v})`);
+      this.emit(`call void @fsh_rt_big_retain(ptr ${v})`);
       return v;
     }
     if (r?.kind === "handle") {
-      emit(`call void @fsh_rt_handle_retain(ptr ${v})`);
+      this.emit(`call void @fsh_rt_handle_retain(ptr ${v})`);
       return v;
     }
     // A copy may panic part way, on a Dyn whose value can't be copied.
-    const result = temp();
-    unwinding(`call ${llvm(type)} ${helper("copy", type as Exclude<Type, string>)}(${llvm(type)} ${v})`, result);
+    const result = this.temp();
+    this.unwinding(`call ${this.llvm(type)} ${this.helper("copy", type as Exclude<Type, string>)}(${this.llvm(type)} ${v})`, result);
     return result;
   }
 
+
   // Gives up a value: releases a reference to everything it owns.
-  function dispose(v: string, type: Type) {
-    const r = recOf(type);
-    if (r?.kind === "interior" && !isLock(r)) return dispose(v, r.of);
-    if (!needsDrop(type)) return;
-    if (type === "string") return emit(`call void @fsh_rt_str_release(ptr ${v})`);
-    if (type === "bigint") return emit(`call void @fsh_rt_big_release(ptr ${v})`);
-    if (r?.kind === "handle") return emit(`call void @fsh_rt_handle_drop(ptr ${v})`);
-    const rust = rustClassOf(typing, type);
+  dispose(this: Mut<this>, v: string, type: Type): void {
+    const r = this.recOf(type);
+    if (r?.kind === "interior" && !isLock(r)) return this.dispose(v, r.of);
+    if (!this.needsDrop(type)) return;
+    if (type === "string") return this.emit(`call void @fsh_rt_str_release(ptr ${v})`);
+    if (type === "bigint") return this.emit(`call void @fsh_rt_big_release(ptr ${v})`);
+    if (r?.kind === "handle") return this.emit(`call void @fsh_rt_handle_drop(ptr ${v})`);
+    const rust = rustClassOf(this.typing, type);
     if (rust) {
       // Rust's drop runs in the shim, which hands back a panic in it for the runtime to raise.
-      const [name, caught] = [`@"${dropSymbol(rust)}"`, alloca("ptr")];
-      rustDrops.add(name);
-      emit(`store ptr null, ptr ${caught}`);
-      emit(`call void ${name}(ptr ${v}, ptr ${caught})`);
-      return emit(`call void @fsh_rt_rust_dropped(ptr ${caught}, ptr ${cString(`panicked while dropping a Rust '${rust.name}':\n`)})`);
+      const [name, caught] = [`@"${dropSymbol(rust)}"`, this.alloca("ptr")];
+      this.rustDrops.add(name);
+      this.emit(`store ptr null, ptr ${caught}`);
+      this.emit(`call void ${name}(ptr ${v}, ptr ${caught})`);
+      return this.emit(`call void @fsh_rt_rust_dropped(ptr ${caught}, ptr ${this.cString(`panicked while dropping a Rust '${rust.name}':\n`)})`);
     }
-    emit(`call void ${helper("drop", type as Exclude<Type, string>)}(${llvm(type)} ${v})`);
+    this.emit(`call void ${this.helper("drop", type as Exclude<Type, string>)}(${this.llvm(type)} ${v})`);
   }
+
 
   // The function that drops what a value of an aggregate type owns, or returns a copy of it,
   // part by part, or for a union, in the member it holds. It is named before it is made, so a
   // type holding itself calls it.
-  function helper(kind: "drop" | "copy", type: Exclude<Type, string>): string {
-    const r = typing.rec(type);
-    if (kind === "copy" && holdsRust(type)) throw new Error(`internal error: a '${typing.show(type)}' holds a Rust handle, which is moved, never copied`);
-    const made = glue[kind].get(type);
+  helper(this: Mut<this>, kind: "drop" | "copy", type: Exclude<Type, string>): string {
+    const r = this.typing.rec(type);
+    if (kind === "copy" && this.holdsRust(type)) throw new Error(`internal error: a '${this.typing.show(type)}' holds a Rust handle, which is moved, never copied`);
+    const made = this.glue[kind].get(type);
     if (made) return made;
-    const name = `@fsh.${kind}.${stableId(kind, typing.described(type), type)}`;
-    glue[kind].set(type, name);
+    const name = `@fsh.${kind}.${this.stableId(kind, this.typing.described(type), type)}`;
+    this.glue[kind].set(type, name);
     // A copy keeps the parts it has made pending, so a panic part way drops them.
-    const saved = { allocas, body, temps, labels, block, pending, scopes };
-    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-    const t = llvm(type);
+    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
+    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const t = this.llvm(type);
     const each = (v: string, part: Type, track = true) => {
-      if (kind === "drop") return (dispose(v, part), v);
-      const made = copied(v, part);
-      if (track) pending.push({ v: made, type: part });
+      if (kind === "drop") return (this.dispose(v, part), v);
+      const made = this.copied(v, part);
+      if (track) this.pending.push({ v: made, type: part });
       return made;
     };
     let result = "%v";
     if (r.kind === "array") {
-      result = kind === "drop" ? dropArray(type as ArrayType) : copyArray(type as ArrayType);
+      result = kind === "drop" ? this.dropArray(type as ArrayType) : this.copyArray(type as ArrayType);
     } else if (r.kind === "map") {
       // A map moved out of its place left it empty, which the runtime's free skips.
-      if (kind === "drop") emit("call void @fsh_rt_map_free(ptr %v)");
-      else result = copyMap(type as MapType);
+      if (kind === "drop") this.emit("call void @fsh_rt_map_free(ptr %v)");
+      else result = this.copyMap(type as MapType);
     } else if (r.kind === "fixed") {
       // Element by element in a loop over the value held in a slot, each copy written back.
-      const [slot, index] = [alloca(t), alloca("i64")];
-      emit(`store ${t} %v, ptr ${slot}`);
-      emit(`store i64 0, ptr ${index}`);
-      const [head, body, done] = [label(), label(), label()];
-      emit(`br label %${head}`);
-      startBlock(head);
-      const [i, more] = [temp(), temp()];
-      emit(`${i} = load i64, ptr ${index}`);
-      emit(`${more} = icmp ult i64 ${i}, ${r.size}`);
-      emit(`br i1 ${more}, label %${body}, label %${done}`);
-      startBlock(body);
-      const [at, v, after] = [temp(), temp(), temp()];
-      emit(`${at} = getelementptr ${t}, ptr ${slot}, i64 0, i64 ${i}`);
-      emit(`${v} = load ${llvm(r.element)}, ptr ${at}`);
+      const [slot, index] = [this.alloca(t), this.alloca("i64")];
+      this.emit(`store ${t} %v, ptr ${slot}`);
+      this.emit(`store i64 0, ptr ${index}`);
+      const [head, body, done] = [this.label(), this.label(), this.label()];
+      this.emit(`br label %${head}`);
+      this.startBlock(head);
+      const [i, more] = [this.temp(), this.temp()];
+      this.emit(`${i} = load i64, ptr ${index}`);
+      this.emit(`${more} = icmp ult i64 ${i}, ${r.size}`);
+      this.emit(`br i1 ${more}, label %${body}, label %${done}`);
+      this.startBlock(body);
+      const [at, v, after] = [this.temp(), this.temp(), this.temp()];
+      this.emit(`${at} = getelementptr ${t}, ptr ${slot}, i64 0, i64 ${i}`);
+      this.emit(`${v} = load ${this.llvm(r.element)}, ptr ${at}`);
       const made = each(v, r.element, false);
-      if (kind === "copy") emit(`store ${llvm(r.element)} ${made}, ptr ${at}`);
-      emit(`${after} = add i64 ${i}, 1`);
-      emit(`store i64 ${after}, ptr ${index}`);
-      emit(`br label %${head}`);
-      startBlock(done);
+      if (kind === "copy") this.emit(`store ${this.llvm(r.element)} ${made}, ptr ${at}`);
+      this.emit(`${after} = add i64 ${i}, 1`);
+      this.emit(`store i64 ${after}, ptr ${index}`);
+      this.emit(`br label %${head}`);
+      this.startBlock(done);
       if (kind === "copy") {
-        result = temp();
-        emit(`${result} = load ${t}, ptr ${slot}`);
+        result = this.temp();
+        this.emit(`${result} = load ${t}, ptr ${slot}`);
       }
     } else if (r.kind === "recursive") {
-      result = kind === "drop" ? dropBlock(type as RecursiveType) : copyBlock(type as RecursiveType);
+      result = kind === "drop" ? this.dropBlock(type as RecursiveType) : this.copyBlock(type as RecursiveType);
     } else if (r.kind === "shared") {
-      if (kind === "copy") emit(`call void @fsh_rt_${{ shared: "shared", Rc: "rc", Weak: "weak" }[typing.rec(type as SharedType).which]}_retain(ptr %v)`);
-      else dropShared(type as SharedType);
+      if (kind === "copy") this.emit(`call void @fsh_rt_${{ shared: "shared", Rc: "rc", Weak: "weak" }[this.typing.rec(type as SharedType).which]}_retain(ptr %v)`);
+      else this.dropShared(type as SharedType);
     } else if (r.kind === "dyn") {
       // Through the vtable: its drop frees the block; its copy gives a new block. A Dyn moved
       // out of its place left it empty, with nothing to drop or copy.
-      const [data, table, empty, at, fn, full, done] = [temp(), temp(), temp(), temp(), temp(), label(), label()];
-      emit(`${data} = extractvalue ${DYN} %v, 0`);
-      emit(`${table} = extractvalue ${DYN} %v, 1`);
-      emit(`${empty} = icmp eq ptr ${data}, null`);
-      emit(`br i1 ${empty}, label %${done}, label %${full}`);
-      startBlock(full);
-      emit(`${at} = getelementptr ptr, ptr ${table}, i64 ${kind === "drop" ? 0 : 1}`);
-      emit(`${fn} = load ptr, ptr ${at}`);
+      const [data, table, empty, at, fn, full, done] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.label(), this.label()];
+      this.emit(`${data} = extractvalue ${DYN} %v, 0`);
+      this.emit(`${table} = extractvalue ${DYN} %v, 1`);
+      this.emit(`${empty} = icmp eq ptr ${data}, null`);
+      this.emit(`br i1 ${empty}, label %${done}, label %${full}`);
+      this.startBlock(full);
+      this.emit(`${at} = getelementptr ptr, ptr ${table}, i64 ${kind === "drop" ? 0 : 1}`);
+      this.emit(`${fn} = load ptr, ptr ${at}`);
       let copy: string | undefined;
-      if (kind === "drop") emit(`call void ${fn}(ptr ${data})`);
+      if (kind === "drop") this.emit(`call void ${fn}(ptr ${data})`);
       else {
-        const made = temp();
-        copy = temp();
-        unwinding(`call ptr ${fn}(ptr ${data})`, made);
-        emit(`${copy} = insertvalue ${DYN} %v, ptr ${made}, 0`);
+        const made = this.temp();
+        copy = this.temp();
+        this.unwinding(`call ptr ${fn}(ptr ${data})`, made);
+        this.emit(`${copy} = insertvalue ${DYN} %v, ptr ${made}, 0`);
       }
-      const from = block;
-      emit(`br label %${done}`);
-      startBlock(done);
+      const from = this.block;
+      this.emit(`br label %${done}`);
+      this.startBlock(done);
       if (copy) {
-        result = temp();
-        emit(`${result} = phi ${DYN} [ %v, %entry ], [ ${copy}, %${from} ]`);
+        result = this.temp();
+        this.emit(`${result} = phi ${DYN} [ %v, %entry ], [ ${copy}, %${from} ]`);
       }
     } else if (r.kind === "block") {
       const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release", UnixListener: "fsh_rt_socket_release", UnixStream: "fsh_rt_socket_release", UdpSocket: "fsh_rt_socket_release", FileJob: "fsh_rt_file_job_release", JsValue: "fsh_rt_js_release", FileDescriptor: "fsh_rt_fd_release" }[r.which];
-      emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
+      this.emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
     } else if (r.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
-      const copy = kind === "copy" ? alloca(t) : "";
-      if (copy) emit(`store ${t} %v, ptr ${copy}`);
-      const tag = temp();
-      emit(`${tag} = extractvalue ${t} %v, 0`);
-      const owners = r.members.filter(needsDrop);
-      const cases = owners.map(() => label());
-      const end = label();
-      emit(`switch i32 ${tag}, label %${end} [ ${owners.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
+      const copy = kind === "copy" ? this.alloca(t) : "";
+      if (copy) this.emit(`store ${t} %v, ptr ${copy}`);
+      const tag = this.temp();
+      this.emit(`${tag} = extractvalue ${t} %v, 0`);
+      const owners = r.members.filter(((type) => this.needsDrop(type)));
+      const cases = owners.map(() => this.label());
+      const end = this.label();
+      this.emit(`switch i32 ${tag}, label %${end} [ ${owners.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
       owners.forEach((m, i) => {
-        startBlock(cases[i]!);
+        this.startBlock(cases[i]!);
         // One member's copy, made on its own path, so nothing else is pending beside it.
-        const part = each(convert("%v", type, m), m, false);
-        if (copy) emit(`store ${t} ${convert(part, m, type)}, ptr ${copy}`);
-        emit(`br label %${end}`);
+        const part = each(this.convert("%v", type, m), m, false);
+        if (copy) this.emit(`store ${t} ${this.convert(part, m, type)}, ptr ${copy}`);
+        this.emit(`br label %${end}`);
       });
-      startBlock(end);
+      this.startBlock(end);
       if (copy) {
-        result = temp();
-        emit(`${result} = load ${t}, ptr ${copy}`);
+        result = this.temp();
+        this.emit(`${result} = load ${t}, ptr ${copy}`);
       }
     } else {
-      for (const [part, i] of parts(type)) {
-        if (!needsDrop(part)) continue;
-        const v = temp();
-        emit(`${v} = extractvalue ${t} %v, ${i}`);
+      for (const [part, i] of this.parts(type)) {
+        if (!this.needsDrop(part)) continue;
+        const v = this.temp();
+        this.emit(`${v} = extractvalue ${t} %v, ${i}`);
         const made = each(v, part);
         if (kind === "drop") continue;
-        const next = temp();
-        emit(`${next} = insertvalue ${t} ${result}, ${llvm(part)} ${made}, ${i}`);
+        const next = this.temp();
+        this.emit(`${next} = insertvalue ${t} ${result}, ${this.llvm(part)} ${made}, ${i}`);
         result = next;
       }
     }
-    emit(kind === "drop" ? "ret void" : `ret ${t} ${result}`);
-    out.push(`define internal ${kind === "drop" ? "void" : t} ${name}(${t} %v) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    this.emit(kind === "drop" ? "ret void" : `ret ${t} ${result}`);
+    this.out.push(`define internal ${kind === "drop" ? "void" : t} ${name}(${t} %v) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
+    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
     return name;
   }
 
+
   // Whether two values of one compound type are equal, part by part, through the function made
   // for the type, which a type holding itself calls again.
-  function deepEquals(a: string, b: string, type: Type): string {
-    let name = comparers.get(type);
+  deepEquals(this: Mut<this>, a: string, b: string, type: Type): string {
+    let name = this.comparers.get(type);
     if (!name) {
-      name = `@fsh.eq.${stableId("eq", typing.described(type), type)}`;
-      comparers.set(type, name);
-      const saved = { allocas, body, temps, labels, block, pending, scopes };
-      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-      const t = llvm(type);
-      emit(`ret i1 ${compareParts("%a", "%b", type as Exclude<Type, string>)}`);
-      out.push(`define internal i1 ${name}(${t} %a, ${t} %b) {`, "entry:", ...allocas, ...body, "}", "");
-      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+      name = `@fsh.eq.${this.stableId("eq", this.typing.described(type), type)}`;
+      this.comparers.set(type, name);
+      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
+      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+      const t = this.llvm(type);
+      this.emit(`ret i1 ${this.compareParts("%a", "%b", type as Exclude<Type, string>)}`);
+      this.out.push(`define internal i1 ${name}(${t} %a, ${t} %b) {`, "entry:", ...this.allocas, ...this.body, "}", "");
+      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
     }
-    const result = temp();
-    emit(`${result} = call i1 ${name}(${llvm(type)} ${a}, ${llvm(type)} ${b})`);
+    const result = this.temp();
+    this.emit(`${result} = call i1 ${name}(${this.llvm(type)} ${a}, ${this.llvm(type)} ${b})`);
     return result;
   }
 
+
   // Whether every part of two values of a compound type is equal.
-  function compareParts(a: string, b: string, type: Exclude<Type, string>): string {
-    const r = typing.rec(type);
-    const both = (x: string, y: string, t: Type) => equals(x, t, y, t);
+  compareParts(this: Mut<this>, a: string, b: string, type: Exclude<Type, string>): string {
+    const r = this.typing.rec(type);
+    const both = (x: string, y: string, t: Type) => this.equals(x, t, y, t);
     const all = (results: string[]) => results.reduce((acc, r) => {
       if (acc === "true") return r;
-      const next = temp();
-      emit(`${next} = and i1 ${acc}, ${r}`);
+      const next = this.temp();
+      this.emit(`${next} = and i1 ${acc}, ${r}`);
       return next;
     }, "true");
     if (r.kind === "recursive") {
-      const [x, y] = [temp(), temp()];
-      emit(`${x} = load ${llvm(r.of)}, ptr ${a}`);
-      emit(`${y} = load ${llvm(r.of)}, ptr ${b}`);
+      const [x, y] = [this.temp(), this.temp()];
+      this.emit(`${x} = load ${this.llvm(r.of)}, ptr ${a}`);
+      this.emit(`${y} = load ${this.llvm(r.of)}, ptr ${b}`);
       return both(x, y, r.of);
     }
     if (r.kind === "array" || r.kind === "fixed") {
       // Element by element in a loop, once the lengths agree.
-      const element = llvm(r.element);
-      const result = alloca("i1");
-      emit(`store i1 true, ptr ${result}`);
-      const [length, other, data, otherData] = [temp(), temp(), temp(), temp()];
+      const element = this.llvm(r.element);
+      const result = this.alloca("i1");
+      this.emit(`store i1 true, ptr ${result}`);
+      const [length, other, data, otherData] = [this.temp(), this.temp(), this.temp(), this.temp()];
       if (r.kind === "array") {
-        emit(`${length} = extractvalue ${ARRAY} ${a}, 1`);
-        emit(`${other} = extractvalue ${ARRAY} ${b}, 1`);
-        emit(`${data} = extractvalue ${ARRAY} ${a}, 0`);
-        emit(`${otherData} = extractvalue ${ARRAY} ${b}, 0`);
+        this.emit(`${length} = extractvalue ${ARRAY} ${a}, 1`);
+        this.emit(`${other} = extractvalue ${ARRAY} ${b}, 1`);
+        this.emit(`${data} = extractvalue ${ARRAY} ${a}, 0`);
+        this.emit(`${otherData} = extractvalue ${ARRAY} ${b}, 0`);
       } else {
-        const [sa, sb] = [alloca(llvm(type)), alloca(llvm(type))];
-        emit(`store ${llvm(type)} ${a}, ptr ${sa}`);
-        emit(`store ${llvm(type)} ${b}, ptr ${sb}`);
-        emit(`${length} = add i64 0, ${r.size}`);
-        emit(`${other} = add i64 0, ${r.size}`);
-        emit(`${data} = getelementptr ${llvm(type)}, ptr ${sa}, i32 0, i32 0`);
-        emit(`${otherData} = getelementptr ${llvm(type)}, ptr ${sb}, i32 0, i32 0`);
+        const [sa, sb] = [this.alloca(this.llvm(type)), this.alloca(this.llvm(type))];
+        this.emit(`store ${this.llvm(type)} ${a}, ptr ${sa}`);
+        this.emit(`store ${this.llvm(type)} ${b}, ptr ${sb}`);
+        this.emit(`${length} = add i64 0, ${r.size}`);
+        this.emit(`${other} = add i64 0, ${r.size}`);
+        this.emit(`${data} = getelementptr ${this.llvm(type)}, ptr ${sa}, i32 0, i32 0`);
+        this.emit(`${otherData} = getelementptr ${this.llvm(type)}, ptr ${sb}, i32 0, i32 0`);
       }
-      const same = temp();
-      emit(`${same} = icmp eq i64 ${length}, ${other}`);
-      const index = alloca("i64");
-      emit(`store i64 0, ptr ${index}`);
-      const [head, loop, differ, done] = [label(), label(), label(), label()];
-      emit(`br i1 ${same}, label %${head}, label %${differ}`);
-      startBlock(head);
-      const [i, more] = [temp(), temp()];
-      emit(`${i} = load i64, ptr ${index}`);
-      emit(`${more} = icmp ult i64 ${i}, ${length}`);
-      emit(`br i1 ${more}, label %${loop}, label %${done}`);
-      startBlock(loop);
-      const [at, bt, x, y, next] = [temp(), temp(), temp(), temp(), temp()];
-      emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
-      emit(`${bt} = getelementptr ${element}, ptr ${otherData}, i64 ${i}`);
-      emit(`${x} = load ${element}, ptr ${at}`);
-      emit(`${y} = load ${element}, ptr ${bt}`);
+      const same = this.temp();
+      this.emit(`${same} = icmp eq i64 ${length}, ${other}`);
+      const index = this.alloca("i64");
+      this.emit(`store i64 0, ptr ${index}`);
+      const [head, loop, differ, done] = [this.label(), this.label(), this.label(), this.label()];
+      this.emit(`br i1 ${same}, label %${head}, label %${differ}`);
+      this.startBlock(head);
+      const [i, more] = [this.temp(), this.temp()];
+      this.emit(`${i} = load i64, ptr ${index}`);
+      this.emit(`${more} = icmp ult i64 ${i}, ${length}`);
+      this.emit(`br i1 ${more}, label %${loop}, label %${done}`);
+      this.startBlock(loop);
+      const [at, bt, x, y, next] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+      this.emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
+      this.emit(`${bt} = getelementptr ${element}, ptr ${otherData}, i64 ${i}`);
+      this.emit(`${x} = load ${element}, ptr ${at}`);
+      this.emit(`${y} = load ${element}, ptr ${bt}`);
       const equal = both(x, y, r.element);
-      emit(`${next} = add i64 ${i}, 1`);
-      emit(`store i64 ${next}, ptr ${index}`);
-      emit(`br i1 ${equal}, label %${head}, label %${differ}`);
-      startBlock(differ);
-      emit(`store i1 false, ptr ${result}`);
-      emit(`br label %${done}`);
-      startBlock(done);
-      const out = temp();
-      emit(`${out} = load i1, ptr ${result}`);
+      this.emit(`${next} = add i64 ${i}, 1`);
+      this.emit(`store i64 ${next}, ptr ${index}`);
+      this.emit(`br i1 ${equal}, label %${head}, label %${differ}`);
+      this.startBlock(differ);
+      this.emit(`store i1 false, ptr ${result}`);
+      this.emit(`br label %${done}`);
+      this.startBlock(done);
+      const out = this.temp();
+      this.emit(`${out} = load i1, ptr ${result}`);
       return out;
     }
     // An instance compares through its class's `equals`, which takes the other by reference.
-    const own = r.kind === "class" ? arenas.instanceOf(equalities.get(type as ClassType)) : undefined;
+    const own = r.kind === "class" ? this.arenas.instanceOf(this.equalities.get(type as ClassType)) : undefined;
     if (own) {
-      const [x, y] = [alloca(llvm(type)), alloca(llvm(type))];
-      emit(`store ${llvm(type)} ${a}, ptr ${x}`);
-      emit(`store ${llvm(type)} ${b}, ptr ${y}`);
-      return invoke(own, upcast(x, type as ClassType, bodyOf(noted.arenas, own).owner!), [`ptr ${upcast(y, type as ClassType, bodyOf(noted.arenas, own).owner!)}`])!;
+      const [x, y] = [this.alloca(this.llvm(type)), this.alloca(this.llvm(type))];
+      this.emit(`store ${this.llvm(type)} ${a}, ptr ${x}`);
+      this.emit(`store ${this.llvm(type)} ${b}, ptr ${y}`);
+      return this.invoke(own, this.upcast(x, type as ClassType, bodyOf(this.noted.arenas, own).owner!), [`ptr ${this.upcast(y, type as ClassType, bodyOf(this.noted.arenas, own).owner!)}`])!;
     }
     // An object, an instance or an enum's member: its fields, a base first.
     const parts = r.kind === "class" && r.base ? [[r.base, 0] as const, ...r.fields.map((f, i) => [f.type, i + 1] as const)] : r.fields.map((f, i) => [f.type, i] as const);
     return all(parts.map(([t, i]) => {
-      const [x, y] = [temp(), temp()];
-      emit(`${x} = extractvalue ${llvm(type)} ${a}, ${i}`);
-      emit(`${y} = extractvalue ${llvm(type)} ${b}, ${i}`);
+      const [x, y] = [this.temp(), this.temp()];
+      this.emit(`${x} = extractvalue ${this.llvm(type)} ${a}, ${i}`);
+      this.emit(`${y} = extractvalue ${this.llvm(type)} ${b}, ${i}`);
       return both(x, y, t);
     }));
   }
 
+
   // `JSON.stringify(x)`: x written into a new writer, whose text becomes the string.
-  function stringifyCall(e: Extract<Expr, { kind: "call" }>): string {
+  stringifyCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): string {
     const x = e.args[0]!;
-    const v = operand(x, []);
-    const w = temp();
-    emit(`${w} = call ptr @fsh_rt_json_new()`);
-    jsonWrite(w, v, current.spelled?.get(x) ?? coercions.get(x) ?? types.get(x)!);
-    const result = temp();
-    emit(`${result} = call ptr @fsh_rt_json_done(ptr ${w})`);
-    if (!types.has(e)) pending.push({ v: result, type: "string" });
+    const v = this.operand(x, []);
+    const w = this.temp();
+    this.emit(`${w} = call ptr @fsh_rt_json_new()`);
+    this.jsonWrite(w, v, this.current.spelled?.get(x) ?? this.coercions.get(x) ?? this.types.get(x)!);
+    const result = this.temp();
+    this.emit(`${result} = call ptr @fsh_rt_json_done(ptr ${w})`);
+    if (!this.types.has(e)) this.pending.push({ v: result, type: "string" });
     return result;
   }
+
 
   // Writes a value as JSON, through the function made for its type when it has parts.
   // The type as written is kept beside the lowered one, which forgets how a field was
   // spelled: an empty `x?: T` is left out, as JavaScript leaves out an undefined field.
-  function jsonWrite(w: string, v: string, type: Type) {
-    const t = typing.lower(type);
-    if (typeof t === "string" || typing.rec(t).kind === "literal") return jsonScalar(w, v, t);
-    const written = asWritten(type);
-    let name = jsonWriters.get(written);
+  jsonWrite(this: Mut<this>, w: string, v: string, type: Type) {
+    const t = this.typing.lower(type);
+    if (typeof t === "string" || this.typing.rec(t).kind === "literal") return this.jsonScalar(w, v, t);
+    const written = this.asWritten(type);
+    let name = this.jsonWriters.get(written);
     if (!name) {
-      name = `@fsh.json.${stableId("json", typing.described(written), written)}`;
-      jsonWriters.set(written, name);
-      const saved = { allocas, body, temps, labels, block, pending, scopes };
-      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-      jsonParts("%w", "%v", t, written);
-      emit("ret void");
-      out.push(`define internal void ${name}(ptr %w, ${llvm(t)} %v) {`, "entry:", ...allocas, ...body, "}", "");
-      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+      name = `@fsh.json.${this.stableId("json", this.typing.described(written), written)}`;
+      this.jsonWriters.set(written, name);
+      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
+      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+      this.jsonParts("%w", "%v", t, written);
+      this.emit("ret void");
+      this.out.push(`define internal void ${name}(ptr %w, ${this.llvm(t)} %v) {`, "entry:", ...this.allocas, ...this.body, "}", "");
+      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
     }
-    emit(`call void ${name}(ptr ${w}, ${llvm(t)} ${v})`);
+    this.emit(`call void ${name}(ptr ${w}, ${this.llvm(t)} ${v})`);
   }
 
-  function jsonRaw(w: string, s: string) {
-    emit(`call void @fsh_rt_json_raw(ptr ${w}, ptr ${cString(s)}, i64 ${new TextEncoder().encode(s).length})`);
+
+  jsonRaw(this: Mut<this>, w: string, s: string) {
+    this.emit(`call void @fsh_rt_json_raw(ptr ${w}, ptr ${this.cString(s)}, i64 ${new TextEncoder().encode(s).length})`);
   }
 
-  function jsonScalar(w: string, v: string, t: Type) {
-    const literal = recOf(t);
-    if (literal?.kind === "literal") return jsonRaw(w, typeof literal.value === "string" ? JSON.stringify(literal.value) : String(literal.value));
-    if (t === "null") return jsonRaw(w, "null");
-    if (t === "string") return void emit(`call void @fsh_rt_json_string(ptr ${w}, ptr ${v})`);
+
+  jsonScalar(this: Mut<this>, w: string, v: string, t: Type) {
+    const literal = this.recOf(t);
+    if (literal?.kind === "literal") return this.jsonRaw(w, typeof literal.value === "string" ? JSON.stringify(literal.value) : String(literal.value));
+    if (t === "null") return this.jsonRaw(w, "null");
+    if (t === "string") return void this.emit(`call void @fsh_rt_json_string(ptr ${w}, ptr ${v})`);
     if (t === "boolean") {
-      const [yes, no, done] = [label(), label(), label()];
-      emit(`br i1 ${v}, label %${yes}, label %${no}`);
-      startBlock(yes);
-      jsonRaw(w, "true");
-      emit(`br label %${done}`);
-      startBlock(no);
-      jsonRaw(w, "false");
-      emit(`br label %${done}`);
-      startBlock(done);
+      const [yes, no, done] = [this.label(), this.label(), this.label()];
+      this.emit(`br i1 ${v}, label %${yes}, label %${no}`);
+      this.startBlock(yes);
+      this.jsonRaw(w, "true");
+      this.emit(`br label %${done}`);
+      this.startBlock(no);
+      this.jsonRaw(w, "false");
+      this.emit(`br label %${done}`);
+      this.startBlock(done);
       return;
     }
     if (isFloat(t)) {
       let wide = v;
       if (t === "f32") {
-        wide = temp();
-        emit(`${wide} = fpext float ${v} to double`);
+        wide = this.temp();
+        this.emit(`${wide} = fpext float ${v} to double`);
       }
-      return void emit(`call void @fsh_rt_json_f64(ptr ${w}, double ${wide}, i32 ${t === "f32" ? 1 : 0})`);
+      return void this.emit(`call void @fsh_rt_json_f64(ptr ${w}, double ${wide}, i32 ${t === "f32" ? 1 : 0})`);
     }
     const { bits, signed } = INTEGERS[t as Integer];
-    if (bits === 128) return void emit(`call void @fsh_rt_json_${signed ? "i" : "u"}128(ptr ${w}, i128 ${v})`);
+    if (bits === 128) return void this.emit(`call void @fsh_rt_json_${signed ? "i" : "u"}128(ptr ${w}, i128 ${v})`);
     let wide = v;
     if (bits < 64) {
-      wide = temp();
-      emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+      wide = this.temp();
+      this.emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
     }
-    emit(`call void @fsh_rt_json_${signed ? "i64" : "u64"}(ptr ${w}, i64 ${wide})`);
+    this.emit(`call void @fsh_rt_json_${signed ? "i64" : "u64"}(ptr ${w}, i64 ${wide})`);
   }
+
 
   // The parts of a value with them: an array's elements, an object's fields by name, an
   // instance's fields as declared, a base's first, a union's member, an enum's member tagged by
   // its name as serde writes it.
   // A type parameter's type as written, or the type itself.
-  function asWritten(t: Type): Type {
-    const r = recOf(t);
-    return r?.kind === "param" && r.concrete ? asWritten(r.concrete) : t;
+  asWritten(this: Mut<this>, t: Type): Type {
+    const r = this.recOf(t);
+    return r?.kind === "param" && r.concrete ? this.asWritten(r.concrete) : t;
   }
+
 
   // A part of `written` where `lowered` has the same shape, so its spelling can be read.
-  function writtenPart(written: Type, lowered: Exclude<Type, string>, part: (t: Exclude<Type, string>) => Type | undefined): Type | undefined {
-    return typeof written !== "string" && typing.rec(written).kind === typing.rec(lowered).kind ? part(written) : undefined;
+  writtenPart(this: Mut<this>, written: Type, lowered: Exclude<Type, string>, part: (t: Exclude<Type, string>) => Type | undefined): Type | undefined {
+    return typeof written !== "string" && this.typing.rec(written).kind === this.typing.rec(lowered).kind ? part(written) : undefined;
   }
 
+
   // The record of `written` where it has the same shape as `lowered`.
-  function writtenShape(written: Type, lowered: Exclude<Type, string>) {
-    const r = recOf(written);
-    return r?.kind === typing.rec(lowered).kind ? (written as Exclude<Type, string>) : undefined;
+  writtenShape(this: Mut<this>, written: Type, lowered: Exclude<Type, string>) {
+    const r = this.recOf(written);
+    return r?.kind === this.typing.rec(lowered).kind ? (written as Exclude<Type, string>) : undefined;
   }
+
 
   // A union's members as written, each beside the lowered member it lowers to: members sort by
   // their keys, which spelling changes, so a written member may sit at another index.
-  function writtenMembers(written: Type, t: UnionType): Type[] {
-    const spelled = writtenShape(written, t) as UnionType | undefined;
-    return typing.rec(t).members.map((m) => recOf(spelled)?.members.find((s) => typing.lower(s) === m) ?? m);
+  writtenMembers(this: Mut<this>, written: Type, t: UnionType): Type[] {
+    const spelled = this.writtenShape(written, t) as UnionType | undefined;
+    return this.typing.rec(t).members.map((m) => this.recOf(spelled)?.members.find((s) => this.typing.lower(s) === m) ?? m);
   }
 
-  function jsonParts(w: string, v: string, t: Exclude<Type, string>, written: Type = t) {
-    const r = typing.rec(t);
+
+  jsonParts(this: Mut<this>, w: string, v: string, t: Exclude<Type, string>, written: Type = t) {
+    const r = this.typing.rec(t);
     if (r.kind === "ref" || r.kind === "recursive") {
       const to = r.kind === "ref" ? r.to : r.of;
-      const held = temp();
-      emit(`${held} = load ${llvm(typing.lower(to))}, ptr ${v}`);
-      return jsonWrite(w, held, writtenPart(written, t, (x) => { const held = typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to);
+      const held = this.temp();
+      this.emit(`${held} = load ${this.llvm(this.typing.lower(to))}, ptr ${v}`);
+      return this.jsonWrite(w, held, this.writtenPart(written, t, (x) => { const held = this.typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to);
     }
-    if (r.kind === "array" || r.kind === "fixed") return jsonElements(w, v, t as ArrayType | FixedType, writtenPart(written, t, (x) => typing.rec(x as ArrayType).element) ?? r.element);
-    if (r.kind === "map") return jsonEntries(w, v, t as MapType, writtenPart(written, t, (x) => typing.rec(x as MapType).value) ?? r.value);
-    if (r.kind === "union") return jsonMember(w, v, t as UnionType, writtenMembers(written, t as UnionType));
+    if (r.kind === "array" || r.kind === "fixed") return this.jsonElements(w, v, t as ArrayType | FixedType, this.writtenPart(written, t, (x) => this.typing.rec(x as ArrayType).element) ?? r.element);
+    if (r.kind === "map") return this.jsonEntries(w, v, t as MapType, this.writtenPart(written, t, (x) => this.typing.rec(x as MapType).value) ?? r.value);
+    if (r.kind === "union") return this.jsonMember(w, v, t as UnionType, this.writtenMembers(written, t as UnionType));
     if (r.kind === "variant") {
-      if (r.fields.length === 0) return jsonRaw(w, JSON.stringify(r.member));
-      jsonRaw(w, `{${JSON.stringify(r.member)}:`);
-      if (r.fields.length > 1) jsonRaw(w, "[");
+      if (r.fields.length === 0) return this.jsonRaw(w, JSON.stringify(r.member));
+      this.jsonRaw(w, `{${JSON.stringify(r.member)}:`);
+      if (r.fields.length > 1) this.jsonRaw(w, "[");
       r.fields.forEach((f, i) => {
-        if (i > 0) jsonRaw(w, ",");
-        const x = temp();
-        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
-        jsonWrite(w, x, f.type);
+        if (i > 0) this.jsonRaw(w, ",");
+        const x = this.temp();
+        this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${i}`);
+        this.jsonWrite(w, x, f.type);
       });
-      jsonRaw(w, r.fields.length > 1 ? "]}" : "}");
+      this.jsonRaw(w, r.fields.length > 1 ? "]}" : "}");
       return;
     }
-    if (r.kind === "class") return jsonObject(w, v, t as ClassType, jsonFields((writtenShape(written, t) as ClassType | undefined) ?? (t as ClassType)));
+    if (r.kind === "class") return this.jsonObject(w, v, t as ClassType, this.jsonFields((this.writtenShape(written, t) as ClassType | undefined) ?? (t as ClassType)));
     const object = t as ObjectType;
-    const spelled = writtenShape(written, t) as ObjectType | undefined;
-    const as = recOf(spelled)?.fields.length === typing.rec(object).fields.length ? typing.rec(spelled!).fields : typing.rec(object).fields;
-    if (typing.isTuple(object)) {
-      const [order, rest] = tupleOrder(object);
-      const length = typing.rec(object).required === undefined ? undefined : tupleLength(v, object);
+    const spelled = this.writtenShape(written, t) as ObjectType | undefined;
+    const as = this.recOf(spelled)?.fields.length === this.typing.rec(object).fields.length ? this.typing.rec(spelled!).fields : this.typing.rec(object).fields;
+    if (this.typing.isTuple(object)) {
+      const [order, rest] = this.tupleOrder(object);
+      const length = this.typing.rec(object).required === undefined ? undefined : this.tupleLength(v, object);
       const many = () => {
-        const x = temp();
-        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${rest!.i}`);
+        const x = this.temp();
+        this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${rest!.i}`);
         return x;
       };
-      if (rest && order.length === 0) return jsonElements(w, many(), rest.f.type as ArrayType, typing.rec(as[rest.i]!.type as ArrayType).element);
-      jsonRaw(w, "[");
+      if (rest && order.length === 0) return this.jsonElements(w, many(), rest.f.type as ArrayType, this.typing.rec(as[rest.i]!.type as ArrayType).element);
+      this.jsonRaw(w, "[");
       order.forEach(({ i }, n) => {
-        present(length, n, () => {
-          if (n > 0) jsonRaw(w, ",");
-          const x = temp();
-          emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
-          jsonWrite(w, x, as[i]!.type);
+        this.present(length, n, () => {
+          if (n > 0) this.jsonRaw(w, ",");
+          const x = this.temp();
+          this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${i}`);
+          this.jsonWrite(w, x, as[i]!.type);
         });
       });
-      if (rest) jsonElements(w, many(), rest.f.type as ArrayType, typing.rec(as[rest.i]!.type as ArrayType).element, true);
-      jsonRaw(w, "]");
+      if (rest) this.jsonElements(w, many(), rest.f.type as ArrayType, this.typing.rec(as[rest.i]!.type as ArrayType).element, true);
+      this.jsonRaw(w, "]");
       return;
     }
-    jsonObject(w, v, t, objectJsonFields(object, as));
+    this.jsonObject(w, v, t, this.objectJsonFields(object, as));
   }
+
 
   // A class's fields JSON writes, a base's first, each with where it sits in the instance.
   // An object's fields as JSON writes them, typed and marked optional as the object was written.
-  function objectJsonFields(object: ObjectType, as: Field[]) {
-    const { fields } = typing.rec(object);
+  objectJsonFields(this: Mut<this>, object: ObjectType, as: Field[]) {
+    const { fields } = this.typing.rec(object);
     return fields.map((f, i) => ({ name: f.name, type: as[i]!.type, path: [i], omit: as[i]!.optional !== undefined }));
   }
 
-  function jsonFields(c: ClassType): { name: string; type: Type; path: usize[]; omit?: boolean }[] {
-    return typing.rec(c).base ? [...jsonFields(typing.rec(c).base!).map((f) => ({ ...f, path: [0, ...f.path] })), ...ownJsonFields(c, 1)] : ownJsonFields(c, 0);
+
+  jsonFields(this: Mut<this>, c: ClassType): { name: string; type: Type; path: usize[]; omit?: boolean }[] {
+    return this.typing.rec(c).base ? [...this.jsonFields(this.typing.rec(c).base!).map((f) => ({ ...f, path: [0, ...f.path] })), ...this.ownJsonFields(c, 1)] : this.ownJsonFields(c, 0);
   }
+
 
   // Where an instance of a class extending Map or Set, itself or through its bases, holds the
   // collection, which it prints as.
-  function embeddedField(c: ClassType): { path: usize[]; type: MapType } | undefined {
-    const r = typing.rec(c);
+  embeddedField(this: Mut<this>, c: ClassType): { path: usize[]; type: MapType } | undefined {
+    const r = this.typing.rec(c);
     const offset = r.base ? 1 : 0;
     const i = r.fields.findIndex((f) => f.name === EMBEDDED);
-    if (i >= 0) return { path: [offset + i], type: typing.lower(r.fields[i]!.type) as MapType };
-    const inner = r.base && embeddedField(r.base);
+    if (i >= 0) return { path: [offset + i], type: this.typing.lower(r.fields[i]!.type) as MapType };
+    const inner = r.base && this.embeddedField(r.base);
     return inner && { ...inner, path: [0, ...inner.path] };
   }
 
-  function ownJsonFields(c: ClassType, offset: usize) {
-    const { fields } = typing.rec(c);
+
+  ownJsonFields(this: Mut<this>, c: ClassType, offset: usize) {
+    const { fields } = this.typing.rec(c);
     return fields.flatMap((f, i) => (f.name.startsWith("#") ? [] : [{ name: f.name, type: f.type, path: [offset + i], omit: f.optional !== undefined }]));
   }
 
+
   // An object's fields; one spelled `x?: T` is left out while empty, so whether a comma is
   // needed is known only as the fields are written.
-  function jsonObject(w: string, v: string, t: Type, fields: { name: string; type: Type; path: usize[]; omit?: boolean }[]) {
-    jsonRaw(w, "{");
+  jsonObject(this: Mut<this>, w: string, v: string, t: Type, fields: { name: string; type: Type; path: usize[]; omit?: boolean }[]) {
+    this.jsonRaw(w, "{");
     const dynamic = fields.some((f) => f.omit);
-    const wrote = dynamic ? alloca("i1") : "";
-    if (dynamic) emit(`store i1 false, ptr ${wrote}`);
+    const wrote = dynamic ? this.alloca("i1") : "";
+    if (dynamic) this.emit(`store i1 false, ptr ${wrote}`);
     fields.forEach((f, n) => {
-      const x = temp();
-      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${f.path.join(", ")}`);
-      const after = label();
+      const x = this.temp();
+      this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${f.path.join(", ")}`);
+      const after = this.label();
       if (f.omit) {
-        const [present, write] = [holds(x, typing.lower(f.type) as UnionType, typing.rec(typing.lower(f.type) as UnionType).members.filter((m) => m !== "null")), label()];
-        emit(`br i1 ${present}, label %${write}, label %${after}`);
-        startBlock(write);
+        const [present, write] = [this.holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null")), this.label()];
+        this.emit(`br i1 ${present}, label %${write}, label %${after}`);
+        this.startBlock(write);
       }
       const key = `${JSON.stringify(f.name)}:`;
-      if (!dynamic) jsonRaw(w, `${n > 0 ? "," : ""}${key}`);
+      if (!dynamic) this.jsonRaw(w, `${n > 0 ? "," : ""}${key}`);
       else {
-        const [was, comma, bare] = [temp(), label(), label()];
-        emit(`${was} = load i1, ptr ${wrote}`);
-        emit(`br i1 ${was}, label %${comma}, label %${bare}`);
-        startBlock(comma);
-        jsonRaw(w, ",");
-        emit(`br label %${bare}`);
-        startBlock(bare);
-        jsonRaw(w, key);
-        emit(`store i1 true, ptr ${wrote}`);
+        const [was, comma, bare] = [this.temp(), this.label(), this.label()];
+        this.emit(`${was} = load i1, ptr ${wrote}`);
+        this.emit(`br i1 ${was}, label %${comma}, label %${bare}`);
+        this.startBlock(comma);
+        this.jsonRaw(w, ",");
+        this.emit(`br label %${bare}`);
+        this.startBlock(bare);
+        this.jsonRaw(w, key);
+        this.emit(`store i1 true, ptr ${wrote}`);
       }
-      jsonWrite(w, x, f.type);
-      emit(`br label %${after}`);
-      startBlock(after);
+      this.jsonWrite(w, x, f.type);
+      this.emit(`br label %${after}`);
+      this.startBlock(after);
     });
-    jsonRaw(w, "}");
+    this.jsonRaw(w, "}");
   }
+
 
   // `bare` writes the elements alone, each after a comma, as a rest tuple's follow its fixed ones.
-  function jsonElements(w: string, v: string, t: ArrayType | FixedType, written: Type, bare = false) {
-    const element = llvm(typing.lower(typing.rec(t).element));
-    const [length, data] = [temp(), temp()];
-    if (typing.rec(t).kind === "array") {
-      emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
-      emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+  jsonElements(this: Mut<this>, w: string, v: string, t: ArrayType | FixedType, written: Type, bare = false) {
+    const element = this.llvm(this.typing.lower(this.typing.rec(t).element));
+    const [length, data] = [this.temp(), this.temp()];
+    if (this.typing.rec(t).kind === "array") {
+      this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+      this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
     } else {
-      const slot = alloca(llvm(t));
-      emit(`store ${llvm(t)} ${v}, ptr ${slot}`);
-      emit(`${length} = add i64 0, ${typing.rec(t as FixedType).size}`);
-      emit(`${data} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 0`);
+      const slot = this.alloca(this.llvm(t));
+      this.emit(`store ${this.llvm(t)} ${v}, ptr ${slot}`);
+      this.emit(`${length} = add i64 0, ${this.typing.rec(t as FixedType).size}`);
+      this.emit(`${data} = getelementptr ${this.llvm(t)}, ptr ${slot}, i32 0, i32 0`);
     }
-    if (!bare) jsonRaw(w, "[");
-    const index = alloca("i64");
-    emit(`store i64 0, ptr ${index}`);
-    const [head, loop, comma, item, done] = [label(), label(), label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${more} = icmp slt i64 ${i}, ${length}`);
-    emit(`br i1 ${more}, label %${loop}, label %${done}`);
-    startBlock(loop);
-    const first = bare ? "false" : temp();
-    if (!bare) emit(`${first} = icmp eq i64 ${i}, 0`);
-    emit(`br i1 ${first}, label %${item}, label %${comma}`);
-    startBlock(comma);
-    jsonRaw(w, ",");
-    emit(`br label %${item}`);
-    startBlock(item);
-    const [at, x, next] = [temp(), temp(), temp()];
-    emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
-    emit(`${x} = load ${element}, ptr ${at}`);
-    jsonWrite(w, x, written);
-    emit(`${next} = add i64 ${i}, 1`);
-    emit(`store i64 ${next}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
-    if (!bare) jsonRaw(w, "]");
+    if (!bare) this.jsonRaw(w, "[");
+    const index = this.alloca("i64");
+    this.emit(`store i64 0, ptr ${index}`);
+    const [head, loop, comma, item, done] = [this.label(), this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [i, more] = [this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp slt i64 ${i}, ${length}`);
+    this.emit(`br i1 ${more}, label %${loop}, label %${done}`);
+    this.startBlock(loop);
+    const first = bare ? "false" : this.temp();
+    if (!bare) this.emit(`${first} = icmp eq i64 ${i}, 0`);
+    this.emit(`br i1 ${first}, label %${item}, label %${comma}`);
+    this.startBlock(comma);
+    this.jsonRaw(w, ",");
+    this.emit(`br label %${item}`);
+    this.startBlock(item);
+    const [at, x, next] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
+    this.emit(`${x} = load ${element}, ptr ${at}`);
+    this.jsonWrite(w, x, written);
+    this.emit(`${next} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${next}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
+    if (!bare) this.jsonRaw(w, "]");
   }
 
+
   // The string `console.log` prints for a value: its tree, laid out by the runtime.
-  function inspected(v: string, type: Type): string {
-    const tree = inspectTree(v, type);
-    const text = temp();
-    emit(`${text} = call ptr @fsh_rt_insp_done(ptr ${tree})`);
+  inspected(this: Mut<this>, v: string, type: Type): string {
+    const tree = this.inspectTree(v, type);
+    const text = this.temp();
+    this.emit(`${text} = call ptr @fsh_rt_insp_done(ptr ${tree})`);
     return text;
   }
 
+
   // util.format's call: each argument described for the runtime's routine, which formats them.
-  function formatted(e: Extract<Expr, { kind: "call" }>): string {
+  formatted(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): string {
     const n = e.args.length;
-    const slots = alloca(`[${n} x ${FARG}]`);
-    const needs = formatNeeds(e.args);
+    const slots = this.alloca(`[${n} x ${FARG}]`);
+    const needs = this.formatNeeds(e.args);
     e.args.forEach((a, i) => {
-      const v = a.kind === "string" ? text(a.value) : operand(a, e.args.slice(i + 1));
-      const at = temp();
-      emit(`${at} = getelementptr [${n} x ${FARG}], ptr ${slots}, i32 0, i32 ${i}`);
-      describe(at, v, printedType(a), needs[i]!);
+      const v = a.kind === "string" ? this.text(a.value) : this.operand(a, e.args.slice(i + 1));
+      const at = this.temp();
+      this.emit(`${at} = getelementptr [${n} x ${FARG}], ptr ${slots}, i32 0, i32 ${i}`);
+      this.describe(at, v, this.printedType(a), needs[i]!);
     });
-    const result = temp();
-    unwinding(`call ptr @fsh_rt_format(ptr ${slots}, i64 ${n}, ptr ${panicAt(e)})`, result);
-    if (!types.has(e)) pending.push({ v: result, type: "string" });
+    const result = this.temp();
+    this.unwinding(`call ptr @fsh_rt_format(ptr ${slots}, i64 ${n}, ptr ${this.panicAt(e)})`, result);
+    if (!this.types.has(e)) this.pending.push({ v: result, type: "string" });
     return result;
   }
 
-  function printedType(a: Expr): Type {
-    return a.kind === "string" ? "string" : (current.spelled?.get(a) ?? valueType(a));
+
+  printedType(this: Mut<this>, a: Expr): Type {
+    return a.kind === "string" ? "string" : (this.current.spelled?.get(a) ?? this.valueType(a));
   }
+
 
   // Whether a first argument may be a format, a string with more arguments after it, as Node
   // formats one: a literal holding a percent sign, or a string known only at run time.
-  function formats(args: Expr[]): boolean {
+  formats(this: Mut<this>, args: Expr[]): boolean {
     const [first] = args;
     if (!first || args.length < 2) return false;
     if (first.kind === "string") return first.value.includes("%");
-    const t = typing.lower(printedType(first));
+    const t = this.typing.lower(this.printedType(first));
     const text = (m: Type) => {
-      const r = recOf(m);
+      const r = this.recOf(m);
       return m === "string" || (r?.kind === "literal" && typeof r.value === "string");
     };
-    const r = recOf(t);
+    const r = this.recOf(t);
     return text(t) || (r?.kind === "union" && r.members.some(text));
   }
 
+
   // What each argument's description needs: a literal format says which specifier takes each,
   // so only that is built; one read at run time may ask anything of any.
-  function formatNeeds(args: Expr[]): { text: boolean; depth: i64 }[] {
+  formatNeeds(this: Mut<this>, args: Expr[]): { text: boolean; depth: i64 }[] {
     const [first] = args;
     if (first?.kind !== "string" || args.length < 2) {
-      const inspected = !formats(args);
+      const inspected = !this.formats(args);
       return args.map(() => (inspected ? { text: false, depth: 2 } : { text: true, depth: 4 }));
     }
     const { specs, rest } = formatPlan(first.value, args.length);
@@ -4580,41 +5015,42 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     });
   }
 
+
   // An argument's description: its kind and value, and for a value with parts its String(x) when
   // `need.text` and its inspect tree, cut at `need.depth`, when that isn't -1. A union is
   // described by its member.
-  function describe(at: string, v: string, type: Type, need: { text: boolean; depth: i64 }) {
-    const t = typing.lower(type);
-    const r = recOf(t);
+  describe(this: Mut<this>, at: string, v: string, type: Type, need: { text: boolean; depth: i64 }) {
+    const t = this.typing.lower(type);
+    const r = this.recOf(t);
     const put = (index: usize, of: string, x: string) => {
-      const p = temp();
-      emit(`${p} = getelementptr ${FARG}, ptr ${at}, i32 0, i32 ${index}`);
-      emit(`store ${of} ${x}, ptr ${p}`);
+      const p = this.temp();
+      this.emit(`${p} = getelementptr ${FARG}, ptr ${at}, i32 0, i32 ${index}`);
+      this.emit(`store ${of} ${x}, ptr ${p}`);
     };
     const whole = (kind: i32, x: string) => {
       put(0, "i32", String(kind));
       put(1, "i64", x);
     };
     if (r?.kind === "union") {
-      const members = writtenMembers(type, t as UnionType);
-      const tag = temp();
-      emit(`${tag} = extractvalue ${llvm(t)} ${v}, 0`);
-      const cases = r.members.map(() => label());
-      const end = label();
-      emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+      const members = this.writtenMembers(type, t as UnionType);
+      const tag = this.temp();
+      this.emit(`${tag} = extractvalue ${this.llvm(t)} ${v}, 0`);
+      const cases = r.members.map(() => this.label());
+      const end = this.label();
+      this.emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
       r.members.forEach((m, i) => {
-        startBlock(cases[i]!);
-        describe(at, convert(v, t, m), members[i]!, need);
-        emit(`br label %${end}`);
+        this.startBlock(cases[i]!);
+        this.describe(at, this.convert(v, t, m), members[i]!, need);
+        this.emit(`br label %${end}`);
       });
-      startBlock(end);
+      this.startBlock(end);
       return;
     }
     if (r?.kind === "literal") {
       const x = r.value;
       if (typeof x === "string") {
         put(0, "i32", String(FARG_KINDS.string));
-        put(3, "ptr", text(x));
+        put(3, "ptr", this.text(x));
       } else if (typeof x === "boolean") whole(FARG_KINDS.boolean, x ? "1" : "0");
       else whole(FARG_KINDS.int, String(x));
       return;
@@ -4623,15 +5059,15 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       put(0, "i32", String(FARG_KINDS.string));
       put(3, "ptr", v);
     } else if (t === "boolean") {
-      const x = temp();
-      emit(`${x} = zext i1 ${v} to i64`);
+      const x = this.temp();
+      this.emit(`${x} = zext i1 ${v} to i64`);
       whole(FARG_KINDS.boolean, x);
     } else if (t === "null" || t === "void" || t === "never") put(0, "i32", String(FARG_KINDS.null));
     else if (isFloat(t)) {
       let x = v;
       if (t === "f32") {
-        x = temp();
-        emit(`${x} = fpext float ${v} to double`);
+        x = this.temp();
+        this.emit(`${x} = fpext float ${v} to double`);
       }
       whole(FARG_KINDS.float, t === "f32" ? "1" : "0");
       put(2, "double", x);
@@ -4639,1000 +5075,1022 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       put(0, "i32", String(t === "bigint" ? FARG_KINDS.bigint : FARG_KINDS.digits));
       // Made inside a union member's block, the text is freed by the runtime once read, as a
       // value with parts' is.
-      const digits = temp();
-      if (t === "bigint") emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
-      else emit(`${digits} = call ptr @fsh_rt_str_from_${INTEGERS[t as Integer].signed ? "i" : "u"}128(i128 ${v})`);
+      const digits = this.temp();
+      if (t === "bigint") this.emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
+      else this.emit(`${digits} = call ptr @fsh_rt_str_from_${INTEGERS[t as Integer].signed ? "i" : "u"}128(i128 ${v})`);
       put(3, "ptr", digits);
       put(4, "ptr", "null");
     } else if (isInteger(t)) {
       const { bits, signed } = INTEGERS[t];
       let x = v;
       if (bits < 64) {
-        x = temp();
-        emit(`${x} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+        x = this.temp();
+        this.emit(`${x} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
       }
       whole(signed ? FARG_KINDS.int : FARG_KINDS.uint, x);
     } else {
       put(0, "i32", String(FARG_KINDS.parts));
-      put(3, "ptr", need.text ? jsText(v, type) : "null");
-      put(4, "ptr", need.depth >= 0 ? inspectTree(v, type, String(2 - need.depth)) : "null");
+      put(3, "ptr", need.text ? this.jsText(v, type) : "null");
+      put(4, "ptr", need.depth >= 0 ? this.inspectTree(v, type, String(2 - need.depth)) : "null");
     }
   }
+
 
   // JavaScript's String(x) of a value with parts, a new string: an array's elements joined by
   // commas, an empty one's as nothing; an object or instance is `[object Object]`.
-  function jsText(v: string, type: Type): string {
-    const [b, s] = [temp(), temp()];
-    emit(`${b} = call ptr @fsh_rt_text_new()`);
-    jsTextInto(b, v, type);
-    emit(`${s} = call ptr @fsh_rt_text_done(ptr ${b})`);
+  jsText(this: Mut<this>, v: string, type: Type): string {
+    const [b, s] = [this.temp(), this.temp()];
+    this.emit(`${b} = call ptr @fsh_rt_text_new()`);
+    this.jsTextInto(b, v, type);
+    this.emit(`${s} = call ptr @fsh_rt_text_done(ptr ${b})`);
     return s;
   }
 
-  function jsTextInto(b: string, v: string, type: Type) {
-    const t = typing.lower(type);
-    const raw = (s: string) => emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${cString(s)})`);
-    const literal = recOf(t);
+
+  jsTextInto(this: Mut<this>, b: string, v: string, type: Type) {
+    const t = this.typing.lower(type);
+    const raw = (s: string) => this.emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${this.cString(s)})`);
+    const literal = this.recOf(t);
     if (literal?.kind === "literal") return raw(String(literal.value));
-    if (t === "string") return emit(`call void @fsh_rt_text_add(ptr ${b}, ptr ${v})`);
+    if (t === "string") return this.emit(`call void @fsh_rt_text_add(ptr ${b}, ptr ${v})`);
     if (t === "null" || t === "void" || t === "never") return;
     if (t === "boolean") {
-      const word = temp();
-      emit(`${word} = select i1 ${v}, ptr ${cString("true")}, ptr ${cString("false")}`);
-      return emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${word})`);
+      const word = this.temp();
+      this.emit(`${word} = select i1 ${v}, ptr ${this.cString("true")}, ptr ${this.cString("false")}`);
+      return this.emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${word})`);
     }
-    if (isFloat(t)) return emit(`call void @fsh_rt_text_${t}(ptr ${b}, ${llvm(t)} ${v})`);
+    if (isFloat(t)) return this.emit(`call void @fsh_rt_text_${t}(ptr ${b}, ${this.llvm(t)} ${v})`);
     if (t === "bigint") {
-      const digits = temp();
-      emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
-      emit(`call void @fsh_rt_text_add(ptr ${b}, ptr ${digits})`);
-      return emit(`call void @fsh_rt_str_release(ptr ${digits})`);
+      const digits = this.temp();
+      this.emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
+      this.emit(`call void @fsh_rt_text_add(ptr ${b}, ptr ${digits})`);
+      return this.emit(`call void @fsh_rt_str_release(ptr ${digits})`);
     }
     if (isInteger(t)) {
       const { bits, signed } = INTEGERS[t];
-      if (bits === 128) return emit(`call void @fsh_rt_text_${signed ? "i" : "u"}128(ptr ${b}, i128 ${v})`);
+      if (bits === 128) return this.emit(`call void @fsh_rt_text_${signed ? "i" : "u"}128(ptr ${b}, i128 ${v})`);
       let x = v;
       if (bits < 64) {
-        x = temp();
-        emit(`${x} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+        x = this.temp();
+        this.emit(`${x} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
       }
-      return emit(`call void @fsh_rt_text_${signed ? "i64" : "u64"}(ptr ${b}, i64 ${x})`);
+      return this.emit(`call void @fsh_rt_text_${signed ? "i64" : "u64"}(ptr ${b}, i64 ${x})`);
     }
     if (typeof t === "string") return;
-    const r = typing.rec(t);
+    const r = this.typing.rec(t);
     if (r.kind === "union") {
-      const tag = temp();
-      emit(`${tag} = extractvalue ${llvm(t)} ${v}, 0`);
-      const cases = r.members.map(() => label());
-      const end = label();
-      emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+      const tag = this.temp();
+      this.emit(`${tag} = extractvalue ${this.llvm(t)} ${v}, 0`);
+      const cases = r.members.map(() => this.label());
+      const end = this.label();
+      this.emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
       r.members.forEach((m, i) => {
-        startBlock(cases[i]!);
-        jsTextInto(b, convert(v, t, m), m);
-        emit(`br label %${end}`);
+        this.startBlock(cases[i]!);
+        this.jsTextInto(b, this.convert(v, t, m), m);
+        this.emit(`br label %${end}`);
       });
-      startBlock(end);
+      this.startBlock(end);
       return;
     }
     if (r.kind === "map") return raw(r.set ? "[object Set]" : r.dict ? "[object Object]" : "[object Map]");
     if (r.kind === "regex") return raw(`/${r.source}/${r.flags}`);
-    if (r.kind !== "array" && r.kind !== "fixed" && r.kind !== "ref" && r.kind !== "recursive" && !(r.kind === "object" && typing.isTuple(t))) return raw("[object Object]");
-    let name = stringers.get(t);
+    if (r.kind !== "array" && r.kind !== "fixed" && r.kind !== "ref" && r.kind !== "recursive" && !(r.kind === "object" && this.typing.isTuple(t))) return raw("[object Object]");
+    let name = this.stringers.get(t);
     if (!name) {
-      name = `@fsh.text.${stableId("text", typing.described(t), t)}`;
-      stringers.set(t, name);
-      const saved = { allocas, body, temps, labels, block, pending, scopes };
-      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-      jsTextParts("%b", "%v", t);
-      emit("ret void");
-      out.push(`define internal void ${name}(${llvm(t)} %v, ptr %b) {`, "entry:", ...allocas, ...body, "}", "");
-      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+      name = `@fsh.text.${this.stableId("text", this.typing.described(t), t)}`;
+      this.stringers.set(t, name);
+      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
+      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+      this.jsTextParts("%b", "%v", t);
+      this.emit("ret void");
+      this.out.push(`define internal void ${name}(${this.llvm(t)} %v, ptr %b) {`, "entry:", ...this.allocas, ...this.body, "}", "");
+      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
     }
-    emit(`call void ${name}(${llvm(t)} ${v}, ptr ${b})`);
+    this.emit(`call void ${name}(${this.llvm(t)} ${v}, ptr ${b})`);
   }
+
 
   // What an array, a tuple or a reference writes for String(x).
-  function jsTextParts(b: string, v: string, t: Exclude<Type, string>) {
-    const r = typing.rec(t);
+  jsTextParts(this: Mut<this>, b: string, v: string, t: Exclude<Type, string>) {
+    const r = this.typing.rec(t);
     if (r.kind === "ref" || r.kind === "recursive") {
       const to = r.kind === "ref" ? r.to : r.of;
-      const held = temp();
-      emit(`${held} = load ${llvm(typing.lower(to))}, ptr ${v}`);
-      return jsTextInto(b, held, to);
+      const held = this.temp();
+      this.emit(`${held} = load ${this.llvm(this.typing.lower(to))}, ptr ${v}`);
+      return this.jsTextInto(b, held, to);
     }
-    const comma = () => emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${cString(",")})`);
+    const comma = () => this.emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${this.cString(",")})`);
     if (r.kind === "object") {
-      const [order, rest] = tupleOrder(t as ObjectType);
-      const length = r.required === undefined ? undefined : tupleLength(v, t as ObjectType);
-      order.forEach(({ f, i }, n) => present(length, n, () => {
+      const [order, rest] = this.tupleOrder(t as ObjectType);
+      const length = r.required === undefined ? undefined : this.tupleLength(v, t as ObjectType);
+      order.forEach(({ f, i }, n) => this.present(length, n, () => {
         if (n > 0) comma();
-        const x = temp();
-        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
-        jsTextInto(b, x, f.type);
+        const x = this.temp();
+        this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${i}`);
+        this.jsTextInto(b, x, f.type);
       }));
       if (!rest) return;
-      const many = temp();
-      emit(`${many} = extractvalue ${llvm(t)} ${v}, ${rest.i}`);
-      return jsElements(b, many, rest.f.type as ArrayType, order.length > 0);
+      const many = this.temp();
+      this.emit(`${many} = extractvalue ${this.llvm(t)} ${v}, ${rest.i}`);
+      return this.jsElements(b, many, rest.f.type as ArrayType, order.length > 0);
     }
-    if (r.kind === "array" || r.kind === "fixed") return jsElements(b, v, t as ArrayType | FixedType, false);
+    if (r.kind === "array" || r.kind === "fixed") return this.jsElements(b, v, t as ArrayType | FixedType, false);
   }
 
+
   // An array's elements, each after a comma but the first unless `after` says one came before.
-  function jsElements(b: string, v: string, t: ArrayType | FixedType, after: boolean) {
-    const element = llvm(typing.lower(typing.rec(t).element));
-    const [length, data] = [temp(), temp()];
-    if (typing.rec(t).kind === "array") {
-      emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
-      emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+  jsElements(this: Mut<this>, b: string, v: string, t: ArrayType | FixedType, after: boolean) {
+    const element = this.llvm(this.typing.lower(this.typing.rec(t).element));
+    const [length, data] = [this.temp(), this.temp()];
+    if (this.typing.rec(t).kind === "array") {
+      this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+      this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
     } else {
-      const slot = alloca(llvm(t));
-      emit(`store ${llvm(t)} ${v}, ptr ${slot}`);
-      emit(`${length} = add i64 0, ${typing.rec(t as FixedType).size}`);
-      emit(`${data} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 0`);
+      const slot = this.alloca(this.llvm(t));
+      this.emit(`store ${this.llvm(t)} ${v}, ptr ${slot}`);
+      this.emit(`${length} = add i64 0, ${this.typing.rec(t as FixedType).size}`);
+      this.emit(`${data} = getelementptr ${this.llvm(t)}, ptr ${slot}, i32 0, i32 0`);
     }
-    const index = alloca("i64");
-    emit(`store i64 0, ptr ${index}`);
-    const [head, loop, separate, write, done] = [label(), label(), label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${more} = icmp slt i64 ${i}, ${length}`);
-    emit(`br i1 ${more}, label %${loop}, label %${done}`);
-    startBlock(loop);
-    const first = temp();
-    emit(`${first} = icmp eq i64 ${i}, 0`);
-    emit(`br i1 ${after ? "false" : first}, label %${write}, label %${separate}`);
-    startBlock(separate);
-    emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${cString(",")})`);
-    emit(`br label %${write}`);
-    startBlock(write);
-    const [at, x, next] = [temp(), temp(), temp()];
-    emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
-    emit(`${x} = load ${element}, ptr ${at}`);
-    jsTextInto(b, x, typing.rec(t).element);
-    emit(`${next} = add i64 ${i}, 1`);
-    emit(`store i64 ${next}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
+    const index = this.alloca("i64");
+    this.emit(`store i64 0, ptr ${index}`);
+    const [head, loop, separate, write, done] = [this.label(), this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [i, more] = [this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp slt i64 ${i}, ${length}`);
+    this.emit(`br i1 ${more}, label %${loop}, label %${done}`);
+    this.startBlock(loop);
+    const first = this.temp();
+    this.emit(`${first} = icmp eq i64 ${i}, 0`);
+    this.emit(`br i1 ${after ? "false" : first}, label %${write}, label %${separate}`);
+    this.startBlock(separate);
+    this.emit(`call void @fsh_rt_text_raw(ptr ${b}, ptr ${this.cString(",")})`);
+    this.emit(`br label %${write}`);
+    this.startBlock(write);
+    const [at, x, next] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
+    this.emit(`${x} = load ${element}, ptr ${at}`);
+    this.jsTextInto(b, x, this.typing.rec(t).element);
+    this.emit(`${next} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${next}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
   }
+
 
   // A value's tree for the runtime's layout, through the function made for its type when it
   // has parts. The type as written is kept beside the lowered one, for how fields were spelled.
   // `depth` is how deep in the printed value this one sits, as Node counts it.
-  function inspectTree(v: string, type: Type, depth = "0"): string {
-    const t = typing.lower(type);
-    if (typeof t === "string" || typing.rec(t).kind === "literal") return inspectScalar(v, t);
-    const written = asWritten(type);
-    let name = inspectors.get(written);
+  inspectTree(this: Mut<this>, v: string, type: Type, depth = "0"): string {
+    const t = this.typing.lower(type);
+    if (typeof t === "string" || this.typing.rec(t).kind === "literal") return this.inspectScalar(v, t);
+    const written = this.asWritten(type);
+    let name = this.inspectors.get(written);
     if (!name) {
-      name = `@fsh.insp.${stableId("insp", typing.described(written), written)}`;
-      inspectors.set(written, name);
-      const saved = { allocas, body, temps, labels, block, pending, scopes };
-      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-      emit(`ret ptr ${inspectParts("%v", t, written)}`);
-      out.push(`define internal ptr ${name}(${llvm(t)} %v, i64 %d) {`, "entry:", ...allocas, ...body, "}", "");
-      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+      name = `@fsh.insp.${this.stableId("insp", this.typing.described(written), written)}`;
+      this.inspectors.set(written, name);
+      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
+      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+      this.emit(`ret ptr ${this.inspectParts("%v", t, written)}`);
+      this.out.push(`define internal ptr ${name}(${this.llvm(t)} %v, i64 %d) {`, "entry:", ...this.allocas, ...this.body, "}", "");
+      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
     }
-    const node = temp();
-    emit(`${node} = call ptr ${name}(${llvm(t)} ${v}, i64 ${depth})`);
+    const node = this.temp();
+    this.emit(`${node} = call ptr ${name}(${this.llvm(t)} ${v}, i64 ${depth})`);
     return node;
   }
 
-  function inspectScalar(v: string, t: Type): string {
-    const node = temp();
-    const literal = recOf(t);
+
+  inspectScalar(this: Mut<this>, v: string, t: Type): string {
+    const node = this.temp();
+    const literal = this.recOf(t);
     if (literal?.kind === "literal") {
       const { value } = literal;
       if (typeof value === "string") {
-        emit(`${node} = call ptr @fsh_rt_insp_string(ptr ${text(value)})`);
-      } else if (typeof value === "bigint") emit(`${node} = call ptr @fsh_rt_insp_i64(i64 ${value})`);
-      else emit(`${node} = call ptr @fsh_rt_insp_text(ptr ${cString(String(value))})`);
+        this.emit(`${node} = call ptr @fsh_rt_insp_string(ptr ${this.text(value)})`);
+      } else if (typeof value === "bigint") this.emit(`${node} = call ptr @fsh_rt_insp_i64(i64 ${value})`);
+      else this.emit(`${node} = call ptr @fsh_rt_insp_text(ptr ${this.cString(String(value))})`);
       return node;
     }
-    if (t === "null" || t === "never" || t === "void") emit(`${node} = call ptr @fsh_rt_insp_text(ptr ${cString("null")})`);
-    else if (t === "string") emit(`${node} = call ptr @fsh_rt_insp_string(ptr ${v})`);
-    else if (t === "bigint") emit(`${node} = call ptr @fsh_rt_insp_bigint(ptr ${v})`);
+    if (t === "null" || t === "never" || t === "void") this.emit(`${node} = call ptr @fsh_rt_insp_text(ptr ${this.cString("null")})`);
+    else if (t === "string") this.emit(`${node} = call ptr @fsh_rt_insp_string(ptr ${v})`);
+    else if (t === "bigint") this.emit(`${node} = call ptr @fsh_rt_insp_bigint(ptr ${v})`);
     else if (t === "boolean") {
-      const word = temp();
-      emit(`${word} = select i1 ${v}, ptr ${cString("true")}, ptr ${cString("false")}`);
-      emit(`${node} = call ptr @fsh_rt_insp_text(ptr ${word})`);
+      const word = this.temp();
+      this.emit(`${word} = select i1 ${v}, ptr ${this.cString("true")}, ptr ${this.cString("false")}`);
+      this.emit(`${node} = call ptr @fsh_rt_insp_text(ptr ${word})`);
     } else if (isFloat(t)) {
       let wide = v;
       if (t === "f32") {
-        wide = temp();
-        emit(`${wide} = fpext float ${v} to double`);
+        wide = this.temp();
+        this.emit(`${wide} = fpext float ${v} to double`);
       }
-      emit(`${node} = call ptr @fsh_rt_insp_f64(double ${wide}, i32 ${t === "f32" ? 1 : 0})`);
+      this.emit(`${node} = call ptr @fsh_rt_insp_f64(double ${wide}, i32 ${t === "f32" ? 1 : 0})`);
     } else {
       const { bits, signed } = INTEGERS[t as Integer];
       let wide = v;
       if (bits < 64) {
-        wide = temp();
-        emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+        wide = this.temp();
+        this.emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
       }
-      if (bits === 128) emit(`${node} = call ptr @fsh_rt_insp_${signed ? "i" : "u"}128(i128 ${v})`);
-      else emit(`${node} = call ptr @fsh_rt_insp_${signed ? "i64" : "u64"}(i64 ${wide})`);
+      if (bits === 128) this.emit(`${node} = call ptr @fsh_rt_insp_${signed ? "i" : "u"}128(i128 ${v})`);
+      else this.emit(`${node} = call ptr @fsh_rt_insp_${signed ? "i64" : "u64"}(i64 ${wide})`);
     }
     return node;
   }
 
+
   // The tree of a value with parts: elements, members, entries, a member's values, an object's
   // fields by name or an instance's as declared, a base's first. An empty field spelled `x?: T`
   // is left out, as Node leaves out a field that isn't there.
-  function inspectParts(v: string, t: Exclude<Type, string>, written: Type): string {
-    const r = typing.rec(t);
+  inspectParts(this: Mut<this>, v: string, t: Exclude<Type, string>, written: Type): string {
+    const r = this.typing.rec(t);
     if (r.kind === "ref" || r.kind === "recursive") {
       const to = r.kind === "ref" ? r.to : r.of;
-      const held = temp();
-      emit(`${held} = load ${llvm(typing.lower(to))}, ptr ${v}`);
-      return inspectTree(held, writtenPart(written, t, (x) => { const held = typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to, "%d");
+      const held = this.temp();
+      this.emit(`${held} = load ${this.llvm(this.typing.lower(to))}, ptr ${v}`);
+      return this.inspectTree(held, this.writtenPart(written, t, (x) => { const held = this.typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to, "%d");
     }
     // A typed array prints as an array under its name, an ArrayBuffer as its bytes in hex.
-    const typed = typing.typedName(written);
+    const typed = this.typing.typedName(written);
     if (typed === "ArrayBuffer") {
-      const [length, data, node] = [temp(), temp(), temp()];
-      emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
-      emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
-      emit(`${node} = call ptr @fsh_rt_insp_buffer(ptr ${data}, i64 ${length})`);
+      const [length, data, node] = [this.temp(), this.temp(), this.temp()];
+      this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+      this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+      this.emit(`${node} = call ptr @fsh_rt_insp_buffer(ptr ${data}, i64 ${length})`);
       return node;
     }
     const named = (node: string) => {
-      if (typed) emit(`call void @fsh_rt_insp_named(ptr ${node}, ptr ${cString(typed)})`);
+      if (typed) this.emit(`call void @fsh_rt_insp_named(ptr ${node}, ptr ${this.cString(typed)})`);
       return node;
     };
     // std's Date prints as its ISO string at any depth, as Node prints one.
-    const iso = r.kind === "class" ? instances.find((i) => bodyOf(noted.arenas, i).name === `${r.name}.toISOString` && bodyOf(noted.arenas, i).start >= STD_BASE) : undefined;
+    const iso = r.kind === "class" ? this.instances.find((i) => bodyOf(this.noted.arenas, i).name === `${r.name}.toISOString` && bodyOf(this.noted.arenas, i).start >= STD_BASE) : undefined;
     if (iso) {
-      const [self, text, node] = [alloca(llvm(t)), temp(), temp()];
-      emit(`store ${llvm(t)} ${v}, ptr ${self}`);
-      emit(`${text} = call ptr ${symbol(noted.arenas, iso)}(ptr ${self})`);
-      emit(`${node} = call ptr @fsh_rt_insp_raw(ptr ${text})`);
+      const [self, text, node] = [this.alloca(this.llvm(t)), this.temp(), this.temp()];
+      this.emit(`store ${this.llvm(t)} ${v}, ptr ${self}`);
+      this.emit(`${text} = call ptr ${this.symbol(this.noted.arenas, iso)}(ptr ${self})`);
+      this.emit(`${node} = call ptr @fsh_rt_insp_raw(ptr ${text})`);
       return node;
     }
     // Past depth 2 Node prints a value with parts as `[Object]`, or `{}` when it has none, so
     // only its size and keys are kept, which also bounds how deep this goes.
     if (r.kind !== "union" && r.kind !== "variant") {
-      const [deep, shell, full] = [temp(), label(), label()];
-      emit(`${deep} = icmp sgt i64 %d, 2`);
-      emit(`br i1 ${deep}, label %${shell}, label %${full}`);
-      startBlock(shell);
-      emit(`ret ptr ${named(inspectShell(v, t, written))}`);
-      startBlock(full);
+      const [deep, shell, full] = [this.temp(), this.label(), this.label()];
+      this.emit(`${deep} = icmp sgt i64 %d, 2`);
+      this.emit(`br i1 ${deep}, label %${shell}, label %${full}`);
+      this.startBlock(shell);
+      this.emit(`ret ptr ${named(this.inspectShell(v, t, written))}`);
+      this.startBlock(full);
     }
-    const next = temp();
-    emit(`${next} = add i64 %d, 1`);
-    if (r.kind === "array" || r.kind === "fixed") return named(inspectElements(v, t as ArrayType | FixedType, writtenPart(written, t, (x) => typing.rec(x as ArrayType).element) ?? r.element, next, typed === "Float32Array"));
-    if (r.kind === "map") return inspectEntries(v, t as MapType, writtenPart(written, t, (x) => typing.rec(x as MapType).value) ?? r.value, next);
+    const next = this.temp();
+    this.emit(`${next} = add i64 %d, 1`);
+    if (r.kind === "array" || r.kind === "fixed") return named(this.inspectElements(v, t as ArrayType | FixedType, this.writtenPart(written, t, (x) => this.typing.rec(x as ArrayType).element) ?? r.element, next, typed === "Float32Array"));
+    if (r.kind === "map") return this.inspectEntries(v, t as MapType, this.writtenPart(written, t, (x) => this.typing.rec(x as MapType).value) ?? r.value, next);
     if (r.kind === "union") {
-      const members = writtenMembers(written, t as UnionType);
-      const result = alloca("ptr");
-      const tag = temp();
-      emit(`${tag} = extractvalue ${llvm(t)} ${v}, 0`);
-      const done = label();
-      const cases = r.members.map(() => label());
-      emit(`switch i32 ${tag}, label %${done} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+      const members = this.writtenMembers(written, t as UnionType);
+      const result = this.alloca("ptr");
+      const tag = this.temp();
+      this.emit(`${tag} = extractvalue ${this.llvm(t)} ${v}, 0`);
+      const done = this.label();
+      const cases = r.members.map(() => this.label());
+      this.emit(`switch i32 ${tag}, label %${done} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
       r.members.forEach((m, i) => {
-        startBlock(cases[i]!);
-        const member = typing.lower(m);
+        this.startBlock(cases[i]!);
+        const member = this.typing.lower(m);
         let x = "zeroinitializer";
-        if (recOf(member)?.kind !== "literal" && member !== "null") {
-          const slot = alloca(llvm(t));
-          emit(`store ${llvm(t)} ${v}, ptr ${slot}`);
-          const at = temp();
-          x = temp();
-          emit(`${at} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 1`);
-          emit(`${x} = load ${llvm(member)}, ptr ${at}, align 8`);
+        if (this.recOf(member)?.kind !== "literal" && member !== "null") {
+          const slot = this.alloca(this.llvm(t));
+          this.emit(`store ${this.llvm(t)} ${v}, ptr ${slot}`);
+          const at = this.temp();
+          x = this.temp();
+          this.emit(`${at} = getelementptr ${this.llvm(t)}, ptr ${slot}, i32 0, i32 1`);
+          this.emit(`${x} = load ${this.llvm(member)}, ptr ${at}, align 8`);
         }
-        emit(`store ptr ${inspectTree(x, members[i]!, "%d")}, ptr ${result}`);
-        emit(`br label %${done}`);
+        this.emit(`store ptr ${this.inspectTree(x, members[i]!, "%d")}, ptr ${result}`);
+        this.emit(`br label %${done}`);
       });
-      startBlock(done);
-      const node = temp();
-      emit(`${node} = load ptr, ptr ${result}`);
+      this.startBlock(done);
+      const node = this.temp();
+      this.emit(`${node} = load ptr, ptr ${result}`);
       return node;
     }
     if (r.kind === "variant") {
-      const node = temp();
-      emit(`${node} = call ptr @fsh_rt_insp_variant(ptr ${cString(r.member)})`);
+      const node = this.temp();
+      this.emit(`${node} = call ptr @fsh_rt_insp_variant(ptr ${this.cString(r.member)})`);
       r.fields.forEach((f, i) => {
-        const x = temp();
-        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
-        emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, f.type, "%d")})`);
+        const x = this.temp();
+        this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${i}`);
+        this.emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${this.inspectTree(x, f.type, "%d")})`);
       });
       return node;
     }
     const object = t as ObjectType;
-    const spelled = writtenShape(written, t) as ObjectType | undefined;
-    const as = recOf(spelled)?.fields.length === typing.rec(object).fields.length ? typing.rec(spelled!).fields : typing.rec(object).fields;
-    if (r.kind === "object" && typing.isTuple(object)) {
-      const [order, rest] = tupleOrder(object);
-      const length = typing.rec(object).required === undefined ? undefined : tupleLength(v, object);
-      const node = temp();
-      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length ?? order.length})`);
+    const spelled = this.writtenShape(written, t) as ObjectType | undefined;
+    const as = this.recOf(spelled)?.fields.length === this.typing.rec(object).fields.length ? this.typing.rec(spelled!).fields : this.typing.rec(object).fields;
+    if (r.kind === "object" && this.typing.isTuple(object)) {
+      const [order, rest] = this.tupleOrder(object);
+      const length = this.typing.rec(object).required === undefined ? undefined : this.tupleLength(v, object);
+      const node = this.temp();
+      this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length ?? order.length})`);
       order.forEach(({ i }, n) => {
-        present(length, n, () => {
-          const x = temp();
-          emit(`${x} = extractvalue ${llvm(t)} ${v}, ${i}`);
-          emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, as[i]!.type, next)})`);
+        this.present(length, n, () => {
+          const x = this.temp();
+          this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${i}`);
+          this.emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${this.inspectTree(x, as[i]!.type, next)})`);
         });
       });
       // A rest tuple's further elements join its own, as one array.
       if (rest) {
-        const x = temp();
-        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${rest.i}`);
-        emit(`call void @fsh_rt_insp_append(ptr ${node}, ptr ${inspectElements(x, rest.f.type as ArrayType, typing.rec(as[rest.i]!.type as ArrayType).element, next)})`);
+        const x = this.temp();
+        this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${rest.i}`);
+        this.emit(`call void @fsh_rt_insp_append(ptr ${node}, ptr ${this.inspectElements(x, rest.f.type as ArrayType, this.typing.rec(as[rest.i]!.type as ArrayType).element, next)})`);
       }
       return node;
     }
-    const fields = r.kind === "class" ? jsonFields((writtenShape(written, t) as ClassType | undefined) ?? (t as ClassType)) : objectJsonFields(object, as);
-    if (r.kind === "class" && errorClass(t as ClassType)) return errorTree(v, t as ClassType, fields, next);
+    const fields = r.kind === "class" ? this.jsonFields((this.writtenShape(written, t) as ClassType | undefined) ?? (t as ClassType)) : this.objectJsonFields(object, as);
+    if (r.kind === "class" && this.errorClass(t as ClassType)) return this.errorTree(v, t as ClassType, fields, next);
     const name = r.kind === "class" ? r.name.replace(/[@<].*$/, "") : "";
-    const embedded = r.kind === "class" ? embeddedField(t as ClassType) : undefined;
-    let node = temp();
+    const embedded = r.kind === "class" ? this.embeddedField(t as ClassType) : undefined;
+    let node = this.temp();
     if (embedded) {
-      const x = temp();
-      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${embedded.path.join(", ")}`);
-      node = inspectEntries(x, embedded.type, typing.rec(embedded.type).value, next);
-      emit(`call void @fsh_rt_insp_named(ptr ${node}, ptr ${cString(name)})`);
-    } else emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString(name)})`);
+      const x = this.temp();
+      this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${embedded.path.join(", ")}`);
+      node = this.inspectEntries(x, embedded.type, this.typing.rec(embedded.type).value, next);
+      this.emit(`call void @fsh_rt_insp_named(ptr ${node}, ptr ${this.cString(name)})`);
+    } else this.emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${this.cString(name)})`);
     for (const f of fields) {
-      const x = temp();
-      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${f.path.join(", ")}`);
-      const after = label();
+      const x = this.temp();
+      this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${f.path.join(", ")}`);
+      const after = this.label();
       if (f.omit) {
-        const present = holds(x, typing.lower(f.type) as UnionType, typing.rec(typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
-        const write = label();
-        emit(`br i1 ${present}, label %${write}, label %${after}`);
-        startBlock(write);
+        const present = this.holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
+        const write = this.label();
+        this.emit(`br i1 ${present}, label %${write}, label %${after}`);
+        this.startBlock(write);
       }
-      emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${cString(f.name)}, ptr ${inspectTree(x, f.type, next)})`);
-      emit(`br label %${after}`);
-      startBlock(after);
+      this.emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${this.cString(f.name)}, ptr ${this.inspectTree(x, f.type, next)})`);
+      this.emit(`br label %${after}`);
+      this.startBlock(after);
     }
     return node;
   }
 
+
   // Whether a class is the prelude's Error, or extends it.
-  function errorClass(t: ClassType): boolean {
-    if (typing.rec(t).generic?.name === "AggregateError") return true;
-    for (let c: ClassType | undefined = t; c; c = typing.rec(c).base) if (typing.rec(c).name === "Error" && !typing.rec(c).generic) return true;
+  errorClass(this: Mut<this>, t: ClassType): boolean {
+    if (this.typing.rec(t).generic?.name === "AggregateError") return true;
+    for (let c: ClassType | undefined = t; c; c = this.typing.rec(c).base) if (this.typing.rec(c).name === "Error" && !this.typing.rec(c).generic) return true;
     return false;
   }
+
 
   // An Error as Node prints one with its stack left out: its header, then the fields beyond
   // Error's own and its cause, read through what ErrorLike gives.
   // `shell`, past the depth, it keeps only whether it has more than its header to show.
-  function errorTree(v: string, t: ClassType, fields: { name: string; type: Type; path: usize[]; omit?: boolean }[], depth: string, shell = false): string {
+  errorTree(this: Mut<this>, v: string, t: ClassType, fields: { name: string; type: Type; path: usize[]; omit?: boolean }[], depth: string, shell = false): string {
     const blank = () => {
-      const b = temp();
-      emit(`${b} = call ptr @fsh_rt_insp_text(ptr ${cString("")})`);
+      const b = this.temp();
+      this.emit(`${b} = call ptr @fsh_rt_insp_text(ptr ${this.cString("")})`);
       return b;
     };
-    const all = jsonFields(t);
+    const all = this.jsonFields(t);
     const read = (name: string) => {
       const f = all.find((x) => x.name === name)!;
-      const x = temp();
-      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${f.path.join(", ")}`);
+      const x = this.temp();
+      this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${f.path.join(", ")}`);
       return [x, f.type] as const;
     };
-    const node = temp();
-    emit(`${node} = call ptr @fsh_rt_insp_error(ptr ${cString(typing.rec(t).name.replace(/[@<].*$/, ""))}, ptr ${read("name")[0]}, ptr ${read("message")[0]})`);
+    const node = this.temp();
+    this.emit(`${node} = call ptr @fsh_rt_insp_error(ptr ${this.cString(this.typing.rec(t).name.replace(/[@<].*$/, ""))}, ptr ${read("name")[0]}, ptr ${read("message")[0]})`);
     // A JsError's JS value is left out, as printing one isn't supported yet.
-    const shown = fields.filter((f) => f.name !== "name" && f.name !== "message" && f.name !== "cause" && !(typing.rec(t).name === "JsError" && f.name === "value"));
+    const shown = fields.filter((f) => f.name !== "name" && f.name !== "message" && f.name !== "cause" && !(this.typing.rec(t).name === "JsError" && f.name === "value"));
     for (const f of shown) {
-      const x = temp();
-      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${f.path.join(", ")}`);
-      const after = label();
+      const x = this.temp();
+      this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${f.path.join(", ")}`);
+      const after = this.label();
       if (f.omit) {
-        const present = holds(x, typing.lower(f.type) as UnionType, typing.rec(typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
-        const write = label();
-        emit(`br i1 ${present}, label %${write}, label %${after}`);
-        startBlock(write);
+        const present = this.holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
+        const write = this.label();
+        this.emit(`br i1 ${present}, label %${write}, label %${after}`);
+        this.startBlock(write);
       }
       // An AggregateError's errors are shown as Node shows them, apart from its own fields.
-      const key = f.name === "errors" && typing.rec(t).generic?.name === "AggregateError" ? "[errors]" : f.name;
-      emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${cString(key)}, ptr ${shell ? blank() : inspectTree(x, f.type, depth)})`);
-      emit(`br label %${after}`);
-      startBlock(after);
+      const key = f.name === "errors" && this.typing.rec(t).generic?.name === "AggregateError" ? "[errors]" : f.name;
+      this.emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${this.cString(key)}, ptr ${shell ? blank() : this.inspectTree(x, f.type, depth)})`);
+      this.emit(`br label %${after}`);
+      this.startBlock(after);
     }
     if (fields.length === 0) return node;
     const [cause, held] = read("cause");
-    const option = typing.lower(held) as UnionType;
-    const dyn = typing.rec(option).members.find((m) => m !== "null") as DynType;
-    const [yes, after] = [label(), label()];
-    emit(`br i1 ${holds(cause, option, [dyn])}, label %${yes}, label %${after}`);
-    startBlock(yes);
+    const option = this.typing.lower(held) as UnionType;
+    const dyn = this.typing.rec(option).members.find((m) => m !== "null") as DynType;
+    const [yes, after] = [this.label(), this.label()];
+    this.emit(`br i1 ${this.holds(cause, option, [dyn])}, label %${yes}, label %${after}`);
+    this.startBlock(yes);
     let inner: string;
     if (shell) inner = blank();
     else {
-      const d = convert(cause, option, dyn);
-      const [data, table] = [temp(), temp()];
-      inner = temp();
-      emit(`${data} = extractvalue ${DYN} ${d}, 0`);
-      emit(`${table} = extractvalue ${DYN} ${d}, 1`);
+      const d = this.convert(cause, option, dyn);
+      const [data, table] = [this.temp(), this.temp()];
+      inner = this.temp();
+      this.emit(`${data} = extractvalue ${DYN} ${d}, 0`);
+      this.emit(`${table} = extractvalue ${DYN} ${d}, 1`);
       // The slot after its fields prints the boxed value as its own type does.
-      emit(`${inner} = call ptr ${vslot(table, typing.rec(typing.rec(dyn).of).methods.length + typing.rec(typing.rec(dyn).of).fields.length)}(ptr ${data}, i64 ${depth})`);
+      this.emit(`${inner} = call ptr ${this.vslot(table, this.typing.rec(this.typing.rec(dyn).of).methods.length + this.typing.rec(this.typing.rec(dyn).of).fields.length)}(ptr ${data}, i64 ${depth})`);
     }
-    emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${cString("[cause]")}, ptr ${inner})`);
-    emit(`br label %${after}`);
-    startBlock(after);
+    this.emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${this.cString("[cause]")}, ptr ${inner})`);
+    this.emit(`br label %${after}`);
+    this.startBlock(after);
     return node;
   }
 
+
   // A value past depth 2, as Node prints it there: its size, or its keys, with no parts inside.
-  function inspectShell(v: string, t: Exclude<Type, string>, written: Type): string {
-    const r = typing.rec(t);
-    const node = temp();
+  inspectShell(this: Mut<this>, v: string, t: Exclude<Type, string>, written: Type): string {
+    const r = this.typing.rec(t);
+    const node = this.temp();
     if (r.kind === "array" || r.kind === "fixed") {
       let length = String((r as FixedRecord).size);
       if (r.kind === "array") {
-        length = temp();
-        emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+        length = this.temp();
+        this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
       }
-      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length})`);
+      this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length})`);
       return node;
     }
-    if (r.kind === "map" && r.dict) return inspectEntries(v, t as MapType, t, "0", true);
+    if (r.kind === "map" && r.dict) return this.inspectEntries(v, t as MapType, t, "0", true);
     if (r.kind === "map") {
-      const size = temp();
-      emit(`${size} = call i64 @fsh_rt_map_size(ptr ${v})`);
-      emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${r.set ? 5 : 4}, i64 ${size})`);
+      const size = this.temp();
+      this.emit(`${size} = call i64 @fsh_rt_map_size(ptr ${v})`);
+      this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${r.set ? 5 : 4}, i64 ${size})`);
       return node;
     }
     const object = t as ObjectType;
-    if (r.kind === "object" && typing.isTuple(object)) {
-      emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${typing.rec(object).required === undefined && typing.rec(object).rest === undefined ? typing.rec(object).fields.length : tupleLength(v, object)})`);
+    if (r.kind === "object" && this.typing.isTuple(object)) {
+      this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${this.typing.rec(object).required === undefined && this.typing.rec(object).rest === undefined ? this.typing.rec(object).fields.length : this.tupleLength(v, object)})`);
       return node;
     }
-    const spelled = writtenShape(written, t) as ObjectType | undefined;
-    const as = recOf(spelled)?.fields.length === typing.rec(object).fields.length ? typing.rec(spelled!).fields : typing.rec(object).fields;
-    const fields = r.kind === "class" ? jsonFields((spelled as ClassType | undefined) ?? (t as ClassType)) : objectJsonFields(object, as);
+    const spelled = this.writtenShape(written, t) as ObjectType | undefined;
+    const as = this.recOf(spelled)?.fields.length === this.typing.rec(object).fields.length ? this.typing.rec(spelled!).fields : this.typing.rec(object).fields;
+    const fields = r.kind === "class" ? this.jsonFields((spelled as ClassType | undefined) ?? (t as ClassType)) : this.objectJsonFields(object, as);
     // Past the depth, an Error is its header alone, or its class's name when it has more to show.
-    if (r.kind === "class" && errorClass(t as ClassType)) return errorTree(v, t as ClassType, fields, "0", true);
-    const embedded = r.kind === "class" ? embeddedField(t as ClassType) : undefined;
+    if (r.kind === "class" && this.errorClass(t as ClassType)) return this.errorTree(v, t as ClassType, fields, "0", true);
+    const embedded = r.kind === "class" ? this.embeddedField(t as ClassType) : undefined;
     if (embedded) {
-      const [x, size] = [temp(), temp()];
-      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${embedded.path.join(", ")}`);
-      emit(`${size} = call i64 @fsh_rt_map_size(ptr ${x})`);
-      emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${typing.rec(embedded.type).set ? 5 : 4}, i64 ${size})`);
-      emit(`call void @fsh_rt_insp_named(ptr ${node}, ptr ${cString((r as { name: string }).name.replace(/[@<].*$/, ""))})`);
-    } else emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString(r.kind === "class" ? r.name.replace(/[@<].*$/, "") : "")})`);
+      const [x, size] = [this.temp(), this.temp()];
+      this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${embedded.path.join(", ")}`);
+      this.emit(`${size} = call i64 @fsh_rt_map_size(ptr ${x})`);
+      this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${this.typing.rec(embedded.type).set ? 5 : 4}, i64 ${size})`);
+      this.emit(`call void @fsh_rt_insp_named(ptr ${node}, ptr ${this.cString((r as { name: string }).name.replace(/[@<].*$/, ""))})`);
+    } else this.emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${this.cString(r.kind === "class" ? r.name.replace(/[@<].*$/, "") : "")})`);
     for (const f of fields) {
-      const after = label();
+      const after = this.label();
       if (f.omit) {
-        const x = temp();
-        emit(`${x} = extractvalue ${llvm(t)} ${v}, ${f.path.join(", ")}`);
-        const present = holds(x, typing.lower(f.type) as UnionType, typing.rec(typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
-        const write = label();
-        emit(`br i1 ${present}, label %${write}, label %${after}`);
-        startBlock(write);
+        const x = this.temp();
+        this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${f.path.join(", ")}`);
+        const present = this.holds(x, this.typing.lower(f.type) as UnionType, this.typing.rec(this.typing.lower(f.type) as UnionType).members.filter((m) => m !== "null"));
+        const write = this.label();
+        this.emit(`br i1 ${present}, label %${write}, label %${after}`);
+        this.startBlock(write);
       }
-      const blank = temp();
-      emit(`${blank} = call ptr @fsh_rt_insp_text(ptr ${cString("")})`);
-      emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${cString(f.name)}, ptr ${blank})`);
-      emit(`br label %${after}`);
-      startBlock(after);
+      const blank = this.temp();
+      this.emit(`${blank} = call ptr @fsh_rt_insp_text(ptr ${this.cString("")})`);
+      this.emit(`call void @fsh_rt_insp_field(ptr ${node}, ptr ${this.cString(f.name)}, ptr ${blank})`);
+      this.emit(`br label %${after}`);
+      this.startBlock(after);
     }
     return node;
   }
 
+
   // An array's first 100 elements, and how many it has.
-  function inspectElements(v: string, t: ArrayType | FixedType, written: Type, depth: string, wide = false): string {
-    const element = llvm(typing.lower(typing.rec(t).element));
-    const [length, data] = [temp(), temp()];
-    if (typing.rec(t).kind === "array") {
-      emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
-      emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
+  inspectElements(this: Mut<this>, v: string, t: ArrayType | FixedType, written: Type, depth: string, wide = false): string {
+    const element = this.llvm(this.typing.lower(this.typing.rec(t).element));
+    const [length, data] = [this.temp(), this.temp()];
+    if (this.typing.rec(t).kind === "array") {
+      this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
+      this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
     } else {
-      const slot = alloca(llvm(t));
-      emit(`store ${llvm(t)} ${v}, ptr ${slot}`);
-      emit(`${length} = add i64 0, ${typing.rec(t as FixedType).size}`);
-      emit(`${data} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 0`);
+      const slot = this.alloca(this.llvm(t));
+      this.emit(`store ${this.llvm(t)} ${v}, ptr ${slot}`);
+      this.emit(`${length} = add i64 0, ${this.typing.rec(t as FixedType).size}`);
+      this.emit(`${data} = getelementptr ${this.llvm(t)}, ptr ${slot}, i32 0, i32 0`);
     }
-    const node = temp();
-    emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length})`);
-    const [cap, kept] = [temp(), temp()];
-    emit(`${cap} = icmp slt i64 ${length}, 100`);
-    emit(`${kept} = select i1 ${cap}, i64 ${length}, i64 100`);
-    const index = alloca("i64");
-    emit(`store i64 0, ptr ${index}`);
-    const [head, loop, done] = [label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${more} = icmp slt i64 ${i}, ${kept}`);
-    emit(`br i1 ${more}, label %${loop}, label %${done}`);
-    startBlock(loop);
-    const [at, x, next] = [temp(), temp(), temp()];
-    emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
-    emit(`${x} = load ${element}, ptr ${at}`);
+    const node = this.temp();
+    this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length})`);
+    const [cap, kept] = [this.temp(), this.temp()];
+    this.emit(`${cap} = icmp slt i64 ${length}, 100`);
+    this.emit(`${kept} = select i1 ${cap}, i64 ${length}, i64 100`);
+    const index = this.alloca("i64");
+    this.emit(`store i64 0, ptr ${index}`);
+    const [head, loop, done] = [this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [i, more] = [this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp slt i64 ${i}, ${kept}`);
+    this.emit(`br i1 ${more}, label %${loop}, label %${done}`);
+    this.startBlock(loop);
+    const [at, x, next] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
+    this.emit(`${x} = load ${element}, ptr ${at}`);
     // A Float32Array's elements print as the doubles JavaScript reads them as.
     let shown = x;
     if (wide) {
-      shown = temp();
-      emit(`${shown} = fpext float ${x} to double`);
+      shown = this.temp();
+      this.emit(`${shown} = fpext float ${x} to double`);
     }
-    emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(shown, shown === x ? written : "f64", depth)})`);
-    emit(`${next} = add i64 ${i}, 1`);
-    emit(`store i64 ${next}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
+    this.emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${this.inspectTree(shown, shown === x ? written : "f64", depth)})`);
+    this.emit(`${next} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${next}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
     return node;
   }
+
 
   // A Map's or Set's live entries in order, its first 100, and how many it has.
   // A dictionary's entries are an object's fields, each value left blank past the depth as a
   // field's is, and are all printed, as an object's are.
-  function inspectEntries(map: string, t: MapType, written: Type, depth: string, shell = false): string {
-    const entry = entryType(t);
-    const dict = typing.rec(t).dict;
-    const [size, node] = [temp(), temp()];
-    emit(`${size} = call i64 @fsh_rt_map_size(ptr ${map})`);
-    if (dict) emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${cString("")})`);
-    else emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${typing.rec(t).set ? 5 : 4}, i64 ${size})`);
-    const order = dictOrder(t, map);
-    const [counter, taken] = [alloca("i64"), alloca("i64")];
-    emit(`store i64 0, ptr ${counter}`);
-    emit(`store i64 0, ptr ${taken}`);
-    const [test, live, loop, next, end] = [label(), label(), label(), label(), label()];
-    emit(`br label %${test}`);
-    startBlock(test);
-    const [i, used, more] = [temp(), temp(), temp()];
-    emit(`${i} = load i64, ptr ${counter}`);
-    emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
+  inspectEntries(this: Mut<this>, map: string, t: MapType, written: Type, depth: string, shell = false): string {
+    const entry = this.entryType(t);
+    const dict = this.typing.rec(t).dict;
+    const [size, node] = [this.temp(), this.temp()];
+    this.emit(`${size} = call i64 @fsh_rt_map_size(ptr ${map})`);
+    if (dict) this.emit(`${node} = call ptr @fsh_rt_insp_object(ptr ${this.cString("")})`);
+    else this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${this.typing.rec(t).set ? 5 : 4}, i64 ${size})`);
+    const order = this.dictOrder(t, map);
+    const [counter, taken] = [this.alloca("i64"), this.alloca("i64")];
+    this.emit(`store i64 0, ptr ${counter}`);
+    this.emit(`store i64 0, ptr ${taken}`);
+    const [test, live, loop, next, end] = [this.label(), this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${test}`);
+    this.startBlock(test);
+    const [i, used, more] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${counter}`);
+    this.emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
     // Node prints the first 100 entries, so the rest aren't built.
-    const [shown, room, going] = [temp(), temp(), temp()];
-    emit(`${shown} = load i64, ptr ${taken}`);
-    emit(`${room} = icmp slt i64 ${shown}, ${dict ? "9223372036854775807" : "100"}`);
-    emit(`${more} = icmp slt i64 ${i}, ${used}`);
-    emit(`${going} = and i1 ${more}, ${room}`);
-    emit(`br i1 ${going}, label %${live}, label %${end}`);
-    startBlock(live);
-    const [at, state, alive] = [temp(), temp(), temp()];
-    emit(`${at} = ${entryAt(map, order, i)}`);
-    emit(`${state} = load i64, ptr ${at}`);
-    emit(`${alive} = icmp eq i64 ${state}, 1`);
-    emit(`br i1 ${alive}, label %${loop}, label %${next}`);
-    startBlock(loop);
-    const counted = temp();
-    emit(`${counted} = add i64 ${shown}, 1`);
-    emit(`store i64 ${counted}, ptr ${taken}`);
-    const [keyAt, key] = [temp(), temp()];
-    emit(`${keyAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
-    emit(`${key} = load ${llvm(typing.lower(typing.rec(t).key))}, ptr ${keyAt}`);
+    const [shown, room, going] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${shown} = load i64, ptr ${taken}`);
+    this.emit(`${room} = icmp slt i64 ${shown}, ${dict ? "9223372036854775807" : "100"}`);
+    this.emit(`${more} = icmp slt i64 ${i}, ${used}`);
+    this.emit(`${going} = and i1 ${more}, ${room}`);
+    this.emit(`br i1 ${going}, label %${live}, label %${end}`);
+    this.startBlock(live);
+    const [at, state, alive] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${at} = ${this.entryAt(map, order, i)}`);
+    this.emit(`${state} = load i64, ptr ${at}`);
+    this.emit(`${alive} = icmp eq i64 ${state}, 1`);
+    this.emit(`br i1 ${alive}, label %${loop}, label %${next}`);
+    this.startBlock(loop);
+    const counted = this.temp();
+    this.emit(`${counted} = add i64 ${shown}, 1`);
+    this.emit(`store i64 ${counted}, ptr ${taken}`);
+    const [keyAt, key] = [this.temp(), this.temp()];
+    this.emit(`${keyAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
+    this.emit(`${key} = load ${this.llvm(this.typing.lower(this.typing.rec(t).key))}, ptr ${keyAt}`);
     if (dict) {
-      const x = temp();
-      if (shell) emit(`${x} = call ptr @fsh_rt_insp_text(ptr ${cString("")})`);
+      const x = this.temp();
+      if (shell) this.emit(`${x} = call ptr @fsh_rt_insp_text(ptr ${this.cString("")})`);
       else {
-        const valueAt = temp();
-        emit(`${valueAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
-        emit(`${x} = load ${llvm(typing.lower(typing.rec(t).value))}, ptr ${valueAt}`);
+        const valueAt = this.temp();
+        this.emit(`${valueAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
+        this.emit(`${x} = load ${this.llvm(this.typing.lower(this.typing.rec(t).value))}, ptr ${valueAt}`);
       }
-      emit(`call void @fsh_rt_insp_entry(ptr ${node}, ptr ${key}, ptr ${shell ? x : inspectTree(x, written, depth)})`);
-    } else emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(key, typing.rec(t).key, depth)})`);
-    if (!typing.rec(t).set && !dict) {
-      const [valueAt, x] = [temp(), temp()];
-      emit(`${valueAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
-      emit(`${x} = load ${llvm(typing.lower(typing.rec(t).value))}, ptr ${valueAt}`);
-      emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${inspectTree(x, written, depth)})`);
+      this.emit(`call void @fsh_rt_insp_entry(ptr ${node}, ptr ${key}, ptr ${shell ? x : this.inspectTree(x, written, depth)})`);
+    } else this.emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${this.inspectTree(key, this.typing.rec(t).key, depth)})`);
+    if (!this.typing.rec(t).set && !dict) {
+      const [valueAt, x] = [this.temp(), this.temp()];
+      this.emit(`${valueAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
+      this.emit(`${x} = load ${this.llvm(this.typing.lower(this.typing.rec(t).value))}, ptr ${valueAt}`);
+      this.emit(`call void @fsh_rt_insp_push(ptr ${node}, ptr ${this.inspectTree(x, written, depth)})`);
     }
-    emit(`br label %${next}`);
-    startBlock(next);
-    const step = temp();
-    emit(`${step} = add i64 ${i}, 1`);
-    emit(`store i64 ${step}, ptr ${counter}`);
-    emit(`br label %${test}`);
-    startBlock(end);
-    if (order) emit(`call void @fsh_rt_free(ptr ${order})`);
+    this.emit(`br label %${next}`);
+    this.startBlock(next);
+    const step = this.temp();
+    this.emit(`${step} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${step}, ptr ${counter}`);
+    this.emit(`br label %${test}`);
+    this.startBlock(end);
+    if (order) this.emit(`call void @fsh_rt_free(ptr ${order})`);
     return node;
   }
 
+
   // `JSON.parse<T>(s)`: s read as a T. A failure, or text left after the value, throws a
   // JsonError holding the reader's message.
-  function parseJsonCall(e: Extract<Expr, { kind: "call" }>): string {
-    const type = types.get(e)!;
-    const s = operand(e.args[0]!, []);
-    const r = temp();
-    emit(`${r} = call ptr @fsh_rt_json_in(ptr ${s})`);
-    const [ok, v] = jsonRead(r, type);
-    const [check, extra, bad, good] = [label(), label(), label(), label()];
-    emit(`br i1 ${ok}, label %${check}, label %${bad}`);
-    startBlock(check);
-    const [ended, whole] = [temp(), temp()];
-    emit(`${ended} = call i32 @fsh_rt_json_end(ptr ${r})`);
-    emit(`${whole} = icmp ne i32 ${ended}, 0`);
-    emit(`br i1 ${whole}, label %${good}, label %${extra}`);
-    startBlock(extra);
-    dispose(v, type);
-    emit(`br label %${bad}`);
-    startBlock(bad);
-    const [message, error] = [temp(), temp()];
-    emit(`${message} = call ptr @fsh_rt_json_close(ptr ${r})`);
-    const failure = current.raises.get(e)!.from;
-    emit(`${error} = insertvalue ${llvm(failure)} zeroinitializer, ptr ${message}, 0`);
-    raised(e, error);
-    startBlock(good);
-    const none = temp();
-    emit(`${none} = call ptr @fsh_rt_json_close(ptr ${r})`);
-    emit(`call void @fsh_rt_str_release(ptr ${none})`);
+  parseJsonCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): string {
+    const type = this.types.get(e)!;
+    const s = this.operand(e.args[0]!, []);
+    const r = this.temp();
+    this.emit(`${r} = call ptr @fsh_rt_json_in(ptr ${s})`);
+    const [ok, v] = this.jsonRead(r, type);
+    const [check, extra, bad, good] = [this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br i1 ${ok}, label %${check}, label %${bad}`);
+    this.startBlock(check);
+    const [ended, whole] = [this.temp(), this.temp()];
+    this.emit(`${ended} = call i32 @fsh_rt_json_end(ptr ${r})`);
+    this.emit(`${whole} = icmp ne i32 ${ended}, 0`);
+    this.emit(`br i1 ${whole}, label %${good}, label %${extra}`);
+    this.startBlock(extra);
+    this.dispose(v, type);
+    this.emit(`br label %${bad}`);
+    this.startBlock(bad);
+    const [message, error] = [this.temp(), this.temp()];
+    this.emit(`${message} = call ptr @fsh_rt_json_close(ptr ${r})`);
+    const failure = this.current.raises.get(e)!.from;
+    this.emit(`${error} = insertvalue ${this.llvm(failure)} zeroinitializer, ptr ${message}, 0`);
+    this.raised(e, error);
+    this.startBlock(good);
+    const none = this.temp();
+    this.emit(`${none} = call ptr @fsh_rt_json_close(ptr ${r})`);
+    this.emit(`call void @fsh_rt_str_release(ptr ${none})`);
     return v;
   }
 
+
   // Reads a value of a type through the function made for it, which reports whether it could.
-  function jsonRead(r: string, type: Type): [ok: string, v: string] {
-    const t = typing.lower(type);
-    let name = jsonReaders.get(t);
+  jsonRead(this: Mut<this>, r: string, type: Type): [ok: string, v: string] {
+    const t = this.typing.lower(type);
+    let name = this.jsonReaders.get(t);
     if (!name) {
-      name = `@fsh.json.read.${stableId("json.read", typing.described(t), t)}`;
-      jsonReaders.set(t, name);
-      const saved = { allocas, body, temps, labels, block, pending, scopes };
-      [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-      emit(`store ${llvm(t)} ${readParts("%r", t)}, ptr %out`);
-      emit("ret i1 true");
-      out.push(`define internal i1 ${name}(ptr %r, ptr %out) {`, "entry:", ...allocas, ...body, "}", "");
-      ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+      name = `@fsh.json.read.${this.stableId("json.read", this.typing.described(t), t)}`;
+      this.jsonReaders.set(t, name);
+      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
+      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+      this.emit(`store ${this.llvm(t)} ${this.readParts("%r", t)}, ptr %out`);
+      this.emit("ret i1 true");
+      this.out.push(`define internal i1 ${name}(ptr %r, ptr %out) {`, "entry:", ...this.allocas, ...this.body, "}", "");
+      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
     }
-    const [slot, ok, v] = [alloca(llvm(t)), temp(), temp()];
-    emit(`${ok} = call i1 ${name}(ptr ${r}, ptr ${slot})`);
-    emit(`${v} = load ${llvm(t)}, ptr ${slot}`);
+    const [slot, ok, v] = [this.alloca(this.llvm(t)), this.temp(), this.temp()];
+    this.emit(`${ok} = call i1 ${name}(ptr ${r}, ptr ${slot})`);
+    this.emit(`${v} = load ${this.llvm(t)}, ptr ${slot}`);
     return [ok, v];
   }
 
+
   // Goes on when a reading step succeeded, an i32 or i1 that isn't zero; otherwise the reading
   // function fails, after `undo` drops what it had made.
-  function jsonGuard(ok: string, width: "i32" | "i1", undo?: () => void) {
-    const [bad, good] = [label(), label()];
+  jsonGuard(this: Mut<this>, ok: string, width: "i32" | "i1", undo?: () => void) {
+    const [bad, good] = [this.label(), this.label()];
     let test = ok;
     if (width === "i32") {
-      test = temp();
-      emit(`${test} = icmp ne i32 ${ok}, 0`);
+      test = this.temp();
+      this.emit(`${test} = icmp ne i32 ${ok}, 0`);
     }
-    emit(`br i1 ${test}, label %${good}, label %${bad}`);
-    startBlock(bad);
+    this.emit(`br i1 ${test}, label %${good}, label %${bad}`);
+    this.startBlock(bad);
     undo?.();
-    emit("ret i1 false");
-    startBlock(good);
+    this.emit("ret i1 false");
+    this.startBlock(good);
   }
+
 
   // Fails the reading function with "expected <what>" at the reader's place.
-  function jsonExpected(r: string, what: string, undo?: () => void) {
-    const ignored = temp();
-    emit(`${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${cString(what)})`);
+  jsonExpected(this: Mut<this>, r: string, what: string, undo?: () => void) {
+    const ignored = this.temp();
+    this.emit(`${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${this.cString(what)})`);
     undo?.();
-    emit("ret i1 false");
-    startBlock(label());
+    this.emit("ret i1 false");
+    this.startBlock(this.label());
   }
 
+
   // A value of the type, read inside a reading function, which fails and returns where it can't.
-  function readParts(r: string, t: Type): string {
-    const literal = recOf(t);
-    if (literal?.kind === "literal") return readLiteral(r, t as LiteralType);
+  readParts(this: Mut<this>, r: string, t: Type): string {
+    const literal = this.recOf(t);
+    if (literal?.kind === "literal") return this.readLiteral(r, t as LiteralType);
     if (t === "null") {
-      const ok = temp();
-      emit(`${ok} = call i32 @fsh_rt_json_null(ptr ${r})`);
-      jsonGuard(ok, "i32");
+      const ok = this.temp();
+      this.emit(`${ok} = call i32 @fsh_rt_json_null(ptr ${r})`);
+      this.jsonGuard(ok, "i32");
       return "zeroinitializer";
     }
     if (t === "boolean") {
-      const [slot, ok, v, b] = [alloca("i32"), temp(), temp(), temp()];
-      emit(`${ok} = call i32 @fsh_rt_json_bool(ptr ${r}, ptr ${slot})`);
-      jsonGuard(ok, "i32");
-      emit(`${v} = load i32, ptr ${slot}`);
-      emit(`${b} = trunc i32 ${v} to i1`);
+      const [slot, ok, v, b] = [this.alloca("i32"), this.temp(), this.temp(), this.temp()];
+      this.emit(`${ok} = call i32 @fsh_rt_json_bool(ptr ${r}, ptr ${slot})`);
+      this.jsonGuard(ok, "i32");
+      this.emit(`${v} = load i32, ptr ${slot}`);
+      this.emit(`${b} = trunc i32 ${v} to i1`);
       return b;
     }
     if (t === "string") {
-      const [slot, ok, v] = [alloca("ptr"), temp(), temp()];
-      emit(`${ok} = call i32 @fsh_rt_json_text(ptr ${r}, ptr ${slot}, ptr ${cString("string")})`);
-      jsonGuard(ok, "i32");
-      emit(`${v} = load ptr, ptr ${slot}`);
+      const [slot, ok, v] = [this.alloca("ptr"), this.temp(), this.temp()];
+      this.emit(`${ok} = call i32 @fsh_rt_json_text(ptr ${r}, ptr ${slot}, ptr ${this.cString("string")})`);
+      this.jsonGuard(ok, "i32");
+      this.emit(`${v} = load ptr, ptr ${slot}`);
       return v;
     }
     if (isFloat(t)) {
-      const [slot, ok, v] = [alloca("double"), temp(), temp()];
-      emit(`${ok} = call i32 @fsh_rt_json_float(ptr ${r}, ptr ${slot}, ptr ${cString(t)})`);
-      jsonGuard(ok, "i32");
-      emit(`${v} = load double, ptr ${slot}`);
+      const [slot, ok, v] = [this.alloca("double"), this.temp(), this.temp()];
+      this.emit(`${ok} = call i32 @fsh_rt_json_float(ptr ${r}, ptr ${slot}, ptr ${this.cString(t)})`);
+      this.jsonGuard(ok, "i32");
+      this.emit(`${v} = load double, ptr ${slot}`);
       if (t === "f64") return v;
-      const narrow = temp();
-      emit(`${narrow} = fptrunc double ${v} to float`);
+      const narrow = this.temp();
+      this.emit(`${narrow} = fptrunc double ${v} to float`);
       return narrow;
     }
     if (typeof t === "string" && Object.hasOwn(INTEGERS, t)) {
       const { bits, signed } = INTEGERS[t as Integer];
-      const [slot, ok, v] = [alloca("i128"), temp(), temp()];
-      emit(`${ok} = call i32 @fsh_rt_json_int(ptr ${r}, ptr ${slot}, i32 ${bits}, i32 ${signed ? 1 : 0}, ptr ${cString(t)})`);
-      jsonGuard(ok, "i32");
-      emit(`${v} = load i128, ptr ${slot}`);
+      const [slot, ok, v] = [this.alloca("i128"), this.temp(), this.temp()];
+      this.emit(`${ok} = call i32 @fsh_rt_json_int(ptr ${r}, ptr ${slot}, i32 ${bits}, i32 ${signed ? 1 : 0}, ptr ${this.cString(t)})`);
+      this.jsonGuard(ok, "i32");
+      this.emit(`${v} = load i128, ptr ${slot}`);
       if (bits === 128) return v;
-      const narrow = temp();
-      emit(`${narrow} = trunc i128 ${v} to i${bits}`);
+      const narrow = this.temp();
+      this.emit(`${narrow} = trunc i128 ${v} to i${bits}`);
       return narrow;
     }
-    const c = typing.rec(t as Exclude<Type, string>);
+    const c = this.typing.rec(t as Exclude<Type, string>);
     if (c.kind === "recursive") {
-      const [ok, v] = jsonRead(r, c.of);
-      jsonGuard(ok, "i1");
-      return convert(v, c.of, t);
+      const [ok, v] = this.jsonRead(r, c.of);
+      this.jsonGuard(ok, "i1");
+      return this.convert(v, c.of, t);
     }
-    if (c.kind === "array") return readElements(r, t as Exclude<Type, string> as ArrayType);
-    if (c.kind === "map") return readEntries(r, t as Exclude<Type, string> as MapType);
-    if (c.kind === "union") return c.members.every((m) => recOf(m)?.kind === "variant") ? readVariant(r, t as Exclude<Type, string> as UnionType) : readMember(r, t as Exclude<Type, string> as UnionType);
-    if (c.kind === "variant") return readVariant(r, t as Exclude<Type, string> as VariantType);
-    if (c.kind === "object" && typing.isTuple(t)) return readTuple(r, t as Exclude<Type, string> as ObjectType);
-    const fields = c.kind === "class" ? jsonFields(t as Exclude<Type, string> as ClassType) : c.fields.map((f, i) => ({ name: f.name, type: f.type, path: [i] }));
-    return readObject(r, t as Exclude<Type, string>, fields);
+    if (c.kind === "array") return this.readElements(r, t as Exclude<Type, string> as ArrayType);
+    if (c.kind === "map") return this.readEntries(r, t as Exclude<Type, string> as MapType);
+    if (c.kind === "union") return c.members.every((m) => this.recOf(m)?.kind === "variant") ? this.readVariant(r, t as Exclude<Type, string> as UnionType) : this.readMember(r, t as Exclude<Type, string> as UnionType);
+    if (c.kind === "variant") return this.readVariant(r, t as Exclude<Type, string> as VariantType);
+    if (c.kind === "object" && this.typing.isTuple(t)) return this.readTuple(r, t as Exclude<Type, string> as ObjectType);
+    const fields = c.kind === "class" ? this.jsonFields(t as Exclude<Type, string> as ClassType) : c.fields.map((f, i) => ({ name: f.name, type: f.type, path: [i] }));
+    return this.readObject(r, t as Exclude<Type, string>, fields);
   }
 
+
   // A literal type's value, read as its base and checked; the error points at where it starts.
-  function readLiteral(r: string, t: LiteralType): string {
-    const [mark, start] = [alloca("[3 x i64]"), temp()];
-    emit(`${start} = call i32 @fsh_rt_json_peek(ptr ${r})`);
-    emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
-    const what = typeof typing.rec(t).value === "string" ? JSON.stringify(typing.rec(t).value) : String(typing.rec(t).value);
-    const base = typeof typing.rec(t).value === "string" ? "string" : typeof typing.rec(t).value === "boolean" ? "boolean" : "i64";
-    const v = readParts(r, base);
-    const same = temp();
+  readLiteral(this: Mut<this>, r: string, t: LiteralType): string {
+    const [mark, start] = [this.alloca("[3 x i64]"), this.temp()];
+    this.emit(`${start} = call i32 @fsh_rt_json_peek(ptr ${r})`);
+    this.emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
+    const what = typeof this.typing.rec(t).value === "string" ? JSON.stringify(this.typing.rec(t).value) : String(this.typing.rec(t).value);
+    const base = typeof this.typing.rec(t).value === "string" ? "string" : typeof this.typing.rec(t).value === "boolean" ? "boolean" : "i64";
+    const v = this.readParts(r, base);
+    const same = this.temp();
     if (base === "string") {
-      const found = temp();
-      emit(`${found} = call i32 @fsh_rt_json_same(ptr ${v}, ptr ${cString(typing.rec(t).value as string)}, i64 ${new TextEncoder().encode(typing.rec(t).value as string).length})`);
-      emit(`call void @fsh_rt_str_release(ptr ${v})`);
-      emit(`${same} = icmp ne i32 ${found}, 0`);
-    } else if (base === "boolean") emit(`${same} = icmp eq i1 ${v}, ${typing.rec(t).value}`);
-    else emit(`${same} = icmp eq i64 ${v}, ${String(typing.rec(t).value)}`);
-    jsonGuard(same, "i1", () => {
-      emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
-      const ignored = temp();
-      emit(`${ignored} = call i32 @fsh_rt_json_unlike(ptr ${r}, ptr ${cString(what)})`);
+      const found = this.temp();
+      this.emit(`${found} = call i32 @fsh_rt_json_same(ptr ${v}, ptr ${this.cString(this.typing.rec(t).value as string)}, i64 ${new TextEncoder().encode(this.typing.rec(t).value as string).length})`);
+      this.emit(`call void @fsh_rt_str_release(ptr ${v})`);
+      this.emit(`${same} = icmp ne i32 ${found}, 0`);
+    } else if (base === "boolean") this.emit(`${same} = icmp eq i1 ${v}, ${this.typing.rec(t).value}`);
+    else this.emit(`${same} = icmp eq i64 ${v}, ${String(this.typing.rec(t).value)}`);
+    this.jsonGuard(same, "i1", () => {
+      this.emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
+      const ignored = this.temp();
+      this.emit(`${ignored} = call i32 @fsh_rt_json_unlike(ptr ${r}, ptr ${this.cString(what)})`);
     });
     return "zeroinitializer";
   }
 
+
   // An array's elements, each pushed as it is read; a failure drops what was read. `after` reads
   // on from a rest tuple's fixed elements, `from` of them, which `undo` drops on a failure.
-  function readElements(r: string, t: ArrayType, after?: { from: usize; undo: () => void }): string {
-    const array = alloca(ARRAY);
-    emit(`store ${ARRAY} zeroinitializer, ptr ${array}`);
+  readElements(this: Mut<this>, r: string, t: ArrayType, after?: { from: usize; undo: () => void }): string {
+    const array = this.alloca(ARRAY);
+    this.emit(`store ${ARRAY} zeroinitializer, ptr ${array}`);
     const undo = () => {
       after?.undo();
-      const held = temp();
-      emit(`${held} = load ${ARRAY}, ptr ${array}`);
-      dispose(held, t);
+      const held = this.temp();
+      this.emit(`${held} = load ${ARRAY}, ptr ${array}`);
+      this.dispose(held, t);
     };
     if (!after) {
-      const opened = temp();
-      emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${cString("array")})`);
-      jsonGuard(opened, "i32");
+      const opened = this.temp();
+      this.emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${this.cString("array")})`);
+      this.jsonGuard(opened, "i32");
     }
-    const index = alloca("i64");
-    emit(`store i64 ${after?.from ?? 0}, ptr ${index}`);
-    const [head, item, done] = [label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [i, first, more] = [temp(), temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${first} = icmp eq i64 ${i}, 0`);
-    const wide = temp();
-    emit(`${wide} = zext i1 ${first} to i32`);
-    emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 93, i32 ${wide})`);
-    const [failed, ended] = [temp(), temp()];
-    emit(`${failed} = icmp slt i32 ${more}, 0`);
-    const [bad, ok] = [label(), label()];
-    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
-    startBlock(bad);
+    const index = this.alloca("i64");
+    this.emit(`store i64 ${after?.from ?? 0}, ptr ${index}`);
+    const [head, item, done] = [this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [i, first, more] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${index}`);
+    this.emit(`${first} = icmp eq i64 ${i}, 0`);
+    const wide = this.temp();
+    this.emit(`${wide} = zext i1 ${first} to i32`);
+    this.emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 93, i32 ${wide})`);
+    const [failed, ended] = [this.temp(), this.temp()];
+    this.emit(`${failed} = icmp slt i32 ${more}, 0`);
+    const [bad, ok] = [this.label(), this.label()];
+    this.emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    this.startBlock(bad);
     undo();
-    emit("ret i1 false");
-    startBlock(ok);
-    emit(`${ended} = icmp eq i32 ${more}, 0`);
-    emit(`br i1 ${ended}, label %${done}, label %${item}`);
-    startBlock(item);
-    const mark = temp();
-    emit(`${mark} = call i64 @fsh_rt_json_index_path(ptr ${r}, i64 ${i})`);
-    const [read, v] = jsonRead(r, typing.rec(t).element);
-    jsonGuard(read, "i1", undo);
-    emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
-    appended(array, typing.rec(t).element, v);
-    const next = temp();
-    emit(`${next} = add i64 ${i}, 1`);
-    emit(`store i64 ${next}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
-    const result = temp();
-    emit(`${result} = load ${ARRAY}, ptr ${array}`);
+    this.emit("ret i1 false");
+    this.startBlock(ok);
+    this.emit(`${ended} = icmp eq i32 ${more}, 0`);
+    this.emit(`br i1 ${ended}, label %${done}, label %${item}`);
+    this.startBlock(item);
+    const mark = this.temp();
+    this.emit(`${mark} = call i64 @fsh_rt_json_index_path(ptr ${r}, i64 ${i})`);
+    const [read, v] = this.jsonRead(r, this.typing.rec(t).element);
+    this.jsonGuard(read, "i1", undo);
+    this.emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
+    this.appended(array, this.typing.rec(t).element, v);
+    const next = this.temp();
+    this.emit(`${next} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${next}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
+    const result = this.temp();
+    this.emit(`${result} = load ${ARRAY}, ptr ${array}`);
     return result;
   }
 
+
   // A tuple's elements, exactly as many as it has, in order.
-  function readTuple(r: string, t: ObjectType): string {
-    const [order, rest] = tupleOrder(t);
-    const opened = temp();
-    emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${cString("array")})`);
-    jsonGuard(opened, "i32");
+  readTuple(this: Mut<this>, r: string, t: ObjectType): string {
+    const [order, rest] = this.tupleOrder(t);
+    const opened = this.temp();
+    this.emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${this.cString("array")})`);
+    this.jsonGuard(opened, "i32");
     const read: { v: string; type: Type; i: usize }[] = [];
     // Optional elements are read into slots, empty until read, since the array may end first.
-    const required = typing.rec(t).required ?? order.length;
+    const required = this.typing.rec(t).required ?? order.length;
     const slots = order.slice(required).map(({ f, i }) => {
-      const slot = alloca(llvm(typing.lower(f.type)));
-      emit(`store ${llvm(typing.lower(f.type))} ${convert("zeroinitializer", "null", f.type)}, ptr ${slot}`);
+      const slot = this.alloca(this.llvm(this.typing.lower(f.type)));
+      this.emit(`store ${this.llvm(this.typing.lower(f.type))} ${this.convert("zeroinitializer", "null", f.type)}, ptr ${slot}`);
       return { slot, type: f.type, i };
     });
     const loaded = (x: { slot: string; type: Type }) => {
-      const v = temp();
-      emit(`${v} = load ${llvm(typing.lower(x.type))}, ptr ${x.slot}`);
+      const v = this.temp();
+      this.emit(`${v} = load ${this.llvm(this.typing.lower(x.type))}, ptr ${x.slot}`);
       return v;
     };
     const undo = () => {
-      read.forEach((x) => dispose(x.v, x.type));
-      slots.forEach((x) => dispose(loaded(x), x.type));
+      read.forEach((x) => this.dispose(x.v, x.type));
+      slots.forEach((x) => this.dispose(loaded(x), x.type));
     };
     const what = rest ? `an array of at least ${order.length}` : required === order.length ? `an array of ${order.length}` : `an array of ${required} to ${order.length}`;
-    const finish = label();
+    const finish = this.label();
     // Whether an element follows, or with `wanted` 0 the array ends, failing on bad text.
     const step = (n: usize, wanted: 0 | 1) => {
-      const [more, readable, right] = [temp(), temp(), temp()];
-      emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 93, i32 ${n === 0 ? 1 : 0})`);
-      emit(`${readable} = icmp sge i32 ${more}, 0`);
-      jsonGuard(readable, "i1", undo);
-      emit(`${right} = icmp eq i32 ${more}, ${wanted}`);
+      const [more, readable, right] = [this.temp(), this.temp(), this.temp()];
+      this.emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 93, i32 ${n === 0 ? 1 : 0})`);
+      this.emit(`${readable} = icmp sge i32 ${more}, 0`);
+      this.jsonGuard(readable, "i1", undo);
+      this.emit(`${right} = icmp eq i32 ${more}, ${wanted}`);
       return right;
     };
     order.forEach(({ f, i }, n) => {
       const right = step(n, 1);
-      const [bad, good] = [label(), label()];
+      const [bad, good] = [this.label(), this.label()];
       // Where an optional element would be, the array may end instead.
-      emit(`br i1 ${right}, label %${good}, label %${n < required ? bad : finish}`);
+      this.emit(`br i1 ${right}, label %${good}, label %${n < required ? bad : finish}`);
       if (n < required) {
-        startBlock(bad);
-        jsonExpected(r, what, undo);
-        emit(`br label %${good}`);
+        this.startBlock(bad);
+        this.jsonExpected(r, what, undo);
+        this.emit(`br label %${good}`);
       }
-      startBlock(good);
-      const mark = temp();
-      emit(`${mark} = call i64 @fsh_rt_json_index_path(ptr ${r}, i64 ${n})`);
-      const [ok, v] = jsonRead(r, f.type);
-      jsonGuard(ok, "i1", undo);
-      emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
+      this.startBlock(good);
+      const mark = this.temp();
+      this.emit(`${mark} = call i64 @fsh_rt_json_index_path(ptr ${r}, i64 ${n})`);
+      const [ok, v] = this.jsonRead(r, f.type);
+      this.jsonGuard(ok, "i1", undo);
+      this.emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
       if (n < required) read.push({ v, type: f.type, i });
-      else emit(`store ${llvm(typing.lower(f.type))} ${v}, ptr ${slots[n - required]!.slot}`);
+      else this.emit(`store ${this.llvm(this.typing.lower(f.type))} ${v}, ptr ${slots[n - required]!.slot}`);
     });
     if (rest) {
       // The fixed elements dominate the rest's reads, so its failures can drop them.
-      read.push({ v: readElements(r, rest.f.type as ArrayType, { from: order.length, undo }), type: rest.f.type, i: rest.i });
+      read.push({ v: this.readElements(r, rest.f.type as ArrayType, { from: order.length, undo }), type: rest.f.type, i: rest.i });
     } else {
       const right = step(order.length, 0);
-      const [bad, good] = [label(), label()];
-      emit(`br i1 ${right}, label %${good}, label %${bad}`);
-      startBlock(bad);
-      jsonExpected(r, what, undo);
-      emit(`br label %${good}`);
-      startBlock(good);
+      const [bad, good] = [this.label(), this.label()];
+      this.emit(`br i1 ${right}, label %${good}, label %${bad}`);
+      this.startBlock(bad);
+      this.jsonExpected(r, what, undo);
+      this.emit(`br label %${good}`);
+      this.startBlock(good);
     }
-    emit(`br label %${finish}`);
-    startBlock(finish);
+    this.emit(`br label %${finish}`);
+    this.startBlock(finish);
     return [...read, ...slots.map((x) => ({ v: loaded(x), type: x.type, i: x.i }))].reduce((agg, x) => {
-      const next = temp();
-      emit(`${next} = insertvalue ${llvm(t)} ${agg}, ${llvm(typing.lower(x.type))} ${x.v}, ${x.i}`);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${this.llvm(t)} ${agg}, ${this.llvm(this.typing.lower(x.type))} ${x.v}, ${x.i}`);
       return next;
     }, "undef");
   }
 
+
   // An object's fields by key, in any order, unknown keys passed over and a repeated key's
   // last value kept, as JavaScript reads them; a missing field is an error unless it may be
   // empty. A failure drops the fields read so far.
-  function readObject(r: string, t: Exclude<Type, string>, fields: { name: string; type: Type; path: usize[] }[]) {
-    const slots = fields.map((f) => ({ ...f, slot: alloca(llvm(typing.lower(f.type))), seen: alloca("i1") }));
-    for (const f of slots) emit(`store i1 false, ptr ${f.seen}`);
+  readObject(this: Mut<this>, r: string, t: Exclude<Type, string>, fields: { name: string; type: Type; path: usize[] }[]) {
+    const slots = fields.map((f) => ({ ...f, slot: this.alloca(this.llvm(this.typing.lower(f.type))), seen: this.alloca("i1") }));
+    for (const f of slots) this.emit(`store i1 false, ptr ${f.seen}`);
     const undo = () => {
-      for (const f of slots.filter((f) => needsDrop(f.type))) {
-        const [was, drop, after, v] = [temp(), label(), label(), temp()];
-        emit(`${was} = load i1, ptr ${f.seen}`);
-        emit(`br i1 ${was}, label %${drop}, label %${after}`);
-        startBlock(drop);
-        emit(`${v} = load ${llvm(typing.lower(f.type))}, ptr ${f.slot}`);
-        dispose(v, f.type);
-        emit(`br label %${after}`);
-        startBlock(after);
+      for (const f of slots.filter((f) => this.needsDrop(f.type))) {
+        const [was, drop, after, v] = [this.temp(), this.label(), this.label(), this.temp()];
+        this.emit(`${was} = load i1, ptr ${f.seen}`);
+        this.emit(`br i1 ${was}, label %${drop}, label %${after}`);
+        this.startBlock(drop);
+        this.emit(`${v} = load ${this.llvm(this.typing.lower(f.type))}, ptr ${f.slot}`);
+        this.dispose(v, f.type);
+        this.emit(`br label %${after}`);
+        this.startBlock(after);
       }
     };
-    const opened = temp();
-    emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 123, ptr ${cString("object")})`);
-    jsonGuard(opened, "i32");
-    const first = alloca("i32");
-    emit(`store i32 1, ptr ${first}`);
-    const [head, entry, next, done] = [label(), label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [isFirst, more, failed, ended] = [temp(), temp(), temp(), temp()];
-    emit(`${isFirst} = load i32, ptr ${first}`);
-    emit(`store i32 0, ptr ${first}`);
-    emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 ${isFirst})`);
-    emit(`${failed} = icmp sge i32 ${more}, 0`);
-    jsonGuard(failed, "i1", undo);
-    emit(`${ended} = icmp eq i32 ${more}, 0`);
-    emit(`br i1 ${ended}, label %${done}, label %${entry}`);
-    startBlock(entry);
-    const [keySlot, gotKey, key] = [alloca("ptr"), temp(), temp()];
-    emit(`${gotKey} = call i32 @fsh_rt_json_key(ptr ${r}, ptr ${keySlot})`);
-    jsonGuard(gotKey, "i32", undo);
-    emit(`${key} = load ptr, ptr ${keySlot}`);
+    const opened = this.temp();
+    this.emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 123, ptr ${this.cString("object")})`);
+    this.jsonGuard(opened, "i32");
+    const first = this.alloca("i32");
+    this.emit(`store i32 1, ptr ${first}`);
+    const [head, entry, next, done] = [this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [isFirst, more, failed, ended] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${isFirst} = load i32, ptr ${first}`);
+    this.emit(`store i32 0, ptr ${first}`);
+    this.emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 ${isFirst})`);
+    this.emit(`${failed} = icmp sge i32 ${more}, 0`);
+    this.jsonGuard(failed, "i1", undo);
+    this.emit(`${ended} = icmp eq i32 ${more}, 0`);
+    this.emit(`br i1 ${ended}, label %${done}, label %${entry}`);
+    this.startBlock(entry);
+    const [keySlot, gotKey, key] = [this.alloca("ptr"), this.temp(), this.temp()];
+    this.emit(`${gotKey} = call i32 @fsh_rt_json_key(ptr ${r}, ptr ${keySlot})`);
+    this.jsonGuard(gotKey, "i32", undo);
+    this.emit(`${key} = load ptr, ptr ${keySlot}`);
     for (const f of slots) {
-      const [found, match, skip] = [temp(), label(), label()];
-      const same = temp();
-      emit(`${found} = call i32 @fsh_rt_json_same(ptr ${key}, ptr ${cString(f.name)}, i64 ${new TextEncoder().encode(f.name).length})`);
-      emit(`${same} = icmp ne i32 ${found}, 0`);
-      emit(`br i1 ${same}, label %${match}, label %${skip}`);
-      startBlock(match);
-      const mark = temp();
-      emit(`${mark} = call i64 @fsh_rt_json_field_path(ptr ${r}, ptr ${key})`);
-      emit(`call void @fsh_rt_str_release(ptr ${key})`);
+      const [found, match, skip] = [this.temp(), this.label(), this.label()];
+      const same = this.temp();
+      this.emit(`${found} = call i32 @fsh_rt_json_same(ptr ${key}, ptr ${this.cString(f.name)}, i64 ${new TextEncoder().encode(f.name).length})`);
+      this.emit(`${same} = icmp ne i32 ${found}, 0`);
+      this.emit(`br i1 ${same}, label %${match}, label %${skip}`);
+      this.startBlock(match);
+      const mark = this.temp();
+      this.emit(`${mark} = call i64 @fsh_rt_json_field_path(ptr ${r}, ptr ${key})`);
+      this.emit(`call void @fsh_rt_str_release(ptr ${key})`);
       // A repeated key replaces the value read before.
-      if (needsDrop(f.type)) {
-        const [was, drop, after, old] = [temp(), label(), label(), temp()];
-        emit(`${was} = load i1, ptr ${f.seen}`);
-        emit(`store i1 false, ptr ${f.seen}`);
-        emit(`br i1 ${was}, label %${drop}, label %${after}`);
-        startBlock(drop);
-        emit(`${old} = load ${llvm(typing.lower(f.type))}, ptr ${f.slot}`);
-        dispose(old, f.type);
-        emit(`br label %${after}`);
-        startBlock(after);
+      if (this.needsDrop(f.type)) {
+        const [was, drop, after, old] = [this.temp(), this.label(), this.label(), this.temp()];
+        this.emit(`${was} = load i1, ptr ${f.seen}`);
+        this.emit(`store i1 false, ptr ${f.seen}`);
+        this.emit(`br i1 ${was}, label %${drop}, label %${after}`);
+        this.startBlock(drop);
+        this.emit(`${old} = load ${this.llvm(this.typing.lower(f.type))}, ptr ${f.slot}`);
+        this.dispose(old, f.type);
+        this.emit(`br label %${after}`);
+        this.startBlock(after);
       }
-      const [ok, v] = jsonRead(r, f.type);
-      jsonGuard(ok, "i1", undo);
-      emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
-      emit(`store ${llvm(typing.lower(f.type))} ${v}, ptr ${f.slot}`);
-      emit(`store i1 true, ptr ${f.seen}`);
-      emit(`br label %${head}`);
-      startBlock(skip);
+      const [ok, v] = this.jsonRead(r, f.type);
+      this.jsonGuard(ok, "i1", undo);
+      this.emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
+      this.emit(`store ${this.llvm(this.typing.lower(f.type))} ${v}, ptr ${f.slot}`);
+      this.emit(`store i1 true, ptr ${f.seen}`);
+      this.emit(`br label %${head}`);
+      this.startBlock(skip);
     }
-    emit(`call void @fsh_rt_str_release(ptr ${key})`);
-    const skipped = temp();
-    emit(`${skipped} = call i32 @fsh_rt_json_skip(ptr ${r})`);
-    jsonGuard(skipped, "i32", undo);
-    emit(`br label %${next}`);
-    startBlock(next);
-    emit(`br label %${head}`);
-    startBlock(done);
+    this.emit(`call void @fsh_rt_str_release(ptr ${key})`);
+    const skipped = this.temp();
+    this.emit(`${skipped} = call i32 @fsh_rt_json_skip(ptr ${r})`);
+    this.jsonGuard(skipped, "i32", undo);
+    this.emit(`br label %${next}`);
+    this.startBlock(next);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
     let agg = "undef";
     for (const f of slots) {
-      const [was, have, absent, join, v] = [temp(), label(), label(), label(), temp()];
-      emit(`${was} = load i1, ptr ${f.seen}`);
-      emit(`br i1 ${was}, label %${join}, label %${absent}`);
-      startBlock(absent);
-      const empty = typing.isOption(typing.lower(f.type));
-      if (empty) emit(`store ${llvm(typing.lower(f.type))} ${convert("zeroinitializer", "null", typing.lower(f.type))}, ptr ${f.slot}`);
+      const [was, have, absent, join, v] = [this.temp(), this.label(), this.label(), this.label(), this.temp()];
+      this.emit(`${was} = load i1, ptr ${f.seen}`);
+      this.emit(`br i1 ${was}, label %${join}, label %${absent}`);
+      this.startBlock(absent);
+      const empty = this.typing.isOption(this.typing.lower(f.type));
+      if (empty) this.emit(`store ${this.llvm(this.typing.lower(f.type))} ${this.convert("zeroinitializer", "null", this.typing.lower(f.type))}, ptr ${f.slot}`);
       else {
-        const ignored = temp();
-        emit(`${ignored} = call i32 @fsh_rt_json_missing(ptr ${r}, ptr ${cString(f.name)})`);
+        const ignored = this.temp();
+        this.emit(`${ignored} = call i32 @fsh_rt_json_missing(ptr ${r}, ptr ${this.cString(f.name)})`);
         undo();
-        emit("ret i1 false");
-        startBlock(have);
+        this.emit("ret i1 false");
+        this.startBlock(have);
       }
-      emit(`br label %${join}`);
-      startBlock(join);
-      emit(`${v} = load ${llvm(typing.lower(f.type))}, ptr ${f.slot}`);
-      const made = temp();
-      emit(`${made} = insertvalue ${llvm(t)} ${agg}, ${llvm(typing.lower(f.type))} ${v}, ${f.path.join(", ")}`);
+      this.emit(`br label %${join}`);
+      this.startBlock(join);
+      this.emit(`${v} = load ${this.llvm(this.typing.lower(f.type))}, ptr ${f.slot}`);
+      const made = this.temp();
+      this.emit(`${made} = insertvalue ${this.llvm(t)} ${agg}, ${this.llvm(this.typing.lower(f.type))} ${v}, ${f.path.join(", ")}`);
       agg = made;
     }
     return agg;
   }
 
+
   // A union's value: each member tried in turn from the same place, the first that reads
   // winning; when none does, the error kept is from the one that read furthest. An enum's
   // members are read together, tagged as the enum is.
-  function readMember(r: string, t: UnionType): string {
-    const mark = alloca("[3 x i64]");
-    const result = alloca(llvm(t));
-    const done = label();
-    emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
+  readMember(this: Mut<this>, r: string, t: UnionType): string {
+    const mark = this.alloca("[3 x i64]");
+    const result = this.alloca(this.llvm(t));
+    const done = this.label();
+    this.emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
     const groups = new Map<string, VariantType[]>();
     const parts: (Type | VariantType[])[] = [];
-    for (const m of typing.rec(t).members) {
-      const variant = recOf(m);
+    for (const m of this.typing.rec(t).members) {
+      const variant = this.recOf(m);
       if (variant?.kind !== "variant") {
         parts.push(m);
         continue;
@@ -5646,1195 +6104,1225 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       group.push(m as VariantType);
     }
     for (const part of parts) {
-      const m = Array.isArray(part) ? typing.unionType(part) : part;
-      const [ok, v] = jsonRead(r, m);
-      const [won, lost] = [label(), label()];
-      emit(`br i1 ${ok}, label %${won}, label %${lost}`);
-      startBlock(won);
-      emit(`call void @fsh_rt_json_forget(ptr ${r})`);
-      emit(`store ${llvm(t)} ${convert(v, m, t)}, ptr ${result}`);
-      emit(`br label %${done}`);
-      startBlock(lost);
-      emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
+      const m = Array.isArray(part) ? this.typing.unionType(part) : part;
+      const [ok, v] = this.jsonRead(r, m);
+      const [won, lost] = [this.label(), this.label()];
+      this.emit(`br i1 ${ok}, label %${won}, label %${lost}`);
+      this.startBlock(won);
+      this.emit(`call void @fsh_rt_json_forget(ptr ${r})`);
+      this.emit(`store ${this.llvm(t)} ${this.convert(v, m, t)}, ptr ${result}`);
+      this.emit(`br label %${done}`);
+      this.startBlock(lost);
+      this.emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
     }
-    emit(`call void @fsh_rt_json_settle(ptr ${r}, ptr ${mark}, ptr ${cString(typing.show(t))})`);
-    emit("ret i1 false");
-    startBlock(done);
-    const v = temp();
-    emit(`${v} = load ${llvm(t)}, ptr ${result}`);
+    this.emit(`call void @fsh_rt_json_settle(ptr ${r}, ptr ${mark}, ptr ${this.cString(this.typing.show(t))})`);
+    this.emit("ret i1 false");
+    this.startBlock(done);
+    const v = this.temp();
+    this.emit(`${v} = load ${this.llvm(t)}, ptr ${result}`);
     return v;
   }
+
 
   // A data enum's member, tagged as serde writes it: a bare name, or an object of one key, the
   // name, holding its value or an array of its values.
-  function readVariant(r: string, t: UnionType | VariantType): string {
-    const variants = typing.rec(t).kind === "union" ? (typing.rec(t as UnionType).members as VariantType[]) : [t as VariantType];
-    const result = alloca(llvm(t));
-    const [named, keyed, done] = [label(), label(), label()];
-    const names = variants.map((v) => typing.rec(v).member).join(", ");
-    const mark = alloca("[3 x i64]");
-    emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
-    const [c, quoted] = [temp(), temp()];
-    emit(`${c} = call i32 @fsh_rt_json_peek(ptr ${r})`);
-    emit(`${quoted} = icmp eq i32 ${c}, 34`);
-    emit(`br i1 ${quoted}, label %${named}, label %${keyed}`);
+  readVariant(this: Mut<this>, r: string, t: UnionType | VariantType): string {
+    const variants = this.typing.rec(t).kind === "union" ? (this.typing.rec(t as UnionType).members as VariantType[]) : [t as VariantType];
+    const result = this.alloca(this.llvm(t));
+    const [named, keyed, done] = [this.label(), this.label(), this.label()];
+    const names = variants.map((v) => this.typing.rec(v).member).join(", ");
+    const mark = this.alloca("[3 x i64]");
+    this.emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
+    const [c, quoted] = [this.temp(), this.temp()];
+    this.emit(`${c} = call i32 @fsh_rt_json_peek(ptr ${r})`);
+    this.emit(`${quoted} = icmp eq i32 ${c}, 34`);
+    this.emit(`br i1 ${quoted}, label %${named}, label %${keyed}`);
     // Pick the member a name says, or fail naming the ones there are.
     const pick = (name: string, units: boolean, then: (v: VariantType) => void) => {
-      for (const v of variants.filter((v) => (typing.rec(v).fields.length === 0) === units)) {
-        const [found, same, yes, no] = [temp(), temp(), label(), label()];
-        emit(`${found} = call i32 @fsh_rt_json_same(ptr ${name}, ptr ${cString(typing.rec(v).member)}, i64 ${new TextEncoder().encode(typing.rec(v).member).length})`);
-        emit(`${same} = icmp ne i32 ${found}, 0`);
-        emit(`br i1 ${same}, label %${yes}, label %${no}`);
-        startBlock(yes);
-        emit(`call void @fsh_rt_str_release(ptr ${name})`);
+      for (const v of variants.filter((v) => (this.typing.rec(v).fields.length === 0) === units)) {
+        const [found, same, yes, no] = [this.temp(), this.temp(), this.label(), this.label()];
+        this.emit(`${found} = call i32 @fsh_rt_json_same(ptr ${name}, ptr ${this.cString(this.typing.rec(v).member)}, i64 ${new TextEncoder().encode(this.typing.rec(v).member).length})`);
+        this.emit(`${same} = icmp ne i32 ${found}, 0`);
+        this.emit(`br i1 ${same}, label %${yes}, label %${no}`);
+        this.startBlock(yes);
+        this.emit(`call void @fsh_rt_str_release(ptr ${name})`);
         then(v);
-        emit(`br label %${done}`);
-        startBlock(no);
+        this.emit(`br label %${done}`);
+        this.startBlock(no);
       }
-      emit(`call void @fsh_rt_str_release(ptr ${name})`);
-      emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
-      jsonExpected(r, `one of ${names}`);
-      emit(`br label %${done}`);
+      this.emit(`call void @fsh_rt_str_release(ptr ${name})`);
+      this.emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
+      this.jsonExpected(r, `one of ${names}`);
+      this.emit(`br label %${done}`);
     };
-    startBlock(named);
-    const name = readParts(r, "string");
-    pick(name, true, (v) => emit(`store ${llvm(t)} ${convert("zeroinitializer", v, t)}, ptr ${result}`));
-    startBlock(keyed);
-    const opened = temp();
-    emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 123, ptr ${cString(`one of ${names}`)})`);
-    jsonGuard(opened, "i32");
-    const [more, one] = [temp(), temp()];
-    emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 1)`);
-    emit(`${one} = icmp sgt i32 ${more}, 0`);
-    jsonGuard(one, "i1", () => {
-      emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
-      const ignored = temp();
-      emit(`${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${cString(`one of ${names}`)})`);
+    this.startBlock(named);
+    const name = this.readParts(r, "string");
+    pick(name, true, (v) => this.emit(`store ${this.llvm(t)} ${this.convert("zeroinitializer", v, t)}, ptr ${result}`));
+    this.startBlock(keyed);
+    const opened = this.temp();
+    this.emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 123, ptr ${this.cString(`one of ${names}`)})`);
+    this.jsonGuard(opened, "i32");
+    const [more, one] = [this.temp(), this.temp()];
+    this.emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 1)`);
+    this.emit(`${one} = icmp sgt i32 ${more}, 0`);
+    this.jsonGuard(one, "i1", () => {
+      this.emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
+      const ignored = this.temp();
+      this.emit(`${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${this.cString(`one of ${names}`)})`);
     });
-    const [keySlot, gotKey, key] = [alloca("ptr"), temp(), temp()];
-    emit(`${gotKey} = call i32 @fsh_rt_json_key(ptr ${r}, ptr ${keySlot})`);
-    jsonGuard(gotKey, "i32");
-    emit(`${key} = load ptr, ptr ${keySlot}`);
-    const path = temp();
-    emit(`${path} = call i64 @fsh_rt_json_field_path(ptr ${r}, ptr ${key})`);
+    const [keySlot, gotKey, key] = [this.alloca("ptr"), this.temp(), this.temp()];
+    this.emit(`${gotKey} = call i32 @fsh_rt_json_key(ptr ${r}, ptr ${keySlot})`);
+    this.jsonGuard(gotKey, "i32");
+    this.emit(`${key} = load ptr, ptr ${keySlot}`);
+    const path = this.temp();
+    this.emit(`${path} = call i64 @fsh_rt_json_field_path(ptr ${r}, ptr ${key})`);
     pick(key, false, (v) => {
-      const payload = typing.rec(v).fields.length === 1 ? readParts(r, typing.lower(typing.rec(v).fields[0]!.type)) : readTuple(r, typing.tupleType(typing.rec(v).fields.map((f) => f.type)));
-      const made = typing.rec(v).fields.length === 1 ? (() => {
-        const one = temp();
-        emit(`${one} = insertvalue ${llvm(v)} undef, ${llvm(typing.lower(typing.rec(v).fields[0]!.type))} ${payload}, 0`);
+      const payload = this.typing.rec(v).fields.length === 1 ? this.readParts(r, this.typing.lower(this.typing.rec(v).fields[0]!.type)) : this.readTuple(r, this.typing.tupleType(this.typing.rec(v).fields.map((f) => f.type)));
+      const made = this.typing.rec(v).fields.length === 1 ? (() => {
+        const one = this.temp();
+        this.emit(`${one} = insertvalue ${this.llvm(v)} undef, ${this.llvm(this.typing.lower(this.typing.rec(v).fields[0]!.type))} ${payload}, 0`);
         return one;
-      })() : typing.rec(v).fields.reduce((agg, f, i) => {
-        const [part, next] = [temp(), temp()];
-        const tuple = typing.tupleType(typing.rec(v).fields.map((f) => f.type));
-        emit(`${part} = extractvalue ${llvm(tuple)} ${payload}, ${typing.rec(tuple).fields.findIndex((g) => g.name === String(i))}`);
-        emit(`${next} = insertvalue ${llvm(v)} ${agg}, ${llvm(typing.lower(f.type))} ${part}, ${i}`);
+      })() : this.typing.rec(v).fields.reduce((agg, f, i) => {
+        const [part, next] = [this.temp(), this.temp()];
+        const tuple = this.typing.tupleType(this.typing.rec(v).fields.map((f) => f.type));
+        this.emit(`${part} = extractvalue ${this.llvm(tuple)} ${payload}, ${this.typing.rec(tuple).fields.findIndex((g) => g.name === String(i))}`);
+        this.emit(`${next} = insertvalue ${this.llvm(v)} ${agg}, ${this.llvm(this.typing.lower(f.type))} ${part}, ${i}`);
         return next;
       }, "undef");
-      const [closing, closed] = [temp(), temp()];
-      emit(`${closing} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 0)`);
-      emit(`${closed} = icmp eq i32 ${closing}, 0`);
-      jsonGuard(closed, "i1", () => {
-        dispose(made, v);
-        const ignored = temp();
-        emit(`${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${cString("an object of one key")})`);
+      const [closing, closed] = [this.temp(), this.temp()];
+      this.emit(`${closing} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 0)`);
+      this.emit(`${closed} = icmp eq i32 ${closing}, 0`);
+      this.jsonGuard(closed, "i1", () => {
+        this.dispose(made, v);
+        const ignored = this.temp();
+        this.emit(`${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${this.cString("an object of one key")})`);
       });
-      emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${path})`);
-      emit(`store ${llvm(t)} ${convert(made, v, t)}, ptr ${result}`);
+      this.emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${path})`);
+      this.emit(`store ${this.llvm(t)} ${this.convert(made, v, t)}, ptr ${result}`);
     });
-    startBlock(done);
-    const v = temp();
-    emit(`${v} = load ${llvm(t)}, ptr ${result}`);
+    this.startBlock(done);
+    const v = this.temp();
+    this.emit(`${v} = load ${this.llvm(t)}, ptr ${result}`);
     return v;
   }
 
+
   // A string-keyed Map's entries, each key's last value kept.
-  function readEntries(r: string, t: MapType): string {
-    const map = mapNew(t, undefined);
-    const undo = () => dispose(map, t);
-    const opened = temp();
-    emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 123, ptr ${cString("object")})`);
-    jsonGuard(opened, "i32", undo);
-    const first = alloca("i32");
-    emit(`store i32 1, ptr ${first}`);
-    const [head, entry, done] = [label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [isFirst, more, failed, ended] = [temp(), temp(), temp(), temp()];
-    emit(`${isFirst} = load i32, ptr ${first}`);
-    emit(`store i32 0, ptr ${first}`);
-    emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 ${isFirst})`);
-    emit(`${failed} = icmp sge i32 ${more}, 0`);
-    jsonGuard(failed, "i1", undo);
-    emit(`${ended} = icmp eq i32 ${more}, 0`);
-    emit(`br i1 ${ended}, label %${done}, label %${entry}`);
-    startBlock(entry);
-    const [keySlot, gotKey, key, mark] = [alloca("ptr"), temp(), temp(), temp()];
-    emit(`${gotKey} = call i32 @fsh_rt_json_key(ptr ${r}, ptr ${keySlot})`);
-    jsonGuard(gotKey, "i32", undo);
-    emit(`${key} = load ptr, ptr ${keySlot}`);
-    emit(`${mark} = call i64 @fsh_rt_json_field_path(ptr ${r}, ptr ${key})`);
-    const [ok, v] = jsonRead(r, typing.rec(t).value);
-    jsonGuard(ok, "i1", () => {
-      emit(`call void @fsh_rt_str_release(ptr ${key})`);
+  readEntries(this: Mut<this>, r: string, t: MapType): string {
+    const map = this.mapNew(t, undefined);
+    const undo = () => this.dispose(map, t);
+    const opened = this.temp();
+    this.emit(`${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 123, ptr ${this.cString("object")})`);
+    this.jsonGuard(opened, "i32", undo);
+    const first = this.alloca("i32");
+    this.emit(`store i32 1, ptr ${first}`);
+    const [head, entry, done] = [this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [isFirst, more, failed, ended] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${isFirst} = load i32, ptr ${first}`);
+    this.emit(`store i32 0, ptr ${first}`);
+    this.emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 ${isFirst})`);
+    this.emit(`${failed} = icmp sge i32 ${more}, 0`);
+    this.jsonGuard(failed, "i1", undo);
+    this.emit(`${ended} = icmp eq i32 ${more}, 0`);
+    this.emit(`br i1 ${ended}, label %${done}, label %${entry}`);
+    this.startBlock(entry);
+    const [keySlot, gotKey, key, mark] = [this.alloca("ptr"), this.temp(), this.temp(), this.temp()];
+    this.emit(`${gotKey} = call i32 @fsh_rt_json_key(ptr ${r}, ptr ${keySlot})`);
+    this.jsonGuard(gotKey, "i32", undo);
+    this.emit(`${key} = load ptr, ptr ${keySlot}`);
+    this.emit(`${mark} = call i64 @fsh_rt_json_field_path(ptr ${r}, ptr ${key})`);
+    const [ok, v] = this.jsonRead(r, this.typing.rec(t).value);
+    this.jsonGuard(ok, "i1", () => {
+      this.emit(`call void @fsh_rt_str_release(ptr ${key})`);
       undo();
     });
-    emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
-    inserted(t, map, key, v);
-    emit(`br label %${head}`);
-    startBlock(done);
+    this.emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
+    this.inserted(t, map, key, v);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
     return map;
   }
 
+
   // A string-keyed Map's live entries, in the order they went in, as an object's fields.
-  function jsonEntries(w: string, map: string, t: MapType, written: Type) {
-    const entry = entryType(t);
-    jsonRaw(w, "{");
-    const order = dictOrder(t, map);
-    const [counter, wrote] = [alloca("i64"), alloca("i1")];
-    emit(`store i64 0, ptr ${counter}`);
-    emit(`store i1 false, ptr ${wrote}`);
-    const [test, live, loop, comma, item, next, end] = [label(), label(), label(), label(), label(), label(), label()];
-    emit(`br label %${test}`);
-    startBlock(test);
-    const [i, used, more] = [temp(), temp(), temp()];
-    emit(`${i} = load i64, ptr ${counter}`);
-    emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
-    emit(`${more} = icmp slt i64 ${i}, ${used}`);
-    emit(`br i1 ${more}, label %${live}, label %${end}`);
-    startBlock(live);
-    const [at, state, alive] = [temp(), temp(), temp()];
-    emit(`${at} = ${entryAt(map, order, i)}`);
-    emit(`${state} = load i64, ptr ${at}`);
-    emit(`${alive} = icmp eq i64 ${state}, 1`);
-    emit(`br i1 ${alive}, label %${loop}, label %${next}`);
-    startBlock(loop);
-    const after = temp();
-    emit(`${after} = load i1, ptr ${wrote}`);
-    emit(`br i1 ${after}, label %${comma}, label %${item}`);
-    startBlock(comma);
-    jsonRaw(w, ",");
-    emit(`br label %${item}`);
-    startBlock(item);
-    emit(`store i1 true, ptr ${wrote}`);
-    const [keyAt, key, valueAt, x] = [temp(), temp(), temp(), temp()];
-    emit(`${keyAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
-    emit(`${key} = load ptr, ptr ${keyAt}`);
-    emit(`call void @fsh_rt_json_string(ptr ${w}, ptr ${key})`);
-    jsonRaw(w, ":");
-    emit(`${valueAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
-    emit(`${x} = load ${llvm(typing.lower(typing.rec(t).value))}, ptr ${valueAt}`);
-    jsonWrite(w, x, written);
-    emit(`br label %${next}`);
-    startBlock(next);
-    const step = temp();
-    emit(`${step} = add i64 ${i}, 1`);
-    emit(`store i64 ${step}, ptr ${counter}`);
-    emit(`br label %${test}`);
-    startBlock(end);
-    if (order) emit(`call void @fsh_rt_free(ptr ${order})`);
-    jsonRaw(w, "}");
+  jsonEntries(this: Mut<this>, w: string, map: string, t: MapType, written: Type) {
+    const entry = this.entryType(t);
+    this.jsonRaw(w, "{");
+    const order = this.dictOrder(t, map);
+    const [counter, wrote] = [this.alloca("i64"), this.alloca("i1")];
+    this.emit(`store i64 0, ptr ${counter}`);
+    this.emit(`store i1 false, ptr ${wrote}`);
+    const [test, live, loop, comma, item, next, end] = [this.label(), this.label(), this.label(), this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${test}`);
+    this.startBlock(test);
+    const [i, used, more] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${counter}`);
+    this.emit(`${used} = call i64 @fsh_rt_map_used(ptr ${map})`);
+    this.emit(`${more} = icmp slt i64 ${i}, ${used}`);
+    this.emit(`br i1 ${more}, label %${live}, label %${end}`);
+    this.startBlock(live);
+    const [at, state, alive] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${at} = ${this.entryAt(map, order, i)}`);
+    this.emit(`${state} = load i64, ptr ${at}`);
+    this.emit(`${alive} = icmp eq i64 ${state}, 1`);
+    this.emit(`br i1 ${alive}, label %${loop}, label %${next}`);
+    this.startBlock(loop);
+    const after = this.temp();
+    this.emit(`${after} = load i1, ptr ${wrote}`);
+    this.emit(`br i1 ${after}, label %${comma}, label %${item}`);
+    this.startBlock(comma);
+    this.jsonRaw(w, ",");
+    this.emit(`br label %${item}`);
+    this.startBlock(item);
+    this.emit(`store i1 true, ptr ${wrote}`);
+    const [keyAt, key, valueAt, x] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${keyAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 3`);
+    this.emit(`${key} = load ptr, ptr ${keyAt}`);
+    this.emit(`call void @fsh_rt_json_string(ptr ${w}, ptr ${key})`);
+    this.jsonRaw(w, ":");
+    this.emit(`${valueAt} = getelementptr ${entry}, ptr ${at}, i64 0, i32 4`);
+    this.emit(`${x} = load ${this.llvm(this.typing.lower(this.typing.rec(t).value))}, ptr ${valueAt}`);
+    this.jsonWrite(w, x, written);
+    this.emit(`br label %${next}`);
+    this.startBlock(next);
+    const step = this.temp();
+    this.emit(`${step} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${step}, ptr ${counter}`);
+    this.emit(`br label %${test}`);
+    this.startBlock(end);
+    if (order) this.emit(`call void @fsh_rt_free(ptr ${order})`);
+    this.jsonRaw(w, "}");
   }
 
+
   // A union's value, written as the member its tag says it holds.
-  function jsonMember(w: string, v: string, t: UnionType, written: Type[]) {
-    const tag = temp();
-    emit(`${tag} = extractvalue ${llvm(t)} ${v}, 0`);
-    const done = label();
-    const cases = typing.rec(t).members.map(() => label());
-    emit(`switch i32 ${tag}, label %${done} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
-    typing.rec(t).members.forEach((m, i) => {
-      startBlock(cases[i]!);
-      const member = typing.lower(m);
-      if (typeof member === "string" && (member === "null" || member === "never")) jsonRaw(w, "null");
-      else if (recOf(member)?.kind === "literal") jsonScalar(w, "", member);
+  jsonMember(this: Mut<this>, w: string, v: string, t: UnionType, written: Type[]) {
+    const tag = this.temp();
+    this.emit(`${tag} = extractvalue ${this.llvm(t)} ${v}, 0`);
+    const done = this.label();
+    const cases = this.typing.rec(t).members.map(() => this.label());
+    this.emit(`switch i32 ${tag}, label %${done} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+    this.typing.rec(t).members.forEach((m, i) => {
+      this.startBlock(cases[i]!);
+      const member = this.typing.lower(m);
+      if (typeof member === "string" && (member === "null" || member === "never")) this.jsonRaw(w, "null");
+      else if (this.recOf(member)?.kind === "literal") this.jsonScalar(w, "", member);
       else {
-        const slot = alloca(llvm(t));
-        emit(`store ${llvm(t)} ${v}, ptr ${slot}`);
-        const [at, x] = [temp(), temp()];
-        emit(`${at} = getelementptr ${llvm(t)}, ptr ${slot}, i32 0, i32 1`);
-        emit(`${x} = load ${llvm(member)}, ptr ${at}, align 8`);
-        jsonWrite(w, x, written[i]!);
+        const slot = this.alloca(this.llvm(t));
+        this.emit(`store ${this.llvm(t)} ${v}, ptr ${slot}`);
+        const [at, x] = [this.temp(), this.temp()];
+        this.emit(`${at} = getelementptr ${this.llvm(t)}, ptr ${slot}, i32 0, i32 1`);
+        this.emit(`${x} = load ${this.llvm(member)}, ptr ${at}, align 8`);
+        this.jsonWrite(w, x, written[i]!);
       }
-      emit(`br label %${done}`);
+      this.emit(`br label %${done}`);
     });
-    startBlock(done);
+    this.startBlock(done);
   }
+
 
   // In an array's drop function: drops each element, then frees the buffer.
   // A recursive type's block, or a copy of it holding copies of what it owns. A block moved out
   // of its place left it empty, with nothing to drop or copy.
-  function dropBlock(type: RecursiveType): string {
-    const [held, done] = [label(), label()];
-    const empty = temp();
-    emit(`${empty} = icmp eq ptr %v, null`);
-    emit(`br i1 ${empty}, label %${done}, label %${held}`);
-    startBlock(held);
-    const v = temp();
-    emit(`${v} = load ${llvm(typing.rec(type).of)}, ptr %v`);
-    dispose(v, typing.rec(type).of);
-    emit("call void @fsh_rt_free(ptr %v)");
-    emit(`br label %${done}`);
-    startBlock(done);
+  dropBlock(this: Mut<this>, type: RecursiveType): string {
+    const [held, done] = [this.label(), this.label()];
+    const empty = this.temp();
+    this.emit(`${empty} = icmp eq ptr %v, null`);
+    this.emit(`br i1 ${empty}, label %${done}, label %${held}`);
+    this.startBlock(held);
+    const v = this.temp();
+    this.emit(`${v} = load ${this.llvm(this.typing.rec(type).of)}, ptr %v`);
+    this.dispose(v, this.typing.rec(type).of);
+    this.emit("call void @fsh_rt_free(ptr %v)");
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
     return "%v";
   }
 
-  function copyBlock(type: RecursiveType): string {
-    const [held, done] = [label(), label()];
-    const empty = temp();
-    emit(`${empty} = icmp eq ptr %v, null`);
-    emit(`br i1 ${empty}, label %${done}, label %${held}`);
-    startBlock(held);
-    const v = temp();
-    emit(`${v} = load ${llvm(typing.rec(type).of)}, ptr %v`);
-    const copy = convert(copied(v, typing.rec(type).of), typing.rec(type).of, type);
-    const from = block;
-    emit(`br label %${done}`);
-    startBlock(done);
-    const result = temp();
-    emit(`${result} = phi ptr [ null, %entry ], [ ${copy}, %${from} ]`);
+
+  copyBlock(this: Mut<this>, type: RecursiveType): string {
+    const [held, done] = [this.label(), this.label()];
+    const empty = this.temp();
+    this.emit(`${empty} = icmp eq ptr %v, null`);
+    this.emit(`br i1 ${empty}, label %${done}, label %${held}`);
+    this.startBlock(held);
+    const v = this.temp();
+    this.emit(`${v} = load ${this.llvm(this.typing.rec(type).of)}, ptr %v`);
+    const copy = this.convert(this.copied(v, this.typing.rec(type).of), this.typing.rec(type).of, type);
+    const from = this.block;
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
+    const result = this.temp();
+    this.emit(`${result} = phi ptr [ null, %entry ], [ ${copy}, %${from} ]`);
     return result;
   }
 
-  function dropArray(type: ArrayType): string {
-    const [data, length] = [temp(), temp()];
-    emit(`${data} = extractvalue ${ARRAY} %v, 0`);
-    emit(`${length} = extractvalue ${ARRAY} %v, 1`);
-    if (needsDrop(typing.rec(type).element)) {
-      elements(typing.rec(type).element, data, length, (at) => {
-        const v = temp();
-        emit(`${v} = load ${llvm(typing.rec(type).element)}, ptr ${at}`);
-        dispose(v, typing.rec(type).element);
+
+  dropArray(this: Mut<this>, type: ArrayType): string {
+    const [data, length] = [this.temp(), this.temp()];
+    this.emit(`${data} = extractvalue ${ARRAY} %v, 0`);
+    this.emit(`${length} = extractvalue ${ARRAY} %v, 1`);
+    if (this.needsDrop(this.typing.rec(type).element)) {
+      this.elements(this.typing.rec(type).element, data, length, (at) => {
+        const v = this.temp();
+        this.emit(`${v} = load ${this.llvm(this.typing.rec(type).element)}, ptr ${at}`);
+        this.dispose(v, this.typing.rec(type).element);
       });
     }
-    emit(`call void @fsh_rt_free(ptr ${data})`);
+    this.emit(`call void @fsh_rt_free(ptr ${data})`);
     return "%v";
   }
 
+
   // In an array's copy function: a new buffer just long enough, holding a copy of each element.
-  function copyArray(type: ArrayType): string {
-    const [data, length, copy] = [temp(), temp(), temp()];
-    emit(`${data} = extractvalue ${ARRAY} %v, 0`);
-    emit(`${length} = extractvalue ${ARRAY} %v, 1`);
-    emit(`${copy} = call ptr @fsh_rt_array_alloc(i64 ${bytes(typing.rec(type).element, length)})`);
-    const t = llvm(typing.rec(type).element);
-    const element = typing.rec(type).element;
-    const held = recOf(element);
-    const glued = held !== undefined && held.kind !== "handle" && held.kind !== "interior" && needsDrop(element);
-    elements(element, data, length, (at, i) => {
-      const [v, to] = [temp(), temp()];
-      emit(`${v} = load ${t}, ptr ${at}`);
-      emit(`${to} = getelementptr ${t}, ptr ${copy}, i64 ${i}`);
-      if (!glued) return emit(`store ${t} ${copied(v, element)}, ptr ${to}`);
+  copyArray(this: Mut<this>, type: ArrayType): string {
+    const [data, length, copy] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${data} = extractvalue ${ARRAY} %v, 0`);
+    this.emit(`${length} = extractvalue ${ARRAY} %v, 1`);
+    this.emit(`${copy} = call ptr @fsh_rt_array_alloc(i64 ${this.bytes(this.typing.rec(type).element, length)})`);
+    const t = this.llvm(this.typing.rec(type).element);
+    const element = this.typing.rec(type).element;
+    const held = this.recOf(element);
+    const glued = held !== undefined && held.kind !== "handle" && held.kind !== "interior" && this.needsDrop(element);
+    this.elements(element, data, length, (at, i) => {
+      const [v, to] = [this.temp(), this.temp()];
+      this.emit(`${v} = load ${t}, ptr ${at}`);
+      this.emit(`${to} = getelementptr ${t}, ptr ${copy}, i64 ${i}`);
+      if (!glued) return this.emit(`store ${t} ${this.copied(v, element)}, ptr ${to}`);
       // An element's copy may panic: the elements copied so far, and the buffer, go with it.
-      const made = temp();
-      unwinding(`call ${t} ${helper("copy", element as Exclude<Type, string>)}(${t} ${v})`, made, () => dispose(built(copy, i, i), type));
-      emit(`store ${t} ${made}, ptr ${to}`);
+      const made = this.temp();
+      this.unwinding(`call ${t} ${this.helper("copy", element as Exclude<Type, string>)}(${t} ${v})`, made, () => this.dispose(this.built(copy, i, i), type));
+      this.emit(`store ${t} ${made}, ptr ${to}`);
     });
-    return built(copy, length, length);
+    return this.built(copy, length, length);
   }
+
 
   // An array literal with spreads, built in order: each part goes in as it runs, a spread array
   // made for it giving up its elements and others giving clones then and there, before a later
   // part could change or move it. The array being built is owned by a scope of its own, so a
   // panic part way drops it.
-  function spreadArray(written: Expr[], type: ArrayType): string {
-    const out = alloca(ARRAY);
-    scopes.push([]);
-    own(out, type);
-    emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+  spreadArray(this: Mut<this>, written: Expr[], type: ArrayType): string {
+    const out = this.alloca(ARRAY);
+    this.scopes.push([]);
+    this.own(out, type);
+    this.emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
     for (const x of written) {
       if (x.kind !== "spread") {
-        appended(out, typing.rec(type).element, owned(x));
+        this.appended(out, this.typing.rec(type).element, this.owned(x));
         continue;
       }
-      const taken = fresh(x.value);
-      const from = types.get(x)!;
-      const whole = taken ? owned(x.value) : value(x.value);
-      const [data, length] = [temp(), temp()];
-      emit(`${data} = extractvalue ${ARRAY} ${whole}, 0`);
-      emit(`${length} = extractvalue ${ARRAY} ${whole}, 1`);
-      elements(from, data, length, (at) => {
-        const v = temp();
-        emit(`${v} = load ${llvm(from)}, ptr ${at}`);
-        appended(out, typing.rec(type).element, convert(taken ? v : copied(v, from), from, typing.rec(type).element));
+      const taken = this.fresh(x.value);
+      const from = this.types.get(x)!;
+      const whole = taken ? this.owned(x.value) : this.value(x.value);
+      const [data, length] = [this.temp(), this.temp()];
+      this.emit(`${data} = extractvalue ${ARRAY} ${whole}, 0`);
+      this.emit(`${length} = extractvalue ${ARRAY} ${whole}, 1`);
+      this.elements(from, data, length, (at) => {
+        const v = this.temp();
+        this.emit(`${v} = load ${this.llvm(from)}, ptr ${at}`);
+        this.appended(out, this.typing.rec(type).element, this.convert(taken ? v : this.copied(v, from), from, this.typing.rec(type).element));
       });
-      if (taken) emit(`call void @fsh_rt_free(ptr ${data})`);
+      if (taken) this.emit(`call void @fsh_rt_free(ptr ${data})`);
     }
-    const v = temp();
-    emit(`${v} = load ${ARRAY}, ptr ${out}`);
-    emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
-    scopes.pop();
+    const v = this.temp();
+    this.emit(`${v} = load ${ARRAY}, ptr ${out}`);
+    this.emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    this.scopes.pop();
     return v;
   }
 
+
   // Puts `v` at the end of the array at `at`, growing it when it is full.
-  function appended(at: string, element: Type, v: string) {
-    const t = llvm(element);
-    emit(`call void @fsh_rt_array_reserve(ptr ${at}, i64 ${bytes(element, "1")})`);
-    const [lengthAt, dataAt, length, data, slot, more] = [temp(), temp(), temp(), temp(), temp(), temp()];
-    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
-    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
-    emit(`${length} = load i64, ptr ${lengthAt}`);
-    emit(`${data} = load ptr, ptr ${dataAt}`);
-    emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${length}`);
-    emit(`store ${t} ${v}, ptr ${slot}`);
-    emit(`${more} = add i64 ${length}, 1`);
-    emit(`store i64 ${more}, ptr ${lengthAt}`);
+  appended(this: Mut<this>, at: string, element: Type, v: string) {
+    const t = this.llvm(element);
+    this.emit(`call void @fsh_rt_array_reserve(ptr ${at}, i64 ${this.bytes(element, "1")})`);
+    const [lengthAt, dataAt, length, data, slot, more] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    this.emit(`${length} = load i64, ptr ${lengthAt}`);
+    this.emit(`${data} = load ptr, ptr ${dataAt}`);
+    this.emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${length}`);
+    this.emit(`store ${t} ${v}, ptr ${slot}`);
+    this.emit(`${more} = add i64 ${length}, 1`);
+    this.emit(`store i64 ${more}, ptr ${lengthAt}`);
   }
+
 
   // `map`, `filter`, `find`, `some`, `every` and `reduce`: a loop calling the callback with each
   // element, a copy when it copies and otherwise a pointer to it, and its index. The array is
   // only read, so its length and data are read once. `some`, `every` and `find` stop at the
   // first element that decides them.
-  function callbackLoop(e: Extract<Expr, { kind: "call" }>, written: string, array: ArrayType, at: string): string | undefined {
+  callbackLoop(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, written: string, array: ArrayType, at: string): string | undefined {
     const backward = Object.hasOwn(BACKWARD, written);
     const method = backward ? BACKWARD[written]! : written;
     const [callback, init] = e.args as [Expr, Expr | undefined];
-    const element = typing.rec(array).element;
-    const t = llvm(element);
-    const closure = types.get(callback) as ClosureType;
-    const target = callOf(callback)!;
-    const env = alloca(llvm(closure));
-    emit(`store ${llvm(closure)} ${owned(callback)}, ptr ${env}`);
-    const result = method === "forEach" ? "void" : types.get(e) ?? (method === "map" ? typing.arrayType(typing.rec(closure).returns) : method === "flatMap" ? typing.lower(typing.rec(closure).returns)
-      : method === "filter" ? array : method === "find" ? typing.unionType([element, "null"]) : method === "findIndex" ? "i64" : method === "reduce" ? typing.rec(closure).params[0]! : "boolean");
+    const element = this.typing.rec(array).element;
+    const t = this.llvm(element);
+    const closure = this.types.get(callback) as ClosureType;
+    const target = this.callOf(callback)!;
+    const env = this.alloca(this.llvm(closure));
+    this.emit(`store ${this.llvm(closure)} ${this.owned(callback)}, ptr ${env}`);
+    const result = method === "forEach" ? "void" : this.types.get(e) ?? (method === "map" ? this.typing.arrayType(this.typing.rec(closure).returns) : method === "flatMap" ? this.typing.lower(this.typing.rec(closure).returns)
+      : method === "filter" ? array : method === "find" ? this.typing.unionType([element, "null"]) : method === "findIndex" ? "i64" : method === "reduce" ? this.typing.rec(closure).params[0]! : "boolean");
     const building = method === "map" || method === "filter" || method === "flatMap";
-    const out = result === "void" ? "" : alloca(llvm(result));
-    const [lengthAt, dataAt, length, data, index] = [temp(), temp(), temp(), temp(), alloca("i64")];
-    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
-    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
-    emit(`${length} = load i64, ptr ${lengthAt}`);
-    emit(`${data} = load ptr, ptr ${dataAt}`);
+    const out = result === "void" ? "" : this.alloca(this.llvm(result));
+    const [lengthAt, dataAt, length, data, index] = [this.temp(), this.temp(), this.temp(), this.temp(), this.alloca("i64")];
+    this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    this.emit(`${length} = load i64, ptr ${lengthAt}`);
+    this.emit(`${data} = load ptr, ptr ${dataAt}`);
     const elementAt = (i: string) => {
-      const slot = temp();
-      emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+      const slot = this.temp();
+      this.emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
       return slot;
     };
     const load = (slot: string) => {
-      const v = temp();
-      emit(`${v} = load ${t}, ptr ${slot}`);
+      const v = this.temp();
+      this.emit(`${v} = load ${t}, ptr ${slot}`);
       return v;
     };
     const reducing = method === "reduce";
     let first = "0";
-    if (building) emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
-    if (method === "findIndex") emit(`store i64 -1, ptr ${out}`);
-    if (method === "find") emit(`store ${llvm(result)} ${convert("zeroinitializer", "null", result)}, ptr ${out}`);
-    if (method === "some" || method === "every") emit(`store i1 ${method === "every"}, ptr ${out}`);
-    if (reducing && init) emit(`store ${llvm(result)} ${convert(owned(init), types.get(init)!, result)}, ptr ${out}`);
+    if (building) this.emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    if (method === "findIndex") this.emit(`store i64 -1, ptr ${out}`);
+    if (method === "find") this.emit(`store ${this.llvm(result)} ${this.convert("zeroinitializer", "null", result)}, ptr ${out}`);
+    if (method === "some" || method === "every") this.emit(`store i1 ${method === "every"}, ptr ${out}`);
+    if (reducing && init) this.emit(`store ${this.llvm(result)} ${this.convert(this.owned(init), this.types.get(init)!, result)}, ptr ${out}`);
     if (reducing && !init) {
       // Without an initial value the first element starts, and an empty array has none.
-      const [empty, fail, ok] = [temp(), label(), label()];
-      emit(`${empty} = icmp eq i64 ${length}, 0`);
-      emit(`br i1 ${empty}, label %${fail}, label %${ok}`);
-      startBlock(fail);
-      unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nreduce of empty array with no initial value\n`)})`);
-      emit("unreachable");
-      startBlock(ok);
+      const [empty, fail, ok] = [this.temp(), this.label(), this.label()];
+      this.emit(`${empty} = icmp eq i64 ${length}, 0`);
+      this.emit(`br i1 ${empty}, label %${fail}, label %${ok}`);
+      this.startBlock(fail);
+      this.unwinding(`call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where(e)}:\nreduce of empty array with no initial value\n`)})`);
+      this.emit("unreachable");
+      this.startBlock(ok);
       let start = "0";
       if (backward) {
-        start = temp();
-        emit(`${start} = sub i64 ${length}, 1`);
+        start = this.temp();
+        this.emit(`${start} = sub i64 ${length}, 1`);
       }
-      emit(`store ${llvm(result)} ${convert(copied(load(elementAt(start)), element), element, result)}, ptr ${out}`);
+      this.emit(`store ${this.llvm(result)} ${this.convert(this.copied(load(elementAt(start)), element), element, result)}, ptr ${out}`);
       first = "1";
     }
-    emit(`store i64 ${first}, ptr ${index}`);
-    const [head, body, next, done] = [label(), label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [k, more] = [temp(), temp()];
-    emit(`${k} = load i64, ptr ${index}`);
-    emit(`${more} = icmp slt i64 ${k}, ${length}`);
-    emit(`br i1 ${more}, label %${body}, label %${done}`);
-    startBlock(body);
+    this.emit(`store i64 ${first}, ptr ${index}`);
+    const [head, body, next, done] = [this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [k, more] = [this.temp(), this.temp()];
+    this.emit(`${k} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp slt i64 ${k}, ${length}`);
+    this.emit(`br i1 ${more}, label %${body}, label %${done}`);
+    this.startBlock(body);
     let i = k;
     if (backward) {
-      const last = temp();
-      i = temp();
-      emit(`${last} = sub i64 ${length}, 1`);
-      emit(`${i} = sub i64 ${last}, ${k}`);
+      const last = this.temp();
+      i = this.temp();
+      this.emit(`${last} = sub i64 ${length}, 1`);
+      this.emit(`${i} = sub i64 ${last}, ${k}`);
     }
     const slot = elementAt(i);
-    const given = typing.rec(closure).params[reducing ? 1 : 0];
-    const passed = given === undefined ? [] : [isRef(given) && !isRef(element) ? `ptr ${slot}` : `${llvm(given)} ${convert(copied(load(slot), element), element, given)}`];
-    if (typing.rec(closure).params.length > (reducing ? 2 : 1)) passed.push(`i64 ${i}`);
+    const given = this.typing.rec(closure).params[reducing ? 1 : 0];
+    const passed = given === undefined ? [] : [this.isRef(given) && !this.isRef(element) ? `ptr ${slot}` : `${this.llvm(given)} ${this.convert(this.copied(load(slot), element), element, given)}`];
+    if (this.typing.rec(closure).params.length > (reducing ? 2 : 1)) passed.push(`i64 ${i}`);
     if (reducing) {
-      const acc = temp();
-      emit(`${acc} = load ${llvm(result)}, ptr ${out}`);
-      passed.unshift(`${llvm(typing.rec(closure).params[0]!)} ${convert(acc, result, typing.rec(closure).params[0]!)}`);
+      const acc = this.temp();
+      this.emit(`${acc} = load ${this.llvm(result)}, ptr ${out}`);
+      passed.unshift(`${this.llvm(this.typing.rec(closure).params[0]!)} ${this.convert(acc, result, this.typing.rec(closure).params[0]!)}`);
     }
     // A panic in the callback drops what the loop has built and what the callback captured.
     const unwound = () => {
       if (building) {
-        const built = temp();
-        emit(`${built} = load ${llvm(result)}, ptr ${out}`);
-        dispose(built, result);
+        const built = this.temp();
+        this.emit(`${built} = load ${this.llvm(result)}, ptr ${out}`);
+        this.dispose(built, result);
       }
-      if (needsDrop(closure)) dispose(unstash(env, closure), closure);
+      if (this.needsDrop(closure)) this.dispose(this.unstash(env, closure), closure);
     };
-    const gives = invoke(target, env, passed.slice(0, bodyOf(noted.arenas, target).params.length), e, undefined, unwound)!;
-    if (method === "map") appended(out, typing.rec(closure).returns, gives);
+    const gives = this.invoke(target, env, passed.slice(0, bodyOf(this.noted.arenas, target).params.length), e, undefined, unwound)!;
+    if (method === "map") this.appended(out, this.typing.rec(closure).returns, gives);
     else if (method === "forEach") {
       // What the callback gives is dropped; JavaScript's forEach ignores it.
-      if (gives !== undefined && needsDrop(typing.rec(closure).returns)) dispose(gives, typing.rec(closure).returns);
+      if (gives !== undefined && this.needsDrop(this.typing.rec(closure).returns)) this.dispose(gives, this.typing.rec(closure).returns);
     } else if (method === "flatMap") {
-      const many = alloca(ARRAY);
-      emit(`store ${ARRAY} ${convert(gives, typing.rec(closure).returns, result)}, ptr ${many}`);
-      emit(`call void @fsh_rt_array_extend(ptr ${out}, ptr ${many}, i64 ${bytes(typing.rec(result as ArrayType).element, "1")})`);
+      const many = this.alloca(ARRAY);
+      this.emit(`store ${ARRAY} ${this.convert(gives, this.typing.rec(closure).returns, result)}, ptr ${many}`);
+      this.emit(`call void @fsh_rt_array_extend(ptr ${out}, ptr ${many}, i64 ${this.bytes(this.typing.rec(result as ArrayType).element, "1")})`);
     }
-    else if (reducing) emit(`store ${llvm(result)} ${convert(gives, typing.rec(closure).returns, result)}, ptr ${out}`);
+    else if (reducing) this.emit(`store ${this.llvm(result)} ${this.convert(gives, this.typing.rec(closure).returns, result)}, ptr ${out}`);
     else {
-      const [hit, miss] = [label(), next];
+      const [hit, miss] = [this.label(), next];
       // `every` stops at the first element its callback rejects; the others at one it accepts.
-      if (method === "every") emit(`br i1 ${gives}, label %${miss}, label %${hit}`);
-      else emit(`br i1 ${gives}, label %${hit}, label %${miss}`);
-      startBlock(hit);
+      if (method === "every") this.emit(`br i1 ${gives}, label %${miss}, label %${hit}`);
+      else this.emit(`br i1 ${gives}, label %${hit}, label %${miss}`);
+      this.startBlock(hit);
       if (method === "filter") {
-        appended(out, element, copied(load(slot), element));
-        emit(`br label %${next}`);
+        this.appended(out, element, this.copied(load(slot), element));
+        this.emit(`br label %${next}`);
       } else {
-        if (method === "find") emit(`store ${llvm(result)} ${convert(copied(load(slot), element), element, result)}, ptr ${out}`);
-        else if (method === "findIndex") emit(`store i64 ${i}, ptr ${out}`);
-        else emit(`store i1 ${method === "some"}, ptr ${out}`);
-        emit(`br label %${done}`);
+        if (method === "find") this.emit(`store ${this.llvm(result)} ${this.convert(this.copied(load(slot), element), element, result)}, ptr ${out}`);
+        else if (method === "findIndex") this.emit(`store i64 ${i}, ptr ${out}`);
+        else this.emit(`store i1 ${method === "some"}, ptr ${out}`);
+        this.emit(`br label %${done}`);
       }
     }
-    if (method === "map" || method === "flatMap" || method === "forEach" || reducing) emit(`br label %${next}`);
-    startBlock(next);
-    const after = temp();
-    emit(`${after} = add i64 ${k}, 1`);
-    emit(`store i64 ${after}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
+    if (method === "map" || method === "flatMap" || method === "forEach" || reducing) this.emit(`br label %${next}`);
+    this.startBlock(next);
+    const after = this.temp();
+    this.emit(`${after} = add i64 ${k}, 1`);
+    this.emit(`store i64 ${after}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
     // What the callback left of its captures drops once, after the last call.
-    if (needsDrop(closure)) dispose(unstash(env, closure), closure);
+    if (this.needsDrop(closure)) this.dispose(this.unstash(env, closure), closure);
     if (result === "void") return undefined;
-    const v = temp();
-    emit(`${v} = load ${llvm(result)}, ptr ${out}`);
-    if (!types.has(e) && needsDrop(result)) pending.push({ v, type: result });
+    const v = this.temp();
+    this.emit(`${v} = load ${this.llvm(result)}, ptr ${out}`);
+    if (!this.types.has(e) && this.needsDrop(result)) this.pending.push({ v, type: result });
     return v;
   }
 
+
   // `at(i)`: a clone of the element `i` names, counting back from the end when it is negative,
   // or nothing outside the array.
-  function elementAt(e: Extract<Expr, { kind: "call" }>, array: ArrayType, at: string): string {
-    const element = typing.rec(array).element;
-    const option = typing.unionType([element, "null"]);
-    const i = value(e.args[0]!);
-    const [lengthAt, length, negative, fromEnd, k, low, high, outside] = [temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp()];
-    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
-    emit(`${length} = load i64, ptr ${lengthAt}`);
-    emit(`${negative} = icmp slt i64 ${i}, 0`);
-    emit(`${fromEnd} = add i64 ${length}, ${i}`);
-    emit(`${k} = select i1 ${negative}, i64 ${fromEnd}, i64 ${i}`);
-    emit(`${low} = icmp slt i64 ${k}, 0`);
-    emit(`${high} = icmp sge i64 ${k}, ${length}`);
-    emit(`${outside} = or i1 ${low}, ${high}`);
-    const [some, none, end] = [label(), label(), label()];
-    emit(`br i1 ${outside}, label %${none}, label %${some}`);
-    startBlock(some);
-    const [dataAt, data, slot, v] = [temp(), temp(), temp(), temp()];
-    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
-    emit(`${data} = load ptr, ptr ${dataAt}`);
-    emit(`${slot} = getelementptr ${llvm(element)}, ptr ${data}, i64 ${k}`);
-    emit(`${v} = load ${llvm(element)}, ptr ${slot}`);
-    const held = convert(copied(v, element), element, option);
-    const someEnd = block;
-    emit(`br label %${end}`);
-    startBlock(none);
-    const nothing = convert("zeroinitializer", "null", option);
-    const noneEnd = block;
-    emit(`br label %${end}`);
-    startBlock(end);
-    const result = temp();
-    emit(`${result} = phi ${llvm(option)} [ ${held}, %${someEnd} ], [ ${nothing}, %${noneEnd} ]`);
-    if (types.has(e)) return convert(result, option, types.get(e)!);
-    pending.push({ v: result, type: option });
+  elementAt(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, array: ArrayType, at: string): string {
+    const element = this.typing.rec(array).element;
+    const option = this.typing.unionType([element, "null"]);
+    const i = this.value(e.args[0]!);
+    const [lengthAt, length, negative, fromEnd, k, low, high, outside] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    this.emit(`${length} = load i64, ptr ${lengthAt}`);
+    this.emit(`${negative} = icmp slt i64 ${i}, 0`);
+    this.emit(`${fromEnd} = add i64 ${length}, ${i}`);
+    this.emit(`${k} = select i1 ${negative}, i64 ${fromEnd}, i64 ${i}`);
+    this.emit(`${low} = icmp slt i64 ${k}, 0`);
+    this.emit(`${high} = icmp sge i64 ${k}, ${length}`);
+    this.emit(`${outside} = or i1 ${low}, ${high}`);
+    const [some, none, end] = [this.label(), this.label(), this.label()];
+    this.emit(`br i1 ${outside}, label %${none}, label %${some}`);
+    this.startBlock(some);
+    const [dataAt, data, slot, v] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    this.emit(`${data} = load ptr, ptr ${dataAt}`);
+    this.emit(`${slot} = getelementptr ${this.llvm(element)}, ptr ${data}, i64 ${k}`);
+    this.emit(`${v} = load ${this.llvm(element)}, ptr ${slot}`);
+    const held = this.convert(this.copied(v, element), element, option);
+    const someEnd = this.block;
+    this.emit(`br label %${end}`);
+    this.startBlock(none);
+    const nothing = this.convert("zeroinitializer", "null", option);
+    const noneEnd = this.block;
+    this.emit(`br label %${end}`);
+    this.startBlock(end);
+    const result = this.temp();
+    this.emit(`${result} = phi ${this.llvm(option)} [ ${held}, %${someEnd} ], [ ${nothing}, %${noneEnd} ]`);
+    if (this.types.has(e)) return this.convert(result, option, this.types.get(e)!);
+    this.pending.push({ v: result, type: option });
     return result;
   }
 
+
   // `sort`: the runtime's merge sort, comparing through a function that calls the comparator
   // with the two elements, or orders numbers and strings when there is none.
-  function sorted(e: Extract<Expr, { kind: "call" }>, array: ArrayType, at: string): undefined {
-    const element = typing.rec(array).element;
+  sorted(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, array: ArrayType, at: string): undefined {
+    const element = this.typing.rec(array).element;
     const compare = e.args[0];
-    const closure = compare && (types.get(compare) as ClosureType);
+    const closure = compare && (this.types.get(compare) as ClosureType);
     let env = "null";
     let through: string;
     if (compare && closure) {
-      const target = callOf(compare)!;
-      env = alloca(llvm(closure));
-      emit(`store ${llvm(closure)} ${owned(compare)}, ptr ${env}`);
+      const target = this.callOf(compare)!;
+      env = this.alloca(this.llvm(closure));
+      this.emit(`store ${this.llvm(closure)} ${this.owned(compare)}, ptr ${env}`);
       // Its own owner, since code emitted twice, as a `finally` is, makes two.
-      through = `@fsh.sort.compare.${stableId("sort.compare", `${current.symbol} ${compare.start}`, {})}`;
-      thunk(through, "i32", () => {
+      through = `@fsh.sort.compare.${this.stableId("sort.compare", `${this.current.symbol} ${compare.start}`, {})}`;
+      this.thunk(through, "i32", () => {
         const arg = (p: string, given: Type | undefined): string[] => {
           if (given === undefined) return [];
-          if (isRef(given) && !isRef(element)) return [`ptr ${p}`];
-          const v = temp();
-          emit(`${v} = load ${llvm(element)}, ptr ${p}`);
-          return [`${llvm(given)} ${convert(copied(v, element), element, given)}`];
+          if (this.isRef(given) && !this.isRef(element)) return [`ptr ${p}`];
+          const v = this.temp();
+          this.emit(`${v} = load ${this.llvm(element)}, ptr ${p}`);
+          return [`${this.llvm(given)} ${this.convert(this.copied(v, element), element, given)}`];
         };
-        const args = [...arg("%a", typing.rec(closure).params[0]), ...arg("%b", typing.rec(closure).params[1])];
-        emit(`ret i32 ${sign(invoke(target, "%p", args.slice(0, bodyOf(noted.arenas, target).params.length))!, typing.rec(closure).returns)}`);
+        const args = [...arg("%a", this.typing.rec(closure).params[0]), ...arg("%b", this.typing.rec(closure).params[1])];
+        this.emit(`ret i32 ${this.sign(this.invoke(target, "%p", args.slice(0, bodyOf(this.noted.arenas, target).params.length))!, this.typing.rec(closure).returns)}`);
       }, ["ptr %a", "ptr %b"]);
-    } else through = order(element);
-    const [lengthAt, dataAt, length, data] = [temp(), temp(), temp(), temp()];
-    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
-    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
-    emit(`${length} = load i64, ptr ${lengthAt}`);
-    emit(`${data} = load ptr, ptr ${dataAt}`);
+    } else through = this.order(element);
+    const [lengthAt, dataAt, length, data] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    this.emit(`${length} = load i64, ptr ${lengthAt}`);
+    this.emit(`${data} = load ptr, ptr ${dataAt}`);
     // The scratch buffer is codegen's, so a comparator's panic frees it too.
-    const [size, room, buffer] = [bytes(element, "1"), temp(), temp()];
-    emit(`${room} = mul i64 ${length}, ${size}`);
-    emit(`${buffer} = call ptr @fsh_rt_array_alloc(i64 ${room})`);
+    const [size, room, buffer] = [this.bytes(element, "1"), this.temp(), this.temp()];
+    this.emit(`${room} = mul i64 ${length}, ${size}`);
+    this.emit(`${buffer} = call ptr @fsh_rt_array_alloc(i64 ${room})`);
     const leftovers = () => {
-      if (closure && needsDrop(closure)) dispose(unstash(env, closure), closure);
+      if (closure && this.needsDrop(closure)) this.dispose(this.unstash(env, closure), closure);
     };
-    unwinding(`call void @fsh_rt_sort(ptr ${data}, i64 ${length}, i64 ${size}, ptr ${through}, ptr ${env}, ptr ${buffer})`, undefined, () => {
-      emit(`call void @fsh_rt_free(ptr ${buffer})`);
+    this.unwinding(`call void @fsh_rt_sort(ptr ${data}, i64 ${length}, i64 ${size}, ptr ${through}, ptr ${env}, ptr ${buffer})`, undefined, () => {
+      this.emit(`call void @fsh_rt_free(ptr ${buffer})`);
       leftovers();
     });
-    emit(`call void @fsh_rt_free(ptr ${buffer})`);
+    this.emit(`call void @fsh_rt_free(ptr ${buffer})`);
     leftovers();
     return undefined;
   }
 
+
   // -1, 0 or 1 for a comparator's number, as its sign; NaN is 0, keeping the order.
-  function sign(v: string, type: Type): string {
-    const t = typing.lower(type);
-    const [less, more, some, result] = [temp(), temp(), temp(), temp()];
-    const ty = llvm(t);
+  sign(this: Mut<this>, v: string, type: Type): string {
+    const t = this.typing.lower(type);
+    const [less, more, some, result] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    const ty = this.llvm(t);
     if (isFloat(t)) {
-      emit(`${less} = fcmp olt ${ty} ${v}, 0.0`);
-      emit(`${more} = fcmp ogt ${ty} ${v}, 0.0`);
+      this.emit(`${less} = fcmp olt ${ty} ${v}, 0.0`);
+      this.emit(`${more} = fcmp ogt ${ty} ${v}, 0.0`);
     } else {
       const signed = isInteger(t) && INTEGERS[t].signed;
-      emit(`${less} = icmp ${signed ? "slt" : "ult"} ${ty} ${v}, 0`);
-      emit(`${more} = icmp ${signed ? "sgt" : "ugt"} ${ty} ${v}, 0`);
+      this.emit(`${less} = icmp ${signed ? "slt" : "ult"} ${ty} ${v}, 0`);
+      this.emit(`${more} = icmp ${signed ? "sgt" : "ugt"} ${ty} ${v}, 0`);
     }
-    emit(`${some} = select i1 ${more}, i32 1, i32 0`);
-    emit(`${result} = select i1 ${less}, i32 -1, i32 ${some}`);
+    this.emit(`${some} = select i1 ${more}, i32 1, i32 0`);
+    this.emit(`${result} = select i1 ${less}, i32 -1, i32 ${some}`);
     return result;
   }
 
+
   // The default order for an element type: numbers by value, strings by UTF-16 code units.
-  function order(element: Type): string {
-    const t = typing.lower(element);
-    const known = orders.get(typing.keyOf(t));
+  order(this: Mut<this>, element: Type): string {
+    const t = this.typing.lower(element);
+    const known = this.orders.get(this.typing.keyOf(t));
     if (known) return known;
-    const name = `@fsh.sort.order.${stableId("sort.order", typing.described(t), typing.keyOf(t))}`;
-    orders.set(typing.keyOf(t), name);
-    thunk(name, "i32", () => {
-      const [a, b] = [temp(), temp()];
-      emit(`${a} = load ${llvm(t)}, ptr %a`);
-      emit(`${b} = load ${llvm(t)}, ptr %b`);
+    const name = `@fsh.sort.order.${this.stableId("sort.order", this.typing.described(t), this.typing.keyOf(t))}`;
+    this.orders.set(this.typing.keyOf(t), name);
+    this.thunk(name, "i32", () => {
+      const [a, b] = [this.temp(), this.temp()];
+      this.emit(`${a} = load ${this.llvm(t)}, ptr %a`);
+      this.emit(`${b} = load ${this.llvm(t)}, ptr %b`);
       if (t === "string") {
-        const result = temp();
-        emit(`${result} = call i32 @fsh_rt_str_compare(ptr ${a}, ptr ${b})`);
-        emit(`ret i32 ${result}`);
+        const result = this.temp();
+        this.emit(`${result} = call i32 @fsh_rt_str_compare(ptr ${a}, ptr ${b})`);
+        this.emit(`ret i32 ${result}`);
         return;
       }
       // A subtraction could overflow, so the two are compared instead.
-      const [less, more, some, result] = [temp(), temp(), temp(), temp()];
+      const [less, more, some, result] = [this.temp(), this.temp(), this.temp(), this.temp()];
       if (isFloat(t)) {
-        emit(`${less} = fcmp olt ${llvm(t)} ${a}, ${b}`);
-        emit(`${more} = fcmp ogt ${llvm(t)} ${a}, ${b}`);
+        this.emit(`${less} = fcmp olt ${this.llvm(t)} ${a}, ${b}`);
+        this.emit(`${more} = fcmp ogt ${this.llvm(t)} ${a}, ${b}`);
       } else {
         const signed = isInteger(t) && INTEGERS[t].signed;
-        emit(`${less} = icmp ${signed ? "slt" : "ult"} ${llvm(t)} ${a}, ${b}`);
-        emit(`${more} = icmp ${signed ? "sgt" : "ugt"} ${llvm(t)} ${a}, ${b}`);
+        this.emit(`${less} = icmp ${signed ? "slt" : "ult"} ${this.llvm(t)} ${a}, ${b}`);
+        this.emit(`${more} = icmp ${signed ? "sgt" : "ugt"} ${this.llvm(t)} ${a}, ${b}`);
       }
-      emit(`${some} = select i1 ${more}, i32 1, i32 0`);
-      emit(`${result} = select i1 ${less}, i32 -1, i32 ${some}`);
-      emit(`ret i32 ${result}`);
+      this.emit(`${some} = select i1 ${more}, i32 1, i32 0`);
+      this.emit(`${result} = select i1 ${less}, i32 -1, i32 ${some}`);
+      this.emit(`ret i32 ${result}`);
     }, ["ptr %a", "ptr %b"]);
     return name;
   }
+
 
   // `toReversed`, `toSorted`, `toSpliced` and `with`: a clone of the array, changed as `reverse`,
   // `sort`, `splice` and a write change theirs. The clone is held as a statement value until the
   // arguments and a comparator have run, so their panics drop it; until then it is unchanged, or
   // only permuted in its own buffer.
-  function copying(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string {
-    const element = typing.rec(array).element;
-    const t = llvm(element);
-    const [lengthAt, length] = [temp(), temp()];
-    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
-    emit(`${length} = load i64, ptr ${lengthAt}`);
+  copying(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string {
+    const element = this.typing.rec(array).element;
+    const t = this.llvm(element);
+    const [lengthAt, length] = [this.temp(), this.temp()];
+    this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    this.emit(`${length} = load i64, ptr ${lengthAt}`);
     // `with` checks its position, then writes over the clone's element, dropping the old one.
-    const [index, given] = method !== "with" ? [] : delivered((hand) => {
-      const [i, v] = [value(e.args[0]!), hand(owned(e.args[1]!), element)];
-      const [negative, fromEnd, k, outside, fail, ok] = [temp(), temp(), temp(), temp(), label(), label()];
-      emit(`${negative} = icmp slt i64 ${i}, 0`);
-      emit(`${fromEnd} = add i64 ${length}, ${i}`);
-      emit(`${k} = select i1 ${negative}, i64 ${fromEnd}, i64 ${i}`);
-      emit(`${outside} = icmp uge i64 ${k}, ${length}`);
-      emit(`br i1 ${outside}, label %${fail}, label %${ok}`);
-      startBlock(fail);
-      unwinding(`call void @fsh_rt_panic_index(ptr ${cString(`panicked at ${where(e)}:\n`)}, i64 ${length}, i64 ${i})`);
-      emit("unreachable");
-      startBlock(ok);
+    const [index, given] = method !== "with" ? [] : this.delivered((hand) => {
+      const [i, v] = [this.value(e.args[0]!), hand(this.owned(e.args[1]!), element)];
+      const [negative, fromEnd, k, outside, fail, ok] = [this.temp(), this.temp(), this.temp(), this.temp(), this.label(), this.label()];
+      this.emit(`${negative} = icmp slt i64 ${i}, 0`);
+      this.emit(`${fromEnd} = add i64 ${length}, ${i}`);
+      this.emit(`${k} = select i1 ${negative}, i64 ${fromEnd}, i64 ${i}`);
+      this.emit(`${outside} = icmp uge i64 ${k}, ${length}`);
+      this.emit(`br i1 ${outside}, label %${fail}, label %${ok}`);
+      this.startBlock(fail);
+      this.unwinding(`call void @fsh_rt_panic_index(ptr ${this.cString(`panicked at ${this.where(e)}:\n`)}, i64 ${length}, i64 ${i})`);
+      this.emit("unreachable");
+      this.startBlock(ok);
       return [k, v];
     });
-    const whole = temp();
-    emit(`${whole} = load ${ARRAY}, ptr ${at}`);
-    const copy = alloca(ARRAY);
+    const whole = this.temp();
+    this.emit(`${whole} = load ${ARRAY}, ptr ${at}`);
+    const copy = this.alloca(ARRAY);
     const kept = given === undefined ? [] : [{ v: given, type: element }];
-    pending.push(...kept);
-    const held = { v: copied(whole, array), type: array as Type };
-    emit(`store ${ARRAY} ${held.v}, ptr ${copy}`);
-    pending.push(held);
-    if (method === "toReversed") changed(e, "reverse", array, copy);
-    if (method === "toSorted") sorted(e, array, copy);
+    this.pending.push(...kept);
+    const held = { v: this.copied(whole, array), type: array as Type };
+    this.emit(`store ${ARRAY} ${held.v}, ptr ${copy}`);
+    this.pending.push(held);
+    if (method === "toReversed") this.changed(e, "reverse", array, copy);
+    if (method === "toSorted") this.sorted(e, array, copy);
     if (method === "toSpliced" && e.args.length > 0) {
-      const removed = changed(e, "splice", array, copy)!;
-      if (types.has(e)) dispose(removed, array);
+      const removed = this.changed(e, "splice", array, copy)!;
+      if (this.types.has(e)) this.dispose(removed, array);
     }
-    pending = pending.filter((p) => p !== held && !kept.includes(p));
+    this.pending = this.pending.filter((p) => p !== held && !kept.includes(p));
     if (index !== undefined) {
-      const [dataAt, data, slot, old] = [temp(), temp(), temp(), temp()];
-      emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${copy}, i32 0, i32 0`);
-      emit(`${data} = load ptr, ptr ${dataAt}`);
-      emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${index}`);
-      emit(`${old} = load ${t}, ptr ${slot}`);
-      emit(`store ${t} ${given}, ptr ${slot}`);
-      dispose(old, element);
+      const [dataAt, data, slot, old] = [this.temp(), this.temp(), this.temp(), this.temp()];
+      this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${copy}, i32 0, i32 0`);
+      this.emit(`${data} = load ptr, ptr ${dataAt}`);
+      this.emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${index}`);
+      this.emit(`${old} = load ${t}, ptr ${slot}`);
+      this.emit(`store ${t} ${given}, ptr ${slot}`);
+      this.dispose(old, element);
     }
-    const v = temp();
-    emit(`${v} = load ${ARRAY}, ptr ${copy}`);
-    if (!types.has(e)) pending.push({ v, type: array });
+    const v = this.temp();
+    this.emit(`${v} = load ${ARRAY}, ptr ${copy}`);
+    if (!this.types.has(e)) this.pending.push({ v, type: array });
     return v;
   }
+
 
   // `shift`, `unshift`, `splice`, `reverse`, `fill` and `copyWithin`. Elements move in and out
   // bitwise, through the runtime's gap and take helpers; only `fill` and `copyWithin` make copies,
   // each stored before the element it replaces is dropped.
-  function changed(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string | undefined {
-    const element = typing.rec(array).element;
-    const t = llvm(element);
-    const size = bytes(element, "1");
+  changed(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string | undefined {
+    const element = this.typing.rec(array).element;
+    const t = this.llvm(element);
+    const size = this.bytes(element, "1");
     // What the call takes over is dropped if a later argument panics before the call.
-    const args = delivered((hand) => e.args.map((a, i) => ((method === "splice" && i >= 2) || method === "unshift" || (method === "fill" && i === 0) ? hand(owned(a), element) : value(a))));
-    const [lengthAt, length] = [temp(), temp()];
-    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
-    emit(`${length} = load i64, ptr ${lengthAt}`);
+    const args = this.delivered((hand) => e.args.map((a, i) => ((method === "splice" && i >= 2) || method === "unshift" || (method === "fill" && i === 0) ? hand(this.owned(a), element) : this.value(a))));
+    const [lengthAt, length] = [this.temp(), this.temp()];
+    this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    this.emit(`${length} = load i64, ptr ${lengthAt}`);
     // The values given, stored from index `from` on.
     const placed = (values: string[], from: string) => {
-      const [dataAt, data] = [temp(), temp()];
-      emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
-      emit(`${data} = load ptr, ptr ${dataAt}`);
+      const [dataAt, data] = [this.temp(), this.temp()];
+      this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+      this.emit(`${data} = load ptr, ptr ${dataAt}`);
       values.forEach((v, i) => {
-        const [index, slot] = [temp(), temp()];
-        emit(`${index} = add i64 ${from}, ${i}`);
-        emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${index}`);
-        emit(`store ${t} ${v}, ptr ${slot}`);
+        const [index, slot] = [this.temp(), this.temp()];
+        this.emit(`${index} = add i64 ${from}, ${i}`);
+        this.emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${index}`);
+        this.emit(`store ${t} ${v}, ptr ${slot}`);
       });
     };
     if (method === "reverse") {
-      emit(`call void @fsh_rt_array_reverse(ptr ${at}, i64 ${size})`);
+      this.emit(`call void @fsh_rt_array_reverse(ptr ${at}, i64 ${size})`);
       return undefined;
     }
     if (method === "unshift") {
       if (args.length === 0) return undefined;
-      emit(`call void @fsh_rt_array_open(ptr ${at}, i64 0, i64 ${args.length}, i64 ${size})`);
+      this.emit(`call void @fsh_rt_array_open(ptr ${at}, i64 0, i64 ${args.length}, i64 ${size})`);
       placed(args, "0");
       return undefined;
     }
     if (method === "shift") {
-      const option = typing.unionType([element, "null"]);
-      const [empty, some, none, end] = [temp(), label(), label(), label()];
-      emit(`${empty} = icmp eq i64 ${length}, 0`);
-      emit(`br i1 ${empty}, label %${none}, label %${some}`);
-      startBlock(some);
-      const taken = alloca(ARRAY);
-      emit(`call void @fsh_rt_array_take(ptr ${at}, i64 0, i64 1, i64 ${size}, ptr ${taken})`);
-      const [dataAt, data, v] = [temp(), temp(), temp()];
-      emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${taken}, i32 0, i32 0`);
-      emit(`${data} = load ptr, ptr ${dataAt}`);
-      emit(`${v} = load ${t}, ptr ${data}`);
-      emit(`call void @fsh_rt_free(ptr ${data})`);
-      const held = convert(v, element, option);
-      const someEnd = block;
-      emit(`br label %${end}`);
-      startBlock(none);
-      const nothing = convert("zeroinitializer", "null", option);
-      const noneEnd = block;
-      emit(`br label %${end}`);
-      startBlock(end);
-      const result = temp();
-      emit(`${result} = phi ${llvm(option)} [ ${held}, %${someEnd} ], [ ${nothing}, %${noneEnd} ]`);
-      if (types.has(e)) return convert(result, option, types.get(e)!);
-      pending.push({ v: result, type: option });
+      const option = this.typing.unionType([element, "null"]);
+      const [empty, some, none, end] = [this.temp(), this.label(), this.label(), this.label()];
+      this.emit(`${empty} = icmp eq i64 ${length}, 0`);
+      this.emit(`br i1 ${empty}, label %${none}, label %${some}`);
+      this.startBlock(some);
+      const taken = this.alloca(ARRAY);
+      this.emit(`call void @fsh_rt_array_take(ptr ${at}, i64 0, i64 1, i64 ${size}, ptr ${taken})`);
+      const [dataAt, data, v] = [this.temp(), this.temp(), this.temp()];
+      this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${taken}, i32 0, i32 0`);
+      this.emit(`${data} = load ptr, ptr ${dataAt}`);
+      this.emit(`${v} = load ${t}, ptr ${data}`);
+      this.emit(`call void @fsh_rt_free(ptr ${data})`);
+      const held = this.convert(v, element, option);
+      const someEnd = this.block;
+      this.emit(`br label %${end}`);
+      this.startBlock(none);
+      const nothing = this.convert("zeroinitializer", "null", option);
+      const noneEnd = this.block;
+      this.emit(`br label %${end}`);
+      this.startBlock(end);
+      const result = this.temp();
+      this.emit(`${result} = phi ${this.llvm(option)} [ ${held}, %${someEnd} ], [ ${nothing}, %${noneEnd} ]`);
+      if (this.types.has(e)) return this.convert(result, option, this.types.get(e)!);
+      this.pending.push({ v: result, type: option });
       return result;
     }
     if (method === "splice") {
-      const start = position(args[0]!, length);
-      const room = temp();
-      emit(`${room} = sub i64 ${length}, ${start}`);
+      const start = this.position(args[0]!, length);
+      const room = this.temp();
+      this.emit(`${room} = sub i64 ${length}, ${start}`);
       let count = room;
       if (args[1] !== undefined) {
         // A count below zero removes nothing, and one past the end removes what is there.
-        const [negative, atLeast, over, kept] = [temp(), temp(), temp(), temp()];
-        emit(`${negative} = icmp slt i64 ${args[1]}, 0`);
-        emit(`${atLeast} = select i1 ${negative}, i64 0, i64 ${args[1]}`);
-        emit(`${over} = icmp sgt i64 ${atLeast}, ${room}`);
-        emit(`${kept} = select i1 ${over}, i64 ${room}, i64 ${atLeast}`);
+        const [negative, atLeast, over, kept] = [this.temp(), this.temp(), this.temp(), this.temp()];
+        this.emit(`${negative} = icmp slt i64 ${args[1]}, 0`);
+        this.emit(`${atLeast} = select i1 ${negative}, i64 0, i64 ${args[1]}`);
+        this.emit(`${over} = icmp sgt i64 ${atLeast}, ${room}`);
+        this.emit(`${kept} = select i1 ${over}, i64 ${room}, i64 ${atLeast}`);
         count = kept;
       }
-      const removed = alloca(ARRAY);
-      emit(`call void @fsh_rt_array_take(ptr ${at}, i64 ${start}, i64 ${count}, i64 ${size}, ptr ${removed})`);
+      const removed = this.alloca(ARRAY);
+      this.emit(`call void @fsh_rt_array_take(ptr ${at}, i64 ${start}, i64 ${count}, i64 ${size}, ptr ${removed})`);
       const items = args.slice(2);
       if (items.length > 0) {
-        emit(`call void @fsh_rt_array_open(ptr ${at}, i64 ${start}, i64 ${items.length}, i64 ${size})`);
+        this.emit(`call void @fsh_rt_array_open(ptr ${at}, i64 ${start}, i64 ${items.length}, i64 ${size})`);
         placed(items, start);
       }
-      const v = temp();
-      emit(`${v} = load ${ARRAY}, ptr ${removed}`);
-      if (!types.has(e)) pending.push({ v, type: array });
+      const v = this.temp();
+      this.emit(`${v} = load ${ARRAY}, ptr ${removed}`);
+      if (!this.types.has(e)) this.pending.push({ v, type: array });
       return v;
     }
     if (method === "copyWithin") {
-      copiedWithin(args, element, length, at);
+      this.copiedWithin(args, element, length, at);
       return undefined;
     }
     // `fill`: a copy of the value in each slot of the range, then the value itself dropped.
     const given = args[0]!;
-    const from = args[1] !== undefined ? position(args[1], length) : "0";
-    const to = args[2] !== undefined ? position(args[2], length) : length;
-    const index = alloca("i64");
-    emit(`store i64 ${from}, ptr ${index}`);
-    const [head, body, done] = [label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [i, more, dataAt, data, slot, old, after] = [temp(), temp(), temp(), temp(), temp(), temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${more} = icmp slt i64 ${i}, ${to}`);
-    emit(`br i1 ${more}, label %${body}, label %${done}`);
-    startBlock(body);
-    const copy = copied(given, element);
-    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
-    emit(`${data} = load ptr, ptr ${dataAt}`);
-    emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
-    emit(`${old} = load ${t}, ptr ${slot}`);
-    emit(`store ${t} ${copy}, ptr ${slot}`);
-    dispose(old, element);
-    emit(`${after} = add i64 ${i}, 1`);
-    emit(`store i64 ${after}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
-    dispose(given, element);
+    const from = args[1] !== undefined ? this.position(args[1], length) : "0";
+    const to = args[2] !== undefined ? this.position(args[2], length) : length;
+    const index = this.alloca("i64");
+    this.emit(`store i64 ${from}, ptr ${index}`);
+    const [head, body, done] = [this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [i, more, dataAt, data, slot, old, after] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp slt i64 ${i}, ${to}`);
+    this.emit(`br i1 ${more}, label %${body}, label %${done}`);
+    this.startBlock(body);
+    const copy = this.copied(given, element);
+    this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    this.emit(`${data} = load ptr, ptr ${dataAt}`);
+    this.emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+    this.emit(`${old} = load ${t}, ptr ${slot}`);
+    this.emit(`store ${t} ${copy}, ptr ${slot}`);
+    this.dispose(old, element);
+    this.emit(`${after} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${after}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
+    this.dispose(given, element);
     return undefined;
   }
+
 
   // `copyWithin(target, start, end?)`: a clone of each element of the range written over the
   // element `target - start` on, which drops. Copying back to front when the range runs over its
   // destination reads each element before it is written, as through a buffer.
-  function copiedWithin(args: string[], element: Type, length: string, at: string) {
-    const t = llvm(element);
-    const to = position(args[0]!, length);
-    const from = position(args[1]!, length);
-    const end = args[2] !== undefined ? position(args[2], length) : length;
-    const [span, room, shorter, count, after, ahead, overlaps, backward, last] = [temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp()];
-    emit(`${span} = sub i64 ${end}, ${from}`);
-    emit(`${room} = sub i64 ${length}, ${to}`);
-    emit(`${shorter} = icmp slt i64 ${span}, ${room}`);
-    emit(`${count} = select i1 ${shorter}, i64 ${span}, i64 ${room}`);
-    emit(`${after} = add i64 ${from}, ${count}`);
-    emit(`${ahead} = icmp slt i64 ${from}, ${to}`);
-    emit(`${overlaps} = icmp slt i64 ${to}, ${after}`);
-    emit(`${backward} = and i1 ${ahead}, ${overlaps}`);
-    emit(`${last} = sub i64 ${count}, 1`);
-    const index = alloca("i64");
-    emit(`store i64 0, ptr ${index}`);
-    const [head, body, done] = [label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [k, more, back, j, dataAt, data, source, target, v, old, next] = [temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp(), temp()];
-    emit(`${k} = load i64, ptr ${index}`);
-    emit(`${more} = icmp slt i64 ${k}, ${count}`);
-    emit(`br i1 ${more}, label %${body}, label %${done}`);
-    startBlock(body);
-    emit(`${back} = sub i64 ${last}, ${k}`);
-    emit(`${j} = select i1 ${backward}, i64 ${back}, i64 ${k}`);
-    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
-    emit(`${data} = load ptr, ptr ${dataAt}`);
-    const [i, o] = [temp(), temp()];
-    emit(`${i} = add i64 ${from}, ${j}`);
-    emit(`${o} = add i64 ${to}, ${j}`);
-    emit(`${source} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
-    emit(`${target} = getelementptr ${t}, ptr ${data}, i64 ${o}`);
-    emit(`${v} = load ${t}, ptr ${source}`);
-    const copy = copied(v, element);
-    emit(`${old} = load ${t}, ptr ${target}`);
-    emit(`store ${t} ${copy}, ptr ${target}`);
-    dispose(old, element);
-    emit(`${next} = add i64 ${k}, 1`);
-    emit(`store i64 ${next}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
+  copiedWithin(this: Mut<this>, args: string[], element: Type, length: string, at: string) {
+    const t = this.llvm(element);
+    const to = this.position(args[0]!, length);
+    const from = this.position(args[1]!, length);
+    const end = args[2] !== undefined ? this.position(args[2], length) : length;
+    const [span, room, shorter, count, after, ahead, overlaps, backward, last] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${span} = sub i64 ${end}, ${from}`);
+    this.emit(`${room} = sub i64 ${length}, ${to}`);
+    this.emit(`${shorter} = icmp slt i64 ${span}, ${room}`);
+    this.emit(`${count} = select i1 ${shorter}, i64 ${span}, i64 ${room}`);
+    this.emit(`${after} = add i64 ${from}, ${count}`);
+    this.emit(`${ahead} = icmp slt i64 ${from}, ${to}`);
+    this.emit(`${overlaps} = icmp slt i64 ${to}, ${after}`);
+    this.emit(`${backward} = and i1 ${ahead}, ${overlaps}`);
+    this.emit(`${last} = sub i64 ${count}, 1`);
+    const index = this.alloca("i64");
+    this.emit(`store i64 0, ptr ${index}`);
+    const [head, body, done] = [this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [k, more, back, j, dataAt, data, source, target, v, old, next] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${k} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp slt i64 ${k}, ${count}`);
+    this.emit(`br i1 ${more}, label %${body}, label %${done}`);
+    this.startBlock(body);
+    this.emit(`${back} = sub i64 ${last}, ${k}`);
+    this.emit(`${j} = select i1 ${backward}, i64 ${back}, i64 ${k}`);
+    this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    this.emit(`${data} = load ptr, ptr ${dataAt}`);
+    const [i, o] = [this.temp(), this.temp()];
+    this.emit(`${i} = add i64 ${from}, ${j}`);
+    this.emit(`${o} = add i64 ${to}, ${j}`);
+    this.emit(`${source} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+    this.emit(`${target} = getelementptr ${t}, ptr ${data}, i64 ${o}`);
+    this.emit(`${v} = load ${t}, ptr ${source}`);
+    const copy = this.copied(v, element);
+    this.emit(`${old} = load ${t}, ptr ${target}`);
+    this.emit(`store ${t} ${copy}, ptr ${target}`);
+    this.dispose(old, element);
+    this.emit(`${next} = add i64 ${k}, 1`);
+    this.emit(`store i64 ${next}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
   }
+
 
   // Where `lastIndexOf` searches back from, as an end past it: a negative position counts from
   // the end, and one past the last element starts at the last.
-  function lastFrom(v: string, length: string): string {
-    const [negative, fromEnd, k, last, past, kept, end] = [temp(), temp(), temp(), temp(), temp(), temp(), temp()];
-    emit(`${negative} = icmp slt i64 ${v}, 0`);
-    emit(`${fromEnd} = add i64 ${length}, ${v}`);
-    emit(`${k} = select i1 ${negative}, i64 ${fromEnd}, i64 ${v}`);
-    emit(`${last} = sub i64 ${length}, 1`);
-    emit(`${past} = icmp sgt i64 ${k}, ${last}`);
-    emit(`${kept} = select i1 ${past}, i64 ${last}, i64 ${k}`);
-    emit(`${end} = add i64 ${kept}, 1`);
+  lastFrom(this: Mut<this>, v: string, length: string): string {
+    const [negative, fromEnd, k, last, past, kept, end] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${negative} = icmp slt i64 ${v}, 0`);
+    this.emit(`${fromEnd} = add i64 ${length}, ${v}`);
+    this.emit(`${k} = select i1 ${negative}, i64 ${fromEnd}, i64 ${v}`);
+    this.emit(`${last} = sub i64 ${length}, 1`);
+    this.emit(`${past} = icmp sgt i64 ${k}, ${last}`);
+    this.emit(`${kept} = select i1 ${past}, i64 ${last}, i64 ${k}`);
+    this.emit(`${end} = add i64 ${kept}, 1`);
     return end;
   }
 
+
   // `concat` and `flat`: a new array of clones, of this array's elements then each argument's,
   // or of the elements of each array this one holds.
-  function gathered(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string {
-    const result = types.get(e) ?? (method === "concat" ? array : typing.lower(typing.rec(array).element));
-    const out = alloca(ARRAY);
-    emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+  gathered(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string {
+    const result = this.types.get(e) ?? (method === "concat" ? array : this.typing.lower(this.typing.rec(array).element));
+    const out = this.alloca(ARRAY);
+    this.emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
     // Each element of the array at `from`, cloned onto the end of the result.
     const cloneAll = (from: string, element: Type, each?: (slot: string) => void) => {
-      const [lengthAt, dataAt, length, data, index] = [temp(), temp(), temp(), temp(), alloca("i64")];
-      emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${from}, i32 0, i32 1`);
-      emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${from}, i32 0, i32 0`);
-      emit(`${length} = load i64, ptr ${lengthAt}`);
-      emit(`${data} = load ptr, ptr ${dataAt}`);
-      emit(`store i64 0, ptr ${index}`);
-      const [head, body, done] = [label(), label(), label()];
-      emit(`br label %${head}`);
-      startBlock(head);
-      const [i, more, slot, after] = [temp(), temp(), temp(), temp()];
-      emit(`${i} = load i64, ptr ${index}`);
-      emit(`${more} = icmp slt i64 ${i}, ${length}`);
-      emit(`br i1 ${more}, label %${body}, label %${done}`);
-      startBlock(body);
-      emit(`${slot} = getelementptr ${llvm(element)}, ptr ${data}, i64 ${i}`);
+      const [lengthAt, dataAt, length, data, index] = [this.temp(), this.temp(), this.temp(), this.temp(), this.alloca("i64")];
+      this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${from}, i32 0, i32 1`);
+      this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${from}, i32 0, i32 0`);
+      this.emit(`${length} = load i64, ptr ${lengthAt}`);
+      this.emit(`${data} = load ptr, ptr ${dataAt}`);
+      this.emit(`store i64 0, ptr ${index}`);
+      const [head, body, done] = [this.label(), this.label(), this.label()];
+      this.emit(`br label %${head}`);
+      this.startBlock(head);
+      const [i, more, slot, after] = [this.temp(), this.temp(), this.temp(), this.temp()];
+      this.emit(`${i} = load i64, ptr ${index}`);
+      this.emit(`${more} = icmp slt i64 ${i}, ${length}`);
+      this.emit(`br i1 ${more}, label %${body}, label %${done}`);
+      this.startBlock(body);
+      this.emit(`${slot} = getelementptr ${this.llvm(element)}, ptr ${data}, i64 ${i}`);
       if (each) each(slot);
       else {
-        const v = temp();
-        emit(`${v} = load ${llvm(element)}, ptr ${slot}`);
-        appended(out, element, copied(v, element));
+        const v = this.temp();
+        this.emit(`${v} = load ${this.llvm(element)}, ptr ${slot}`);
+        this.appended(out, element, this.copied(v, element));
       }
-      emit(`${after} = add i64 ${i}, 1`);
-      emit(`store i64 ${after}, ptr ${index}`);
-      emit(`br label %${head}`);
-      startBlock(done);
+      this.emit(`${after} = add i64 ${i}, 1`);
+      this.emit(`store i64 ${after}, ptr ${index}`);
+      this.emit(`br label %${head}`);
+      this.startBlock(done);
     };
     if (method === "flat") {
-      const inner = typing.rec(array).element as ArrayType;
-      cloneAll(at, typing.rec(array).element, (slot) => cloneAll(slot, typing.rec(inner).element));
+      const inner = this.typing.rec(array).element as ArrayType;
+      cloneAll(at, this.typing.rec(array).element, (slot) => cloneAll(slot, this.typing.rec(inner).element));
     } else {
       // The arguments run first, as in JavaScript, before anything is cloned.
-      const sources = e.args.map((a) => value(a));
-      cloneAll(at, typing.rec(array).element);
-      for (const from of sources) cloneAll(from, typing.rec(array).element);
+      const sources = e.args.map((a) => this.value(a));
+      cloneAll(at, this.typing.rec(array).element);
+      for (const from of sources) cloneAll(from, this.typing.rec(array).element);
     }
-    const v = temp();
-    emit(`${v} = load ${ARRAY}, ptr ${out}`);
-    if (!types.has(e)) pending.push({ v, type: result });
+    const v = this.temp();
+    this.emit(`${v} = load ${ARRAY}, ptr ${out}`);
+    if (!this.types.has(e)) this.pending.push({ v, type: result });
     return v;
   }
 
+
   // A position as JavaScript reads one against a length: a negative one counts from the end,
   // and either is kept between 0 and the length.
-  function position(v: string, length: string): string {
-    const [negative, fromEnd, low, high, past, kept, result] = [temp(), temp(), temp(), temp(), temp(), temp(), temp()];
-    emit(`${negative} = icmp slt i64 ${v}, 0`);
-    emit(`${fromEnd} = add i64 ${length}, ${v}`);
-    emit(`${low} = icmp slt i64 ${fromEnd}, 0`);
-    emit(`${high} = select i1 ${low}, i64 0, i64 ${fromEnd}`);
-    emit(`${past} = icmp sgt i64 ${v}, ${length}`);
-    emit(`${kept} = select i1 ${past}, i64 ${length}, i64 ${v}`);
-    emit(`${result} = select i1 ${negative}, i64 ${high}, i64 ${kept}`);
+  position(this: Mut<this>, v: string, length: string): string {
+    const [negative, fromEnd, low, high, past, kept, result] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${negative} = icmp slt i64 ${v}, 0`);
+    this.emit(`${fromEnd} = add i64 ${length}, ${v}`);
+    this.emit(`${low} = icmp slt i64 ${fromEnd}, 0`);
+    this.emit(`${high} = select i1 ${low}, i64 0, i64 ${fromEnd}`);
+    this.emit(`${past} = icmp sgt i64 ${v}, ${length}`);
+    this.emit(`${kept} = select i1 ${past}, i64 ${length}, i64 ${v}`);
+    this.emit(`${result} = select i1 ${negative}, i64 ${high}, i64 ${kept}`);
     return result;
   }
+
 
   // `includes`, `indexOf`, `join` and `slice`: one loop over the elements from a start
   // position, reading each where it lives.
-  function readingLoop(e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string | undefined {
-    const element = typing.rec(array).element;
-    const t = llvm(element);
-    const [lengthAt, dataAt, length, data] = [temp(), temp(), temp(), temp()];
-    emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
-    emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
-    emit(`${length} = load i64, ptr ${lengthAt}`);
-    emit(`${data} = load ptr, ptr ${dataAt}`);
-    const args = e.args.map((a) => value(a));
+  readingLoop(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, method: string, array: ArrayType, at: string): string | undefined {
+    const element = this.typing.rec(array).element;
+    const t = this.llvm(element);
+    const [lengthAt, dataAt, length, data] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
+    this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
+    this.emit(`${length} = load i64, ptr ${lengthAt}`);
+    this.emit(`${data} = load ptr, ptr ${dataAt}`);
+    const args = e.args.map((a) => this.value(a));
     const searching = method === "includes" || method === "indexOf" || method === "lastIndexOf";
     const from = method === "slice" ? args[0] : args[1];
-    const start = method !== "join" && method !== "lastIndexOf" && from ? position(from, length) : "0";
+    const start = method !== "join" && method !== "lastIndexOf" && from ? this.position(from, length) : "0";
     // `lastIndexOf` looks at every element up to where it starts searching back from, and keeps
     // the last it finds.
-    const end = method === "slice" && args[1] ? position(args[1], length) : method === "lastIndexOf" && from ? lastFrom(from, length) : length;
+    const end = method === "slice" && args[1] ? this.position(args[1], length) : method === "lastIndexOf" && from ? this.lastFrom(from, length) : length;
     const result: Type = searching ? (method === "includes" ? "boolean" : "i64") : method === "join" ? "string" : array;
-    const out = alloca(llvm(result));
-    if (searching) emit(`store ${llvm(result)} ${method === "includes" ? "false" : "-1"}, ptr ${out}`);
-    else if (method === "join") emit(`store ptr ${text("")}, ptr ${out}`);
-    else emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
-    const index = alloca("i64");
-    emit(`store i64 ${start}, ptr ${index}`);
-    const [head, body, next, done] = [label(), label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${more} = icmp slt i64 ${i}, ${end}`);
-    emit(`br i1 ${more}, label %${body}, label %${done}`);
-    startBlock(body);
-    const [slot, v] = [temp(), temp()];
-    emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
-    emit(`${v} = load ${t}, ptr ${slot}`);
+    const out = this.alloca(this.llvm(result));
+    if (searching) this.emit(`store ${this.llvm(result)} ${method === "includes" ? "false" : "-1"}, ptr ${out}`);
+    else if (method === "join") this.emit(`store ptr ${this.text("")}, ptr ${out}`);
+    else this.emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
+    const index = this.alloca("i64");
+    this.emit(`store i64 ${start}, ptr ${index}`);
+    const [head, body, next, done] = [this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [i, more] = [this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp slt i64 ${i}, ${end}`);
+    this.emit(`br i1 ${more}, label %${body}, label %${done}`);
+    this.startBlock(body);
+    const [slot, v] = [this.temp(), this.temp()];
+    this.emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+    this.emit(`${v} = load ${t}, ptr ${slot}`);
     if (searching) {
-      const hit = label();
-      let same = equals(v, element, args[0]!, valueType(e.args[0]!));
+      const hit = this.label();
+      let same = this.equals(v, element, args[0]!, this.valueType(e.args[0]!));
       // `includes` finds NaN, as JavaScript's SameValueZero does; `indexOf` never does.
-      if (method === "includes" && isFloat(typing.lower(element)) && isFloat(typing.lower(valueType(e.args[0]!)))) {
-        const [here, there, both, either] = [temp(), temp(), temp(), temp()];
-        emit(`${here} = fcmp uno ${t} ${v}, ${v}`);
-        emit(`${there} = fcmp uno ${llvm(typing.lower(valueType(e.args[0]!)))} ${args[0]}, ${args[0]}`);
-        emit(`${both} = and i1 ${here}, ${there}`);
-        emit(`${either} = or i1 ${same}, ${both}`);
+      if (method === "includes" && isFloat(this.typing.lower(element)) && isFloat(this.typing.lower(this.valueType(e.args[0]!)))) {
+        const [here, there, both, either] = [this.temp(), this.temp(), this.temp(), this.temp()];
+        this.emit(`${here} = fcmp uno ${t} ${v}, ${v}`);
+        this.emit(`${there} = fcmp uno ${this.llvm(this.typing.lower(this.valueType(e.args[0]!)))} ${args[0]}, ${args[0]}`);
+        this.emit(`${both} = and i1 ${here}, ${there}`);
+        this.emit(`${either} = or i1 ${same}, ${both}`);
         same = either;
       }
-      emit(`br i1 ${same}, label %${hit}, label %${next}`);
-      startBlock(hit);
-      emit(`store ${llvm(result)} ${method === "includes" ? "true" : i}, ptr ${out}`);
-      emit(`br label %${method === "lastIndexOf" ? next : done}`);
+      this.emit(`br i1 ${same}, label %${hit}, label %${next}`);
+      this.startBlock(hit);
+      this.emit(`store ${this.llvm(result)} ${method === "includes" ? "true" : i}, ptr ${out}`);
+      this.emit(`br label %${method === "lastIndexOf" ? next : done}`);
     } else if (method === "join") {
       // ponytail: each element copies the text so far, quadratic in the result's length; an
       // in-place append of a uniquely owned string makes it linear.
-      const so = temp();
-      emit(`${so} = load ptr, ptr ${out}`);
-      const [first, separated, joined] = [temp(), label(), label()];
-      emit(`${first} = icmp eq i64 ${i}, 0`);
-      const from = block;
-      emit(`br i1 ${first}, label %${joined}, label %${separated}`);
-      startBlock(separated);
-      const withSep = concat(so, args[0] ?? text(","));
-      emit(`call void @fsh_rt_str_release(ptr ${so})`);
-      const sepEnd = block;
-      emit(`br label %${joined}`);
-      startBlock(joined);
-      const before = temp();
-      emit(`${before} = phi ptr [ ${so}, %${from} ], [ ${withSep}, %${sepEnd} ]`);
-      const mark = pending.length;
-      const base = typing.lower(element);
+      const so = this.temp();
+      this.emit(`${so} = load ptr, ptr ${out}`);
+      const [first, separated, joined] = [this.temp(), this.label(), this.label()];
+      this.emit(`${first} = icmp eq i64 ${i}, 0`);
+      const from = this.block;
+      this.emit(`br i1 ${first}, label %${joined}, label %${separated}`);
+      this.startBlock(separated);
+      const withSep = this.concat(so, args[0] ?? this.text(","));
+      this.emit(`call void @fsh_rt_str_release(ptr ${so})`);
+      const sepEnd = this.block;
+      this.emit(`br label %${joined}`);
+      this.startBlock(joined);
+      const before = this.temp();
+      this.emit(`${before} = phi ptr [ ${so}, %${from} ], [ ${withSep}, %${sepEnd} ]`);
+      const mark = this.pending.length;
+      const base = this.typing.lower(element);
       const plain = isInteger(base) || isFloat(base) || base === "boolean";
-      const piece = plain ? written(v, base) : written(convert(v, element, "string"), "string");
-      const made = pending.splice(mark);
-      const after = concat(before, piece);
-      emit(`call void @fsh_rt_str_release(ptr ${before})`);
-      for (const p of made) dispose(p.v, p.type);
-      emit(`store ptr ${after}, ptr ${out}`);
-      emit(`br label %${next}`);
+      const piece = plain ? this.written(v, base) : this.written(this.convert(v, element, "string"), "string");
+      const made = this.pending.splice(mark);
+      const after = this.concat(before, piece);
+      this.emit(`call void @fsh_rt_str_release(ptr ${before})`);
+      for (const p of made) this.dispose(p.v, p.type);
+      this.emit(`store ptr ${after}, ptr ${out}`);
+      this.emit(`br label %${next}`);
     } else {
-      appended(out, element, copied(v, element));
-      emit(`br label %${next}`);
+      this.appended(out, element, this.copied(v, element));
+      this.emit(`br label %${next}`);
     }
-    startBlock(next);
-    const after = temp();
-    emit(`${after} = add i64 ${i}, 1`);
-    emit(`store i64 ${after}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
-    const r = temp();
-    emit(`${r} = load ${llvm(result)}, ptr ${out}`);
-    if (!types.has(e) && needsDrop(result)) pending.push({ v: r, type: result });
+    this.startBlock(next);
+    const after = this.temp();
+    this.emit(`${after} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${after}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
+    const r = this.temp();
+    this.emit(`${r} = load ${this.llvm(result)}, ptr ${out}`);
+    if (!this.types.has(e) && this.needsDrop(result)) this.pending.push({ v: r, type: result });
     return r;
   }
 
+
   // The size in bytes of `count` elements, as LLVM lays them out.
-  function bytes(element: Type, count: string): string {
-    const [end, size] = [temp(), temp()];
-    emit(`${end} = getelementptr ${llvm(element)}, ptr null, i64 ${count}`);
-    emit(`${size} = ptrtoint ptr ${end} to i64`);
+  bytes(this: Mut<this>, element: Type, count: string): string {
+    const [end, size] = [this.temp(), this.temp()];
+    this.emit(`${end} = getelementptr ${this.llvm(element)}, ptr null, i64 ${count}`);
+    this.emit(`${size} = ptrtoint ptr ${end} to i64`);
     return size;
   }
 
+
   // An array value from its buffer, length and capacity.
-  function built(data: string, length: string, capacity: string): string {
-    const [a, b, c] = [temp(), temp(), temp()];
-    emit(`${a} = insertvalue ${ARRAY} undef, ptr ${data}, 0`);
-    emit(`${b} = insertvalue ${ARRAY} ${a}, i64 ${length}, 1`);
-    emit(`${c} = insertvalue ${ARRAY} ${b}, i64 ${capacity}, 2`);
+  built(this: Mut<this>, data: string, length: string, capacity: string): string {
+    const [a, b, c] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${a} = insertvalue ${ARRAY} undef, ptr ${data}, 0`);
+    this.emit(`${b} = insertvalue ${ARRAY} ${a}, i64 ${length}, 1`);
+    this.emit(`${c} = insertvalue ${ARRAY} ${b}, i64 ${capacity}, 2`);
     return c;
   }
 
+
   // Runs `each` with a pointer to each of the first `length` elements of a buffer, and its index.
-  function elements(element: Type, data: string, length: string, each: (at: string, i: string) => void) {
-    const counter = alloca("i64");
-    emit(`store i64 0, ptr ${counter}`);
-    const [test, loop, end] = [label(), label(), label()];
-    emit(`br label %${test}`);
-    startBlock(test);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${counter}`);
-    emit(`${more} = icmp ult i64 ${i}, ${length}`);
-    emit(`br i1 ${more}, label %${loop}, label %${end}`);
-    startBlock(loop);
-    const at = temp();
-    emit(`${at} = getelementptr ${llvm(element)}, ptr ${data}, i64 ${i}`);
+  elements(this: Mut<this>, element: Type, data: string, length: string, each: (at: string, i: string) => void) {
+    const counter = this.alloca("i64");
+    this.emit(`store i64 0, ptr ${counter}`);
+    const [test, loop, end] = [this.label(), this.label(), this.label()];
+    this.emit(`br label %${test}`);
+    this.startBlock(test);
+    const [i, more] = [this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${counter}`);
+    this.emit(`${more} = icmp ult i64 ${i}, ${length}`);
+    this.emit(`br i1 ${more}, label %${loop}, label %${end}`);
+    this.startBlock(loop);
+    const at = this.temp();
+    this.emit(`${at} = getelementptr ${this.llvm(element)}, ptr ${data}, i64 ${i}`);
     each(at, i);
-    const next = temp();
-    emit(`${next} = add i64 ${i}, 1`);
-    emit(`store i64 ${next}, ptr ${counter}`);
-    emit(`br label %${test}`);
-    startBlock(end);
+    const next = this.temp();
+    this.emit(`${next} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${next}, ptr ${counter}`);
+    this.emit(`br label %${test}`);
+    this.startBlock(end);
   }
+
 
   // `push` moves its argument in at the end, growing the buffer when full; `pop` takes the last
   // element out as an Option, empty when there is none. Both work on the array where it lives.
-  function arrayCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
-    const type = valueType(callee.object) as ArrayType;
-    const t = llvm(typing.rec(type).element);
-    const at = receiver(callee.object);
-    const [lengthAt, dataAt] = [temp(), temp()];
-    const field = (to: string, i: usize) => emit(`${to} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 ${i}`);
+  arrayCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string | undefined {
+    const type = this.valueType(callee.object) as ArrayType;
+    const t = this.llvm(this.typing.rec(type).element);
+    const at = this.receiver(callee.object);
+    const [lengthAt, dataAt] = [this.temp(), this.temp()];
+    const field = (to: string, i: usize) => this.emit(`${to} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 ${i}`);
     if (callee.name === "push") {
-      appended(at, typing.rec(type).element, owned(e.args[0]!));
+      this.appended(at, this.typing.rec(type).element, this.owned(e.args[0]!));
       return undefined;
     }
-    if (callee.name === "sort") return sorted(e, type, at);
-    if (["toReversed", "toSorted", "toSpliced", "with"].includes(callee.name)) return copying(e, callee.name, type, at);
-    if (callee.name === "at") return elementAt(e, type, at);
+    if (callee.name === "sort") return this.sorted(e, type, at);
+    if (["toReversed", "toSorted", "toSpliced", "with"].includes(callee.name)) return this.copying(e, callee.name, type, at);
+    if (callee.name === "at") return this.elementAt(e, type, at);
     if (callee.name === "reserve") {
       // A count below zero panics, which drops what is live here.
-      unwinding(`call void @fsh_rt_array_grow(ptr ${at}, i64 ${value(e.args[0]!)}, i64 ${bytes(typing.rec(type).element, "1")}, ptr ${panicAt(e)})`);
+      this.unwinding(`call void @fsh_rt_array_grow(ptr ${at}, i64 ${this.value(e.args[0]!)}, i64 ${this.bytes(this.typing.rec(type).element, "1")}, ptr ${this.panicAt(e)})`);
       return undefined;
     }
     if (callee.name === "shrinkToFit") {
-      emit(`call void @fsh_rt_array_shrink(ptr ${at}, i64 ${bytes(typing.rec(type).element, "1")})`);
+      this.emit(`call void @fsh_rt_array_shrink(ptr ${at}, i64 ${this.bytes(this.typing.rec(type).element, "1")})`);
       return undefined;
     }
-    if (callee.name === "concat" || callee.name === "flat") return gathered(e, callee.name, type, at);
-    if (["shift", "unshift", "splice", "reverse", "fill", "copyWithin"].includes(callee.name)) return changed(e, callee.name, type, at);
-    if (["includes", "indexOf", "lastIndexOf", "join", "slice"].includes(callee.name)) return readingLoop(e, callee.name, type, at);
-    if (callee.name !== "pop") return callbackLoop(e, callee.name, type, at);
-    const option = typing.unionType([typing.rec(type).element, "null"]);
+    if (callee.name === "concat" || callee.name === "flat") return this.gathered(e, callee.name, type, at);
+    if (["shift", "unshift", "splice", "reverse", "fill", "copyWithin"].includes(callee.name)) return this.changed(e, callee.name, type, at);
+    if (["includes", "indexOf", "lastIndexOf", "join", "slice"].includes(callee.name)) return this.readingLoop(e, callee.name, type, at);
+    if (callee.name !== "pop") return this.callbackLoop(e, callee.name, type, at);
+    const option = this.typing.unionType([this.typing.rec(type).element, "null"]);
     field(lengthAt, 1);
-    const [length, empty, some, none, end] = [temp(), temp(), label(), label(), label()];
-    emit(`${length} = load i64, ptr ${lengthAt}`);
-    emit(`${empty} = icmp eq i64 ${length}, 0`);
-    emit(`br i1 ${empty}, label %${none}, label %${some}`);
-    startBlock(some);
-    const [last, data, slot, v] = [temp(), temp(), temp(), temp()];
-    emit(`${last} = sub i64 ${length}, 1`);
-    emit(`store i64 ${last}, ptr ${lengthAt}`);
+    const [length, empty, some, none, end] = [this.temp(), this.temp(), this.label(), this.label(), this.label()];
+    this.emit(`${length} = load i64, ptr ${lengthAt}`);
+    this.emit(`${empty} = icmp eq i64 ${length}, 0`);
+    this.emit(`br i1 ${empty}, label %${none}, label %${some}`);
+    this.startBlock(some);
+    const [last, data, slot, v] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${last} = sub i64 ${length}, 1`);
+    this.emit(`store i64 ${last}, ptr ${lengthAt}`);
     field(dataAt, 0);
-    emit(`${data} = load ptr, ptr ${dataAt}`);
-    emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${last}`);
-    emit(`${v} = load ${t}, ptr ${slot}`);
-    const held = convert(v, typing.rec(type).element, option);
-    const someEnd = block;
-    emit(`br label %${end}`);
-    startBlock(none);
-    const nothing = convert("zeroinitializer", "null", option);
-    const noneEnd = block;
-    emit(`br label %${end}`);
-    startBlock(end);
-    const result = temp();
-    emit(`${result} = phi ${llvm(option)} [ ${held}, %${someEnd} ], [ ${nothing}, %${noneEnd} ]`);
+    this.emit(`${data} = load ptr, ptr ${dataAt}`);
+    this.emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${last}`);
+    this.emit(`${v} = load ${t}, ptr ${slot}`);
+    const held = this.convert(v, this.typing.rec(type).element, option);
+    const someEnd = this.block;
+    this.emit(`br label %${end}`);
+    this.startBlock(none);
+    const nothing = this.convert("zeroinitializer", "null", option);
+    const noneEnd = this.block;
+    this.emit(`br label %${end}`);
+    this.startBlock(end);
+    const result = this.temp();
+    this.emit(`${result} = phi ${this.llvm(option)} [ ${held}, %${someEnd} ], [ ${nothing}, %${noneEnd} ]`);
     // Used as a statement, the call has no type of its own; what it took out drops after it.
-    if (types.has(e)) return convert(result, option, types.get(e)!);
-    pending.push({ v: result, type: option });
+    if (this.types.has(e)) return this.convert(result, option, this.types.get(e)!);
+    this.pending.push({ v: result, type: option });
     return result;
   }
+
 
   // A pointer to an array's element, after the bounds check.
   // An array that is a place is read after the index runs, which may change it; a temporary
   // one runs first, as JavaScript runs an index's object. An index an assignment already ran is
   // reused, with the bounds checked again.
-  function element(e: Extract<Expr, { kind: "index" }>): string {
-    const held = types.get(e.object)!;
-    const inline = recOf(referent(held));
-    if (inline?.kind === "fixed") return fixedElement(e, referent(held) as FixedType);
-    const type = valueType(e.object) as ArrayType;
-    let index = fixed.get(e.index);
+  element(this: Mut<this>, e: Extract<Expr, { kind: "index" }>): string {
+    const held = this.types.get(e.object)!;
+    const inline = this.recOf(this.referent(held));
+    if (inline?.kind === "fixed") return this.fixedElement(e, this.referent(held) as FixedType);
+    const type = this.valueType(e.object) as ArrayType;
+    let index = this.fixed.get(e.index);
     let array: string;
-    if (index === undefined && !lendable(e.object)) {
-      array = value(e.object);
-      index = value(e.index);
+    if (index === undefined && !this.lendable(e.object)) {
+      array = this.value(e.object);
+      index = this.value(e.index);
     } else {
-      index ??= value(e.index);
-      array = value(e.object);
+      index ??= this.value(e.index);
+      array = this.value(e.object);
     }
-    const [data, length, at] = [temp(), temp(), temp()];
-    emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
-    bounds(length, index, e, restStarts.get(e.object));
-    emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
-    emit(`${at} = getelementptr ${llvm(typing.rec(type).element)}, ptr ${data}, i64 ${index}`);
+    const [data, length, at] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
+    this.bounds(length, index, e, this.restStarts.get(e.object));
+    this.emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
+    this.emit(`${at} = getelementptr ${this.llvm(this.typing.rec(type).element)}, ptr ${data}, i64 ${index}`);
     return at;
   }
+
 
   // `FixedArray.filled<T, N>(v)`: a copy of `v` in each slot but the last, which takes `v`
   // itself, filled in a loop so a large one stays small.
-  function fixedFilled(e: Extract<Expr, { kind: "call" }>, type: FixedType): string {
-    const element = typing.rec(type).element;
-    const v = owned(e.args[0]!);
-    if (typing.rec(type).size === 0) {
-      dispose(v, element);
+  fixedFilled(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, type: FixedType): string {
+    const element = this.typing.rec(type).element;
+    const v = this.owned(e.args[0]!);
+    if (this.typing.rec(type).size === 0) {
+      this.dispose(v, element);
       return "undef";
     }
-    const at = alloca(llvm(type));
-    const index = alloca("i64");
-    emit(`store i64 0, ptr ${index}`);
-    const [head, body, done] = [label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${more} = icmp ult i64 ${i}, ${typing.rec(type).size - 1}`);
-    emit(`br i1 ${more}, label %${body}, label %${done}`);
-    startBlock(body);
-    const [slot, after] = [temp(), temp()];
-    emit(`${slot} = getelementptr ${llvm(type)}, ptr ${at}, i64 0, i64 ${i}`);
-    emit(`store ${llvm(element)} ${copied(v, element)}, ptr ${slot}`);
-    emit(`${after} = add i64 ${i}, 1`);
-    emit(`store i64 ${after}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
-    const last = temp();
-    emit(`${last} = getelementptr ${llvm(type)}, ptr ${at}, i64 0, i64 ${typing.rec(type).size - 1}`);
-    emit(`store ${llvm(element)} ${v}, ptr ${last}`);
-    const result = temp();
-    emit(`${result} = load ${llvm(type)}, ptr ${at}`);
-    if (!types.has(e) && needsDrop(type)) pending.push({ v: result, type });
+    const at = this.alloca(this.llvm(type));
+    const index = this.alloca("i64");
+    this.emit(`store i64 0, ptr ${index}`);
+    const [head, body, done] = [this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [i, more] = [this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp ult i64 ${i}, ${this.typing.rec(type).size - 1}`);
+    this.emit(`br i1 ${more}, label %${body}, label %${done}`);
+    this.startBlock(body);
+    const [slot, after] = [this.temp(), this.temp()];
+    this.emit(`${slot} = getelementptr ${this.llvm(type)}, ptr ${at}, i64 0, i64 ${i}`);
+    this.emit(`store ${this.llvm(element)} ${this.copied(v, element)}, ptr ${slot}`);
+    this.emit(`${after} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${after}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
+    const last = this.temp();
+    this.emit(`${last} = getelementptr ${this.llvm(type)}, ptr ${at}, i64 0, i64 ${this.typing.rec(type).size - 1}`);
+    this.emit(`store ${this.llvm(element)} ${v}, ptr ${last}`);
+    const result = this.temp();
+    this.emit(`${result} = load ${this.llvm(type)}, ptr ${at}`);
+    if (!this.types.has(e) && this.needsDrop(type)) this.pending.push({ v: result, type });
     return result;
   }
 
+
   // A pointer to a fixed array's element, after the bounds check against its known length: the
   // array is where it lives, through a reference, or a temporary spilled to a slot.
-  function fixedElement(e: Extract<Expr, { kind: "index" }>, type: FixedType): string {
-    const held = types.get(e.object)!;
-    let index = fixed.get(e.index);
+  fixedElement(this: Mut<this>, e: Extract<Expr, { kind: "index" }>, type: FixedType): string {
+    const held = this.types.get(e.object)!;
+    let index = this.fixed.get(e.index);
     let base: string;
-    if (isRef(held)) {
-      base = evaluate(e.object);
-      index ??= value(e.index);
-    } else if (lendable(e.object)) {
-      index ??= value(e.index);
-      base = address(e.object);
+    if (this.isRef(held)) {
+      base = this.evaluate(e.object);
+      index ??= this.value(e.index);
+    } else if (this.lendable(e.object)) {
+      index ??= this.value(e.index);
+      base = this.address(e.object);
     } else {
-      const v = value(e.object);
-      index ??= value(e.index);
-      base = alloca(llvm(type));
-      emit(`store ${llvm(type)} ${v}, ptr ${base}`);
+      const v = this.value(e.object);
+      index ??= this.value(e.index);
+      base = this.alloca(this.llvm(type));
+      this.emit(`store ${this.llvm(type)} ${v}, ptr ${base}`);
     }
-    bounds(String(typing.rec(type).size), index, e);
-    const at = temp();
-    emit(`${at} = getelementptr ${llvm(type)}, ptr ${base}, i64 0, i64 ${index}`);
+    this.bounds(String(this.typing.rec(type).size), index, e);
+    const at = this.temp();
+    this.emit(`${at} = getelementptr ${this.llvm(type)}, ptr ${base}, i64 0, i64 ${index}`);
     return at;
   }
 
+
   // Whether an expression makes a value of its own, rather than reading one that lives somewhere.
   // A conditional or `??` makes one from whichever side it gives.
-  function fresh(e: Expr): boolean {
-    while (wraps(e)) e = e.expr;
-    if (!needsDrop(types.get(e))) return false;
+  fresh(this: Mut<this>, e: Expr): boolean {
+    while (this.wraps(e)) e = e.expr;
+    if (!this.needsDrop(this.types.get(e))) return false;
     switch (e.kind) {
       case "call":
       case "new":
@@ -6851,356 +7339,379 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       // An awaited future gives its value over.
       // Every operator on a bigint makes a new one; a literal is a constant.
       case "unary":
-        return e.op === "await" || types.get(e) === "bigint";
+        return e.op === "await" || this.types.get(e) === "bigint";
       case "binary":
-        return e.op === "+" || e.op === "??" || types.get(e) === "bigint";
+        return e.op === "+" || e.op === "??" || this.types.get(e) === "bigint";
       case "member":
-        return calls.has(e) || current.copiesOut.has(e) || computed.has(e) || jsMembers.has(e) || jsStatics.has(e);
+        return this.calls.has(e) || this.current.copiesOut.has(e) || this.computed.has(e) || this.jsMembers.has(e) || this.jsStatics.has(e);
       // A JsValue read out of JS as a string, or a package's const.
       case "ident":
-        return current.copiesOut.has(e) || jsExports.has(e);
+        return this.current.copiesOut.has(e) || this.jsExports.has(e);
       // A string's index makes a string; an array's reads an element.
       case "index":
-        return !indexes(valueType(e.object));
+        return !this.indexes(this.valueType(e.object));
       default:
         return false;
     }
   }
 
+
   // What a wrapper with no conversion of its own hands on, so it owns what its operand owns.
-  function handedOn(e: Expr): Expr {
-    while (wraps(e) && !coercions.has(e)) e = e.expr;
+  handedOn(this: Mut<this>, e: Expr): Expr {
+    while (this.wraps(e) && !this.coercions.has(e)) e = e.expr;
     return e;
   }
 
+
   // A wrapper whose value is its operand's, made for the statement exactly when the operand's is.
-  function wraps(e: Expr): e is Extract<Expr, { kind: "as" | "satisfies" | "unsafe" }> {
-    return e.kind === "satisfies" || e.kind === "unsafe" || (e.kind === "as" && widens(e));
+  wraps(this: Mut<this>, e: Expr): e is Extract<Expr, { kind: "as" | "satisfies" | "unsafe" }> {
+    return e.kind === "satisfies" || e.kind === "unsafe" || (e.kind === "as" && this.widens(e));
   }
+
 
   // An expression's value for a place to own: one it made, the value of a place it moves out
   // of, which is left empty, or else a copy holding another reference to what it owns. A
   // conversion that leaves part of a value behind copies the part it keeps.
-  function owned(e: Expr): string {
-    if (handedOn(e) !== e) return owned(handedOn(e));
+  owned(this: Mut<this>, e: Expr): string {
+    if (this.handedOn(e) !== e) return this.owned(this.handedOn(e));
     // A shared callback has no slot to empty: its closure stays the caller's to drop.
-    if (pairOf(e) !== undefined) return value(e);
-    const to = coercions.get(e);
+    if (this.pairOf(e) !== undefined) return this.value(e);
+    const to = this.coercions.get(e);
     // A value boxed into a Dyn: the block takes it, moved out of its place or made for it, or
     // else a copy of it. One boxed into a union's Dyn then goes into the union.
     // So is a stored callable held in one that throws more.
-    const dyn = boxedMembers.get(e) ?? (to && isDyn(to) ? to : undefined);
-    if (to && dyn && (!isDyn(types.get(e)!) || relays(types.get(e)!, dyn))) {
-      const type = types.get(e)!;
-      let v = known.get(e) ?? evaluate(e);
-      if (current.consumes.has(e.id) && lendable(e)) emit(`store ${llvm(e.kind === "member" ? stored(e) : type)} zeroinitializer, ptr ${address(e)}`);
-      else if (!fresh(e)) v = copied(v, type);
-      return to === dyn ? box(v, type, dyn) : convert(box(v, type, dyn), dyn, to);
+    const dyn = this.boxedMembers.get(e) ?? (to && this.isDyn(to) ? to : undefined);
+    if (to && dyn && (!this.isDyn(this.types.get(e)!) || this.relays(this.types.get(e)!, dyn))) {
+      const type = this.types.get(e)!;
+      let v = this.known.get(e) ?? this.evaluate(e);
+      if (this.current.consumes.has(e.id) && this.lendable(e)) this.emit(`store ${this.llvm(e.kind === "member" ? this.stored(e) : type)} zeroinitializer, ptr ${this.address(e)}`);
+      else if (!this.fresh(e)) v = this.copied(v, type);
+      return to === dyn ? this.box(v, type, dyn) : this.convert(this.box(v, type, dyn), dyn, to);
     }
     // A value read out of a recursive type's block, when it is given up, leaves the block to be
     // freed.
-    if (to && !isRef(to) && unboxes(types.get(e)!, to)) {
-      const type = types.get(e)!;
-      const v = known.get(e) ?? evaluate(e);
-      const out = convert(v, type, to);
-      if (fresh(e)) freeBlocks(v, type);
-      else if (current.consumes.has(e.id) && lendable(e)) {
-        freeBlocks(v, type);
-        emit(`store ${llvm(placeType(e))} zeroinitializer, ptr ${address(e)}`);
-      } else return copied(out, to);
+    if (to && !this.isRef(to) && this.unboxes(this.types.get(e)!, to)) {
+      const type = this.types.get(e)!;
+      const v = this.known.get(e) ?? this.evaluate(e);
+      const out = this.convert(v, type, to);
+      if (this.fresh(e)) this.freeBlocks(v, type);
+      else if (this.current.consumes.has(e.id) && this.lendable(e)) {
+        this.freeBlocks(v, type);
+        this.emit(`store ${this.llvm(this.placeType(e))} zeroinitializer, ptr ${this.address(e)}`);
+      } else return this.copied(out, to);
       return out;
     }
     // A value moving into a recursive type's block is taken, or copied, first.
-    if (to && boxes(types.get(e)!, to)) {
-      const type = types.get(e)!;
-      let v = known.get(e) ?? evaluate(e);
-      if (current.consumes.has(e.id) && lendable(e)) take(e);
-      else if (!fresh(e)) v = copied(v, type);
-      return convert(v, type, to);
+    if (to && this.boxes(this.types.get(e)!, to)) {
+      const type = this.types.get(e)!;
+      let v = this.known.get(e) ?? this.evaluate(e);
+      if (this.current.consumes.has(e.id) && this.lendable(e)) this.take(e);
+      else if (!this.fresh(e)) v = this.copied(v, type);
+      return this.convert(v, type, to);
     }
-    const whole = !to || keepsAll(types.get(e)!, to);
+    const whole = !to || this.keepsAll(this.types.get(e)!, to);
     // A Rust handle is never copied: one made here, or moved out of its place, is taken whole.
-    const rust = holdsRust(types.get(e)!);
-    if ((whole || rust) && fresh(e)) return value(e, true);
-    if (!rust && !needsDrop(types.get(e)!) && holdsRust(valueType(e))) return value(e);
+    const rust = this.holdsRust(this.types.get(e)!);
+    if ((whole || rust) && this.fresh(e)) return this.value(e, true);
+    if (!rust && !this.needsDrop(this.types.get(e)!) && this.holdsRust(this.valueType(e))) return this.value(e);
     // A value owning nothing meets a recursive type's blocks only as the blocks just made for it.
-    if (to && !needsDrop(referent(types.get(e)!)) && typing.holdsPart(to, (t) => recOf(t)?.kind === "recursive")) return value(e, true);
-    const v = value(e);
-    if ((whole || rust) && current.consumes.has(e.id) && lendable(e)) {
-      take(e);
+    if (to && !this.needsDrop(this.referent(this.types.get(e)!)) && this.typing.holdsPart(to, (t) => this.recOf(t)?.kind === "recursive")) return this.value(e, true);
+    const v = this.value(e);
+    if ((whole || rust) && this.current.consumes.has(e.id) && this.lendable(e)) {
+      this.take(e);
       return v;
     }
-    return e.kind === "string" ? v : copied(v, valueType(e));
+    return e.kind === "string" ? v : this.copied(v, this.valueType(e));
   }
+
 
   // Leaves a place empty once its value is moved out. A value read out of a recursive type's
   // block leaves the block behind, which is freed.
-  function take(e: Expr) {
-    const at = address(e);
-    const place = placeType(e);
-    if (place !== types.get(e)) {
-      const held = temp();
-      emit(`${held} = load ${llvm(place)}, ptr ${at}`);
-      freeBlocks(held, place);
+  take(this: Mut<this>, e: Expr) {
+    const at = this.address(e);
+    const place = this.placeType(e);
+    if (place !== this.types.get(e)) {
+      const held = this.temp();
+      this.emit(`${held} = load ${this.llvm(place)}, ptr ${at}`);
+      this.freeBlocks(held, place);
     }
-    emit(`store ${llvm(place)} zeroinitializer, ptr ${at}`);
+    this.emit(`store ${this.llvm(place)} zeroinitializer, ptr ${at}`);
   }
 
+
   // Where a place's value lives: in the place, or in the block a recursive type's place holds.
-  function blockOf(at: string, place: Type): string {
-    if (recOf(place)?.kind !== "recursive") return at;
-    const block = temp();
-    emit(`${block} = load ptr, ptr ${at}`);
+  blockOf(this: Mut<this>, at: string, place: Type): string {
+    if (this.recOf(place)?.kind !== "recursive") return at;
+    const block = this.temp();
+    this.emit(`${block} = load ptr, ptr ${at}`);
     return block;
   }
 
+
   // The type a place holds its value as: a field's or an element's own, or the variable's.
-  function placeType(e: Expr): Type {
-    if (e.kind === "member") return stored(e);
-    if (e.kind === "index" && indexes(valueType(e.object))) {
-      const object = valueType(e.object);
-      return typing.rec(referent(object) as ArrayType | FixedType).element;
+  placeType(this: Mut<this>, e: Expr): Type {
+    if (e.kind === "member") return this.stored(e);
+    if (e.kind === "index" && this.indexes(this.valueType(e.object))) {
+      const object = this.valueType(e.object);
+      return this.typing.rec(this.referent(object) as ArrayType | FixedType).element;
     }
-    return types.get(e)!;
+    return this.types.get(e)!;
   }
+
 
   // Frees a value's own recursive block, or the one its union holds, without what is in it.
-  function freeBlocks(v: string, type: Type) {
-    const r = recOf(type);
-    if (r?.kind === "recursive") return emit(`call void @fsh_rt_free(ptr ${v})`);
+  freeBlocks(this: Mut<this>, v: string, type: Type) {
+    const r = this.recOf(type);
+    if (r?.kind === "recursive") return this.emit(`call void @fsh_rt_free(ptr ${v})`);
     if (r?.kind !== "union") return;
-    const blocks = r.members.filter((m) => recOf(m)?.kind === "recursive");
+    const blocks = r.members.filter((m) => this.recOf(m)?.kind === "recursive");
     if (blocks.length === 0) return;
-    const tag = temp();
-    emit(`${tag} = extractvalue ${llvm(type)} ${v}, 0`);
-    const [cases, end] = [blocks.map(() => label()), label()];
-    emit(`switch i32 ${tag}, label %${end} [ ${blocks.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
+    const tag = this.temp();
+    this.emit(`${tag} = extractvalue ${this.llvm(type)} ${v}, 0`);
+    const [cases, end] = [blocks.map(() => this.label()), this.label()];
+    this.emit(`switch i32 ${tag}, label %${end} [ ${blocks.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
     blocks.forEach((m, i) => {
-      startBlock(cases[i]!);
-      emit(`call void @fsh_rt_free(ptr ${convert(v, type, m)})`);
-      emit(`br label %${end}`);
+      this.startBlock(cases[i]!);
+      this.emit(`call void @fsh_rt_free(ptr ${this.convert(v, type, m)})`);
+      this.emit(`br label %${end}`);
     });
-    startBlock(end);
+    this.startBlock(end);
   }
+
 
   // Whether converting a value reads some of it out of a recursive type's block.
-  function unboxes(from: Type, to: Type): boolean {
+  unboxes(this: Mut<this>, from: Type, to: Type): boolean {
     const members = (t: Type) => {
-      const r = recOf(t);
+      const r = this.recOf(t);
       return r?.kind === "union" ? r.members : [t];
     };
-    return from !== to && members(from).some((m) => recOf(m)?.kind === "recursive" && !members(to).includes(m));
+    return from !== to && members(from).some((m) => this.recOf(m)?.kind === "recursive" && !members(to).includes(m));
   }
 
+
   // Whether converting a value moves some of it into a recursive type's block.
-  function boxes(from: Type, to: Type): boolean {
+  boxes(this: Mut<this>, from: Type, to: Type): boolean {
     const members = (t: Type) => {
-      const r = recOf(t);
+      const r = this.recOf(t);
       return r?.kind === "union" ? r.members : [t];
     };
-    return from !== to && members(to).some((m) => recOf(m)?.kind === "recursive") && members(referent(from)).some((m) => !members(to).includes(m));
+    return from !== to && members(to).some((m) => this.recOf(m)?.kind === "recursive") && members(this.referent(from)).some((m) => !members(to).includes(m));
   }
+
 
   // Whether converting a value from one type to another keeps all it owns: putting it in a
   // union, taking a union's member out, or moving it to a union holding all its members.
-  function keepsAll(from: Type, to: Type): boolean {
+  keepsAll(this: Mut<this>, from: Type, to: Type): boolean {
     const members = (t: Type) => {
-      const r = recOf(t);
+      const r = this.recOf(t);
       return r?.kind === "union" ? r.members : [t];
     };
     // Types that lower to the same one convert as they are, as `convert` takes them.
-    if (!needsDrop(from) || isDyn(to) || typing.lower(from) === typing.lower(to) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to)) return true;
-    return members(from).every((m) => members(to).some((t) => keepsPart(m, t)));
+    if (!this.needsDrop(from) || this.isDyn(to) || this.typing.lower(from) === this.typing.lower(to) || members(from).every((m) => members(to).includes(m)) || members(from).includes(to)) return true;
+    return members(from).every((m) => members(to).some((t) => this.keepsPart(m, t)));
   }
+
 
   // Whether a member converts to another keeping all it owns: moved into a recursive type's
   // block, or an object whose fields each do.
-  function keepsPart(from: Type, to: Type): boolean {
-    const [source, target] = [recOf(from), recOf(to)];
-    if (target?.kind === "recursive") return keepsAll(from, target.of);
+  keepsPart(this: Mut<this>, from: Type, to: Type): boolean {
+    const [source, target] = [this.recOf(from), this.recOf(to)];
+    if (target?.kind === "recursive") return this.keepsAll(from, target.of);
     if (source?.kind !== "object" || target?.kind !== "object") return false;
     return source.fields.every((f) => {
-      const kept = typing.field(to as ObjectType, f.name);
-      return kept ? keepsAll(f.type, kept.type) : !needsDrop(f.type);
+      const kept = this.typing.field(to as ObjectType, f.name);
+      return kept ? this.keepsAll(f.type, kept.type) : !this.needsDrop(f.type);
     });
   }
 
+
   // A receiver copied into a slot for an owning method: the copy is its own, pending until the
   // call takes it.
-  function spill(slot: string, type: Type, v: string): string {
-    const copy = { v: copied(v, type), type };
-    pending.push(copy);
-    spills.push({ slot, type, copy });
+  spill(this: Mut<this>, slot: string, type: Type, v: string): string {
+    const copy = { v: this.copied(v, type), type };
+    this.pending.push(copy);
+    this.spills.push({ slot, type, copy });
     return copy.v;
   }
 
+
   // A value read for an operand. One read from a place takes a reference of its own while a
   // later operand that might change the place runs, released when the statement ends.
-  function operand(e: Expr, later: Expr[]): string {
-    const v = value(e);
-    const type = valueType(e);
-    if (!needsDrop(type) || fresh(e) || e.kind === "string" || !later.some(writes) || holdsRust(type)) return v;
-    const copy = copied(v, type);
-    pending.push({ v: copy, type });
+  operand(this: Mut<this>, e: Expr, later: Expr[]): string {
+    const v = this.value(e);
+    const type = this.valueType(e);
+    if (!this.needsDrop(type) || this.fresh(e) || e.kind === "string" || !later.some(((e) => this.writes(e))) || this.holdsRust(type)) return v;
+    const copy = this.copied(v, type);
+    this.pending.push({ v: copy, type });
     return copy;
   }
 
+
   // Whether running an expression might change a place: it assigns, updates or calls.
-  function writes(e: Expr): boolean {
+  writes(this: Mut<this>, e: Expr): boolean {
     let found = false;
     walkWhile({ of: "expr", node: e }, ({ node }) => {
       // A call signature in a type, as in `as { (): T }`, counts too.
       const kind = (node as { kind?: string }).kind;
       if (found || kind === "arrow") return false;
       if (kind === "assign" || kind === "update" || kind === "call" || kind === "new") found = true;
-      if (kind === "member" && calls.has(node as Expr)) found = true;
+      if (kind === "member" && this.calls.has(node as Expr)) found = true;
       return true;
     });
     return found;
   }
 
+
   // Owned values handed to something not yet called or built: dropped if an error leaves before
   // it takes them.
-  function delivered<T>(make: (hand: (v: string, type: Type) => string) => T): T {
+  delivered<T>(this: Mut<this>, make: (hand: (v: string, type: Type) => string) => T): T {
     const handed: { v: string; type: Type }[] = [];
     const result = make((v, type) => {
       const entry = { v, type };
-      pending.push(entry);
+      this.pending.push(entry);
       handed.push(entry);
       return v;
     });
-    pending = pending.filter((entry) => !handed.includes(entry));
+    this.pending = this.pending.filter((entry) => !handed.includes(entry));
     return result;
   }
 
+
   // Releases the values made since `mark` that nothing took over, newest first.
-  function settle(mark: usize = floor) {
-    for (const { v, type } of pending.splice(mark).reverse()) dispose(v, type);
+  settle(this: Mut<this>, mark: usize = this.floor) {
+    for (const { v, type } of this.pending.splice(mark).reverse()) this.dispose(v, type);
   }
+
 
   // A variable the innermost scope owns. Its slot starts empty, so dropping it before it is set,
   // or again after, does nothing.
-  function own(at: string, type: Type, empty = true) {
-    if (!needsDrop(type)) return;
-    if (empty && !framed.has(at)) allocas.push(`  store ${llvm(type)} zeroinitializer, ptr ${at}`);
-    scopes.at(-1)!.push({ slot: at, type });
+  own(this: Mut<this>, at: string, type: Type, empty = true) {
+    if (!this.needsDrop(type)) return;
+    if (empty && !this.framed.has(at)) this.allocas.push(`  store ${this.llvm(type)} zeroinitializer, ptr ${at}`);
+    this.scopes.at(-1)!.push({ slot: at, type });
   }
 
+
   // Drops what the scopes from `depth` inward own, innermost and newest first, emptying each.
-  function drop(depth: usize) {
-    for (const scope of scopes.slice(depth).reverse()) {
+  drop(this: Mut<this>, depth: usize) {
+    for (const scope of this.scopes.slice(depth).reverse()) {
       for (const { slot, type } of [...scope].reverse()) {
-        const v = temp();
-        emit(`${v} = load ${llvm(type)}, ptr ${slot}`);
-        emit(`store ${llvm(type)} zeroinitializer, ptr ${slot}`);
-        dispose(v, type);
+        const v = this.temp();
+        this.emit(`${v} = load ${this.llvm(type)}, ptr ${slot}`);
+        this.emit(`store ${this.llvm(type)} zeroinitializer, ptr ${slot}`);
+        this.dispose(v, type);
       }
     }
   }
 
-  function scoped(body: Stmt[]) {
-    scopes.push([]);
-    body.forEach(statement);
-    drop(scopes.length - 1);
-    scopes.pop();
+
+  scoped(this: Mut<this>, body: Stmt[]) {
+    this.scopes.push([]);
+    body.forEach(((s) => this.statement(s)));
+    this.drop(this.scopes.length - 1);
+    this.scopes.pop();
   }
 
+
   // Returns the call's result, or undefined for a call that returns nothing.
-  function compare(type: string, a: string, b: string): string {
-    const result = temp();
-    emit(`${result} = ${type === "float" || type === "double" ? "fcmp oeq" : "icmp eq"} ${type} ${a}, ${b}`);
+  compare(this: Mut<this>, type: string, a: string, b: string): string {
+    const result = this.temp();
+    this.emit(`${result} = ${type === "float" || type === "double" ? "fcmp oeq" : "icmp eq"} ${type} ${a}, ${b}`);
     return result;
   }
 
+
   // A method's receiver runs before its arguments, as in JavaScript. A method called in an
   // optional chain runs only when the chain isn't empty.
-  function call(e: Extract<Expr, { kind: "call" }>): string | undefined {
-    if (fixedFills.has(e)) return fixedFilled(e, types.get(e) as FixedType);
-    if (stringBuilds.has(e)) return stringBuilt(e, stringBuilds.get(e)!);
+  call(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): string | undefined {
+    if (this.fixedFills.has(e)) return this.fixedFilled(e, this.types.get(e) as FixedType);
+    if (this.stringBuilds.has(e)) return this.stringBuilt(e, this.stringBuilds.get(e)!);
     // A joined handle is the same task's pointer.
-    if (joinCalls.has(e)) return owned((e.callee as Extract<Expr, { kind: "member" }>).object);
-    if (current.absent?.has(e)) return absentCall(e);
-    if (e.callee.kind === "member" && unwraps(e.callee.object)) return link(e, e.callee.object, () => run(e));
-    return run(e);
+    if (this.joinCalls.has(e)) return this.owned((e.callee as Extract<Expr, { kind: "member" }>).object);
+    if (this.current.absent?.has(e)) return this.absentCall(e);
+    if (e.callee.kind === "member" && this.unwraps(e.callee.object)) return this.link(e, e.callee.object, () => this.run(e));
+    return this.run(e);
   }
+
 
   // A call of an optional method this instance's type leaves out: `?.()` gives the empty Option
   // without running its arguments, and a plain call, which only a check that is false here
   // guards, is never reached.
-  function absentCall(e: Extract<Expr, { kind: "call" }>): string | undefined {
-    const type = types.get(e);
-    if (optionalCalls.has(e)) {
-      ranFor((e.callee as Extract<Expr, { kind: "member" }>).object);
-      return type && convert("zeroinitializer", "null", type);
+  absentCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): string | undefined {
+    const type = this.types.get(e);
+    if (this.optionalCalls.has(e)) {
+      this.ranFor((e.callee as Extract<Expr, { kind: "member" }>).object);
+      return type && this.convert("zeroinitializer", "null", type);
     }
-    emit("unreachable");
-    startBlock(label());
+    this.emit("unreachable");
+    this.startBlock(this.label());
     return type && "undef";
   }
 
+
   // node:fs's blocking calls: what each gives, or a failure raised as the IoError the runtime's
   // parts make.
-  function syncFile(e: Extract<Expr, { kind: "call" }>, name: string): string | undefined {
-    const path = operand(e.args[0]!, e.args.slice(1));
+  syncFile(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, name: string): string | undefined {
+    const path = this.operand(e.args[0]!, e.args.slice(1));
     if (name === "pathExists") {
-      const [found, result] = [temp(), temp()];
-      emit(`${found} = call i32 @fsh_rt_fs_exists(ptr ${path})`);
-      emit(`${result} = icmp ne i32 ${found}, 0`);
+      const [found, result] = [this.temp(), this.temp()];
+      this.emit(`${found} = call i32 @fsh_rt_fs_exists(ptr ${path})`);
+      this.emit(`${result} = icmp ne i32 ${found}, 0`);
       return result;
     }
-    const parts = alloca("[4 x ptr]");
-    const status = temp();
+    const parts = this.alloca("[4 x ptr]");
+    const status = this.temp();
     // What a call fills in, read once it has succeeded.
     let read: (() => string) | undefined;
     const filled = (type: string, slot: string) => () => {
-      const v = temp();
-      emit(`${v} = load ${type}, ptr ${slot}`);
+      const v = this.temp();
+      this.emit(`${v} = load ${type}, ptr ${slot}`);
       return v;
     };
     switch (name) {
       case "fileReadSync":
       case "dirRead": {
-        const out = alloca(ARRAY);
-        emit(`${status} = call i32 @fsh_rt_fs_${name === "dirRead" ? "readdir" : "read_sync"}(ptr ${path}, ptr ${out}, ptr ${parts})`);
+        const out = this.alloca(ARRAY);
+        this.emit(`${status} = call i32 @fsh_rt_fs_${name === "dirRead" ? "readdir" : "read_sync"}(ptr ${path}, ptr ${out}, ptr ${parts})`);
         read = filled(ARRAY, out);
         break;
       }
       case "fileWriteSync": {
         // The bytes are handed over, as to any call, and released once written.
-        const [bytes, given] = [alloca(ARRAY), owned(e.args[1]!)];
-        emit(`store ${ARRAY} ${given}, ptr ${bytes}`);
-        emit(`${status} = call i32 @fsh_rt_fs_write_sync(ptr ${path}, ptr ${bytes}, ptr ${parts})`);
-        dispose(given, typing.arrayType("u8"));
+        const [bytes, given] = [this.alloca(ARRAY), this.owned(e.args[1]!)];
+        this.emit(`store ${ARRAY} ${given}, ptr ${bytes}`);
+        this.emit(`${status} = call i32 @fsh_rt_fs_write_sync(ptr ${path}, ptr ${bytes}, ptr ${parts})`);
+        this.dispose(given, this.typing.arrayType("u8"));
         break;
       }
       case "pathReal":
       case "pathRealNative":
       case "pathReadLink":
       case "dirTemp": {
-        const out = alloca("ptr");
+        const out = this.alloca("ptr");
         const callee = { pathReal: "realpath", pathRealNative: "realpath_native", pathReadLink: "readlink", dirTemp: "mkdtemp" }[name];
-        emit(`${status} = call i32 @fsh_rt_fs_${callee}(ptr ${path}, ptr ${out}, ptr ${parts})`);
+        this.emit(`${status} = call i32 @fsh_rt_fs_${callee}(ptr ${path}, ptr ${out}, ptr ${parts})`);
         read = filled("ptr", out);
         break;
       }
       case "pathStat": {
-        const [numbers, mtime, follow] = [alloca("[3 x i64]"), alloca("double"), temp()];
-        emit(`${follow} = zext i1 ${value(e.args[1]!)} to i32`);
-        emit(`${status} = call i32 @fsh_rt_fs_stat(ptr ${path}, i32 ${follow}, ptr ${numbers}, ptr ${mtime}, ptr ${parts})`);
+        const [numbers, mtime, follow] = [this.alloca("[3 x i64]"), this.alloca("double"), this.temp()];
+        this.emit(`${follow} = zext i1 ${this.value(e.args[1]!)} to i32`);
+        this.emit(`${status} = call i32 @fsh_rt_fs_stat(ptr ${path}, i32 ${follow}, ptr ${numbers}, ptr ${mtime}, ptr ${parts})`);
         read = () => {
-          const tuple = types.get(e) as ObjectType;
+          const tuple = this.types.get(e) as ObjectType;
           const number = (i: usize) => {
-            const [at, v] = [temp(), temp()];
-            emit(`${at} = getelementptr [3 x i64], ptr ${numbers}, i32 0, i32 ${i}`);
-            emit(`${v} = load i64, ptr ${at}`);
+            const [at, v] = [this.temp(), this.temp()];
+            this.emit(`${at} = getelementptr [3 x i64], ptr ${numbers}, i32 0, i32 ${i}`);
+            this.emit(`${v} = load i64, ptr ${at}`);
             return v;
           };
-          const time = temp();
-          emit(`${time} = load double, ptr ${mtime}`);
+          const time = this.temp();
+          this.emit(`${time} = load double, ptr ${mtime}`);
           let made = "zeroinitializer";
           for (const [field, v] of [["0", number(0)], ["1", number(1)], ["2", time], ["3", number(2)]] as const) {
-            const next = temp();
-            emit(`${next} = insertvalue ${llvm(tuple)} ${made}, ${llvm(field === "2" ? "f64" : "i64")} ${v}, ${typing.fieldPath(tuple, field).join(", ")}`);
+            const next = this.temp();
+            this.emit(`${next} = insertvalue ${this.llvm(tuple)} ${made}, ${this.llvm(field === "2" ? "f64" : "i64")} ${v}, ${this.typing.fieldPath(tuple, field).join(", ")}`);
             made = next;
           }
           return made;
@@ -7208,23 +7719,23 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         break;
       }
       case "processSpawn": {
-        const [args, input] = [alloca(ARRAY), alloca(ARRAY)];
-        emit(`store ${ARRAY} ${operand(e.args[1]!, e.args.slice(2))}, ptr ${args}`);
-        const cwd = operand(e.args[2]!, e.args.slice(3));
-        emit(`store ${ARRAY} ${operand(e.args[3]!, e.args.slice(4))}, ptr ${input}`);
-        const flags = operand(e.args[4]!, e.args.slice(5));
-        const env = alloca(ARRAY);
-        emit(`store ${ARRAY} ${value(e.args[5]!)}, ptr ${env}`);
-        const [numbers, out, err] = [alloca("[3 x i64]"), alloca(ARRAY), alloca(ARRAY)];
-        emit(`${status} = call i32 @fsh_rt_spawn_sync(ptr ${path}, ptr ${args}, ptr ${cwd}, ptr ${input}, i64 ${flags}, ptr ${env}, ptr ${numbers}, ptr ${out}, ptr ${err}, ptr ${parts})`);
+        const [args, input] = [this.alloca(ARRAY), this.alloca(ARRAY)];
+        this.emit(`store ${ARRAY} ${this.operand(e.args[1]!, e.args.slice(2))}, ptr ${args}`);
+        const cwd = this.operand(e.args[2]!, e.args.slice(3));
+        this.emit(`store ${ARRAY} ${this.operand(e.args[3]!, e.args.slice(4))}, ptr ${input}`);
+        const flags = this.operand(e.args[4]!, e.args.slice(5));
+        const env = this.alloca(ARRAY);
+        this.emit(`store ${ARRAY} ${this.value(e.args[5]!)}, ptr ${env}`);
+        const [numbers, out, err] = [this.alloca("[3 x i64]"), this.alloca(ARRAY), this.alloca(ARRAY)];
+        this.emit(`${status} = call i32 @fsh_rt_spawn_sync(ptr ${path}, ptr ${args}, ptr ${cwd}, ptr ${input}, i64 ${flags}, ptr ${env}, ptr ${numbers}, ptr ${out}, ptr ${err}, ptr ${parts})`);
         read = () => {
-          const tuple = typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]) as ObjectType;
+          const tuple = this.typing.tupleType(["i64", "i64", "i64", this.typing.arrayType("u8"), this.typing.arrayType("u8")]) as ObjectType;
           let made = "zeroinitializer";
           for (let i = 0; i < 5; i++) {
-            const [at, v, next] = [temp(), temp(), temp()];
-            if (i < 3) emit(`${at} = getelementptr [3 x i64], ptr ${numbers}, i32 0, i32 ${i}`);
-            emit(`${v} = load ${i < 3 ? "i64" : ARRAY}, ptr ${i < 3 ? at : i === 3 ? out : err}`);
-            emit(`${next} = insertvalue ${llvm(tuple)} ${made}, ${i < 3 ? "i64" : ARRAY} ${v}, ${typing.fieldPath(tuple, String(i)).join(", ")}`);
+            const [at, v, next] = [this.temp(), this.temp(), this.temp()];
+            if (i < 3) this.emit(`${at} = getelementptr [3 x i64], ptr ${numbers}, i32 0, i32 ${i}`);
+            this.emit(`${v} = load ${i < 3 ? "i64" : ARRAY}, ptr ${i < 3 ? at : i === 3 ? out : err}`);
+            this.emit(`${next} = insertvalue ${this.llvm(tuple)} ${made}, ${i < 3 ? "i64" : ARRAY} ${v}, ${this.typing.fieldPath(tuple, String(i)).join(", ")}`);
             made = next;
           }
           return made;
@@ -7232,571 +7743,576 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         break;
       }
       case "pathRemove": {
-        const [recursive, force] = [temp(), temp()];
-        emit(`${recursive} = zext i1 ${value(e.args[1]!)} to i32`);
-        emit(`${force} = zext i1 ${value(e.args[2]!)} to i32`);
-        emit(`${status} = call i32 @fsh_rt_fs_rm(ptr ${path}, i32 ${recursive}, i32 ${force}, ptr ${parts})`);
+        const [recursive, force] = [this.temp(), this.temp()];
+        this.emit(`${recursive} = zext i1 ${this.value(e.args[1]!)} to i32`);
+        this.emit(`${force} = zext i1 ${this.value(e.args[2]!)} to i32`);
+        this.emit(`${status} = call i32 @fsh_rt_fs_rm(ptr ${path}, i32 ${recursive}, i32 ${force}, ptr ${parts})`);
         break;
       }
       case "pathRename":
       case "fileCopy": {
-        const to = operand(e.args[1]!, e.args.slice(2));
-        const flags = name === "fileCopy" ? `i64 ${value(e.args[2]!)}, ` : "";
-        emit(`${status} = call i32 @fsh_rt_fs_${name === "fileCopy" ? "copyfile" : "rename"}(ptr ${path}, ptr ${to}, ${flags}ptr ${parts})`);
+        const to = this.operand(e.args[1]!, e.args.slice(2));
+        const flags = name === "fileCopy" ? `i64 ${this.value(e.args[2]!)}, ` : "";
+        this.emit(`${status} = call i32 @fsh_rt_fs_${name === "fileCopy" ? "copyfile" : "rename"}(ptr ${path}, ptr ${to}, ${flags}ptr ${parts})`);
         break;
       }
       case "pathLink": {
-        const [to, symbolic] = [operand(e.args[1]!, e.args.slice(2)), temp()];
-        emit(`${symbolic} = zext i1 ${value(e.args[2]!)} to i32`);
-        emit(`${status} = call i32 @fsh_rt_fs_link(ptr ${path}, ptr ${to}, i32 ${symbolic}, ptr ${parts})`);
+        const [to, symbolic] = [this.operand(e.args[1]!, e.args.slice(2)), this.temp()];
+        this.emit(`${symbolic} = zext i1 ${this.value(e.args[2]!)} to i32`);
+        this.emit(`${status} = call i32 @fsh_rt_fs_link(ptr ${path}, ptr ${to}, i32 ${symbolic}, ptr ${parts})`);
         break;
       }
       case "pathUnlink":
-        emit(`${status} = call i32 @fsh_rt_fs_unlink(ptr ${path}, ptr ${parts})`);
+        this.emit(`${status} = call i32 @fsh_rt_fs_unlink(ptr ${path}, ptr ${parts})`);
         break;
       case "pathAccess":
       case "pathChmod":
-        emit(`${status} = call i32 @fsh_rt_fs_${name === "pathAccess" ? "access" : "chmod"}(ptr ${path}, i64 ${value(e.args[1]!)}, ptr ${parts})`);
+        this.emit(`${status} = call i32 @fsh_rt_fs_${name === "pathAccess" ? "access" : "chmod"}(ptr ${path}, i64 ${this.value(e.args[1]!)}, ptr ${parts})`);
         break;
       case "pathUtimes": {
-        const follow = temp();
-        emit(`${follow} = zext i1 ${value(e.args[3]!)} to i32`);
-        emit(`${status} = call i32 @fsh_rt_fs_utimes(ptr ${path}, double ${value(e.args[1]!)}, double ${value(e.args[2]!)}, i32 ${follow}, ptr ${parts})`);
+        const follow = this.temp();
+        this.emit(`${follow} = zext i1 ${this.value(e.args[3]!)} to i32`);
+        this.emit(`${status} = call i32 @fsh_rt_fs_utimes(ptr ${path}, double ${this.value(e.args[1]!)}, double ${this.value(e.args[2]!)}, i32 ${follow}, ptr ${parts})`);
         break;
       }
       case "dirMake": {
-        const [recursive, out] = [temp(), alloca("ptr")];
-        emit(`${recursive} = zext i1 ${value(e.args[1]!)} to i32`);
-        emit(`${status} = call i32 @fsh_rt_fs_mkdir(ptr ${path}, i32 ${recursive}, i64 ${value(e.args[2]!)}, ptr ${out}, ptr ${parts})`);
+        const [recursive, out] = [this.temp(), this.alloca("ptr")];
+        this.emit(`${recursive} = zext i1 ${this.value(e.args[1]!)} to i32`);
+        this.emit(`${status} = call i32 @fsh_rt_fs_mkdir(ptr ${path}, i32 ${recursive}, i64 ${this.value(e.args[2]!)}, ptr ${out}, ptr ${parts})`);
         read = () => {
-          const option = typing.unionType(["string", "null"]);
-          const [made, none, held] = [temp(), temp(), temp()];
-          emit(`${made} = load ptr, ptr ${out}`);
-          emit(`${none} = icmp eq ptr ${made}, null`);
-          emit(`${held} = select i1 ${none}, ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ${llvm(option)} ${convert(made, "string", option)}`);
+          const option = this.typing.unionType(["string", "null"]);
+          const [made, none, held] = [this.temp(), this.temp(), this.temp()];
+          this.emit(`${made} = load ptr, ptr ${out}`);
+          this.emit(`${none} = icmp eq ptr ${made}, null`);
+          this.emit(`${held} = select i1 ${none}, ${this.llvm(option)} ${this.convert("zeroinitializer", "null", option)}, ${this.llvm(option)} ${this.convert(made, "string", option)}`);
           return held;
         };
         break;
       }
     }
-    const [failed, bad, good] = [temp(), label(), label()];
-    emit(`${failed} = icmp ne i32 ${status}, 1`);
-    emit(`br i1 ${failed}, label %${bad}, label %${good}`);
-    startBlock(bad);
-    raised(e, ioError(parts, current.raises.get(e)!.from as ClassType));
-    startBlock(good);
+    const [failed, bad, good] = [this.temp(), this.label(), this.label()];
+    this.emit(`${failed} = icmp ne i32 ${status}, 1`);
+    this.emit(`br i1 ${failed}, label %${bad}, label %${good}`);
+    this.startBlock(bad);
+    this.raised(e, this.ioError(parts, this.current.raises.get(e)!.from as ClassType));
+    this.startBlock(good);
     if (!read) return undefined;
     const result = read();
     // Unused, as a statement, what a call gives is released when the statement ends.
-    const gives: Record<string, Type> = { processSpawn: typing.tupleType(["i64", "i64", "i64", typing.arrayType("u8"), typing.arrayType("u8")]), fileReadSync: typing.arrayType("u8"), dirRead: typing.arrayType("string"), pathReal: "string", pathRealNative: "string", pathReadLink: "string", dirTemp: "string", dirMake: typing.unionType(["string", "null"]) };
-    if (!types.has(e) && gives[name]) pending.push({ v: result, type: gives[name]! });
+    const gives: Record<string, Type> = { processSpawn: this.typing.tupleType(["i64", "i64", "i64", this.typing.arrayType("u8"), this.typing.arrayType("u8")]), fileReadSync: this.typing.arrayType("u8"), dirRead: this.typing.arrayType("string"), pathReal: "string", pathRealNative: "string", pathReadLink: "string", dirTemp: "string", dirMake: this.typing.unionType(["string", "null"]) };
+    if (!this.types.has(e) && gives[name]) this.pending.push({ v: result, type: gives[name]! });
     return result;
   }
+
 
   // `String.fromCharCode` and `String.fromCodePoint` over their gathered array, a temporary the
   // statement releases.
-  function stringBuilt(e: Extract<Expr, { kind: "call" }>, kind: "units" | "points"): string {
-    const array = value(e.args[0]!);
-    const [data, length, result] = [temp(), temp(), temp()];
-    emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
-    emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
-    if (kind === "units") emit(`${result} = call ptr @fsh_rt_str_from_units(ptr ${data}, i64 ${length})`);
-    else unwinding(`call ptr @fsh_rt_str_from_points(ptr ${data}, i64 ${length}, ptr ${panicAt(e)})`, result);
-    if (!types.has(e)) pending.push({ v: result, type: "string" });
+  stringBuilt(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, kind: "units" | "points"): string {
+    const array = this.value(e.args[0]!);
+    const [data, length, result] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
+    this.emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
+    if (kind === "units") this.emit(`${result} = call ptr @fsh_rt_str_from_units(ptr ${data}, i64 ${length})`);
+    else this.unwinding(`call ptr @fsh_rt_str_from_points(ptr ${data}, i64 ${length}, ptr ${this.panicAt(e)})`, result);
+    if (!this.types.has(e)) this.pending.push({ v: result, type: "string" });
     return result;
   }
 
+
   // The slot of a parameter taken as a closure's address and code that `e` names.
-  function pairOf(e: Expr): string | undefined {
-    if (pairs.size === 0 || e.kind !== "ident") return undefined;
-    const local = current.locals.get(e);
-    return local === undefined ? undefined : pairs.get(local);
+  pairOf(this: Mut<this>, e: Expr): string | undefined {
+    if (this.pairs.size === 0 || e.kind !== "ident") return undefined;
+    const local = this.current.locals.get(e);
+    return local === undefined ? undefined : this.pairs.get(local);
   }
 
-  function run(e: Extract<Expr, { kind: "call" }>): string | undefined {
-    const target = callOf(e);
-    const pair = target && pairOf(e.callee);
+
+  run(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): string | undefined {
+    const target = this.callOf(e);
+    const pair = target && this.pairOf(e.callee);
     if (pair !== undefined && target) {
-      const [both, env, code] = [temp(), temp(), temp()];
-      emit(`${both} = load ${PAIR}, ptr ${pair}`);
-      emit(`${env} = extractvalue ${PAIR} ${both}, 0`);
-      emit(`${code} = extractvalue ${PAIR} ${both}, 1`);
-      const values = argValues(e.args, target, bodyOf(noted.arenas, target).params.length);
-      const result = invoke(target, env, values, e, undefined, undefined, code);
-      return result && types.has(e) ? convert(result, target.returns, types.get(e)!) : result;
+      const [both, env, code] = [this.temp(), this.temp(), this.temp()];
+      this.emit(`${both} = load ${PAIR}, ptr ${pair}`);
+      this.emit(`${env} = extractvalue ${PAIR} ${both}, 0`);
+      this.emit(`${code} = extractvalue ${PAIR} ${both}, 1`);
+      const values = this.argValues(e.args, target, bodyOf(this.noted.arenas, target).params.length);
+      const result = this.invoke(target, env, values, e, undefined, undefined, code);
+      return result && this.types.has(e) ? this.convert(result, target.returns, this.types.get(e)!) : result;
     }
-    const js = jsCalls.get(e);
-    if (js && target) return jsCall(e, js, target);
-    const statics = jsStatics.get(e);
-    if (statics) return jsStatic(e, statics);
+    const js = this.jsCalls.get(e);
+    if (js && target) return this.jsCall(e, js, target);
+    const statics = this.jsStatics.get(e);
+    if (statics) return this.jsStatic(e, statics);
     if (!target) {
-      if (formatCalls.has(e)) return formatted(e);
-      if (inspectCalls.has(e)) {
+      if (this.formatCalls.has(e)) return this.formatted(e);
+      if (this.inspectCalls.has(e)) {
         const [a] = e.args as [Expr];
-        const [slot, result] = [alloca(FARG), temp()];
-        describe(slot, a.kind === "string" ? text(a.value) : operand(a, []), printedType(a), { text: false, depth: 2 });
-        emit(`${result} = call ptr @fsh_rt_inspect(ptr ${slot})`);
-        if (!types.has(e)) pending.push({ v: result, type: "string" });
+        const [slot, result] = [this.alloca(FARG), this.temp()];
+        this.describe(slot, a.kind === "string" ? this.text(a.value) : this.operand(a, []), this.printedType(a), { text: false, depth: 2 });
+        this.emit(`${result} = call ptr @fsh_rt_inspect(ptr ${slot})`);
+        if (!this.types.has(e)) this.pending.push({ v: result, type: "string" });
         return result;
       }
       // A print whose first argument may be a format prints what format gives.
-      if (printCalls.has(e) && formats(e.args)) {
-        const line = formatted(e);
+      if (this.printCalls.has(e) && this.formats(e.args)) {
+        const line = this.formatted(e);
         // The statement releases the line, as it does a format call's value it drops.
-        write(printStream(e.callee), [[line, "string"]], builder, convert);
+        write(printStream(e.callee), [[line, "string"]], this.builder, this.convert);
         return undefined;
       }
-      if (printCalls.has(e)) {
-        print(e.args, builder, (a) => operand(a, e.args.slice(e.args.indexOf(a) + 1)), (a) => current.spelled?.get(a) ?? valueType(a), convert, printStream(e.callee));
+      if (this.printCalls.has(e)) {
+        print(e.args, this.builder, (a) => this.operand(a, e.args.slice(e.args.indexOf(a) + 1)), (a) => this.current.spelled?.get(a) ?? this.valueType(a), this.convert, printStream(e.callee));
         return undefined;
       }
       // `Shape.Circle(1.5)`: a variant built from its payload, each value handed to it. Used as a
       // statement, it is dropped after it.
-      const built = recOf(types.get(e.callee));
+      const built = this.recOf(this.types.get(e.callee));
       if (built?.kind === "variant") {
-        const values = delivered((hand) => e.args.map((a, i) => hand(owned(a), built.fields[i]!.type)));
+        const values = this.delivered((hand) => e.args.map((a, i) => hand(this.owned(a), built.fields[i]!.type)));
         let result = "zeroinitializer";
         values.forEach((v, i) => {
-          const next = temp();
-          emit(`${next} = insertvalue ${llvm(types.get(e.callee) as VariantType)} ${result === "zeroinitializer" ? "undef" : result}, ${llvm(built.fields[i]!.type)} ${v}, ${i}`);
+          const next = this.temp();
+          this.emit(`${next} = insertvalue ${this.llvm(this.types.get(e.callee) as VariantType)} ${result === "zeroinitializer" ? "undef" : result}, ${this.llvm(built.fields[i]!.type)} ${v}, ${i}`);
           result = next;
         });
-        if (!types.has(e)) pending.push({ v: result, type: types.get(e.callee)! });
+        if (!this.types.has(e)) this.pending.push({ v: result, type: this.types.get(e.callee)! });
         return result;
       }
       // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
-      if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return value(e.args[0]!);
+      if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return this.value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
-      if (maths.has(e)) return mathCall(e);
-      if (kindTests.has(e)) return test(e, value, valueType)!;
-      if (syncFileCalls.has(e)) return syncFile(e, syncFileCalls.get(e)!);
+      if (this.maths.has(e)) return this.mathCall(e);
+      if (this.kindTests.has(e)) return this.test(e, ((e) => this.value(e)), ((e) => this.valueType(e)))!;
+      if (this.syncFileCalls.has(e)) return this.syncFile(e, this.syncFileCalls.get(e)!);
       // `Promise.all` and `Promise.race`: their futures moved into the combined one's frame.
-      if (combinedCalls.has(e)) {
-        const t = types.get(e) as FutureType;
+      if (this.combinedCalls.has(e)) {
+        const t = this.types.get(e) as FutureType;
         if (e.args[0]!.kind !== "array") {
-          const made = temp();
-          emit(`${made} = insertvalue ${llvm(t)} zeroinitializer, ${ARRAY} ${owned(e.args[0]!)}, 1`);
+          const made = this.temp();
+          this.emit(`${made} = insertvalue ${this.llvm(t)} zeroinitializer, ${ARRAY} ${this.owned(e.args[0]!)}, 1`);
           return made;
         }
         const list = (e.args[0] as Extract<Expr, { kind: "array" }>).elements as Expr[];
-        const given = list.map((x) => owned(x));
+        const given = list.map((x) => this.owned(x));
         let frame = "zeroinitializer";
         given.forEach((v, i) => {
-          const next = temp();
-          emit(`${next} = insertvalue ${llvm(t)} ${frame}, ${llvm(valueType(list[i]!))} ${v}, ${1 + 3 * i}`);
+          const next = this.temp();
+          this.emit(`${next} = insertvalue ${this.llvm(t)} ${frame}, ${this.llvm(this.valueType(list[i]!))} ${v}, ${1 + 3 * i}`);
           frame = next;
         });
         return frame;
       }
-      if (jsEvaluations.has(e)) {
-        const made = temp();
-        unwinding(`call ptr @fsh_rt_js_evaluate(ptr ${value(e.args[0]!)}, ptr ${panicAt(e)})`, made);
+      if (this.jsEvaluations.has(e)) {
+        const made = this.temp();
+        this.unwinding(`call ptr @fsh_rt_js_evaluate(ptr ${this.value(e.args[0]!)}, ptr ${this.panicAt(e)})`, made);
         return made;
       }
       // The std's timers. A timer's callable goes to the runtime, the timer task started with
       // the first; the next one due is waited for as a leaf future holding only its state.
-      const timer = timerCalls.get(e);
+      const timer = this.timerCalls.get(e);
       if (timer === "timerNext") {
-        const frame = temp();
-        emit(`${frame} = insertvalue ${llvm(types.get(e)!)} zeroinitializer, i32 0, 0`);
+        const frame = this.temp();
+        this.emit(`${frame} = insertvalue ${this.llvm(this.types.get(e)!)} zeroinitializer, i32 0, 0`);
         return frame;
       }
-      if (timer === "timerClear") return void emit(`call void @fsh_rt_timeout_clear(i64 ${value(e.args[0]!)})`);
+      if (timer === "timerClear") return void this.emit(`call void @fsh_rt_timeout_clear(i64 ${this.value(e.args[0]!)})`);
       if (timer === "timerSet") {
-        const callable = owned(e.args[0]!);
-        const [ms, repeats] = [value(e.args[1]!), value(e.args[2]!)];
-        const loop = valueType(e.args[3]!) as FutureType;
-        const held = owned(e.args[3]!);
-        const [block, table, repeat, claimed, id, start, skip, done] = [temp(), temp(), temp(), temp(), temp(), label(), label(), label()];
-        emit(`${claimed} = call i32 @fsh_rt_timeouts_claim()`);
-        const first = temp();
-        emit(`${first} = icmp ne i32 ${claimed}, 0`);
-        emit(`br i1 ${first}, label %${start}, label %${skip}`);
-        startBlock(start);
-        const [poll, drop, dropOutput] = taskGlue(loop);
-        const [frame, task] = [alloca(llvm(loop)), temp()];
-        emit(`store ${llvm(loop)} ${held}, ptr ${frame}`);
-        unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${sizeOf(llvm(loop))}, i64 ${sizeOf(pollType(loop))})`, task);
-        emit(`call void @fsh_rt_timeouts_task(ptr ${task})`);
-        emit(`br label %${done}`);
-        startBlock(skip);
-        dispose(held, loop);
-        emit(`br label %${done}`);
-        startBlock(done);
-        emit(`${block} = extractvalue ${DYN} ${callable}, 0`);
-        emit(`${table} = extractvalue ${DYN} ${callable}, 1`);
-        emit(`${repeat} = zext i1 ${repeats} to i32`);
-        emit(`${id} = call i64 @fsh_rt_timeout_set(ptr ${block}, ptr ${table}, i64 ${ms}, i32 ${repeat})`);
+        const callable = this.owned(e.args[0]!);
+        const [ms, repeats] = [this.value(e.args[1]!), this.value(e.args[2]!)];
+        const loop = this.valueType(e.args[3]!) as FutureType;
+        const held = this.owned(e.args[3]!);
+        const [block, table, repeat, claimed, id, start, skip, done] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.label(), this.label(), this.label()];
+        this.emit(`${claimed} = call i32 @fsh_rt_timeouts_claim()`);
+        const first = this.temp();
+        this.emit(`${first} = icmp ne i32 ${claimed}, 0`);
+        this.emit(`br i1 ${first}, label %${start}, label %${skip}`);
+        this.startBlock(start);
+        const [poll, drop, dropOutput] = this.taskGlue(loop);
+        const [frame, task] = [this.alloca(this.llvm(loop)), this.temp()];
+        this.emit(`store ${this.llvm(loop)} ${held}, ptr ${frame}`);
+        this.unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(loop))}, i64 ${this.sizeOf(this.pollType(loop))})`, task);
+        this.emit(`call void @fsh_rt_timeouts_task(ptr ${task})`);
+        this.emit(`br label %${done}`);
+        this.startBlock(skip);
+        this.dispose(held, loop);
+        this.emit(`br label %${done}`);
+        this.startBlock(done);
+        this.emit(`${block} = extractvalue ${DYN} ${callable}, 0`);
+        this.emit(`${table} = extractvalue ${DYN} ${callable}, 1`);
+        this.emit(`${repeat} = zext i1 ${repeats} to i32`);
+        this.emit(`${id} = call i64 @fsh_rt_timeout_set(ptr ${block}, ptr ${table}, i64 ${ms}, i32 ${repeat})`);
         return id;
       }
       // A file's future: the path, and a write's bytes, in its frame for the pool to take.
-      if (fileCalls.has(e)) {
-        const future = types.get(e) as FutureType;
-        let frame = temp();
-        emit(`${frame} = insertvalue ${llvm(future)} zeroinitializer, ptr ${owned(e.args[0]!)}, 1`);
+      if (this.fileCalls.has(e)) {
+        const future = this.types.get(e) as FutureType;
+        let frame = this.temp();
+        this.emit(`${frame} = insertvalue ${this.llvm(future)} zeroinitializer, ptr ${this.owned(e.args[0]!)}, 1`);
         if (e.args[1]) {
-          const next = temp();
-          emit(`${next} = insertvalue ${llvm(future)} ${frame}, ${ARRAY} ${owned(e.args[1])}, 2`);
+          const next = this.temp();
+          this.emit(`${next} = insertvalue ${this.llvm(future)} ${frame}, ${ARRAY} ${this.owned(e.args[1])}, 2`);
           frame = next;
         }
         return frame;
       }
-      if (clocks.has(e)) {
-        const now = temp();
-        const clock = clocks.get(e);
-        emit(clock === "Date.now" ? `${now} = call i64 @fsh_rt_date_now()` : `${now} = call double @fsh_rt_${clock === "Math.random" ? "math_random" : "performance_now"}()`);
+      if (this.clocks.has(e)) {
+        const now = this.temp();
+        const clock = this.clocks.get(e);
+        this.emit(clock === "Date.now" ? `${now} = call i64 @fsh_rt_date_now()` : `${now} = call double @fsh_rt_${clock === "Math.random" ? "math_random" : "performance_now"}()`);
         return now;
       }
-      if (jsonCalls.get(e) === "stringify") return stringifyCall(e);
-      if (jsonCalls.get(e) === "parse") return parseJsonCall(e);
-      if (parses.has(e)) return parseCall(e, parses.get(e)!);
-      if (asserts.has(e)) return assertCall(e);
-      if (fixedPrints.has(e)) return toFixed(e);
-      if (integerCalls.has(e)) return integerMethodCall(e);
-      if (regexCalls.get(e) === "exec") return regexExec(e);
-      if (regexStringCalls.has(e)) return regexString(e, regexStringCalls.get(e)!);
-      if (regexCalls.get(e) === "test") {
-        const re = value((e.callee as Extract<Expr, { kind: "member" }>).object);
-        const [found, yes] = [temp(), temp()];
-        emit(`${found} = call i32 @fsh_rt_regex_test(ptr ${re}, ptr ${value(e.args[0]!)})`);
-        emit(`${yes} = icmp ne i32 ${found}, 0`);
+      if (this.jsonCalls.get(e) === "stringify") return this.stringifyCall(e);
+      if (this.jsonCalls.get(e) === "parse") return this.parseJsonCall(e);
+      if (this.parses.has(e)) return this.parseCall(e, this.parses.get(e)!);
+      if (this.asserts.has(e)) return this.assertCall(e);
+      if (this.fixedPrints.has(e)) return this.toFixed(e);
+      if (this.integerCalls.has(e)) return this.integerMethodCall(e);
+      if (this.regexCalls.get(e) === "exec") return this.regexExec(e);
+      if (this.regexStringCalls.has(e)) return this.regexString(e, this.regexStringCalls.get(e)!);
+      if (this.regexCalls.get(e) === "test") {
+        const re = this.value((e.callee as Extract<Expr, { kind: "member" }>).object);
+        const [found, yes] = [this.temp(), this.temp()];
+        this.emit(`${found} = call i32 @fsh_rt_regex_test(ptr ${re}, ptr ${this.value(e.args[0]!)})`);
+        this.emit(`${yes} = icmp ne i32 ${found}, 0`);
         return yes;
       }
       if (e.callee.kind === "ident" && e.callee.name === "fill length") {
-        const n = value(e.args[0]!);
-        if (!lengthChecks.has(e)) return n;
-        const [negative, fail, ok] = [temp(), label(), label()];
-        emit(`${negative} = icmp slt i64 ${n}, 0`);
-        emit(`br i1 ${negative}, label %${fail}, label %${ok}`);
-        startBlock(fail);
-        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\ninvalid array length\n`)})`);
-        emit("unreachable");
-        startBlock(ok);
+        const n = this.value(e.args[0]!);
+        if (!this.lengthChecks.has(e)) return n;
+        const [negative, fail, ok] = [this.temp(), this.label(), this.label()];
+        this.emit(`${negative} = icmp slt i64 ${n}, 0`);
+        this.emit(`br i1 ${negative}, label %${fail}, label %${ok}`);
+        this.startBlock(fail);
+        this.unwinding(`call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where(e)}:\ninvalid array length\n`)})`);
+        this.emit("unreachable");
+        this.startBlock(ok);
         return n;
       }
       // `spawn(p)`: the future's frame moves into a new task, whose handle this gives.
       if (e.callee.kind === "ident" && (e.callee.name === "spawn" || e.callee.name === "timer spawn" || e.callee.name === "blocking spawn")) {
-        const future = valueType(e.args[0]!) as FutureType;
-        const [poll, drop, dropOutput] = taskGlue(future);
-        const [frame, task] = [alloca(llvm(future)), temp()];
-        emit(`store ${llvm(future)} ${owned(e.args[0]!)}, ptr ${frame}`);
+        const future = this.valueType(e.args[0]!) as FutureType;
+        const [poll, drop, dropOutput] = this.taskGlue(future);
+        const [frame, task] = [this.alloca(this.llvm(future)), this.temp()];
+        this.emit(`store ${this.llvm(future)} ${this.owned(e.args[0]!)}, ptr ${frame}`);
         const spawning = { spawn: "fsh_rt_spawn", "timer spawn": "fsh_rt_spawn_now", "blocking spawn": "fsh_rt_spawn_blocking" }[e.callee.name];
-        unwinding(`call ptr @${spawning}(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${sizeOf(llvm(future))}, i64 ${sizeOf(pollType(future))})`, task);
-        if (!types.has(e)) pending.push({ v: task, type: typing.handleType(typing.rec(future).gives, typing.rec(future).throws) });
+        this.unwinding(`call ptr @${spawning}(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))})`, task);
+        if (!this.types.has(e)) this.pending.push({ v: task, type: this.typing.handleType(this.typing.rec(future).gives, this.typing.rec(future).throws) });
         return task;
       }
       // `sleep(ms)`'s future holds the delay until its first poll makes it a deadline.
       if (e.callee.kind === "ident" && e.callee.name === "sleep") {
-        const future = (types.get(e) ?? SLEEP) as FutureType;
-        const made = temp();
-        emit(`${made} = insertvalue ${llvm(future)} zeroinitializer, i64 ${value(e.args[0]!)}, 1`);
-        return signalled(e, future, made);
+        const future = (this.types.get(e) ?? SLEEP) as FutureType;
+        const made = this.temp();
+        this.emit(`${made} = insertvalue ${this.llvm(future)} zeroinitializer, i64 ${this.value(e.args[0]!)}, 1`);
+        return this.signalled(e, future, made);
       }
       // `yieldNow()`'s future is its one state, not yet polled.
       if (e.callee.kind === "ident" && e.callee.name === "yieldNow") return "zeroinitializer";
-      if (e.callee.kind === "ident" && e.callee.name === "cString") return forC(value(e.args[0]!), e);
-      if (e.callee.kind === "ident" && e.callee.name === "shared" && !locals.has(e.callee)) {
-        const made = sharedNew(e, valueType(e) as SharedType);
-        if (!types.has(e)) pending.push({ v: made, type: valueType(e) });
+      if (e.callee.kind === "ident" && e.callee.name === "cString") return this.forC(this.value(e.args[0]!), e);
+      if (e.callee.kind === "ident" && e.callee.name === "shared" && !this.locals.has(e.callee)) {
+        const made = this.sharedNew(e, this.valueType(e) as SharedType);
+        if (!this.types.has(e)) this.pending.push({ v: made, type: this.valueType(e) });
         return made;
       }
       // `TcpListener.bind` and `TcpStream.connect` make a future holding the address, and the Unix
       // ones the path in the host's place; connect's frame also keeps the socket while it connects.
-      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && ["TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket"].includes(e.callee.object.name) && !types.has(e.callee.object)) {
-        const future = types.get(e) as FutureType;
-        const first = typing.leafOf.get(future)!.method === "connect" ? 2 : 1;
-        const [host, made] = [owned(e.args[0]!), temp()];
-        emit(`${made} = insertvalue ${llvm(future)} zeroinitializer, ptr ${host}, ${first}`);
-        if (onPath(typing, typing.leafOf.get(future)!.of)) return signalled(e, future, made);
-        const [port, frame] = [value(e.args[1]!), temp()];
-        emit(`${frame} = insertvalue ${llvm(future)} ${made}, i64 ${port}, ${first + 1}`);
-        return signalled(e, future, frame);
+      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && ["TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket"].includes(e.callee.object.name) && !this.types.has(e.callee.object)) {
+        const future = this.types.get(e) as FutureType;
+        const first = this.typing.leafOf.get(future)!.method === "connect" ? 2 : 1;
+        const [host, made] = [this.owned(e.args[0]!), this.temp()];
+        this.emit(`${made} = insertvalue ${this.llvm(future)} zeroinitializer, ptr ${host}, ${first}`);
+        if (onPath(this.typing, this.typing.leafOf.get(future)!.of)) return this.signalled(e, future, made);
+        const [port, frame] = [this.value(e.args[1]!), this.temp()];
+        this.emit(`${frame} = insertvalue ${this.llvm(future)} ${made}, i64 ${port}, ${first + 1}`);
+        return this.signalled(e, future, frame);
       }
-      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "AbortSignal" && !types.has(e.callee.object)) {
-        const made = temp();
-        if (e.callee.name === "any") emit(`${made} = call ptr @fsh_rt_signal_any(${signalList(e.args[0]!)})`);
-        else emit(`${made} = call ptr @fsh_rt_signal_timeout(i64 ${value(e.args[0]!)})`);
-        if (!types.has(e)) pending.push({ v: made, type: typing.blockType("AbortSignal") });
+      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "AbortSignal" && !this.types.has(e.callee.object)) {
+        const made = this.temp();
+        if (e.callee.name === "any") this.emit(`${made} = call ptr @fsh_rt_signal_any(${this.signalList(e.args[0]!)})`);
+        else this.emit(`${made} = call ptr @fsh_rt_signal_timeout(i64 ${this.value(e.args[0]!)})`);
+        if (!this.types.has(e)) this.pending.push({ v: made, type: this.typing.blockType("AbortSignal") });
         return made;
       }
-      if (e.callee.kind === "ident" && e.callee.name === "nowMs" && !calls.has(e)) {
-        const made = temp();
-        emit(`${made} = call i64 @fsh_rt_now_ms()`);
+      if (e.callee.kind === "ident" && e.callee.name === "nowMs" && !this.calls.has(e)) {
+        const made = this.temp();
+        this.emit(`${made} = call i64 @fsh_rt_now_ms()`);
         return made;
       }
-      if (e.callee.kind === "ident" && e.callee.name === "shutdownSignal" && !calls.has(e)) {
-        const made = temp();
-        emit(`${made} = call ptr @fsh_rt_signal_shutdown()`);
-        if (!types.has(e)) pending.push({ v: made, type: typing.blockType("AbortSignal") });
+      if (e.callee.kind === "ident" && e.callee.name === "shutdownSignal" && !this.calls.has(e)) {
+        const made = this.temp();
+        this.emit(`${made} = call ptr @fsh_rt_signal_shutdown()`);
+        if (!this.types.has(e)) this.pending.push({ v: made, type: this.typing.blockType("AbortSignal") });
         return made;
       }
-      if (e.callee.kind === "ident" && e.callee.name === "unixUnlink" && !calls.has(e)) return void emit(`call void @fsh_rt_unix_unlink(ptr ${value(e.args[0]!)})`);
-      if (e.callee.kind === "ident" && e.callee.name === "httpDate" && !calls.has(e)) {
-        const made = temp();
-        emit(`${made} = call ptr @fsh_rt_http_date()`);
-        if (!types.has(e)) pending.push({ v: made, type: "string" });
+      if (e.callee.kind === "ident" && e.callee.name === "unixUnlink" && !this.calls.has(e)) return void this.emit(`call void @fsh_rt_unix_unlink(ptr ${this.value(e.args[0]!)})`);
+      if (e.callee.kind === "ident" && e.callee.name === "httpDate" && !this.calls.has(e)) {
+        const made = this.temp();
+        this.emit(`${made} = call ptr @fsh_rt_http_date()`);
+        if (!this.types.has(e)) this.pending.push({ v: made, type: "string" });
         return made;
       }
-      if (e.callee.kind === "ident" && e.callee.name === "utf8Encode" && !calls.has(e)) {
-        const [bytes, made] = [alloca(ARRAY), temp()];
-        emit(`call void @fsh_rt_utf8_encode(ptr ${bytes}, ptr ${value(e.args[0]!)})`);
-        emit(`${made} = load ${ARRAY}, ptr ${bytes}`);
+      if (e.callee.kind === "ident" && e.callee.name === "utf8Encode" && !this.calls.has(e)) {
+        const [bytes, made] = [this.alloca(ARRAY), this.temp()];
+        this.emit(`call void @fsh_rt_utf8_encode(ptr ${bytes}, ptr ${this.value(e.args[0]!)})`);
+        this.emit(`${made} = load ${ARRAY}, ptr ${bytes}`);
         return made;
       }
-      if (e.callee.kind === "ident" && e.callee.name === "utf8Decode" && !calls.has(e)) {
-        const made = temp();
-        emit(`${made} = call ptr @fsh_rt_utf8_decode(ptr ${value(e.args[0]!)})`);
+      if (e.callee.kind === "ident" && e.callee.name === "utf8Decode" && !this.calls.has(e)) {
+        const made = this.temp();
+        this.emit(`${made} = call ptr @fsh_rt_utf8_decode(ptr ${this.value(e.args[0]!)})`);
         return made;
       }
       if (e.callee.kind === "ident" && e.callee.name === "fromCString") {
-        const made = temp();
-        unwinding(`call ptr @fsh_rt_str_from_cstring(ptr ${value(e.args[0]!)})`, made);
-        if (!types.has(e)) pending.push({ v: made, type: "string" });
+        const made = this.temp();
+        this.unwinding(`call ptr @fsh_rt_str_from_cstring(ptr ${this.value(e.args[0]!)})`, made);
+        if (!this.types.has(e)) this.pending.push({ v: made, type: "string" });
         return made;
       }
       // `Rc.ptrEq(a, b)` is given each Rc borrowed, a pointer to its handle.
-      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "Rc" && !types.has(e.callee.object)) {
-        const [a, b, result] = [temp(), temp(), temp()];
-        emit(`${a} = load ptr, ptr ${value(e.args[0]!)}`);
-        emit(`${b} = load ptr, ptr ${value(e.args[1]!)}`);
-        emit(`${result} = icmp eq ptr ${a}, ${b}`);
+      if (e.callee.kind === "member" && e.callee.object.kind === "ident" && e.callee.object.name === "Rc" && !this.types.has(e.callee.object)) {
+        const [a, b, result] = [this.temp(), this.temp(), this.temp()];
+        this.emit(`${a} = load ptr, ptr ${this.value(e.args[0]!)}`);
+        this.emit(`${b} = load ptr, ptr ${this.value(e.args[1]!)}`);
+        this.emit(`${result} = icmp eq ptr ${a}, ${b}`);
         return result;
       }
-      if (e.callee.kind === "member" && recOf(valueType(e.callee.object))?.kind === "pointer") return pointerCall(e, e.callee);
-      if (e.callee.kind === "member" && recOf(referent(valueType(e.callee.object)))?.kind === "interior") return atomicCall(e, e.callee);
-      if (e.callee.kind === "member" && e.callee.name !== "clone" && recOf(referent(valueType(e.callee.object)))?.kind === "block") return blockCall(e, e.callee);
-      if (dynCalls.has(e)) return dynCall(e, e.callee);
-      if (e.callee.kind === "member" && (e.callee.name === "downgrade" || e.callee.name === "upgrade") && recOf(referent(valueType(e.callee.object)))?.kind === "shared") return countedCall(e, e.callee);
-      if (e.callee.kind === "member" && (e.callee.name === "update" || e.callee.name === "read") && recOf(referent(valueType(e.callee.object)))?.kind === "shared") {
-        const t = referent(valueType(e.callee.object)) as SharedType;
-        const block = temp();
-        emit(`${block} = load ptr, ptr ${receiver(e.callee.object)}`);
-        const lock = temp();
-        emit(`${lock} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
-        return lockUpdate(e, typing.interiorType("Lock", typing.rec(t).of), lock, typing.rec(t).which === "Rc");
+      if (e.callee.kind === "member" && this.recOf(this.valueType(e.callee.object))?.kind === "pointer") return this.pointerCall(e, e.callee);
+      if (e.callee.kind === "member" && this.recOf(this.referent(this.valueType(e.callee.object)))?.kind === "interior") return this.atomicCall(e, e.callee);
+      if (e.callee.kind === "member" && e.callee.name !== "clone" && this.recOf(this.referent(this.valueType(e.callee.object)))?.kind === "block") return this.blockCall(e, e.callee);
+      if (this.dynCalls.has(e)) return this.dynCall(e, e.callee);
+      if (e.callee.kind === "member" && (e.callee.name === "downgrade" || e.callee.name === "upgrade") && this.recOf(this.referent(this.valueType(e.callee.object)))?.kind === "shared") return this.countedCall(e, e.callee);
+      if (e.callee.kind === "member" && (e.callee.name === "update" || e.callee.name === "read") && this.recOf(this.referent(this.valueType(e.callee.object)))?.kind === "shared") {
+        const t = this.referent(this.valueType(e.callee.object)) as SharedType;
+        const block = this.temp();
+        this.emit(`${block} = load ptr, ptr ${this.receiver(e.callee.object)}`);
+        const lock = this.temp();
+        this.emit(`${lock} = getelementptr ${this.sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
+        return this.lockUpdate(e, this.typing.interiorType("Lock", this.typing.rec(t).of), lock, this.typing.rec(t).which === "Rc");
       }
       // `BigInt(x)`: a new bigint of an integer, extended to 128 bits by its sign.
-      if (e.callee.kind === "ident" && e.callee.name === "BigInt" && !calls.has(e)) {
-        const from = valueType(e.args[0]!);
-        const v = value(e.args[0]!);
-        if (from === "bigint") return copied(v, from);
+      if (e.callee.kind === "ident" && e.callee.name === "BigInt" && !this.calls.has(e)) {
+        const from = this.valueType(e.args[0]!);
+        const v = this.value(e.args[0]!);
+        if (from === "bigint") return this.copied(v, from);
         const { bits, signed } = INTEGERS[from as Integer];
         let wide = v;
         if (bits < 128) {
-          wide = temp();
-          emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i128`);
+          wide = this.temp();
+          this.emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i128`);
         }
-        const made = temp();
-        emit(signed ? `${made} = call ptr @fsh_rt_big_from_i128(i128 ${wide})` : `${made} = call ptr @fsh_rt_big_from_u128(i128 ${wide}, i32 0)`);
-        if (!types.has(e)) pending.push({ v: made, type: "bigint" });
+        const made = this.temp();
+        this.emit(signed ? `${made} = call ptr @fsh_rt_big_from_i128(i128 ${wide})` : `${made} = call ptr @fsh_rt_big_from_u128(i128 ${wide}, i32 0)`);
+        if (!this.types.has(e)) this.pending.push({ v: made, type: "bigint" });
         return made;
       }
-      if (e.callee.kind === "member" && e.callee.name === "toString" && referent(valueType(e.callee.object)) === "bigint") {
-        const radix = e.args[0] ? value(e.args[0]) : "10";
-        const made = temp();
-        let big = value(e.callee.object);
-        if (isRef(valueType(e.callee.object))) {
+      if (e.callee.kind === "member" && e.callee.name === "toString" && this.referent(this.valueType(e.callee.object)) === "bigint") {
+        const radix = e.args[0] ? this.value(e.args[0]) : "10";
+        const made = this.temp();
+        let big = this.value(e.callee.object);
+        if (this.isRef(this.valueType(e.callee.object))) {
           const at = big;
-          big = temp();
-          emit(`${big} = load ptr, ptr ${at}`);
+          big = this.temp();
+          this.emit(`${big} = load ptr, ptr ${at}`);
         }
-        unwinding(`call ptr @fsh_rt_big_to_string(ptr ${big}, i64 ${radix}, ptr ${panicAt(e)})`, made);
-        if (!types.has(e)) pending.push({ v: made, type: "string" });
+        this.unwinding(`call ptr @fsh_rt_big_to_string(ptr ${big}, i64 ${radix}, ptr ${this.panicAt(e)})`, made);
+        if (!this.types.has(e)) this.pending.push({ v: made, type: "string" });
         return made;
       }
       // `String(x)`: a number's new string, or another reference to a string. Used as a
       // statement, the call has no type of its own, and the string drops after it.
       if (e.callee.kind === "ident" && e.callee.name === "String") {
-        const v = written(value(e.args[0]!), valueType(e.args[0]!));
-        const made = pending.at(-1)?.v === v ? pending.pop() : undefined;
-        const result = made ? v : copied(v, "string");
-        if (!types.has(e)) pending.push({ v: result, type: "string" });
+        const v = this.written(this.value(e.args[0]!), this.valueType(e.args[0]!));
+        const made = this.pending.at(-1)?.v === v ? this.pending.pop() : undefined;
+        const result = made ? v : this.copied(v, "string");
+        if (!this.types.has(e)) this.pending.push({ v: result, type: "string" });
         return result;
       }
-      if (e.callee.kind === "member" && e.callee.name !== "clone" && valueType(e.callee.object) === "string") return stringCall(e, e.callee);
-      if (e.callee.kind === "member" && e.callee.name !== "clone" && isArray(valueType(e.callee.object))) return arrayCall(e, e.callee);
-      if (e.callee.kind === "member" && e.callee.name !== "clone" && recOf(valueType(e.callee.object))?.kind === "map") return mapCall(e, e.callee);
-      if (e.callee.kind === "member" && recOf(valueType(e.callee.object) as GeneratorType | undefined)?.async) {
-        const made = temp();
-        emit(`${made} = insertvalue ${llvm(types.get(e)!)} zeroinitializer, ptr ${receiver(e.callee.object)}, 1`);
+      if (e.callee.kind === "member" && e.callee.name !== "clone" && this.valueType(e.callee.object) === "string") return this.stringCall(e, e.callee);
+      if (e.callee.kind === "member" && e.callee.name !== "clone" && this.isArray(this.valueType(e.callee.object))) return this.arrayCall(e, e.callee);
+      if (e.callee.kind === "member" && e.callee.name !== "clone" && this.recOf(this.valueType(e.callee.object))?.kind === "map") return this.mapCall(e, e.callee);
+      if (e.callee.kind === "member" && this.recOf(this.valueType(e.callee.object) as GeneratorType | undefined)?.async) {
+        const made = this.temp();
+        this.emit(`${made} = insertvalue ${this.llvm(this.types.get(e)!)} zeroinitializer, ptr ${this.receiver(e.callee.object)}, 1`);
         return made;
       }
-      const generator = e.callee.kind === "member" ? recOf(valueType(e.callee.object)) : undefined;
+      const generator = e.callee.kind === "member" ? this.recOf(this.valueType(e.callee.object)) : undefined;
       if (e.callee.kind === "member" && generator?.kind === "generator") {
-        const sent = e.args[0] && owned(e.args[0]);
-        const result = resume(valueType(e.callee.object) as GeneratorType, receiver(e.callee.object), e, sent);
-        const type = typing.nextResult(generator.yields);
-        if (!types.has(e) && needsDrop(type)) pending.push({ v: result, type });
+        const sent = e.args[0] && this.owned(e.args[0]);
+        const result = this.resume(this.valueType(e.callee.object) as GeneratorType, this.receiver(e.callee.object), e, sent);
+        const type = this.typing.nextResult(generator.yields);
+        if (!this.types.has(e) && this.needsDrop(type)) this.pending.push({ v: result, type });
         return result;
       }
       // The compiler's `clone()`: a copy holding another reference to what the value owns.
       const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
-      if (isDyn(types.get(e)!)) return dynCloned(e, object);
-      return copied(convert(value(object), types.get(object)!, types.get(e)!), types.get(e)!);
+      if (this.isDyn(this.types.get(e)!)) return this.dynCloned(e, object);
+      return this.copied(this.convert(this.value(object), this.types.get(object)!, this.types.get(e)!), this.types.get(e)!);
     }
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
-    const before = spills.length;
+    const before = this.spills.length;
     // A nested function calling itself runs with the captures it was called with.
-    const pointer = bodyOf(noted.arenas, target).closure ? (selfCalls.has(e) ? "%env" : current.envs?.has(e) ? envFor(target, current.envs.get(e)!.env) : !target.generator && !target.future && fresh(e.callee) && !unwraps(e.callee) ? calledClosure(e.callee) : receiver(e.callee)) : bodyOf(noted.arenas, target).self && object ? thisPointer(target, object) : undefined;
-    const mine = spills.splice(before);
+    const pointer = bodyOf(this.noted.arenas, target).closure ? (this.selfCalls.has(e) ? "%env" : this.current.envs?.has(e) ? this.envFor(target, this.current.envs.get(e)!.env) : !target.generator && !target.future && this.fresh(e.callee) && !this.unwraps(e.callee) ? this.calledClosure(e.callee) : this.receiver(e.callee)) : bodyOf(this.noted.arenas, target).self && object ? this.thisPointer(target, object) : undefined;
+    const mine = this.spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
-    const values = argValues(e.args, target, bodyOf(noted.arenas, target).closure ? bodyOf(noted.arenas, target).params.length : e.args.length);
+    const values = this.argValues(e.args, target, bodyOf(this.noted.arenas, target).closure ? bodyOf(this.noted.arenas, target).params.length : e.args.length);
     // Calling a generator or async function makes its frame, holding the arguments, ready to start.
     const machine = target.generator ?? target.future;
     if (machine) {
       let frame = "zeroinitializer";
       // An async arrow's frame starts with its own copy of the closure, and an async method's
       // with its object, then the arguments.
-      const method = bodyOf(noted.arenas, target).self && !bodyOf(noted.arenas, target).self!.constructor;
-      const first = bodyOf(noted.arenas, target).closure || method ? 2 : 1;
+      const method = bodyOf(this.noted.arenas, target).self && !bodyOf(this.noted.arenas, target).self!.constructor;
+      const first = bodyOf(this.noted.arenas, target).closure || method ? 2 : 1;
       // The frame takes the call's spilled receiver, which then drops nothing of its own.
-      pending = pending.filter((entry) => !mine.some((m) => m.copy === entry));
+      this.pending = this.pending.filter((entry) => !mine.some((m) => m.copy === entry));
       if (method) {
-        const owns = bodyOf(noted.arenas, target).self!.owned;
-        const self = owns ? unstash(pointer!, bodyOf(noted.arenas, target).self!.type) : pointer!;
-        const next = temp();
-        emit(`${next} = insertvalue ${llvm(machine)} ${frame}, ${owns ? llvm(bodyOf(noted.arenas, target).self!.type) : "ptr"} ${self}, 1`);
+        const owns = bodyOf(this.noted.arenas, target).self!.owned;
+        const self = owns ? this.unstash(pointer!, bodyOf(this.noted.arenas, target).self!.type) : pointer!;
+        const next = this.temp();
+        this.emit(`${next} = insertvalue ${this.llvm(machine)} ${frame}, ${owns ? this.llvm(bodyOf(this.noted.arenas, target).self!.type) : "ptr"} ${self}, 1`);
         frame = next;
       }
-      if (bodyOf(noted.arenas, target).closure) {
-        const [env, next] = [temp(), temp()];
-        emit(`${env} = load ${llvm(target.closure!)}, ptr ${pointer}`);
-        emit(`${next} = insertvalue ${llvm(machine)} ${frame}, ${llvm(target.closure!)} ${copied(env, target.closure!)}, 1`);
+      if (bodyOf(this.noted.arenas, target).closure) {
+        const [env, next] = [this.temp(), this.temp()];
+        this.emit(`${env} = load ${this.llvm(target.closure!)}, ptr ${pointer}`);
+        this.emit(`${next} = insertvalue ${this.llvm(machine)} ${frame}, ${this.llvm(target.closure!)} ${this.copied(env, target.closure!)}, 1`);
         frame = next;
       }
       values.forEach((v, i) => {
-        const next = temp();
-        emit(`${next} = insertvalue ${llvm(machine)} ${frame}, ${v}, ${i + first}`);
+        const next = this.temp();
+        this.emit(`${next} = insertvalue ${this.llvm(machine)} ${frame}, ${v}, ${i + first}`);
         frame = next;
       });
-      if (!types.has(e)) pending.push({ v: frame, type: machine });
+      if (!this.types.has(e)) this.pending.push({ v: frame, type: machine });
       return frame;
     }
     // The call takes the copy; what it leaves, the parts of a derived instance its base's
     // method doesn't drop, is dropped once it returns or raises.
-    pending = pending.filter((entry) => !mine.some((m) => m.copy === entry));
+    this.pending = this.pending.filter((entry) => !mine.some((m) => m.copy === entry));
     // A function compiled once for every closure it is given takes each as its address and its
     // body's code, and leaves dropping it to the caller.
-    const share = shares.get(target.id);
+    const share = this.shares.get(target.id);
     const lent: { slot: string; type: Type }[] = [];
     for (const k of share?.at ?? []) {
       const a = e.args[k]!;
-      if (pairOf(a) !== undefined) {
+      if (this.pairOf(a) !== undefined) {
         values[k] = values[k]!.replace(/^.*? (%\S+)$/, `${PAIR} $1`);
         continue;
       }
-      const type = valueType(a);
-      const v = values[k]!.slice(llvm(type).length + 1);
-      const slot = alloca(llvm(type));
-      emit(`store ${llvm(type)} ${v}, ptr ${slot}`);
+      const type = this.valueType(a);
+      const v = values[k]!.slice(this.llvm(type).length + 1);
+      const slot = this.alloca(this.llvm(type));
+      this.emit(`store ${this.llvm(type)} ${v}, ptr ${slot}`);
       const code = share!.code.get(k);
-      const [half, both] = [temp(), temp()];
-      emit(`${half} = insertvalue ${PAIR} undef, ptr ${slot}, 0`);
-      emit(`${both} = insertvalue ${PAIR} ${half}, ptr ${code === undefined ? "null" : symbol(noted.arenas, noted.arenas.instanceOf(code))}, 1`);
+      const [half, both] = [this.temp(), this.temp()];
+      this.emit(`${half} = insertvalue ${PAIR} undef, ptr ${slot}, 0`);
+      this.emit(`${both} = insertvalue ${PAIR} ${half}, ptr ${code === undefined ? "null" : this.symbol(this.noted.arenas, this.noted.arenas.instanceOf(code))}, 1`);
       values[k] = `${PAIR} ${both}`;
       lent.push({ slot, type });
     }
     const leftovers = mine.length === 0 && lent.length === 0 ? undefined : () => {
-      for (const { slot, type } of mine) dispose(unstash(slot, type), type);
-      for (const { slot, type } of lent) dispose(unstash(slot, type), type);
+      for (const { slot, type } of mine) this.dispose(this.unstash(slot, type), type);
+      for (const { slot, type } of lent) this.dispose(this.unstash(slot, type), type);
     };
-    const result = invoke(target, pointer, values, e, leftovers, undefined, share && symbol(noted.arenas, share.template));
+    const result = this.invoke(target, pointer, values, e, leftovers, undefined, share && this.symbol(this.noted.arenas, share.template));
     // A call through a type parameter returns what its bound's method declares.
-    return result && types.has(e) ? convert(result, target.returns, types.get(e)!) : result;
+    return result && this.types.has(e) ? this.convert(result, target.returns, this.types.get(e)!) : result;
   }
+
 
   // A call's arguments, typed, then an empty value for each optional parameter it leaves out.
   // Arguments past `taken` run for their effects only.
-  function argValues(args: Expr[], target: Instance, taken: usize = args.length): string[] {
+  argValues(this: Mut<this>, args: Expr[], target: Instance, taken: usize = args.length): string[] {
     // A comptime parameter's argument was computed while compiling, and isn't passed.
-    const passed = (i: usize) => !bodyOf(noted.arenas, target).params[i]?.comptime;
-    const values = delivered((hand) => args.flatMap((a, i) => (!passed(i) ? [] : i < taken ? [`${llvm(valueType(a))} ${pairOf(a) !== undefined ? owned(a) : hand(owned(a), valueType(a))}`] : (value(a), []))));
+    const passed = (i: usize) => !bodyOf(this.noted.arenas, target).params[i]?.comptime;
+    const values = this.delivered((hand) => args.flatMap((a, i) => (!passed(i) ? [] : i < taken ? [`${this.llvm(this.valueType(a))} ${this.pairOf(a) !== undefined ? this.owned(a) : hand(this.owned(a), this.valueType(a))}`] : (this.value(a), []))));
     // A left-out optional parameter is empty, and a left-out rest parameter an empty array.
-    for (const p of bodyOf(noted.arenas, target).params.slice(args.length)) {
-      const type = localOf(target.locals.get(p)!).type;
-      values.push(`${llvm(type)} ${p.rest ? "zeroinitializer" : convert("zeroinitializer", "null", type)}`);
+    for (const p of bodyOf(this.noted.arenas, target).params.slice(args.length)) {
+      const type = this.localOf(target.locals.get(p)!).type;
+      values.push(`${this.llvm(type)} ${p.rest ? "zeroinitializer" : this.convert("zeroinitializer", "null", type)}`);
     }
     return values;
   }
 
+
   // A string method's call. The string is read before its arguments run, as in JavaScript. In
   // an optional chain, the result is the chain's Option.
-  function stringCall(e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string {
-    const s = operand(callee.object, e.args);
-    const args = e.args.map((a) => value(a));
-    const result = temp();
+  stringCall(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, callee: Extract<Expr, { kind: "member" }>): string {
+    const s = this.operand(callee.object, e.args);
+    const args = e.args.map((a) => this.value(a));
+    const result = this.temp();
     // A call used as a statement has no type of its own; a string it makes is released when the
     // statement ends.
     const given = (v: string, type: Type) => {
-      if (types.has(e)) return convert(v, type, types.get(e)!);
-      if (needsDrop(type)) pending.push({ v, type });
+      if (this.types.has(e)) return this.convert(v, type, this.types.get(e)!);
+      if (this.needsDrop(type)) this.pending.push({ v, type });
       return v;
     };
     switch (callee.name) {
       case "charCodeAt":
-        inBounds(s, args[0]!, e);
-        emit(`${result} = call i16 @fsh_rt_str_unit(ptr ${s}, i64 ${args[0]})`);
+        this.inBounds(s, args[0]!, e);
+        this.emit(`${result} = call i16 @fsh_rt_str_unit(ptr ${s}, i64 ${args[0]})`);
         return given(result, "u16");
       case "slice":
       case "substring":
-        emit(`${result} = call ptr @fsh_rt_str_${callee.name}(ptr ${s}, i64 ${args[0]}, i64 ${args[1] ?? 0}, i32 ${args.length - 1})`);
+        this.emit(`${result} = call ptr @fsh_rt_str_${callee.name}(ptr ${s}, i64 ${args[0]}, i64 ${args[1] ?? 0}, i32 ${args.length - 1})`);
         return given(result, "string");
       // Past either end, an Option's empty value: the runtime says so with NULL or -1.
       case "at": {
-        const [raw, none] = [temp(), temp()];
-        emit(`${raw} = call ptr @fsh_rt_str_at_or_null(ptr ${s}, i64 ${args[0]})`);
-        emit(`${none} = icmp eq ptr ${raw}, null`);
-        const option = typing.unionType(["string", "null"]);
-        emit(`${result} = select i1 ${none}, ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ${llvm(option)} ${convert(raw, "string", option)}`);
+        const [raw, none] = [this.temp(), this.temp()];
+        this.emit(`${raw} = call ptr @fsh_rt_str_at_or_null(ptr ${s}, i64 ${args[0]})`);
+        this.emit(`${none} = icmp eq ptr ${raw}, null`);
+        const option = this.typing.unionType(["string", "null"]);
+        this.emit(`${result} = select i1 ${none}, ${this.llvm(option)} ${this.convert("zeroinitializer", "null", option)}, ${this.llvm(option)} ${this.convert(raw, "string", option)}`);
         return given(result, option);
       }
       case "codePointAt": {
-        const [raw, none, point] = [temp(), temp(), temp()];
-        emit(`${raw} = call i64 @fsh_rt_str_code_point_at(ptr ${s}, i64 ${args[0]})`);
-        emit(`${none} = icmp slt i64 ${raw}, 0`);
-        emit(`${point} = trunc i64 ${raw} to i32`);
-        const option = typing.unionType(["u32", "null"]);
-        emit(`${result} = select i1 ${none}, ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ${llvm(option)} ${convert(point, "u32", option)}`);
+        const [raw, none, point] = [this.temp(), this.temp(), this.temp()];
+        this.emit(`${raw} = call i64 @fsh_rt_str_code_point_at(ptr ${s}, i64 ${args[0]})`);
+        this.emit(`${none} = icmp slt i64 ${raw}, 0`);
+        this.emit(`${point} = trunc i64 ${raw} to i32`);
+        const option = this.typing.unionType(["u32", "null"]);
+        this.emit(`${result} = select i1 ${none}, ${this.llvm(option)} ${this.convert("zeroinitializer", "null", option)}, ${this.llvm(option)} ${this.convert(point, "u32", option)}`);
         return given(result, option);
       }
       case "charAt":
-        emit(`${result} = call ptr @fsh_rt_str_char_at(ptr ${s}, i64 ${args[0]})`);
+        this.emit(`${result} = call ptr @fsh_rt_str_char_at(ptr ${s}, i64 ${args[0]})`);
         return given(result, "string");
       // A missing position is the end, which the runtime clamps to.
       case "lastIndexOf":
-        emit(`${result} = call i64 @fsh_rt_str_last_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? "9223372036854775807"})`);
+        this.emit(`${result} = call i64 @fsh_rt_str_last_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? "9223372036854775807"})`);
         return given(result, "i64");
       // A missing position is the start, or for endsWith, the end, which the runtime clamps to.
       case "indexOf":
-        emit(`${result} = call i64 @fsh_rt_str_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? 0})`);
+        this.emit(`${result} = call i64 @fsh_rt_str_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? 0})`);
         return given(result, "i64");
       case "includes": {
-        const found = temp();
-        emit(`${found} = call i64 @fsh_rt_str_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? 0})`);
-        emit(`${result} = icmp sge i64 ${found}, 0`);
+        const found = this.temp();
+        this.emit(`${found} = call i64 @fsh_rt_str_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? 0})`);
+        this.emit(`${result} = icmp sge i64 ${found}, 0`);
         return given(result, "boolean");
       }
       // An array comes back through memory, as C and LLVM return aggregates differently.
       case "split": {
-        const out = alloca(ARRAY);
-        emit(`call void @fsh_rt_str_split(ptr ${out}, ptr ${s}, ptr ${args[0] ?? "null"}, i64 ${args[1] ?? "4294967295"})`);
-        emit(`${result} = load ${ARRAY}, ptr ${out}`);
-        return given(result, typing.arrayType("string"));
+        const out = this.alloca(ARRAY);
+        this.emit(`call void @fsh_rt_str_split(ptr ${out}, ptr ${s}, ptr ${args[0] ?? "null"}, i64 ${args[1] ?? "4294967295"})`);
+        this.emit(`${result} = load ${ARRAY}, ptr ${out}`);
+        return given(result, this.typing.arrayType("string"));
       }
       case "replace":
       case "replaceAll":
-        emit(`${result} = call ptr @fsh_rt_str_${callee.name === "replace" ? "replace" : "replace_all"}(ptr ${s}, ptr ${args[0]}, ptr ${args[1]})`);
+        this.emit(`${result} = call ptr @fsh_rt_str_${callee.name === "replace" ? "replace" : "replace_all"}(ptr ${s}, ptr ${args[0]}, ptr ${args[1]})`);
         return given(result, "string");
       // Each join makes a new string, the one before it released.
       case "concat": {
         if (args.length === 0) {
-          emit(`call void @fsh_rt_str_retain(ptr ${s})`);
+          this.emit(`call void @fsh_rt_str_retain(ptr ${s})`);
           return given(s, "string");
         }
-        let joined = concat(s, args[0]!);
+        let joined = this.concat(s, args[0]!);
         for (const a of args.slice(1)) {
-          const next = concat(joined, a);
-          emit(`call void @fsh_rt_str_release(ptr ${joined})`);
+          const next = this.concat(joined, a);
+          this.emit(`call void @fsh_rt_str_release(ptr ${joined})`);
           joined = next;
         }
         return given(joined, "string");
@@ -7804,465 +8320,488 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       case "padStart":
       case "padEnd":
         // These two may panic, so a panic in them drops what is live here.
-        unwinding(`call ptr @fsh_rt_str_pad(ptr ${s}, i64 ${args[0]}, ptr ${args[1] ?? "null"}, i32 ${callee.name === "padStart" ? 1 : 0}, ptr ${panicAt(e)})`, result);
+        this.unwinding(`call ptr @fsh_rt_str_pad(ptr ${s}, i64 ${args[0]}, ptr ${args[1] ?? "null"}, i32 ${callee.name === "padStart" ? 1 : 0}, ptr ${this.panicAt(e)})`, result);
         return given(result, "string");
       case "repeat":
-        unwinding(`call ptr @fsh_rt_str_repeat(ptr ${s}, i64 ${args[0]}, ptr ${panicAt(e)})`, result);
+        this.unwinding(`call ptr @fsh_rt_str_repeat(ptr ${s}, i64 ${args[0]}, ptr ${this.panicAt(e)})`, result);
         return given(result, "string");
       case "toUpperCase":
       case "toLowerCase":
-        emit(`${result} = call ptr @fsh_rt_str_case(ptr ${s}, i32 ${callee.name === "toUpperCase" ? 1 : 0})`);
+        this.emit(`${result} = call ptr @fsh_rt_str_case(ptr ${s}, i32 ${callee.name === "toUpperCase" ? 1 : 0})`);
         return given(result, "string");
       case "trim":
       case "trimStart":
       case "trimEnd":
-        emit(`${result} = call ptr @fsh_rt_str_trim(ptr ${s}, i32 ${callee.name === "trimStart" ? 1 : callee.name === "trimEnd" ? 2 : 3})`);
+        this.emit(`${result} = call ptr @fsh_rt_str_trim(ptr ${s}, i32 ${callee.name === "trimStart" ? 1 : callee.name === "trimEnd" ? 2 : 3})`);
         return given(result, "string");
       case "startsWith":
       case "endsWith": {
-        const yes = temp();
+        const yes = this.temp();
         const name = callee.name === "startsWith" ? "starts_with" : "ends_with";
-        emit(`${yes} = call i32 @fsh_rt_str_${name}(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? (callee.name === "startsWith" ? 0 : "9223372036854775807")})`);
-        emit(`${result} = icmp ne i32 ${yes}, 0`);
+        this.emit(`${yes} = call i32 @fsh_rt_str_${name}(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? (callee.name === "startsWith" ? 0 : "9223372036854775807")})`);
+        this.emit(`${result} = icmp ne i32 ${yes}, 0`);
         return given(result, "boolean");
       }
     }
     throw new Error(`internal error: no lowering for the string method ${callee.name}`);
   }
 
+
   // The "panicked at" line for a panic the runtime raises at an expression.
-  function panicAt(at: Expr): string {
-    return cString(`panicked at ${where(at)}:\n`);
+  panicAt(this: Mut<this>, at: Expr): string {
+    return this.cString(`panicked at ${this.where(at)}:\n`);
   }
+
 
   // A type predicate's answer narrows its argument, and a wrong one would have the narrowed code
   // read the union's payload as a member it doesn't hold, so its tag is checked against the
   // answer in every build, as an index is against the length.
-  function predicateCheck(e: Extract<Expr, { kind: "call" }>, answer: string) {
-    const { index, type, yes, no } = current.predicates!.get(e)!;
+  predicateCheck(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, answer: string) {
+    const { index, type, yes, no } = this.current.predicates!.get(e)!;
     // Only a variable or a field is narrowed by a predicate's answer, so only one needs its answer
     // checked. A field is read again, which runs nothing: a field read through a getter isn't one
     // a check narrows. One moved into the call is gone, and nothing reads it after.
     const arg = e.args[index];
     if (arg?.kind !== "ident" && arg?.kind !== "member") return;
-    if (arg.kind === "member" && current.consumes.has(arg.id)) return;
+    if (arg.kind === "member" && this.current.consumes.has(arg.id)) return;
     let v: string, whole: Type;
-    if (arg.kind === "member") [v, whole] = [value(arg), valueType(arg)];
+    if (arg.kind === "member") [v, whole] = [this.value(arg), this.valueType(arg)];
     else {
-      const local = resolved(arg);
-      [v, whole] = [temp(), local.type];
-      emit(`${v} = load ${llvm(whole)}, ptr ${slot(local)}`);
+      const local = this.resolved(arg);
+      [v, whole] = [this.temp(), local.type];
+      this.emit(`${v} = load ${this.llvm(whole)}, ptr ${this.slot(local)}`);
     }
-    for (let held = recOf(whole); held?.kind === "ref" || held?.kind === "recursive"; held = recOf(whole)) {
-      const [inner, next] = [temp(), held.kind === "ref" ? held.to : held.of];
-      emit(`${inner} = load ${llvm(next)}, ptr ${v}`);
+    for (let held = this.recOf(whole); held?.kind === "ref" || held?.kind === "recursive"; held = this.recOf(whole)) {
+      const [inner, next] = [this.temp(), held.kind === "ref" ? held.to : held.of];
+      this.emit(`${inner} = load ${this.llvm(next)}, ptr ${v}`);
       [v, whole] = [inner, next];
     }
-    const union = recOf(whole);
+    const union = this.recOf(whole);
     if (union?.kind !== "union") return;
     // An `unknown` holding any number holds JavaScript's `number`, read as an f64.
-    const gives = (m: Type) => (union.unknown ? typing.unknownGives(m, type) : typing.fits(m, type));
-    const [held, wrong, bad] = [holdsWhere(v, whole as UnionType, gives), temp(), temp()];
-    emit(`${wrong} = xor i1 ${answer}, ${held}`);
-    emit(`${bad} = select i1 ${answer}, i1 ${yes ? wrong : "false"}, i1 ${no ? wrong : "false"}`);
-    const [fail, ok] = [label(), label()];
-    emit(`br i1 ${bad}, label %${fail}, label %${ok}`);
-    startBlock(fail);
-    const [said, saidNot] = [label(), label()];
-    emit(`br i1 ${answer}, label %${said}, label %${saidNot}`);
+    const gives = (m: Type) => (union.unknown ? this.typing.unknownGives(m, type) : this.typing.fits(m, type));
+    const [held, wrong, bad] = [this.holdsWhere(v, whole as UnionType, gives), this.temp(), this.temp()];
+    this.emit(`${wrong} = xor i1 ${answer}, ${held}`);
+    this.emit(`${bad} = select i1 ${answer}, i1 ${yes ? wrong : "false"}, i1 ${no ? wrong : "false"}`);
+    const [fail, ok] = [this.label(), this.label()];
+    this.emit(`br i1 ${bad}, label %${fail}, label %${ok}`);
+    this.startBlock(fail);
+    const [said, saidNot] = [this.label(), this.label()];
+    this.emit(`br i1 ${answer}, label %${said}, label %${saidNot}`);
     // A name spelling a long type argument list is shortened as symbols are.
-    const name = shortened(bodyOf(noted.arenas, callOf(e)!).name);
+    const name = shortened(bodyOf(this.noted.arenas, this.callOf(e)!).name);
     const shown = (x: Expr): string => (x.kind === "member" ? `${shown(x.object)}.${x.name}` : x.kind === "ident" ? x.name : "this");
     for (const [at, is] of [[said, "is"], [saidNot, "is not"]] as const) {
-      startBlock(at);
-      const tag = temp();
-      emit(`${tag} = extractvalue ${llvm(whole as UnionType)} ${v}, 0`);
-      const cases = union.members.map(() => label());
-      emit(`switch i32 ${tag}, label %${cases[0]} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+      this.startBlock(at);
+      const tag = this.temp();
+      this.emit(`${tag} = extractvalue ${this.llvm(whole as UnionType)} ${v}, 0`);
+      const cases = union.members.map(() => this.label());
+      this.emit(`switch i32 ${tag}, label %${cases[0]} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
       union.members.forEach((m, i) => {
-        startBlock(cases[i]!);
-        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\nthe type predicate '${name}' said '${shown(arg)}' ${is} '${brief(typing.show(type))}', but it holds a '${brief(typing.show(m))}'\n`)})`);
-        emit("unreachable");
+        this.startBlock(cases[i]!);
+        this.unwinding(`call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where(e)}:\nthe type predicate '${name}' said '${shown(arg)}' ${is} '${brief(this.typing.show(type))}', but it holds a '${brief(this.typing.show(m))}'\n`)})`);
+        this.emit("unreachable");
       });
     }
-    startBlock(ok);
+    this.startBlock(ok);
   }
 
+
   // `file:line:col` of an expression, in the program or the std library.
-  function where(at: Span): string {
-    const place = sourceOf(src, file, at.start, sources);
+  where(this: Mut<this>, at: Span): string {
+    const place = sourceOf(this.src, this.file, at.start, this.sources);
     const { line, col } = locate(place.src, place.offset);
     return `${place.file}:${line}:${col}`;
   }
 
-  function units(s: string): string {
-    const result = temp();
-    emit(`${result} = call i64 @fsh_rt_str_units(ptr ${s})`);
+
+  units(this: Mut<this>, s: string): string {
+    const result = this.temp();
+    this.emit(`${result} = call i64 @fsh_rt_str_units(ptr ${s})`);
     return result;
   }
 
+
   // Panics, as Rust's indexing does, unless a `usize` index is below the string's UTF-16 length.
-  function inBounds(s: string, index: string, at: Expr) {
-    bounds(units(s), index, at);
+  inBounds(this: Mut<this>, s: string, index: string, at: Expr) {
+    this.bounds(this.units(s), index, at);
   }
+
 
   // Panics, as Rust's indexing does, unless a `usize` index is below a length. A rest tuple's
   // array is named as the tuple, its `before` fixed elements counted in.
-  function bounds(length: string, index: string, at: Expr, before = 0) {
-    const [outside, fail, ok] = [temp(), label(), label()];
-    emit(`${outside} = icmp uge i64 ${index}, ${length}`);
-    emit(`br i1 ${outside}, label %${fail}, label %${ok}`);
-    startBlock(fail);
-    const [told, asked] = before === 0 ? [length, index] : [temp(), temp()];
+  bounds(this: Mut<this>, length: string, index: string, at: Expr, before = 0) {
+    const [outside, fail, ok] = [this.temp(), this.label(), this.label()];
+    this.emit(`${outside} = icmp uge i64 ${index}, ${length}`);
+    this.emit(`br i1 ${outside}, label %${fail}, label %${ok}`);
+    this.startBlock(fail);
+    const [told, asked] = before === 0 ? [length, index] : [this.temp(), this.temp()];
     if (before !== 0) {
-      emit(`${told} = add i64 ${length}, ${before}`);
-      emit(`${asked} = add i64 ${index}, ${before}`);
+      this.emit(`${told} = add i64 ${length}, ${before}`);
+      this.emit(`${asked} = add i64 ${index}, ${before}`);
     }
-    unwinding(`call void @fsh_rt_panic_bounds(ptr ${cString(`panicked at ${where(at)}:\n`)}, i64 ${told}, i64 ${asked})`);
-    emit("unreachable");
-    startBlock(ok);
+    this.unwinding(`call void @fsh_rt_panic_bounds(ptr ${this.cString(`panicked at ${this.where(at)}:\n`)}, i64 ${told}, i64 ${asked})`);
+    this.emit("unreachable");
+    this.startBlock(ok);
   }
 
-  function assign(e: Extract<Expr, { kind: "assign" }>): string {
+
+  assign(this: Mut<this>, e: Extract<Expr, { kind: "assign" }>): string {
     const target = bare(e.target);
     // A handle's property is written in JS, with a new JS value of what is assigned; the
     // assignment's own value is what the property holds, a handle as the new JS value.
-    if (jsMembers.has(target) && target.kind === "member") {
-      const object = jsHandle(target.object);
-      const declared = recOf(typing.jsShape(referent(valueType(target.object))))?.fields.find((f) => f.name === (target as Extract<Expr, { kind: "member" }>).name);
+    if (this.jsMembers.has(target) && target.kind === "member") {
+      const object = this.jsHandle(target.object);
+      const declared = this.recOf(this.typing.jsShape(this.referent(this.valueType(target.object))))?.fields.find((f) => f.name === (target as Extract<Expr, { kind: "member" }>).name);
       const empty = declared?.optional ? "undefined" : "null";
       // A callback or a future goes as the stored callable or Promise it meets, as an argument does.
-      const held = coercions.get(e.value) ?? types.get(e.value)!;
-      const kept = isCallback(held) || isPromised(held);
-      const type = types.get(e)!;
-      jsSite = e.value;
-      const v = kept ? owned(e.value) : jsOperand(e.value);
-      const box = toJs(v, kept ? held : types.get(e.value)!, empty);
-      const handle = recOf(type)?.kind === "block";
+      const held = this.coercions.get(e.value) ?? this.types.get(e.value)!;
+      const kept = this.isCallback(held) || this.isPromised(held);
+      const type = this.types.get(e)!;
+      this.jsSite = e.value;
+      const v = kept ? this.owned(e.value) : this.jsOperand(e.value);
+      const box = this.toJs(v, kept ? held : this.types.get(e.value)!, empty);
+      const handle = this.recOf(type)?.kind === "block";
       if (handle) {
-        emit(`call void @fsh_rt_block_retain(ptr ${box})`);
-        pending.push({ v: box, type });
+        this.emit(`call void @fsh_rt_block_retain(ptr ${box})`);
+        this.pending.push({ v: box, type });
       }
-      unwinding(`call void @fsh_rt_js_set(ptr ${object}, ptr ${text(target.name)}, ptr ${box}, ptr ${panicAt(e)})`);
+      this.unwinding(`call void @fsh_rt_js_set(ptr ${object}, ptr ${this.text(target.name)}, ptr ${box}, ptr ${this.panicAt(e)})`);
       // A callback or a Promise is only written as a statement, whose value nothing reads.
       if (kept) return "zeroinitializer";
-      return handle ? box : convert(v, types.get(e.value)!, type);
+      return handle ? box : this.convert(v, this.types.get(e.value)!, type);
     }
     const op = ASSIGNMENTS[e.op]!;
     // `&&=` and `||=` skip the right side as `&&` and `||` do, and assign only when they
     // run it, which matters when the target is a setter.
-    if (op === "&&" || op === "||") return logical(op, value(target), () => store(target, value(e.value)));
+    if (op === "&&" || op === "||") return this.logical(op, this.value(target), () => this.store(target, this.value(e.value)));
     // The target is read before the right-hand side runs, as in JavaScript.
-    const type = types.get(e)!;
+    const type = this.types.get(e)!;
     if (op === "+" && type === "string") {
-      return store(target, concat(operand(target, [e.value]), written(value(e.value), valueType(e.value))));
+      return this.store(target, this.concat(this.operand(target, [e.value]), this.written(this.value(e.value), this.valueType(e.value))));
     }
-    return store(target, op === "=" ? owned(e.value) : numeric(op, value(target), value(e.value), e, type));
+    return this.store(target, op === "=" ? this.owned(e.value) : this.numeric(op, this.value(target), this.value(e.value), e, type));
   }
+
 
   // Runs an assignment to a target, having first run the indexes into arrays along its path,
   // outermost first, so each runs once and before the value, as in JavaScript.
-  function fixing(target: Expr, run: () => string): string {
+  fixing(this: Mut<this>, target: Expr, run: () => string): string {
     const nodes: Expr[] = [];
-    for (let e = bare(target); e.kind === "member" || e.kind === "index"; e = bare(e.object)) if (e.kind === "index" && indexes(valueType(e.object))) nodes.unshift(e.index);
-    for (const index of nodes) fixed.set(index, value(index));
+    for (let e = bare(target); e.kind === "member" || e.kind === "index"; e = bare(e.object)) if (e.kind === "index" && this.indexes(this.valueType(e.object))) nodes.unshift(e.index);
+    for (const index of nodes) this.fixed.set(index, this.value(index));
     const result = run();
-    for (const index of nodes) fixed.delete(index);
+    for (const index of nodes) this.fixed.delete(index);
     return result;
   }
 
+
   // A field read, or a getter's result.
-  function member(e: Extract<Expr, { kind: "member" }>): string {
-    const statics = jsStatics.get(e);
-    if (statics) return jsStatic(e, statics)!;
-    if (jsMembers.has(e)) return jsGet(jsHandle(e.object), e.name, types.get(e)!, `property '${e.name}' of '${typing.show(referent(valueType(e.object)))}' is`, e);
-    if (current.copiesOut.has(e)) return copyOut(e);
-    if (computed.has(e)) return isDyn(referent(types.get(e.object)!)) ? dynField(e) : blockProperty(e);
-    const getter = callOf(e);
-    if (getter) return convert(invoke(getter, thisPointer(getter, e.object), [])!, getter.returns, types.get(e)!);
+  member(this: Mut<this>, e: Extract<Expr, { kind: "member" }>): string {
+    const statics = this.jsStatics.get(e);
+    if (statics) return this.jsStatic(e, statics)!;
+    if (this.jsMembers.has(e)) return this.jsGet(this.jsHandle(e.object), e.name, this.types.get(e)!, `property '${e.name}' of '${this.typing.show(this.referent(this.valueType(e.object)))}' is`, e);
+    if (this.current.copiesOut.has(e)) return this.copyOut(e);
+    if (this.computed.has(e)) return this.isDyn(this.referent(this.types.get(e.object)!)) ? this.dynField(e) : this.blockProperty(e);
+    const getter = this.callOf(e);
+    if (getter) return this.convert(this.invoke(getter, this.thisPointer(getter, e.object), [])!, getter.returns, this.types.get(e)!);
     // An enum member's value is known, and the enum's name is no value to evaluate.
-    if (!types.has(e.object)) return "zeroinitializer";
+    if (!this.types.has(e.object)) return "zeroinitializer";
     // Inside a shared value's block only this field is read: its neighbours change unlocked.
-    if (inBlock(e)) {
-      const read = temp();
-      emit(`${read} = load ${llvm(stored(e))}, ptr ${address(e)}`);
-      return convert(read, stored(e), types.get(e)!);
+    if (this.inBlock(e)) {
+      const read = this.temp();
+      this.emit(`${read} = load ${this.llvm(this.stored(e))}, ptr ${this.address(e)}`);
+      return this.convert(read, this.stored(e), this.types.get(e)!);
     }
     // Through a reference, the value it points to.
-    const shared = coercions.get(e.object) ?? types.get(e.object)!;
+    const shared = this.coercions.get(e.object) ?? this.types.get(e.object)!;
     const whole = () => {
-      if (!inBlock(e.object)) return value(e.object);
-      const read = temp();
-      emit(`${read} = load ${llvm(stored(e.object))}, ptr ${address(e.object)}`);
+      if (!this.inBlock(e.object)) return this.value(e.object);
+      const read = this.temp();
+      this.emit(`${read} = load ${this.llvm(this.stored(e.object))}, ptr ${this.address(e.object)}`);
       return read;
     };
-    if (shared === "string") return convert(units(whole()), "usize", types.get(e)!);
+    if (shared === "string") return this.convert(this.units(whole()), "usize", this.types.get(e)!);
     // A fixed array's length is known while compiling; what it is read from still runs, and an
     // index into it is still checked.
-    const sharedRec = recOf(shared);
+    const sharedRec = this.recOf(shared);
     if (sharedRec?.kind === "fixed") {
       if (e.object.kind !== "ident" && e.object.kind !== "this") whole();
-      return convert(String(sharedRec.size), "usize", types.get(e)!);
+      return this.convert(String(sharedRec.size), "usize", this.types.get(e)!);
     }
     if (sharedRec?.kind === "map") {
-      const size = temp();
-      emit(`${size} = call i64 @fsh_rt_map_size(ptr ${whole()})`);
-      return convert(size, "usize", types.get(e)!);
+      const size = this.temp();
+      this.emit(`${size} = call i64 @fsh_rt_map_size(ptr ${whole()})`);
+      return this.convert(size, "usize", this.types.get(e)!);
     }
     if (sharedRec?.kind === "array") {
-      const length = temp();
-      emit(`${length} = extractvalue ${ARRAY} ${whole()}, ${e.name === "capacity" ? 2 : 1}`);
-      return convert(length, "usize", types.get(e)!);
+      const length = this.temp();
+      this.emit(`${length} = extractvalue ${ARRAY} ${whole()}, ${e.name === "capacity" ? 2 : 1}`);
+      return this.convert(length, "usize", this.types.get(e)!);
     }
-    if (sharedRec?.kind === "union") return unionField(whole(), shared as UnionType, e.name, types.get(e)!);
-    if (typing.isTuple(shared) && e.name === "length") return convert(tupleLength(whole(), shared as ObjectType), "usize", types.get(e)!);
+    if (sharedRec?.kind === "union") return this.unionField(whole(), shared as UnionType, e.name, this.types.get(e)!);
+    if (this.typing.isTuple(shared) && e.name === "length") return this.convert(this.tupleLength(whole(), shared as ObjectType), "usize", this.types.get(e)!);
     const object = shared as ObjectType | ClassType;
-    const result = temp();
-    emit(`${result} = extractvalue ${llvm(object)} ${value(e.object)}, ${typing.fieldPath(object, e.name).join(", ")}`);
+    const result = this.temp();
+    this.emit(`${result} = extractvalue ${this.llvm(object)} ${this.value(e.object)}, ${this.typing.fieldPath(object, e.name).join(", ")}`);
     // A field read through an interface or object parameter takes the type its bound declares. A
     // class's field keeps its type as written, `?` markers included, which lowering drops. One a
     // check narrowed is read as declared first.
-    const field = typing.lower(typing.field(object, e.name)!.type);
-    const declared = current.narrowedFields?.get(e);
-    return declared === undefined ? convert(result, field, types.get(e)!) : convert(convert(result, field, declared), declared, types.get(e)!);
+    const field = this.typing.lower(this.typing.field(object, e.name)!.type);
+    const declared = this.current.narrowedFields?.get(e);
+    return declared === undefined ? this.convert(result, field, this.types.get(e)!) : this.convert(this.convert(result, field, declared), declared, this.types.get(e)!);
   }
 
+
   // A nested function's environment built for one call, in a slot of its own.
-  function envFor(target: Instance, env: LocalId[]): string {
-    const at = alloca(llvm(target.closure!));
-    emit(`store ${llvm(target.closure!)} ${environment(target, env)}, ptr ${at}`);
+  envFor(this: Mut<this>, target: Instance, env: LocalId[]): string {
+    const at = this.alloca(this.llvm(target.closure!));
+    this.emit(`store ${this.llvm(target.closure!)} ${this.environment(target, env)}, ptr ${at}`);
     return at;
   }
 
+
   // A closure's environment, from the bindings standing here for what it captures, in order:
   // where each lives, or a copy, or the value moved in.
-  function environment(inner: Instance, froms: (LocalId | "this")[]): string {
+  environment(this: Mut<this>, inner: Instance, froms: (LocalId | "this")[]): string {
     let result = "undef";
     froms.forEach((id, i) => {
-      const from = id === "this" ? id : localOf(id);
-      const type = typing.rec(inner.closure!).fields[i]!.type;
-      let part = from === "this" ? "%this" : slot(from);
+      const from = id === "this" ? id : this.localOf(id);
+      const type = this.typing.rec(inner.closure!).fields[i]!.type;
+      let part = from === "this" ? "%this" : this.slot(from);
       // A closure holding a variable's value holds a copy, or moves it in, emptying it.
-      if (!isRef(type)) {
-        part = temp();
-        emit(`${part} = load ${llvm(type)}, ptr ${slot(from as Local)}`);
-        if (typing.isCopy(type)) part = copied(part, type);
-        else emit(`store ${llvm(type)} zeroinitializer, ptr ${slot(from as Local)}`);
+      if (!this.isRef(type)) {
+        part = this.temp();
+        this.emit(`${part} = load ${this.llvm(type)}, ptr ${this.slot(from as Local)}`);
+        if (this.typing.isCopy(type)) part = this.copied(part, type);
+        else this.emit(`store ${this.llvm(type)} zeroinitializer, ptr ${this.slot(from as Local)}`);
       }
-      const next = temp();
-      emit(`${next} = insertvalue ${llvm(inner.closure!)} ${result}, ${llvm(type)} ${part}, ${i}`);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${this.llvm(inner.closure!)} ${result}, ${this.llvm(type)} ${part}, ${i}`);
       result = next;
     });
     return froms.length === 0 ? "zeroinitializer" : result;
   }
 
+
   // A tuple's fixed elements in order, with where each is in its fields, and its rest array's.
-  function tupleOrder(t: ObjectType): [{ f: Field; i: usize }[], { f: Field; i: usize } | undefined] {
-    const all = typing.rec(t).fields.map((f, i) => ({ f, i }));
+  tupleOrder(this: Mut<this>, t: ObjectType): [{ f: Field; i: usize }[], { f: Field; i: usize } | undefined] {
+    const all = this.typing.rec(t).fields.map((f, i) => ({ f, i }));
     return [all.filter(({ f }) => f.name !== "...").sort((a, b) => Number(a.f.name) - Number(b.f.name)), all.find(({ f }) => f.name === "...")];
   }
 
+
   // `write`, for a tuple's element `n`, only when it is within `length`, when one is known.
-  function present(length: string | undefined, n: usize, write: () => void) {
+  present(this: Mut<this>, length: string | undefined, n: usize, write: () => void) {
     if (length === undefined) return write();
-    const [within, yes, after] = [temp(), label(), label()];
-    emit(`${within} = icmp ult i64 ${n}, ${length}`);
-    emit(`br i1 ${within}, label %${yes}, label %${after}`);
-    startBlock(yes);
+    const [within, yes, after] = [this.temp(), this.label(), this.label()];
+    this.emit(`${within} = icmp ult i64 ${n}, ${length}`);
+    this.emit(`br i1 ${within}, label %${yes}, label %${after}`);
+    this.startBlock(yes);
     write();
-    emit(`br label %${after}`);
-    startBlock(after);
+    this.emit(`br label %${after}`);
+    this.startBlock(after);
   }
 
+
   // A tuple's length: its required elements, then up to the last optional one there.
-  function tupleLength(v: string, t: ObjectType): string {
-    const count = typing.elementsOf(t).length;
-    let length = String(typing.rec(t).required ?? count);
-    for (let i = typing.rec(t).required ?? count; i < count; i++) {
-      const [x, next] = [temp(), temp()];
-      emit(`${x} = extractvalue ${llvm(t)} ${v}, ${typing.fieldPath(t, String(i)).join(", ")}`);
-      const union = typing.field(t, String(i))!.type as UnionType;
-      emit(`${next} = select i1 ${holds(x, union, typing.rec(union).members.filter((m) => m !== "null"))}, i64 ${i + 1}, i64 ${length}`);
+  tupleLength(this: Mut<this>, v: string, t: ObjectType): string {
+    const count = this.typing.elementsOf(t).length;
+    let length = String(this.typing.rec(t).required ?? count);
+    for (let i = this.typing.rec(t).required ?? count; i < count; i++) {
+      const [x, next] = [this.temp(), this.temp()];
+      this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${this.typing.fieldPath(t, String(i)).join(", ")}`);
+      const union = this.typing.field(t, String(i))!.type as UnionType;
+      this.emit(`${next} = select i1 ${this.holds(x, union, this.typing.rec(union).members.filter((m) => m !== "null"))}, i64 ${i + 1}, i64 ${length}`);
       length = next;
     }
-    if (typing.rec(t).rest !== undefined) {
-      const [many, more, sum] = [temp(), temp(), temp()];
-      emit(`${many} = extractvalue ${llvm(t)} ${v}, ${typing.fieldPath(t, "...").join(", ")}`);
-      emit(`${more} = extractvalue ${ARRAY} ${many}, 1`);
-      emit(`${sum} = add i64 ${length}, ${more}`);
+    if (this.typing.rec(t).rest !== undefined) {
+      const [many, more, sum] = [this.temp(), this.temp(), this.temp()];
+      this.emit(`${many} = extractvalue ${this.llvm(t)} ${v}, ${this.typing.fieldPath(t, "...").join(", ")}`);
+      this.emit(`${more} = extractvalue ${ARRAY} ${many}, 1`);
+      this.emit(`${sum} = add i64 ${length}, ${more}`);
       length = sum;
     }
     return length;
   }
 
+
   // Whether a field read reaches into a shared value's block through its interior-mutable
   // fields, where it is read in place.
-  function inBlock(e: Expr): boolean {
-    for (; e.kind === "member" && !calls.has(e); e = e.object) {
-      const holder = referent(types.get(e.object)!);
-      const kind = recOf(holder)?.kind;
-      if (kind === "shared") return !current.copiesOut.has(e);
+  inBlock(this: Mut<this>, e: Expr): boolean {
+    for (; e.kind === "member" && !this.calls.has(e); e = e.object) {
+      const holder = this.referent(this.types.get(e.object)!);
+      const kind = this.recOf(holder)?.kind;
+      if (kind === "shared") return !this.current.copiesOut.has(e);
       if (kind !== "object" && kind !== "class") return false;
     }
     return false;
   }
 
+
   // A shared value's block, and a pointer to one of its value's fields.
-  function sharedField(e: Extract<Expr, { kind: "member" }>): [string, SharedType, string] {
-    const holder = types.get(e.object)!;
-    const t = referent(holder) as SharedType;
-    const block = isRef(holder) ? temp() : value(e.object);
-    if (isRef(holder)) emit(`${block} = load ptr, ptr ${value(e.object)}`);
-    const at = temp();
-    const path = typing.fieldPath(typing.rec(t).of as ObjectType | ClassType, e.name).map((i) => `i32 ${i}`).join(", ");
-    emit(`${at} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1, i32 1, ${path}`);
+  sharedField(this: Mut<this>, e: Extract<Expr, { kind: "member" }>): [string, SharedType, string] {
+    const holder = this.types.get(e.object)!;
+    const t = this.referent(holder) as SharedType;
+    const block = this.isRef(holder) ? this.temp() : this.value(e.object);
+    if (this.isRef(holder)) this.emit(`${block} = load ptr, ptr ${this.value(e.object)}`);
+    const at = this.temp();
+    const path = this.typing.fieldPath(this.typing.rec(t).of as ObjectType | ClassType, e.name).map((i) => `i32 ${i}`).join(", ");
+    this.emit(`${at} = getelementptr ${this.sharedBlock(t)}, ptr ${block}, i32 0, i32 1, i32 1, ${path}`);
     return [block, t, at];
   }
+
 
   // A shared value's plain field, copied out while its lock is held.
   // An Rc's field is copied without its word: only this thread reaches it, and between two of its
   // steps an `update` running here has left the value whole.
-  function copyOut(e: Extract<Expr, { kind: "member" }>): string {
-    const [block, t, at] = sharedField(e);
-    const type = types.get(e)!;
-    if (typing.rec(t).which === "Rc") {
-      const read = temp();
-      emit(`${read} = load ${llvm(type)}, ptr ${at}`);
-      return copied(read, type);
+  copyOut(this: Mut<this>, e: Extract<Expr, { kind: "member" }>): string {
+    const [block, t, at] = this.sharedField(e);
+    const type = this.types.get(e)!;
+    if (this.typing.rec(t).which === "Rc") {
+      const read = this.temp();
+      this.emit(`${read} = load ${this.llvm(type)}, ptr ${at}`);
+      return this.copied(read, type);
     }
-    const lock = temp();
-    emit(`${lock} = getelementptr ${sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
-    takeLock(lock, e);
-    const read = temp();
-    emit(`${read} = load ${llvm(type)}, ptr ${at}`);
-    const copy = copied(read, type);
-    emit(`call void @fsh_rt_unlock(ptr ${lock})`);
+    const lock = this.temp();
+    this.emit(`${lock} = getelementptr ${this.sharedBlock(t)}, ptr ${block}, i32 0, i32 1`);
+    this.takeLock(lock, e);
+    const read = this.temp();
+    this.emit(`${read} = load ${this.llvm(type)}, ptr ${at}`);
+    const copy = this.copied(read, type);
+    this.emit(`call void @fsh_rt_unlock(ptr ${lock})`);
     return copy;
   }
 
+
   // Whether an expression is an Option a link of an optional chain reads through.
-  function unwraps(object: Expr): boolean {
-    const option = types.get(object);
-    return option !== undefined && typing.isOption(option) && coercions.has(object);
+  unwraps(this: Mut<this>, object: Expr): boolean {
+    const option = this.types.get(object);
+    return option !== undefined && this.typing.isOption(option) && this.coercions.has(object);
   }
+
 
   // A link of an optional chain: empty when the Option it reads through is, and otherwise
   // `compute`, which reads what the Option holds. Its result is already the link's Option.
-  function link(e: Expr, object: Expr, compute: () => string | undefined): string | undefined {
-    const option = types.get(object) as UnionType;
-    const raw = evaluate(object);
-    if (fresh(object)) pending.push({ v: raw, type: option });
-    known.set(object, raw);
-    const [some, none, end] = [label(), label(), label()];
-    emit(`br i1 ${holds(raw, option, ["null"])}, label %${none}, label %${some}`);
-    startBlock(some);
-    const mark = pending.length;
+  link(this: Mut<this>, e: Expr, object: Expr, compute: () => string | undefined): string | undefined {
+    const option = this.types.get(object) as UnionType;
+    const raw = this.evaluate(object);
+    if (this.fresh(object)) this.pending.push({ v: raw, type: option });
+    this.known.set(object, raw);
+    const [some, none, end] = [this.label(), this.label(), this.label()];
+    this.emit(`br i1 ${this.holds(raw, option, ["null"])}, label %${none}, label %${some}`);
+    this.startBlock(some);
+    const mark = this.pending.length;
     const got = compute();
-    settle(mark);
-    const someEnd = block;
-    emit(`br label %${end}`);
-    startBlock(none);
-    const type = types.get(e);
-    const empty = got !== undefined && type ? convert("zeroinitializer", "null", type) : undefined;
-    const noneEnd = block;
-    emit(`br label %${end}`);
-    startBlock(end);
-    known.delete(object);
+    this.settle(mark);
+    const someEnd = this.block;
+    this.emit(`br label %${end}`);
+    this.startBlock(none);
+    const type = this.types.get(e);
+    const empty = got !== undefined && type ? this.convert("zeroinitializer", "null", type) : undefined;
+    const noneEnd = this.block;
+    this.emit(`br label %${end}`);
+    this.startBlock(end);
+    this.known.delete(object);
     if (got === undefined || !type || empty === undefined) return undefined;
-    const result = temp();
-    emit(`${result} = phi ${llvm(type)} [ ${got}, %${someEnd} ], [ ${empty}, %${noneEnd} ]`);
+    const result = this.temp();
+    this.emit(`${result} = phi ${this.llvm(type)} [ ${got}, %${someEnd} ], [ ${empty}, %${noneEnd} ]`);
     return result;
   }
 
+
   // A pointer to the instance a method works on: its receiver, or the base embedded in it
   // that declares the method.
-  function thisPointer(target: Instance, object: Expr): string {
-    const held = unwraps(object) ? coercions.get(object)! : typing.unfold(referent(types.get(object)!));
-    return upcast(receiver(object, bodyOf(noted.arenas, target).self?.owned), held as ClassType, bodyOf(noted.arenas, target).owner!);
+  thisPointer(this: Mut<this>, target: Instance, object: Expr): string {
+    const held = this.unwraps(object) ? this.coercions.get(object)! : this.typing.unfold(this.referent(this.types.get(object)!));
+    return this.upcast(this.receiver(object, bodyOf(this.noted.arenas, target).self?.owned), held as ClassType, bodyOf(this.noted.arenas, target).owner!);
   }
+
 
   // Calls a function with its arguments' values, after the instance when it is a method.
   // `after` runs once the call returns, and before an error it raises goes on.
   // `after` runs once the call is over, however it ended; `unwound` only when it panicked.
-  function invoke(target: Instance, pointer: string | undefined, args: string[], at?: Expr, after?: () => void, unwound?: () => void, via?: string): string | undefined {
+  invoke(this: Mut<this>, target: Instance, pointer: string | undefined, args: string[], at?: Expr, after?: () => void, unwound?: () => void, via?: string): string | undefined {
     const cleanup = after || unwound ? () => (after?.(), unwound?.()) : undefined;
     const type = target.returns;
-    if (bodyOf(noted.arenas, target).rust) return rustInvoke(target, pointer, args, at!, cleanup, after);
+    if (bodyOf(this.noted.arenas, target).rust) return this.rustInvoke(target, pointer, args, at!, cleanup, after);
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
     // A narrow value crosses to C widened, both ways.
-    const passed = bodyOf(noted.arenas, target).foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(llvm, target.signature![i]!)} `)) : values;
-    const call = `call ${bodyOf(noted.arenas, target).foreign ? crossed(llvm, type) : resultType(target)} ${via ?? symbol(noted.arenas, target)}(${passed.join(", ")})`;
+    const passed = bodyOf(this.noted.arenas, target).foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(this.llvm, target.signature![i]!)} `)) : values;
+    const call = `call ${bodyOf(this.noted.arenas, target).foreign ? crossed(this.llvm, type) : this.resultType(target)} ${via ?? this.symbol(this.noted.arenas, target)}(${passed.join(", ")})`;
     if (type === "void" && !target.throws) {
-      unwinding(call, undefined, cleanup);
+      this.unwinding(call, undefined, cleanup);
       after?.();
       return undefined;
     }
-    const result = temp();
-    unwinding(call, result, cleanup);
+    const result = this.temp();
+    this.unwinding(call, result, cleanup);
     if (!target.throws) {
       after?.();
       return result;
     }
-    return unpacked(resultType(target), result, type, at!, after, bodyOf(noted.arenas, target).self?.constructor ? undefined : unwound);
+    return this.unpacked(this.resultType(target), result, type, at!, after, bodyOf(this.noted.arenas, target).self?.constructor ? undefined : unwound);
   }
+
 
   // A throwing call's result: a call that failed raises its error where this function sends
   // it; one that didn't gives its value.
-  function unpacked(shape: string, result: string, type: Type, at: Expr, after?: () => void, unwound?: () => void): string | undefined {
-    const [failed, bad, ok] = [temp(), label(), label()];
-    emit(`${failed} = extractvalue ${shape} ${result}, 0`);
-    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
-    startBlock(bad);
-    const error = temp();
-    emit(`${error} = extractvalue ${shape} ${result}, 2`);
+  unpacked(this: Mut<this>, shape: string, result: string, type: Type, at: Expr, after?: () => void, unwound?: () => void): string | undefined {
+    const [failed, bad, ok] = [this.temp(), this.label(), this.label()];
+    this.emit(`${failed} = extractvalue ${shape} ${result}, 0`);
+    this.emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    this.startBlock(bad);
+    const error = this.temp();
+    this.emit(`${error} = extractvalue ${shape} ${result}, 2`);
     after?.();
     unwound?.();
-    raised(at, error);
-    startBlock(ok);
+    this.raised(at, error);
+    this.startBlock(ok);
     after?.();
     if (type === "void") return undefined;
-    const got = temp();
-    emit(`${got} = extractvalue ${shape} ${result}, 1`);
+    const got = this.temp();
+    this.emit(`${got} = extractvalue ${shape} ${result}, 1`);
     return got;
   }
+
 
   // A call of a Rust function's shim: the handle a method works on, read from where it is held,
   // then each argument as it crosses, owned strings and arrays given up once Rust has made its
   // own of them; what it gives made into a Fish value; and a panic in it raised at the call.
-  function rustInvoke(target: Instance, pointer: string | undefined, args: string[], at: Expr, cleanup?: () => void, after?: () => void): string | undefined {
+  rustInvoke(this: Mut<this>, target: Instance, pointer: string | undefined, args: string[], at: Expr, cleanup?: () => void, after?: () => void): string | undefined {
     const load = (type: string, from: string) => {
-      const v = temp();
-      emit(`${v} = load ${type}, ptr ${from}`);
+      const v = this.temp();
+      this.emit(`${v} = load ${type}, ptr ${from}`);
       return v;
     };
     const part = (whole: string, i: usize) => {
-      const v = temp();
-      emit(`${v} = extractvalue ${ARRAY} ${whole}, ${i}`);
+      const v = this.temp();
+      this.emit(`${v} = extractvalue ${ARRAY} ${whole}, ${i}`);
       return v;
     };
     const passed: string[] = [];
     const given: (() => void)[] = [];
-    if (pointer && bodyOf(noted.arenas, target).self && !bodyOf(noted.arenas, target).self!.constructor) {
+    if (pointer && bodyOf(this.noted.arenas, target).self && !bodyOf(this.noted.arenas, target).self!.constructor) {
       passed.push(`ptr ${load("ptr", pointer)}`);
       // A method taking its object over leaves the place it was in empty, as one in Fish does.
-      if (bodyOf(noted.arenas, target).self!.owned) emit(`store ptr null, ptr ${pointer}`);
+      if (bodyOf(this.noted.arenas, target).self!.owned) this.emit(`store ptr null, ptr ${pointer}`);
     }
     // An owned array is given up once Rust has its elements: Rust has made its own strings and
     // numbers, and taken the Rust values, which leave only the buffer.
     const giveUp = (v: string, c: Extract<Crossing, { kind: "array" }>, t: Type) => {
-      if (c.element.kind !== "handle") return dispose(v, t);
-      const emptied = temp();
-      emit(`${emptied} = insertvalue ${ARRAY} ${v}, i64 0, 1`);
-      dispose(emptied, t);
+      if (c.element.kind !== "handle") return this.dispose(v, t);
+      const emptied = this.temp();
+      this.emit(`${emptied} = insertvalue ${ARRAY} ${v}, i64 0, 1`);
+      this.dispose(emptied, t);
     };
     const pass = (c: Crossing, t: Type, v: string): string[] => {
       switch (c.kind) {
         case "plain":
-          return [`${crossing(llvm, t)} ${v}`];
+          return [`${crossing(this.llvm, t)} ${v}`];
         case "handle":
           return [`ptr ${v}`];
         case "string":
-          given.push(() => dispose(v, t));
+          given.push(() => this.dispose(v, t));
           return [`ptr ${v}`];
         case "lent":
           return [`ptr ${load("ptr", v)}`];
@@ -8272,794 +8811,819 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
           return [`ptr ${part(whole, 0)}`, `i64 ${part(whole, 1)}`];
         }
         case "option": {
-          const none = holds(v, t as UnionType, ["null"]);
-          const inner = convert(v, t, c.inner);
-          if (c.of.kind === "string") given.push(() => dispose(v, t));
+          const none = this.holds(v, t as UnionType, ["null"]);
+          const inner = this.convert(v, t, c.inner);
+          if (c.of.kind === "string") given.push(() => this.dispose(v, t));
           if (c.of.kind === "array" && !c.of.lent) {
             const array = c.of;
             given.push(() => {
-              const [some, done] = [label(), label()];
-              emit(`br i1 ${none}, label %${done}, label %${some}`);
-              startBlock(some);
+              const [some, done] = [this.label(), this.label()];
+              this.emit(`br i1 ${none}, label %${done}, label %${some}`);
+              this.startBlock(some);
               giveUp(inner, array, c.inner);
-              emit(`br label %${done}`);
-              startBlock(done);
+              this.emit(`br label %${done}`);
+              this.startBlock(done);
             });
           }
           if (c.of.kind === "plain" || c.of.kind === "array") {
-            const some = temp();
-            emit(`${some} = xor i1 ${none}, true`);
+            const some = this.temp();
+            this.emit(`${some} = xor i1 ${none}, true`);
             return [`i1 zeroext ${some}`, ...pass(c.of.kind === "array" ? { ...c.of, lent: true } : c.of, c.inner, c.of.kind === "array" ? spilled(inner) : inner)];
           }
-          const p = temp();
-          emit(`${p} = select i1 ${none}, ptr null, ptr ${inner}`);
+          const p = this.temp();
+          this.emit(`${p} = select i1 ${none}, ptr null, ptr ${inner}`);
           return [`ptr ${p}`];
         }
       }
     };
     // An Option's array is read where it is spilled, as a lent one is.
     const spilled = (v: string) => {
-      const slot = alloca(ARRAY);
-      emit(`store ${ARRAY} ${v}, ptr ${slot}`);
+      const slot = this.alloca(ARRAY);
+      this.emit(`store ${ARRAY} ${v}, ptr ${slot}`);
       return slot;
     };
-    args.forEach((a, i) => passed.push(...pass(rustCrossing(typing, target.signature![i]!), target.signature![i]!, a.slice(a.lastIndexOf(" ") + 1))));
-    const gives = rustGiven(noted.typing, noted.arenas, target);
-    const shim = shimGives(llvm, gives);
-    const out = shim.out ? alloca(shim.out) : undefined;
+    args.forEach((a, i) => passed.push(...pass(rustCrossing(this.typing, target.signature![i]!), target.signature![i]!, a.slice(a.lastIndexOf(" ") + 1))));
+    const gives = rustGiven(this.noted.typing, this.noted.arenas, target);
+    const shim = shimGives(this.llvm, gives);
+    const out = shim.out ? this.alloca(shim.out) : undefined;
     if (out) passed.push(`ptr ${out}`);
-    const err = target.throws ? alloca("ptr") : undefined;
+    const err = target.throws ? this.alloca("ptr") : undefined;
     if (err) {
-      emit(`store ptr null, ptr ${err}`);
+      this.emit(`store ptr null, ptr ${err}`);
       passed.push(`ptr ${err}`);
     }
-    const caught = alloca("ptr");
-    emit(`store ptr null, ptr ${caught}`);
+    const caught = this.alloca("ptr");
+    this.emit(`store ptr null, ptr ${caught}`);
     passed.push(`ptr ${caught}`);
-    const call = `call ${shim.returns} ${symbol(noted.arenas, target)}(${passed.join(", ")})`;
-    const result = shim.returns === "void" ? undefined : temp();
-    unwinding(call, result, cleanup);
+    const call = `call ${shim.returns} ${this.symbol(this.noted.arenas, target)}(${passed.join(", ")})`;
+    const result = shim.returns === "void" ? undefined : this.temp();
+    this.unwinding(call, result, cleanup);
     given.forEach((g) => g());
-    rustPanic(caught, at);
+    this.rustPanic(caught, at);
     after?.();
-    if (err) rustErr(err, target.throws!, at);
+    if (err) this.rustErr(err, target.throws!, at);
     if (!gives) return undefined;
-    const type = bodyOf(noted.arenas, target).self?.constructor ? bodyOf(noted.arenas, target).owner! : target.returns;
+    const type = bodyOf(this.noted.arenas, target).self?.constructor ? bodyOf(this.noted.arenas, target).owner! : target.returns;
     if (gives.kind !== "option") return gives.kind === "array" ? load(ARRAY, out!) : result;
-    const some = gives.of.kind === "plain" || gives.of.kind === "array" ? result! : temp();
-    if (some !== result) emit(`${some} = icmp ne ptr ${result}, null`);
-    const inner = gives.of.kind === "plain" ? load(llvm(gives.inner), out!) : gives.of.kind === "array" ? load(ARRAY, out!) : result!;
-    const made = temp();
-    emit(`${made} = select i1 ${some}, ${llvm(type)} ${convert(inner, gives.inner, type)}, ${llvm(type)} ${convert("zeroinitializer", "null", type)}`);
+    const some = gives.of.kind === "plain" || gives.of.kind === "array" ? result! : this.temp();
+    if (some !== result) this.emit(`${some} = icmp ne ptr ${result}, null`);
+    const inner = gives.of.kind === "plain" ? load(this.llvm(gives.inner), out!) : gives.of.kind === "array" ? load(ARRAY, out!) : result!;
+    const made = this.temp();
+    this.emit(`${made} = select i1 ${some}, ${this.llvm(type)} ${this.convert(inner, gives.inner, type)}, ${this.llvm(type)} ${this.convert("zeroinitializer", "null", type)}`);
     return made;
   }
+
 
   // A Rust `Err` the shim handed back, raised at the call: the Rust value itself, or Fish's
   // `Error` with the Rust error's text as its message.
-  function rustErr(err: string, thrown: Type, at: Expr) {
-    const [error, failed, bad, ok] = [temp(), temp(), label(), label()];
-    emit(`${error} = load ptr, ptr ${err}`);
-    emit(`${failed} = icmp ne ptr ${error}, null`);
-    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
-    startBlock(bad);
-    if (rustClassOf(typing, thrown)) raised(at, error);
+  rustErr(this: Mut<this>, err: string, thrown: Type, at: Expr) {
+    const [error, failed, bad, ok] = [this.temp(), this.temp(), this.label(), this.label()];
+    this.emit(`${error} = load ptr, ptr ${err}`);
+    this.emit(`${failed} = icmp ne ptr ${error}, null`);
+    this.emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    this.startBlock(bad);
+    if (rustClassOf(this.typing, thrown)) this.raised(at, error);
     else {
-      const made = typing.rec(thrown as ClassType).fields.reduce((whole, f, i) => {
-        const v = f.name === "name" ? text("Error") : f.name === "message" ? error : f.name === "cause" ? convert("zeroinitializer", "null", f.type) : undefined;
+      const made = this.typing.rec(thrown as ClassType).fields.reduce((whole, f, i) => {
+        const v = f.name === "name" ? this.text("Error") : f.name === "message" ? error : f.name === "cause" ? this.convert("zeroinitializer", "null", f.type) : undefined;
         if (v === undefined) throw new Error(`internal error: Error has a field '${f.name}' a Rust error doesn't fill`);
-        const next = temp();
-        emit(`${next} = insertvalue ${llvm(thrown)} ${whole}, ${llvm(f.type)} ${v}, ${i}`);
+        const next = this.temp();
+        this.emit(`${next} = insertvalue ${this.llvm(thrown)} ${whole}, ${this.llvm(f.type)} ${v}, ${i}`);
         return next;
       }, "undef");
-      raised(at, made);
+      this.raised(at, made);
     }
-    startBlock(ok);
+    this.startBlock(ok);
   }
+
 
   // A panic a Rust function's shim caught, raised as a Fish panic at the call.
-  function rustPanic(caught: string, at: Expr) {
-    const [message, failed, bad, ok] = [temp(), temp(), label(), label()];
-    emit(`${message} = load ptr, ptr ${caught}`);
-    emit(`${failed} = icmp ne ptr ${message}, null`);
-    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
-    startBlock(bad);
-    unwinding(`call void @fsh_rt_panic_rust(ptr ${panicAt(at)}, ptr ${message})`);
-    emit("unreachable");
-    startBlock(ok);
+  rustPanic(this: Mut<this>, caught: string, at: Expr) {
+    const [message, failed, bad, ok] = [this.temp(), this.temp(), this.label(), this.label()];
+    this.emit(`${message} = load ptr, ptr ${caught}`);
+    this.emit(`${failed} = icmp ne ptr ${message}, null`);
+    this.emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    this.startBlock(bad);
+    this.unwinding(`call void @fsh_rt_panic_rust(ptr ${this.panicAt(at)}, ptr ${message})`);
+    this.emit("unreachable");
+    this.startBlock(ok);
   }
 
+
   // The future an async function's poll, or an async generator's resume, answers as.
-  function pollOf(i: Instance): FutureType {
-    return i.future ?? typing.leafFuture("next", i.generator!);
+  pollOf(this: Mut<this>, i: Instance): FutureType {
+    return i.future ?? this.typing.leafFuture("next", i.generator!);
   }
+
 
   // What a generator gives back from a `yield` or its end: what `next()` gives, which an async
   // one's resume gives as ready.
-  function yieldedAs(answer: string): string {
-    const g = recOf(current.generator);
-    if (g?.kind === "generator" && g.async) return polled(pollOf(current), 1, answer);
+  yieldedAs(this: Mut<this>, answer: string): string {
+    const g = this.recOf(this.current.generator);
+    if (g?.kind === "generator" && g.async) return this.polled(this.pollOf(this.current), 1, answer);
     if (g?.kind !== "generator" || !g.throws) return answer;
-    const made = temp();
-    emit(`${made} = insertvalue ${resultType(current)} zeroinitializer, ${llvm(typing.nextResult(g.yields))} ${answer}, 1`);
+    const made = this.temp();
+    this.emit(`${made} = insertvalue ${this.resultType(this.current)} zeroinitializer, ${this.llvm(this.typing.nextResult(g.yields))} ${answer}, 1`);
     return made;
   }
 
+
   // The IR type a function returns: its value, or for a throwing one, whether it failed, then
   // its value (`{}` for none) and its error.
-  function resultType(i: Instance): string {
-    if (recOf(i.generator)?.async) return pollType(pollOf(i));
+  resultType(this: Mut<this>, i: Instance): string {
+    if (this.recOf(i.generator)?.async) return this.pollType(this.pollOf(i));
     if (i.generator) {
-      const g = typing.rec(i.generator);
-      return g.throws ? throwing(typing.nextResult(g.yields), g.throws) : llvm(typing.nextResult(g.yields));
+      const g = this.typing.rec(i.generator);
+      return g.throws ? this.throwing(this.typing.nextResult(g.yields), g.throws) : this.llvm(this.typing.nextResult(g.yields));
     }
-    if (i.future) return pollType(i.future);
-    if (!i.throws) return llvm(i.returns);
-    return throwing(i.returns, i.throws);
+    if (i.future) return this.pollType(i.future);
+    if (!i.throws) return this.llvm(i.returns);
+    return this.throwing(i.returns, i.throws);
   }
 
-  function throwing(returns: Type, throws: Type): string {
-    return `{ i1, ${returns === "void" ? "{}" : llvm(returns)}, ${llvm(throws)} }`;
+
+  throwing(this: Mut<this>, returns: Type, throws: Type): string {
+    return `{ i1, ${returns === "void" ? "{}" : this.llvm(returns)}, ${this.llvm(throws)} }`;
   }
 
-  // A `finally` region being emitted: the block its `finally` starts, the slot naming the way
-  // control left, each way out with how to resume it, the labels made before the region, and
-  // how many catches and scopes enclosed it.
-  type Region = { label: string; chosen: string; exits: { key: string; resume: () => void }[]; start: usize; handlers: usize; depth: usize; floor: usize; slots: Map<string, { slot: string; type: Type }> };
 
-  function enter(): Region {
-    const region = { label: label(), chosen: alloca("i32"), exits: [], start: labels, handlers: handlers.length, depth: scopes.length, floor, slots: new Map() };
-    finallies.push(region);
+
+  enter(this: Mut<this>): Region {
+    const region = { label: this.label(), chosen: this.alloca("i32"), exits: [], start: this.labels, handlers: this.handlers.length, depth: this.scopes.length, floor: this.floor, slots: new Map() };
+    this.finallies.push(region);
     return region;
   }
 
+
   // Leaves a region the way `key` names, through its `finally`, which then resumes it.
-  function exit(region: Region, key: string, resume: () => void) {
+  exit(this: Mut<this>, region: Region, key: string, resume: () => void) {
     let i = region.exits.findIndex((e) => e.key === key);
     if (i < 0) i = region.exits.push({ key, resume }) - 1;
-    emit(`store i32 ${i}, ptr ${region.chosen}`);
-    emit(`br label %${region.label}`);
+    this.emit(`store i32 ${i}, ptr ${region.chosen}`);
+    this.emit(`br label %${region.label}`);
   }
 
+
   // A slot a region keeps a value in while its `finally` runs.
-  function stash(region: Region, key: string, type: Type, v: string): string {
+  stash(this: Mut<this>, region: Region, key: string, type: Type, v: string): string {
     let slot = region.slots.get(key)?.slot;
-    if (!slot) region.slots.set(key, { slot: (slot = alloca(llvm(type))), type });
-    emit(`store ${llvm(type)} ${v}, ptr ${slot}`);
+    if (!slot) region.slots.set(key, { slot: (slot = this.alloca(this.llvm(type))), type });
+    this.emit(`store ${this.llvm(type)} ${v}, ptr ${slot}`);
     return slot;
   }
 
+
   // Takes a value back out of a region's slot, leaving it empty.
-  function unstash(slot: string, type: Type): string {
-    const v = temp();
-    emit(`${v} = load ${llvm(type)}, ptr ${slot}`);
-    emit(`store ${llvm(type)} zeroinitializer, ptr ${slot}`);
+  unstash(this: Mut<this>, slot: string, type: Type): string {
+    const v = this.temp();
+    this.emit(`${v} = load ${this.llvm(type)}, ptr ${slot}`);
+    this.emit(`store ${this.llvm(type)} zeroinitializer, ptr ${slot}`);
     return v;
   }
 
+
   // Jumps to a label outside the scopes from `depth` inward, dropping what they own, through
   // each `finally` whose region it leaves.
-  function jump(to: string, depth: usize) {
-    const region = finallies.at(-1);
+  jump(this: Mut<this>, to: string, depth: usize) {
+    const region = this.finallies.at(-1);
     if (region && (Number(to.slice(1)) as usize) < region.start) {
-      drop(region.depth);
-      return exit(region, `jump ${to}`, () => jump(to, depth));
+      this.drop(region.depth);
+      return this.exit(region, `jump ${to}`, () => this.jump(to, depth));
     }
-    drop(depth);
-    emit(`br label %${to}`);
+    this.drop(depth);
+    this.emit(`br label %${to}`);
   }
 
+
   // Leaves the function being emitted with a value, or with none, through any `finally`.
-  function leave(v: string | undefined) {
-    const region = finallies.at(-1);
-    drop(region?.depth ?? 0);
-    const gives = current.future ? typing.rec(current.future).gives : current.returns;
+  leave(this: Mut<this>, v: string | undefined) {
+    const region = this.finallies.at(-1);
+    this.drop(region?.depth ?? 0);
+    const gives = this.current.future ? this.typing.rec(this.current.future).gives : this.current.returns;
     if (region) {
-      const kept = v === undefined ? undefined : stash(region, "return", gives, v);
-      return exit(region, "return", () => leave(kept && unstash(kept, gives)));
+      const kept = v === undefined ? undefined : this.stash(region, "return", gives, v);
+      return this.exit(region, "return", () => this.leave(kept && this.unstash(kept, gives)));
     }
     // A generator or a future that finishes stays finished; a future gives its value as it does.
-    if (resuming) {
-      emit("store i32 -1, ptr %state");
-      if (current.future) return emit(`ret ${resultType(current)} ${polled(current.future, 1, v)}`);
-      return emit(`br label %${resuming.done}`);
+    if (this.resuming) {
+      this.emit("store i32 -1, ptr %state");
+      if (this.current.future) return this.emit(`ret ${this.resultType(this.current)} ${this.polled(this.current.future, 1, v)}`);
+      return this.emit(`br label %${this.resuming.done}`);
     }
-    if (!current.throws) return emit(v === undefined ? "ret void" : `ret ${llvm(current.returns)} ${v}`);
-    const type = resultType(current);
-    let result = temp();
-    emit(`${result} = insertvalue ${type} undef, i1 false, 0`);
+    if (!this.current.throws) return this.emit(v === undefined ? "ret void" : `ret ${this.llvm(this.current.returns)} ${v}`);
+    const type = this.resultType(this.current);
+    let result = this.temp();
+    this.emit(`${result} = insertvalue ${type} undef, i1 false, 0`);
     if (v !== undefined) {
-      const next = temp();
-      emit(`${next} = insertvalue ${type} ${result}, ${llvm(current.returns)} ${v}, 1`);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${type} ${result}, ${this.llvm(this.current.returns)} ${v}, 1`);
       result = next;
     }
-    emit(`ret ${type} ${result}`);
+    this.emit(`ret ${type} ${result}`);
   }
+
 
   // An error raised by a `throw` or a failed call, which goes to the innermost catch, or else
   // leaves the function with it.
-  function raised(at: Expr | Stmt, error: string) {
-    const { from, to, wrapper, param, via } = current.raises.get(at)!;
-    if (!via) return route(convert(error, from, to), to);
+  raised(this: Mut<this>, at: Expr | Stmt, error: string) {
+    const { from, to, wrapper, param, via } = this.current.raises.get(at)!;
+    if (!via) return this.route(this.convert(error, from, to), to);
     // Wrapped by the error class's static `from` first.
-    const wrapped = invoke(arenas.instanceOf(via), undefined, [`${llvm(param!)} ${convert(error, from, param!)}`])!;
-    route(convert(wrapped, wrapper!, to), to);
+    const wrapped = this.invoke(this.arenas.instanceOf(via), undefined, [`${this.llvm(param!)} ${this.convert(error, from, param!)}`])!;
+    this.route(this.convert(wrapped, wrapper!, to), to);
   }
+
 
   // Sends an error of type `to` to the innermost catch, through any `finally` in between, or
   // else leaves the function with it.
   // What the statement made so far, and what the scopes left own, are dropped on the way; in a
   // match arm's block, so are the values pending in the expressions it leaves.
-  function route(error: string, to: Type) {
-    const region = finallies.at(-1);
-    const toRegion = region !== undefined && handlers.length <= region.handlers;
-    const kept = toRegion ? region.floor : handlers.at(-1)?.floor ?? 0;
-    for (const { v, type } of pending.slice(kept).reverse()) dispose(v, type);
+  route(this: Mut<this>, error: string, to: Type) {
+    const region = this.finallies.at(-1);
+    const toRegion = region !== undefined && this.handlers.length <= region.handlers;
+    const kept = toRegion ? region.floor : this.handlers.at(-1)?.floor ?? 0;
+    for (const { v, type } of this.pending.slice(kept).reverse()) this.dispose(v, type);
     if (region && toRegion) {
-      drop(region.depth);
-      const kept = stash(region, "error", to, error);
-      return exit(region, "error", () => route(unstash(kept, to), to));
+      this.drop(region.depth);
+      const kept = this.stash(region, "error", to, error);
+      return this.exit(region, "error", () => this.route(this.unstash(kept, to), to));
     }
-    const handler = handlers.at(-1);
-    drop(handler?.depth ?? 0);
+    const handler = this.handlers.at(-1);
+    this.drop(handler?.depth ?? 0);
     if (handler) {
-      emit(`store ${llvm(to)} ${error}, ptr ${handler.slot}`);
-      emit(`br label %${handler.label}`);
+      this.emit(`store ${this.llvm(to)} ${error}, ptr ${handler.slot}`);
+      this.emit(`br label %${handler.label}`);
       return;
     }
-    if (current.future) {
-      emit("store i32 -1, ptr %state");
-      emit(`ret ${resultType(current)} ${polled(current.future, 2, undefined, error)}`);
+    if (this.current.future) {
+      this.emit("store i32 -1, ptr %state");
+      this.emit(`ret ${this.resultType(this.current)} ${this.polled(this.current.future, 2, undefined, error)}`);
       return;
     }
     // A generator that throws is finished, as in JavaScript.
-    if (current.generator) emit("store i32 -1, ptr %state");
-    if (recOf(current.generator)?.async) return emit(`ret ${resultType(current)} ${polled(pollOf(current), 2, undefined, error)}`);
-    const type = resultType(current);
-    const [a, b] = [temp(), temp()];
-    emit(`${a} = insertvalue ${type} undef, i1 true, 0`);
-    emit(`${b} = insertvalue ${type} ${a}, ${llvm(to)} ${error}, 2`);
-    emit(`ret ${type} ${b}`);
+    if (this.current.generator) this.emit("store i32 -1, ptr %state");
+    if (this.recOf(this.current.generator)?.async) return this.emit(`ret ${this.resultType(this.current)} ${this.polled(this.pollOf(this.current), 2, undefined, error)}`);
+    const type = this.resultType(this.current);
+    const [a, b] = [this.temp(), this.temp()];
+    this.emit(`${a} = insertvalue ${type} undef, i1 true, 0`);
+    this.emit(`${b} = insertvalue ${type} ${a}, ${this.llvm(to)} ${error}, 2`);
+    this.emit(`ret ${type} ${b}`);
   }
+
 
   // What polling a future gives: a tag, pending (0), ready (1) or failed (2), then the value it
   // gives and the error it throws, each `{}` when there is none.
-  function pollType(f: FutureType | HandleType): string {
-    const r = typing.rec(f);
-    return `{ i8, ${r.gives === "void" ? "{}" : llvm(r.gives)}, ${r.throws ? llvm(r.throws) : "{}"} }`;
+  pollType(this: Mut<this>, f: FutureType | HandleType): string {
+    const r = this.typing.rec(f);
+    return `{ i8, ${r.gives === "void" ? "{}" : this.llvm(r.gives)}, ${r.throws ? this.llvm(r.throws) : "{}"} }`;
   }
 
+
   // A poll result with `tag`, and the value or the error it carries.
-  function polled(f: FutureType, tag: u8, v?: string, error?: string): string {
-    let made = temp();
-    emit(`${made} = insertvalue ${pollType(f)} zeroinitializer, i8 ${tag}, 0`);
-    for (const [part, at, type] of [[v, 1, typing.rec(f).gives], [error, 2, typing.rec(f).throws]] as const) {
+  polled(this: Mut<this>, f: FutureType, tag: u8, v?: string, error?: string): string {
+    let made = this.temp();
+    this.emit(`${made} = insertvalue ${this.pollType(f)} zeroinitializer, i8 ${tag}, 0`);
+    for (const [part, at, type] of [[v, 1, this.typing.rec(f).gives], [error, 2, this.typing.rec(f).throws]] as const) {
       if (part === undefined || type === undefined || type === "void") continue;
-      const next = temp();
-      emit(`${next} = insertvalue ${pollType(f)} ${made}, ${llvm(type)} ${part}, ${at}`);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${this.pollType(f)} ${made}, ${this.llvm(type)} ${part}, ${at}`);
       made = next;
     }
     return made;
   }
 
+
   // `await p`: the future moves into its slot in the frame, and is polled there, here and at
   // each later poll of this one until it is done. While it is pending, so is this future. Its
   // value comes out, or its error is raised; either way it is finished, and dropped.
-  function awaitFuture(e: Extract<Expr, { kind: "unary" }>): string | undefined {
-    const inner = valueType(e.operand) as FutureType | HandleType | DynType;
-    const field = current.frame!.awaits.get(e)!;
+  awaitFuture(this: Mut<this>, e: Extract<Expr, { kind: "unary" }>): string | undefined {
+    const inner = this.valueType(e.operand) as FutureType | HandleType | DynType;
+    const field = this.current.frame!.awaits.get(e)!;
     const at = `%await${field}`;
-    emit(`store ${llvm(inner)} ${owned(e.operand)}, ptr ${at}`);
-    settle();
-    scopes.at(-1)!.push({ slot: at, type: inner });
-    return suspend(inner, at, field, e);
+    this.emit(`store ${this.llvm(inner)} ${this.owned(e.operand)}, ptr ${at}`);
+    this.settle();
+    this.scopes.at(-1)!.push({ slot: at, type: inner });
+    return this.suspend(inner, at, field, e);
   }
+
 
   // Polls the future in frame field `field`, at `at`, until it is done, this future or async
   // generator pending meanwhile; then it is finished and dropped, and gives its value, or its
   // error is raised at `e`.
-  function suspend(inner: FutureType | HandleType | DynType, at: string, field: usize, e: Expr): string | undefined {
+  suspend(this: Mut<this>, inner: FutureType | HandleType | DynType, at: string, field: usize, e: Expr): string | undefined {
     // A boxed future polls as a future giving what its Promise does, and throws nothing.
-    const shape = typing.rec(inner).kind === "dyn" ? typing.handleType(typing.promiseElement(typing.rec(inner as DynType).of)!, undefined) : (inner as FutureType | HandleType);
-    const g = resuming!;
-    const poll = label();
+    const shape = this.typing.rec(inner).kind === "dyn" ? this.typing.handleType(this.typing.promiseElement(this.typing.rec(inner as DynType).of)!, undefined) : (inner as FutureType | HandleType);
+    const g = this.resuming!;
+    const poll = this.label();
     g.resumes.push(poll);
     const resumed = g.resumes.length;
-    if (!awaitsOf.has(current.id)) awaitsOf.set(current.id, []);
-    awaitsOf.get(current.id)!.push({ state: resumed, field, type: inner });
-    emit(`br label %${poll}`);
-    startBlock(poll);
-    const step = pollStep(inner, at, e);
-    startBlock(step.waiting);
+    if (!this.awaitsOf.has(this.current.id)) this.awaitsOf.set(this.current.id, []);
+    this.awaitsOf.get(this.current.id)!.push({ state: resumed, field, type: inner });
+    this.emit(`br label %${poll}`);
+    this.startBlock(poll);
+    const step = this.pollStep(inner, at, e);
+    this.startBlock(step.waiting);
     // `yieldNow` asks to be polled again at once, behind whatever else is waiting.
-    if (inner === YIELD_NOW) emit("call void @fsh_rt_wake(ptr %cx)");
-    emit(`store i32 ${resumed}, ptr %state`);
-    emit(`ret ${resultType(current)} ${polled(pollOf(current), 0)}`);
+    if (inner === YIELD_NOW) this.emit("call void @fsh_rt_wake(ptr %cx)");
+    this.emit(`store i32 ${resumed}, ptr %state`);
+    this.emit(`ret ${this.resultType(this.current)} ${this.polled(this.pollOf(this.current), 0)}`);
     const finish = () => {
-      const old = temp();
-      emit(`${old} = load ${llvm(inner)}, ptr ${at}`);
-      emit(`store ${llvm(inner)} zeroinitializer, ptr ${at}`);
-      dispose(old, inner);
+      const old = this.temp();
+      this.emit(`${old} = load ${this.llvm(inner)}, ptr ${at}`);
+      this.emit(`store ${this.llvm(inner)} zeroinitializer, ptr ${at}`);
+      this.dispose(old, inner);
     };
-    if (typing.rec(shape).throws) {
-      startBlock(step.failed);
+    if (this.typing.rec(shape).throws) {
+      this.startBlock(step.failed);
       const error = step.error();
       finish();
-      raised(e, error);
+      this.raised(e, error);
     } else if (inner !== YIELD_NOW && inner !== SLEEP) {
-      startBlock(step.failed);
-      emit("unreachable");
+      this.startBlock(step.failed);
+      this.emit("unreachable");
     }
-    startBlock(step.ready);
+    this.startBlock(step.ready);
     const v = step.value();
     finish();
     return v;
   }
+
 
   // A combined future's poll: each future not yet done is polled in turn, and one done keeps its
   // value, its outcome for `allSettled`, or its error for `any`. `race` is done with the first to
   // settle, `any` with the first success or the last error, `all` with the last or the first
   // error, `allSettled` with the last; then the ones still waiting are cancelled where they wait,
   // and the awaiter's drop of this frame drops them.
-  function combinePoll(t: FutureType): string {
-    const known = combinePolls.get(t);
+  combinePoll(this: Mut<this>, t: FutureType): string {
+    const known = this.combinePolls.get(t);
     if (known) return known;
-    const name = `@fsh.combine.${stableId("combine", `${typing.described(t)} ${typing.combinedOf.get(t)!.at.start}`, t)}`;
-    combinePolls.set(t, name);
-    const { kind, futures, at, array } = typing.combinedOf.get(t)!;
-    if (array) return combineArray(t, name, kind, array, at as Expr);
-    const saved = { allocas, body, temps, labels, block, pending, scopes };
-    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
+    const name = `@fsh.combine.${this.stableId("combine", `${this.typing.described(t)} ${this.typing.combinedOf.get(t)!.at.start}`, t)}`;
+    this.combinePolls.set(t, name);
+    const { kind, futures, at, array } = this.typing.combinedOf.get(t)!;
+    if (array) return this.combineArray(t, name, kind, array, at as Expr);
+    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
+    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
     const field = (i: usize) => {
-      const p = temp();
-      emit(`${p} = getelementptr ${llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
+      const p = this.temp();
+      this.emit(`${p} = getelementptr ${this.llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
       return p;
     };
     const valueOf = (f: FutureType | HandleType | DynType): Type => {
-      const fr = typing.rec(f);
-      const gives = fr.kind === "dyn" ? typing.promiseElement(fr.of)! : fr.gives;
+      const fr = this.typing.rec(f);
+      const gives = fr.kind === "dyn" ? this.typing.promiseElement(fr.of)! : fr.gives;
       return gives === "void" ? "null" : gives;
     };
     // What each future's slot keeps: its value, its outcome, or for `any` its error.
-    const kept = (i: usize) => typing.rec(t).frame[2 + 3 * i]!.type;
-    const finishWith = (tag: u8, v?: string, error?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v, error)}`);
+    const kept = (i: usize) => this.typing.rec(t).frame[2 + 3 * i]!.type;
+    const finishWith = (tag: u8, v?: string, error?: string) => this.emit(`ret ${this.pollType(t)} ${this.polled(t, tag, v, error)}`);
     const finished = (at: string, f: Type) => {
-      const old = temp();
-      emit(`${old} = load ${llvm(f)}, ptr ${at}`);
-      emit(`store ${llvm(f)} zeroinitializer, ptr ${at}`);
-      dispose(old, f);
+      const old = this.temp();
+      this.emit(`${old} = load ${this.llvm(f)}, ptr ${at}`);
+      this.emit(`store ${this.llvm(f)} zeroinitializer, ptr ${at}`);
+      this.dispose(old, f);
     };
     const cancelOthers = (except: usize) => futures.forEach((f, j) => {
-      if (j !== except) whileWaiting(field(3 + 3 * j), () => cancelAt(field(1 + 3 * j), f));
+      if (j !== except) this.whileWaiting(field(3 + 3 * j), () => this.cancelAt(field(1 + 3 * j), f));
     });
     futures.forEach((f, i) => {
       const [futureAt, valueAt, doneAt] = [field(1 + 3 * i), field(2 + 3 * i), field(3 + 3 * i)];
-      const [d, over, skip, go] = [temp(), temp(), label(), label()];
-      const fr = typing.rec(f);
+      const [d, over, skip, go] = [this.temp(), this.temp(), this.label(), this.label()];
+      const fr = this.typing.rec(f);
       const thrown = fr.kind === "dyn" ? undefined : fr.throws;
-      const outcome = typing.settledParts(valueOf(f), thrown);
-      const keep = (v: string, from: Type) => emit(`store ${llvm(kept(i))} ${convert(v, from, kept(i))}, ptr ${valueAt}`);
-      emit(`${d} = load i32, ptr ${doneAt}`);
-      emit(`${over} = icmp eq i32 ${d}, 2`);
-      emit(`br i1 ${over}, label %${skip}, label %${go}`);
-      startBlock(go);
-      emit(`store i32 1, ptr ${doneAt}`);
-      const step = pollStep(f, futureAt, at as Expr);
-      startBlock(step.waiting);
+      const outcome = this.typing.settledParts(valueOf(f), thrown);
+      const keep = (v: string, from: Type) => this.emit(`store ${this.llvm(kept(i))} ${this.convert(v, from, kept(i))}, ptr ${valueAt}`);
+      this.emit(`${d} = load i32, ptr ${doneAt}`);
+      this.emit(`${over} = icmp eq i32 ${d}, 2`);
+      this.emit(`br i1 ${over}, label %${skip}, label %${go}`);
+      this.startBlock(go);
+      this.emit(`store i32 1, ptr ${doneAt}`);
+      const step = this.pollStep(f, futureAt, at as Expr);
+      this.startBlock(step.waiting);
       // `yieldNow` asks to be polled again at once, behind whatever else is waiting.
-      if (f === YIELD_NOW) emit("call void @fsh_rt_wake(ptr %cx)");
-      emit(`br label %${skip}`);
-      startBlock(step.ready);
+      if (f === YIELD_NOW) this.emit("call void @fsh_rt_wake(ptr %cx)");
+      this.emit(`br label %${skip}`);
+      this.startBlock(step.ready);
       const v = step.value() ?? "zeroinitializer";
       finished(futureAt, f);
-      emit(`store i32 2, ptr ${doneAt}`);
+      this.emit(`store i32 2, ptr ${doneAt}`);
       if (kind === "race" || kind === "any") {
         cancelOthers(i);
-        finishWith(1, convert(v, valueOf(f), typing.rec(t).gives));
+        finishWith(1, this.convert(v, valueOf(f), this.typing.rec(t).gives));
       } else {
-        if (kind === "allSettled") keep(objectOf(outcome.fulfilled, { value: v }), outcome.fulfilled);
+        if (kind === "allSettled") keep(this.objectOf(outcome.fulfilled, { value: v }), outcome.fulfilled);
         else keep(v, valueOf(f));
-        emit(`br label %${skip}`);
+        this.emit(`br label %${skip}`);
       }
-      startBlock(step.failed);
+      this.startBlock(step.failed);
       if (thrown) {
         const error = step.error();
         finished(futureAt, f);
-        emit(`store i32 2, ptr ${doneAt}`);
+        this.emit(`store i32 2, ptr ${doneAt}`);
         if (kind === "all" || kind === "race") {
           cancelOthers(i);
-          finishWith(2, undefined, convert(error, thrown, typing.rec(t).throws!));
+          finishWith(2, undefined, this.convert(error, thrown, this.typing.rec(t).throws!));
         } else {
           // An outcome, or for `any` an error kept for its AggregateError.
-          if (kind === "allSettled") keep(objectOf(outcome.rejected!, { reason: error }), outcome.rejected!);
+          if (kind === "allSettled") keep(this.objectOf(outcome.rejected!, { reason: error }), outcome.rejected!);
           else keep(error, thrown);
-          emit(`br label %${skip}`);
+          this.emit(`br label %${skip}`);
         }
-      } else emit("unreachable");
-      startBlock(skip);
+      } else this.emit("unreachable");
+      this.startBlock(skip);
     });
     if (kind === "race") finishWith(0);
     else {
       let all = "true";
       futures.forEach((_, i) => {
-        const [d, over, both] = [temp(), temp(), temp()];
-        emit(`${d} = load i32, ptr ${field(3 + 3 * i)}`);
-        emit(`${over} = icmp eq i32 ${d}, 2`);
-        emit(`${both} = and i1 ${all}, ${over}`);
+        const [d, over, both] = [this.temp(), this.temp(), this.temp()];
+        this.emit(`${d} = load i32, ptr ${field(3 + 3 * i)}`);
+        this.emit(`${over} = icmp eq i32 ${d}, 2`);
+        this.emit(`${both} = and i1 ${all}, ${over}`);
         all = both;
       });
-      const [waiting, ready] = [label(), label()];
-      emit(`br i1 ${all}, label %${ready}, label %${waiting}`);
-      startBlock(waiting);
+      const [waiting, ready] = [this.label(), this.label()];
+      this.emit(`br i1 ${all}, label %${ready}, label %${waiting}`);
+      this.startBlock(waiting);
       finishWith(0);
-      startBlock(ready);
+      this.startBlock(ready);
       // What the slots keep moves out of the frame: into the tuple, or, for an `any` every one of
       // whose futures failed, into its AggregateError.
       const moved = futures.map((_, i) => {
-        const [valueAt, v] = [field(2 + 3 * i), temp()];
-        emit(`${v} = load ${llvm(kept(i))}, ptr ${valueAt}`);
-        emit(`store ${llvm(kept(i))} zeroinitializer, ptr ${valueAt}`);
+        const [valueAt, v] = [field(2 + 3 * i), this.temp()];
+        this.emit(`${v} = load ${this.llvm(kept(i))}, ptr ${valueAt}`);
+        this.emit(`store ${this.llvm(kept(i))} zeroinitializer, ptr ${valueAt}`);
         return v;
       });
       if (kind === "any") {
-        if (!typing.rec(t).throws) emit("unreachable");
-        else finishWith(2, undefined, aggregated(typing.rec(t).throws as ClassType, moved.map((v, i) => [v, kept(i)] as const)));
+        if (!this.typing.rec(t).throws) this.emit("unreachable");
+        else finishWith(2, undefined, this.aggregated(this.typing.rec(t).throws as ClassType, moved.map((v, i) => [v, kept(i)] as const)));
       } else {
-        const tuple = typing.rec(t).gives as ObjectType;
+        const tuple = this.typing.rec(t).gives as ObjectType;
         let made = "zeroinitializer";
         moved.forEach((v, i) => {
-          const next = temp();
-          emit(`${next} = insertvalue ${llvm(tuple)} ${made}, ${llvm(kept(i))} ${v}, ${typing.fieldPath(tuple, String(i)).join(", ")}`);
+          const next = this.temp();
+          this.emit(`${next} = insertvalue ${this.llvm(tuple)} ${made}, ${this.llvm(kept(i))} ${v}, ${this.typing.fieldPath(tuple, String(i)).join(", ")}`);
           made = next;
         });
         finishWith(1, made);
       }
     }
-    out.push(`define internal ${pollType(t)} ${name}(ptr %frame, ptr %cx) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    this.out.push(`define internal ${this.pollType(t)} ${name}(ptr %frame, ptr %cx) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
+    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
     return name;
   }
 
+
   // `combinePoll` over an array of `Promise<T>` values. Its first poll makes the values array and
   // a flag per future, every one zero.
-  function combineArray(t: FutureType, name: string, kind: "all" | "race" | "allSettled" | "any", array: ArrayType, at: Expr): string {
-    const saved = { allocas, body, temps, labels, block, pending, scopes };
-    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-    const dyn = typing.rec(array).element as DynType;
-    const given = typing.promiseElement(typing.rec(dyn).of)!;
+  combineArray(this: Mut<this>, t: FutureType, name: string, kind: "all" | "race" | "allSettled" | "any", array: ArrayType, at: Expr): string {
+    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
+    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const dyn = this.typing.rec(array).element as DynType;
+    const given = this.typing.promiseElement(this.typing.rec(dyn).of)!;
     const value = given === "void" ? "null" : given;
     // What the values array keeps: each value, or for `allSettled` its outcome.
-    const keptType = typing.rec(typing.rec(t).frame[2]!.type as ArrayType).element;
-    const element = llvm(keptType);
+    const keptType = this.typing.rec(this.typing.rec(t).frame[2]!.type as ArrayType).element;
+    const element = this.llvm(keptType);
     const field = (i: usize) => {
-      const p = temp();
-      emit(`${p} = getelementptr ${llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
+      const p = this.temp();
+      this.emit(`${p} = getelementptr ${this.llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
       return p;
     };
     const [futuresAt, valuesAt, flagsAt] = [field(1), field(2), field(3)];
     const part = (at: string, i: usize) => {
-      const p = temp();
-      emit(`${p} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 ${i}`);
+      const p = this.temp();
+      this.emit(`${p} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 ${i}`);
       return p;
     };
-    const [futures, n] = [temp(), temp()];
-    emit(`${futures} = load ptr, ptr ${part(futuresAt, 0)}`);
-    emit(`${n} = load i64, ptr ${part(futuresAt, 1)}`);
-    const [state, fresh, first, go] = [temp(), temp(), label(), label()];
-    emit(`${state} = load i32, ptr %frame`);
-    emit(`${fresh} = icmp eq i32 ${state}, 0`);
-    emit(`br i1 ${fresh}, label %${first}, label %${go}`);
-    startBlock(first);
-    emit("store i32 1, ptr %frame");
-    const [bytes, values, flags] = [temp(), temp(), temp()];
-    emit(`${bytes} = mul i64 ${n}, ${sizeOf(element)}`);
-    emit(`${values} = call ptr @fsh_rt_array_zeroed(i64 ${bytes})`);
-    emit(`${flags} = call ptr @fsh_rt_array_zeroed(i64 ${n})`);
+    const [futures, n] = [this.temp(), this.temp()];
+    this.emit(`${futures} = load ptr, ptr ${part(futuresAt, 0)}`);
+    this.emit(`${n} = load i64, ptr ${part(futuresAt, 1)}`);
+    const [state, fresh, first, go] = [this.temp(), this.temp(), this.label(), this.label()];
+    this.emit(`${state} = load i32, ptr %frame`);
+    this.emit(`${fresh} = icmp eq i32 ${state}, 0`);
+    this.emit(`br i1 ${fresh}, label %${first}, label %${go}`);
+    this.startBlock(first);
+    this.emit("store i32 1, ptr %frame");
+    const [bytes, values, flags] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${bytes} = mul i64 ${n}, ${this.sizeOf(element)}`);
+    this.emit(`${values} = call ptr @fsh_rt_array_zeroed(i64 ${bytes})`);
+    this.emit(`${flags} = call ptr @fsh_rt_array_zeroed(i64 ${n})`);
     for (const [slot, data] of [[valuesAt, values], [flagsAt, flags]] as const) {
-      emit(`store ptr ${data}, ptr ${part(slot, 0)}`);
-      emit(`store i64 ${n}, ptr ${part(slot, 1)}`);
-      emit(`store i64 ${n}, ptr ${part(slot, 2)}`);
+      this.emit(`store ptr ${data}, ptr ${part(slot, 0)}`);
+      this.emit(`store i64 ${n}, ptr ${part(slot, 1)}`);
+      this.emit(`store i64 ${n}, ptr ${part(slot, 2)}`);
     }
-    emit(`br label %${go}`);
-    startBlock(go);
-    const [valuesData, flagsData] = [temp(), temp()];
-    emit(`${valuesData} = load ptr, ptr ${part(valuesAt, 0)}`);
-    emit(`${flagsData} = load ptr, ptr ${part(flagsAt, 0)}`);
-    const finishWith = (tag: u8, v?: string, error?: string) => emit(`ret ${pollType(t)} ${polled(t, tag, v, error)}`);
+    this.emit(`br label %${go}`);
+    this.startBlock(go);
+    const [valuesData, flagsData] = [this.temp(), this.temp()];
+    this.emit(`${valuesData} = load ptr, ptr ${part(valuesAt, 0)}`);
+    this.emit(`${flagsData} = load ptr, ptr ${part(flagsAt, 0)}`);
+    const finishWith = (tag: u8, v?: string, error?: string) => this.emit(`ret ${this.pollType(t)} ${this.polled(t, tag, v, error)}`);
     // Each index below `n`, in a loop of its own.
     const each = (body: (i: string, next: string) => void) => {
-      const index = alloca("i64");
-      emit(`store i64 0, ptr ${index}`);
-      const [head, loop, next, done] = [label(), label(), label(), label()];
-      emit(`br label %${head}`);
-      startBlock(head);
-      const [i, more] = [temp(), temp()];
-      emit(`${i} = load i64, ptr ${index}`);
-      emit(`${more} = icmp slt i64 ${i}, ${n}`);
-      emit(`br i1 ${more}, label %${loop}, label %${done}`);
-      startBlock(loop);
+      const index = this.alloca("i64");
+      this.emit(`store i64 0, ptr ${index}`);
+      const [head, loop, next, done] = [this.label(), this.label(), this.label(), this.label()];
+      this.emit(`br label %${head}`);
+      this.startBlock(head);
+      const [i, more] = [this.temp(), this.temp()];
+      this.emit(`${i} = load i64, ptr ${index}`);
+      this.emit(`${more} = icmp slt i64 ${i}, ${n}`);
+      this.emit(`br i1 ${more}, label %${loop}, label %${done}`);
+      this.startBlock(loop);
       body(i, next);
-      startBlock(next);
-      const step = temp();
-      emit(`${step} = add i64 ${i}, 1`);
-      emit(`store i64 ${step}, ptr ${index}`);
-      emit(`br label %${head}`);
-      startBlock(done);
+      this.startBlock(next);
+      const step = this.temp();
+      this.emit(`${step} = add i64 ${i}, 1`);
+      this.emit(`store i64 ${step}, ptr ${index}`);
+      this.emit(`br label %${head}`);
+      this.startBlock(done);
     };
     const flagOf = (i: string) => {
-      const [p, f] = [temp(), temp()];
-      emit(`${p} = getelementptr i8, ptr ${flagsData}, i64 ${i}`);
-      emit(`${f} = load i8, ptr ${p}`);
+      const [p, f] = [this.temp(), this.temp()];
+      this.emit(`${p} = getelementptr i8, ptr ${flagsData}, i64 ${i}`);
+      this.emit(`${f} = load i8, ptr ${p}`);
       return [p, f] as const;
     };
     const futureOf_ = (i: string) => {
-      const p = temp();
-      emit(`${p} = getelementptr ${DYN}, ptr ${futures}, i64 ${i}`);
+      const p = this.temp();
+      this.emit(`${p} = getelementptr ${DYN}, ptr ${futures}, i64 ${i}`);
       return p;
     };
     const cancelOthers = (except: string) => each((j, next) => {
       const [, f] = flagOf(j);
-      const [waiting, other, both, yes] = [temp(), temp(), temp(), label()];
-      emit(`${waiting} = icmp eq i8 ${f}, 1`);
-      emit(`${other} = icmp ne i64 ${j}, ${except}`);
-      emit(`${both} = and i1 ${waiting}, ${other}`);
-      emit(`br i1 ${both}, label %${yes}, label %${next}`);
-      startBlock(yes);
-      cancelAt(futureOf_(j), dyn);
-      emit(`br label %${next}`);
+      const [waiting, other, both, yes] = [this.temp(), this.temp(), this.temp(), this.label()];
+      this.emit(`${waiting} = icmp eq i8 ${f}, 1`);
+      this.emit(`${other} = icmp ne i64 ${j}, ${except}`);
+      this.emit(`${both} = and i1 ${waiting}, ${other}`);
+      this.emit(`br i1 ${both}, label %${yes}, label %${next}`);
+      this.startBlock(yes);
+      this.cancelAt(futureOf_(j), dyn);
+      this.emit(`br label %${next}`);
     });
     each((i, next) => {
       const [flagAt, f] = flagOf(i);
-      const [over, poll] = [temp(), label()];
-      emit(`${over} = icmp eq i8 ${f}, 2`);
-      emit(`br i1 ${over}, label %${next}, label %${poll}`);
-      startBlock(poll);
-      emit(`store i8 1, ptr ${flagAt}`);
+      const [over, poll] = [this.temp(), this.label()];
+      this.emit(`${over} = icmp eq i8 ${f}, 2`);
+      this.emit(`br i1 ${over}, label %${next}, label %${poll}`);
+      this.startBlock(poll);
+      this.emit(`store i8 1, ptr ${flagAt}`);
       const slot = futureOf_(i);
-      const step = pollStep(dyn, slot, at);
-      startBlock(step.waiting);
-      emit(`br label %${next}`);
-      startBlock(step.ready);
+      const step = this.pollStep(dyn, slot, at);
+      this.startBlock(step.waiting);
+      this.emit(`br label %${next}`);
+      this.startBlock(step.ready);
       const v = step.value() ?? "zeroinitializer";
-      const old = temp();
-      emit(`${old} = load ${DYN}, ptr ${slot}`);
-      emit(`store ${DYN} zeroinitializer, ptr ${slot}`);
-      dispose(old, dyn);
-      emit(`store i8 2, ptr ${flagAt}`);
+      const old = this.temp();
+      this.emit(`${old} = load ${DYN}, ptr ${slot}`);
+      this.emit(`store ${DYN} zeroinitializer, ptr ${slot}`);
+      this.dispose(old, dyn);
+      this.emit(`store i8 2, ptr ${flagAt}`);
       if (kind === "race" || kind === "any") {
         cancelOthers(i);
         finishWith(1, v);
       } else {
-        const p = temp();
-        const outcome = typing.settledParts(value, undefined).fulfilled;
-        emit(`${p} = getelementptr ${element}, ptr ${valuesData}, i64 ${i}`);
-        emit(`store ${element} ${kind === "allSettled" ? objectOf(outcome, { value: v }) : v}, ptr ${p}`);
-        emit(`br label %${next}`);
+        const p = this.temp();
+        const outcome = this.typing.settledParts(value, undefined).fulfilled;
+        this.emit(`${p} = getelementptr ${element}, ptr ${valuesData}, i64 ${i}`);
+        this.emit(`store ${element} ${kind === "allSettled" ? this.objectOf(outcome, { value: v }) : v}, ptr ${p}`);
+        this.emit(`br label %${next}`);
       }
-      startBlock(step.failed);
-      emit("unreachable");
+      this.startBlock(step.failed);
+      this.emit("unreachable");
     });
     // A boxed future can't fail, so an `any` fails only over an empty array, as JavaScript rejects.
     if (kind === "race") finishWith(0);
     else if (kind === "any") {
-      const [empty, none, waiting] = [temp(), label(), label()];
-      emit(`${empty} = icmp eq i64 ${n}, 0`);
-      emit(`br i1 ${empty}, label %${none}, label %${waiting}`);
-      startBlock(none);
-      finishWith(2, undefined, aggregateOf(typing.rec(t).throws as ClassType, "null", "0"));
-      startBlock(waiting);
+      const [empty, none, waiting] = [this.temp(), this.label(), this.label()];
+      this.emit(`${empty} = icmp eq i64 ${n}, 0`);
+      this.emit(`br i1 ${empty}, label %${none}, label %${waiting}`);
+      this.startBlock(none);
+      finishWith(2, undefined, this.aggregateOf(this.typing.rec(t).throws as ClassType, "null", "0"));
+      this.startBlock(waiting);
       finishWith(0);
     } else {
-      const count = alloca("i64");
-      emit(`store i64 0, ptr ${count}`);
+      const count = this.alloca("i64");
+      this.emit(`store i64 0, ptr ${count}`);
       each((i, next) => {
         const [, f] = flagOf(i);
-        const [over, c, added] = [temp(), temp(), temp()];
-        emit(`${over} = icmp eq i8 ${f}, 2`);
-        emit(`${c} = load i64, ptr ${count}`);
-        emit(`${added} = add i64 ${c}, 1`);
-        const [yes] = [label()];
-        emit(`br i1 ${over}, label %${yes}, label %${next}`);
-        startBlock(yes);
-        emit(`store i64 ${added}, ptr ${count}`);
-        emit(`br label %${next}`);
+        const [over, c, added] = [this.temp(), this.temp(), this.temp()];
+        this.emit(`${over} = icmp eq i8 ${f}, 2`);
+        this.emit(`${c} = load i64, ptr ${count}`);
+        this.emit(`${added} = add i64 ${c}, 1`);
+        const [yes] = [this.label()];
+        this.emit(`br i1 ${over}, label %${yes}, label %${next}`);
+        this.startBlock(yes);
+        this.emit(`store i64 ${added}, ptr ${count}`);
+        this.emit(`br label %${next}`);
       });
-      const [c, all, ready, waiting] = [temp(), temp(), label(), label()];
-      emit(`${c} = load i64, ptr ${count}`);
-      emit(`${all} = icmp eq i64 ${c}, ${n}`);
-      emit(`br i1 ${all}, label %${ready}, label %${waiting}`);
-      startBlock(waiting);
+      const [c, all, ready, waiting] = [this.temp(), this.temp(), this.label(), this.label()];
+      this.emit(`${c} = load i64, ptr ${count}`);
+      this.emit(`${all} = icmp eq i64 ${c}, ${n}`);
+      this.emit(`br i1 ${all}, label %${ready}, label %${waiting}`);
+      this.startBlock(waiting);
       finishWith(0);
-      startBlock(ready);
+      this.startBlock(ready);
       // The values move out of the frame.
-      const v = temp();
-      emit(`${v} = load ${ARRAY}, ptr ${valuesAt}`);
-      emit(`store ${ARRAY} zeroinitializer, ptr ${valuesAt}`);
+      const v = this.temp();
+      this.emit(`${v} = load ${ARRAY}, ptr ${valuesAt}`);
+      this.emit(`store ${ARRAY} zeroinitializer, ptr ${valuesAt}`);
       finishWith(1, v);
     }
-    out.push(`define internal ${pollType(t)} ${name}(ptr %frame, ptr %cx) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    this.out.push(`define internal ${this.pollType(t)} ${name}(ptr %frame, ptr %cx) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
+    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
     return name;
   }
 
+
   // An object of `type` with the given fields, the rest, as a literal's, empty.
-  function objectOf(type: ObjectType, given: Record<string, string>): string {
+  objectOf(this: Mut<this>, type: ObjectType, given: Record<string, string>): string {
     let made = "zeroinitializer";
     for (const [name, v] of Object.entries(given)) {
-      const next = temp();
-      emit(`${next} = insertvalue ${llvm(type)} ${made}, ${llvm(typing.field(type, name)!.type)} ${v}, ${typing.fieldPath(type, name).join(", ")}`);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${this.llvm(type)} ${made}, ${this.llvm(this.typing.field(type, name)!.type)} ${v}, ${this.typing.fieldPath(type, name).join(", ")}`);
       made = next;
     }
     return made;
   }
 
+
   // An `any`'s AggregateError: JavaScript's message, and each error in the list's order.
-  function aggregated(type: ClassType, errors: (readonly [string, Type])[]): string {
-    const list = typing.field(type, "errors")!.type as ArrayType;
-    const element = llvm(typing.rec(list).element);
-    const [bytes, data] = [temp(), temp()];
-    emit(`${bytes} = mul i64 ${errors.length}, ${sizeOf(element)}`);
-    emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes})`);
+  aggregated(this: Mut<this>, type: ClassType, errors: (readonly [string, Type])[]): string {
+    const list = this.typing.field(type, "errors")!.type as ArrayType;
+    const element = this.llvm(this.typing.rec(list).element);
+    const [bytes, data] = [this.temp(), this.temp()];
+    this.emit(`${bytes} = mul i64 ${errors.length}, ${this.sizeOf(element)}`);
+    this.emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes})`);
     errors.forEach(([v, from], i) => {
-      const at = temp();
-      emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
-      emit(`store ${element} ${convert(v, from, typing.rec(list).element)}, ptr ${at}`);
+      const at = this.temp();
+      this.emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
+      this.emit(`store ${element} ${this.convert(v, from, this.typing.rec(list).element)}, ptr ${at}`);
     });
-    return aggregateOf(type, data, String(errors.length));
+    return this.aggregateOf(type, data, String(errors.length));
   }
 
-  function aggregateOf(type: ClassType, data: string, n: string): string {
-    const [a, b, c, made, done] = [temp(), temp(), temp(), temp(), temp()];
-    emit(`${a} = insertvalue ${ARRAY} undef, ptr ${data}, 0`);
-    emit(`${b} = insertvalue ${ARRAY} ${a}, i64 ${n}, 1`);
-    emit(`${c} = insertvalue ${ARRAY} ${b}, i64 ${n}, 2`);
-    emit(`${made} = insertvalue ${llvm(type)} zeroinitializer, ${ARRAY} ${c}, ${typing.fieldPath(type, "errors").join(", ")}`);
-    const [named] = [temp()];
-    emit(`${done} = insertvalue ${llvm(type)} ${made}, ptr ${text("All promises were rejected")}, ${typing.fieldPath(type, "message").join(", ")}`);
-    emit(`${named} = insertvalue ${llvm(type)} ${done}, ptr ${text("AggregateError")}, ${typing.fieldPath(type, "name").join(", ")}`);
+
+  aggregateOf(this: Mut<this>, type: ClassType, data: string, n: string): string {
+    const [a, b, c, made, done] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${a} = insertvalue ${ARRAY} undef, ptr ${data}, 0`);
+    this.emit(`${b} = insertvalue ${ARRAY} ${a}, i64 ${n}, 1`);
+    this.emit(`${c} = insertvalue ${ARRAY} ${b}, i64 ${n}, 2`);
+    this.emit(`${made} = insertvalue ${this.llvm(type)} zeroinitializer, ${ARRAY} ${c}, ${this.typing.fieldPath(type, "errors").join(", ")}`);
+    const [named] = [this.temp()];
+    this.emit(`${done} = insertvalue ${this.llvm(type)} ${made}, ptr ${this.text("All promises were rejected")}, ${this.typing.fieldPath(type, "message").join(", ")}`);
+    this.emit(`${named} = insertvalue ${this.llvm(type)} ${done}, ptr ${this.text("AggregateError")}, ${this.typing.fieldPath(type, "name").join(", ")}`);
     return named;
   }
 
+
   // `then` where a combined future's flag at `doneAt` says its future is waiting.
-  function whileWaiting(doneAt: string, then: () => void) {
-    const [d, waiting, yes, after] = [temp(), temp(), label(), label()];
-    emit(`${d} = load i32, ptr ${doneAt}`);
-    emit(`${waiting} = icmp eq i32 ${d}, 1`);
-    emit(`br i1 ${waiting}, label %${yes}, label %${after}`);
-    startBlock(yes);
+  whileWaiting(this: Mut<this>, doneAt: string, then: () => void) {
+    const [d, waiting, yes, after] = [this.temp(), this.temp(), this.label(), this.label()];
+    this.emit(`${d} = load i32, ptr ${doneAt}`);
+    this.emit(`${waiting} = icmp eq i32 ${d}, 1`);
+    this.emit(`br i1 ${waiting}, label %${yes}, label %${after}`);
+    this.startBlock(yes);
     then();
-    emit(`br label %${after}`);
-    startBlock(after);
+    this.emit(`br label %${after}`);
+    this.startBlock(after);
   }
+
 
   // Cancels the future of type `t` at `at`, paused where it waits: it leaves the waiters of what
   // it waits on, as an abort does, passing on a wake it was given, so nothing it waited on wakes
   // the task for it or loses a wake meant for another. Its drop comes after.
-  function cancelAt(at: string, t: Type) {
-    const r = recOf(t);
+  cancelAt(this: Mut<this>, at: string, t: Type) {
+    const r = this.recOf(t);
     // A boxed future through its vtable: the slot after its poll.
-    if (r?.kind === "dyn" && typing.promiseElement(r.of) !== undefined) {
-      const [dyn, data, table, slot, fn] = [temp(), temp(), temp(), temp(), temp()];
-      emit(`${dyn} = load ${DYN}, ptr ${at}`);
-      emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
-      emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
-      emit(`${slot} = getelementptr ptr, ptr ${table}, i64 4`);
-      emit(`${fn} = load ptr, ptr ${slot}`);
-      emit(`call void ${fn}(ptr ${data}, ptr %cx)`);
+    if (r?.kind === "dyn" && this.typing.promiseElement(r.of) !== undefined) {
+      const [dyn, data, table, slot, fn] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+      this.emit(`${dyn} = load ${DYN}, ptr ${at}`);
+      this.emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+      this.emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+      this.emit(`${slot} = getelementptr ptr, ptr ${table}, i64 4`);
+      this.emit(`${fn} = load ptr, ptr ${slot}`);
+      this.emit(`call void ${fn}(ptr ${data}, ptr %cx)`);
       return;
     }
     if (r?.kind !== "future" || t === YIELD_NOW) return;
     const frame = r.frame;
     const load = (i: usize, of: string) => {
-      const [p, v] = [temp(), temp()];
-      emit(`${p} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
-      emit(`${v} = load ${of}, ptr ${p}`);
+      const [p, v] = [this.temp(), this.temp()];
+      this.emit(`${p} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
+      this.emit(`${v} = load ${of}, ptr ${p}`);
       return [p, v] as const;
     };
-    const leaf = typing.leafOf.get(t as FutureType);
-    if (t === SLEEP || leaf?.method === "sleep") emit(`call void @fsh_rt_sleep_cancel(ptr %cx, ptr ${at})`);
-    else if (leaf?.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${load(1, "ptr")[1]}, ptr %cx, ptr ${at})`);
-    else if (leaf?.method === "send" || leaf?.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${load(1, "ptr")[1]}, ptr %cx, ptr ${at})`);
-    else if (leaf && ["connect", "accept", "read", "write", "sendTo", "receiveFrom"].includes(leaf.method)) emit(`call void @fsh_rt_socket_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
+    const leaf = this.typing.leafOf.get(t as FutureType);
+    if (t === SLEEP || leaf?.method === "sleep") this.emit(`call void @fsh_rt_sleep_cancel(ptr %cx, ptr ${at})`);
+    else if (leaf?.method === "acquire") this.emit(`call void @fsh_rt_semaphore_leave(ptr ${load(1, "ptr")[1]}, ptr %cx, ptr ${at})`);
+    else if (leaf?.method === "send" || leaf?.method === "receive") this.emit(`call void @fsh_rt_channel_leave(ptr ${load(1, "ptr")[1]}, ptr %cx, ptr ${at})`);
+    else if (leaf && ["connect", "accept", "read", "write", "sendTo", "receiveFrom"].includes(leaf.method)) this.emit(`call void @fsh_rt_socket_leave(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
     else if (leaf?.method === "next") {
-      const instance = generatorOf.get(leaf.of as GeneratorType)!;
-      cancelled.add(instance.id);
-      emit(`call void ${cancelSymbol(instance)}(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
+      const instance = this.generatorOf.get(leaf.of as GeneratorType)!;
+      this.cancelled.add(instance.id);
+      this.emit(`call void ${this.cancelSymbol(instance)}(ptr ${load(1, "ptr")[1]}, ptr %cx)`);
     }
     if (leaf?.signal) {
       const [flag] = load(frame.length - 1, "i32");
-      emit(`call void @fsh_rt_signal_leave(ptr ${load(frame.length - 2, "ptr")[1]}, ptr ${flag}, ptr %cx)`);
+      this.emit(`call void @fsh_rt_signal_leave(ptr ${load(frame.length - 2, "ptr")[1]}, ptr ${flag}, ptr %cx)`);
     }
     if (leaf || t === SLEEP) return;
-    const combined = typing.combinedOf.get(t as FutureType);
+    const combined = this.typing.combinedOf.get(t as FutureType);
     if (combined?.array) {
-      combinedArrayCancel(at, t as FutureType, combined.array);
+      this.combinedArrayCancel(at, t as FutureType, combined.array);
       return;
     }
     if (combined) {
       combined.futures.forEach((f, j) => {
-        const [doneAt, futureAt] = [temp(), temp()];
-        emit(`${doneAt} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${3 + 3 * j}`);
-        emit(`${futureAt} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${1 + 3 * j}`);
-        whileWaiting(doneAt, () => cancelAt(futureAt, f));
+        const [doneAt, futureAt] = [this.temp(), this.temp()];
+        this.emit(`${doneAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 ${3 + 3 * j}`);
+        this.emit(`${futureAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 ${1 + 3 * j}`);
+        this.whileWaiting(doneAt, () => this.cancelAt(futureAt, f));
       });
       return;
     }
-    const instance = futureOf.get(t as FutureType);
+    const instance = this.futureOf.get(t as FutureType);
     if (!instance) return;
-    cancelled.add(instance.id);
-    emit(`call void ${cancelSymbol(instance)}(ptr ${at}, ptr %cx)`);
+    this.cancelled.add(instance.id);
+    this.emit(`call void ${this.cancelSymbol(instance)}(ptr ${at}, ptr %cx)`);
   }
 
+
   // A combined future over an array cancels each future its flags say is waiting.
-  function combinedArrayCancel(at: string, t: FutureType, array: ArrayType) {
+  combinedArrayCancel(this: Mut<this>, at: string, t: FutureType, array: ArrayType) {
     const field = (i: usize, j: usize, of: string) => {
-      const [p, q, v] = [temp(), temp(), temp()];
-      emit(`${p} = getelementptr ${llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
-      emit(`${q} = getelementptr ${ARRAY}, ptr ${p}, i32 0, i32 ${j}`);
-      emit(`${v} = load ${of}, ptr ${q}`);
+      const [p, q, v] = [this.temp(), this.temp(), this.temp()];
+      this.emit(`${p} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
+      this.emit(`${q} = getelementptr ${ARRAY}, ptr ${p}, i32 0, i32 ${j}`);
+      this.emit(`${v} = load ${of}, ptr ${q}`);
       return v;
     };
     const [futures, flags, n] = [field(1, 0, "ptr"), field(3, 0, "ptr"), field(3, 1, "i64")];
-    const index = alloca("i64");
-    emit(`store i64 0, ptr ${index}`);
-    const [head, loop, yes, next, done] = [label(), label(), label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const [i, more] = [temp(), temp()];
-    emit(`${i} = load i64, ptr ${index}`);
-    emit(`${more} = icmp slt i64 ${i}, ${n}`);
-    emit(`br i1 ${more}, label %${loop}, label %${done}`);
-    startBlock(loop);
-    const [flagAt, f, waiting] = [temp(), temp(), temp()];
-    emit(`${flagAt} = getelementptr i8, ptr ${flags}, i64 ${i}`);
-    emit(`${f} = load i8, ptr ${flagAt}`);
-    emit(`${waiting} = icmp eq i8 ${f}, 1`);
-    emit(`br i1 ${waiting}, label %${yes}, label %${next}`);
-    startBlock(yes);
-    const slot = temp();
-    emit(`${slot} = getelementptr ${DYN}, ptr ${futures}, i64 ${i}`);
-    cancelAt(slot, typing.rec(array).element);
-    emit(`br label %${next}`);
-    startBlock(next);
-    const step = temp();
-    emit(`${step} = add i64 ${i}, 1`);
-    emit(`store i64 ${step}, ptr ${index}`);
-    emit(`br label %${head}`);
-    startBlock(done);
+    const index = this.alloca("i64");
+    this.emit(`store i64 0, ptr ${index}`);
+    const [head, loop, yes, next, done] = [this.label(), this.label(), this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [i, more] = [this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp slt i64 ${i}, ${n}`);
+    this.emit(`br i1 ${more}, label %${loop}, label %${done}`);
+    this.startBlock(loop);
+    const [flagAt, f, waiting] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${flagAt} = getelementptr i8, ptr ${flags}, i64 ${i}`);
+    this.emit(`${f} = load i8, ptr ${flagAt}`);
+    this.emit(`${waiting} = icmp eq i8 ${f}, 1`);
+    this.emit(`br i1 ${waiting}, label %${yes}, label %${next}`);
+    this.startBlock(yes);
+    const slot = this.temp();
+    this.emit(`${slot} = getelementptr ${DYN}, ptr ${futures}, i64 ${i}`);
+    this.cancelAt(slot, this.typing.rec(array).element);
+    this.emit(`br label %${next}`);
+    this.startBlock(next);
+    const step = this.temp();
+    this.emit(`${step} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${step}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
   }
 
-  function cancelSymbol(i: Instance): string {
-    return symbol(noted.arenas, i).replace(/^@"fsh\./, '@"fsh.cancel.');
+
+  cancelSymbol(this: Mut<this>, i: Instance): string {
+    return this.symbol(this.noted.arenas, i).replace(/^@"fsh\./, '@"fsh.cancel.');
   }
+
 
   // An async instance's cancel: the future it awaits in the state it is paused in is cancelled.
-  function cancelFunction(i: Instance) {
-    const saved = { allocas, body, temps, labels, block, pending, scopes };
-    [allocas, body, temps, labels, block, pending, scopes] = [[], [], 0, 0, "entry", [], []];
-    const awaits = awaitsOf.get(i.id) ?? [];
-    const [state, done] = [temp(), label()];
-    const cases = awaits.map(() => label());
-    emit(`${state} = load i32, ptr %frame`);
-    emit(`switch i32 ${state}, label %${done} [ ${awaits.map((a, n) => `i32 ${a.state}, label %${cases[n]}`).join(" ")} ]`);
+  cancelFunction(this: Mut<this>, i: Instance) {
+    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
+    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const awaits = this.awaitsOf.get(i.id) ?? [];
+    const [state, done] = [this.temp(), this.label()];
+    const cases = awaits.map(() => this.label());
+    this.emit(`${state} = load i32, ptr %frame`);
+    this.emit(`switch i32 ${state}, label %${done} [ ${awaits.map((a, n) => `i32 ${a.state}, label %${cases[n]}`).join(" ")} ]`);
     awaits.forEach((a, n) => {
-      startBlock(cases[n]!);
-      const p = temp();
-      emit(`${p} = getelementptr ${llvm(i.future ?? i.generator!)}, ptr %frame, i32 0, i32 ${a.field}`);
-      cancelAt(p, a.type);
-      emit(`br label %${done}`);
+      this.startBlock(cases[n]!);
+      const p = this.temp();
+      this.emit(`${p} = getelementptr ${this.llvm(i.future ?? i.generator!)}, ptr %frame, i32 0, i32 ${a.field}`);
+      this.cancelAt(p, a.type);
+      this.emit(`br label %${done}`);
     });
-    startBlock(done);
-    emit("ret void");
-    out.push(`define internal void ${cancelSymbol(i)}(ptr %frame, ptr %cx) ${unwinds} {`, "entry:", ...allocas, ...body, "}", "");
-    ({ allocas, body, temps, labels, block, pending, scopes } = saved);
+    this.startBlock(done);
+    this.emit("ret void");
+    this.out.push(`define internal void ${this.cancelSymbol(i)}(ptr %frame, ptr %cx) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
+    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
   }
+
 
   // One poll of the future in slot `at`: the blocks it goes on to, waiting, ready or failed,
   // and, called in those blocks, the value it gave and the error it threw. `e` places a panic.
-  function pollStep(inner: FutureType | HandleType | DynType, at: string, e: Expr): { waiting: string; ready: string; failed: string; value: () => string | undefined; error: () => string } {
-    const shape = typing.rec(inner).kind === "dyn" ? typing.handleType(typing.promiseElement(typing.rec(inner as DynType).of)!, undefined) : (inner as FutureType | HandleType);
-    const [result, tag, waiting, ready, failed] = [temp(), temp(), label(), label(), label()];
-    const leaf = typing.rec(inner).kind === "future" ? typing.leafOf.get(inner as FutureType) : undefined;
+  pollStep(this: Mut<this>, inner: FutureType | HandleType | DynType, at: string, e: Expr): { waiting: string; ready: string; failed: string; value: () => string | undefined; error: () => string } {
+    const shape = this.typing.rec(inner).kind === "dyn" ? this.typing.handleType(this.typing.promiseElement(this.typing.rec(inner as DynType).of)!, undefined) : (inner as FutureType | HandleType);
+    const [result, tag, waiting, ready, failed] = [this.temp(), this.temp(), this.label(), this.label(), this.label()];
+    const leaf = this.typing.rec(inner).kind === "future" ? this.typing.leafOf.get(inner as FutureType) : undefined;
     let given: string | undefined;
     // What is read only once it is ready, as reading it before would read nothing.
     let readied: (() => string | undefined) | undefined;
@@ -9067,675 +9631,693 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     // A joined task's panic reason, when it panicked.
     let why: string | undefined;
     // The poll result as the runtime gives it: a joined task's is its own, throwing no TaskPanic.
-    const handle = typing.rec(inner).kind === "handle" ? typing.rec(inner as HandleType) : undefined;
+    const handle = this.typing.rec(inner).kind === "handle" ? this.typing.rec(inner as HandleType) : undefined;
     const polledAs = handle?.joined ? handle.joined.base : shape;
     if (leaf?.method === "next") {
       // An async generator's `next()`: its resume, run where the generator lives.
-      const [slot, generator] = [temp(), temp()];
-      emit(`${slot} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 1`);
-      emit(`${generator} = load ptr, ptr ${slot}`);
-      const target = generatorOf.get(leaf.of as GeneratorType)!;
-      unwinding(`call ${pollType(shape)} ${symbol(noted.arenas, target)}(ptr ${generator}, ptr %cx)`, result);
-      emit(`${tag} = extractvalue ${pollType(shape)} ${result}, 0`);
-      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
+      const [slot, generator] = [this.temp(), this.temp()];
+      this.emit(`${slot} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 1`);
+      this.emit(`${generator} = load ptr, ptr ${slot}`);
+      const target = this.generatorOf.get(leaf.of as GeneratorType)!;
+      this.unwinding(`call ${this.pollType(shape)} ${this.symbol(this.noted.arenas, target)}(ptr ${generator}, ptr %cx)`, result);
+      this.emit(`${tag} = extractvalue ${this.pollType(shape)} ${result}, 0`);
+      this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
     } else if (leaf) {
       // A semaphore's, channel's or socket's wait, or a sleep given a signal, polled by the
       // runtime, which wakes the task when it may go on. A send moves its value in, leaving its
       // slot empty.
-      const [slot, handle, outcome] = [temp(), temp(), temp()];
+      const [slot, handle, outcome] = [this.temp(), this.temp(), this.temp()];
       // The timer task's wait holds nothing but its state.
-      if (leaf.method !== "timerNext") emit(`${slot} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 1`);
-      if (leaf.method !== "sleep" && leaf.method !== "timerNext") emit(`${handle} = load ptr, ptr ${slot}`);
+      if (leaf.method !== "timerNext") this.emit(`${slot} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 1`);
+      if (leaf.method !== "sleep" && leaf.method !== "timerNext") this.emit(`${handle} = load ptr, ptr ${slot}`);
       // A socket's poll gives its result through `made`, and on failure the system's reason
       // through `reason`, for the IoError its awaiter is thrown; an abort leaves it null.
       const socket = ["bind", "connect", "accept", "read", "write", "sendTo", "receiveFrom", "udpConnect"].includes(leaf.method);
       const file = leaf.method === "readFile" || leaf.method === "writeFile";
       if (socket || file) {
-        reason = alloca("[4 x ptr]");
-        emit(`store [4 x ptr] zeroinitializer, ptr ${reason}`);
+        reason = this.alloca("[4 x ptr]");
+        this.emit(`store [4 x ptr] zeroinitializer, ptr ${reason}`);
       }
       // One given a signal joins its waiters first, and stops if it has aborted, leaving the
       // waiters it joined; once done any other way, it leaves the signal's.
       let signal: [string, string] | undefined;
       if (leaf.signal) {
-        const n = typing.rec(inner as FutureType).frame.length;
-        const [at1, sig, flag, aborted, yes, cancel, go] = [temp(), temp(), temp(), temp(), temp(), label(), label()];
-        emit(`${at1} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${n - 2}`);
-        emit(`${sig} = load ptr, ptr ${at1}`);
-        emit(`${flag} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${n - 1}`);
-        emit(`${aborted} = call i32 @fsh_rt_signal_enter(ptr ${sig}, ptr ${flag}, ptr %cx)`);
-        emit(`${yes} = icmp ne i32 ${aborted}, 0`);
-        emit(`br i1 ${yes}, label %${cancel}, label %${go}`);
-        startBlock(cancel);
-        if (leaf.method === "acquire") emit(`call void @fsh_rt_semaphore_leave(ptr ${handle}, ptr %cx, ptr ${at})`);
-        if (leaf.method === "send" || leaf.method === "receive") emit(`call void @fsh_rt_channel_leave(ptr ${handle}, ptr %cx, ptr ${at})`);
-        if (leaf.method === "sleep") emit(`call void @fsh_rt_sleep_cancel(ptr %cx, ptr ${at})`);
-        if (socket) emit(`call void @fsh_rt_socket_leave(ptr ${handle}, ptr %cx)`);
-        emit(`call void @fsh_rt_signal_leave(ptr ${sig}, ptr ${flag}, ptr %cx)`);
-        emit(`br label %${failed}`);
-        startBlock(go);
+        const n = this.typing.rec(inner as FutureType).frame.length;
+        const [at1, sig, flag, aborted, yes, cancel, go] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.label(), this.label()];
+        this.emit(`${at1} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 ${n - 2}`);
+        this.emit(`${sig} = load ptr, ptr ${at1}`);
+        this.emit(`${flag} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 ${n - 1}`);
+        this.emit(`${aborted} = call i32 @fsh_rt_signal_enter(ptr ${sig}, ptr ${flag}, ptr %cx)`);
+        this.emit(`${yes} = icmp ne i32 ${aborted}, 0`);
+        this.emit(`br i1 ${yes}, label %${cancel}, label %${go}`);
+        this.startBlock(cancel);
+        if (leaf.method === "acquire") this.emit(`call void @fsh_rt_semaphore_leave(ptr ${handle}, ptr %cx, ptr ${at})`);
+        if (leaf.method === "send" || leaf.method === "receive") this.emit(`call void @fsh_rt_channel_leave(ptr ${handle}, ptr %cx, ptr ${at})`);
+        if (leaf.method === "sleep") this.emit(`call void @fsh_rt_sleep_cancel(ptr %cx, ptr ${at})`);
+        if (socket) this.emit(`call void @fsh_rt_socket_leave(ptr ${handle}, ptr %cx)`);
+        this.emit(`call void @fsh_rt_signal_leave(ptr ${sig}, ptr ${flag}, ptr %cx)`);
+        this.emit(`br label %${failed}`);
+        this.startBlock(go);
         signal = [sig, flag];
       }
       if (socket) {
-        const [made, field] = [alloca(leaf.method === "read" || leaf.method === "receiveFrom" ? ARRAY : "ptr"), (i: usize) => {
-          const [ptr, v] = [temp(), temp()];
-          emit(`${ptr} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${i}`);
+        const [made, field] = [this.alloca(leaf.method === "read" || leaf.method === "receiveFrom" ? ARRAY : "ptr"), (i: usize) => {
+          const [ptr, v] = [this.temp(), this.temp()];
+          this.emit(`${ptr} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 ${i}`);
           return [ptr, v] as const;
         }];
-        if (leaf.method === "accept") emit(`${outcome} = call i32 @fsh_rt_tcp_accept(ptr ${handle}, ptr %cx, ptr ${made}, ptr ${reason})`);
+        if (leaf.method === "accept") this.emit(`${outcome} = call i32 @fsh_rt_tcp_accept(ptr ${handle}, ptr %cx, ptr ${made}, ptr ${reason})`);
         else if (leaf.method === "sendTo" || leaf.method === "udpConnect") {
           const first = leaf.method === "sendTo" ? 3 : 2;
           const [hostAt, host] = field(first);
           const [portAt, port] = field(first + 1);
-          emit(`${host} = load ptr, ptr ${hostAt}`);
-          emit(`${port} = load i64, ptr ${portAt}`);
-          if (leaf.method === "udpConnect") emit(`${outcome} = call i32 @fsh_rt_udp_connect(ptr ${handle}, ptr ${host}, i64 ${port}, ptr ${reason})`);
-          else emit(`${outcome} = call i32 @fsh_rt_udp_send(ptr ${handle}, ptr ${field(2)[0]}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${reason})`);
+          this.emit(`${host} = load ptr, ptr ${hostAt}`);
+          this.emit(`${port} = load i64, ptr ${portAt}`);
+          if (leaf.method === "udpConnect") this.emit(`${outcome} = call i32 @fsh_rt_udp_connect(ptr ${handle}, ptr ${host}, i64 ${port}, ptr ${reason})`);
+          else this.emit(`${outcome} = call i32 @fsh_rt_udp_send(ptr ${handle}, ptr ${field(2)[0]}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${reason})`);
         } else if (leaf.method === "receiveFrom") {
           // `receive()` gives the bytes alone; `receiveFrom()` the sender's address with them.
           const from = leaf.of === "void";
-          const [hostAt, portAt] = [alloca("ptr"), alloca("i64")];
-          emit(`${outcome} = call i32 @fsh_rt_udp_receive(ptr ${handle}, ptr %cx, ptr ${made}, ptr ${from ? hostAt : "null"}, ptr ${portAt}, ptr ${reason})`);
-          const bytes = temp();
-          emit(`${bytes} = load ${ARRAY}, ptr ${made}`);
+          const [hostAt, portAt] = [this.alloca("ptr"), this.alloca("i64")];
+          this.emit(`${outcome} = call i32 @fsh_rt_udp_receive(ptr ${handle}, ptr %cx, ptr ${made}, ptr ${from ? hostAt : "null"}, ptr ${portAt}, ptr ${reason})`);
+          const bytes = this.temp();
+          this.emit(`${bytes} = load ${ARRAY}, ptr ${made}`);
           given = bytes;
           if (from) {
-            const [host, port, withBytes, withHost, withPort] = [temp(), temp(), temp(), temp(), temp()];
-            emit(`${host} = load ptr, ptr ${hostAt}`);
-            emit(`${port} = load i64, ptr ${portAt}`);
-            emit(`${withBytes} = insertvalue ${llvm(typing.rec(shape).gives)} undef, ${ARRAY} ${bytes}, 0`);
-            emit(`${withHost} = insertvalue ${llvm(typing.rec(shape).gives)} ${withBytes}, ptr ${host}, 1`);
-            emit(`${withPort} = insertvalue ${llvm(typing.rec(shape).gives)} ${withHost}, i64 ${port}, 2`);
+            const [host, port, withBytes, withHost, withPort] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+            this.emit(`${host} = load ptr, ptr ${hostAt}`);
+            this.emit(`${port} = load i64, ptr ${portAt}`);
+            this.emit(`${withBytes} = insertvalue ${this.llvm(this.typing.rec(shape).gives)} undef, ${ARRAY} ${bytes}, 0`);
+            this.emit(`${withHost} = insertvalue ${this.llvm(this.typing.rec(shape).gives)} ${withBytes}, ptr ${host}, 1`);
+            this.emit(`${withPort} = insertvalue ${this.llvm(this.typing.rec(shape).gives)} ${withHost}, i64 ${port}, 2`);
             given = withPort;
           }
         } else if (leaf.method === "read") {
           const [maxAt, max] = field(2);
-          emit(`${max} = load i64, ptr ${maxAt}`);
-          emit(`${outcome} = call i32 @fsh_rt_tcp_read(ptr ${handle}, i64 ${max}, ptr %cx, ptr ${made}, ptr ${reason})`);
+          this.emit(`${max} = load i64, ptr ${maxAt}`);
+          this.emit(`${outcome} = call i32 @fsh_rt_tcp_read(ptr ${handle}, i64 ${max}, ptr %cx, ptr ${made}, ptr ${reason})`);
         } else if (leaf.method === "write") {
           const [bytesAt] = field(2);
           const [writtenAt] = field(3);
-          emit(`${outcome} = call i32 @fsh_rt_tcp_write(ptr ${handle}, ptr ${bytesAt}, ptr ${writtenAt}, ptr %cx, ptr ${reason})`);
+          this.emit(`${outcome} = call i32 @fsh_rt_tcp_write(ptr ${handle}, ptr ${bytesAt}, ptr ${writtenAt}, ptr %cx, ptr ${reason})`);
         } else {
           const first = leaf.method === "bind" ? 1 : 2;
           const [hostAt, host] = field(first);
           const [portAt, port] = field(first + 1);
-          emit(`${host} = load ptr, ptr ${hostAt}`);
-          emit(`${port} = load i64, ptr ${portAt}`);
-          if (leaf.method === "bind" && leaf.of !== "void" && !onPath(typing, leaf.of)) emit(`${outcome} = call i32 @fsh_rt_udp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
-          else if (leaf.method === "bind" && onPath(typing, leaf.of)) emit(`${outcome} = call i32 @fsh_rt_unix_bind(ptr ${host}, ptr ${made}, ptr ${reason})`);
-          else if (leaf.method === "bind") emit(`${outcome} = call i32 @fsh_rt_tcp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
-          else if (leaf.of !== "void") emit(`${outcome} = call i32 @fsh_rt_unix_connect(ptr ${slot}, ptr ${host}, ptr %cx, ptr ${made}, ptr ${reason})`);
-          else emit(`${outcome} = call i32 @fsh_rt_tcp_connect(ptr ${slot}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${made}, ptr ${reason})`);
+          this.emit(`${host} = load ptr, ptr ${hostAt}`);
+          this.emit(`${port} = load i64, ptr ${portAt}`);
+          if (leaf.method === "bind" && leaf.of !== "void" && !onPath(this.typing, leaf.of)) this.emit(`${outcome} = call i32 @fsh_rt_udp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
+          else if (leaf.method === "bind" && onPath(this.typing, leaf.of)) this.emit(`${outcome} = call i32 @fsh_rt_unix_bind(ptr ${host}, ptr ${made}, ptr ${reason})`);
+          else if (leaf.method === "bind") this.emit(`${outcome} = call i32 @fsh_rt_tcp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
+          else if (leaf.of !== "void") this.emit(`${outcome} = call i32 @fsh_rt_unix_connect(ptr ${slot}, ptr ${host}, ptr %cx, ptr ${made}, ptr ${reason})`);
+          else this.emit(`${outcome} = call i32 @fsh_rt_tcp_connect(ptr ${slot}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${made}, ptr ${reason})`);
         }
         if (!["write", "sendTo", "udpConnect", "receiveFrom"].includes(leaf.method)) {
-          given = temp();
-          emit(`${given} = load ${leaf.method === "read" ? ARRAY : "ptr"}, ptr ${made}`);
+          given = this.temp();
+          this.emit(`${given} = load ${leaf.method === "read" ? ARRAY : "ptr"}, ptr ${made}`);
         }
       } else if (file) {
         // A file's job runs on the runtime's blocking pool, its frame the path, a write's bytes,
         // and the job once handed over.
         const reading = leaf.method === "readFile";
-        const [made, jobAt] = [alloca(ARRAY), temp()];
-        emit(`store ${ARRAY} zeroinitializer, ptr ${made}`);
-        emit(`${jobAt} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 ${reading ? 2 : 3}`);
+        const [made, jobAt] = [this.alloca(ARRAY), this.temp()];
+        this.emit(`store ${ARRAY} zeroinitializer, ptr ${made}`);
+        this.emit(`${jobAt} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 ${reading ? 2 : 3}`);
         let bytesAt = "null";
         if (!reading) {
-          bytesAt = temp();
-          emit(`${bytesAt} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 2`);
+          bytesAt = this.temp();
+          this.emit(`${bytesAt} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 2`);
         }
-        emit(`${outcome} = call i32 @fsh_rt_file_poll(ptr ${handle}, ptr ${bytesAt}, ptr ${jobAt}, i32 ${reading ? 0 : 1}, ptr %cx, ptr ${made}, ptr ${reason})`);
+        this.emit(`${outcome} = call i32 @fsh_rt_file_poll(ptr ${handle}, ptr ${bytesAt}, ptr ${jobAt}, i32 ${reading ? 0 : 1}, ptr %cx, ptr ${made}, ptr ${reason})`);
         if (reading) {
-          given = temp();
-          emit(`${given} = load ${ARRAY}, ptr ${made}`);
+          given = this.temp();
+          this.emit(`${given} = load ${ARRAY}, ptr ${made}`);
         }
       } else if (leaf.method === "timerNext") {
         // The next timer's callable, or none once the program is done with timers.
         // Ended with nothing, it is ready all the same.
-        const [made, raw, dyn, option, got, nothing] = [alloca("[2 x ptr]"), temp(), temp(), temp(), temp(), temp()];
-        emit(`${raw} = call i32 @fsh_rt_timeout_next(ptr %cx, ptr ${made})`);
-        emit(`${dyn} = load ${DYN}, ptr ${made}`);
-        emit(`${got} = icmp eq i32 ${raw}, 1`);
-        emit(`${nothing} = icmp eq i32 ${raw}, 2`);
-        emit(`${option} = select i1 ${got}, ${llvm(typing.rec(shape).gives)} ${convert(dyn, leaf.of, typing.rec(shape).gives)}, ${llvm(typing.rec(shape).gives)} ${convert("zeroinitializer", "null", typing.rec(shape).gives)}`);
+        const [made, raw, dyn, option, got, nothing] = [this.alloca("[2 x ptr]"), this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+        this.emit(`${raw} = call i32 @fsh_rt_timeout_next(ptr %cx, ptr ${made})`);
+        this.emit(`${dyn} = load ${DYN}, ptr ${made}`);
+        this.emit(`${got} = icmp eq i32 ${raw}, 1`);
+        this.emit(`${nothing} = icmp eq i32 ${raw}, 2`);
+        this.emit(`${option} = select i1 ${got}, ${this.llvm(this.typing.rec(shape).gives)} ${this.convert(dyn, leaf.of, this.typing.rec(shape).gives)}, ${this.llvm(this.typing.rec(shape).gives)} ${this.convert("zeroinitializer", "null", this.typing.rec(shape).gives)}`);
         given = option;
-        emit(`${outcome} = select i1 ${nothing}, i32 1, i32 ${raw}`);
+        this.emit(`${outcome} = select i1 ${nothing}, i32 1, i32 ${raw}`);
       } else if (leaf.method === "jsAwait") {
         // A JS promise: what it settled with, read as its declaration says once it fulfilled,
         // or what it rejected with, for the JsError its awaiter is thrown.
-        const [waitingAt, made] = [temp(), alloca("ptr")];
-        emit(`${waitingAt} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 2`);
-        emit(`${outcome} = call i32 @fsh_rt_js_await(ptr ${handle}, ptr ${waitingAt}, ptr %cx, ptr ${made})`);
+        const [waitingAt, made] = [this.temp(), this.alloca("ptr")];
+        this.emit(`${waitingAt} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 2`);
+        this.emit(`${outcome} = call i32 @fsh_rt_js_await(ptr ${handle}, ptr ${waitingAt}, ptr %cx, ptr ${made})`);
         reason = made;
         readied = () => {
-          const box = temp();
-          emit(`${box} = load ptr, ptr ${made}`);
-          if (leaf.of !== "void") return fromJs(box, leaf.of, "the awaited promise fulfilled with", e);
-          emit(`call void @fsh_rt_js_release(ptr ${box})`);
+          const box = this.temp();
+          this.emit(`${box} = load ptr, ptr ${made}`);
+          if (leaf.of !== "void") return this.fromJs(box, leaf.of, "the awaited promise fulfilled with", e);
+          this.emit(`call void @fsh_rt_js_release(ptr ${box})`);
           return undefined;
         };
       } else if (leaf.method === "sleep") {
-        emit(`${outcome} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
+        this.emit(`${outcome} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
       } else if (leaf.method === "acquire") {
-        const [permit, made] = [alloca("ptr"), temp()];
-        emit(`${outcome} = call i32 @fsh_rt_semaphore_acquire(ptr ${handle}, ptr %cx, ptr ${permit}, ptr ${at})`);
-        emit(`${made} = load ptr, ptr ${permit}`);
+        const [permit, made] = [this.alloca("ptr"), this.temp()];
+        this.emit(`${outcome} = call i32 @fsh_rt_semaphore_acquire(ptr ${handle}, ptr %cx, ptr ${permit}, ptr ${at})`);
+        this.emit(`${made} = load ptr, ptr ${permit}`);
         given = made;
       } else if (leaf.method === "send") {
-        const [moving, closed] = [temp(), temp()];
-        emit(`${moving} = getelementptr ${llvm(inner)}, ptr ${at}, i32 0, i32 2`);
-        emit(`${outcome} = call i32 @fsh_rt_channel_send(ptr ${handle}, ptr ${moving}, ptr %cx, ptr ${at})`);
-        emit(`${closed} = icmp eq i32 ${outcome}, 3`);
-        panicIf(closed, "send on a closed channel", e);
+        const [moving, closed] = [this.temp(), this.temp()];
+        this.emit(`${moving} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 2`);
+        this.emit(`${outcome} = call i32 @fsh_rt_channel_send(ptr ${handle}, ptr ${moving}, ptr %cx, ptr ${at})`);
+        this.emit(`${closed} = icmp eq i32 ${outcome}, 3`);
+        this.panicIf(closed, "send on a closed channel", e);
       } else {
-        const buffer = alloca(llvm(leaf.of));
-        emit(`${outcome} = call i32 @fsh_rt_channel_receive(ptr ${handle}, ptr ${buffer}, ptr %cx, ptr ${at})`);
+        const buffer = this.alloca(this.llvm(leaf.of));
+        this.emit(`${outcome} = call i32 @fsh_rt_channel_receive(ptr ${handle}, ptr ${buffer}, ptr %cx, ptr ${at})`);
         // What it gives is an Option: the value, or empty once the channel is closed and drained.
-        const [got, read, option] = [temp(), temp(), temp()];
-        emit(`${got} = icmp eq i32 ${outcome}, 1`);
-        emit(`${read} = load ${llvm(leaf.of)}, ptr ${buffer}`);
-        emit(`${option} = select i1 ${got}, ${llvm(typing.rec(shape).gives)} ${convert(read, leaf.of, typing.rec(shape).gives)}, ${llvm(typing.rec(shape).gives)} ${convert("zeroinitializer", "null", typing.rec(shape).gives)}`);
+        const [got, read, option] = [this.temp(), this.temp(), this.temp()];
+        this.emit(`${got} = icmp eq i32 ${outcome}, 1`);
+        this.emit(`${read} = load ${this.llvm(leaf.of)}, ptr ${buffer}`);
+        this.emit(`${option} = select i1 ${got}, ${this.llvm(this.typing.rec(shape).gives)} ${this.convert(read, leaf.of, this.typing.rec(shape).gives)}, ${this.llvm(this.typing.rec(shape).gives)} ${this.convert("zeroinitializer", "null", this.typing.rec(shape).gives)}`);
         given = option;
       }
-      emit(`${tag} = trunc i32 ${outcome} to i8`);
-      if (!signal) emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${ready} i8 5, label %${failed} ]`);
+      this.emit(`${tag} = trunc i32 ${outcome} to i8`);
+      if (!signal) this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${ready} i8 5, label %${failed} ]`);
       else {
-        const [over, broke] = [label(), label()];
-        emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${over} i8 2, label %${over} i8 5, label %${broke} ]`);
-        startBlock(over);
-        emit(`call void @fsh_rt_signal_leave(ptr ${signal[0]}, ptr ${signal[1]}, ptr %cx)`);
-        emit(`br label %${ready}`);
-        startBlock(broke);
-        emit(`call void @fsh_rt_signal_leave(ptr ${signal[0]}, ptr ${signal[1]}, ptr %cx)`);
-        emit(`br label %${failed}`);
+        const [over, broke] = [this.label(), this.label()];
+        this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${over} i8 2, label %${over} i8 5, label %${broke} ]`);
+        this.startBlock(over);
+        this.emit(`call void @fsh_rt_signal_leave(ptr ${signal[0]}, ptr ${signal[1]}, ptr %cx)`);
+        this.emit(`br label %${ready}`);
+        this.startBlock(broke);
+        this.emit(`call void @fsh_rt_signal_leave(ptr ${signal[0]}, ptr ${signal[1]}, ptr %cx)`);
+        this.emit(`br label %${failed}`);
       }
     } else if (inner === YIELD_NOW) {
       // Pending the first time it is polled, done the next.
-      const [state, fresh] = [temp(), temp()];
-      emit(`${state} = load i32, ptr ${at}`);
-      emit(`store i32 1, ptr ${at}`);
-      emit(`${fresh} = icmp eq i32 ${state}, 0`);
-      emit(`br i1 ${fresh}, label %${waiting}, label %${ready}`);
+      const [state, fresh] = [this.temp(), this.temp()];
+      this.emit(`${state} = load i32, ptr ${at}`);
+      this.emit(`store i32 1, ptr ${at}`);
+      this.emit(`${fresh} = icmp eq i32 ${state}, 0`);
+      this.emit(`br i1 ${fresh}, label %${waiting}, label %${ready}`);
     } else if (inner === SLEEP) {
-      const done = temp();
-      emit(`${done} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
-      emit(`${tag} = trunc i32 ${done} to i8`);
-      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
-    } else if (typing.rec(inner).kind === "handle") {
+      const done = this.temp();
+      this.emit(`${done} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
+      this.emit(`${tag} = trunc i32 ${done} to i8`);
+      this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
+    } else if (this.typing.rec(inner).kind === "handle") {
       // A spawned task: the runtime copies its result out once it is done.
       // Awaited plainly, a task that panicked panics its awaiter; joined, it fails with its reason.
       const base = handle!.joined?.base ?? (inner as HandleType);
-      const [buffer, task, outcome] = [alloca(pollType(base)), temp(), temp()];
-      emit(`${task} = load ptr, ptr ${at}`);
+      const [buffer, task, outcome] = [this.alloca(this.pollType(base)), this.temp(), this.temp()];
+      this.emit(`${task} = load ptr, ptr ${at}`);
       if (handle!.joined) {
-        why = alloca("ptr");
-        emit(`${outcome} = call i32 @fsh_rt_join(ptr ${task}, ptr %cx, ptr ${buffer}, ptr null, ptr ${why})`);
-      } else unwinding(`call i32 @fsh_rt_join(ptr ${task}, ptr %cx, ptr ${buffer}, ptr ${panicAt(e)}, ptr null)`, outcome);
-      emit(`${result} = load ${pollType(base)}, ptr ${buffer}`);
-      emit(`${tag} = trunc i32 ${outcome} to i8`);
-      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} i8 3, label %${failed} ]`);
-    } else if (typing.rec(inner).kind === "dyn") {
+        why = this.alloca("ptr");
+        this.emit(`${outcome} = call i32 @fsh_rt_join(ptr ${task}, ptr %cx, ptr ${buffer}, ptr null, ptr ${why})`);
+      } else this.unwinding(`call i32 @fsh_rt_join(ptr ${task}, ptr %cx, ptr ${buffer}, ptr ${this.panicAt(e)}, ptr null)`, outcome);
+      this.emit(`${result} = load ${this.pollType(base)}, ptr ${buffer}`);
+      this.emit(`${tag} = trunc i32 ${outcome} to i8`);
+      this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} i8 3, label %${failed} ]`);
+    } else if (this.typing.rec(inner).kind === "dyn") {
       // Through its vtable: the slot after drop, copy and clone is the future's own poll.
-      const [dyn, data, table, slot, fn] = [temp(), temp(), temp(), temp(), temp()];
-      emit(`${dyn} = load ${DYN}, ptr ${at}`);
-      emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
-      emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
-      emit(`${slot} = getelementptr ptr, ptr ${table}, i64 3`);
-      emit(`${fn} = load ptr, ptr ${slot}`);
-      unwinding(`call ${pollType(shape)} ${fn}(ptr ${data}, ptr %cx)`, result);
-      emit(`${tag} = extractvalue ${pollType(shape)} ${result}, 0`);
-      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
+      const [dyn, data, table, slot, fn] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
+      this.emit(`${dyn} = load ${DYN}, ptr ${at}`);
+      this.emit(`${data} = extractvalue ${DYN} ${dyn}, 0`);
+      this.emit(`${table} = extractvalue ${DYN} ${dyn}, 1`);
+      this.emit(`${slot} = getelementptr ptr, ptr ${table}, i64 3`);
+      this.emit(`${fn} = load ptr, ptr ${slot}`);
+      this.unwinding(`call ${this.pollType(shape)} ${fn}(ptr ${data}, ptr %cx)`, result);
+      this.emit(`${tag} = extractvalue ${this.pollType(shape)} ${result}, 0`);
+      this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
     } else {
-      const fn = typing.combinedOf.has(inner as FutureType) ? combinePoll(inner as FutureType) : symbol(noted.arenas, futureOf.get(inner as FutureType)!);
-      unwinding(`call ${pollType(shape)} ${fn}(ptr ${at}, ptr %cx)`, result);
-      emit(`${tag} = extractvalue ${pollType(shape)} ${result}, 0`);
-      emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
+      const fn = this.typing.combinedOf.has(inner as FutureType) ? this.combinePoll(inner as FutureType) : this.symbol(this.noted.arenas, this.futureOf.get(inner as FutureType)!);
+      this.unwinding(`call ${this.pollType(shape)} ${fn}(ptr ${at}, ptr %cx)`, result);
+      this.emit(`${tag} = extractvalue ${this.pollType(shape)} ${result}, 0`);
+      this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
     }
     const error = () => {
-      const thrown = typing.rec(shape).throws!;
+      const thrown = this.typing.rec(shape).throws!;
       let error = "";
       if (leaf?.method === "jsAwait") {
-        error = jsError(reason!, thrown as ClassType);
+        error = this.jsError(reason!, thrown as ClassType);
       } else if (leaf && reason && !leaf.signal) {
-        error = ioError(reason, thrown as ClassType);
+        error = this.ioError(reason, thrown as ClassType);
       } else if (leaf && reason) {
         // Given a signal, it throws either: an AbortError when it was aborted, leaving no reason.
-        const members = typing.rec(thrown as UnionType).members as ClassType[];
-        const [io, aborted] = [members.find((m) => typing.rec(m).name === "IoError")!, members.find((m) => typing.rec(m).name === "AbortError")!];
-        const [text, none, ioAt, abortAt, join, made] = [temp(), temp(), label(), label(), label(), temp()];
-        emit(`${text} = load ptr, ptr ${reason}`);
-        emit(`${none} = icmp eq ptr ${text}, null`);
-        emit(`br i1 ${none}, label %${abortAt}, label %${ioAt}`);
-        startBlock(ioAt);
-        const asIo = convert(ioError(reason, io), io, thrown);
-        const fromIo = block;
-        emit(`br label %${join}`);
-        startBlock(abortAt);
-        const asAbort = convert(abortError(aborted), aborted, thrown);
-        const fromAbort = block;
-        emit(`br label %${join}`);
-        startBlock(join);
-        emit(`${made} = phi ${llvm(thrown)} [ ${asIo}, %${fromIo} ], [ ${asAbort}, %${fromAbort} ]`);
+        const members = this.typing.rec(thrown as UnionType).members as ClassType[];
+        const [io, aborted] = [members.find((m) => this.typing.rec(m).name === "IoError")!, members.find((m) => this.typing.rec(m).name === "AbortError")!];
+        const [text, none, ioAt, abortAt, join, made] = [this.temp(), this.temp(), this.label(), this.label(), this.label(), this.temp()];
+        this.emit(`${text} = load ptr, ptr ${reason}`);
+        this.emit(`${none} = icmp eq ptr ${text}, null`);
+        this.emit(`br i1 ${none}, label %${abortAt}, label %${ioAt}`);
+        this.startBlock(ioAt);
+        const asIo = this.convert(this.ioError(reason, io), io, thrown);
+        const fromIo = this.block;
+        this.emit(`br label %${join}`);
+        this.startBlock(abortAt);
+        const asAbort = this.convert(this.abortError(aborted), aborted, thrown);
+        const fromAbort = this.block;
+        this.emit(`br label %${join}`);
+        this.startBlock(join);
+        this.emit(`${made} = phi ${this.llvm(thrown)} [ ${asIo}, %${fromIo} ], [ ${asAbort}, %${fromAbort} ]`);
         error = made;
-      } else if (leaf && leaf.method !== "next") error = abortError(thrown);
-      else if (why) error = joinError(why, tag, result, typing.rec(inner as HandleType).joined!, thrown);
+      } else if (leaf && leaf.method !== "next") error = this.abortError(thrown);
+      else if (why) error = this.joinError(why, tag, result, this.typing.rec(inner as HandleType).joined!, thrown);
       else {
-        error = temp();
-        emit(`${error} = extractvalue ${pollType(shape)} ${result}, 2`);
+        error = this.temp();
+        this.emit(`${error} = extractvalue ${this.pollType(shape)} ${result}, 2`);
       }
       return error;
     };
     const value = () => {
       let v: string | undefined = readied ? readied() : given;
-      if (typing.rec(shape).gives !== "void" && (!leaf || leaf.method === "next")) {
-        v = temp();
-        emit(`${v} = extractvalue ${pollType(polledAs)} ${result}, 1`);
+      if (this.typing.rec(shape).gives !== "void" && (!leaf || leaf.method === "next")) {
+        v = this.temp();
+        this.emit(`${v} = extractvalue ${this.pollType(polledAs)} ${result}, 1`);
       }
       return v;
     };
     return { waiting, ready, failed, value, error };
   }
 
+
   // What a joined task's await throws: a TaskPanic holding the reason it panicked with, when its
   // outcome `tag` is 3, or else the error it threw itself.
-  function joinError(why: string, tag: string, result: string, joined: { base: HandleType; panic: Type }, thrown: Type): string {
+  joinError(this: Mut<this>, why: string, tag: string, result: string, joined: { base: HandleType; panic: Type }, thrown: Type): string {
     const [base, panicked] = [joined.base, joined.panic as ClassType];
     const make = () => {
-      const [reason, made] = [temp(), temp()];
-      emit(`${reason} = load ptr, ptr ${why}`);
-      emit(`${made} = insertvalue ${llvm(panicked)} zeroinitializer, ptr ${reason}, ${typing.rec(panicked).fields.findIndex((f) => f.name === "message")}`);
-      return convert(made, panicked, thrown);
+      const [reason, made] = [this.temp(), this.temp()];
+      this.emit(`${reason} = load ptr, ptr ${why}`);
+      this.emit(`${made} = insertvalue ${this.llvm(panicked)} zeroinitializer, ptr ${reason}, ${this.typing.rec(panicked).fields.findIndex((f) => f.name === "message")}`);
+      return this.convert(made, panicked, thrown);
     };
-    if (!typing.rec(base).throws) return make();
-    const [isPanic, onPanic, onThrow, join, made] = [temp(), label(), label(), label(), temp()];
-    emit(`${isPanic} = icmp eq i8 ${tag}, 3`);
-    emit(`br i1 ${isPanic}, label %${onPanic}, label %${onThrow}`);
-    startBlock(onPanic);
+    if (!this.typing.rec(base).throws) return make();
+    const [isPanic, onPanic, onThrow, join, made] = [this.temp(), this.label(), this.label(), this.label(), this.temp()];
+    this.emit(`${isPanic} = icmp eq i8 ${tag}, 3`);
+    this.emit(`br i1 ${isPanic}, label %${onPanic}, label %${onThrow}`);
+    this.startBlock(onPanic);
     const asPanic = make();
-    const fromPanic = block;
-    emit(`br label %${join}`);
-    startBlock(onThrow);
-    const own = temp();
-    emit(`${own} = extractvalue ${pollType(base)} ${result}, 2`);
-    const asOwn = convert(own, typing.rec(base).throws!, thrown);
-    const fromOwn = block;
-    emit(`br label %${join}`);
-    startBlock(join);
-    emit(`${made} = phi ${llvm(thrown)} [ ${asPanic}, %${fromPanic} ], [ ${asOwn}, %${fromOwn} ]`);
+    const fromPanic = this.block;
+    this.emit(`br label %${join}`);
+    this.startBlock(onThrow);
+    const own = this.temp();
+    this.emit(`${own} = extractvalue ${this.pollType(base)} ${result}, 2`);
+    const asOwn = this.convert(own, this.typing.rec(base).throws!, thrown);
+    const fromOwn = this.block;
+    this.emit(`br label %${join}`);
+    this.startBlock(join);
+    this.emit(`${made} = phi ${this.llvm(thrown)} [ ${asPanic}, %${fromPanic} ], [ ${asOwn}, %${fromOwn} ]`);
     return made;
   }
+
 
   // The C entry point. An error escaping Fish's `main` is printed to stderr, exiting with 1.
   // A C function under an export's name, calling it. A panic can't unwind into C, so one that
   // reaches here aborts, its message already printed.
-  function exported(i: Instance): string[] {
-    const params = bodyOf(noted.arenas, i).params.map((p, n) => [localOf(i.locals.get(p)!).type, `%a${n}`] as const);
+  exported(this: Mut<this>, i: Instance): string[] {
+    const params = bodyOf(this.noted.arenas, i).params.map((p, n) => [this.localOf(i.locals.get(p)!).type, `%a${n}`] as const);
     // A library's panics all unwind, the runtime's default, whichever way the build chose: the
     // abort happens here, before C sees the unwind.
-    const call = `${i.returns === "void" ? "" : "%r = "}invoke ${llvm(i.returns)} ${symbol(noted.arenas, i)}(${params.map(([t, a]) => `${llvm(t)} ${a}`).join(", ")})`;
-    const head = `define ${crossed(llvm, i.returns)} @"${bodyOf(noted.arenas, i).name}"(${params.map(([t, a]) => `${crossing(llvm, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
-    const done = i.returns === "void" ? "  ret void" : `  ret ${llvm(i.returns)} %r`;
+    const call = `${i.returns === "void" ? "" : "%r = "}invoke ${this.llvm(i.returns)} ${this.symbol(this.noted.arenas, i)}(${params.map(([t, a]) => `${this.llvm(t)} ${a}`).join(", ")})`;
+    const head = `define ${crossed(this.llvm, i.returns)} @"${bodyOf(this.noted.arenas, i).name}"(${params.map(([t, a]) => `${crossing(this.llvm, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
+    const done = i.returns === "void" ? "  ret void" : `  ret ${this.llvm(i.returns)} %r`;
     return [head, "entry:", `  ${call} to label %ok unwind label %pad`, "ok:", done, "pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  call void @abort()", "  unreachable", "}", ""];
   }
 
-  function entry(): string[] {
-    if (main.future) return driver(main.future);
+
+  entry(this: Mut<this>): string[] {
+    if (this.main.future) return this.driver(this.main.future);
     // The runtime keeps the program's arguments for `process.argv`.
-    if (!main.throws) return [`define i32 @main(i32 %argc, ptr %argv) ${unwinds} {`, "  call void @fsh_rt_args(i32 %argc, ptr %argv)", '  call void @"fsh.main"()', "  ret i32 0", "}"];
-    current = main;
-    ({ types, locals, calls, setters, coercions, jumps } = main);
-    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
-    const type = resultType(main);
-    const [result, failed, bad, ok, error] = [temp(), temp(), label(), label(), temp()];
-    emit("call void @fsh_rt_args(i32 %argc, ptr %argv)");
-    emit(`${result} = call ${type} @"fsh.main"()`);
-    emit(`${failed} = extractvalue ${type} ${result}, 0`);
-    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
-    startBlock(ok);
-    emit("ret i32 0");
-    startBlock(bad);
-    emit(`${error} = extractvalue ${type} ${result}, 2`);
+    if (!this.main.throws) return [`define i32 @main(i32 %argc, ptr %argv) ${this.unwinds} {`, "  call void @fsh_rt_args(i32 %argc, ptr %argv)", '  call void @"fsh.main"()', "  ret i32 0", "}"];
+    this.current = this.main;
+    ({ types: this.types, locals: this.locals, calls: this.calls, setters: this.setters, coercions: this.coercions, jumps: this.jumps } = this.main);
+    [this.allocas, this.body, this.temps, this.labels, this.block] = [[], [], 0, 0, "entry"];
+    const type = this.resultType(this.main);
+    const [result, failed, bad, ok, error] = [this.temp(), this.temp(), this.label(), this.label(), this.temp()];
+    this.emit("call void @fsh_rt_args(i32 %argc, ptr %argv)");
+    this.emit(`${result} = call ${type} @"fsh.main"()`);
+    this.emit(`${failed} = extractvalue ${type} ${result}, 0`);
+    this.emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    this.startBlock(ok);
+    this.emit("ret i32 0");
+    this.startBlock(bad);
+    this.emit(`${error} = extractvalue ${type} ${result}, 2`);
     // Output printed before the error stays ahead of it, as a panic's does.
-    emit("call i32 @fflush(ptr null)");
-    write(2, ["Error:", [error, main.throws]], builder, convert);
-    dispose(error, main.throws);
-    emit("ret i32 1");
-    return [`define i32 @main(i32 %argc, ptr %argv) ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
+    this.emit("call i32 @fflush(ptr null)");
+    write(2, ["Error:", [error, this.main.throws]], this.builder, this.convert);
+    this.dispose(error, this.main.throws);
+    this.emit("ret i32 1");
+    return [`define i32 @main(i32 %argc, ptr %argv) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}"];
   }
+
 
   // An async `main`, run by the runtime as its first task; an error it gives is reported as a
   // throwing `main`'s is.
-  function driver(future: FutureType): string[] {
-    const [poll, drop, dropOutput] = taskGlue(future);
-    current = main;
-    ({ types, locals, calls, setters, coercions, jumps } = main);
-    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
-    const type = pollType(future);
-    const [frame, out, outcome, result, failed, ok, bad] = [temp(), temp(), temp(), temp(), temp(), label(), label()];
-    allocas.push(`  ${frame} = alloca ${llvm(future)}`, `  store ${llvm(future)} zeroinitializer, ptr ${frame}`, `  ${out} = alloca ${type}`);
-    emit("call void @fsh_rt_args(i32 %argc, ptr %argv)");
-    emit(`${outcome} = call i32 @fsh_rt_run(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${sizeOf(llvm(future))}, i64 ${sizeOf(type)}, ptr ${out})`);
-    emit(`${failed} = icmp eq i32 ${outcome}, 2`);
-    emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
-    startBlock(ok);
-    emit("ret i32 0");
-    startBlock(bad);
-    emit(`${result} = load ${type}, ptr ${out}`);
-    if (typing.rec(future).throws) {
-      const error = temp();
-      emit(`${error} = extractvalue ${type} ${result}, 2`);
-      emit("call i32 @fflush(ptr null)");
-      write(2, ["Error:", [error, typing.rec(future).throws!]], builder, convert);
-      dispose(error, typing.rec(future).throws!);
-      emit("ret i32 1");
-    } else emit("unreachable");
-    return [`define i32 @main(i32 %argc, ptr %argv) ${unwinds} {`, "entry:", ...allocas, ...body, "}"];
+  driver(this: Mut<this>, future: FutureType): string[] {
+    const [poll, drop, dropOutput] = this.taskGlue(future);
+    this.current = this.main;
+    ({ types: this.types, locals: this.locals, calls: this.calls, setters: this.setters, coercions: this.coercions, jumps: this.jumps } = this.main);
+    [this.allocas, this.body, this.temps, this.labels, this.block] = [[], [], 0, 0, "entry"];
+    const type = this.pollType(future);
+    const [frame, out, outcome, result, failed, ok, bad] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.label(), this.label()];
+    this.allocas.push(`  ${frame} = alloca ${this.llvm(future)}`, `  store ${this.llvm(future)} zeroinitializer, ptr ${frame}`, `  ${out} = alloca ${type}`);
+    this.emit("call void @fsh_rt_args(i32 %argc, ptr %argv)");
+    this.emit(`${outcome} = call i32 @fsh_rt_run(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(type)}, ptr ${out})`);
+    this.emit(`${failed} = icmp eq i32 ${outcome}, 2`);
+    this.emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
+    this.startBlock(ok);
+    this.emit("ret i32 0");
+    this.startBlock(bad);
+    this.emit(`${result} = load ${type}, ptr ${out}`);
+    if (this.typing.rec(future).throws) {
+      const error = this.temp();
+      this.emit(`${error} = extractvalue ${type} ${result}, 2`);
+      this.emit("call i32 @fflush(ptr null)");
+      write(2, ["Error:", [error, this.typing.rec(future).throws!]], this.builder, this.convert);
+      this.dispose(error, this.typing.rec(future).throws!);
+      this.emit("ret i32 1");
+    } else this.emit("unreachable");
+    return [`define i32 @main(i32 %argc, ptr %argv) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}"];
   }
+
 
   // A JsError from the box of what JS threw at `thrown`: named, its message read from the value,
   // which it keeps.
-  function jsError(thrown: string, error: ClassType): string {
-    const [box, message] = [temp(), temp()];
-    emit(`${box} = load ptr, ptr ${thrown}`);
-    emit(`${message} = call ptr @fsh_rt_js_message(ptr ${box})`);
+  jsError(this: Mut<this>, thrown: string, error: ClassType): string {
+    const [box, message] = [this.temp(), this.temp()];
+    this.emit(`${box} = load ptr, ptr ${thrown}`);
+    this.emit(`${message} = call ptr @fsh_rt_js_message(ptr ${box})`);
     let made = "zeroinitializer";
     const put = (name: string, v: string) => {
-      const next = temp();
-      emit(`${next} = insertvalue ${llvm(error)} ${made}, ${llvm(typing.field(error, name)!.type)} ${v}, ${typing.fieldPath(error, name).join(", ")}`);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${this.llvm(error)} ${made}, ${this.llvm(this.typing.field(error, name)!.type)} ${v}, ${this.typing.fieldPath(error, name).join(", ")}`);
       made = next;
     };
-    put("name", text("JsError"));
+    put("name", this.text("JsError"));
     put("message", message);
-    put("cause", convert("zeroinitializer", "null", typing.field(error, "cause")!.type));
+    put("cause", this.convert("zeroinitializer", "null", this.typing.field(error, "cause")!.type));
     put("value", box);
     return made;
   }
 
+
   // An IoError from the parts the runtime gave at `parts`: its message, code, system call and
   // path, the path empty where the runtime gave none.
-  function ioError(parts: string, io: ClassType): string {
+  ioError(this: Mut<this>, parts: string, io: ClassType): string {
     const part = (i: usize) => {
-      const [at, v] = [temp(), temp()];
-      emit(`${at} = getelementptr [4 x ptr], ptr ${parts}, i32 0, i32 ${i}`);
-      emit(`${v} = load ptr, ptr ${at}`);
+      const [at, v] = [this.temp(), this.temp()];
+      this.emit(`${at} = getelementptr [4 x ptr], ptr ${parts}, i32 0, i32 ${i}`);
+      this.emit(`${v} = load ptr, ptr ${at}`);
       return v;
     };
     const [message, code, syscall, path] = [part(0), part(1), part(2), part(3)];
     // A part the runtime left out is an empty string, or for the path, no path.
     const orEmpty = (v: string) => {
-      const [none, given] = [temp(), temp()];
-      emit(`${none} = icmp eq ptr ${v}, null`);
-      emit(`${given} = select i1 ${none}, ptr ${text("")}, ptr ${v}`);
+      const [none, given] = [this.temp(), this.temp()];
+      this.emit(`${none} = icmp eq ptr ${v}, null`);
+      this.emit(`${given} = select i1 ${none}, ptr ${this.text("")}, ptr ${v}`);
       return given;
     };
-    const option = typing.rec(io).fields.find((f) => f.name === "path")!.type;
-    const [none, held] = [temp(), temp()];
-    emit(`${none} = icmp eq ptr ${path}, null`);
-    emit(`${held} = select i1 ${none}, ${llvm(option)} ${convert("zeroinitializer", "null", option)}, ${llvm(option)} ${convert(path, "string", option)}`);
+    const option = this.typing.rec(io).fields.find((f) => f.name === "path")!.type;
+    const [none, held] = [this.temp(), this.temp()];
+    this.emit(`${none} = icmp eq ptr ${path}, null`);
+    this.emit(`${held} = select i1 ${none}, ${this.llvm(option)} ${this.convert("zeroinitializer", "null", option)}, ${this.llvm(option)} ${this.convert(path, "string", option)}`);
     let made = "zeroinitializer";
     for (const [name, v] of [["message", orEmpty(message)], ["code", orEmpty(code)], ["syscall", orEmpty(syscall)], ["path", held]] as const) {
-      const index = typing.rec(io).fields.findIndex((f) => f.name === name);
-      const next = temp();
-      emit(`${next} = insertvalue ${llvm(io)} ${made}, ${llvm(typing.rec(io).fields[index]!.type)} ${v}, ${index}`);
+      const index = this.typing.rec(io).fields.findIndex((f) => f.name === name);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${this.llvm(io)} ${made}, ${this.llvm(this.typing.rec(io).fields[index]!.type)} ${v}, ${index}`);
       made = next;
     }
     return made;
   }
 
+
   // The size of an LLVM type in bytes, as a constant.
-  function sizeOf(type: string): string {
+  sizeOf(this: Mut<this>, type: string): string {
     return `ptrtoint (ptr getelementptr (${type}, ptr null, i32 1) to i64)`;
   }
+
 
   // What the runtime needs to run a future as a task, made once per future type: a poll that
   // writes the result into the task's output and says pending (0), ready (1), failed (2) or
   // panicked (3); a drop of the frame where it stopped; and a drop of the output it gave.
-  function taskGlue(future: FutureType): [string, string, string] {
-    const name = (kind: string) => symbol(noted.arenas, futureOf.get(future)!).replace(/^@"fsh\./, `@"task.${kind}.`);
-    if (!glued.has(future)) {
-      glued.add(future);
-      const [frame, type] = [llvm(future), pollType(future)];
-      const output = `getelementptr i8, ptr %frame, i64 ${sizeOf(frame)}`;
-      const caught = panic === "abort" ? [] : ["pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  ret i32 3"];
-      const call = panic === "abort" ? `  %r = call ${type} ${symbol(noted.arenas, futureOf.get(future)!)}(ptr %frame, ptr %task)` : `  %r = invoke ${type} ${symbol(noted.arenas, futureOf.get(future)!)}(ptr %frame, ptr %task) to label %polled unwind label %pad`;
-      const [dropFrame, dropOutput] = [helperBody((v) => dispose(v, future)), outputDrop(future)];
-      out.push(
-        `define internal i32 ${name("poll")}(ptr %task, ptr %frame) ${UNWINDS} {`, "entry:", call, ...(panic === "abort" ? [] : ["polled:"]),
+  taskGlue(this: Mut<this>, future: FutureType): [string, string, string] {
+    const name = (kind: string) => this.symbol(this.noted.arenas, this.futureOf.get(future)!).replace(/^@"fsh\./, `@"task.${kind}.`);
+    if (!this.glued.has(future)) {
+      this.glued.add(future);
+      const [frame, type] = [this.llvm(future), this.pollType(future)];
+      const output = `getelementptr i8, ptr %frame, i64 ${this.sizeOf(frame)}`;
+      const caught = this.panic === "abort" ? [] : ["pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  ret i32 3"];
+      const call = this.panic === "abort" ? `  %r = call ${type} ${this.symbol(this.noted.arenas, this.futureOf.get(future)!)}(ptr %frame, ptr %task)` : `  %r = invoke ${type} ${this.symbol(this.noted.arenas, this.futureOf.get(future)!)}(ptr %frame, ptr %task) to label %polled unwind label %pad`;
+      const [dropFrame, dropOutput] = [this.helperBody((v) => this.dispose(v, future)), this.outputDrop(future)];
+      this.out.push(
+        `define internal i32 ${name("poll")}(ptr %task, ptr %frame) ${UNWINDS} {`, "entry:", call, ...(this.panic === "abort" ? [] : ["polled:"]),
         "  %tag = extractvalue " + type + " %r, 0", "  %done = icmp ne i8 %tag, 0", "  br i1 %done, label %finished, label %waiting",
         "waiting:", "  ret i32 0",
         "finished:", `  %out = ${output}`, `  store ${type} %r, ptr %out`, "  %outcome = zext i8 %tag to i32", "  ret i32 %outcome", ...caught, "}", "",
-        `define internal void ${name("drop")}(ptr %frame) ${unwinds} {`, "entry:", `  %v = load ${frame}, ptr %frame`, ...dropFrame, "  ret void", "}", "",
-        `define internal void ${name("output")}(ptr %out) ${unwinds} {`, "entry:", `  %v = load ${type}, ptr %out`, ...dropOutput, "  ret void", "}", "",
+        `define internal void ${name("drop")}(ptr %frame) ${this.unwinds} {`, "entry:", `  %v = load ${frame}, ptr %frame`, ...dropFrame, "  ret void", "}", "",
+        `define internal void ${name("output")}(ptr %out) ${this.unwinds} {`, "entry:", `  %v = load ${type}, ptr %out`, ...dropOutput, "  ret void", "}", "",
       );
     }
     return [name("poll"), name("drop"), name("output")];
   }
 
+
   // The instructions dropping `%v` of `type`, as a helper's body.
-  function helperBody(drop: (v: string) => void): string[] {
-    const saved = [allocas, body, temps, labels, block] as const;
-    [allocas, body, temps, labels, block] = [[], [], 0, 0, "entry"];
+  helperBody(this: Mut<this>, drop: (v: string) => void): string[] {
+    const saved = [this.allocas, this.body, this.temps, this.labels, this.block] as const;
+    [this.allocas, this.body, this.temps, this.labels, this.block] = [[], [], 0, 0, "entry"];
     drop("%v");
-    const lines = [...allocas, ...body];
-    [allocas, body, temps, labels, block] = saved as unknown as [string[], string[], usize, usize, string];
+    const lines = [...this.allocas, ...this.body];
+    [this.allocas, this.body, this.temps, this.labels, this.block] = saved as unknown as [string[], string[], usize, usize, string];
     return lines;
   }
 
+
   // Drops the value or the error in a finished future's poll result.
-  function outputDrop(future: FutureType): string[] {
-    return helperBody((v) => {
-      const type = pollType(future);
-      const [tag, ready, failed, end] = [temp(), label(), label(), label()];
-      emit(`${tag} = extractvalue ${type} ${v}, 0`);
-      emit(`switch i8 ${tag}, label %${end} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
-      startBlock(ready);
-      if (needsDrop(typing.rec(future).gives)) {
-        const value = temp();
-        emit(`${value} = extractvalue ${type} ${v}, 1`);
-        dispose(value, typing.rec(future).gives);
+  outputDrop(this: Mut<this>, future: FutureType): string[] {
+    return this.helperBody((v) => {
+      const type = this.pollType(future);
+      const [tag, ready, failed, end] = [this.temp(), this.label(), this.label(), this.label()];
+      this.emit(`${tag} = extractvalue ${type} ${v}, 0`);
+      this.emit(`switch i8 ${tag}, label %${end} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
+      this.startBlock(ready);
+      if (this.needsDrop(this.typing.rec(future).gives)) {
+        const value = this.temp();
+        this.emit(`${value} = extractvalue ${type} ${v}, 1`);
+        this.dispose(value, this.typing.rec(future).gives);
       }
-      emit(`br label %${end}`);
-      startBlock(failed);
-      if (typing.rec(future).throws && needsDrop(typing.rec(future).throws)) {
-        const error = temp();
-        emit(`${error} = extractvalue ${type} ${v}, 2`);
-        dispose(error, typing.rec(future).throws!);
+      this.emit(`br label %${end}`);
+      this.startBlock(failed);
+      if (this.typing.rec(future).throws && this.needsDrop(this.typing.rec(future).throws)) {
+        const error = this.temp();
+        this.emit(`${error} = extractvalue ${type} ${v}, 2`);
+        this.dispose(error, this.typing.rec(future).throws!);
       }
-      emit(`br label %${end}`);
-      startBlock(end);
+      this.emit(`br label %${end}`);
+      this.startBlock(end);
     });
   }
 
+
   // A pointer to the base embedded in an instance of `from`, through as many bases as it
   // takes to reach `to`.
-  function upcast(ptr: string, from: ClassType, to: ClassType): string {
-    for (let t = from; t !== to; t = typing.rec(t).base!) {
-      const next = temp();
-      emit(`${next} = getelementptr ${llvm(t)}, ptr ${ptr}, i32 0, i32 0`);
+  upcast(this: Mut<this>, ptr: string, from: ClassType, to: ClassType): string {
+    for (let t = from; t !== to; t = this.typing.rec(t).base!) {
+      const next = this.temp();
+      this.emit(`${next} = getelementptr ${this.llvm(t)}, ptr ${ptr}, i32 0, i32 0`);
       ptr = next;
     }
     return ptr;
   }
 
+
   // Where a method's receiver lives. A temporary, such as a call's or a getter's result,
   // gets a slot. A method that `owns` its object drops it: one in place is left empty, and one
   // in a slot is a copy of its own.
-  function receiver(object: Expr, owns = false): string {
-    if (object.kind === "super") return upcast("%this", self!, types.get(object) as ClassType);
+  receiver(this: Mut<this>, object: Expr, owns = false): string {
+    if (object.kind === "super") return this.upcast("%this", this.self!, this.types.get(object) as ClassType);
     // A reference already points where the receiver lives, or at the block it lives in.
-    if (isRef(types.get(object)!)) return blockOf(evaluate(object), typing.rec(types.get(object) as RefType).to);
+    if (this.isRef(this.types.get(object)!)) return this.blockOf(this.evaluate(object), this.typing.rec(this.types.get(object) as RefType).to);
     // In an optional chain, what the Option holds: in place when it is one member of it.
-    if (unwraps(object)) {
-      const option = types.get(object) as UnionType;
-      const held = coercions.get(object)!;
-      if (lendable(object) && typing.rec(option).members.includes(held)) {
-        const at = temp();
-        emit(`${at} = getelementptr ${llvm(option)}, ptr ${address(object)}, i32 0, i32 1`);
+    if (this.unwraps(object)) {
+      const option = this.types.get(object) as UnionType;
+      const held = this.coercions.get(object)!;
+      if (this.lendable(object) && this.typing.rec(option).members.includes(held)) {
+        const at = this.temp();
+        this.emit(`${at} = getelementptr ${this.llvm(option)}, ptr ${this.address(object)}, i32 0, i32 1`);
         return at;
       }
       // A variable narrowed to fewer members still holds its value in its own union's payload.
-      const local = object.kind === "ident" ? localAt(object) : undefined;
+      const local = object.kind === "ident" ? this.localAt(object) : undefined;
       const whole = local?.type;
-      const union = recOf(whole);
+      const union = this.recOf(whole);
       if (local && union?.kind === "union" && union.members.includes(held)) {
-        const at = temp();
-        emit(`${at} = getelementptr ${llvm(local.type)}, ptr ${slot(local)}, i32 0, i32 1`);
+        const at = this.temp();
+        this.emit(`${at} = getelementptr ${this.llvm(local.type)}, ptr ${this.slot(local)}, i32 0, i32 1`);
         return at;
       }
-      const copy = alloca(llvm(held));
-      const read = value(object);
-      const v = owns ? spill(copy, held, read) : read;
-      emit(`store ${llvm(held)} ${v}, ptr ${copy}`);
+      const copy = this.alloca(this.llvm(held));
+      const read = this.value(object);
+      const v = owns ? this.spill(copy, held, read) : read;
+      this.emit(`store ${this.llvm(held)} ${v}, ptr ${copy}`);
       return copy;
     }
-    if (lendable(object)) return blockOf(address(object), stored(object));
-    const type = llvm(types.get(object)!);
-    const spilled = alloca(type);
+    if (this.lendable(object)) return this.blockOf(this.address(object), this.stored(object));
+    const type = this.llvm(this.types.get(object)!);
+    const spilled = this.alloca(type);
     // A Rust handle made for the call moves into it, the call taking it over.
-    if (owns && holdsRust(types.get(object)!)) {
-      if (!fresh(object)) throw new Error("internal error: a Rust handle taken over by a method is read from a place nothing empties");
-      emit(`store ${type} ${value(object, true)}, ptr ${spilled}`);
+    if (owns && this.holdsRust(this.types.get(object)!)) {
+      if (!this.fresh(object)) throw new Error("internal error: a Rust handle taken over by a method is read from a place nothing empties");
+      this.emit(`store ${type} ${this.value(object, true)}, ptr ${spilled}`);
       return spilled;
     }
-    const read = value(object);
-    const v = owns ? spill(spilled, types.get(object)!, read) : read;
-    emit(`store ${type} ${v}, ptr ${spilled}`);
+    const read = this.value(object);
+    const v = owns ? this.spill(spilled, this.types.get(object)!, read) : read;
+    this.emit(`store ${type} ${v}, ptr ${spilled}`);
     return spilled;
   }
+
 
   // A closure made for its call, as in `(() => f(xs))()`, moves into the slot the call runs on.
   // Its body may move a capture out of that slot, so what it leaves is dropped from the slot
   // once the call returns, not from the value as it was made.
-  function calledClosure(callee: Expr): string {
-    const type = valueType(callee);
-    const slot = alloca(llvm(type));
-    const copy = { v: value(callee, true), type };
-    emit(`store ${llvm(type)} ${copy.v}, ptr ${slot}`);
-    pending.push(copy);
-    spills.push({ slot, type, copy });
+  calledClosure(this: Mut<this>, callee: Expr): string {
+    const type = this.valueType(callee);
+    const slot = this.alloca(this.llvm(type));
+    const copy = { v: this.value(callee, true), type };
+    this.emit(`store ${this.llvm(type)} ${copy.v}, ptr ${slot}`);
+    this.pending.push(copy);
+    this.spills.push({ slot, type, copy });
     return slot;
   }
 
+
   // An expression's value, copied down to the declared type it meets when that is narrower.
   // A value the expression made is released when the statement ends, unless `consume` takes it.
-  function value(e: Expr, consume = false): string {
-    const to = coercions.get(e);
-    const type = types.get(e)!;
-    const [ref, given] = [recOf(to), recOf(type)];
-    if (ref?.kind === "ref" && given?.kind !== "ref") return borrowed(e, ref.to);
+  value(this: Mut<this>, e: Expr, consume = false): string {
+    const to = this.coercions.get(e);
+    const type = this.types.get(e)!;
+    const [ref, given] = [this.recOf(to), this.recOf(type)];
+    if (ref?.kind === "ref" && given?.kind !== "ref") return this.borrowed(e, ref.to);
     // A narrowed reference read at the type it was declared with is the pointer it holds.
-    if (ref?.kind === "ref" && given?.kind === "ref" && e.kind === "ident" && !known.has(e)) {
-      const local = localAt(e);
-      if (local !== undefined && local.type !== type && typing.lower(local.type) === typing.lower(to!)) {
-        const held = temp();
-        emit(`${held} = load ptr, ptr ${slot(local)}`);
+    if (ref?.kind === "ref" && given?.kind === "ref" && e.kind === "ident" && !this.known.has(e)) {
+      const local = this.localAt(e);
+      if (local !== undefined && local.type !== type && this.typing.lower(local.type) === this.typing.lower(to!)) {
+        const held = this.temp();
+        this.emit(`${held} = load ptr, ptr ${this.slot(local)}`);
         return held;
       }
     }
-    const lent = typing.optionRef(to);
-    if (lent && type !== "null" && !typing.optionRef(type) && given?.kind !== "ref") return convert(borrowed(e, typing.rec(lent).to), lent, to!);
-    const result = known.get(e) ?? evaluate(e);
+    const lent = this.typing.optionRef(to);
+    if (lent && type !== "null" && !this.typing.optionRef(type) && given?.kind !== "ref") return this.convert(this.borrowed(e, this.typing.rec(lent).to), lent, to!);
+    const result = this.known.get(e) ?? this.evaluate(e);
     // Nothing runs after a value of `never`, so it stands for any value at all.
     if (type === "never") return "undef";
     // A value meeting a Dyn, or a recursive type, moves into its block; a temporary then drops
     // as what it became.
-    if (to && boxes(type, to)) {
-      const boxed = convert(result, type, to);
-      if (!consume && fresh(e) && !known.has(e)) pending.push({ v: boxed, type: to });
+    if (to && this.boxes(type, to)) {
+      const boxed = this.convert(result, type, to);
+      if (!consume && this.fresh(e) && !this.known.has(e)) this.pending.push({ v: boxed, type: to });
       return boxed;
     }
-    const dyn = boxedMembers.get(e) ?? (to && isDyn(to) ? to : undefined);
-    if (to && dyn && !isDyn(type)) {
-      const boxed = to === dyn ? box(result, type, dyn) : convert(box(result, type, dyn), dyn, to);
-      if (!consume && fresh(e) && !known.has(e)) pending.push({ v: boxed, type: to });
+    const dyn = this.boxedMembers.get(e) ?? (to && this.isDyn(to) ? to : undefined);
+    if (to && dyn && !this.isDyn(type)) {
+      const boxed = to === dyn ? this.box(result, type, dyn) : this.convert(this.box(result, type, dyn), dyn, to);
+      if (!consume && this.fresh(e) && !this.known.has(e)) this.pending.push({ v: boxed, type: to });
       return boxed;
     }
     // A temporary taken out of a recursive type's block leaves the block to be freed.
-    if (consume && to && !isRef(to) && unboxes(type, to) && fresh(e) && !known.has(e)) {
-      const out = convert(result, type, to);
-      freeBlocks(result, type);
+    if (consume && to && !this.isRef(to) && this.unboxes(type, to) && this.fresh(e) && !this.known.has(e)) {
+      const out = this.convert(result, type, to);
+      this.freeBlocks(result, type);
       return out;
     }
-    if (!consume && fresh(e) && !known.has(e)) pending.push({ v: result, type });
-    return to ? convert(result, type, to) : result;
+    if (!consume && this.fresh(e) && !this.known.has(e)) this.pending.push({ v: result, type });
+    return to ? this.convert(result, type, to) : result;
   }
 
+
   // The type of what `value` gives for an expression: its own, or what it is converted to.
-  function valueType(e: Expr): Type {
-    return coercions.get(e) ?? types.get(e)!;
+  valueType(this: Mut<this>, e: Expr): Type {
+    return this.coercions.get(e) ?? this.types.get(e)!;
   }
+
 
   // A pointer to a value lent to a reference: where a place holding exactly that type lives,
   // or else a slot holding a copy converted to it.
-  function borrowed(e: Expr, to: Type): string {
-    if (lendable(e) && (stored(e) === to || typing.unfold(stored(e)) === to || typing.lower(stored(e)) === typing.lower(to))) return blockOf(address(e), stored(e));
-    const slot = alloca(llvm(to));
-    const made = evaluate(e);
-    if (fresh(e)) pending.push({ v: made, type: types.get(e)! });
-    emit(`store ${llvm(to)} ${convert(made, types.get(e)!, to)}, ptr ${slot}`);
+  borrowed(this: Mut<this>, e: Expr, to: Type): string {
+    if (this.lendable(e) && (this.stored(e) === to || this.typing.unfold(this.stored(e)) === to || this.typing.lower(this.stored(e)) === this.typing.lower(to))) return this.blockOf(this.address(e), this.stored(e));
+    const slot = this.alloca(this.llvm(to));
+    const made = this.evaluate(e);
+    if (this.fresh(e)) this.pending.push({ v: made, type: this.types.get(e)! });
+    this.emit(`store ${this.llvm(to)} ${this.convert(made, this.types.get(e)!, to)}, ptr ${slot}`);
     return slot;
   }
 
+
   // The calls an expression makes are made from its site, once its operands' own calls are done.
-  function evaluate(e: Expr): string {
-    const outer = site;
-    site = e;
-    const v = evaluated(e);
-    site = outer;
+  evaluate(this: Mut<this>, e: Expr): string {
+    const outer = this.site;
+    this.site = e;
+    const v = this.evaluated(e);
+    this.site = outer;
     return v;
   }
 
-  function evaluated(e: Expr): string {
-    const pair = pairOf(e);
+
+  evaluated(this: Mut<this>, e: Expr): string {
+    const pair = this.pairOf(e);
     if (pair !== undefined) {
-      const v = temp();
-      emit(`${v} = load ${PAIR}, ptr ${pair}`);
+      const v = this.temp();
+      this.emit(`${v} = load ${PAIR}, ptr ${pair}`);
       return v;
     }
     switch (e.kind) {
       case "int": {
-        const type = types.get(e)!;
+        const type = this.types.get(e)!;
         return isFloat(type) ? floatConstant(Number(e.value), type) : String(e.value);
       }
       case "float":
-        return floatConstant(e.value, types.get(e) as "f32" | "f64");
+        return floatConstant(e.value, this.types.get(e) as "f32" | "f64");
       case "bigint":
-        return bigConstant(e.value);
+        return this.bigConstant(e.value);
       case "regex":
-        return regex(types.get(e) as RegexType);
+        return this.regex(this.types.get(e) as RegexType);
       // The operand's value, which whoever asked for the wrapper's drops when it is fresh.
       case "satisfies":
-        return value(e.expr, true);
+        return this.value(e.expr, true);
       case "as": {
-        const [from, to] = [coercions.get(e.expr) ?? types.get(e.expr)!, types.get(e)!];
+        const [from, to] = [this.coercions.get(e.expr) ?? this.types.get(e.expr)!, this.types.get(e)!];
         // A widening 'as' is its operand, converted by the coercion the checker gave it.
-        if (widens(e)) return value(e.expr, true);
-        if (recOf(from)?.kind === "union") {
-          const v = value(e.expr);
-          const declared = recOf(to);
+        if (this.widens(e)) return this.value(e.expr, true);
+        if (this.recOf(from)?.kind === "union") {
+          const v = this.value(e.expr);
+          const declared = this.recOf(to);
           const kept = declared?.kind === "union" ? declared.members : [to];
           const union = from as UnionType;
-          const rejected = typing.rec(union).members.filter((m) => !kept.includes(m) && !kept.includes(typing.unfold(m)));
-          panicIf(holds(v, union, rejected), `'as ${typing.show(to)}' failed: union held another member`, e);
-          return convert(v, union, to);
+          const rejected = this.typing.rec(union).members.filter((m) => !kept.includes(m) && !kept.includes(this.typing.unfold(m)));
+          this.panicIf(this.holds(v, union, rejected), `'as ${this.typing.show(to)}' failed: union held another member`, e);
+          return this.convert(v, union, to);
         }
-        if (from === "bigint") return bigTo(value(e.expr), to);
-        const pointer = (t: Type) => recOf(t)?.kind === "pointer";
-        if (!pointer(from) && !pointer(to)) return cast(value(e.expr), from, to as Numeric);
+        if (from === "bigint") return this.bigTo(this.value(e.expr), to);
+        const pointer = (t: Type) => this.recOf(t)?.kind === "pointer";
+        if (!pointer(from) && !pointer(to)) return this.cast(this.value(e.expr), from, to as Numeric);
         // A raw pointer is an address: another pointer is the same one, and an integer is its
         // number.
-        if (pointer(from) && pointer(to)) return value(e.expr);
+        if (pointer(from) && pointer(to)) return this.value(e.expr);
         // An integer becomes an address as a `usize` would, sign-extending a narrower signed one.
-        const converted = temp();
-        if (pointer(to)) emit(`${converted} = inttoptr i64 ${cast(value(e.expr), from, "usize")} to ptr`);
-        else emit(`${converted} = ptrtoint ptr ${value(e.expr)} to ${llvm(to)}`);
+        const converted = this.temp();
+        if (pointer(to)) this.emit(`${converted} = inttoptr i64 ${this.cast(this.value(e.expr), from, "usize")} to ptr`);
+        else this.emit(`${converted} = ptrtoint ptr ${this.value(e.expr)} to ${this.llvm(to)}`);
         return converted;
       }
       case "bool":
         return String(e.value);
       case "comptime":
-        bakeable(types.get(e)!, e);
-        return bake(comptimeValue(new CheckedHost(noted), current.id, e), types.get(e)!);
+        this.bakeable(this.types.get(e)!, e);
+        return this.bake(comptimeValue(new CheckedHost(this.noted), this.current.id, e), this.types.get(e)!);
       // A string literal on its own has only its literal type, which takes no space.
       case "string":
         return "zeroinitializer";
@@ -9743,374 +10325,375 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
         return "zeroinitializer";
       // Nothing after a throw expression runs, so the value it stands for is never read.
       case "throw":
-        raised(e, owned(e.value));
-        startBlock(label());
+        this.raised(e, this.owned(e.value));
+        this.startBlock(this.label());
         return "undef";
       case "index": {
-        const object = valueType(e.object);
-        if (indexes(object)) {
-          const held = referent(object) as ArrayType | FixedType;
-          const v = temp();
-          emit(`${v} = load ${llvm(typing.rec(held).element)}, ptr ${element(e)}`);
-          return convert(v, typing.rec(held).element, types.get(e)!);
+        const object = this.valueType(e.object);
+        if (this.indexes(object)) {
+          const held = this.referent(object) as ArrayType | FixedType;
+          const v = this.temp();
+          this.emit(`${v} = load ${this.llvm(this.typing.rec(held).element)}, ptr ${this.element(e)}`);
+          return this.convert(v, this.typing.rec(held).element, this.types.get(e)!);
         }
-        const s = operand(e.object, [e.index]);
-        const index = value(e.index);
-        inBounds(s, index, e);
-        const result = temp();
-        emit(`${result} = call ptr @fsh_rt_str_at(ptr ${s}, i64 ${index})`);
+        const s = this.operand(e.object, [e.index]);
+        const index = this.value(e.index);
+        this.inBounds(s, index, e);
+        const result = this.temp();
+        this.emit(`${result} = call ptr @fsh_rt_str_at(ptr ${s}, i64 ${index})`);
         return result;
       }
       // The elements run first, then fill a buffer just long enough.
       case "array": {
-        const made = types.get(e)!;
-        const fixed = recOf(made);
+        const made = this.types.get(e)!;
+        const fixed = this.recOf(made);
         // A fixed array's literal is its elements in place.
         if (fixed?.kind === "fixed") {
-          const values = delivered((hand) => (e.elements as Expr[]).map((x) => hand(owned(x), fixed.element)));
+          const values = this.delivered((hand) => (e.elements as Expr[]).map((x) => hand(this.owned(x), fixed.element)));
           return values.reduce((whole, v, i) => {
-            const next = temp();
-            emit(`${next} = insertvalue ${llvm(made)} ${whole}, ${llvm(fixed.element)} ${v}, ${i}`);
+            const next = this.temp();
+            this.emit(`${next} = insertvalue ${this.llvm(made)} ${whole}, ${this.llvm(fixed.element)} ${v}, ${i}`);
             return next;
           }, "undef");
         }
         const type = made as ArrayType;
-        const t = llvm(typing.rec(type).element);
-        if (e.elements.some((x) => x?.kind === "spread")) return spreadArray(e.elements as Expr[], type);
-        const values = delivered((hand) => (e.elements as Expr[]).map((x) => hand(owned(x), typing.rec(type).element)));
+        const t = this.llvm(this.typing.rec(type).element);
+        if (e.elements.some((x) => x?.kind === "spread")) return this.spreadArray(e.elements as Expr[], type);
+        const values = this.delivered((hand) => (e.elements as Expr[]).map((x) => hand(this.owned(x), this.typing.rec(type).element)));
         const n = String(values.length);
-        const data = temp();
-        emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes(typing.rec(type).element, n)})`);
+        const data = this.temp();
+        this.emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${this.bytes(this.typing.rec(type).element, n)})`);
         values.forEach((v, i) => {
-          const at = temp();
-          emit(`${at} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
-          emit(`store ${t} ${v}, ptr ${at}`);
+          const at = this.temp();
+          this.emit(`${at} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+          this.emit(`store ${t} ${v}, ptr ${at}`);
         });
-        return built(data, n, n);
+        return this.built(data, n, n);
       }
       case "template": {
         // Text alone is a literal, which takes no space.
         if (e.exprs.length === 0) return "zeroinitializer";
         const parts: string[] = [];
         e.quasis.forEach((q, i) => {
-          if (q !== "") parts.push(text(q));
+          if (q !== "") parts.push(this.text(q));
           const x = e.exprs[i];
-          if (x) parts.push(written(operand(x, e.exprs.slice(i + 1)), valueType(x)));
+          if (x) parts.push(this.written(this.operand(x, e.exprs.slice(i + 1)), this.valueType(x)));
         });
-        const array = alloca(`[${parts.length} x ptr]`);
+        const array = this.alloca(`[${parts.length} x ptr]`);
         parts.forEach((part, i) => {
-          const at = temp();
-          emit(`${at} = getelementptr [${parts.length} x ptr], ptr ${array}, i32 0, i32 ${i}`);
-          emit(`store ptr ${part}, ptr ${at}`);
+          const at = this.temp();
+          this.emit(`${at} = getelementptr [${parts.length} x ptr], ptr ${array}, i32 0, i32 ${i}`);
+          this.emit(`store ptr ${part}, ptr ${at}`);
         });
-        const result = temp();
-        emit(`${result} = call ptr @fsh_rt_str_join(ptr ${array}, i64 ${parts.length})`);
+        const result = this.temp();
+        this.emit(`${result} = call ptr @fsh_rt_str_join(ptr ${array}, i64 ${parts.length})`);
         return result;
       }
       case "nonNull": {
         // An overload's body narrows the implementation's value to the signature's return type.
         if (e.narrows) {
-          const [from, to] = [valueType(e.expr), types.get(e)!];
-          const v = value(e.expr);
+          const [from, to] = [this.valueType(e.expr), this.types.get(e)!];
+          const v = this.value(e.expr);
           if (from === to) return v;
-          const declared = recOf(to);
+          const declared = this.recOf(to);
           const kept = declared?.kind === "union" ? declared.members : [to];
           const union = from as UnionType;
-          panicIf(holds(v, union, typing.rec(union).members.filter((m) => !kept.includes(m))), "the implementation returned a value this overload signature doesn't declare", e);
-          return convert(v, union, to);
+          this.panicIf(this.holds(v, union, this.typing.rec(union).members.filter((m) => !kept.includes(m))), "the implementation returned a value this overload signature doesn't declare", e);
+          return this.convert(v, union, to);
         }
-        if (redundantBang(e)) return value(e.expr);
+        if (redundantBang(e)) return this.value(e.expr);
         // An optional interface parameter a call left out is only ever empty.
-        if (valueType(e.expr) === "null") {
-          value(e.expr);
-          panicIf("true", (e as { reason?: string }).reason ?? "called `Option::unwrap()` on a `None` value", e);
+        if (this.valueType(e.expr) === "null") {
+          this.value(e.expr);
+          this.panicIf("true", (e as { reason?: string }).reason ?? "called `Option::unwrap()` on a `None` value", e);
           return "undef";
         }
         // Through a reference, the Option it points to.
-        const option = valueType(e.expr) as UnionType;
-        const v = value(e.expr);
+        const option = this.valueType(e.expr) as UnionType;
+        const v = this.value(e.expr);
         // The checker's own unwraps, as of an iterator helper's count, say why they panic.
-        panicIf(holds(v, option, ["null"]), (e as { reason?: string }).reason ?? "called `Option::unwrap()` on a `None` value", e);
-        return convert(v, option, types.get(e)!);
+        this.panicIf(this.holds(v, option, ["null"]), (e as { reason?: string }).reason ?? "called `Option::unwrap()` on a `None` value", e);
+        return this.convert(v, option, this.types.get(e)!);
       }
       case "ident": {
         // A top-level const: a scalar or string baked where it is read, an aggregate read through
         // a pointer to its global.
-        const read = callOf(e);
-        if (read && bodyOf(noted.arenas, read).comptime === "const") return isRef(types.get(e)!) ? constantGlobal(read) : bake(comptimeBody(new CheckedHost(noted), read.id), types.get(e)!);
+        const read = this.callOf(e);
+        if (read && bodyOf(this.noted.arenas, read).comptime === "const") return this.isRef(this.types.get(e)!) ? this.constantGlobal(read) : this.bake(comptimeBody(new CheckedHost(this.noted), read.id), this.types.get(e)!);
         // A nested function used as a value is its closure, made here.
-        const built = current.envs?.get(e);
-        if (built) return environment(arenas.instanceOf(built.of), built.env);
-        const exported = jsExports.get(e);
-        if (exported) return fromJs(jsExport(exported, e), types.get(e)!, `'${exported.name}' from '${exported.module}' is`, e);
+        const built = this.current.envs?.get(e);
+        if (built) return this.environment(this.arenas.instanceOf(built.of), built.env);
+        const exported = this.jsExports.get(e);
+        if (exported) return this.fromJs(this.jsExport(exported, e), this.types.get(e)!, `'${exported.name}' from '${exported.module}' is`, e);
         // `undefined` is the empty value, unless a variable takes the name.
-        if (!locals.has(e)) return "zeroinitializer";
-        const local = resolved(e);
-        const t = temp();
-        emit(`${t} = load ${llvm(local.type)}, ptr ${slot(local)}`);
-        if (current.copiesOut.has(e)) {
+        if (!this.locals.has(e)) return "zeroinitializer";
+        const local = this.resolved(e);
+        const t = this.temp();
+        this.emit(`${t} = load ${this.llvm(local.type)}, ptr ${this.slot(local)}`);
+        if (this.current.copiesOut.has(e)) {
           // The box, through a reference and out of a union holding it.
           let [held, type] = [t, local.type];
-          if (isRef(type)) {
-            const through = temp();
-            emit(`${through} = load ${llvm(referent(type))}, ptr ${held}`);
-            [held, type] = [through, referent(type)];
+          if (this.isRef(type)) {
+            const through = this.temp();
+            this.emit(`${through} = load ${this.llvm(this.referent(type))}, ptr ${held}`);
+            [held, type] = [through, this.referent(type)];
           }
-          const union = recOf(type);
-          if (union?.kind === "union") held = convert(held, type, union.members.find((t) => typing.isPlainJs(t))!);
-          return jsRead(held, types.get(e)!);
+          const union = this.recOf(type);
+          if (union?.kind === "union") held = this.convert(held, type, union.members.find((t) => this.typing.isPlainJs(t))!);
+          return this.jsRead(held, this.types.get(e)!);
         }
         // Where a check narrowed the variable, its value comes out of the union.
-        return convert(t, local.type, types.get(e)!);
+        return this.convert(t, local.type, this.types.get(e)!);
       }
       case "member":
-        if (maths.has(e)) return floatConstant(MATH_CONSTANTS[e.name]!, "f64");
-        const held = types.has(e.object) ? typing.lower(valueType(e.object)) : undefined;
-        const pattern = recOf(held);
+        if (this.maths.has(e)) return floatConstant(MATH_CONSTANTS[e.name]!, "f64");
+        const held = this.types.has(e.object) ? this.typing.lower(this.valueType(e.object)) : undefined;
+        const pattern = this.recOf(held);
         if (pattern?.kind === "regex") {
           const t = pattern;
-          if (e.name === "source") return text(t.source);
-          if (e.name === "flags") return text([..."dgimsuvy"].filter((f) => t.flags.includes(f)).join(""));
+          if (e.name === "source") return this.text(t.source);
+          if (e.name === "flags") return this.text([..."dgimsuvy"].filter((f) => t.flags.includes(f)).join(""));
           return t.flags.includes(REGEX_FLAGS[e.name]!) ? "1" : "0";
         }
-        return unwraps(e.object) ? link(e, e.object, () => member(e))! : member(e);
+        return this.unwraps(e.object) ? this.link(e, e.object, () => this.member(e))! : this.member(e);
       // A closure's value is each variable it holds, and a pointer to each it borrows, or to `this`.
       case "arrow": {
-        const inner = callOf(e)!;
-        return environment(inner, [...inner.captures!.values()]);
+        const inner = this.callOf(e)!;
+        return this.environment(inner, [...inner.captures!.values()]);
       }
       case "object": {
-        const type = types.get(e) as ObjectType;
-        if (e.props.some((p) => p.kind === "spread")) return spreadObject(e, type);
+        const type = this.types.get(e) as ObjectType;
+        if (e.props.some((p) => p.kind === "spread")) return this.spreadObject(e, type);
         // Properties run in source order, then fill the fields in their sorted order.
-        const values = delivered((hand) => new Map(e.props.map((p) => {
-          const [name, v] = property(p, type);
-          return [name, hand(v, typing.field(type, name)!.type)];
+        const values = this.delivered((hand) => new Map(e.props.map((p) => {
+          const [name, v] = this.property(p, type);
+          return [name, hand(v, this.typing.field(type, name)!.type)];
         })));
         let result = "undef";
-        typing.rec(type).fields.forEach((f, i) => {
-          const next = temp();
-          emit(`${next} = insertvalue ${llvm(type)} ${result}, ${llvm(f.type)} ${values.get(f.name)}, ${i}`);
+        this.typing.rec(type).fields.forEach((f, i) => {
+          const next = this.temp();
+          this.emit(`${next} = insertvalue ${this.llvm(type)} ${result}, ${this.llvm(f.type)} ${values.get(f.name)}, ${i}`);
           result = next;
         });
         return result;
       }
       case "this": {
-        const result = temp();
-        emit(`${result} = load ${llvm(types.get(e)!)}, ptr %this`);
+        const result = this.temp();
+        this.emit(`${result} = load ${this.llvm(this.types.get(e)!)}, ptr %this`);
         return result;
       }
       case "new": {
-        if (regexNews.has(e)) return regex(types.get(e) as RegexType);
-        const made = jsNews.get(e);
+        if (this.regexNews.has(e)) return this.regex(this.types.get(e) as RegexType);
+        const made = this.jsNews.get(e);
         if (made) {
-          const c = jsExport(made, e);
+          const c = this.jsExport(made, e);
           const args = e.args ?? [];
-          const [argv, box] = [jsArgv(args, optionalAt(e)), temp()];
-          unwinding(`call ptr @fsh_rt_js_new(ptr ${c}, i64 ${args.length}, ptr ${argv}, ptr ${panicAt(e)})`, box);
-          return fromJs(box, types.get(e)!, `'new ${made.name}' from '${made.module}' gave`, e);
+          const [argv, box] = [this.jsArgv(args, this.optionalAt(e)), this.temp()];
+          this.unwinding(`call ptr @fsh_rt_js_new(ptr ${c}, i64 ${args.length}, ptr ${argv}, ptr ${this.panicAt(e)})`, box);
+          return this.fromJs(box, this.types.get(e)!, `'new ${made.name}' from '${made.module}' gave`, e);
         }
-        const newed = recOf(types.get(e));
-        if (newed?.kind === "interior") return interiorNew(e, types.get(e) as InteriorType);
-        if (newed?.kind === "block") return blockNew(e, types.get(e) as BlockType);
-        if (newed?.kind === "map") return mapNew(types.get(e) as MapType, e.args?.[0]);
-        if (newed?.kind === "shared") return sharedNew(e, types.get(e) as SharedType);
+        const newed = this.recOf(this.types.get(e));
+        if (newed?.kind === "interior") return this.interiorNew(e, this.types.get(e) as InteriorType);
+        if (newed?.kind === "block") return this.blockNew(e, this.types.get(e) as BlockType);
+        if (newed?.kind === "map") return this.mapNew(this.types.get(e) as MapType, e.args?.[0]);
+        if (newed?.kind === "shared") return this.sharedNew(e, this.types.get(e) as SharedType);
         // A Rust type's constructor gives the handle to the value it boxed.
-        if (bodyOf(noted.arenas, callOf(e)!).rust) return invoke(callOf(e)!, undefined, argValues(e.args ?? [], callOf(e)!), e)!;
+        if (bodyOf(this.noted.arenas, this.callOf(e)!).rust) return this.invoke(this.callOf(e)!, undefined, this.argValues(e.args ?? [], this.callOf(e)!), e)!;
         // The constructor fills in a slot, which then holds the new instance. The slot starts
         // empty, so a field's first assignment has nothing to drop.
-        const type = types.get(e) as ClassType;
-        const instance = alloca(llvm(type));
-        emit(`store ${llvm(type)} zeroinitializer, ptr ${instance}`);
+        const type = this.types.get(e) as ClassType;
+        const instance = this.alloca(this.llvm(type));
+        this.emit(`store ${this.llvm(type)} zeroinitializer, ptr ${instance}`);
         // A panic in the constructor drops the fields it has set. One that throws has set none.
-        invoke(callOf(e)!, instance, argValues(e.args ?? [], callOf(e)!), e, undefined, () => dispose(unstash(instance, type), type));
-        const result = temp();
-        emit(`${result} = load ${llvm(type)}, ptr ${instance}`);
+        this.invoke(this.callOf(e)!, instance, this.argValues(e.args ?? [], this.callOf(e)!), e, undefined, () => this.dispose(this.unstash(instance, type), type));
+        const result = this.temp();
+        this.emit(`${result} = load ${this.llvm(type)}, ptr ${instance}`);
         return result;
       }
       case "call": {
-        const result = call(e);
+        const result = this.call(e);
         if (!result) throw new Error("internal error: void call used as a value");
-        if (current.predicates?.has(e)) predicateCheck(e, result);
+        if (this.current.predicates?.has(e)) this.predicateCheck(e, result);
         return result;
       }
       case "unary": {
-        if (e.op === "await") return awaitFuture(e)!;
-        const type = types.get(e)!;
+        if (e.op === "await") return this.awaitFuture(e)!;
+        const type = this.types.get(e)!;
         // A negative literal is a constant, which may be the type's minimum.
         if (e.op === "-" && (e.operand.kind === "int" || e.operand.kind === "float")) {
           return isFloat(type) ? floatConstant(-Number(e.operand.value), type) : String(-e.operand.value);
         }
-        const operand = value(e.operand);
+        const operand = this.value(e.operand);
         if (type === "bigint") {
-          const result = temp();
-          emit(`${result} = call ptr @fsh_rt_big_${e.op === "-" ? "neg" : "not"}(ptr ${operand})`);
+          const result = this.temp();
+          this.emit(`${result} = call ptr @fsh_rt_big_${e.op === "-" ? "neg" : "not"}(ptr ${operand})`);
           return result;
         }
         if (e.op === "-" && isFloat(type)) {
-          const result = temp();
-          emit(`${result} = fneg ${llvm(type)} ${operand}`);
+          const result = this.temp();
+          this.emit(`${result} = fneg ${this.llvm(type)} ${operand}`);
           return result;
         }
-        if (e.op === "-") return arithmetic("-", "0", operand, e, type as Integer, "negate");
-        const result = temp();
-        emit(`${result} = xor ${llvm(type)} ${operand}, ${e.op === "~" ? -1 : "true"}`);
+        if (e.op === "-") return this.arithmetic("-", "0", operand, e, type as Integer, "negate");
+        const result = this.temp();
+        this.emit(`${result} = xor ${this.llvm(type)} ${operand}, ${e.op === "~" ? -1 : "true"}`);
         return result;
       }
       case "assign":
-        return fixing(e.target, () => assign(e));
+        return this.fixing(e.target, () => this.assign(e));
       case "yield":
-        return yielded(e, true);
+        return this.yielded(e, true);
       case "match":
-        return lowerMatch(e, true)!;
+        return this.lowerMatch(e, true)!;
       case "unsafe":
-        return value(e.expr, true);
+        return this.value(e.expr, true);
       case "pipe":
-        return lowerPipe(e, true)!;
+        return this.lowerPipe(e, true)!;
       case "update":
-        return fixing(e.operand, () => {
-          const old = value(e.operand);
-          const type = types.get(e)!;
+        return this.fixing(e.operand, () => {
+          const old = this.value(e.operand);
+          const type = this.types.get(e)!;
           if (type === "bigint") {
             // The old value outlives the store that releases the place's hold on it.
-            const kept = copied(old, type);
-            const result = bigOperate(e.op === "++" ? "+" : "-", old, bigConstant(1n), e);
-            store(e.operand, result);
+            const kept = this.copied(old, type);
+            const result = this.bigOperate(e.op === "++" ? "+" : "-", old, this.bigConstant(1n), e);
+            this.store(e.operand, result);
             if (e.prefix) {
-              emit(`call void @fsh_rt_big_release(ptr ${kept})`);
+              this.emit(`call void @fsh_rt_big_release(ptr ${kept})`);
               return result;
             }
-            pending.push({ v: kept, type });
+            this.pending.push({ v: kept, type });
             return kept;
           }
-          const result = numeric(e.op === "++" ? "+" : "-", old, isFloat(type) ? floatConstant(1, type) : "1", e, type);
-          store(e.operand, result);
+          const result = this.numeric(e.op === "++" ? "+" : "-", old, isFloat(type) ? floatConstant(1, type) : "1", e, type);
+          this.store(e.operand, result);
           return e.prefix ? result : old;
         });
       case "conditional": {
-        const cond = value(e.cond);
-        const lent = isRef(types.get(e)!);
+        const cond = this.value(e.cond);
+        const lent = this.isRef(this.types.get(e)!);
         const kept: { slot: string; type: Type }[] = [];
         // Each side gives a value of its own when the result owns memory.
         const side = (x: Expr) => {
-          const mark = pending.length;
-          const v = needsDrop(types.get(e)) ? owned(x) : value(x);
+          const mark = this.pending.length;
+          const v = this.needsDrop(this.types.get(e)) ? this.owned(x) : this.value(x);
           // A side lent out of the conditional lends what it made, which lasts the statement.
           if (lent) {
-            for (const made of pending.splice(mark)) {
-              const slot = alloca(llvm(made.type));
-              allocas.push(`  store ${llvm(made.type)} zeroinitializer, ptr ${slot}`);
-              emit(`store ${llvm(made.type)} ${made.v}, ptr ${slot}`);
+            for (const made of this.pending.splice(mark)) {
+              const slot = this.alloca(this.llvm(made.type));
+              this.allocas.push(`  store ${this.llvm(made.type)} zeroinitializer, ptr ${slot}`);
+              this.emit(`store ${this.llvm(made.type)} ${made.v}, ptr ${slot}`);
               kept.push({ slot, type: made.type });
             }
-          } else settle(mark);
+          } else this.settle(mark);
           return v;
         };
-        if (!types.has(e.then)) return side(e.else);
-        if (!types.has(e.else)) return side(e.then);
-        const [then, otherwise, end] = [label(), label(), label()];
-        emit(`br i1 ${cond}, label %${then}, label %${otherwise}`);
-        startBlock(then);
+        if (!this.types.has(e.then)) return side(e.else);
+        if (!this.types.has(e.else)) return side(e.then);
+        const [then, otherwise, end] = [this.label(), this.label(), this.label()];
+        this.emit(`br i1 ${cond}, label %${then}, label %${otherwise}`);
+        this.startBlock(then);
         const a = side(e.then);
-        const thenEnd = block;
-        emit(`br label %${end}`);
-        startBlock(otherwise);
+        const thenEnd = this.block;
+        this.emit(`br label %${end}`);
+        this.startBlock(otherwise);
         const b = side(e.else);
-        const otherwiseEnd = block;
-        emit(`br label %${end}`);
-        startBlock(end);
-        const result = temp();
-        emit(`${result} = phi ${llvm(types.get(e)!)} [ ${a}, %${thenEnd} ], [ ${b}, %${otherwiseEnd} ]`);
+        const otherwiseEnd = this.block;
+        this.emit(`br label %${end}`);
+        this.startBlock(end);
+        const result = this.temp();
+        this.emit(`${result} = phi ${this.llvm(this.types.get(e)!)} [ ${a}, %${thenEnd} ], [ ${b}, %${otherwiseEnd} ]`);
         // Only the side that ran filled its slot; the other's reads as nothing to drop.
         for (const { slot, type } of kept) {
-          const v = temp();
-          emit(`${v} = load ${llvm(type)}, ptr ${slot}`);
-          emit(`store ${llvm(type)} zeroinitializer, ptr ${slot}`);
-          pending.push({ v, type });
+          const v = this.temp();
+          this.emit(`${v} = load ${this.llvm(type)}, ptr ${slot}`);
+          this.emit(`store ${this.llvm(type)} zeroinitializer, ptr ${slot}`);
+          this.pending.push({ v, type });
         }
         return result;
       }
       case "binary": {
-        if (presenceTests.has(e)) return presence(e);
-        if (e.op === "&&" || e.op === "||") return logical(e.op, value(e.left), () => value(e.right));
-        if (e.op === "??" && !typing.isOption(typing.lower(valueType(e.left)))) return owned(e.left);
-        if (e.op === "??") return orElse(e);
-        if (e.op === "+" && types.get(e) === "string") return concat(written(operand(e.left, [e.right]), valueType(e.left)), written(value(e.right), valueType(e.right)));
-        const empty = jsEmptyTests.get(e);
+        if (this.presenceTests.has(e)) return this.presence(e);
+        if (e.op === "&&" || e.op === "||") return this.logical(e.op, this.value(e.left), () => this.value(e.right));
+        if (e.op === "??" && !this.typing.isOption(this.typing.lower(this.valueType(e.left)))) return this.owned(e.left);
+        if (e.op === "??") return this.orElse(e);
+        if (e.op === "+" && this.types.get(e) === "string") return this.concat(this.written(this.operand(e.left, [e.right]), this.valueType(e.left)), this.written(this.value(e.right), this.valueType(e.right)));
+        const empty = this.jsEmptyTests.get(e);
         if (empty) {
-          const [found, same] = [temp(), temp()];
-          let box = value(empty[0]);
-          if (isRef(valueType(empty[0]))) {
-            const loaded = temp();
-            emit(`${loaded} = load ptr, ptr ${box}`);
+          const [found, same] = [this.temp(), this.temp()];
+          let box = this.value(empty[0]);
+          if (this.isRef(this.valueType(empty[0]))) {
+            const loaded = this.temp();
+            this.emit(`${loaded} = load ptr, ptr ${box}`);
             box = loaded;
           }
-          emit(`${found} = call i32 @fsh_rt_js_typeof(ptr ${box}, ptr ${text(empty[1])})`);
-          emit(`${same} = icmp ${e.op === "===" ? "ne" : "eq"} i32 ${found}, 0`);
+          this.emit(`${found} = call i32 @fsh_rt_js_typeof(ptr ${box}, ptr ${this.text(empty[1])})`);
+          this.emit(`${same} = icmp ${e.op === "===" ? "ne" : "eq"} i32 ${found}, 0`);
           return same;
         }
-        const first = (x: Expr) => (x === e.left ? operand(x, [e.right]) : value(x));
-        const tested = test(e, first, valueType);
+        const first = (x: Expr) => (x === e.left ? this.operand(x, [e.right]) : this.value(x));
+        const tested = this.test(e, first, ((e) => this.valueType(e)));
         if (tested) return tested;
         const condition = COMPARISON[e.op];
-        const [a, b] = [first(e.left), value(e.right)];
+        const [a, b] = [first(e.left), this.value(e.right)];
         // A literal, as a literal type argument is, compares by value, and two types of different
         // bases, as an instance's argument and a value of its bound may have, are never equal.
-        const [lt, rt] = [typing.lower(valueType(e.left)), typing.lower(valueType(e.right))];
-        if ((e.op === "===" || e.op === "!==") && (lt !== rt || recOf(lt)?.kind === "literal")) {
-          const same = mixedNumbers(a, lt, b, rt) ?? equals(a, lt, b, rt);
+        const [lt, rt] = [this.typing.lower(this.valueType(e.left)), this.typing.lower(this.valueType(e.right))];
+        if ((e.op === "===" || e.op === "!==") && (lt !== rt || this.recOf(lt)?.kind === "literal")) {
+          const same = this.mixedNumbers(a, lt, b, rt) ?? this.equals(a, lt, b, rt);
           if (e.op === "===") return same;
-          const differ = temp();
-          emit(`${differ} = xor i1 ${same}, true`);
+          const differ = this.temp();
+          this.emit(`${differ} = xor i1 ${same}, true`);
           return differ;
         }
         // An operand keeps a literal type only when both are the same string literal.
-        const type = coercions.get(e.left) ?? types.get(e.left)!;
-        if (!condition) return numeric(e.op, a, b, e, type);
+        const type = this.coercions.get(e.left) ?? this.types.get(e.left)!;
+        if (!condition) return this.numeric(e.op, a, b, e, type);
         // Empty values are always equal.
         if (type === "null") return String(e.op === "===");
         // Raw pointers compare by address.
-        if (recOf(type)?.kind === "pointer") {
-          const same = temp();
-          emit(`${same} = icmp ${condition} ptr ${a}, ${b}`);
+        if (this.recOf(type)?.kind === "pointer") {
+          const same = this.temp();
+          this.emit(`${same} = icmp ${condition} ptr ${a}, ${b}`);
           return same;
         }
         // Values holding objects, arrays or instances compare part by part.
-        if (compound(typing, type)) {
-          const same = deepEquals(a, b, type);
+        if (compound(this.typing, type)) {
+          const same = this.deepEquals(a, b, type);
           if (e.op === "===") return same;
-          const differ = temp();
-          emit(`${differ} = xor i1 ${same}, true`);
+          const differ = this.temp();
+          this.emit(`${differ} = xor i1 ${same}, true`);
           return differ;
         }
-        const result = temp();
+        const result = this.temp();
         if (isFloat(type)) {
-          emit(`${result} = fcmp ${FLOAT_COMPARISON[e.op]} ${llvm(type)} ${a}, ${b}`);
+          this.emit(`${result} = fcmp ${FLOAT_COMPARISON[e.op]} ${this.llvm(type)} ${a}, ${b}`);
           return result;
         }
         // Strings and bigints compare by the runtime's order: below, equal or above zero.
         if (type === "string" || type === "bigint") {
-          const order = temp();
-          emit(`${order} = call i32 @fsh_rt_${type === "string" ? "str" : "big"}_compare(ptr ${a}, ptr ${b})`);
-          emit(`${result} = icmp ${condition} i32 ${order}, 0`);
+          const order = this.temp();
+          this.emit(`${order} = call i32 @fsh_rt_${type === "string" ? "str" : "big"}_compare(ptr ${a}, ptr ${b})`);
+          this.emit(`${result} = icmp ${condition} i32 ${order}, 0`);
           return result;
         }
         // An ordering of unsigned numbers compares them as unsigned.
         const unsigned = isInteger(type) && !INTEGERS[type].signed && condition.startsWith("s");
-        emit(`${result} = icmp ${unsigned ? `u${condition.slice(1)}` : condition} ${llvm(type)} ${a}, ${b}`);
+        this.emit(`${result} = icmp ${unsigned ? `u${condition.slice(1)}` : condition} ${this.llvm(type)} ${a}, ${b}`);
         return result;
       }
       // A quote is made only while compiling; one reached when the program runs panics.
       case "tagged": {
-        unwinding(`call void @fsh_rt_panic(ptr ${cString(`panicked at ${where(e)}:\na quote builds syntax while compiling, so it can't run in the program\n`)})`);
-        emit("unreachable");
-        startBlock(label());
+        this.unwinding(`call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where(e)}:\na quote builds syntax while compiling, so it can't run in the program\n`)})`);
+        this.emit("unreachable");
+        this.startBlock(this.label());
         return "undef";
       }
       default:
         throw new Error(`internal error: no lowering for ${e.kind}`);
     }
   }
+
 
   // A property's name and value.
   // A shorthand's variable may be narrowed, or an enum member the field widens, so its value
@@ -10120,300 +10703,313 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
   // for the literal taken apart. A field a later part replaces is dropped; until the object is
   // made, every value gathered is dropped if a later part panics. A spread gives an instance's
   // public fields only.
-  function spreadObject(e: Extract<Expr, { kind: "object" }>, type: ObjectType): string {
+  spreadObject(this: Mut<this>, e: Extract<Expr, { kind: "object" }>, type: ObjectType): string {
     const got = new Map<string, { v: string; type: Type }>();
     const put = (name: string, v: string, t: Type) => {
       const old = got.get(name);
       if (old) {
-        pending = pending.filter((entry) => entry !== old);
-        dispose(old.v, old.type);
+        this.pending = this.pending.filter((entry) => entry !== old);
+        this.dispose(old.v, old.type);
       }
       const entry = { v, type: t };
-      pending.push(entry);
+      this.pending.push(entry);
       got.set(name, entry);
     };
     for (const p of e.props) {
       if (p.kind === "property") {
-        put(p.key as string, owned(p.value), valueType(p.value));
+        put(p.key as string, this.owned(p.value), this.valueType(p.value));
         continue;
       }
       if (p.kind === "shorthand") {
-        const local = resolved(p);
-        const to = typing.field(type, p.name)!.type;
+        const local = this.resolved(p);
+        const to = this.typing.field(type, p.name)!.type;
         // A shorthand lent to a reference field points at its variable.
-        if (isRef(to) && !isRef(local.type)) {
-          put(p.name, slot(local), to);
+        if (this.isRef(to) && !this.isRef(local.type)) {
+          put(p.name, this.slot(local), to);
           continue;
         }
-        put(p.name, shorthand(p, local), local.type);
+        put(p.name, this.shorthand(p, local), local.type);
         continue;
       }
       if (p.kind !== "spread") throw new Error("internal error: unchecked property");
-      const held = types.get(p.value)!;
+      const held = this.types.get(p.value)!;
       // The source's own type in this instance, its fields laid out as this instance has them.
-      const source = typing.lower(referent(held)) as ObjectType | ClassType;
-      const taken = fresh(p.value);
-      let whole = taken ? owned(p.value) : value(p.value);
-      if (isRef(held)) {
-        const read = temp();
-        emit(`${read} = load ${llvm(source)}, ptr ${whole}`);
+      const source = this.typing.lower(this.referent(held)) as ObjectType | ClassType;
+      const taken = this.fresh(p.value);
+      let whole = taken ? this.owned(p.value) : this.value(p.value);
+      if (this.isRef(held)) {
+        const read = this.temp();
+        this.emit(`${read} = load ${this.llvm(source)}, ptr ${whole}`);
         whole = read;
       }
-      const fields = typing.rec(source).kind === "class" ? typing.allFields(source as ClassType) : typing.rec(source).fields;
+      const fields = this.typing.rec(source).kind === "class" ? this.typing.allFields(source as ClassType) : this.typing.rec(source).fields;
       for (const f of fields) {
-        const v = temp();
-        emit(`${v} = extractvalue ${llvm(source)} ${whole}, ${typing.fieldPath(source, f.name).join(", ")}`);
-        const shown = typing.rec(source).kind !== "class" || (f.access ?? "public") === "public";
-        if (shown) put(f.name, taken ? v : copied(v, f.type), f.type);
-        else if (taken) dispose(v, f.type);
+        const v = this.temp();
+        this.emit(`${v} = extractvalue ${this.llvm(source)} ${whole}, ${this.typing.fieldPath(source, f.name).join(", ")}`);
+        const shown = this.typing.rec(source).kind !== "class" || (f.access ?? "public") === "public";
+        if (shown) put(f.name, taken ? v : this.copied(v, f.type), f.type);
+        else if (taken) this.dispose(v, f.type);
       }
     }
     let result = "undef";
-    typing.rec(type).fields.forEach((f, i) => {
+    this.typing.rec(type).fields.forEach((f, i) => {
       const part = got.get(f.name)!;
-      const next = temp();
-      emit(`${next} = insertvalue ${llvm(type)} ${result}, ${llvm(f.type)} ${convert(part.v, part.type, f.type)}, ${i}`);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${this.llvm(type)} ${result}, ${this.llvm(f.type)} ${this.convert(part.v, part.type, f.type)}, ${i}`);
       result = next;
     });
     const made = new Set(got.values());
-    pending = pending.filter((entry) => !made.has(entry as { v: string; type: Type }));
+    this.pending = this.pending.filter((entry) => !made.has(entry as { v: string; type: Type }));
     return result;
   }
 
-  function property(p: ObjectProp, object: ObjectType): [string, string] {
-    if (p.kind === "property") return [p.key as string, owned(p.value)];
+
+  property(this: Mut<this>, p: ObjectProp, object: ObjectType): [string, string] {
+    if (p.kind === "property") return [p.key as string, this.owned(p.value)];
     if (p.kind !== "shorthand") throw new Error("internal error: unchecked property");
-    const local = resolved(p);
-    const to = typing.field(object, p.name)!.type;
+    const local = this.resolved(p);
+    const to = this.typing.field(object, p.name)!.type;
     // A shorthand lent to a reference field points at its variable.
-    if (isRef(to) && !isRef(local.type)) return [p.name, slot(local)];
-    if (holdsRust(local.type)) return [p.name, convert(shorthand(p, local), local.type, to)];
-    const result = temp();
-    emit(`${result} = load ${llvm(local.type)}, ptr ${slot(local)}`);
-    return [p.name, copied(convert(result, local.type, to), to)];
+    if (this.isRef(to) && !this.isRef(local.type)) return [p.name, this.slot(local)];
+    if (this.holdsRust(local.type)) return [p.name, this.convert(this.shorthand(p, local), local.type, to)];
+    const result = this.temp();
+    this.emit(`${result} = load ${this.llvm(local.type)}, ptr ${this.slot(local)}`);
+    return [p.name, this.copied(this.convert(result, local.type, to), to)];
   }
+
 
   // A shorthand property's value: its variable's, copied, or for a Rust value, moved out of it, as
   // the property written out moves it.
-  function shorthand(p: Extract<ObjectProp, { kind: "shorthand" }>, local: Local): string {
-    const read = temp();
-    emit(`${read} = load ${llvm(local.type)}, ptr ${slot(local)}`);
-    if (!holdsRust(local.type)) return copied(read, local.type);
-    if (!current.consumes.has(p.id)) throw new Error("internal error: a Rust value in a shorthand property isn't moved");
-    emit(`store ${llvm(local.type)} zeroinitializer, ptr ${slot(local)}`);
+  shorthand(this: Mut<this>, p: Extract<ObjectProp, { kind: "shorthand" }>, local: Local): string {
+    const read = this.temp();
+    this.emit(`${read} = load ${this.llvm(local.type)}, ptr ${this.slot(local)}`);
+    if (!this.holdsRust(local.type)) return this.copied(read, local.type);
+    if (!this.current.consumes.has(p.id)) throw new Error("internal error: a Rust value in a shorthand property isn't moved");
+    this.emit(`store ${this.llvm(local.type)} zeroinitializer, ptr ${this.slot(local)}`);
     return read;
   }
 
+
   // Writes a value to a place, giving the assignment's value: what was written, or, for a setter,
   // which keeps what it is given, a copy of its own released when the statement ends.
-  function store(target: Expr, result: string): string {
+  store(this: Mut<this>, target: Expr, result: string): string {
     target = bare(target);
-    const setter = setterOf(target);
+    const setter = this.setterOf(target);
     if (setter && target.kind === "member") {
-      const type = types.get(target)!;
+      const type = this.types.get(target)!;
       // A Rust value goes to the setter alone: the checker refuses such an assignment's value.
-      if (holdsRust(type)) {
-        invoke(setter, thisPointer(setter, target.object), [`${llvm(type)} ${result}`]);
+      if (this.holdsRust(type)) {
+        this.invoke(setter, this.thisPointer(setter, target.object), [`${this.llvm(type)} ${result}`]);
         return result;
       }
-      const kept = copied(result, type);
-      if (needsDrop(type)) pending.push({ v: kept, type });
-      invoke(setter, thisPointer(setter, target.object), [`${llvm(type)} ${result}`]);
+      const kept = this.copied(result, type);
+      if (this.needsDrop(type)) this.pending.push({ v: kept, type });
+      this.invoke(setter, this.thisPointer(setter, target.object), [`${this.llvm(type)} ${result}`]);
       return kept;
     }
     // A whole value written through a mutable reference goes where it points.
-    const type = types.get(target)!;
-    if (isRef(type) && coercions.has(target)) {
+    const type = this.types.get(target)!;
+    if (this.isRef(type) && this.coercions.has(target)) {
       // Through the reference as stored, unless an update keeps the member it was narrowed to.
-      const whole = target.kind === "ident" && type === resolved(target).type;
-      const pointer = whole ? temp() : evaluate(target);
-      if (whole) emit(`${pointer} = load ptr, ptr ${slot(resolved(target))}`);
-      replace(pointer, referent(type), result);
+      const whole = target.kind === "ident" && type === this.resolved(target).type;
+      const pointer = whole ? this.temp() : this.evaluate(target);
+      if (whole) this.emit(`${pointer} = load ptr, ptr ${this.slot(this.resolved(target))}`);
+      this.replace(pointer, this.referent(type), result);
       return result;
     }
     // An element or a field kept in a recursive type's block takes the value into a new block.
-    const place = placeType(target);
-    replace(address(target), place, place !== type && boxes(type, place) ? convert(result, type, place) : result);
+    const place = this.placeType(target);
+    this.replace(this.address(target), place, place !== type && this.boxes(type, place) ? this.convert(result, type, place) : result);
     return result;
   }
 
+
   // Writes a value into a place, dropping the one it held.
-  function replace(at: string, type: Type, v: string) {
-    const old = temp();
-    if (needsDrop(type)) emit(`${old} = load ${llvm(type)}, ptr ${at}`);
-    emit(`store ${llvm(type)} ${v}, ptr ${at}`);
-    if (needsDrop(type)) dispose(old, type);
+  replace(this: Mut<this>, at: string, type: Type, v: string) {
+    const old = this.temp();
+    if (this.needsDrop(type)) this.emit(`${old} = load ${this.llvm(type)}, ptr ${at}`);
+    this.emit(`store ${this.llvm(type)} ${v}, ptr ${at}`);
+    if (this.needsDrop(type)) this.dispose(old, type);
   }
+
 
   // Where a value of `want` lives inside a place holding a `whole`: a union narrowed to one
   // member keeps it in place as its payload, and one narrowed into a member that holds itself
   // keeps it in that member's block.
-  function narrowedPlace(at: string, whole: Type, want: Type): string {
+  narrowedPlace(this: Mut<this>, at: string, whole: Type, want: Type): string {
     if (whole === want || typeof whole === "string") return at;
-    const r = typing.rec(whole);
+    const r = this.typing.rec(whole);
     if (r.kind === "recursive") {
-      const block = temp();
-      emit(`${block} = load ptr, ptr ${at}`);
-      return narrowedPlace(block, r.of, want);
+      const block = this.temp();
+      this.emit(`${block} = load ptr, ptr ${at}`);
+      return this.narrowedPlace(block, r.of, want);
     }
     if (r.kind !== "union") return at;
-    const payload = temp();
-    emit(`${payload} = getelementptr ${llvm(whole)}, ptr ${at}, i32 0, i32 1`);
+    const payload = this.temp();
+    this.emit(`${payload} = getelementptr ${this.llvm(whole)}, ptr ${at}, i32 0, i32 1`);
     if (r.members.includes(want)) return payload;
     // A member holding itself keeps its value in a block, which a field of a class points to.
     const holder = r.members.find((m) => {
-      const block = recOf(m);
+      const block = this.recOf(m);
       if (block?.kind !== "recursive") return false;
-      const of = recOf(block.of);
+      const of = this.recOf(block.of);
       return block.of === want || (of?.kind === "union" && of.members.includes(want));
     });
-    return holder ? narrowedPlace(payload, holder, want) : payload;
+    return holder ? this.narrowedPlace(payload, holder, want) : payload;
   }
 
+
   // Where an assignment target lives: a variable's slot, or a field inside one.
-  function address(target: Expr): string {
+  address(this: Mut<this>, target: Expr): string {
     target = bare(target);
     if (target.kind === "this") return "%this";
-    if (target.kind === "index") return element(target);
+    if (target.kind === "index") return this.element(target);
     if (target.kind !== "member") {
-      const local = resolved(target);
-      return narrowedPlace(slot(local), local.type, types.get(target)!);
+      const local = this.resolved(target);
+      return this.narrowedPlace(this.slot(local), local.type, this.types.get(target)!);
     }
-    if (recOf(referent(types.get(target.object)!))?.kind === "shared") return sharedField(target)[2];
-    const holder = stored(target.object);
-    const object = typing.unfold(referent(holder)) as ObjectType | ClassType;
+    if (this.recOf(this.referent(this.types.get(target.object)!))?.kind === "shared") return this.sharedField(target)[2];
+    const holder = this.stored(target.object);
+    const object = this.typing.unfold(this.referent(holder)) as ObjectType | ClassType;
     // Through a reference, the field is inside what it points to, and in a recursive type's
     // block, inside the block. A reference to a recursive member, as a narrowed `Mut` gives,
     // points at the place holding the block, not at the block.
-    let base = isRef(holder) ? evaluate(target.object) : address(target.object);
-    if (recOf(referent(holder))?.kind === "recursive") {
-      const block = temp();
-      emit(`${block} = load ptr, ptr ${base}`);
+    let base = this.isRef(holder) ? this.evaluate(target.object) : this.address(target.object);
+    if (this.recOf(this.referent(holder))?.kind === "recursive") {
+      const block = this.temp();
+      this.emit(`${block} = load ptr, ptr ${base}`);
       base = block;
     }
-    const result = temp();
-    const path = typing.fieldPath(object, target.name).map((i) => `i32 ${i}`).join(", ");
-    emit(`${result} = getelementptr ${llvm(object)}, ptr ${base}, i32 0, ${path}`);
-    return inPayload(target) ? narrowedPlace(result, typing.field(object, target.name)!.type, types.get(target)!) : result;
+    const result = this.temp();
+    const path = this.typing.fieldPath(object, target.name).map((i) => `i32 ${i}`).join(", ");
+    this.emit(`${result} = getelementptr ${this.llvm(object)}, ptr ${base}, i32 0, ${path}`);
+    return this.inPayload(target) ? this.narrowedPlace(result, this.typing.field(object, target.name)!.type, this.types.get(target)!) : result;
   }
+
 
   // A field read a check narrowed to one member, whose place is inside its union's payload,
   // where it is stored as it is read.
-  function inPayload(e: Expr): boolean {
-    const declared = current.narrowedFields?.get(e);
-    if (declared === undefined || e.kind !== "member" || recOf(types.get(e))?.kind === "union") return false;
-    const holder = typing.unfold(referent(stored(e.object))) as ObjectType | ClassType;
-    return typing.lower(typing.unfolded(typing.field(holder, e.name)!.type)) === typing.lower(declared);
+  inPayload(this: Mut<this>, e: Expr): boolean {
+    const declared = this.current.narrowedFields?.get(e);
+    if (declared === undefined || e.kind !== "member" || this.recOf(this.types.get(e))?.kind === "union") return false;
+    const holder = this.typing.unfold(this.referent(this.stored(e.object))) as ObjectType | ClassType;
+    return this.typing.lower(this.typing.unfolded(this.typing.field(holder, e.name)!.type)) === this.typing.lower(declared);
   }
+
 
   // Whether an expression names somewhere a value lives: a variable, `this`, or a field of one,
   // but not a variable narrowed to part of a union, an enum's member or a union's shared field.
-  function lendable(e: Expr): boolean {
+  lendable(this: Mut<this>, e: Expr): boolean {
     let through = false;
-    for (e = bare(e); e.kind === "member" && !calls.has(e); e = bare(e.object)) {
+    for (e = bare(e); e.kind === "member" && !this.calls.has(e); e = bare(e.object)) {
       through = true;
       // A field narrowed to several members is read as a copy, laid out as the narrower union.
-      if (current.narrowedFields?.has(e) && !inPayload(e)) return false;
+      if (this.current.narrowedFields?.has(e) && !this.inPayload(e)) return false;
       // A string's or an array's `length` is computed, not a field.
       // A recursive member's fields live in its block, which is a place too.
-      const object = types.has(e.object) ? typing.unfold(referent(types.get(e.object)!)) : undefined;
+      const object = this.types.has(e.object) ? this.typing.unfold(this.referent(this.types.get(e.object)!)) : undefined;
       // A shared value's interior-mutable field lives in its block, wherever the handle is.
-      const kind = recOf(object)?.kind;
-      if (kind === "shared") return !current.copiesOut.has(e);
+      const kind = this.recOf(object)?.kind;
+      if (kind === "shared") return !this.current.copiesOut.has(e);
       if (kind !== "object" && kind !== "class") return false;
     }
     if (e.kind === "this") return true;
     // A field of what a call's reference points at lives there, as one through a variable does.
-    if (through && e.kind === "call" && isRef(types.get(e)!)) return true;
+    if (through && e.kind === "call" && this.isRef(this.types.get(e)!)) return true;
     // An array's element lives in its buffer, wherever the array itself is.
-    if (e.kind === "index") return indexes(valueType(e.object));
+    if (e.kind === "index") return this.indexes(this.valueType(e.object));
     // A JsValue read out of JS lives nowhere until the read makes it.
-    if (current.copiesOut.has(e)) return false;
-    const local = e.kind === "ident" ? localAt(e) : undefined;
-    const type = types.get(e);
-    return local !== undefined && (type === local.type || recOf(type)?.kind !== "union");
+    if (this.current.copiesOut.has(e)) return false;
+    const local = e.kind === "ident" ? this.localAt(e) : undefined;
+    const type = this.types.get(e);
+    return local !== undefined && (type === local.type || this.recOf(type)?.kind !== "union");
   }
+
 
   // The type a place is stored as. Read through a type parameter's bound, a field may have a
   // wider type than the one it is stored with.
-  function stored(e: Expr): Type {
+  stored(this: Mut<this>, e: Expr): Type {
     e = bare(e);
-    if (e.kind === "index" && indexes(valueType(e.object))) return placeType(e);
-    if (e.kind !== "member" || calls.has(e)) return types.get(e)!;
-    const holder = typing.unfold(referent(stored(e.object)));
+    if (e.kind === "index" && this.indexes(this.valueType(e.object))) return this.placeType(e);
+    if (e.kind !== "member" || this.calls.has(e)) return this.types.get(e)!;
+    const holder = this.typing.unfold(this.referent(this.stored(e.object)));
     // A shared value's field is stored in its block's value.
-    const shared = recOf(holder);
+    const shared = this.recOf(holder);
     const object = shared?.kind === "shared" ? shared.of : holder;
-    return inPayload(e) ? types.get(e)! : typing.field(object as ObjectType | ClassType, e.name)!.type;
+    return this.inPayload(e) ? this.types.get(e)! : this.typing.field(object as ObjectType | ClassType, e.name)!.type;
   }
+
 
   // The right side runs only when the left side does not already decide the result.
   // What the left Option holds, or the right side, run only when the left is empty.
-  function orElse(e: Extract<Expr, { kind: "binary" }>): string {
-    const option = valueType(e.left) as UnionType;
-    const type = types.get(e)!;
+  orElse(this: Mut<this>, e: Extract<Expr, { kind: "binary" }>): string {
+    const option = this.valueType(e.left) as UnionType;
+    const type = this.types.get(e)!;
     // A Rust value is moved out of the left side, which is left empty, never copied.
-    const rust = holdsRust(option);
-    const v = rust && fresh(e.left) ? value(e.left, true) : value(e.left);
-    if (rust && !fresh(e.left)) {
-      if (!current.consumes.has(e.left.id) || !lendable(e.left)) throw new Error("internal error: a Rust value on the left of '??' isn't moved");
-      take(e.left);
+    const rust = this.holdsRust(option);
+    const v = rust && this.fresh(e.left) ? this.value(e.left, true) : this.value(e.left);
+    if (rust && !this.fresh(e.left)) {
+      if (!this.current.consumes.has(e.left.id) || !this.lendable(e.left)) throw new Error("internal error: a Rust value on the left of '??' isn't moved");
+      this.take(e.left);
     }
-    const [some, none, end] = [label(), label(), label()];
-    emit(`br i1 ${holds(v, option, ["null"])}, label %${none}, label %${some}`);
-    startBlock(some);
+    const [some, none, end] = [this.label(), this.label(), this.label()];
+    this.emit(`br i1 ${this.holds(v, option, ["null"])}, label %${none}, label %${some}`);
+    this.startBlock(some);
     // The result is a value of its own, like a conditional's.
-    const kept = rust ? convert(v, option, type) : copied(convert(v, option, type), type);
-    const someEnd = block;
-    emit(`br label %${end}`);
-    startBlock(none);
-    const mark = pending.length;
-    const fallback = needsDrop(type) ? owned(e.right) : value(e.right);
-    settle(mark);
-    const noneEnd = block;
-    emit(`br label %${end}`);
-    startBlock(end);
-    const result = temp();
-    emit(`${result} = phi ${llvm(type)} [ ${kept}, %${someEnd} ], [ ${fallback}, %${noneEnd} ]`);
+    const kept = rust ? this.convert(v, option, type) : this.copied(this.convert(v, option, type), type);
+    const someEnd = this.block;
+    this.emit(`br label %${end}`);
+    this.startBlock(none);
+    const mark = this.pending.length;
+    const fallback = this.needsDrop(type) ? this.owned(e.right) : this.value(e.right);
+    this.settle(mark);
+    const noneEnd = this.block;
+    this.emit(`br label %${end}`);
+    this.startBlock(end);
+    const result = this.temp();
+    this.emit(`${result} = phi ${this.llvm(type)} [ ${kept}, %${someEnd} ], [ ${fallback}, %${noneEnd} ]`);
     return result;
   }
 
-  function logical(op: "&&" | "||", a: string, right: () => string): string {
-    const from = block;
-    const rhs = label();
-    const end = label();
-    emit(op === "&&" ? `br i1 ${a}, label %${rhs}, label %${end}` : `br i1 ${a}, label %${end}, label %${rhs}`);
-    startBlock(rhs);
-    const mark = pending.length;
+
+  logical(this: Mut<this>, op: "&&" | "||", a: string, right: () => string): string {
+    const from = this.block;
+    const rhs = this.label();
+    const end = this.label();
+    this.emit(op === "&&" ? `br i1 ${a}, label %${rhs}, label %${end}` : `br i1 ${a}, label %${end}, label %${rhs}`);
+    this.startBlock(rhs);
+    const mark = this.pending.length;
     const b = right();
-    settle(mark);
-    const rhsEnd = block;
-    emit(`br label %${end}`);
-    startBlock(end);
-    const result = temp();
-    emit(`${result} = phi i1 [ ${op === "||"}, %${from} ], [ ${b}, %${rhsEnd} ]`);
+    this.settle(mark);
+    const rhsEnd = this.block;
+    this.emit(`br label %${end}`);
+    this.startBlock(end);
+    const result = this.temp();
+    this.emit(`${result} = phi i1 [ ${op === "||"}, %${from} ], [ ${b}, %${rhsEnd} ]`);
     return result;
   }
 
-  function concat(a: string, b: string): string {
-    const result = temp();
-    emit(`${result} = call ptr @fsh_rt_str_concat(ptr ${a}, ptr ${b})`);
+
+  concat(this: Mut<this>, a: string, b: string): string {
+    const result = this.temp();
+    this.emit(`${result} = call ptr @fsh_rt_str_concat(ptr ${a}, ptr ${b})`);
     return result;
   }
+
 
   // A value as a string, written as JavaScript's `String(x)` would; a number's is a new string,
   // released when the statement ends.
-  function written(v: string, type: Type): string {
+  written(this: Mut<this>, v: string, type: Type): string {
     if (type === "string") return v;
     if (type === "bigint") {
-      const digits = temp();
-      emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
-      pending.push({ v: digits, type: "string" });
+      const digits = this.temp();
+      this.emit(`${digits} = call ptr @fsh_rt_big_text(ptr ${v}, i64 10)`);
+      this.pending.push({ v: digits, type: "string" });
       return digits;
     }
     if (type === "boolean") {
-      const result = temp();
-      emit(`${result} = select i1 ${v}, ptr ${text("true")}, ptr ${text("false")}`);
+      const result = this.temp();
+      this.emit(`${result} = select i1 ${v}, ptr ${this.text("true")}, ptr ${this.text("false")}`);
       return result;
     }
     let from = isFloat(type) ? type : "i64";
@@ -10422,82 +11018,83 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       const { bits, signed } = INTEGERS[type];
       if (!signed) from = "u64";
       if (bits === 128) {
-        const result = temp();
-        emit(`${result} = call ptr @fsh_rt_str_from_${signed ? "i" : "u"}128(i128 ${v})`);
-        pending.push({ v: result, type: "string" });
+        const result = this.temp();
+        this.emit(`${result} = call ptr @fsh_rt_str_from_${signed ? "i" : "u"}128(i128 ${v})`);
+        this.pending.push({ v: result, type: "string" });
         return result;
       }
       if (bits < 64) {
-        wide = temp();
-        emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
+        wide = this.temp();
+        this.emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${v} to i64`);
       }
     }
-    const result = temp();
-    emit(`${result} = call ptr @fsh_rt_str_from_${from}(${from === "f32" ? "float" : from === "f64" ? "double" : "i64"} ${wide})`);
-    pending.push({ v: result, type: "string" });
+    const result = this.temp();
+    this.emit(`${result} = call ptr @fsh_rt_str_from_${from}(${from === "f32" ? "float" : from === "f64" ? "double" : "i64"} ${wide})`);
+    this.pending.push({ v: result, type: "string" });
     return result;
   }
 
+
   // A value computed while compiling, built as a value of its type: scalars and strings as
   // constants, aggregates assembled from their baked parts.
-  function bake(tagged: Value, type: Type): string {
-    const r = recOf(type);
+  bake(this: Mut<this>, tagged: Value, type: Type): string {
+    const r = this.recOf(type);
     // A regex comptime made is its flags and pattern, as the interpreter holds it.
     if (r?.kind === "regex") {
       const held = untagged(tagged) as string;
       const slash = held.indexOf("/");
       const [flags, pattern] = [held.slice(0, slash), held.slice(slash + 1)];
-      return regex(typing.regexType(pattern, flags, parsePattern(pattern, flags, regexTables).captures));
+      return this.regex(this.typing.regexType(pattern, flags, parsePattern(pattern, flags, this.regexTables).captures));
     }
     if (r?.kind === "union") {
-      const member = memberOf(typing, tagged, type as UnionType);
-      return convert(bake(untagged(tagged), member), member, type);
+      const member = memberOf(this.typing, tagged, type as UnionType);
+      return this.convert(this.bake(untagged(tagged), member), member, type);
     }
     const v = untagged(tagged);
     // A literal type, or the empty value, takes no space.
     if ((r?.kind === "literal") || v === null) return "zeroinitializer";
-    if (typeof v === "string") return text(v);
+    if (typeof v === "string") return this.text(v);
     if (typeof v === "boolean") return String(v);
     if (typeof v === "number") return floatConstant(v, type as "f32" | "f64");
-    if (typeof v === "bigint" && type === "bigint") return bigConstant(v);
+    if (typeof v === "bigint" && type === "bigint") return this.bigConstant(v);
     if (typeof v === "bigint") return String(v);
     // An Atomic is its value; an atomic boolean a byte. A lock is its word, free, then its value.
     if (v && v.kind === "interior" && r?.kind === "interior") {
       if (isLock(r)) {
-        const made = temp();
-        emit(`${made} = insertvalue ${llvm(type)} zeroinitializer, ${llvm(r.of)} ${bake(v.value, r.of)}, 1`);
+        const made = this.temp();
+        this.emit(`${made} = insertvalue ${this.llvm(type)} zeroinitializer, ${this.llvm(r.of)} ${this.bake(v.value, r.of)}, 1`);
         return made;
       }
-      return llvm(type) === "i8" ? (v.value ? "1" : "0") : bake(v.value, r.of);
+      return this.llvm(type) === "i8" ? (v.value ? "1" : "0") : this.bake(v.value, r.of);
     }
     // A table is built at start-up, each entry inserted in the order comptime made it.
     if (v && v.kind === "map" && r?.kind === "map") {
-      const made = emptyMap(type as MapType);
-      for (const [k, x] of v.entries.values()) inserted(type as MapType, made, bake(k, r.key), r.set ? undefined : bake(x, r.value));
+      const made = this.emptyMap(type as MapType);
+      for (const [k, x] of v.entries.values()) this.inserted(type as MapType, made, this.bake(k, r.key), r.set ? undefined : this.bake(x, r.value));
       return made;
     }
     if (v && v.kind === "array" && r?.kind === "array") {
       const n = String(v.items.length);
-      const [data, t] = [temp(), llvm(r.element)];
-      emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes(r.element, n)})`);
+      const [data, t] = [this.temp(), this.llvm(r.element)];
+      this.emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${this.bytes(r.element, n)})`);
       // Numbers are copied from constant data, so a large table is one copy, not a store each.
       if (v.items.length > 0 && (isInteger(r.element) || isFloat(r.element))) {
         const element = r.element;
         const items = v.items.map((x) => `${t} ${typeof untagged(x) === "number" ? floatConstant(untagged(x) as f64, element as "f32" | "f64") : String(untagged(x))}`);
         const contents = `[${n} x ${t}] [${items.join(", ")}]`;
-        const table = `@.table.${stableId("table", contents)}`;
-        if (!tables.has(table)) globals.push(`${table} = private unnamed_addr constant ${contents}`);
-        tables.add(table);
-        intrinsics.add("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
-        emit(`call void @llvm.memcpy.p0.p0.i64(ptr ${data}, ptr ${table}, i64 ${bytes(element, n)}, i1 false)`);
-        return built(data, n, n);
+        const table = `@.table.${this.stableId("table", contents)}`;
+        if (!this.tables.has(table)) this.globals.push(`${table} = private unnamed_addr constant ${contents}`);
+        this.tables.add(table);
+        this.intrinsics.add("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
+        this.emit(`call void @llvm.memcpy.p0.p0.i64(ptr ${data}, ptr ${table}, i64 ${this.bytes(element, n)}, i1 false)`);
+        return this.built(data, n, n);
       }
       v.items.forEach((item, i) => {
-        const at = temp();
-        emit(`${at} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
-        emit(`store ${t} ${bake(item, r.element)}, ptr ${at}`);
+        const at = this.temp();
+        this.emit(`${at} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
+        this.emit(`store ${t} ${this.bake(item, r.element)}, ptr ${at}`);
       });
-      return built(data, n, n);
+      return this.built(data, n, n);
     }
     if (v && r !== undefined && (r.kind === "object" || r.kind === "class" || r.kind === "variant")) {
       const parts: [Type, Value][] = [];
@@ -10505,262 +11102,270 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       r.fields.forEach((f, i) => parts.push([f.type, v.kind === "variant" ? v.args[i] : v.kind === "record" ? v.fields.get(f.name) : undefined]));
       let made = "zeroinitializer";
       parts.forEach(([part, x], i) => {
-        const next = temp();
-        emit(`${next} = insertvalue ${llvm(type)} ${made}, ${llvm(part)} ${bake(x, part)}, ${i}`);
+        const next = this.temp();
+        this.emit(`${next} = insertvalue ${this.llvm(type)} ${made}, ${this.llvm(part)} ${this.bake(x, part)}, ${i}`);
         made = next;
       });
       return made;
     }
-    throw new Error(`internal error: no baked form for a comptime value of type ${typing.keyOf(type)}`);
+    throw new Error(`internal error: no baked form for a comptime value of type ${this.typing.keyOf(type)}`);
   }
+
 
   // A literal's string block: a count below zero, so it is never freed, its length, a pointer
   // to its bytes, no base, its UTF-16 length, and no breadcrumbs.
   // `re.exec(s)`: the runtime writes each group's start and end, and the match is built from
   // slices of s, with null for a group that took no part.
-  function regexExec(e: Extract<Expr, { kind: "call" }>): string {
+  regexExec(this: Mut<this>, e: Extract<Expr, { kind: "call" }>): string {
     const object = (e.callee as Extract<Expr, { kind: "member" }>).object;
-    const regexT = typing.lower(valueType(object)) as RegexType;
-    const option = (types.get(e) ?? typing.unionType([typing.matchType(regexT), "null"])) as UnionType;
-    const re = value(object);
-    const result = execOf(regexT, option, re, value(e.args[0]!));
-    if (!types.has(e)) pending.push({ v: result, type: option });
+    const regexT = this.typing.lower(this.valueType(object)) as RegexType;
+    const option = (this.types.get(e) ?? this.typing.unionType([this.typing.matchType(regexT), "null"])) as UnionType;
+    const re = this.value(object);
+    const result = this.execOf(regexT, option, re, this.value(e.args[0]!));
+    if (!this.types.has(e)) this.pending.push({ v: result, type: option });
     return result;
   }
 
+
   // The first match of a regex in s, or null.
-  function execOf(regexT: RegexType, option: UnionType, re: string, s: string): string {
-    const match = typing.rec(option).members.find((m) => m !== "null") as ObjectType;
-    const groups = typing.rec(regexT).captures.length + 1;
-    const [out, found, yes] = [alloca(`[${groups * 2} x i64]`), temp(), temp()];
-    emit(`${found} = call i32 @fsh_rt_regex_match(ptr ${re}, ptr ${s}, ptr ${out})`);
-    emit(`${yes} = icmp ne i32 ${found}, 0`);
-    const [made, none, done] = [label(), label(), label()];
-    emit(`br i1 ${yes}, label %${made}, label %${none}`);
-    startBlock(made);
-    const some = convert(matchValue(regexT, match, s, out), match, option);
-    const filled = block;
-    emit(`br label %${done}`);
-    startBlock(none);
-    const nothing = convert("zeroinitializer", "null", option);
-    emit(`br label %${done}`);
-    startBlock(done);
-    const result = temp();
-    emit(`${result} = phi ${llvm(option)} [ ${some}, %${filled} ], [ ${nothing}, %${none} ]`);
+  execOf(this: Mut<this>, regexT: RegexType, option: UnionType, re: string, s: string): string {
+    const match = this.typing.rec(option).members.find((m) => m !== "null") as ObjectType;
+    const groups = this.typing.rec(regexT).captures.length + 1;
+    const [out, found, yes] = [this.alloca(`[${groups * 2} x i64]`), this.temp(), this.temp()];
+    this.emit(`${found} = call i32 @fsh_rt_regex_match(ptr ${re}, ptr ${s}, ptr ${out})`);
+    this.emit(`${yes} = icmp ne i32 ${found}, 0`);
+    const [made, none, done] = [this.label(), this.label(), this.label()];
+    this.emit(`br i1 ${yes}, label %${made}, label %${none}`);
+    this.startBlock(made);
+    const some = this.convert(this.matchValue(regexT, match, s, out), match, option);
+    const filled = this.block;
+    this.emit(`br label %${done}`);
+    this.startBlock(none);
+    const nothing = this.convert("zeroinitializer", "null", option);
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
+    const result = this.temp();
+    this.emit(`${result} = phi ${this.llvm(option)} [ ${some}, %${filled} ], [ ${nothing}, %${none} ]`);
     return result;
   }
+
 
   // A match built from the starts and ends the runtime wrote at `slots`: slices of s, with null
   // for a group that took no part.
-  function matchValue(regexT: RegexType, match: ObjectType, s: string, slots: string): string {
+  matchValue(this: Mut<this>, regexT: RegexType, match: ObjectType, s: string, slots: string): string {
     const at = (k: usize) => {
-      const [p, v] = [temp(), temp()];
-      emit(`${p} = getelementptr i64, ptr ${slots}, i64 ${k}`);
-      emit(`${v} = load i64, ptr ${p}`);
+      const [p, v] = [this.temp(), this.temp()];
+      this.emit(`${p} = getelementptr i64, ptr ${slots}, i64 ${k}`);
+      this.emit(`${v} = load i64, ptr ${p}`);
       return v;
     };
     // A group's text, or null when it took no part; one of a name's groups that took part.
     const capture = (indexes: usize[], type: Type) => {
       if (type === "string") {
-        const v = temp();
-        emit(`${v} = call ptr @fsh_rt_str_slice(ptr ${s}, i64 ${at(indexes[0]! * 2)}, i64 ${at(indexes[0]! * 2 + 1)}, i32 2)`);
+        const v = this.temp();
+        this.emit(`${v} = call ptr @fsh_rt_str_slice(ptr ${s}, i64 ${at(indexes[0]! * 2)}, i64 ${at(indexes[0]! * 2 + 1)}, i32 2)`);
         return v;
       }
-      let result = convert("zeroinitializer", "null", type);
+      let result = this.convert("zeroinitializer", "null", type);
       for (const i of indexes) {
         const start = at(i * 2);
-        const [took, yes, next, from] = [temp(), label(), label(), block];
-        emit(`${took} = icmp sge i64 ${start}, 0`);
-        emit(`br i1 ${took}, label %${yes}, label %${next}`);
-        startBlock(yes);
-        const text = temp();
-        emit(`${text} = call ptr @fsh_rt_str_slice(ptr ${s}, i64 ${start}, i64 ${at(i * 2 + 1)}, i32 2)`);
-        const some = convert(text, "string", type);
-        const filled = block;
-        emit(`br label %${next}`);
-        startBlock(next);
-        const merged = temp();
-        emit(`${merged} = phi ${llvm(type)} [ ${result}, %${from} ], [ ${some}, %${filled} ]`);
+        const [took, yes, next, from] = [this.temp(), this.label(), this.label(), this.block];
+        this.emit(`${took} = icmp sge i64 ${start}, 0`);
+        this.emit(`br i1 ${took}, label %${yes}, label %${next}`);
+        this.startBlock(yes);
+        const text = this.temp();
+        this.emit(`${text} = call ptr @fsh_rt_str_slice(ptr ${s}, i64 ${start}, i64 ${at(i * 2 + 1)}, i32 2)`);
+        const some = this.convert(text, "string", type);
+        const filled = this.block;
+        this.emit(`br label %${next}`);
+        this.startBlock(next);
+        const merged = this.temp();
+        this.emit(`${merged} = phi ${this.llvm(type)} [ ${result}, %${from} ], [ ${some}, %${filled} ]`);
         result = merged;
       }
       return result;
     };
     let built = "undef";
-    typing.rec(match).fields.forEach((f, i) => {
+    this.typing.rec(match).fields.forEach((f, i) => {
       let v: string;
       if (/^\d+$/.test(f.name)) v = capture([Number(f.name)], f.type);
       else if (f.name === "index") v = at(0);
-      else if (f.name === "input") v = copied(s, "string");
+      else if (f.name === "input") v = this.copied(s, "string");
       else {
         const named = f.type as ObjectType;
         let inner = "undef";
-        typing.rec(named).fields.forEach((g, j) => {
-          const indexes = typing.rec(regexT).captures.flatMap((c, k) => (c.name === g.name ? [k + 1] : []));
-          const next = temp();
-          emit(`${next} = insertvalue ${llvm(named)} ${inner}, ${llvm(g.type)} ${capture(indexes, g.type)}, ${j}`);
+        this.typing.rec(named).fields.forEach((g, j) => {
+          const indexes = this.typing.rec(regexT).captures.flatMap((c, k) => (c.name === g.name ? [k + 1] : []));
+          const next = this.temp();
+          this.emit(`${next} = insertvalue ${this.llvm(named)} ${inner}, ${this.llvm(g.type)} ${capture(indexes, g.type)}, ${j}`);
           inner = next;
         });
         v = inner;
       }
-      const next = temp();
-      emit(`${next} = insertvalue ${llvm(match)} ${built}, ${llvm(f.type)} ${v}, ${i}`);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${this.llvm(match)} ${built}, ${this.llvm(f.type)} ${v}, ${i}`);
       built = next;
     });
     return built;
   }
 
+
   // A string method given a regex: search, match, matchAll, split, replace and replaceAll.
-  function regexString(e: Extract<Expr, { kind: "call" }>, name: string): string {
+  regexString(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, name: string): string {
     const callee = e.callee as Extract<Expr, { kind: "member" }>;
-    const regexT = typing.lower(valueType(e.args[0]!)) as RegexType;
-    const s = operand(callee.object, e.args);
-    const re = value(e.args[0]!);
+    const regexT = this.typing.lower(this.valueType(e.args[0]!)) as RegexType;
+    const s = this.operand(callee.object, e.args);
+    const re = this.value(e.args[0]!);
     // A call used as a statement has no type of its own; what it makes, from this instance's
     // regex, is dropped at its end.
-    const type = types.get(e) ?? regexStringType(typing, name, regexT, typing.rec(regexT).any === true);
+    const type = this.types.get(e) ?? regexStringType(this.typing, name, regexT, this.typing.rec(regexT).any === true);
     const call = (line: string) => {
-      const v = temp();
-      emit(`${v} = call ${line}`);
+      const v = this.temp();
+      this.emit(`${v} = call ${line}`);
       return v;
     };
     let result: string;
     if (name === "search") result = call(`i64 @fsh_rt_regex_search(ptr ${re}, ptr ${s})`);
-    else if (name === "match" && !typing.rec(regexT).flags.includes("g")) result = execOf(regexT, type as UnionType, re, s);
+    else if (name === "match" && !this.typing.rec(regexT).flags.includes("g")) result = this.execOf(regexT, type as UnionType, re, s);
     else if (name === "match") {
-      const out = alloca(ARRAY);
+      const out = this.alloca(ARRAY);
       const found = call(`i32 @fsh_rt_regex_match_all(ptr ${out}, ptr ${re}, ptr ${s})`);
-      const [yes, list] = [temp(), temp()];
-      emit(`${yes} = icmp ne i32 ${found}, 0`);
-      emit(`${list} = load ${ARRAY}, ptr ${out}`);
-      const v = temp();
-      emit(`${v} = select i1 ${yes}, ${llvm(type)} ${convert(list, typing.arrayType("string"), type)}, ${llvm(type)} ${convert("zeroinitializer", "null", type)}`);
+      const [yes, list] = [this.temp(), this.temp()];
+      this.emit(`${yes} = icmp ne i32 ${found}, 0`);
+      this.emit(`${list} = load ${ARRAY}, ptr ${out}`);
+      const v = this.temp();
+      this.emit(`${v} = select i1 ${yes}, ${this.llvm(type)} ${this.convert(list, this.typing.arrayType("string"), type)}, ${this.llvm(type)} ${this.convert("zeroinitializer", "null", type)}`);
       result = v;
     } else if (name === "split") {
-      const out = alloca(ARRAY);
-      const element = recOf(typing.rec(type as ArrayType).element);
+      const out = this.alloca(ARRAY);
+      const element = this.recOf(this.typing.rec(type as ArrayType).element);
       const tagged = element?.kind === "union";
       const tags = tagged ? [element.members.indexOf("null"), element.members.indexOf("string")] : [0, 0];
-      const limit = e.args[1] ? value(e.args[1]) : "-1";
-      emit(`call void @fsh_rt_regex_split(ptr ${out}, ptr ${re}, ptr ${s}, i64 ${limit}, i32 ${tagged ? 1 : 0}, i32 ${tags[0]}, i32 ${tags[1]})`);
-      result = temp();
-      emit(`${result} = load ${ARRAY}, ptr ${out}`);
-    } else result = regexLoop(e, name, regexT, re, s, type);
-    if (!types.has(e) && needsDrop(type)) pending.push({ v: result, type });
+      const limit = e.args[1] ? this.value(e.args[1]) : "-1";
+      this.emit(`call void @fsh_rt_regex_split(ptr ${out}, ptr ${re}, ptr ${s}, i64 ${limit}, i32 ${tagged ? 1 : 0}, i32 ${tags[0]}, i32 ${tags[1]})`);
+      result = this.temp();
+      this.emit(`${result} = load ${ARRAY}, ptr ${out}`);
+    } else result = this.regexLoop(e, name, regexT, re, s, type);
+    if (!this.types.has(e) && this.needsDrop(type)) this.pending.push({ v: result, type });
     return result;
   }
+
 
   // matchAll and replace, which go through the matches one at a time: matchAll builds each
   // into an array, replace puts what replaces each, from a pattern or a function, between the
   // text around them.
-  function regexLoop(e: Extract<Expr, { kind: "call" }>, name: string, regexT: RegexType, re: string, s: string, type: Type): string {
+  regexLoop(this: Mut<this>, e: Extract<Expr, { kind: "call" }>, name: string, regexT: RegexType, re: string, s: string, type: Type): string {
     // A regex whose flags aren't known here says in its program whether it is global.
-    const global = name === "matchAll" || typing.rec(regexT).flags.includes("g") ? 1 : typing.rec(regexT).any ? -1 : 0;
-    const it = temp();
-    emit(`${it} = call ptr @fsh_rt_regex_iter(ptr ${re}, ptr ${s}, i32 ${global})`);
+    const global = name === "matchAll" || this.typing.rec(regexT).flags.includes("g") ? 1 : this.typing.rec(regexT).any ? -1 : 0;
+    const it = this.temp();
+    this.emit(`${it} = call ptr @fsh_rt_regex_iter(ptr ${re}, ptr ${s}, i32 ${global})`);
     const given = e.args[1];
     const callback = given?.kind === "arrow" ? given : undefined;
-    const closure = callback && (types.get(callback) as ClosureType);
-    const env = callback ? alloca(llvm(closure!)) : "";
-    if (callback) emit(`store ${llvm(closure!)} ${owned(callback)}, ptr ${env}`);
-    const pattern = name.startsWith("replace") && !callback ? value(given!) : undefined;
-    const list = name === "matchAll" ? alloca(ARRAY) : undefined;
-    if (list) emit(`store ${ARRAY} zeroinitializer, ptr ${list}`);
-    const [head, body, done] = [label(), label(), label()];
-    emit(`br label %${head}`);
-    startBlock(head);
-    const more = temp();
-    emit(`${more} = call i32 @fsh_rt_regex_next(ptr ${it})`);
-    const yes = temp();
-    emit(`${yes} = icmp ne i32 ${more}, 0`);
-    emit(`br i1 ${yes}, label %${body}, label %${done}`);
-    startBlock(body);
-    const slots = temp();
-    emit(`${slots} = call ptr @fsh_rt_regex_slots(ptr ${it})`);
-    if (list) appended(list, typing.rec(type as ArrayType).element, matchValue(regexT, typing.rec(type as ArrayType).element as ObjectType, s, slots));
-    else if (pattern) emit(`call void @fsh_rt_regex_put_pattern(ptr ${it}, ptr ${pattern})`);
+    const closure = callback && (this.types.get(callback) as ClosureType);
+    const env = callback ? this.alloca(this.llvm(closure!)) : "";
+    if (callback) this.emit(`store ${this.llvm(closure!)} ${this.owned(callback)}, ptr ${env}`);
+    const pattern = name.startsWith("replace") && !callback ? this.value(given!) : undefined;
+    const list = name === "matchAll" ? this.alloca(ARRAY) : undefined;
+    if (list) this.emit(`store ${ARRAY} zeroinitializer, ptr ${list}`);
+    const [head, body, done] = [this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const more = this.temp();
+    this.emit(`${more} = call i32 @fsh_rt_regex_next(ptr ${it})`);
+    const yes = this.temp();
+    this.emit(`${yes} = icmp ne i32 ${more}, 0`);
+    this.emit(`br i1 ${yes}, label %${body}, label %${done}`);
+    this.startBlock(body);
+    const slots = this.temp();
+    this.emit(`${slots} = call ptr @fsh_rt_regex_slots(ptr ${it})`);
+    if (list) this.appended(list, this.typing.rec(type as ArrayType).element, this.matchValue(regexT, this.typing.rec(type as ArrayType).element as ObjectType, s, slots));
+    else if (pattern) this.emit(`call void @fsh_rt_regex_put_pattern(ptr ${it}, ptr ${pattern})`);
     else {
-      const target = callOf(callback!)!;
-      const match = typing.matchType(regexT);
-      const whole = matchValue(regexT, match, s, slots);
-      const parts = typing.elementsOf(match);
-      const groups = typing.field(match, "groups");
-      const kept = groups ? alloca(llvm(groups.type)) : undefined;
-      const passed = typing.rec(closure!).params.map((p, i) => {
+      const target = this.callOf(callback!)!;
+      const match = this.typing.matchType(regexT);
+      const whole = this.matchValue(regexT, match, s, slots);
+      const parts = this.typing.elementsOf(match);
+      const groups = this.typing.field(match, "groups");
+      const kept = groups ? this.alloca(this.llvm(groups.type)) : undefined;
+      const passed = this.typing.rec(closure!).params.map((p, i) => {
         if (i < parts.length) {
-          const part = temp();
-          emit(`${part} = extractvalue ${llvm(match)} ${whole}, ${typing.rec(match).fields.findIndex((f) => f.name === String(i))}`);
-          return `${llvm(p)} ${convert(copied(part, parts[i]!), parts[i]!, p)}`;
+          const part = this.temp();
+          this.emit(`${part} = extractvalue ${this.llvm(match)} ${whole}, ${this.typing.rec(match).fields.findIndex((f) => f.name === String(i))}`);
+          return `${this.llvm(p)} ${this.convert(this.copied(part, parts[i]!), parts[i]!, p)}`;
         }
         if (i === parts.length) {
-          const index = temp();
-          emit(`${index} = extractvalue ${llvm(match)} ${whole}, ${typing.rec(match).fields.findIndex((f) => f.name === "index")}`);
+          const index = this.temp();
+          this.emit(`${index} = extractvalue ${this.llvm(match)} ${whole}, ${this.typing.rec(match).fields.findIndex((f) => f.name === "index")}`);
           return `i64 ${index}`;
         }
-        if (i === parts.length + 1) return `ptr ${copied(s, "string")}`;
-        const g = temp();
-        emit(`${g} = extractvalue ${llvm(match)} ${whole}, ${typing.rec(match).fields.findIndex((f) => f.name === "groups")}`);
-        emit(`store ${llvm(groups!.type)} ${g}, ptr ${kept}`);
+        if (i === parts.length + 1) return `ptr ${this.copied(s, "string")}`;
+        const g = this.temp();
+        this.emit(`${g} = extractvalue ${this.llvm(match)} ${whole}, ${this.typing.rec(match).fields.findIndex((f) => f.name === "groups")}`);
+        this.emit(`store ${this.llvm(groups!.type)} ${g}, ptr ${kept}`);
         return `ptr ${kept}`;
       });
       // The match is read back from a slot in the landing pad: at -O0 a value carried in
       // registers into one may be lost.
-      const stash = alloca(llvm(match));
-      emit(`store ${llvm(match)} ${whole}, ptr ${stash}`);
+      const stash = this.alloca(this.llvm(match));
+      this.emit(`store ${this.llvm(match)} ${whole}, ptr ${stash}`);
       const unwound = () => {
-        const held = temp();
-        emit(`${held} = load ${llvm(match)}, ptr ${stash}`);
-        dispose(held, match);
-        emit(`call void @fsh_rt_regex_close(ptr ${it})`);
-        if (needsDrop(closure!)) dispose(unstash(env, closure!), closure!);
+        const held = this.temp();
+        this.emit(`${held} = load ${this.llvm(match)}, ptr ${stash}`);
+        this.dispose(held, match);
+        this.emit(`call void @fsh_rt_regex_close(ptr ${it})`);
+        if (this.needsDrop(closure!)) this.dispose(this.unstash(env, closure!), closure!);
       };
-      const gives = invoke(target, env, passed.slice(0, bodyOf(noted.arenas, target).params.length), e, undefined, unwound)!;
-      const text = convert(gives, typing.rec(closure!).returns, "string");
-      emit(`call void @fsh_rt_regex_put(ptr ${it}, ptr ${text})`);
-      dispose(text, "string");
-      dispose(whole, match);
+      const gives = this.invoke(target, env, passed.slice(0, bodyOf(this.noted.arenas, target).params.length), e, undefined, unwound)!;
+      const text = this.convert(gives, this.typing.rec(closure!).returns, "string");
+      this.emit(`call void @fsh_rt_regex_put(ptr ${it}, ptr ${text})`);
+      this.dispose(text, "string");
+      this.dispose(whole, match);
     }
-    emit(`br label %${head}`);
-    startBlock(done);
-    if (callback && needsDrop(closure!)) dispose(unstash(env, closure!), closure!);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
+    if (callback && this.needsDrop(closure!)) this.dispose(this.unstash(env, closure!), closure!);
     if (list) {
-      emit(`call void @fsh_rt_regex_close(ptr ${it})`);
-      const v = temp();
-      emit(`${v} = load ${ARRAY}, ptr ${list}`);
+      this.emit(`call void @fsh_rt_regex_close(ptr ${it})`);
+      const v = this.temp();
+      this.emit(`${v} = load ${ARRAY}, ptr ${list}`);
       return v;
     }
-    const made = temp();
-    emit(`${made} = call ptr @fsh_rt_regex_finish(ptr ${it})`);
+    const made = this.temp();
+    this.emit(`${made} = call ptr @fsh_rt_regex_finish(ptr ${it})`);
     return made;
   }
 
+
   // A regex is a pointer to its compiled program, one constant per pattern and flags.
-  function regex(t: RegexType): string {
-    const key = `${typing.rec(t).flags}/${typing.rec(t).pattern}`;
-    const made = regexes.get(key);
+  regex(this: Mut<this>, t: RegexType): string {
+    const key = `${this.typing.rec(t).flags}/${this.typing.rec(t).pattern}`;
+    const made = this.regexes.get(key);
     if (made) return made;
-    const program = compileRegex(parsePattern(typing.rec(t).pattern, typing.rec(t).flags, regexTables), regexTables);
-    const name = `@.regex.${stableId("regex", key)}`;
-    globals.push(`${name} = private unnamed_addr constant [${program.length} x i32] [${program.map((w) => `i32 ${w | 0}`).join(", ")}]`);
-    regexes.set(key, name);
+    const program = compileRegex(parsePattern(this.typing.rec(t).pattern, this.typing.rec(t).flags, this.regexTables), this.regexTables);
+    const name = `@.regex.${this.stableId("regex", key)}`;
+    this.globals.push(`${name} = private unnamed_addr constant [${program.length} x i32] [${program.map((w) => `i32 ${w | 0}`).join(", ")}]`);
+    this.regexes.set(key, name);
     return name;
   }
 
+
   // A bigint known while compiling, as a constant the runtime never counts or frees.
-  function bigConstant(value: bigint): string {
+  bigConstant(this: Mut<this>, value: bigint): string {
     const key = String(value);
-    const made = bigConstants.get(value);
+    const made = this.bigConstants.get(value);
     if (made) return made;
     const limbs: bigint[] = [];
     for (let m = value < 0n ? -value : value; m > 0n; m >>= 32n) limbs.push(m & 0xffffffffn);
-    const name = `@.bigint.${stableId("bigint constant", key, key)}`;
-    bigConstants.set(value, name);
+    const name = `@.bigint.${this.stableId("bigint constant", key, key)}`;
+    this.bigConstants.set(value, name);
     const words = limbs.length === 0 ? "i32 0" : limbs.map((l) => `i32 ${BigInt.asIntN(32, l)}`).join(", ");
-    globals.push(`${name} = private unnamed_addr constant { i64, i32, i64, [${Math.max(limbs.length, 1)} x i32] } { i64 -1, i32 ${value < 0n ? 1 : 0}, i64 ${limbs.length}, [${Math.max(limbs.length, 1)} x i32] [${words}] }`);
+    this.globals.push(`${name} = private unnamed_addr constant { i64, i32, i64, [${Math.max(limbs.length, 1)} x i32] } { i64 -1, i32 ${value < 0n ? 1 : 0}, i64 ${limbs.length}, [${Math.max(limbs.length, 1)} x i32] [${words}] }`);
     return name;
   }
 
-  function text(value: string): string {
-    const made = texts.get(value);
+
+  text(this: Mut<this>, value: string): string {
+    const made = this.texts.get(value);
     if (made) return made;
     const bytes = wtf8(value);
     let lit = "";
@@ -10768,18 +11373,19 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       const plain = b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c;
       lit += plain ? String.fromCharCode(b) : "\\" + b.toString(16).padStart(2, "0").toUpperCase();
     }
-    const name = `@.text.${stableId("text constant", lit, value)}`;
-    texts.set(value, name);
-    globals.push(`${name}.bytes = private unnamed_addr constant [${bytes.length} x i8] c"${lit}"`);
+    const name = `@.text.${this.stableId("text constant", lit, value)}`;
+    this.texts.set(value, name);
+    this.globals.push(`${name}.bytes = private unnamed_addr constant [${bytes.length} x i8] c"${lit}"`);
     // Non-ASCII text longer than one breadcrumb's stride gets its breadcrumbs, as the runtime
     // would make them.
     const crumbs = bytes.length !== value.length && value.length > STRIDE ? breadcrumbs(value) : undefined;
-    if (crumbs) globals.push(`${name}.crumbs = private unnamed_addr constant [${crumbs.length} x i64] [${crumbs.map((c) => `i64 ${c}`).join(", ")}]`);
-    globals.push(`${name} = private unnamed_addr constant { i64, i64, ptr, ptr, i64, ptr } { i64 -1, i64 ${bytes.length}, ptr ${name}.bytes, ptr null, i64 ${value.length}, ptr ${crumbs ? `${name}.crumbs` : "null"} }`);
+    if (crumbs) this.globals.push(`${name}.crumbs = private unnamed_addr constant [${crumbs.length} x i64] [${crumbs.map((c) => `i64 ${c}`).join(", ")}]`);
+    this.globals.push(`${name} = private unnamed_addr constant { i64, i64, ptr, ptr, i64, ptr } { i64 -1, i64 ${bytes.length}, ptr ${name}.bytes, ptr null, i64 ${value.length}, ptr ${crumbs ? `${name}.crumbs` : "null"} }`);
     return name;
   }
 
-  function cString(s: string): string {
+
+  cString(this: Mut<this>, s: string): string {
     const bytes = new TextEncoder().encode(s + "\0");
     let lit = "";
     for (const b of bytes) {
@@ -10787,13 +11393,18 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       lit += plain ? String.fromCharCode(b) : "\\" + b.toString(16).padStart(2, "0").toUpperCase();
     }
     // Keyed by its bytes, which two strings with lone surrogates may share.
-    const made = cStrings.get(lit);
+    const made = this.cStrings.get(lit);
     if (made) return made;
-    const name = `@.str.${stableId("str", lit)}`;
-    cStrings.set(lit, name);
-    globals.push(`${name} = private unnamed_addr constant [${bytes.length} x i8] c"${lit}"`);
+    const name = `@.str.${this.stableId("str", lit)}`;
+    this.cStrings.set(lit, name);
+    this.globals.push(`${name} = private unnamed_addr constant [${bytes.length} x i8] c"${lit}"`);
     return name;
   }
+}
+
+// The LLVM IR of a checked program.
+export function codegen(checked: Checked, options: Options): string {
+  return new Codegen(checked, options).result;
 }
 
 // The runtime's breadcrumb stride, in UTF-16 units.
