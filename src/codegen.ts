@@ -14,7 +14,7 @@ import { ARRAY, DYN, compound, Conversions, llvmOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
 import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
-import { forEachChild, NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.ts";
+import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.ts";
 import type { Tables } from "./compilation.ts";
 import type { Kind, Verdict } from "./narrow.ts";
 
@@ -369,6 +369,10 @@ class Codegen implements PrintHost {
   
 
     this.frames = false;
+
+    this.site = undefined;
+
+    this.marked = undefined;
 
     this.globals = [];
 
@@ -1005,7 +1009,9 @@ class Codegen implements PrintHost {
         const target = this.calledThrough(i, p.pattern.kind === "ident" ? p.pattern.name : "");
         parts.push(target === undefined ? "*" : `*${this.inst(target).throws === undefined ? "" : this.noted.typing.keyOf(this.inst(target).throws!)}*${this.noted.typing.keyOf(this.inst(target).returns)}(${bodyOf(this.noted.arenas, this.inst(target)).params.map((q) => this.noted.typing.keyOf(this.loc(this.inst(target).locals.get(q)!).type)).join(",")})`);
       });
-      for (const [name, t] of [...this.inst(i).bindings].sort(([a], [b]) => (a < b ? -1 : 1))) {
+      let bound = [...this.inst(i).bindings];
+      bound.sort(([a], [b]) => (a < b ? -1 : 1));
+      for (const [name, t] of bound) {
         const k = name.startsWith("#") ? Number(name.slice(1)) : -1;
         if (k >= 0 && at.has(k)) continue;
         parts.push(`${name}=${this.noted.typing.keyOf(t)}`);
@@ -1159,11 +1165,15 @@ class Codegen implements PrintHost {
       cg.takeUp(saved);
       return lines;
     };
+    // Each constant's value, computed while compiling, before the filler that stores it.
+    let computed: Value[] = [];
+    for (const [c] of this.constantGlobals) computed.push(comptimeBody(new CheckedHost(this.noted), c));
     const filler = made(this, '@"fsh.constants"', (cg) => {
+      let at: usize = 0;
       for (const [c, name] of [...cg.constantGlobals]) {
-        const comptimeBody2 = comptimeBody(new CheckedHost(cg.noted), c);
         const gives = cg.inst(c).returns;
-        const line = `store ${cg.llvm(gives)} ${cg.bake(comptimeBody2, gives)}, ptr ${name}`;
+        const line = `store ${cg.llvm(gives)} ${cg.bake(computed[at]!, gives)}, ptr ${name}`;
+        at++;
         cg.emit(line);
       }
       cg.emit('call void @fsh_rt_constants(ptr @"fsh.constants.drop")');
@@ -1183,7 +1193,7 @@ class Codegen implements PrintHost {
   // Comptime gives what can be built into the program: numbers, booleans, strings, and arrays,
   // Maps, Sets, objects, instances, unions and enums of them; a top-level const may also hold an Atomic or
   // a Lock.
-  bakeable(type: Type, at: Ref<Span>, constant = false) {
+  bakeable(this: Mut<this>, type: Type, at: Ref<Span>, constant = false) {
     // The first part of a type comptime can't make, or undefined.
     function fault(cg: Mut<Codegen>, t: Type): Type | undefined {
       if (typeof t === "string") return t === "void" ? t : undefined;
@@ -1453,7 +1463,7 @@ class Codegen implements PrintHost {
     const result = this.temp();
     if (family === "checked") {
       const option = this.noted.typing.unionType([type, "null"]);
-      const line = `${result} = select i1 ${over}, ${this.llvm(option)} ${this.convert("zeroinitializer", "null", option)}, ${this.llvm(option)} ${this.convert(v, type, option)}`;
+      const line = `${result} = select i1 ${over!}, ${this.llvm(option)} ${this.convert("zeroinitializer", "null", option)}, ${this.llvm(option)} ${this.convert(v, type, option)}`;
       this.emit(line);
       return result;
     }
@@ -1926,7 +1936,9 @@ class Codegen implements PrintHost {
     const chosen = this.noted.typing.lower(this.noted.typing.rec(t).key) === "string" ? 1 : 0;
     const part2 = this.noted.typing.rec(t).key;
     const drop2 = drop(this, part2);
-    const line = `${made} = call ptr @fsh_rt_map_new(i64 ${size}, i64 ${keyAt}, i64 ${valueAt}, i32 ${chosen}, ptr ${drop2}, ptr ${this.noted.typing.rec(t).set ? "null" : drop(this, this.noted.typing.rec(t).value)})`;
+    const value = this.noted.typing.rec(t).value;
+    const drop3 = this.noted.typing.rec(t).set ? "null" : drop(this, value);
+    const line = `${made} = call ptr @fsh_rt_map_new(i64 ${size}, i64 ${keyAt}, i64 ${valueAt}, i32 ${chosen}, ptr ${drop2}, ptr ${drop3})`;
     this.emit(line);
     return made;
   }
@@ -2424,6 +2436,11 @@ class Codegen implements PrintHost {
   optionalAt(call: Ref<Expr>): boolean[] {
     const optional = this.noted.jsOptionalOf.get(call);
     return optional === undefined ? [] : [...optional];
+  }
+
+  // The site whose calls the function being emitted is making now.
+  siteNow(): Span | undefined {
+    return this.site === undefined ? undefined : { start: this.site.start, end: this.site.end };
   }
 
   // Where the value going to JS now was written, for the callbacks and settlers made for it.
@@ -4247,8 +4264,8 @@ class Codegen implements PrintHost {
 
   statement(this: Mut<this>, s: Ref<Stmt>) {
     if (this.cur().unreached?.has(s) === true) return;
-    const outer = this.site;
-    this.site = s;
+    const outer = this.siteNow();
+    this.site = { start: s.start, end: s.end };
     this.lowerStatement(s);
     this.site = outer;
   }
@@ -11672,8 +11689,8 @@ class Codegen implements PrintHost {
 
   // The calls an expression makes are made from its site, once its operands' own calls are done.
   evaluate(this: Mut<this>, e: Ref<Expr>): string {
-    const outer = this.site;
-    this.site = e;
+    const outer = this.siteNow();
+    this.site = { start: e.start, end: e.end };
     const v = this.evaluated(e);
     this.site = outer;
     return v;
