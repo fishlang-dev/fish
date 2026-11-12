@@ -38,7 +38,9 @@ const FLOAT_COMPARISON: Partial<Record<BinaryOp, string>> = {
   "===": "oeq", "!==": "une", "<": "olt", "<=": "ole", ">": "ogt", ">=": "oge",
 };
 
-const FLOAT_ARITHMETIC: Partial<Record<BinaryOp, string>> = { "+": "fadd", "-": "fsub", "*": "fmul", "/": "fdiv", "%": "frem" };
+function floatArithmetic(op: BinaryOp): string {
+  return op === "+" ? "fadd" : op === "-" ? "fsub" : op === "*" ? "fmul" : op === "/" ? "fdiv" : "frem";
+}
 
 // Every function has unwind tables, and when panics unwind, the C personality, whose cleanups
 // run a panic's drops.
@@ -174,7 +176,6 @@ function byName(lines: Ref<string[]>): string[] {
 // libm of the machine compiling.
 const MATH_INTRINSICS = new Set(["floor", "ceil", "trunc", "sqrt"]);
 // The array methods that are another walking from the last element back.
-const BACKWARD: Record<string, string> = { findLast: "find", findLastIndex: "findIndex", reduceRight: "reduce" };
 
 // The C functions the runtime prelude already declares, which a `declare function` reuses.
 function declared(): Set<string> {
@@ -310,7 +311,7 @@ class Codegen implements PrintHost {
   elementDrops: TypeMap<Type, string>;
   callbacks: Map<string, string>;
   settlers: Map<string, [string, string]>;
-  jsSite: Expr | undefined;
+  jsSite: Span | undefined;
   vtables: Map<string, string>;
   orders: Map<string, string>;
   intrinsics: Set<string>;
@@ -329,12 +330,12 @@ class Codegen implements PrintHost {
 
   constructor(checked: Checked, options: Options) {
     const first = checked.instances[0]!;
-    let resumes: [GeneratorType, InstanceId][] = [];
-    let polls: [FutureType, InstanceId][] = [];
+    let resumes = new TypeMap<GeneratorType, InstanceId>();
+    let polls = new TypeMap<FutureType, InstanceId>();
     for (const i of checked.instances) {
       const made = checked.tables.arenas.instanceOf(i)!;
-      if (made.generator !== undefined) resumes.push([made.generator, i]);
-      if (made.future !== undefined) polls.push([made.future, i]);
+      if (made.generator !== undefined) resumes.set(made.generator, i);
+      if (made.future !== undefined) polls.set(made.future, i);
     }
     this.names = symbolNames(checked.tables.arenas);
     this.src = options.src;
@@ -518,9 +519,9 @@ class Codegen implements PrintHost {
 
 
     // The instance each generator type resumes, and each future type polls.
-    this.generatorOf = new TypeMap(resumes);
+    this.generatorOf = resumes;
 
-    this.futureOf = new TypeMap(polls);
+    this.futureOf = polls;
 
     // Each generated name in each family and what it stands for, so two things described alike
     // are never given one name.
@@ -992,7 +993,7 @@ class Codegen implements PrintHost {
       if (at.size === 0) continue;
       found.set(i, at);
       const b = bodyOf(this.noted.arenas, this.inst(i));
-      const parts = [`${b.name}@${b.start}`, this.noted.typing.keyOf(this.inst(i).returns), this.inst(i).throws === undefined ? "" : this.noted.typing.keyOf(this.inst(i).throws!)];
+      let parts = [`${b.name}@${b.start}`, this.noted.typing.keyOf(this.inst(i).returns), this.inst(i).throws === undefined ? "" : this.noted.typing.keyOf(this.inst(i).throws!)];
       b.params.forEach((p, k) => {
         const local = this.loc(this.inst(i).locals.get(p)!);
         if (!at.has(k as usize)) {
@@ -1046,7 +1047,7 @@ class Codegen implements PrintHost {
       let calls = 0;
       // A generic function value runs another instance for each type it is called with.
       let runs = new Set<InstanceId>();
-      const visit = (cg: Mut<Codegen>, n: AnyNode, nested: boolean) => {
+      function visit(cg: Mut<Codegen>, n: AnyNode, nested: boolean): void {
         let inner = nested;
         if (n.of === "expr") {
           const e = n.node;
@@ -1065,7 +1066,7 @@ class Codegen implements PrintHost {
         }
         if (n.of === "objectProp" && n.node.kind === "shorthand" && n.node.name === name) uses++;
         forEachChild(n, (c) => visit(cg, c, inner));
-      };
+      }
       for (const st of b.body) visit(this, { of: "stmt", node: st }, false);
       // A call through the pair passes an environment and builds no frame, so it can only run a
       // plain closure: a generic function value's instance takes no environment.
@@ -1088,7 +1089,7 @@ class Codegen implements PrintHost {
 
   // The closure's body a call of the parameter `name` runs, in `i`.
   calledThrough(i: InstanceId, name: string): InstanceId | undefined {
-    let found: InstanceId | undefined;
+    let found: InstanceId | undefined = undefined;
     for (const st of bodyOf(this.noted.arenas, this.inst(i)).body) {
       walkWhile({ of: "stmt", node: st }, (n) => {
         if (found !== undefined) return false;
@@ -1177,21 +1178,28 @@ class Codegen implements PrintHost {
   // a Lock.
   bakeable(type: Type, at: Ref<Span>, constant = false) {
     // The first part of a type comptime can't make, or undefined.
-    const fault = (cg: Mut<Codegen>, t: Type): Type | undefined => {
+    function fault(cg: Mut<Codegen>, t: Type): Type | undefined {
       if (typeof t === "string") return t === "void" ? t : undefined;
       const r = cg.noted.typing.rec(t);
       if (r.kind === "literal" || r.kind === "regex") return undefined;
       // A type holding itself isn't built into the program.
       if (cg.noted.typing.tiedBy(t) !== undefined) return t;
-      const parts = r.kind === "union" ? r.members : r.kind === "array" ? [r.element] : r.kind === "object" || r.kind === "variant" ? r.fields.map((f) => f.type)
-        : r.kind === "class" ? [...(r.base !== undefined ? [r.base] : []), ...r.fields.map((f) => f.type)] : r.kind === "map" ? (r.set ? [r.key] : [r.key, r.value]) : r.kind === "interior" && constant && r.which !== "Cell" ? [r.of] : undefined;
-      if (parts === undefined) return t;
+      let parts: Type[] = [];
+      if (r.kind === "union") parts = [...r.members];
+      else if (r.kind === "array") parts = [r.element];
+      else if (r.kind === "object" || r.kind === "variant") parts = r.fields.map((f) => f.type);
+      else if (r.kind === "class") {
+        if (r.base !== undefined) parts.push(r.base);
+        for (const f of r.fields) parts.push(f.type);
+      } else if (r.kind === "map") parts = r.set ? [r.key] : [r.key, r.value];
+      else if (r.kind === "interior" && constant && r.which !== "Cell") parts = [r.of];
+      else return t;
       for (const p of parts) {
         const found = fault(cg, p);
         if (found !== undefined) return found;
       }
       return undefined;
-    };
+    }
     const part = fault(this, type);
     if (part === undefined) return;
     const inside = part === type ? "" : ` (in '${this.noted.typing.show(type)}')`;
@@ -1207,7 +1215,8 @@ class Codegen implements PrintHost {
     const number = (cg: Mut<Codegen>, t: Type): [Numeric, string | undefined] | undefined => {
       const r = cg.recOf(t);
       const base = r?.kind === "literal" ? cg.noted.typing.baseOf(t as LiteralType) : t;
-      return base !== undefined && isNumeric(base) ? [base, r?.kind === "literal" ? String(r.value) : undefined] : undefined;
+      if (!isNumeric(base)) return undefined;
+      return [base, r !== undefined && r.kind === "literal" ? literalText(r.value) : undefined];
     };
     const [x, y] = [number(this, aType), number(this, bType)];
     if (x === undefined || y === undefined || x[0] === y[0]) return undefined;
@@ -1259,7 +1268,7 @@ class Codegen implements PrintHost {
       this.emit(`${result} = fptrunc double ${wide} to float`);
       return result;
     }
-    this.emit(`${result} = ${FLOAT_ARITHMETIC[op]} ${this.llvm(type)} ${a}, ${b}`);
+    this.emit(`${result} = ${floatArithmetic(op)} ${this.llvm(type)} ${a}, ${b}`);
     return result;
   }
 
@@ -1340,7 +1349,7 @@ class Codegen implements PrintHost {
     if (name in MATH_FLOAT && name !== "round") return call(this, `@fsh_math_${name}`, args);
     const x = args[0]!;
     const float = isFloat(type);
-    const number = (n: f64) => (float ? floatConstant(n, type) : String(n));
+    const number = (n: f64) => (float ? floatConstant(n, type as "f32" | "f64") : `${n}`);
     if (name === "round") {
       const down = call(this, "@llvm.floor.f64", [x]);
       const line2 = `fcmp oge double ${op(this, `fsub double ${x}, ${down}`)}, ${floatConstant(0.5, "f64")}`;
@@ -1410,7 +1419,13 @@ class Codegen implements PrintHost {
       this.emit(`${result} = call ptr @fsh_rt_to_fixed(double ${wide}, i64 ${digits})`);
     } else {
       const { signed, bits } = integerInfo(type as Integer);
-      const wide = bits === 64 ? x : op(this, `${signed ? "sext" : "zext"} ${this.llvm(type)} ${x} to i64`);
+      let wide: string;
+      if (bits === 64) {
+        wide = x;
+      } else {
+        const line2 = `${signed ? "sext" : "zext"} ${this.llvm(type)} ${x} to i64`;
+        wide = op(this, line2);
+      }
       this.emit(`${result} = call ptr @fsh_rt_int_to_fixed(i64 ${wide}, i32 ${signed ? 1 : 0}, i64 ${digits})`);
     }
     if (!this.cur().types.has(e)) this.pending.push({ v: result, type: "string" });
@@ -1541,7 +1556,7 @@ class Codegen implements PrintHost {
       if (call.kind === "call" && call.callee.kind === "ident" && call.callee.name === "cString" && !this.cur().calls.has(call) && !this.reserved.has(call)) {
         const held = this.alloca(ARRAY);
         this.allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
-        this.scopes.at(-1)!.held.push({ slot: held, type: this.noted.typing.arrayType("u8") });
+        this.scopes[this.scopes.length - 1]!.held.push({ slot: held, type: this.noted.typing.arrayType("u8") });
         this.reserved.set(call, held);
       }
       return true;
@@ -1900,7 +1915,10 @@ class Codegen implements PrintHost {
     const [size, keyAt, valueAt] = [this.offsetOf(entry), this.offsetOf(entry, 3), this.offsetOf(entry, 4)];
     const drop = (cg: Mut<Codegen>, part: Type) => (cg.needsDrop(part) ? cg.elementDrop(part) : "null");
     const made = this.temp();
-    const line = `${made} = call ptr @fsh_rt_map_new(i64 ${size}, i64 ${keyAt}, i64 ${valueAt}, i32 ${this.noted.typing.lower(this.noted.typing.rec(t).key) === "string" ? 1 : 0}, ptr ${drop(this, this.noted.typing.rec(t).key)}, ptr ${this.noted.typing.rec(t).set ? "null" : drop(this, this.noted.typing.rec(t).value)})`;
+    const chosen = this.noted.typing.lower(this.noted.typing.rec(t).key) === "string" ? 1 : 0;
+    const part2 = this.noted.typing.rec(t).key;
+    const drop2 = drop(this, part2);
+    const line = `${made} = call ptr @fsh_rt_map_new(i64 ${size}, i64 ${keyAt}, i64 ${valueAt}, i32 ${chosen}, ptr ${drop2}, ptr ${this.noted.typing.rec(t).set ? "null" : drop(this, this.noted.typing.rec(t).value)})`;
     this.emit(line);
     return made;
   }
@@ -2103,7 +2121,8 @@ class Codegen implements PrintHost {
     this.emit(line3);
     this.emit(`br label %${done}`);
     this.startBlock(done);
-    const v = load(this, this.llvm(option), out);
+    const llvm2 = this.llvm(option);
+    const v = load(this, llvm2, out);
     if (!this.cur().types.has(e) && this.needsDrop(option)) this.pending.push({ v, type: option });
     return v;
   }
@@ -2159,15 +2178,19 @@ class Codegen implements PrintHost {
       return cg.copied(v, type);
     };
     if (this.noted.typing.rec(t).set) {
-      const line3 = `store ${this.llvm(this.loc(local).type)} ${piece(this, 3, this.noted.typing.rec(t).key, this.loc(local).type)}, ptr ${this.slot(local)}`;
+      const part2 = this.noted.typing.rec(t).key;
+      const part3 = this.loc(local).type;
+      const line3 = `store ${this.llvm(this.loc(local).type)} ${piece(this, 3, part2, part3)}, ptr ${this.slot(local)}`;
       this.emit(line3);
     }
     else {
       const [k, v] = this.noted.typing.elementsOf(this.loc(local).type as ObjectType);
       const [first, pair] = [this.temp(), this.temp()];
-      const line5 = `${first} = insertvalue ${this.llvm(this.loc(local).type)} undef, ${this.llvm(k!)} ${piece(this, 3, this.noted.typing.rec(t).key, k!)}, 0`;
+      const part4 = this.noted.typing.rec(t).key;
+      const line5 = `${first} = insertvalue ${this.llvm(this.loc(local).type)} undef, ${this.llvm(k!)} ${piece(this, 3, part4, k!)}, 0`;
       this.emit(line5);
-      const line6 = `${pair} = insertvalue ${this.llvm(this.loc(local).type)} ${first}, ${this.llvm(v!)} ${piece(this, 4, this.noted.typing.rec(t).value, v!)}, 1`;
+      const part5 = this.noted.typing.rec(t).value;
+      const line6 = `${pair} = insertvalue ${this.llvm(this.loc(local).type)} ${first}, ${this.llvm(v!)} ${piece(this, 4, part5, v!)}, 1`;
       this.emit(line6);
       const line4 = `store ${this.llvm(this.loc(local).type)} ${pair}, ptr ${this.slot(local)}`;
       this.emit(line4);
@@ -2250,17 +2273,21 @@ class Codegen implements PrintHost {
     };
     this.entriesLoop(t, map, (cg, at) => {
       if (name === "keys" || (name === "values" && cg.noted.typing.rec(t).set)) {
-        const read2 = read(cg, at, 3, cg.noted.typing.rec(t).key);
+        const part = cg.noted.typing.rec(t).key;
+        const read2 = read(cg, at, 3, part);
         cg.appended(out, cg.noted.typing.rec(t).key, read2);
         return;
       }
       if (name === "values") {
-        const read3 = read(cg, at, 4, cg.noted.typing.rec(t).value);
+        const part2 = cg.noted.typing.rec(t).value;
+        const read3 = read(cg, at, 4, part2);
         cg.appended(out, cg.noted.typing.rec(t).value, read3);
         return;
       }
       const pair = cg.noted.typing.rec(result).element;
-      const [k, v] = [read(cg, at, 3, cg.noted.typing.rec(t).key), cg.noted.typing.rec(t).set ? read(cg, at, 3, cg.noted.typing.rec(t).key) : read(cg, at, 4, cg.noted.typing.rec(t).value)];
+      const part3 = cg.noted.typing.rec(t).key;
+      const read4 = read(cg, at, 3, part3);
+      const [k, v] = [read4, cg.noted.typing.rec(t).set ? read(cg, at, 3, cg.noted.typing.rec(t).key) : read(cg, at, 4, cg.noted.typing.rec(t).value)];
       const [first, both] = [cg.temp(), cg.temp()];
       cg.emit(`${first} = insertvalue ${cg.llvm(pair)} undef, ${cg.llvm(cg.noted.typing.rec(t).key)} ${k}, 0`);
       cg.emit(`${both} = insertvalue ${cg.llvm(pair)} ${first}, ${cg.noted.typing.rec(t).set ? cg.llvm(cg.noted.typing.rec(t).key) : cg.llvm(cg.noted.typing.rec(t).value)} ${v}, 1`);
@@ -2325,7 +2352,7 @@ class Codegen implements PrintHost {
   // read back as its declaration says.
   jsCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, name: Ref<JsName>, target: InstanceId): string | undefined {
     const fn = this.jsExport(name, { start: e.start, end: e.end });
-    const argv = this.jsArgv(e.args, (cg, i) => i < bodyOf(cg.noted.arenas, cg.inst(target)).params.length && bodyOf(cg.noted.arenas, cg.inst(target)).params[i]!.optional === true);
+    const argv = this.jsArgv(e.args, bodyOf(this.noted.arenas, this.inst(target)).params.map((p) => p.optional));
     const result = this.temp();
     const line = `call ptr @fsh_rt_js_call(ptr ${fn}, ptr null, i64 ${e.args.length}, ptr ${argv}, ptr ${this.panicAt({ start: e.start, end: e.end })})`;
     this.unwinding(line, result);
@@ -2340,20 +2367,20 @@ class Codegen implements PrintHost {
 
   // Arguments going to JS, each a new JS value in a buffer of boxes the call gives up; `optional`
   // says which parameters JS may leave out, so an empty value is undefined there.
-  jsArgv(this: Mut<this>, args: Ref<Expr[]>, optional: (cg: Mut<Codegen>, i: usize) => boolean): string {
+  jsArgv(this: Mut<this>, args: Ref<Expr[]>, optional: Ref<boolean[]>): string {
     const boxes = args.map((a, i) => {
-      this.jsSite = a;
+      this.jsSite = { start: a.start, end: a.end };
       const to = this.cur().coercions.get(a);
       // A callback is handed over to JS, which keeps it, as the stored callable it meets, and a
       // future as the stored Promise, which a task awaits; one read from a place moves out of it.
       const held = to ?? this.cur().types.get(a)!;
       if (this.isCallback(held) || this.isPromised(held)) {
         const owned2 = this.owned(a);
-        const chosen = optional(this, i) ? "undefined" : "null";
+        const chosen = i < optional.length && optional[i]! ? "undefined" : "null";
         return this.toJs(owned2, held, chosen);
       }
       const jsOperand2 = this.jsOperand(a);
-      const chosen2 = optional(this, i) ? "undefined" : "null";
+      const chosen2 = i < optional.length && optional[i]! ? "undefined" : "null";
       return this.toJs(jsOperand2, this.cur().types.get(a)!, chosen2, this.cur().coercions.get(a));
     });
     const argv = this.alloca(`[${Math.max(boxes.length, 1)} x ptr]`);
@@ -2386,9 +2413,14 @@ class Codegen implements PrintHost {
 
 
   // Which parameters of the method, constructor or static a call takes are written with `?`.
-  optionalAt(call: Ref<Expr>): (cg: Mut<Codegen>, i: usize) => boolean {
-    const optional = this.noted.jsOptionalOf.get(call) ?? [];
-    return (_cg, i) => optional[i] === true;
+  optionalAt(call: Ref<Expr>): boolean[] {
+    const optional = this.noted.jsOptionalOf.get(call);
+    return optional === undefined ? [] : [...optional];
+  }
+
+  // Where the value going to JS now was written, for the callbacks and settlers made for it.
+  jsSiteNow(): Span | undefined {
+    return this.jsSite === undefined ? undefined : { start: this.jsSite.start, end: this.jsSite.end };
   }
 
 
@@ -2454,7 +2486,7 @@ class Codegen implements PrintHost {
   // The task settling a JS promise with what a stored Promise gives, given at `at`: its poll,
   // awaiting the Promise and resolving the JS promise with its value made a JS value, and the
   // drop of a frame never finished. The frame holds the Promise and the settling functions.
-  jsSettler(this: Mut<this>, type: DynType, at: Ref<Expr>): [string, string] {
+  jsSettler(this: Mut<this>, type: DynType, at: Ref<Span>): [string, string] {
     const key = `${this.noted.typing.keyOf(type)} ${at.start}`;
     const made = this.settlers.get(key);
     if (made !== undefined) return made;
@@ -2464,7 +2496,7 @@ class Codegen implements PrintHost {
     this.settlers.set(key, names);
     const frame = `{ ${DYN}, ptr }`;
     const saved = this.setAside();
-    const site = this.jsSite;
+    const site = this.jsSiteNow();
     const [innerAt, settleAt, settle] = [this.temp(), this.temp(), this.temp()];
     this.emit(`${innerAt} = getelementptr ${frame}, ptr %frame, i32 0, i32 0`);
     this.emit(`${settleAt} = getelementptr ${frame}, ptr %frame, i32 0, i32 1`);
@@ -2477,7 +2509,7 @@ class Codegen implements PrintHost {
     this.startBlock(step.ready);
     const gives = this.noted.typing.promiseElement(this.noted.typing.rec(type).of)!;
     const v = step.value(this);
-    this.jsSite = at;
+    this.jsSite = { start: at.start, end: at.end };
     const box = gives === "void" || v === undefined ? this.temp() : this.toJs(v, gives, "null");
     if (gives === "void" || v === undefined) this.emit(`${box} = call ptr @fsh_rt_js_of_empty(i32 1)`);
     this.emit(`call void @fsh_rt_js_settle(ptr ${settle}, ptr ${box})`);
@@ -2524,7 +2556,7 @@ class Codegen implements PrintHost {
   // The function JS calls a callback of this type through, given at `at`: what JS gives it read
   // as its parameters say, the callable called, and what it gives made a JS value. Called with a
   // count below zero, as JS's garbage collector drops the function, it drops the callable.
-  jsCallback(this: Mut<this>, type: DynType, at: Ref<Expr>): string {
+  jsCallback(this: Mut<this>, type: DynType, at: Ref<Span>): string {
     const key = `${this.noted.typing.keyOf(type)} ${at.start}`;
     const made = this.callbacks.get(key);
     if ((made !== undefined && made !== "")) return made;
@@ -2532,7 +2564,7 @@ class Codegen implements PrintHost {
     const name = `@fsh.js.callback.${this.stableId("js.callback", line, key)}`;
     this.callbacks.set(key, name);
     const saved = this.setAside();
-    const site = this.jsSite;
+    const site = this.jsSiteNow();
     const fn = this.noted.typing.callableOf.get(this.noted.typing.rec(type).of)!;
     const [dropping, drop, call] = [this.temp(), this.label(), this.label()];
     this.emit(`${dropping} = icmp slt i64 %argc, 0`);
@@ -2555,7 +2587,7 @@ class Codegen implements PrintHost {
     this.unwinding(`call ${this.noted.typing.rec(fn).returns === "void" ? "void" : this.llvm(this.noted.typing.rec(fn).returns)} ${callee}(ptr %data${args.join("")})`, result);
     if (result === undefined) this.emit("ret ptr null");
     else {
-      this.jsSite = at;
+      this.jsSite = { start: at.start, end: at.end };
       const box = this.toJs(result, this.noted.typing.rec(fn).returns, "null");
       this.dispose(result, this.noted.typing.rec(fn).returns);
       this.emit(`ret ptr ${box}`);
@@ -2618,7 +2650,7 @@ class Codegen implements PrintHost {
       this.emit(`store ${DYN} ${v}, ptr ${innerAt}`);
       this.emit(`${heldAt} = getelementptr { ${DYN}, ptr }, ptr ${frame}, i32 0, i32 1`);
       this.emit(`store ptr ${settle}, ptr ${heldAt}`);
-      const [poll, drop] = this.jsSettler(type as DynType, this.jsSite!);
+      const [poll, drop] = this.jsSettler(type as DynType, this.jsSiteNow()!);
       this.unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr @"fsh.js.settled.output", ptr ${frame}, i64 ${this.sizeOf(`{ ${DYN}, ptr }`)}, i64 8)`, task);
       this.emit(`call void @fsh_rt_handle_drop(ptr ${task})`);
       return box;
@@ -2628,7 +2660,7 @@ class Codegen implements PrintHost {
       const [data, table] = [this.temp(), this.temp()];
       this.emit(`${data} = extractvalue ${DYN} ${v}, 0`);
       this.emit(`${table} = extractvalue ${DYN} ${v}, 1`);
-      const line = `${box} = call ptr @fsh_rt_js_function(ptr ${data}, ptr ${table}, ptr ${this.jsCallback(type as DynType, this.jsSite!)}, i32 ${this.noted.typing.rec(this.noted.typing.callableOf.get(this.noted.typing.rec(type as DynType).of)!).params.length})`;
+      const line = `${box} = call ptr @fsh_rt_js_function(ptr ${data}, ptr ${table}, ptr ${this.jsCallback(type as DynType, this.jsSiteNow()!)}, i32 ${this.noted.typing.rec(this.noted.typing.callableOf.get(this.noted.typing.rec(type as DynType).of)!).params.length})`;
       this.emit(line);
       return box;
     }
@@ -3623,7 +3655,7 @@ class Codegen implements PrintHost {
   }
 
   dynInvoke(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, m: Ref<Method>, fn: string, data: string): string | undefined {
-    const args = e.args.map((a, i) => `, ${this.llvm(m.params[i]!)} ${this.owned(a)}`).join("");
+    const args = e.args.map((a, i) => `, ${this.llvm(m.params[i as usize]!)} ${this.owned(a)}`).join("");
     // A `Promise<T>` comes back as its boxed future.
     const gives = this.noted.typing.promiseElement(m.returns) !== undefined ? this.cur().types.get(e)! : m.returns;
     const returns = m.throws !== undefined ? this.throwing(gives, m.throws) : gives === "void" ? "void" : this.llvm(gives);
@@ -4029,7 +4061,7 @@ class Codegen implements PrintHost {
       this.emit(line4);
     }
     this.settle();
-    this.scopes.at(-1)!.held.push({ slot: at, type: awaited });
+    this.scopes[this.scopes.length - 1]!.held.push({ slot: at, type: awaited });
     const [test, loop, end] = [this.label(), this.label(), this.label()];
     this.emit(`br label %${test}`);
     this.startBlock(test);
@@ -5053,11 +5085,12 @@ class Codegen implements PrintHost {
   helper(this: Mut<this>, kind: "drop" | "copy", type: Exclude<Type, string>): string {
     const r = this.noted.typing.rec(type);
     if (kind === "copy" && this.holdsRust(type)) assert(false, `internal error: a '${this.noted.typing.show(type)}' holds a Rust handle, which is moved, never copied`);
-    const made = this.glue[kind].get(type);
+    const made = kind === "copy" ? this.glue.copy.get(type) : this.glue.drop.get(type);
     if ((made !== undefined && made !== "")) return made;
     const described2 = this.noted.typing.described(type);
     const name = `@fsh.${kind}.${this.stableId(kind, described2, typeOwner(type))}`;
-    this.glue[kind].set(type, name);
+    if (kind === "copy") this.glue.copy.set(type, name);
+    else this.glue.drop.set(type, name);
     // A copy keeps the parts it has made pending, so a panic part way drops them.
     const saved = this.setAside();
     const t = this.llvm(type);
@@ -6724,7 +6757,7 @@ class Codegen implements PrintHost {
     const read: { v: string; type: Type; i: usize }[] = [];
     // Optional elements are read into slots, empty until read, since the array may end first.
     const required = this.noted.typing.rec(t).required ?? order.length;
-    const slots = order.slice(required).map(({ f, i }) => {
+    const slots = order.slice(required as i64).map(({ f, i }) => {
       const lower2 = this.noted.typing.lower(f.type);
       const llvm2 = this.llvm(lower2);
       const slot = this.alloca(llvm2);
@@ -7347,8 +7380,8 @@ class Codegen implements PrintHost {
   // only read, so its length and data are read once. `some`, `every` and `find` stop at the
   // first element that decides them.
   callbackLoop(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, written: string, array: ArrayType, at: string): string | undefined {
-    const backward = Object.hasOwn(BACKWARD, written);
-    const method = backward ? BACKWARD[written]! : written;
+    const backward = written === "findLast" || written === "findLastIndex" || written === "reduceRight";
+    const method = written === "findLast" ? "find" : written === "findLastIndex" ? "findIndex" : written === "reduceRight" ? "reduce" : written;
     const [callback, init] = e.args as [Expr, Expr | undefined];
     const element = this.noted.typing.rec(array).element;
     const t = this.llvm(element);
@@ -7582,7 +7615,9 @@ class Codegen implements PrintHost {
           const copied2 = cg.copied(v, element);
           return [`${cg.llvm(given)} ${cg.convert(copied2, element, given)}`];
         };
-        const args = [...arg(cg, "%a", cg.noted.typing.rec(closure).params[0]), ...arg(cg, "%b", cg.noted.typing.rec(closure).params[1])];
+        const part = cg.noted.typing.rec(closure).params[0];
+        const part2 = cg.noted.typing.rec(closure).params[1];
+        const args = [...arg(cg, "%a", part), ...arg(cg, "%b", part2)];
         const invoke2 = cg.invoke(target, "%p", args.slice(0, bodyOf(cg.noted.arenas, cg.inst(target)).params.length))!;
         const line2 = `ret i32 ${cg.sign(invoke2, cg.noted.typing.rec(closure).returns)}`;
         cg.emit(line2);
@@ -7947,12 +7982,20 @@ class Codegen implements PrintHost {
     };
     if (method === "flat") {
       const inner = this.noted.typing.rec(array).element as ArrayType;
-      cloneAll(this, at, this.noted.typing.rec(array).element, (cg: Mut<Codegen>, slot) => cloneAll(cg, slot, cg.noted.typing.rec(inner).element));
+      const part = this.noted.typing.rec(array).element;
+      cloneAll(this, at, part, (cg: Mut<Codegen>, slot) => {
+        const part2 = cg.noted.typing.rec(inner).element;
+        cloneAll(cg, slot, part2);
+      });
     } else {
       // The arguments run first, as in JavaScript, before anything is cloned.
       const sources = e.args.map((a) => this.value(a));
-      cloneAll(this, at, this.noted.typing.rec(array).element);
-      for (const from of sources) cloneAll(this, from, this.noted.typing.rec(array).element);
+      const part3 = this.noted.typing.rec(array).element;
+      cloneAll(this, at, part3);
+      for (const from of sources) {
+        const part4 = this.noted.typing.rec(array).element;
+        cloneAll(this, from, part4);
+      }
     }
     const v = this.temp();
     this.emit(`${v} = load ${ARRAY}, ptr ${out}`);
@@ -8577,7 +8620,7 @@ class Codegen implements PrintHost {
   own(this: Mut<this>, at: string, type: Type, empty = true) {
     if (!this.needsDrop(type)) return;
     if (empty && !this.framed.has(at)) this.allocas.push(`  store ${this.llvm(type)} zeroinitializer, ptr ${at}`);
-    this.scopes.at(-1)!.held.push({ slot: at, type });
+    this.scopes[this.scopes.length - 1]!.held.push({ slot: at, type });
   }
 
 
@@ -9465,7 +9508,9 @@ class Codegen implements PrintHost {
     this.emit(`br i1 ${answer}, label %${said}, label %${saidNot}`);
     // A name spelling a long type argument list is shortened as symbols are.
     const name = shortened(bodyOf(this.noted.arenas, this.inst(this.callOf(e)!)).name);
-    const shown = (x: Expr): string => (x.kind === "member" ? `${shown(x.object)}.${x.name}` : x.kind === "ident" ? x.name : "this");
+    function shown(x: Expr): string {
+      return (x.kind === "member" ? `${shown(x.object)}.${x.name}` : x.kind === "ident" ? x.name : "this");
+    }
     for (const [at, is] of [[said, "is"], [saidNot, "is not"]] as const) {
       this.startBlock(at);
       const tag = this.temp();
@@ -9536,7 +9581,7 @@ class Codegen implements PrintHost {
       const held = this.cur().coercions.get(e.value) ?? this.cur().types.get(e.value)!;
       const kept = this.isCallback(held) || this.isPromised(held);
       const type = this.cur().types.get(e)!;
-      this.jsSite = e.value;
+      this.jsSite = { start: e.value.start, end: e.value.end };
       const v = kept ? this.owned(e.value) : this.jsOperand(e.value);
       const box = this.toJs(v, kept ? held : this.cur().types.get(e.value)!, empty);
       const handle = this.recOf(type)?.kind === "block";
@@ -9943,7 +9988,7 @@ class Codegen implements PrintHost {
       cg.emit(`${emptied} = insertvalue ${ARRAY} ${v}, i64 0, 1`);
       cg.dispose(emptied, t);
     };
-    const pass = (cg: Mut<Codegen>, c: Crossing, t: Type, v: string): string[] => {
+    function pass(cg: Mut<Codegen>, c: Crossing, t: Type, v: string): string[] {
       switch (c.kind) {
         case "plain":
           return [`${crossing(cg.noted.typing, t)} ${v}`];
@@ -9985,14 +10030,18 @@ class Codegen implements PrintHost {
           return [`ptr ${p}`];
         }
       }
-    };
+    }
     // An Option's array is read where it is spilled, as a lent one is.
     const spilled = (cg: Mut<Codegen>, v: string) => {
       const slot = cg.alloca(ARRAY);
       cg.emit(`store ${ARRAY} ${v}, ptr ${slot}`);
       return slot;
     };
-    args.forEach((a, i) => passed.push(...pass(this, rustCrossing(this.noted.typing, this.inst(target).signature![i]!), this.inst(target).signature![i]!, a.slice(a.lastIndexOf(" ") + 1))));
+    args.forEach((a, i) => {
+      const rustCrossing2 = rustCrossing(this.noted.typing, this.inst(target).signature![i]!);
+      const part2 = this.inst(target).signature![i]!;
+      return passed.push(...pass(this, rustCrossing2, part2, a.slice(a.lastIndexOf(" ") + 1)));
+    });
     const gives = rustGiven(this.noted.typing, this.noted.arenas, this.inst(target));
     const shim = shimGives(this.noted.typing, gives);
     const out = (shim.out !== undefined && shim.out !== "") ? this.alloca(shim.out) : undefined;
@@ -10017,7 +10066,13 @@ class Codegen implements PrintHost {
     if (gives.kind !== "option") return gives.kind === "array" ? load(this, ARRAY, out!) : result;
     const some = gives.of.kind === "plain" || gives.of.kind === "array" ? result! : this.temp();
     if (some !== result) this.emit(`${some} = icmp ne ptr ${result}, null`);
-    const inner = gives.of.kind === "plain" ? load(this, this.llvm(gives.inner), out!) : gives.of.kind === "array" ? load(this, ARRAY, out!) : result!;
+    let inner: string;
+    if (gives.of.kind === "plain") {
+      const llvm2 = this.llvm(gives.inner);
+      inner = load(this, llvm2, out!);
+    } else {
+      inner = gives.of.kind === "array" ? load(this, ARRAY, out!) : result!;
+    }
     const made = this.temp();
     const line = `${made} = select i1 ${some}, ${this.llvm(type)} ${this.convert(inner, gives.inner, type)}, ${this.llvm(type)} ${this.convert("zeroinitializer", "null", type)}`;
     this.emit(line);
@@ -10299,7 +10354,7 @@ class Codegen implements PrintHost {
     const line = `store ${this.llvm(inner)} ${this.owned(e.operand)}, ptr ${at}`;
     this.emit(line);
     this.settle();
-    this.scopes.at(-1)!.held.push({ slot: at, type: inner });
+    this.scopes[this.scopes.length - 1]!.held.push({ slot: at, type: inner });
     return this.suspend(inner, at, field, e);
   }
 
@@ -12124,7 +12179,8 @@ class Codegen implements PrintHost {
     for (const p of e.props) {
       if (p.kind === "property") {
         const owned2 = this.owned(p.value);
-        put(this, p.key as string, owned2, this.valueType(p.value));
+        const valueType2 = this.valueType(p.value);
+        put(this, p.key as string, owned2, valueType2);
         continue;
       }
       if (p.kind === "shorthand") {
@@ -12137,7 +12193,8 @@ class Codegen implements PrintHost {
           continue;
         }
         const shorthand2 = this.shorthand(p, local);
-        put(this, p.name, shorthand2, this.loc(local).type);
+        const part2 = this.loc(local).type;
+        put(this, p.name, shorthand2, part2);
         continue;
       }
       if (p.kind !== "spread") throw new Error("internal error: unchecked property");
