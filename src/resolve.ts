@@ -653,11 +653,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     return error;
   }
 
-  // An array of an element type. Arrays of mutable references, whose elements a read would
-  // duplicate, and of functions, which would need their calls boxed, aren't supported yet.
+  // An array of an element type. Arrays of functions, which would need their calls boxed,
+  // aren't supported yet.
   /** @throws {CompileError} */
   private array(this: Mut<this>, element: Type, at: Ref<TypeNode>): Type {
-    if (this.host.tables.typing.holdsMut(element)) throw unsupported("arrays of mutable references", at);
     const e = this.recOf(element);
     if (e?.kind === "closure") throw unsupported("arrays of functions", at);
     if (e?.kind === "function" && e.generic !== undefined) throw new CompileError("E0115", familyHeld("an array"), at.start, at.end);

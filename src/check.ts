@@ -5346,6 +5346,9 @@ class BodyChecker implements Context, GuardHost {
         const referred = this.cx.isRef(through) ? this.cx.tables.typing.rec(through).to : through;
         // An `Iterable<T>` parameter is looped over as what it stands for in an instance; at its
         // definition, it gives its `T`s.
+        // Each pass would hold a second copy of a mutable reference the array keeps.
+        const looped = typeof referred === "string" ? undefined : this.cx.tables.typing.rec(referred);
+        if (looped !== undefined && (looped.kind === "array" || looped.kind === "fixed") && this.cx.tables.typing.holdsMut(looped.element)) throw unsupported("'for...of' loops over arrays of mutable references", s.right);
         const element = this.cx.tables.typing.iterableElement(referred);
         const object = element === undefined ? referred : this.cx.tables.typing.lower(referred);
         const call = element === undefined ? undefined : this.exprs().iteratorCall(s.right, object);

@@ -3060,6 +3060,8 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     if (!ARRAY_METHODS.has(callee.name)) throw new CompileError("E0502", `arrays have no method '${callee.name}' yet${didYouMean(callee.name, [...ARRAY_METHODS])}`, callee.start, callee.end);
     if (REF_ARRAY_REFUSED.has(callee.name) && this.ctx.typing().holdsRef(this.ctx.typing().rec(array).element)) throw unsupported(`calls to '${callee.name}' on arrays of references`, callee);
+    // Any other method would hand out a second copy of a mutable reference the array keeps.
+    if (!MUT_ARRAY_ALLOWED.has(callee.name) && this.ctx.typing().holdsMut(this.ctx.typing().rec(array).element)) throw unsupported(`calls to '${callee.name}' on arrays of mutable references`, callee);
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
@@ -8290,6 +8292,7 @@ export class Expressions<C extends Context> implements Union<C> {
     for (const x of e.elements) {
       if (x === undefined || x.kind !== "spread") continue;
       const t = this.spreadElements(x);
+      if (t !== "never" && this.ctx.typing().holdsMut(t)) throw unsupported("spreads of arrays of mutable references", x.value);
       // Owned elements spread where references are wanted would each need borrowing in place.
       const wanted = this.ctx.exprsState.wanted.get(e);
       if (wanted !== undefined && t !== "never" && this.ctx.typing().holdsRef(wanted) && !this.ctx.typing().holdsRef(t)) throw unsupported("spreads of owned values into arrays of references", x.value);
@@ -8338,7 +8341,6 @@ export class Expressions<C extends Context> implements Union<C> {
       return into;
     }
     if (typeof t !== "string" && this.ctx.typing().rec(t).kind === "closure") throw unsupported("arrays of functions", x);
-    if (this.ctx.typing().holdsMut(t)) throw unsupported("arrays of mutable references", x);
     // A borrow where an owned element is wanted is read through, as one assigned to a variable is.
     if (want !== undefined && this.isRefType(t) && !this.ctx.typing().holdsRef(want)) {
       this.coerce(x, t, want, `type '${this.ctx.typing().show(t)}' is not assignable to type '${this.ctx.typing().show(want)}'`);
@@ -10988,6 +10990,7 @@ const TYPED_MEMBERS = new Set(["byteLength", "byteOffset", "buffer", "BYTES_PER_
 // The methods an array of references refuses: what each gives back, or is given to keep, would
 // borrow nothing.
 const REF_ARRAY_REFUSED = new Set(["entries", "values"]);
+const MUT_ARRAY_ALLOWED = new Set(["push", "pop", "shift", "unshift"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...COPYING_METHODS, ...CHANGING_METHODS]);
 
 // Whether `name` is a member of the Map or Set a class embeds.

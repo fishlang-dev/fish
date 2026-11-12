@@ -92,13 +92,92 @@ function main() {
   console.log(xs.length);
 }
 // error: can't move a value out of a reference to it, which only borrows it
-// case: ref_arrays_mutable
+// case: ref_arrays_mut_push_pop
+// expect: 2 a1! b2
 class B { s: string; constructor(s: string) { this.s = s; } }
 function main() {
-  let b1 = new B("a");
-  let rs: Mut<B>[] = [b1];
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 2);
+  let ms: Mut<B>[] = [b1];
+  ms.push(b2);
+  ms[0].s = ms[0].s + "!";
+  console.log(ms.length, ms[0].s, ms[1].s);
 }
-// error: arrays of mutable references are not supported yet
+// case: ref_arrays_mut_element_changes_referent
+// expect: z9
+class B { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let b1 = new B("a" + 1);
+  {
+    let ms: Mut<B>[] = [b1];
+    const m: Mut<B> = ms[0];
+    m.s = "z" + 9;
+  }
+  console.log(b1.s);
+}
+// case: ref_arrays_mut_pop_gives_reference
+// expect: c3 1
+class B { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 2);
+  let ms: Mut<B>[] = [b1, b2];
+  const m: Mut<B> = ms.pop()!;
+  m.s = "c" + 3;
+  console.log(m.s, ms.length);
+}
+// case: ref_arrays_mut_same_place_twice
+// error: the new array being built borrows 'b1' mutably
+class B { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let b1 = new B("a" + 1);
+  let ms: Mut<B>[] = [b1, b1];
+  console.log(ms.length);
+}
+// case: ref_arrays_mut_element_held_array_used
+// error: 'm' borrows 'ms[...]' mutably
+class B { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 2);
+  let ms: Mut<B>[] = [b1];
+  const m: Mut<B> = ms[0];
+  ms.push(b2);
+  m.s = "z" + 9;
+}
+// case: ref_arrays_mut_owner_used_while_held
+// error: cannot use 'b1'
+class B { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let b1 = new B("a" + 1);
+  let ms: Mut<B>[] = [b1];
+  console.log(b1.s);
+  ms[0].s = "z" + 9;
+}
+// case: ref_arrays_mut_method_refused
+// error: calls to 'slice' on arrays of mutable references are not supported yet
+class B { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let b1 = new B("a" + 1);
+  let ms: Mut<B>[] = [b1];
+  const copy = ms.slice(0);
+}
+// case: ref_arrays_mut_spread_refused
+// error: spreads of arrays of mutable references are not supported yet
+class B { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let b1 = new B("a" + 1);
+  let ms: Mut<B>[] = [b1];
+  const copy: Mut<B>[] = [...ms];
+}
+// case: ref_arrays_mut_loop_refused
+// error: 'for...of' loops over arrays of mutable references are not supported yet
+class B { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let b1 = new B("a" + 1);
+  let ms: Mut<B>[] = [b1];
+  for (const m of ms) m.s = "z" + 9;
+}
 // case: ref_arrays_method
 class B { s: string; constructor(s: string) { this.s = s; } }
 function main() {
