@@ -161,7 +161,8 @@ function membersOf(typing: Ref<Typing>, t: Type): Type[] {
 
 // What `as`, `satisfies` or `unsafe` wraps.
 function innerOf(e: Ref<Expr>): Ref<Expr> {
-  return e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe" ? e.expr : e;
+  if (e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe") return e.expr;
+  return e;
 }
 
 // The runtime function releasing each kind of handle block.
@@ -406,6 +407,8 @@ class Codegen implements PrintHost, ComptimeHost {
   
 
     this.frames = false;
+
+    this.resuming = undefined;
 
     this.site = undefined;
 
@@ -770,7 +773,7 @@ class Codegen implements PrintHost, ComptimeHost {
         this.captured.set(alias, pointer);
       });
       if (f.closure !== undefined) this.self = selfOf(this.tables.arenas, f)?.type;
-      f.body.forEach(((s) => this.statement(s)));
+      for (const each of f.body) this.statement(each);
       // Falling off the end drops what the body holds there, at its closing brace.
       this.site = { start: f.end - 1, end: f.end };
       // The last block is unreachable when every path returned; the checker guarantees it for values.
@@ -1079,7 +1082,7 @@ class Codegen implements PrintHost, ComptimeHost {
     for (const i of this.instances) {
       const at = this.callbacksOnlyCalled(i);
       if (at.size === 0) continue;
-      found.set(i, new Set(at));
+      found.set(i, new Set([...at]));
       const b = this.bodyAt(i);
       let parts = [`${b.name}@${b.start}`, this.tables.typing.keyOf(this.inst(i).returns), this.inst(i).throws === undefined ? "" : this.tables.typing.keyOf(this.inst(i).throws!)];
       b.params.forEach((p, k) => {
@@ -2169,7 +2172,9 @@ class Codegen implements PrintHost, ComptimeHost {
     const [key, given] = this.delivered<[string, string | undefined]>((cg): [string, string | undefined] => {
       const owned2 = cg.owned(e.args[0]!);
       const hand2 = cg.hand(owned2, cg.tables.typing.rec(t).key);
-      return [hand2, name === "set" ? cg.hand(cg.owned(e.args[1]!), cg.tables.typing.rec(t).value) : undefined];
+      if (name !== "set") return [hand2, undefined];
+      const owned3 = cg.owned(e.args[1]!);
+      return [hand2, cg.hand(owned3, cg.tables.typing.rec(t).value)];
     });
     if (name === "set" || name === "add") {
       this.inserted(t, map, key, given);
@@ -2319,7 +2324,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const line4 = `store ${this.llvm(this.loc(local).type)} ${pair}, ptr ${this.slot(local)}`;
       this.emit(line4);
     }
-    s.body.forEach(((s) => this.statement(s)));
+    for (const each of s.body) this.statement(each);
     this.drop(this.scopes.length - 1);
     this.scopes.pop();
     this.emit(`br label %${next}`);
@@ -2847,7 +2852,7 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(line4);
       }
       else if (typeof value === "boolean") this.emit(`${box} = call ptr @fsh_rt_js_of_boolean(i32 ${value ? 1 : 0})`);
-      else this.emit(`${box} = call ptr @fsh_rt_js_of_number(double ${floatConstant(Number(value), "f64")})`);
+      else this.emit(`${box} = call ptr @fsh_rt_js_of_number(double ${floatConstant(toFloat(value as bigint), "f64")})`);
       return box;
     }
     if (type === "string") this.emit(`${box} = call ptr @fsh_rt_js_of_string(ptr ${v})`);
@@ -2916,7 +2921,8 @@ class Codegen implements PrintHost, ComptimeHost {
       const { bits, signed } = integerInfo(type as Integer);
       // The bound past the largest value, which a double holds exactly where the largest isn't.
       const half = Math.pow(2, (bits - 1) as f64);
-      const [min, past] = signed ? [-half, half] : [0, half * 2];
+      const min = signed ? -half : 0;
+      const past = signed ? half : half * 2;
       const line = `call double @fsh_rt_js_as_integer(ptr ${box}, double ${floatConstant(min, "f64")}, double ${floatConstant(past, "f64")}, ptr ${this.cString(what)}, ptr ${this.cString(this.tables.typing.show(type))}, ptr ${this.panicAt(at)})`;
       this.unwinding(line, d);
       this.emit(`${v} = ${signed ? "fptosi" : "fptoui"} double ${d} to ${this.llvm(type)}`);
@@ -3806,7 +3812,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const optional = this.tables.optionalCallables.get(e);
     if (optional !== undefined) return this.optionalCallableCall(e, object, optional, info.index);
     const t = this.referent(this.valueType(object)) as DynType;
-    const m: Ref<Method> = this.tables.typing.rec(this.tables.typing.rec(t).of).methods[info.index]!;
+    const m = copyMethod(this.tables.typing.rec(this.tables.typing.rec(t).of).methods[info.index]!);
     const [data, table] = this.opened(object, info.owned);
     const fn = this.vslot(table, info.index);
     const called = (cg: Mut<Codegen>) => cg.dynInvoke(e, m, fn, data);
@@ -4094,7 +4100,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const line4 = `store ${this.llvm(this.loc(local).type)} ${this.copied(v, this.tables.typing.rec(type).element)}, ptr ${this.slot(local)}`;
       this.emit(line4);
     }
-    s.body.forEach(((s) => this.statement(s)));
+    for (const each of s.body) this.statement(each);
     this.drop(this.scopes.length - 1);
     this.scopes.pop();
     this.emit(`br label %${next}`);
@@ -4143,7 +4149,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.own(slot2, "string");
     const line = `store ptr ${point}, ptr ${this.slot(local)}`;
     this.emit(line);
-    s.body.forEach(((s) => this.statement(s)));
+    for (const each of s.body) this.statement(each);
     this.drop(this.scopes.length - 1);
     this.scopes.pop();
     this.emit(`br label %${next}`);
@@ -4199,7 +4205,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`${v} = extractvalue ${this.llvm(more)} ${shaped}, 1`);
     const line4 = `store ${this.llvm(this.loc(local).type)} ${v}, ptr ${this.slot(local)}`;
     this.emit(line4);
-    s.body.forEach(((s) => this.statement(s)));
+    for (const each of s.body) this.statement(each);
     this.drop(this.scopes.length - 1);
     this.scopes.pop();
     this.emit(`br label %${test}`);
@@ -4273,7 +4279,8 @@ class Codegen implements PrintHost, ComptimeHost {
     const gives = (boxed !== undefined ? this.tables.typing.promiseElement(this.tables.typing.rec(boxed as DynType).of)! : this.tables.typing.rec(future).gives) as UnionType;
     let v: string;
     if (channel !== undefined) {
-      const line7 = `br i1 ${this.conversions().holds(result, gives, ["null"])}, label %${end}, label %${loop}`;
+      const absent2: Type[] = ["null"];
+    const line7 = `br i1 ${this.conversions().holds(result, gives, absent2)}, label %${end}, label %${loop}`;
       this.emit(line7);
       this.startBlock(loop);
       const part = this.loc(local).type;
@@ -4296,7 +4303,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.own(slot2, part3);
     const line10 = `store ${this.llvm(this.loc(local).type)} ${v}, ptr ${this.slot(local)}`;
     this.emit(line10);
-    s.body.forEach(((s) => this.statement(s)));
+    for (const each of s.body) this.statement(each);
     this.drop(this.scopes.length - 1);
     this.scopes.pop();
     this.emit(`br label %${test}`);
@@ -4593,7 +4600,7 @@ class Codegen implements PrintHost, ComptimeHost {
           const line4 = `store ${this.llvm(this.loc(local).type)} ${this.copied(v, this.tables.typing.rec(type).element)}, ptr ${this.slot(local)}`;
           this.emit(line4);
         }
-        s.body.forEach(((s) => this.statement(s)));
+        for (const each of s.body) this.statement(each);
         this.drop(this.scopes.length - 1);
         this.scopes.pop();
         this.emit(`br label %${next}`);
@@ -5102,7 +5109,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const single = shape?.kind === "object" || shape?.kind === "class" ? (holder as ObjectType | ClassType) : undefined;
       const holderAt = (at !== undefined && at !== "") && single !== undefined ? (union ? this.partAt(this.llvm(info.type), at, 1) : at) : undefined;
       for (const [key, sub, type] of info.fields) {
-        let fieldAt: string | undefined;
+        let fieldAt: string | undefined = undefined;
         if ((holderAt !== undefined && holderAt !== "") && single !== undefined) {
           fieldAt = this.temp();
           this.emit(`${fieldAt} = getelementptr ${this.llvm(single)}, ptr ${holderAt}, i32 0, ${this.tables.typing.fieldPath(single, key).map((i) => `i32 ${i}`).join(", ")}`);
@@ -7065,7 +7072,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const right = step(this, n as usize, 1);
       const [bad, good] = [this.label(), this.label()];
       // Where an optional element would be, the array may end instead.
-      this.emit(`br i1 ${right}, label %${good}, label %${n < required ? bad : finish}`);
+      this.emit(`br i1 ${right}, label %${good}, label %${(n as usize) < required ? bad : finish}`);
       if (n < required) {
         this.startBlock(bad);
         this.jsonExpected(r, what, undo);
@@ -8017,18 +8024,17 @@ class Codegen implements PrintHost, ComptimeHost {
     const whole = this.temp();
     this.emit(`${whole} = load ${ARRAY}, ptr ${at}`);
     const copy = this.alloca(ARRAY);
-    const kept = given === undefined ? [] : [{ v: given, type: element }];
-    for (const pushed of kept) this.pending.push(pushed);
+    if (given !== undefined) this.pending.push({ v: given, type: element });
     const held = { v: this.copied(whole, array), type: array as Type };
     this.emit(`store ${ARRAY} ${held.v}, ptr ${copy}`);
-    this.pending.push(held);
+    this.pending.push({ v: held.v, type: held.type });
     if (method === "toReversed") this.changed(e, "reverse", array, copy);
     if (method === "toSorted") this.sorted(e, array, copy);
     if (method === "toSpliced" && e.args.length > 0) {
       const removed = this.changed(e, "splice", array, copy)!;
       if (this.cur().types.has(e)) this.dispose(removed, array);
     }
-    this.pending = this.pending.filter((p) => p !== held && !kept.includes(p));
+    this.pending = this.pending.filter((p) => !(p.v === held.v && p.type === held.type) && !(given !== undefined && p.v === given && p.type === element));
     if (index !== undefined) {
       const [dataAt, data, slot, old] = [this.temp(), this.temp(), this.temp(), this.temp()];
       this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${copy}, i32 0, i32 0`);
@@ -8053,7 +8059,17 @@ class Codegen implements PrintHost, ComptimeHost {
     const t = this.llvm(element);
     const size = this.bytes(element, "1");
     // What the call takes over is dropped if a later argument panics before the call.
-    const args = this.delivered((cg) => e.args.map((a, i) => ((method === "splice" && i >= 2) || method === "unshift" || (method === "fill" && i === 0) ? cg.hand(cg.owned(a), element) : cg.value(a))));
+    const args = this.delivered((cg) => {
+      let given: string[] = [];
+      for (let i: usize = 0; i < e.args.length; i++) {
+        const a = e.args[i]!;
+        if ((method === "splice" && i >= 2) || method === "unshift" || (method === "fill" && i === 0)) {
+          const owned3 = cg.owned(a);
+          given.push(cg.hand(owned3, element));
+        } else given.push(cg.value(a));
+      }
+      return given;
+    });
     const [lengthAt, length] = [this.temp(), this.temp()];
     this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
     this.emit(`${length} = load i64, ptr ${lengthAt}`);
@@ -8240,49 +8256,18 @@ class Codegen implements PrintHost, ComptimeHost {
     const out = this.alloca(ARRAY);
     this.emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
     // Each element of the array at `from`, cloned onto the end of the result.
-    const cloneAll = (cg: Mut<Codegen>, from: string, element: Type, each?: (cg: Mut<Codegen>, slot: string) => void) => {
-      const [lengthAt, dataAt, length, data, index] = [cg.temp(), cg.temp(), cg.temp(), cg.temp(), cg.alloca("i64")];
-      cg.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${from}, i32 0, i32 1`);
-      cg.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${from}, i32 0, i32 0`);
-      cg.emit(`${length} = load i64, ptr ${lengthAt}`);
-      cg.emit(`${data} = load ptr, ptr ${dataAt}`);
-      cg.emit(`store i64 0, ptr ${index}`);
-      const [head, body, done] = [cg.label(), cg.label(), cg.label()];
-      cg.emit(`br label %${head}`);
-      cg.startBlock(head);
-      const [i, more, slot, after] = [cg.temp(), cg.temp(), cg.temp(), cg.temp()];
-      cg.emit(`${i} = load i64, ptr ${index}`);
-      cg.emit(`${more} = icmp slt i64 ${i}, ${length}`);
-      cg.emit(`br i1 ${more}, label %${body}, label %${done}`);
-      cg.startBlock(body);
-      cg.emit(`${slot} = getelementptr ${cg.llvm(element)}, ptr ${data}, i64 ${i}`);
-      if (each !== undefined) each(cg, slot);
-      else {
-        const v = cg.temp();
-        cg.emit(`${v} = load ${cg.llvm(element)}, ptr ${slot}`);
-        const copied2 = cg.copied(v, element);
-        cg.appended(out, element, copied2);
-      }
-      cg.emit(`${after} = add i64 ${i}, 1`);
-      cg.emit(`store i64 ${after}, ptr ${index}`);
-      cg.emit(`br label %${head}`);
-      cg.startBlock(done);
-    };
     if (method === "flat") {
       const inner = this.tables.typing.rec(array).element as ArrayType;
       const part = this.tables.typing.rec(array).element;
-      cloneAll(this, at, part, (cg: Mut<Codegen>, slot: string) => {
-        const part2 = cg.tables.typing.rec(inner).element;
-        cloneAll(cg, slot, part2);
-      });
+      this.cloneAll(out, at, part, this.tables.typing.rec(inner).element);
     } else {
       // The arguments run first, as in JavaScript, before anything is cloned.
       const sources = e.args.map((a) => this.value(a));
       const part3 = this.tables.typing.rec(array).element;
-      cloneAll(this, at, part3);
+      this.cloneAll(out, at, part3, undefined);
       for (const from of sources) {
         const part4 = this.tables.typing.rec(array).element;
-        cloneAll(this, from, part4);
+        this.cloneAll(out, from, part4, undefined);
       }
     }
     const v = this.temp();
@@ -8634,7 +8619,7 @@ class Codegen implements PrintHost, ComptimeHost {
       // An awaited future gives its value over.
       // Every operator on a bigint makes a new one; a literal is a constant.
       case "unary":
-        return e.op === "await" || this.cur().types.get(e) === "bigint";
+        return (e.kind === "unary" && e.op === "await") || this.cur().types.get(e) === "bigint";
       case "binary":
         return e.op === "+" || e.op === "??" || this.cur().types.get(e) === "bigint";
       case "member":
@@ -8652,7 +8637,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // What a wrapper with no conversion of its own hands on, so it owns what its operand owns.
-  handedOn(this: Mut<this>, eGiven: Ref<Expr>): Expr {
+  handedOn(this: Mut<this>, eGiven: Ref<Expr>): Ref<Expr> {
     let e: Ref<Expr> = eGiven;
     while (this.wraps(e) && !this.cur().coercions.has(e)) e = innerOf(e);
     return e;
@@ -8796,7 +8781,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // Whether converting a value reads some of it out of a recursive type's block.
   unboxes(from: Type, to: Type): boolean {
     if (from === to) return false;
-    const [fromAll, toAll] = [membersOf(this.tables.typing, from), membersOf(this.tables.typing, to)];
+    const fromAll = membersOf(this.tables.typing, from);
+    const toAll = membersOf(this.tables.typing, to);
     return fromAll.some((m) => this.recOf(m)?.kind === "recursive" && !toAll.includes(m));
   }
 
@@ -8804,7 +8790,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // Whether converting a value moves some of it into a recursive type's block.
   boxes(from: Type, to: Type): boolean {
     if (from === to) return false;
-    const [fromAll, toAll] = [membersOf(this.tables.typing, this.referent(from)), membersOf(this.tables.typing, to)];
+    const fromAll = membersOf(this.tables.typing, this.referent(from));
+    const toAll = membersOf(this.tables.typing, to);
     return toAll.some((m) => this.recOf(m)?.kind === "recursive") && fromAll.some((m) => !toAll.includes(m));
   }
 
@@ -8942,7 +8929,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   scoped(this: Mut<this>, body: Ref<Stmt[]>) {
     this.scopes.push({ transient: false, held: [] });
-    body.forEach(((s) => this.statement(s)));
+    for (const each of body) this.statement(each);
     this.drop(this.scopes.length - 1);
     this.scopes.pop();
   }
@@ -9169,6 +9156,38 @@ class Codegen implements PrintHost, ComptimeHost {
     const line13 = `${held} = select i1 ${none}, ${this.llvm(option)} ${this.convert("zeroinitializer", "null", option)}, ${this.llvm(option)} ${this.convert(made, "string", option)}`;
     this.emit(line13);
     return held;
+  }
+
+
+  // Each element of the array at `from` cloned onto the array at `out`; with `inner`, each element
+  // is an array whose elements, of type `inner`, are cloned instead, as `flat` does.
+  cloneAll(this: Mut<this>, out: string, from: string, element: Type, inner: Type | undefined): void {
+    const [lengthAt, dataAt, length, data, index] = [this.temp(), this.temp(), this.temp(), this.temp(), this.alloca("i64")];
+    this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${from}, i32 0, i32 1`);
+    this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${from}, i32 0, i32 0`);
+    this.emit(`${length} = load i64, ptr ${lengthAt}`);
+    this.emit(`${data} = load ptr, ptr ${dataAt}`);
+    this.emit(`store i64 0, ptr ${index}`);
+    const [head, body, done] = [this.label(), this.label(), this.label()];
+    this.emit(`br label %${head}`);
+    this.startBlock(head);
+    const [i, more, slot, after] = [this.temp(), this.temp(), this.temp(), this.temp()];
+    this.emit(`${i} = load i64, ptr ${index}`);
+    this.emit(`${more} = icmp slt i64 ${i}, ${length}`);
+    this.emit(`br i1 ${more}, label %${body}, label %${done}`);
+    this.startBlock(body);
+    this.emit(`${slot} = getelementptr ${this.llvm(element)}, ptr ${data}, i64 ${i}`);
+    if (inner !== undefined) this.cloneAll(out, slot, inner, undefined);
+    else {
+      const v = this.temp();
+      this.emit(`${v} = load ${this.llvm(element)}, ptr ${slot}`);
+      const copied2 = this.copied(v, element);
+      this.appended(out, element, copied2);
+    }
+    this.emit(`${after} = add i64 ${i}, 1`);
+    this.emit(`store i64 ${after}, ptr ${index}`);
+    this.emit(`br label %${head}`);
+    this.startBlock(done);
   }
 
 
