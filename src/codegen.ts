@@ -164,6 +164,9 @@ function innerOf(e: Ref<Expr>): Ref<Expr> {
   return e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe" ? e.expr : e;
 }
 
+// The runtime function releasing each kind of handle block.
+const RELEASES = new Map<string, string>([["Semaphore", "fsh_rt_semaphore_release"], ["Permit", "fsh_rt_permit_drop"], ["Channel", "fsh_rt_channel_release"], ["AbortController", "fsh_rt_signal_release"], ["AbortSignal", "fsh_rt_signal_release"], ["TcpListener", "fsh_rt_socket_release"], ["TcpStream", "fsh_rt_socket_release"], ["UnixListener", "fsh_rt_socket_release"], ["UnixStream", "fsh_rt_socket_release"], ["UdpSocket", "fsh_rt_socket_release"], ["FileJob", "fsh_rt_file_job_release"], ["JsValue", "fsh_rt_js_release"], ["FileDescriptor", "fsh_rt_fd_release"]]);
+
 // A failure that has nothing read before it to drop.
 function noUndo(_cg: Mut<Codegen>): void {}
 
@@ -1653,8 +1656,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // A pipe's hidden topic is named `%`, which an LLVM name can't start with.
   // A loop's condition and update run again after its body, which may leave first: each C
   // string they make gets its slot in the loop's scope up front, so every way out drops it.
-  reserveC(this: Mut<this>, e: Ref<Expr> | undefined) {
-    if (e === undefined) return;
+  reserveC(this: Mut<this>, e: Ref<Expr>) {
     walkWhile({ of: "expr", node: e }, (n) => {
       if (n.of !== "expr") return true;
       const call = n.node;
@@ -2159,7 +2161,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (name === "forEach") return this.eachEntry(e, t, map);
     // The key is owned for the call: kept when it goes in, dropped once it has been looked up.
     // A panic in the value's argument drops the key made before it.
-    const [key, given] = this.delivered<[string, string | undefined]>((cg, hand) => [hand(cg.owned(e.args[0]!), cg.tables.typing.rec(t).key), name === "set" ? hand(cg.owned(e.args[1]!), cg.tables.typing.rec(t).value) : undefined]);
+    const [key, given] = this.delivered<[string, string | undefined]>((cg, hand): [string, string | undefined] => [hand(cg.owned(e.args[0]!), cg.tables.typing.rec(t).key), name === "set" ? hand(cg.owned(e.args[1]!), cg.tables.typing.rec(t).value) : undefined]);
     if (name === "set" || name === "add") {
       this.inserted(t, map, key, given);
       return at;
@@ -2475,7 +2477,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const gives = this.cur().types.get(e) ?? (this.inst(target).returns === "void" ? undefined : this.inst(target).returns);
     if (gives === undefined) {
       this.emit(`call void @fsh_rt_js_release(ptr ${result})`);
-      return;
+      return undefined;
     }
     return this.fromJs(result, gives, `'${name.name}' from '${name.module}' gave`, { start: e.start, end: e.end });
   }
@@ -2567,7 +2569,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.unwinding(line2, result);
     if (gives === undefined || gives === "void") {
       this.emit(`call void @fsh_rt_js_release(ptr ${result})`);
-      return;
+      return undefined;
     }
     return this.fromJs(result, gives, what, { start: at.start, end: at.end });
   }
@@ -2821,7 +2823,8 @@ class Codegen implements PrintHost, ComptimeHost {
       // The shape the object is given as says which properties are written with `?`.
       const shape = declared === undefined ? undefined : this.jsShapeOf(this.referent(declared));
       for (const f of r.fields) {
-        const [part, into] = [this.temp(), this.recOf(shape)?.fields.find((g) => g.name === f.name)];
+        const part = this.temp();
+        const into = shape !== undefined ? this.tables.typing.rec(shape).fields.find((g) => g.name === f.name) : undefined;
         this.emit(`${part} = extractvalue ${this.llvm(type)} ${v}, ${this.tables.typing.fieldPath(type as ObjectType, f.name).join(", ")}`);
         const line3 = `call void @fsh_rt_js_put(ptr ${box}, ptr ${this.cString(f.name)}, ptr ${this.toJs(part, f.type, into?.optional !== undefined ? "undefined" : "null", into?.type)})`;
         this.emit(line3);
@@ -2903,7 +2906,8 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       const { bits, signed } = integerInfo(type as Integer);
       // The bound past the largest value, which a double holds exactly where the largest isn't.
-      const [min, past] = signed ? [-(2 ** (bits - 1)), 2 ** (bits - 1)] : [0, 2 ** bits];
+      const half = Math.pow(2, (bits - 1) as f64);
+      const [min, past] = signed ? [-half, half] : [0, half * 2];
       const line = `call double @fsh_rt_js_as_integer(ptr ${box}, double ${floatConstant(min, "f64")}, double ${floatConstant(past, "f64")}, ptr ${this.cString(what)}, ptr ${this.cString(this.tables.typing.show(type))}, ptr ${this.panicAt(at)})`;
       this.unwinding(line, d);
       this.emit(`${v} = ${signed ? "fptosi" : "fptoui"} double ${d} to ${this.llvm(type)}`);
@@ -3192,7 +3196,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     if (callee.name === "abort") {
       this.emit(`call void @fsh_rt_signal_abort(ptr ${handle})`);
-      return;
+      return undefined;
     }
     if (callee.name === "throwIfAborted") {
       const [aborted, yes, stop, fine] = [this.temp(), this.temp(), this.label(), this.label()];
@@ -3234,7 +3238,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const result = this.temp();
       if (callee.name === "close") {
         this.emit(`call void @fsh_rt_channel_close(ptr ${handle})`);
-        return;
+        return undefined;
       }
       this.emit(`${result} = call i64 @fsh_rt_semaphore_available(ptr ${handle})`);
       return result;
@@ -3783,10 +3787,13 @@ class Codegen implements PrintHost, ComptimeHost {
   // A method call through a Dyn: one taking its object over takes the Dyn.
   // A stored callable's call is its one method's, on the callee itself.
   dynCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, callee: Ref<Expr>): string | undefined {
+    const via = this.tables.dynCalls.get(e)!.callable;
+    if (via !== undefined) return this.dynCallOn(e, cloneExpr(via));
+    return this.dynCallOn(e, callee.kind === "member" ? callee.object : callee);
+  }
+
+  dynCallOn(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, object: Ref<Expr>): string | undefined {
     const info = this.tables.dynCalls.get(e)!;
-    let object: Ref<Expr> = callee;
-    if (info.callable !== undefined) object = info.callable;
-    else if (callee.kind === "member") object = callee.object;
     const optional = this.tables.optionalCallables.get(e);
     if (optional !== undefined) return this.optionalCallableCall(e, object, optional, info.index);
     const t = this.referent(this.valueType(object)) as DynType;
@@ -4474,8 +4481,8 @@ class Codegen implements PrintHost, ComptimeHost {
         // The initializer's variables last for the whole loop.
         this.scopes.push({ transient: false, held: [] });
         if (s.init !== undefined) this.statement(s.init);
-        this.reserveC(s.test);
-        this.reserveC(s.update);
+        if (s.test !== undefined) this.reserveC(s.test);
+        if (s.update !== undefined) this.reserveC(s.update);
         const [test, loop, next, end] = [this.label(), this.label(), this.label(), this.label()];
         this.emit(`br label %${test}`);
         this.startBlock(test);
@@ -5038,7 +5045,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // Binds the names a pattern gives, in the arm's scope: a pointer into where the value lives,
   // for a borrowing binding; otherwise the value, moved out of a temporary the match owns, or a
   // copy. A part with no place of its own to point at is pointed at in a copy of its bits.
-  bindAll(this: Mut<this>, p: Ref<Pattern>, v: string, at: string | undefined, move: boolean) {
+  bindAll(this: Mut<this>, p: Ref<Pattern>, v: string, at: string | undefined, move: boolean): void {
     const info = this.cur().patterns.get(p)!;
     if (info.kind === "any" && p.kind === "ident") {
       const local = this.resolved(exprKey(p));
@@ -5363,7 +5370,7 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`${result} = phi ${DYN} [ %v, %entry ], [ ${copy}, %${from} ]`);
       }
     } else if (r.kind === "block") {
-      const release = { Semaphore: "fsh_rt_semaphore_release", Permit: "fsh_rt_permit_drop", Channel: "fsh_rt_channel_release", AbortController: "fsh_rt_signal_release", AbortSignal: "fsh_rt_signal_release", TcpListener: "fsh_rt_socket_release", TcpStream: "fsh_rt_socket_release", UnixListener: "fsh_rt_socket_release", UnixStream: "fsh_rt_socket_release", UdpSocket: "fsh_rt_socket_release", FileJob: "fsh_rt_file_job_release", JsValue: "fsh_rt_js_release", FileDescriptor: "fsh_rt_fd_release" }[r.which];
+      const release = RELEASES.get(r.which)!;
       this.emit(kind === "copy" ? "call void @fsh_rt_block_retain(ptr %v)" : `call void @${release}(ptr %v)`);
     } else if (r.kind === "union") {
       // The copy starts as the value itself, which is right for members owning nothing.
@@ -5507,14 +5514,14 @@ class Codegen implements PrintHost, ComptimeHost {
       return out;
     }
     // An instance compares through its class's `equals`, which takes the other by reference.
-    const own = r.kind === "class" ? this.tables.arenas.instanceOf(this.tables.equalities.get(type as ClassType)) : undefined;
+    const own = r.kind === "class" ? this.tables.equalities.get(type as ClassType) : undefined;
     if (own !== undefined) {
       const [x, y] = [this.alloca(this.llvm(type)), this.alloca(this.llvm(type))];
       this.emit(`store ${this.llvm(type)} ${a}, ptr ${x}`);
       this.emit(`store ${this.llvm(type)} ${b}, ptr ${y}`);
-      const upcast2 = this.upcast(x, type as ClassType, bodyOf(this.tables.arenas, own).owner!);
-      const list = [`ptr ${this.upcast(y, type as ClassType, bodyOf(this.tables.arenas, own).owner!)}`];
-      return this.invoke(own.id, upcast2, list)!;
+      const upcast2 = this.upcast(x, type as ClassType, this.bodyAt(own).owner!);
+      const list = [`ptr ${this.upcast(y, type as ClassType, this.bodyAt(own).owner!)}`];
+      return this.invoke(own, upcast2, list)!;
     }
     // An object, an instance or an enum's member: its fields, a base first.
     const parts = r.kind === "class" && r.base !== undefined ? [[r.base, 0] as const, ...r.fields.map((f, i) => [f.type, i + 1] as const)] : r.fields.map((f, i) => [f.type, i] as const);
@@ -5667,7 +5674,8 @@ class Codegen implements PrintHost, ComptimeHost {
       for (const s of written2) as.push(s);
     }
     let out: Type[] = [];
-    for (const m of this.tables.typing.rec(t).members) {
+    const lowered = this.tables.typing.rec(t).members;
+    for (const m of lowered) {
       let found: Type | undefined = undefined;
       for (const s of as) if (found === undefined && this.tables.typing.lower(s) === m) found = s;
       out.push(found !== undefined ? found : m);
@@ -6927,8 +6935,8 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(line);
       this.emit(`call void @fsh_rt_str_release(ptr ${v})`);
       this.emit(`${same} = icmp ne i32 ${found}, 0`);
-    } else if (base === "boolean") this.emit(`${same} = icmp eq i1 ${v}, ${this.tables.typing.rec(t).value}`);
-    else this.emit(`${same} = icmp eq i64 ${v}, ${String(this.tables.typing.rec(t).value)}`);
+    } else if (base === "boolean") this.emit(`${same} = icmp eq i1 ${v}, ${literalText(literal)}`);
+    else this.emit(`${same} = icmp eq i64 ${v}, ${literalText(literal)}`);
     this.jsonGuard(same, "i1", (cg) => {
       cg.emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
       const ignored = cg.temp();
@@ -7016,7 +7024,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(line2);
       return { slot, type: f.type, i };
     });
-    const loaded = (cg: Mut<Codegen>, x: { slot: string; type: Type }) => {
+    const loaded = (cg: Mut<Codegen>, x: Ref<{ slot: string; type: Type }>) => {
       const v = cg.temp();
       const lower4 = cg.tables.typing.lower(x.type);
       const line3 = `${v} = load ${cg.llvm(lower4)}, ptr ${x.slot}`;
@@ -7091,7 +7099,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // An object's fields by key, in any order, unknown keys passed over and a repeated key's
   // last value kept, as JavaScript reads them; a missing field is an error unless it may be
   // empty. A failure drops the fields read so far.
-  readObject(this: Mut<this>, r: string, t: Exclude<Type, string>, fields: Ref<{ name: string; type: Type; path: usize[] }[]>) {
+  readObject(this: Mut<this>, r: string, t: Exclude<Type, string>, fields: Ref<JsonField[]>) {
     const slots = fields.map((f) => {
       const lower2 = this.tables.typing.lower(f.type);
       const llvm2 = this.llvm(lower2);
@@ -7974,7 +7982,9 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
     this.emit(`${length} = load i64, ptr ${lengthAt}`);
     // `with` checks its position, then writes over the clone's element, dropping the old one.
-    const [index, given] = method !== "with" ? [] : this.delivered((cg, hand) => {
+    let index: string | undefined = undefined;
+    let given: string | undefined = undefined;
+    const placed = method !== "with" ? undefined : this.delivered<[string, string]>((cg, hand): [string, string] => {
       const [i, v] = [cg.value(e.args[0]!), hand(cg.owned(e.args[1]!), element)];
       const [negative, fromEnd, k, outside, fail, ok] = [cg.temp(), cg.temp(), cg.temp(), cg.temp(), cg.label(), cg.label()];
       cg.emit(`${negative} = icmp slt i64 ${i}, 0`);
@@ -7989,6 +7999,7 @@ class Codegen implements PrintHost, ComptimeHost {
       cg.startBlock(ok);
       return [k, v];
     });
+    if (placed !== undefined) [index, given] = placed;
     const whole = this.temp();
     this.emit(`${whole} = load ${ARRAY}, ptr ${at}`);
     const copy = this.alloca(ARRAY);
@@ -9272,7 +9283,7 @@ class Codegen implements PrintHost, ComptimeHost {
       if (timer === "timerClear") {
         const line4 = `call void @fsh_rt_timeout_clear(i64 ${this.value(e.args[0]!)})`;
         this.emit(line4);
-        return;
+        return undefined;
       }
       if (timer === "timerSet") {
         const callable = this.owned(e.args[0]!);
@@ -9429,7 +9440,7 @@ class Codegen implements PrintHost, ComptimeHost {
       if (e.callee.kind === "ident" && e.callee.name === "unixUnlink" && !this.cur().calls.has(e)) {
         const line13 = `call void @fsh_rt_unix_unlink(ptr ${this.value(e.args[0]!)})`;
         this.emit(line13);
-        return;
+        return undefined;
       }
       if (e.callee.kind === "ident" && e.callee.name === "httpDate" && !this.cur().calls.has(e)) {
         const made = this.temp();
