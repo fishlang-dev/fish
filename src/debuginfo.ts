@@ -81,7 +81,7 @@ export function withDebugInfo(ir: string, src: string, file: string, sources: So
         result.push(label);
         result.push(line);
       } else {
-        const start = place(Number(marked[1])!);
+        const start = place(Number(marked[1])! as usize);
         // Codegen escapes a quote in a symbol, so the first `"(` ends its name.
         const name = header.slice(header.indexOf('@"fsh.') + 6, header.indexOf('"('));
         const scope = fileNode(start.file);
@@ -101,7 +101,7 @@ export function withDebugInfo(ir: string, src: string, file: string, sources: So
       else {
         // A mark in another file, such as a default value written at its declaration, keeps the
         // line it follows, since a location's file is its function's.
-        const to = place(Number(moved[1])!);
+        const to = place(Number(moved[1])! as usize);
         if (to.file === home) here = at(to.line, to.col, subprogram);
       }
     }
