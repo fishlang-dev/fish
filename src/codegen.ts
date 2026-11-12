@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import type { Body } from "./classes.ts";
 import { bodyOf, type Arenas, type InstanceId, type LocalId } from "./arenas.ts";
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
@@ -554,6 +555,10 @@ class Codegen implements PrintHost, ComptimeHost {
     return this.tables.arenas.instanceOf(id)!;
   }
 
+  bodyAt(id: InstanceId): Ref<Body> {
+    return this.tables.arenas.bodyOf(this.tables.arenas.instanceOf(id)!.body)!;
+  }
+
   cur(): Ref<Instance> {
     return this.tables.arenas.instanceOf(this.current)!;
   }
@@ -563,9 +568,9 @@ class Codegen implements PrintHost, ComptimeHost {
     // Top-level consts and comptime blocks run while compiling, every one of them, so one that
     // fails is reported even when nothing reads it; none is compiled.
     for (const instance of this.instances) {
-      if (bodyOf(this.tables.arenas, this.inst(instance)).comptime === undefined || !this.inst(instance).concrete) continue;
-      if (bodyOf(this.tables.arenas, this.inst(instance)).comptime === "const") {
-        const written = bodyOf(this.tables.arenas, this.inst(instance));
+      if (this.bodyAt(instance).comptime === undefined || !this.inst(instance).concrete) continue;
+      if (this.bodyAt(instance).comptime === "const") {
+        const written = this.bodyAt(instance);
         this.bakeable(this.inst(instance).returns, { start: written.start, end: written.end }, true);
       }
       comptimeBody(this, instance);
@@ -578,27 +583,27 @@ class Codegen implements PrintHost, ComptimeHost {
   this.pairs = new Map<LocalId, string>();
 
   for (const instance of this.instances) {
-    if (bodyOf(this.tables.arenas, this.inst(instance)).comptime !== undefined) continue;
+    if (this.bodyAt(instance).comptime !== undefined) continue;
     try {
       // A copy compiled as another instance of its function has no code of its own.
       if (this.shares.has(instance) && this.shares.get(instance)!.template !== instance) continue;
       // A C function is declared under its own name, unless the runtime already declares it.
-      if (bodyOf(this.tables.arenas, this.inst(instance)).foreign === true) {
-        this.foreign.add(bodyOf(this.tables.arenas, this.inst(instance)).name);
-        if (bodyOf(this.tables.arenas, this.inst(instance)).rust !== undefined) {
+      if (this.bodyAt(instance).foreign === true) {
+        this.foreign.add(this.bodyAt(instance).name);
+        if (this.bodyAt(instance).rust !== undefined) {
           // A Rust function's shim takes its handle first when it is a method, then its parameters
           // as they cross, the slot for the rest of what it gives, and where it puts a panic's message.
           const rust = this.symbol(instance);
           if (this.declaredRust.has(rust)) continue;
           this.declaredRust.add(rust);
-          const self = bodyOf(this.tables.arenas, this.inst(instance)).self !== undefined && !bodyOf(this.tables.arenas, this.inst(instance)).self!.constructor ? ["ptr"] : [];
+          const self = this.bodyAt(instance).self !== undefined && !this.bodyAt(instance).self!.constructor ? ["ptr"] : [];
           const gives = shimGives(this.tables.typing, rustGiven(this.tables.typing, this.tables.arenas, this.inst(instance)));
           const params = [...self, ...this.inst(instance).signature!.flatMap((t) => shimParams(this.tables.typing, rustCrossing(this.tables.typing, t))), ...((gives.out !== undefined && gives.out !== "") ? ["ptr"] : []), ...(this.inst(instance).throws !== undefined ? ["ptr"] : []), "ptr"];
           this.out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`);
           this.out.push("");
           continue;
         }
-        if (!DECLARED.has(bodyOf(this.tables.arenas, this.inst(instance)).name)) {
+        if (!DECLARED.has(this.bodyAt(instance).name)) {
           const line2 = `declare ${crossed(this.tables.typing, this.inst(instance).returns)} ${this.symbol(instance)}(${this.inst(instance).signature!.map((t) => crossing(this.tables.typing, t)).join(", ")})`;
           this.out.push(line2);
           this.out.push("");
@@ -606,7 +611,7 @@ class Codegen implements PrintHost, ComptimeHost {
         continue;
       }
       this.current = instance;
-      const f = bodyOf(this.tables.arenas, this.inst(instance));
+      const f = this.bodyAt(instance);
       this.self = f.self?.type;
       this.allocas = [];
       this.body = [];
@@ -796,7 +801,7 @@ class Codegen implements PrintHost, ComptimeHost {
   this.main = this.instances.find((i) => this.inst(i).symbol === "main")!;
 
   // Built before the module is put together, since its message adds a global.
-  this.start = this.library ? this.instances.filter((i) => bodyOf(this.tables.arenas, this.inst(i)).exported).flatMap(((i) => this.exported(i))) : this.entry();
+  this.start = this.library ? this.instances.filter((i) => this.bodyAt(i).exported).flatMap(((i) => this.exported(i))) : this.entry();
 
   this.filled = this.fillConstants();
 
@@ -1001,7 +1006,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const at = this.callbacksOnlyCalled(i);
       if (at.size === 0) continue;
       found.set(i, at);
-      const b = bodyOf(this.tables.arenas, this.inst(i));
+      const b = this.bodyAt(i);
       let parts = [`${b.name}@${b.start}`, this.tables.typing.keyOf(this.inst(i).returns), this.inst(i).throws === undefined ? "" : this.tables.typing.keyOf(this.inst(i).throws!)];
       b.params.forEach((p, k) => {
         const local = this.loc(this.inst(i).locals.get(p)!);
@@ -1012,7 +1017,7 @@ class Codegen implements PrintHost, ComptimeHost {
         // What calling it gives and takes, which every instance sharing the code must agree on: as
         // types, since one IR shape can hold values that are dropped or dispatched differently.
         const target = this.calledThrough(i, p.pattern.kind === "ident" ? p.pattern.name : "");
-        parts.push(target === undefined ? "*" : `*${this.inst(target).throws === undefined ? "" : this.tables.typing.keyOf(this.inst(target).throws!)}*${this.tables.typing.keyOf(this.inst(target).returns)}(${bodyOf(this.tables.arenas, this.inst(target)).params.map((q) => this.tables.typing.keyOf(this.loc(this.inst(target).locals.get(q)!).type)).join(",")})`);
+        parts.push(target === undefined ? "*" : `*${this.inst(target).throws === undefined ? "" : this.tables.typing.keyOf(this.inst(target).throws!)}*${this.tables.typing.keyOf(this.inst(target).returns)}(${this.bodyAt(target).params.map((q) => this.tables.typing.keyOf(this.loc(this.inst(target).locals.get(q)!).type)).join(",")})`);
       });
       let bound = [...this.inst(i).bindings];
       bound.sort(([a], [b]) => (a < b ? -1 : 1));
@@ -1046,7 +1051,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // to the same function at the same place; one read anywhere else, a nested function's included,
   // is used some other way.
   callbacksOnlyCalled(i: InstanceId): Set<usize> {
-    const b = bodyOf(this.tables.arenas, this.inst(i));
+    const b = this.bodyAt(i);
     const at = new Set<usize>();
     if (b.self !== undefined || b.closure !== undefined || b.generator === true || b.async === true || b.foreign === true || b.rust !== undefined || b.js !== undefined || b.exported === true || b.comptime !== undefined || this.inst(i).symbol === "main") return at;
     if (b.params.some((p) => p.comptime || p.rest)) return at;
@@ -1099,8 +1104,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   sameFunction(a: InstanceId, b: InstanceId): boolean {
-    const x = bodyOf(this.tables.arenas, this.inst(a));
-    const y = bodyOf(this.tables.arenas, this.inst(b));
+    const x = this.bodyAt(a);
+    const y = this.bodyAt(b);
     return x.name === y.name && x.start === y.start;
   }
 
@@ -1108,7 +1113,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // The closure's body a call of the parameter `name` runs, in `i`.
   calledThrough(i: InstanceId, name: string): InstanceId | undefined {
     let found: InstanceId | undefined = undefined;
-    for (const st of bodyOf(this.tables.arenas, this.inst(i)).body) {
+    for (const st of this.bodyAt(i).body) {
       walkWhile({ of: "stmt", node: st }, (n) => {
         if (found !== undefined) return false;
         if (n.of === "expr" && n.node.kind === "call" && n.node.callee.kind === "ident" && n.node.callee.name === name) {
@@ -1123,10 +1128,10 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   frameName(i: InstanceId): string {
-    const closure = bodyOf(this.tables.arenas, this.inst(i)).closure;
+    const closure = this.bodyAt(i).closure;
     if (closure !== undefined) {
       if (closure.self !== undefined) return closure.self;
-      const written = bodyOf(this.tables.arenas, this.inst(i));
+      const written = this.bodyAt(i);
       return `<arrow ${this.where({ start: written.start, end: written.end }).split(":").slice(-2).join(":")}>`;
     }
     // A generic instance ends in `#<id>`, which no frame shows; a private name is `#name` after a
@@ -1152,7 +1157,7 @@ class Codegen implements PrintHost, ComptimeHost {
   constantGlobal(this: Mut<this>, c: InstanceId): string {
     const made = this.constantGlobals.get(c);
     if ((made !== undefined && made !== "")) return made;
-    const name = `@"fsh.const.${bodyOf(this.tables.arenas, this.inst(c)).name.slice("const ".length as i64)}"`;
+    const name = `@"fsh.const.${this.bodyAt(c).name.slice("const ".length as i64)}"`;
     this.constantGlobals.set(c, name);
     this.globals.push(`${name} = internal global ${this.llvm(this.inst(c).returns)} zeroinitializer`);
     return name;
@@ -2120,7 +2125,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const found = this.temp();
       this.emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
       const target = this.callOf(callback)!;
-      const slice2 = [`ptr ${part(this, found, 4)}`].slice(0, bodyOf(this.tables.arenas, this.inst(target)).params.length);
+      const slice2 = [`ptr ${part(this, found, 4)}`].slice(0, this.bodyAt(target).params.length);
       const gives = this.invoke(target, env, slice2, e, undefined, drop);
       if (gives !== undefined && this.needsDrop(this.tables.typing.rec(closure).returns)) this.dispose(gives, this.tables.typing.rec(closure).returns);
       this.emit(`br label %${done}`);
@@ -2352,7 +2357,7 @@ class Codegen implements PrintHost, ComptimeHost {
           cg.dispose(unstash2, closure);
         }
       };
-      const gives = cg.invoke(target, env, passed.slice(0, bodyOf(cg.tables.arenas, cg.inst(target)).params.length), e, undefined, unwound);
+      const gives = cg.invoke(target, env, passed.slice(0, cg.bodyAt(target).params.length), e, undefined, unwound);
       if (gives !== undefined && cg.needsDrop(cg.tables.typing.rec(closure).returns)) cg.dispose(gives, cg.tables.typing.rec(closure).returns);
     });
     if (this.needsDrop(closure)) {
@@ -2377,7 +2382,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // read back as its declaration says.
   jsCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, name: Ref<JsName>, target: InstanceId): string | undefined {
     const fn = this.jsExport(name, { start: e.start, end: e.end });
-    const argv = this.jsArgv(e.args, bodyOf(this.tables.arenas, this.inst(target)).params.map((p) => p.optional));
+    const argv = this.jsArgv(e.args, this.bodyAt(target).params.map((p) => p.optional));
     const result = this.temp();
     const line = `call ptr @fsh_rt_js_call(ptr ${fn}, ptr null, i64 ${e.args.length}, ptr ${argv}, ptr ${this.panicAt({ start: e.start, end: e.end })})`;
     this.unwinding(line, result);
@@ -3425,14 +3430,14 @@ class Codegen implements PrintHost, ComptimeHost {
     if (this.tables.typing.promiseElement(m.returns) !== undefined) return this.futureThunk(name, type, m, target);
     const returns = m.throws !== undefined ? this.throwing(m.returns, m.throws) : m.returns === "void" ? "void" : this.llvm(m.returns);
     this.thunk(name, returns, (cg) => {
-      const owner = bodyOf(cg.tables.arenas, cg.inst(target)).owner;
+      const owner = cg.bodyAt(target).owner;
       const r = cg.recOf(type);
       const upcasts = r?.kind === "class" && owner !== undefined && owner !== type;
       const self = upcasts ? cg.upcast("%p", type as ClassType, owner!) : "%p";
       // Given up, the block is freed once the method returns or unwinds: its value dropped first,
       // or for a base's owning method, the derived fields it doesn't know of.
       const giveUp = m.owned !== true ? undefined : (cg: Mut<Codegen>) => {
-        if (bodyOf(cg.tables.arenas, cg.inst(target)).self?.owned !== true) {
+        if (cg.bodyAt(target).self?.owned !== true) {
           const v = cg.temp();
           cg.emit(`${v} = load ${cg.llvm(type)}, ptr %p`);
           cg.dispose(v, type);
@@ -3451,7 +3456,7 @@ class Codegen implements PrintHost, ComptimeHost {
         cg.emit("call void @fsh_rt_free(ptr %p)");
       };
       // A closure may take fewer parameters than its callable passes: the rest are dropped here.
-      const taken = bodyOf(cg.tables.arenas, cg.inst(target)).closure !== undefined ? bodyOf(cg.tables.arenas, cg.inst(target)).params.length : m.params.length;
+      const taken = cg.bodyAt(target).closure !== undefined ? cg.bodyAt(target).params.length : m.params.length;
       m.params.slice(taken).forEach((p, i) => cg.dispose(`%a${taken + i}`, p));
       const args = m.params.slice(0, taken).map((p, i) => `${cg.llvm(p)} %a${i}`);
       const give = (cg: Mut<Codegen>, v: string | undefined) => (m.throws !== undefined ? cg.succeeded(m, v) : cg.emit(v === undefined ? "ret void" : `ret ${returns} ${v}`));
@@ -3543,11 +3548,11 @@ class Codegen implements PrintHost, ComptimeHost {
   // A slot giving a `Promise<T>`: the future the method or async arrow makes, its frame holding
   // the block (a method's object, borrowed) or a copy of the closure, then the arguments, boxed.
   futureThunk(this: Mut<this>, name: string, type: Type, m: Ref<Method>, target: InstanceId): string {
-    const closure = bodyOf(this.tables.arenas, this.inst(target)).closure !== undefined;
+    const closure = this.bodyAt(target).closure !== undefined;
     const to = closure ? (this.tables.typing.stored(m.returns) as DynType) : this.tables.typing.lentPromise(this.tables.typing.promiseElement(m.returns)!);
     const params = m.params.map((p, i) => `${this.llvm(p)} %a${i}`);
     this.thunk(name, DYN, (cg) => {
-      const taken = closure ? bodyOf(cg.tables.arenas, cg.inst(target)).params.length : m.params.length;
+      const taken = closure ? cg.bodyAt(target).params.length : m.params.length;
       m.params.slice(taken as i64).forEach((p, i) => cg.dispose(`%a${taken + i}`, p));
       let made: string;
       let future: FutureType;
@@ -3560,7 +3565,7 @@ class Codegen implements PrintHost, ComptimeHost {
           const line = `${frame} = insertvalue ${cg.llvm(future)} zeroinitializer, ${cg.llvm(cg.inst(target).closure!)} ${cg.copied(env, cg.inst(target).closure!)}, 1`;
           cg.emit(line);
         } else {
-          const owner = bodyOf(cg.tables.arenas, cg.inst(target)).owner;
+          const owner = cg.bodyAt(target).owner;
           const r = cg.recOf(type);
           const self = r?.kind === "class" && owner !== undefined && owner !== type ? cg.upcast("%p", type as ClassType, owner) : "%p";
           cg.emit(`${frame} = insertvalue ${cg.llvm(future)} zeroinitializer, ptr ${self}, 1`);
@@ -3586,7 +3591,7 @@ class Codegen implements PrintHost, ComptimeHost {
   fieldThunk(this: Mut<this>, name: string, type: Type, f: Ref<Field>, getter: InstanceId | undefined): string {
     this.thunk(name, this.llvm(f.type), (cg) => {
       if (getter !== undefined) {
-        const owner = bodyOf(cg.tables.arenas, cg.inst(getter)).owner;
+        const owner = cg.bodyAt(getter).owner;
         const r = cg.recOf(type);
         const self = r?.kind === "class" && owner !== undefined && owner !== type ? cg.upcast("%p", type as ClassType, owner) : "%p";
         const invoke2 = cg.invoke(getter, self, [])!;
@@ -3861,7 +3866,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const inside = this.temp();
     this.emit(`${inside} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 1`);
     const target = this.callOf(callback)!;
-    const result = this.invoke(target, env, bodyOf(this.tables.arenas, this.inst(target)).params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
+    const result = this.invoke(target, env, this.bodyAt(target).params.length > 0 ? [`ptr ${inside}`] : [], e, leftovers);
     this.emit(`call void @${rc ? (reading ? "fsh_rt_rc_read_end" : "fsh_rt_rc_write_end") : reading ? "fsh_rt_read_unlock" : "fsh_rt_unlock"}(ptr ${at})`);
     if ((result !== undefined && result !== "") && !this.cur().types.has(e) && this.needsDrop(this.inst(target).returns)) this.pending.push({ v: result, type: this.inst(target).returns });
     return result;
@@ -6131,7 +6136,7 @@ class Codegen implements PrintHost, ComptimeHost {
       return node;
     };
     // std's Date prints as its ISO string at any depth, as Node prints one.
-    const iso = r.kind === "class" ? this.instances.find((i) => bodyOf(this.tables.arenas, this.inst(i)).name === `${r.name}.toISOString` && bodyOf(this.tables.arenas, this.inst(i)).start >= STD_BASE) : undefined;
+    const iso = r.kind === "class" ? this.instances.find((i) => this.bodyAt(i).name === `${r.name}.toISOString` && this.bodyAt(i).start >= STD_BASE) : undefined;
     if (iso !== undefined) {
       const [self, text, node] = [this.alloca(this.llvm(t)), this.temp(), this.temp()];
       this.emit(`store ${this.llvm(t)} ${v}, ptr ${self}`);
@@ -7522,7 +7527,7 @@ class Codegen implements PrintHost, ComptimeHost {
         cg.dispose(unstash2, closure);
       }
     };
-    const gives = this.invoke(target, env, passed.slice(0, bodyOf(this.tables.arenas, this.inst(target)).params.length), e, undefined, unwound)!;
+    const gives = this.invoke(target, env, passed.slice(0, this.bodyAt(target).params.length), e, undefined, unwound)!;
     if (method === "map") this.appended(out, this.tables.typing.rec(closure).returns, gives);
     else if (method === "forEach") {
       // What the callback gives is dropped; JavaScript's forEach ignores it.
@@ -7648,7 +7653,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const part = cg.tables.typing.rec(closure).params[0];
         const part2 = cg.tables.typing.rec(closure).params[1];
         const args = [...arg(cg, "%a", part), ...arg(cg, "%b", part2)];
-        const invoke2 = cg.invoke(target, "%p", args.slice(0, bodyOf(cg.tables.arenas, cg.inst(target)).params.length))!;
+        const invoke2 = cg.invoke(target, "%p", args.slice(0, cg.bodyAt(target).params.length))!;
         const line2 = `ret i32 ${cg.sign(invoke2, cg.tables.typing.rec(closure).returns)}`;
         cg.emit(line2);
       }, ["ptr %a", "ptr %b"]);
@@ -8918,7 +8923,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${both} = load ${PAIR}, ptr ${pair}`);
       this.emit(`${env} = extractvalue ${PAIR} ${both}, 0`);
       this.emit(`${code} = extractvalue ${PAIR} ${both}, 1`);
-      const values = this.argValues(e.args, target, bodyOf(this.tables.arenas, this.inst(target)).params.length);
+      const values = this.argValues(e.args, target, this.bodyAt(target).params.length);
       const result = this.invoke(target, env, values, e, undefined, undefined, code);
       return (result !== undefined && result !== "") && this.cur().types.has(e) ? this.convert(result, this.inst(target).returns, this.cur().types.get(e)!) : result;
     }
@@ -9285,28 +9290,28 @@ class Codegen implements PrintHost, ComptimeHost {
     const object = e.callee.kind === "member" ? e.callee.object : e.callee.kind === "super" ? e.callee : undefined;
     const before = this.spills.length;
     // A nested function calling itself runs with the captures it was called with.
-    const pointer = bodyOf(this.tables.arenas, this.inst(target)).closure !== undefined ? (this.tables.selfCalls.has(e) ? "%env" : this.cur().envs?.has(e) === true ? this.envFor(target, this.cur().envs!.get(e)!.env) : this.inst(target).generator === undefined && this.inst(target).future === undefined && this.fresh(e.callee) && !this.unwraps(e.callee) ? this.calledClosure(e.callee) : this.receiver(e.callee)) : bodyOf(this.tables.arenas, this.inst(target)).self !== undefined && object !== undefined ? this.thisPointer(target, object) : undefined;
+    const pointer = this.bodyAt(target).closure !== undefined ? (this.tables.selfCalls.has(e) ? "%env" : this.cur().envs?.has(e) === true ? this.envFor(target, this.cur().envs!.get(e)!.env) : this.inst(target).generator === undefined && this.inst(target).future === undefined && this.fresh(e.callee) && !this.unwraps(e.callee) ? this.calledClosure(e.callee) : this.receiver(e.callee)) : this.bodyAt(target).self !== undefined && object !== undefined ? this.thisPointer(target, object) : undefined;
     const mine = this.spills.splice(before);
     // A closure may take fewer parameters than the function type it was given as.
-    const values = this.argValues(e.args, target, bodyOf(this.tables.arenas, this.inst(target)).closure !== undefined ? bodyOf(this.tables.arenas, this.inst(target)).params.length : e.args.length);
+    const values = this.argValues(e.args, target, this.bodyAt(target).closure !== undefined ? this.bodyAt(target).params.length : e.args.length);
     // Calling a generator or async function makes its frame, holding the arguments, ready to start.
     const machine = this.inst(target).generator ?? this.inst(target).future;
     if (machine !== undefined) {
       let frame = "zeroinitializer";
       // An async arrow's frame starts with its own copy of the closure, and an async method's
       // with its object, then the arguments.
-      const method = bodyOf(this.tables.arenas, this.inst(target)).self !== undefined && !bodyOf(this.tables.arenas, this.inst(target)).self!.constructor;
-      const first = bodyOf(this.tables.arenas, this.inst(target)).closure !== undefined || method === true ? 2 : 1;
+      const method = this.bodyAt(target).self !== undefined && !this.bodyAt(target).self!.constructor;
+      const first = this.bodyAt(target).closure !== undefined || method === true ? 2 : 1;
       // The frame takes the call's spilled receiver, which then drops nothing of its own.
       this.pending = this.pending.filter((entry) => !mine.some((m) => m.copy === entry));
       if (method === true) {
-        const owns = bodyOf(this.tables.arenas, this.inst(target)).self!.owned;
-        const self = owns === true ? this.unstash(pointer!, bodyOf(this.tables.arenas, this.inst(target)).self!.type) : pointer!;
+        const owns = this.bodyAt(target).self!.owned;
+        const self = owns === true ? this.unstash(pointer!, this.bodyAt(target).self!.type) : pointer!;
         const next = this.temp();
-        this.emit(`${next} = insertvalue ${this.llvm(machine)} ${frame}, ${owns === true ? this.llvm(bodyOf(this.tables.arenas, this.inst(target)).self!.type) : "ptr"} ${self}, 1`);
+        this.emit(`${next} = insertvalue ${this.llvm(machine)} ${frame}, ${owns === true ? this.llvm(this.bodyAt(target).self!.type) : "ptr"} ${self}, 1`);
         frame = next;
       }
-      if (bodyOf(this.tables.arenas, this.inst(target)).closure !== undefined) {
+      if (this.bodyAt(target).closure !== undefined) {
         const [env, next] = [this.temp(), this.temp()];
         this.emit(`${env} = load ${this.llvm(this.inst(target).closure!)}, ptr ${pointer}`);
         const line23 = `${next} = insertvalue ${this.llvm(machine)} ${frame}, ${this.llvm(this.inst(target).closure!)} ${this.copied(env, this.inst(target).closure!)}, 1`;
@@ -9367,10 +9372,10 @@ class Codegen implements PrintHost, ComptimeHost {
   // Arguments past `taken` run for their effects only.
   argValues(this: Mut<this>, args: Ref<Expr[]>, target: InstanceId, taken: usize = args.length): string[] {
     // A comptime parameter's argument was computed while compiling, and isn't passed.
-    const passed = (cg: Mut<Codegen>, i: usize) => bodyOf(cg.tables.arenas, cg.inst(target)).params[i]?.comptime !== true;
+    const passed = (cg: Mut<Codegen>, i: usize) => cg.bodyAt(target).params[i]?.comptime !== true;
     const values = this.delivered((cg, hand) => args.flatMap((a, i) => (!passed(cg, i) ? [] : i < taken ? [`${cg.llvm(cg.valueType(a))} ${cg.pairOf(a) !== undefined ? cg.owned(a) : hand(cg.owned(a), cg.valueType(a))}`] : (cg.value(a), []))));
     // A left-out optional parameter is empty, and a left-out rest parameter an empty array.
-    for (const p of bodyOf(this.tables.arenas, this.inst(target)).params.slice(args.length)) {
+    for (const p of this.bodyAt(target).params.slice(args.length)) {
       const type = this.loc(this.inst(target).locals.get(p)!).type;
       values.push(`${this.llvm(type)} ${p.rest ? "zeroinitializer" : this.convert("zeroinitializer", "null", type)}`);
     }
@@ -9537,7 +9542,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const [said, saidNot] = [this.label(), this.label()];
     this.emit(`br i1 ${answer}, label %${said}, label %${saidNot}`);
     // A name spelling a long type argument list is shortened as symbols are.
-    const name = shortened(bodyOf(this.tables.arenas, this.inst(this.callOf(e)!)).name);
+    const name = shortened(this.bodyAt(this.callOf(e)!).name);
     function shown(x: Expr): string {
       return (x.kind === "member" ? `${shown(x.object)}.${x.name}` : x.kind === "ident" ? x.name : "this");
     }
@@ -9933,8 +9938,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // that declares the method.
   thisPointer(this: Mut<this>, target: InstanceId, object: Ref<Expr>): string {
     const held = this.unwraps(object) ? this.cur().coercions.get(object)! : this.tables.typing.unfold(this.referent(this.cur().types.get(object)!));
-    const receiver2 = this.receiver(object, bodyOf(this.tables.arenas, this.inst(target)).self?.owned);
-    return this.upcast(receiver2, held as ClassType, bodyOf(this.tables.arenas, this.inst(target)).owner!);
+    const receiver2 = this.receiver(object, this.bodyAt(target).self?.owned);
+    return this.upcast(receiver2, held as ClassType, this.bodyAt(target).owner!);
   }
 
 
@@ -9944,11 +9949,11 @@ class Codegen implements PrintHost, ComptimeHost {
   invoke(this: Mut<this>, target: InstanceId, pointer: string | undefined, args: Ref<string[]>, at?: Ref<Expr>, after?: (cg: Mut<Codegen>) => void, unwound?: (cg: Mut<Codegen>) => void, via?: string): string | undefined {
     const cleanup = after !== undefined || unwound !== undefined ? (cg: Mut<Codegen>) => (after?.(cg), unwound?.(cg)) : undefined;
     const type = this.inst(target).returns;
-    if (bodyOf(this.tables.arenas, this.inst(target)).rust !== undefined) return this.rustInvoke(target, pointer, args, at!, cleanup, after);
+    if (this.bodyAt(target).rust !== undefined) return this.rustInvoke(target, pointer, args, at!, cleanup, after);
     const values = (pointer !== undefined && pointer !== "") ? [`ptr ${pointer}`, ...args] : args;
     // A narrow value crosses to C widened, both ways.
-    const passed = bodyOf(this.tables.arenas, this.inst(target)).foreign === true ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(this.tables.typing, this.inst(target).signature![i]!)} `)) : values;
-    const call = `call ${bodyOf(this.tables.arenas, this.inst(target)).foreign === true ? crossed(this.tables.typing, type) : this.resultType(target)} ${via ?? this.symbol(target)}(${passed.join(", ")})`;
+    const passed = this.bodyAt(target).foreign === true ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(this.tables.typing, this.inst(target).signature![i]!)} `)) : values;
+    const call = `call ${this.bodyAt(target).foreign === true ? crossed(this.tables.typing, type) : this.resultType(target)} ${via ?? this.symbol(target)}(${passed.join(", ")})`;
     if (type === "void" && this.inst(target).throws === undefined) {
       this.unwinding(call, undefined, cleanup);
       after?.(this);
@@ -9961,7 +9966,7 @@ class Codegen implements PrintHost, ComptimeHost {
       return result;
     }
     const resultType2 = this.resultType(target);
-    return this.unpacked(resultType2, result, type, at!, after, bodyOf(this.tables.arenas, this.inst(target)).self?.constructor === true ? undefined : unwound);
+    return this.unpacked(resultType2, result, type, at!, after, this.bodyAt(target).self?.constructor === true ? undefined : unwound);
   }
 
 
@@ -10002,10 +10007,10 @@ class Codegen implements PrintHost, ComptimeHost {
     };
     let passed: string[] = [];
     let given: (() => void)[] = [];
-    if ((pointer !== undefined && pointer !== "") && bodyOf(this.tables.arenas, this.inst(target)).self !== undefined && !bodyOf(this.tables.arenas, this.inst(target)).self!.constructor) {
+    if ((pointer !== undefined && pointer !== "") && this.bodyAt(target).self !== undefined && !this.bodyAt(target).self!.constructor) {
       passed.push(`ptr ${load(this, "ptr", pointer)}`);
       // A method taking its object over leaves the place it was in empty, as one in Fish does.
-      if (bodyOf(this.tables.arenas, this.inst(target)).self!.owned === true) this.emit(`store ptr null, ptr ${pointer}`);
+      if (this.bodyAt(target).self!.owned === true) this.emit(`store ptr null, ptr ${pointer}`);
     }
     // An owned array is given up once Rust has its elements: Rust has made its own strings and
     // numbers, and taken the Rust values, which leave only the buffer.
@@ -10092,7 +10097,7 @@ class Codegen implements PrintHost, ComptimeHost {
     after?.(this);
     if ((err !== undefined && err !== "")) this.rustErr(err, this.inst(target).throws!, at);
     if (gives === undefined) return undefined;
-    const type = bodyOf(this.tables.arenas, this.inst(target)).self?.constructor === true ? bodyOf(this.tables.arenas, this.inst(target)).owner! : this.inst(target).returns;
+    const type = this.bodyAt(target).self?.constructor === true ? this.bodyAt(target).owner! : this.inst(target).returns;
     if (gives.kind !== "option") return gives.kind === "array" ? load(this, ARRAY, out!) : result;
     const some = gives.of.kind === "plain" || gives.of.kind === "array" ? result! : this.temp();
     if (some !== result) this.emit(`${some} = icmp ne ptr ${result}, null`);
@@ -11309,11 +11314,11 @@ class Codegen implements PrintHost, ComptimeHost {
   // A C function under an export's name, calling it. A panic can't unwind into C, so one that
   // reaches here aborts, its message already printed.
   exported(this: Mut<this>, i: InstanceId): string[] {
-    const params = bodyOf(this.tables.arenas, this.inst(i)).params.map((p, n) => [this.loc(this.inst(i).locals.get(p)!).type, `%a${n}`] as const);
+    const params = this.bodyAt(i).params.map((p, n) => [this.loc(this.inst(i).locals.get(p)!).type, `%a${n}`] as const);
     // A library's panics all unwind, the runtime's default, whichever way the build chose: the
     // abort happens here, before C sees the unwind.
     const call = `${this.inst(i).returns === "void" ? "" : "%r = "}invoke ${this.llvm(this.inst(i).returns)} ${this.symbol(i)}(${params.map(([t, a]) => `${this.llvm(t)} ${a}`).join(", ")})`;
-    const head = `define ${crossed(this.tables.typing, this.inst(i).returns)} @"${bodyOf(this.tables.arenas, this.inst(i)).name}"(${params.map(([t, a]) => `${crossing(this.tables.typing, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
+    const head = `define ${crossed(this.tables.typing, this.inst(i).returns)} @"${this.bodyAt(i).name}"(${params.map(([t, a]) => `${crossing(this.tables.typing, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
     const done = this.inst(i).returns === "void" ? "  ret void" : `  ret ${this.llvm(this.inst(i).returns)} %r`;
     return [head, "entry:", `  ${call} to label %ok unwind label %pad`, "ok:", done, "pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  call void @abort()", "  unreachable", "}", ""];
   }
@@ -11878,7 +11883,7 @@ class Codegen implements PrintHost, ComptimeHost {
         // A top-level const: a scalar or string baked where it is read, an aggregate read through
         // a pointer to its global.
         const read = this.callOf(e);
-        if (read !== undefined && bodyOf(this.tables.arenas, this.inst(read)).comptime === "const") {
+        if (read !== undefined && this.bodyAt(read).comptime === "const") {
           if (this.isRef(this.cur().types.get(e)!)) return this.constantGlobal(read);
           const baked = comptimeBody(this, read);
           return this.bake(baked, this.cur().types.get(e)!);
@@ -11966,7 +11971,7 @@ class Codegen implements PrintHost, ComptimeHost {
         if (newed?.kind === "map") return this.mapNew(this.cur().types.get(e) as MapType, e.args?.[0]);
         if (newed?.kind === "shared") return this.sharedNew(e, this.cur().types.get(e) as SharedType);
         // A Rust type's constructor gives the handle to the value it boxed.
-        if (bodyOf(this.tables.arenas, this.inst(this.callOf(e)!)).rust !== undefined) {
+        if (this.bodyAt(this.callOf(e)!).rust !== undefined) {
           const argValues2 = this.argValues(e.args ?? [], this.callOf(e)!);
           return this.invoke(this.callOf(e)!, undefined, argValues2, e)!;
         }
@@ -12876,7 +12881,7 @@ class Codegen implements PrintHost, ComptimeHost {
           cg.dispose(unstash2, closure!);
         }
       };
-      const gives = this.invoke(target, env, passed.slice(0, bodyOf(this.tables.arenas, this.inst(target)).params.length), e, undefined, unwound)!;
+      const gives = this.invoke(target, env, passed.slice(0, this.bodyAt(target).params.length), e, undefined, unwound)!;
       const text = this.convert(gives, this.tables.typing.rec(closure!).returns, "string");
       this.emit(`call void @fsh_rt_regex_put(ptr ${it}, ptr ${text})`);
       this.dispose(text, "string");
