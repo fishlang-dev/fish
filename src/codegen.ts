@@ -2431,14 +2431,13 @@ class Codegen implements PrintHost, ComptimeHost {
         const copied2 = cg.copied(v, type);
         return `${cg.llvm(given)} ${cg.convert(copied2, type, given)}`;
       });
-      const unwound = (cg: Mut<Codegen>) => {
+      const slice2 = passed.slice(0, cg.bodyAt(target).params.length as i64);
+      const gives = cg.invoke(target, env, slice2, exprKey(e), undefined, (cg: Mut<Codegen>) => {
         if (cg.needsDrop(closure)) {
           const unstash2 = cg.unstash(env, closure);
           cg.dispose(unstash2, closure);
         }
-      };
-      const slice2 = passed.slice(0, cg.bodyAt(target).params.length);
-      const gives = cg.invoke(target, env, slice2, exprKey(e), undefined, unwound);
+      });
       if (gives !== undefined && cg.needsDrop(cg.tables.typing.rec(closure).returns)) cg.dispose(gives, cg.tables.typing.rec(closure).returns);
     });
     if (this.needsDrop(closure)) {
@@ -3692,7 +3691,7 @@ class Codegen implements PrintHost, ComptimeHost {
         made = frame;
       } else {
         future = (cg.inst(target).returns as FutureType);
-        made = cg.invoke(target, "%p", params.slice(0, taken))!;
+        made = cg.invoke(target, "%p", params.slice(0, taken as i64))!;
       }
       const line2 = `ret ${DYN} ${cg.box(made, future, to)}`;
       cg.emit(line2);
@@ -7721,8 +7720,9 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${acc} = load ${this.llvm(result)}, ptr ${out}`);
       passed.unshift(`${this.llvm(this.tables.typing.rec(closure).params[0]!)} ${this.convert(acc, result, this.tables.typing.rec(closure).params[0]!)}`);
     }
+    const slice2 = passed.slice(0, this.bodyAt(target).params.length as i64);
     // A panic in the callback drops what the loop has built and what the callback captured.
-    const unwound = (cg: Mut<Codegen>) => {
+    const gives = this.invoke(target, env, slice2, exprKey(e), undefined, (cg: Mut<Codegen>) => {
       if (building) {
         const built = cg.temp();
         cg.emit(`${built} = load ${cg.llvm(result)}, ptr ${out}`);
@@ -7732,9 +7732,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const unstash2 = cg.unstash(env, closure);
         cg.dispose(unstash2, closure);
       }
-    };
-    const slice2 = passed.slice(0, this.bodyAt(target).params.length);
-    const gives = this.invoke(target, env, slice2, exprKey(e), undefined, unwound)!;
+    })!;
     if (method === "map") this.appended(out, this.tables.typing.rec(closure).returns, gives);
     else if (method === "forEach") {
       // What the callback gives is dropped; JavaScript's forEach ignores it.
@@ -7865,7 +7863,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const part = takes.length > 0 ? takes[0]! : undefined;
         const part2 = takes.length > 1 ? takes[1]! : undefined;
         const args = [...arg(cg, "%a", part), ...arg(cg, "%b", part2)];
-        const slice2 = args.slice(0, cg.bodyAt(target).params.length);
+        const slice2 = args.slice(0, cg.bodyAt(target).params.length as i64);
         const invoke2 = cg.invoke(target, "%p", slice2)!;
         const line2 = `ret i32 ${cg.sign(invoke2, cg.tables.typing.rec(closure).returns)}`;
         cg.emit(line2);
@@ -8354,7 +8352,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const convert2 = this.convert(v, element, "string");
         piece = this.written(convert2, "string");
       }
-      const made = this.pending.splice(mark);
+      const made = this.pending.splice(mark as i64);
       const after = this.concat(before, piece);
       this.emit(`call void @fsh_rt_str_release(ptr ${before})`);
       for (const p of made) this.dispose(p.v, p.type);
@@ -8747,7 +8745,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const end = this.label();
     this.emit(`switch i32 ${tag}, label %${end} [ ${blocks.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i as usize]!}`).join(" ")} ]`);
     blocks.forEach((m, i) => {
-      this.startBlock(cases[i]!);
+      this.startBlock(cases[i as usize]!);
       const line = `call void @fsh_rt_free(ptr ${this.convert(v, type, m)})`;
       this.emit(line);
       this.emit(`br label %${end}`);
