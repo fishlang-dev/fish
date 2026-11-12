@@ -314,7 +314,7 @@ export function redundantBang(e: Ref<Expr>): boolean {
 }
 
 // An expression with its redundant `!`s taken off.
-export function bare(e: Expr): Expr {
+export function bare<A extends Lifetime>(e: Ref<Expr, A>): Ref<Expr, A> {
   if (e.kind === "nonNull" && redundantBang(e)) return bare(e.expr);
   return e;
 }

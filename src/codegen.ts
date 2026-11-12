@@ -51,7 +51,7 @@ const UNWINDS = "uwtable personality ptr @__gcc_personality_v0";
 // An argument described for the runtime's util.format routine: its kind, an integer's or a
 // boolean's value, a float's, a string or String(x), and an inspect tree.
 const FARG = "{ i32, i64, double, ptr, ptr }";
-const FARG_KINDS = { string: 0, int: 1, uint: 2, float: 3, boolean: 4, null: 5, parts: 6, digits: 7, bigint: 8 };
+const FARG_KINDS: { string: i32; int: i32; uint: i32; float: i32; boolean: i32; null: i32; parts: i32; digits: i32; bigint: i32 } = { string: 0, int: 1, uint: 2, float: 3, boolean: 4, null: 5, parts: 6, digits: 7, bigint: 8 };
 
 // Whether a socket future's address is a path rather than a host and port: a Unix socket's, or
 // std's own TCP-typed socket on a path, whose leaf gives the socket type where TCP's gives void.
@@ -160,7 +160,7 @@ function membersOf(typing: Ref<Typing>, t: Type): Type[] {
 }
 
 // What `as`, `satisfies` or `unsafe` wraps.
-function innerOf(e: Ref<Expr>): Ref<Expr> {
+function innerOf<A extends Lifetime>(e: Ref<Expr, A>): Ref<Expr, A> {
   if (e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe") return e.expr;
   return e;
 }
@@ -253,7 +253,7 @@ function shimGives(typing: Ref<Typing>, c: Ref<Crossing> | undefined): { returns
 }
 
 // What a Rust function gives, as it crosses: a constructor gives its handle.
-const rustGiven = (typing: Typing, arenas: Ref<Arenas>, i: Instance): Crossing | undefined => (bodyOf(arenas, i).self?.constructor === true ? rustCrossing(typing, bodyOf(arenas, i).owner!, true) : i.returns === "void" ? undefined : rustCrossing(typing, i.returns, true));
+const rustGiven = (typing: Typing, arenas: Ref<Arenas>, i: Ref<Instance>): Crossing | undefined => (bodyOf(arenas, i).self?.constructor === true ? rustCrossing(typing, bodyOf(arenas, i).owner!, true) : i.returns === "void" ? undefined : rustCrossing(typing, i.returns, true));
 
 // A library has no C `main`; each export gets a C function under its own name instead.
 // `sources` holds the program's files other than the entry, for panic locations.
@@ -2222,22 +2222,18 @@ class Codegen implements PrintHost, ComptimeHost {
       const env = this.alloca(this.llvm(closure));
       const line = `store ${this.llvm(closure)} ${this.owned(callback)}, ptr ${env}`;
       this.emit(line);
-      const drop = (cg: Mut<Codegen>) => {
-        if (!cg.needsDrop(closure)) return;
-        const kept = cg.unstash(env, closure);
-        cg.dispose(kept, closure);
-      };
+
       this.emit(`br i1 ${there}, label %${hit}, label %${done}`);
       this.startBlock(hit);
       const found = this.temp();
       this.emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
       const target = this.callOf(callback)!;
       const slice2 = [`ptr ${part(this, found, 4)}`].slice(0, this.bodyAt(target).params.length as i64);
-      const gives = this.invoke(target, env, slice2, exprKey(e), undefined, drop);
+      const gives = this.invoke(target, env, slice2, exprKey(e), undefined, (cg: Mut<Codegen>) => cg.dropStashed(env, closure));
       if (gives !== undefined && this.needsDrop(this.tables.typing.rec(closure).returns)) this.dispose(gives, this.tables.typing.rec(closure).returns);
       this.emit(`br label %${done}`);
       this.startBlock(done);
-      drop(this);
+      this.dropStashed(env, closure);
       return there;
     }
     // `get`: a clone of the value, or nothing.
@@ -2789,7 +2785,8 @@ class Codegen implements PrintHost, ComptimeHost {
       const b = conversions.branch(v, type as UnionType, box);
       for (let i: usize = 0; i < b.members.length; i++) {
         const part = conversions.arm(b, i, v, type as UnionType);
-        const made = this.toJs(part, b.members[i]!, empty, declared);
+        const member = b.members[i]!;
+        const made = this.toJs(part, member, empty, declared);
         conversions.armDone(b, box, made);
       }
       return conversions.joined(b, box);
@@ -2949,7 +2946,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`call void @fsh_rt_js_release(ptr ${box})`);
       return "zeroinitializer";
     }
-    if (r === undefined) throw new Error(`internal error: no reading of a '${type}' out of JS`);
+    assert(r !== undefined, `internal error: no reading of a '${this.tables.typing.show(type)}' out of JS`);
     // A JS array as a new Fish array, each element read as the declaration says; a fixed array
     // takes exactly its length, and a tuple its elements by their places.
     if (r.kind === "array" || r.kind === "fixed" || (r.kind === "object" && r.tuple === true)) {
@@ -3564,6 +3561,13 @@ class Codegen implements PrintHost, ComptimeHost {
   // and its value dropped first unless the type's method took it over.
   // A throwing callable's slot gives whether the call failed, then its value and its error, as
   // its function type has them; a closure throwing nothing never fails.
+  // A closure stashed in `env` for a loop's calls, dropped once they are over or one panics.
+  dropStashed(this: Mut<this>, env: string, closure: Type): void {
+    if (!this.needsDrop(closure)) return;
+    const kept = this.unstash(env, closure);
+    this.dispose(kept, closure);
+  }
+
   // Given up, the block is freed once the method returns or unwinds: its value dropped first,
   // or for a base's owning method, the derived fields it doesn't know of.
   giveUp(this: Mut<this>, target: InstanceId, type: Type, upcasts: boolean, owner: ClassType | undefined): void {
@@ -3628,7 +3632,8 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       // A result narrowed to what the interface gives drops the parts it leaves out.
       const part = cg.inst(target).returns;
-      if (cg.needsDrop(part) && !cg.keepsAll(cg.inst(target).returns, m.returns)) {
+      const keeps = cg.keepsAll(part, m.returns);
+      if (cg.needsDrop(part) && !keeps) {
         const part5 = cg.inst(target).returns;
         const convert2 = cg.convert(result, part5, m.returns);
         const kept = cg.copied(convert2, m.returns);
@@ -3742,7 +3747,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       const line2 = `ret ${DYN} ${cg.box(made, future, to)}`;
       cg.emit(line2);
-    }, params);
+    }, [...params]);
     return name;
   }
 
@@ -6061,7 +6066,7 @@ class Codegen implements PrintHost, ComptimeHost {
         put(this, 0, "i32", String(FARG_KINDS.string));
         const text2 = this.text(x);
         put(this, 3, "ptr", text2);
-      } else if (typeof x === "boolean") whole(this, FARG_KINDS.boolean as i32, x ? "1" : "0");
+      } else if (typeof x === "boolean") whole(this, FARG_KINDS.boolean, x ? "1" : "0");
       else whole(this, FARG_KINDS.int as i32, String(x));
       return;
     }
@@ -8069,7 +8074,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`${whole} = load ${ARRAY}, ptr ${at}`);
     const copy = this.alloca(ARRAY);
     if (given !== undefined) this.pending.push({ v: given, type: element });
-    const held = { v: this.copied(whole, array), type: array as Type };
+    const held: { v: string; type: Type } = { v: this.copied(whole, array), type: array };
     this.emit(`store ${ARRAY} ${held.v}, ptr ${copy}`);
     this.pending.push({ v: held.v, type: held.type });
     if (method === "toReversed") this.changed(e, "reverse", array, copy);
@@ -8571,7 +8576,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     const [data, length, at] = [this.temp(), this.temp(), this.temp()];
     this.emit(`${length} = extractvalue ${ARRAY} ${array}, 1`);
-    this.bounds(length, index, { start: e.start, end: e.end }, this.tables.restStarts.get(e.object));
+    this.bounds(length, index, { start: e.start, end: e.end }, this.tables.restStarts.get(e.object) ?? 0);
     this.emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
     this.emit(`${at} = getelementptr ${this.llvm(this.tables.typing.rec(type).element)}, ptr ${data}, i64 ${index}`);
     return at;
@@ -8644,8 +8649,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // Whether an expression makes a value of its own, rather than reading one that lives somewhere.
   // A conditional or `??` makes one from whichever side it gives.
   fresh(this: Mut<this>, eGiven: Ref<Expr>): boolean {
-    let e: Ref<Expr> = eGiven;
-    while (this.wraps(e)) e = innerOf(e);
+    const e = this.unwrapped(eGiven);
     const get2 = this.cur().types.get(e);
     if (!this.needsDrop(get2)) return false;
     switch (e.kind) {
@@ -8664,7 +8668,7 @@ class Codegen implements PrintHost, ComptimeHost {
       // An awaited future gives its value over.
       // Every operator on a bigint makes a new one; a literal is a constant.
       case "unary":
-        return (e.kind === "unary" && e.op === "await") || this.cur().types.get(e) === "bigint";
+        return e.op === "await" || this.cur().types.get(e) === "bigint";
       case "binary":
         return e.op === "+" || e.op === "??" || this.cur().types.get(e) === "bigint";
       case "member":
@@ -8681,9 +8685,16 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // What `as`, `satisfies` and `unsafe` wrappers that convert nothing wrap.
+  unwrapped<A extends Lifetime>(this: Mut<this>, eGiven: Ref<Expr, A>): Ref<Expr, A> {
+    let e: Ref<Expr, A> = eGiven;
+    while (this.wraps(e)) e = innerOf(e);
+    return e;
+  }
+
   // What a wrapper with no conversion of its own hands on, so it owns what its operand owns.
-  handedOn(this: Mut<this>, eGiven: Ref<Expr>): Ref<Expr> {
-    let e: Ref<Expr> = eGiven;
+  handedOn<A extends Lifetime>(this: Mut<this>, eGiven: Ref<Expr, A>): Ref<Expr, A> {
+    let e: Ref<Expr, A> = eGiven;
     while (this.wraps(e) && !this.cur().coercions.has(e)) e = innerOf(e);
     return e;
   }
