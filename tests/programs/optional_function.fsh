@@ -92,6 +92,21 @@ function main() {
   const f: ((n: i64) => void) | undefined = (n) => console.log(words[0]!, n);
   f?.(1);
 }
+// case: optional_function_conditional
+// expect: give 1 t
+// expect: other 2
+// A '?:' choosing a function or nothing holds an optional function, owning what it captures.
+function run(owned: boolean) {
+  const tag = "t";
+  const giveUp = owned ? (n: i64) => console.log("give", n, tag) : undefined;
+  giveUp?.(1);
+  const other: ((n: i64) => void) | undefined = owned ? undefined : (n) => console.log("other", n);
+  if (other !== undefined) other(2);
+}
+function main() {
+  run(true);
+  run(false);
+}
 // case: optional_function_chain
 // error: optional calls in an optional chain are not supported yet
 type Inner = { f?: () => void };

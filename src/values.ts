@@ -8444,6 +8444,10 @@ export class Expressions<C extends Context> implements Union<C> {
     const proven = this.ctx.proves(e.cond);
     if (ruledOut(proven.yes)) return this.valueAssuming(proven.no, e.else, false);
     if (ruledOut(proven.no)) return this.valueAssuming(proven.yes, e.then, false);
+    // An arrow chosen against nothing is stored as an optional callback, so it owns what it captures.
+    const absent = (x: Ref<Expr>) => (x.kind === "ident" && x.name === "undefined") || x.kind === "null";
+    if (e.then.kind === "arrow" && absent(e.else)) this.ctx.exprsState.owning.add(cloneExpr(e.then));
+    if (e.else.kind === "arrow" && absent(e.then)) this.ctx.exprsState.owning.add(cloneExpr(e.else));
     let then = this.valueAssuming(proven.yes, e.then, false);
     let otherwise = this.valueAssuming(proven.no, e.else, false);
     [then, otherwise] = this.sameNumbers(e.then, then, e.else, otherwise);

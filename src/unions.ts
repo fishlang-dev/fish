@@ -5,7 +5,7 @@ import { unsupported } from "./unsupported.ts";
 import { JS_TYPEOF, literalValue, TYPEOF, typeofTest, type Kind, type Verdict } from "./narrow.ts";
 import type { Expr, Span } from "./parser.ts";
 import { TypeMap, TypeSet, isNumeric } from "./typing.ts";
-import type { ClassType, Field, LiteralType, Type, Typing, UnionType } from "./typing.ts";
+import type { ClassType, ClosureType, Field, FunctionRecord, LiteralType, Type, Typing, UnionType } from "./typing.ts";
 import { NodeMap } from "./nodes.ts";
 import { cloneExpr, cloneOneOf2 } from "./rebuild.ts";
 
@@ -309,11 +309,30 @@ export function holdsArgument(typing: Ref<Typing>, t: UnionType): boolean {
 /** @throws {CompileError} */
 export function bothSides<B extends UnionContext, H extends Union<B>>(host: Mut<H>, e: Ref<Extract<Expr, { kind: "conditional" }>>, then: Type, otherwise: Type): Type {
   const kinds = [then, otherwise].map((t) => (typeof t === "string" ? t : host.ctx.tables().typing.rec(t).kind));
+  // `c ? undefined : () => ...` holds the function as a stored callable of its own signature, or nothing.
+  if (kinds.includes("closure") && kinds.includes("null")) return optionalClosure<B, H>(host, e, then, otherwise);
   if (kinds.includes("closure")) throw unsupported("unions holding functions", { start: e.start, end: e.end });
   if (kinds.includes("void") || kinds.includes("interface") || kinds.includes("param")) {
     throw new CompileError("E0101", `both sides of '?:' must have the same type, not '${host.ctx.tables().typing.show(then)}' and '${host.ctx.tables().typing.show(otherwise)}'`, e.start, e.end);
   }
   const union = host.ctx.tables().typing.unionType([then, otherwise]);
+  const intoThen = `type '${host.ctx.tables().typing.show(then)}' is not assignable to type '${host.ctx.tables().typing.show(union)}'`;
+  host.coerce(e.then, then, union, intoThen);
+  const intoElse = `type '${host.ctx.tables().typing.show(otherwise)}' is not assignable to type '${host.ctx.tables().typing.show(union)}'`;
+  host.coerce(e.else, otherwise, union, intoElse);
+  return union;
+}
+
+/** @throws {CompileError} */
+function optionalClosure<B extends UnionContext, H extends Union<B>>(host: Mut<H>, e: Ref<Extract<Expr, { kind: "conditional" }>>, then: Type, otherwise: Type): Type {
+  const typing = host.ctx.tables().typing;
+  const closure = then === "null" ? otherwise : then;
+  const fn = typing.rec(closure as ClosureType);
+  if (fn.generic !== undefined || typing.promiseElement(fn.returns) !== undefined) throw unsupported("unions holding functions", { start: e.start, end: e.end });
+  const names = fn.params.map((_, i) => `p${i}`);
+  const signature: FunctionRecord = fn.throws !== undefined ? { kind: "function", name: fn.name, names, params: fn.params.slice(), returns: fn.returns, throws: fn.throws, fields: [] } : { kind: "function", name: fn.name, names, params: fn.params.slice(), returns: fn.returns, fields: [] };
+  const own = host.ctx.tables().typing.callableFrom(signature);
+  const union = host.ctx.tables().typing.unionType([own, "null"]);
   const intoThen = `type '${host.ctx.tables().typing.show(then)}' is not assignable to type '${host.ctx.tables().typing.show(union)}'`;
   host.coerce(e.then, then, union, intoThen);
   const intoElse = `type '${host.ctx.tables().typing.show(otherwise)}' is not assignable to type '${host.ctx.tables().typing.show(union)}'`;
