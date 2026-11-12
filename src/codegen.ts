@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import type { Body } from "./classes.ts";
+import { cloneExpr } from "./rebuild.ts";
 import { bodyOf, type Arenas, type InstanceId, type LocalId } from "./arenas.ts";
 import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.ts";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
@@ -543,6 +544,10 @@ class Codegen implements PrintHost, ComptimeHost {
     this.main = first;
     this.start = [];
     this.filled = [];
+    this.self = undefined;
+
+    this.jsSite = undefined;
+
   }
 
   // Comptime runs on the checked program, every function of which is checked already.
@@ -1022,8 +1027,7 @@ class Codegen implements PrintHost, ComptimeHost {
       let bound = [...this.inst(i).bindings];
       bound.sort(([a], [b]) => (a < b ? -1 : 1));
       for (const [name, t] of bound) {
-        const k = name.startsWith("#") ? Number(name.slice(1)) : -1;
-        if (k >= 0 && at.has(k)) continue;
+        if (name.startsWith("#") && at.has(parseInt(name.slice(1))! as usize)) continue;
         parts.push(`${name}=${this.tables.typing.keyOf(t)}`);
       }
       const key = parts.join("|");
@@ -1083,9 +1087,10 @@ class Codegen implements PrintHost, ComptimeHost {
               calls++;
               if (target !== undefined) runs.add(target);
             }
-            for (let j: usize = 0; j < e.args.length; j++) {
-              const a = e.args[j]!;
+            let j: usize = 0;
+            for (const a of e.args) {
               if (a.kind === "ident" && a.name === name && j === (k as usize) && target !== undefined && this.sameFunction(target, i)) calls++;
+              j++;
             }
           }
           return true;
@@ -1585,7 +1590,7 @@ class Codegen implements PrintHost, ComptimeHost {
         this.allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
         const part = { slot: held, type: this.tables.typing.arrayType("u8") };
         this.scopes[this.scopes.length - 1]!.held.push(part);
-        this.reserved.set(call, held);
+        this.reserved.set(cloneExpr(call), held);
       }
       return true;
     });
@@ -2077,7 +2082,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (name === "forEach") return this.eachEntry(e, t, map);
     // The key is owned for the call: kept when it goes in, dropped once it has been looked up.
     // A panic in the value's argument drops the key made before it.
-    const [key, given] = this.delivered((cg, hand) => [hand(cg.owned(e.args[0]!), cg.tables.typing.rec(t).key), name === "set" ? hand(cg.owned(e.args[1]!), cg.tables.typing.rec(t).value) : undefined]);
+    const [key, given] = this.delivered<[string, string | undefined]>((cg, hand) => [hand(cg.owned(e.args[0]!), cg.tables.typing.rec(t).key), name === "set" ? hand(cg.owned(e.args[1]!), cg.tables.typing.rec(t).value) : undefined]);
     if (name === "set" || name === "add") {
       this.inserted(t, map, key, given);
       return at;
@@ -2317,7 +2322,9 @@ class Codegen implements PrintHost, ComptimeHost {
       const pair = cg.tables.typing.rec(result).element;
       const part3 = cg.tables.typing.rec(t).key;
       const read4 = read(cg, at, 3, part3);
-      const [k, v] = [read4, cg.tables.typing.rec(t).set ? read(cg, at, 3, cg.tables.typing.rec(t).key) : read(cg, at, 4, cg.tables.typing.rec(t).value)];
+      const key = cg.tables.typing.rec(t).key;
+      const value = cg.tables.typing.rec(t).value;
+      const [k, v] = [read4, cg.tables.typing.rec(t).set ? read(cg, at, 3, key) : read(cg, at, 4, value)];
       const [first, both] = [cg.temp(), cg.temp()];
       cg.emit(`${first} = insertvalue ${cg.llvm(pair)} undef, ${cg.llvm(cg.tables.typing.rec(t).key)} ${k}, 0`);
       cg.emit(`${both} = insertvalue ${cg.llvm(pair)} ${first}, ${cg.tables.typing.rec(t).set ? cg.llvm(cg.tables.typing.rec(t).key) : cg.llvm(cg.tables.typing.rec(t).value)} ${v}, 1`);
@@ -2406,11 +2413,11 @@ class Codegen implements PrintHost, ComptimeHost {
       const held = to ?? this.cur().types.get(a)!;
       if (this.isCallback(held) || this.isPromised(held)) {
         const owned2 = this.owned(a);
-        const chosen = i < optional.length && optional[i]! ? "undefined" : "null";
+        const chosen = (i as usize) < optional.length && optional[i as usize]! ? "undefined" : "null";
         return this.toJs(owned2, held, chosen);
       }
       const jsOperand2 = this.jsOperand(a);
-      const chosen2 = i < optional.length && optional[i]! ? "undefined" : "null";
+      const chosen2 = (i as usize) < optional.length && optional[i as usize]! ? "undefined" : "null";
       return this.toJs(jsOperand2, this.cur().types.get(a)!, chosen2, this.cur().coercions.get(a));
     });
     const argv = this.alloca(`[${Math.max(boxes.length, 1)} x ptr]`);
@@ -2961,7 +2968,8 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     const shape = r.kind === "block" ? this.tables.typing.jsShape(m as BlockType) : undefined;
     let all = is(this, 9);
-    const shaped = shape !== undefined ? this.tables.typing.rec(shape).fields : [];
+    let shaped: { name: string; type: Type }[] = [];
+    if (shape !== undefined) for (const f of this.tables.typing.rec(shape).fields) shaped.push({ name: f.name, type: f.type });
     for (const f of shaped) {
       if (this.tables.typing.isOption(f.type)) continue;
       const ft = typeof f.type === "string" ? undefined : this.tables.typing.rec(f.type);
@@ -3225,7 +3233,7 @@ class Codegen implements PrintHost, ComptimeHost {
         if (rust === undefined) rust = rustClassOf(this.tables.typing, u)?.name;
         return rust !== undefined;
       });
-      const copied = rust !== undefined ? this.dynUncopyable(rust) : this.dynCopy(type, n);
+      const copied = rust !== undefined ? this.dynUncopyable(rust!) : this.dynCopy(type, n);
       const cloned = table.clone === "copy" ? copied : this.dynClone(type, n, table);
       // A value holding nothing pinned copies as the compiler copies, its own Dyns through their
       // own vtables; one that does would split that state, so its copy panics.
@@ -3249,10 +3257,10 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Emits a thunk taking the pointer to a Dyn's block, then `params`, its body from `fill`. It
   // is a function of its own, so nothing the function being emitted holds drops in it.
-  thunk(this: Mut<this>, name: string, returns: string, fill: (cg: Mut<Codegen>) => void, params?: Ref<string[]>) {
+  thunk(this: Mut<this>, name: string, returns: string, fill: (cg: Mut<Codegen>) => void, params: string[] = []) {
     const saved = this.setAside();
     fill(this);
-    const takes = params === undefined ? "ptr %p" : ["ptr %p", ...params].join(", ");
+    const takes = ["ptr %p", ...params].join(", ");
     this.out.push(`define internal ${returns} ${name}(${takes}) ${this.unwinds} {`);
     this.out.push("entry:");
     for (const pushed of this.allocas) this.out.push(pushed);
