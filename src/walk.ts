@@ -1430,98 +1430,138 @@ export function forEachChild(n: AnyNode, v: (c: AnyNode) => void): void {
   }
 }
 
-// Appends each node `n` holds to `out`, in the order `forEachChild` gives them, for a walk
-// that keeps its own stack.
-export function pushChildren(n: AnyNode, out: Mut<AnyNode[]>): void {
+// Reborrows `n` so a walk can pass a copy of the tagged reference to a callback.
+export function reborrowAnyNode(n: Ref<AnyNode>): AnyNode {
+  if (n.of === "typeNode") return { of: "typeNode", node: n.node };
+  if (n.of === "expr") return { of: "expr", node: n.node };
+  if (n.of === "stmt") return { of: "stmt", node: n.node };
+  if (n.of === "tupleElement") return { of: "tupleElement", node: n.node };
+  if (n.of === "typeMember") return { of: "typeMember", node: n.node };
+  if (n.of === "objectProp") return { of: "objectProp", node: n.node };
+  if (n.of === "classNode") return { of: "classNode", node: n.node };
+  if (n.of === "classMember") return { of: "classMember", node: n.node };
+  if (n.of === "param") return { of: "param", node: n.node };
+  if (n.of === "pattern") return { of: "pattern", node: n.node };
+  if (n.of === "matchArm") return { of: "matchArm", node: n.node };
+  if (n.of === "patternProp") return { of: "patternProp", node: n.node };
+  if (n.of === "specifier") return { of: "specifier", node: n.node };
+  if (n.of === "enumMember") return { of: "enumMember", node: n.node };
+  if (n.of === "switchCase") return { of: "switchCase", node: n.node };
+  if (n.of === "declarator") return { of: "declarator", node: n.node };
+  if (n.of === "typeParam") return { of: "typeParam", node: n.node };
+  if (n.of === "typeAlias") return { of: "typeAlias", node: n.node };
+  if (n.of === "interface") return { of: "interface", node: n.node };
+  if (n.of === "jsName") return { of: "jsName", node: n.node };
+  if (n.of === "func") return { of: "func", node: n.node };
+  return { of: "stmts", node: n.node };
+}
+
+// Walks down `steps` from `n`, calling `each` on every first child along the way until a leaf
+// or a node `each` skips is reached, or gives -1 when `steps[d]` is past the last child at `d`.
+export function visitAt(n: AnyNode, steps: Mut<usize[]>, d: usize, each: (n: AnyNode) => boolean): i32 {
+  if (d === steps.length) {
+    if (n.of !== "stmts" && !each(reborrowAnyNode(n))) return 0;
+    steps.push(0);
+  }
+  const k = steps[d]!;
+  let i: usize = 0;
   switch (n.of) {
     case "typeNode":
       switch (n.node.kind) {
         case "ref":
-          for (const x1 of n.node.args) {
-            out.push({ of: "typeNode", node: x1 });
-          }
+          if (k >= i && k < i + n.node.args.length) return visitAt({ of: "typeNode", node: n.node.args[k - i]! }, steps, d + 1, each);
+          i += n.node.args.length;
           break;
         case "literal":
-          out.push({ of: "expr", node: n.node.value });
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
           break;
         case "array":
-          out.push({ of: "typeNode", node: n.node.element });
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.element }, steps, d + 1, each);
+          i += 1;
           break;
         case "tuple":
-          for (const x1 of n.node.elements) {
-            out.push({ of: "tupleElement", node: x1 });
-          }
+          if (k >= i && k < i + n.node.elements.length) return visitAt({ of: "tupleElement", node: n.node.elements[k - i]! }, steps, d + 1, each);
+          i += n.node.elements.length;
           break;
         case "object":
-          for (const x1 of n.node.members) {
-            out.push({ of: "typeMember", node: x1 });
-          }
+          if (k >= i && k < i + n.node.members.length) return visitAt({ of: "typeMember", node: n.node.members[k - i]! }, steps, d + 1, each);
+          i += n.node.members.length;
           break;
         case "function":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
-          out.push({ of: "typeNode", node: n.node.returns });
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.returns }, steps, d + 1, each);
+          i += 1;
           if (n.node.throws !== undefined) {
-            out.push({ of: "typeNode", node: n.node.throws! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.throws! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "union":
-          for (const x1 of n.node.types) {
-            out.push({ of: "typeNode", node: x1 });
-          }
+          if (k >= i && k < i + n.node.types.length) return visitAt({ of: "typeNode", node: n.node.types[k - i]! }, steps, d + 1, each);
+          i += n.node.types.length;
           break;
         case "intersection":
-          for (const x1 of n.node.types) {
-            out.push({ of: "typeNode", node: x1 });
-          }
+          if (k >= i && k < i + n.node.types.length) return visitAt({ of: "typeNode", node: n.node.types[k - i]! }, steps, d + 1, each);
+          i += n.node.types.length;
           break;
         case "operator":
-          out.push({ of: "typeNode", node: n.node.type });
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.type }, steps, d + 1, each);
+          i += 1;
           break;
         case "indexed":
-          out.push({ of: "typeNode", node: n.node.object });
-          out.push({ of: "typeNode", node: n.node.index });
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.object }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.index }, steps, d + 1, each);
+          i += 1;
           break;
         case "query":
-          out.push({ of: "typeNode", node: n.node.target });
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.target }, steps, d + 1, each);
+          i += 1;
           break;
         case "import":
-          for (const x1 of n.node.args) {
-            out.push({ of: "typeNode", node: x1 });
-          }
+          if (k >= i && k < i + n.node.args.length) return visitAt({ of: "typeNode", node: n.node.args[k - i]! }, steps, d + 1, each);
+          i += n.node.args.length;
           break;
         case "conditional":
-          out.push({ of: "typeNode", node: n.node.check });
-          out.push({ of: "typeNode", node: n.node.extends });
-          out.push({ of: "typeNode", node: n.node.then });
-          out.push({ of: "typeNode", node: n.node.else });
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.check }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.extends }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.then }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.else }, steps, d + 1, each);
+          i += 1;
           break;
         case "infer":
           if (n.node.constraint !== undefined) {
-            out.push({ of: "typeNode", node: n.node.constraint! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.constraint! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "template":
-          for (const x1 of n.node.types) {
-            out.push({ of: "typeNode", node: x1 });
-          }
+          if (k >= i && k < i + n.node.types.length) return visitAt({ of: "typeNode", node: n.node.types[k - i]! }, steps, d + 1, each);
+          i += n.node.types.length;
           break;
         case "mapped":
-          out.push({ of: "typeNode", node: n.node.constraint });
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.constraint }, steps, d + 1, each);
+          i += 1;
           if (n.node.as !== undefined) {
-            out.push({ of: "typeNode", node: n.node.as! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.as! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.type !== undefined) {
-            out.push({ of: "typeNode", node: n.node.type! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.type! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "predicate":
           if (n.node.type !== undefined) {
-            out.push({ of: "typeNode", node: n.node.type! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.type! }, steps, d + 1, each);
+            i += 1;
           }
           break;
       }
@@ -1529,756 +1569,892 @@ export function pushChildren(n: AnyNode, out: Mut<AnyNode[]>): void {
     case "expr":
       switch (n.node.kind) {
         case "template":
-          for (const x1 of n.node.exprs) {
-            out.push({ of: "expr", node: x1 });
-          }
+          if (k >= i && k < i + n.node.exprs.length) return visitAt({ of: "expr", node: n.node.exprs[k - i]! }, steps, d + 1, each);
+          i += n.node.exprs.length;
           break;
         case "tagged":
-          out.push({ of: "expr", node: n.node.tag });
-          for (const x1 of n.node.typeArgs) {
-            out.push({ of: "typeNode", node: x1 });
-          }
-          out.push({ of: "expr", node: n.node.template });
+          if (i === k) return visitAt({ of: "expr", node: n.node.tag }, steps, d + 1, each);
+          i += 1;
+          if (k >= i && k < i + n.node.typeArgs.length) return visitAt({ of: "typeNode", node: n.node.typeArgs[k - i]! }, steps, d + 1, each);
+          i += n.node.typeArgs.length;
+          if (i === k) return visitAt({ of: "expr", node: n.node.template }, steps, d + 1, each);
+          i += 1;
           break;
         case "spread":
-          out.push({ of: "expr", node: n.node.value });
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
           break;
         case "array":
           for (const x1 of n.node.elements) {
             if (x1 !== undefined) {
-              out.push({ of: "expr", node: x1! });
+              if (i === k) return visitAt({ of: "expr", node: x1! }, steps, d + 1, each);
+              i += 1;
             }
           }
           break;
         case "object":
-          for (const x1 of n.node.props) {
-            out.push({ of: "objectProp", node: x1 });
-          }
+          if (k >= i && k < i + n.node.props.length) return visitAt({ of: "objectProp", node: n.node.props[k - i]! }, steps, d + 1, each);
+          i += n.node.props.length;
           break;
         case "function":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returnType !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returnType! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returnType! }, steps, d + 1, each);
+            i += 1;
           }
-          out.push({ of: "stmts", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "arrow":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returnType !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returnType! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returnType! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.throws !== undefined) {
-            out.push({ of: "typeNode", node: n.node.throws! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.throws! }, steps, d + 1, each);
+            i += 1;
           }
           if (Array.isArray(n.node.body)) {
-            out.push({ of: "stmts", node: n.node.body });
+            if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+            i += 1;
           } else {
-            out.push({ of: "expr", node: n.node.body });
+            if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "member":
-          out.push({ of: "expr", node: n.node.object });
+          if (i === k) return visitAt({ of: "expr", node: n.node.object }, steps, d + 1, each);
+          i += 1;
           break;
         case "index":
-          out.push({ of: "expr", node: n.node.object });
-          out.push({ of: "expr", node: n.node.index });
+          if (i === k) return visitAt({ of: "expr", node: n.node.object }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "expr", node: n.node.index }, steps, d + 1, each);
+          i += 1;
           break;
         case "call":
-          out.push({ of: "expr", node: n.node.callee });
-          for (const x1 of n.node.typeArgs) {
-            out.push({ of: "typeNode", node: x1 });
-          }
-          for (const x1 of n.node.args) {
-            out.push({ of: "expr", node: x1 });
-          }
+          if (i === k) return visitAt({ of: "expr", node: n.node.callee }, steps, d + 1, each);
+          i += 1;
+          if (k >= i && k < i + n.node.typeArgs.length) return visitAt({ of: "typeNode", node: n.node.typeArgs[k - i]! }, steps, d + 1, each);
+          i += n.node.typeArgs.length;
+          if (k >= i && k < i + n.node.args.length) return visitAt({ of: "expr", node: n.node.args[k - i]! }, steps, d + 1, each);
+          i += n.node.args.length;
           break;
         case "new":
-          out.push({ of: "expr", node: n.node.callee });
-          for (const x1 of n.node.typeArgs) {
-            out.push({ of: "typeNode", node: x1 });
-          }
+          if (i === k) return visitAt({ of: "expr", node: n.node.callee }, steps, d + 1, each);
+          i += 1;
+          if (k >= i && k < i + n.node.typeArgs.length) return visitAt({ of: "typeNode", node: n.node.typeArgs[k - i]! }, steps, d + 1, each);
+          i += n.node.typeArgs.length;
           if (n.node.args !== undefined) {
-            for (const x1 of n.node.args!) {
-              out.push({ of: "expr", node: x1 });
-            }
+            if (k >= i && k < i + n.node.args!.length) return visitAt({ of: "expr", node: n.node.args![k - i]! }, steps, d + 1, each);
+            i += n.node.args!.length;
           }
           break;
         case "instantiation":
-          out.push({ of: "expr", node: n.node.expr });
-          for (const x1 of n.node.typeArgs) {
-            out.push({ of: "typeNode", node: x1 });
-          }
+          if (i === k) return visitAt({ of: "expr", node: n.node.expr }, steps, d + 1, each);
+          i += 1;
+          if (k >= i && k < i + n.node.typeArgs.length) return visitAt({ of: "typeNode", node: n.node.typeArgs[k - i]! }, steps, d + 1, each);
+          i += n.node.typeArgs.length;
           break;
         case "import":
-          for (const x1 of n.node.args) {
-            out.push({ of: "expr", node: x1 });
-          }
+          if (k >= i && k < i + n.node.args.length) return visitAt({ of: "expr", node: n.node.args[k - i]! }, steps, d + 1, each);
+          i += n.node.args.length;
           break;
         case "nonNull":
-          out.push({ of: "expr", node: n.node.expr });
+          if (i === k) return visitAt({ of: "expr", node: n.node.expr }, steps, d + 1, each);
+          i += 1;
           if (n.node.narrows !== undefined) {
-            out.push({ of: "typeNode", node: n.node.narrows! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.narrows! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "throw":
-          out.push({ of: "expr", node: n.node.value });
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
           break;
         case "class":
-          for (const x1 of n.node.decorators) {
-            out.push({ of: "expr", node: x1 });
-          }
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
+          if (k >= i && k < i + n.node.decorators.length) return visitAt({ of: "expr", node: n.node.decorators[k - i]! }, steps, d + 1, each);
+          i += n.node.decorators.length;
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
           if (n.node.extends !== undefined) {
-            out.push({ of: "expr", node: n.node.extends! });
+            if (i === k) return visitAt({ of: "expr", node: n.node.extends! }, steps, d + 1, each);
+            i += 1;
           }
-          for (const x1 of n.node.implements) {
-            out.push({ of: "typeNode", node: x1 });
-          }
-          for (const x1 of n.node.members) {
-            out.push({ of: "classMember", node: x1 });
-          }
+          if (k >= i && k < i + n.node.implements.length) return visitAt({ of: "typeNode", node: n.node.implements[k - i]! }, steps, d + 1, each);
+          i += n.node.implements.length;
+          if (k >= i && k < i + n.node.members.length) return visitAt({ of: "classMember", node: n.node.members[k - i]! }, steps, d + 1, each);
+          i += n.node.members.length;
           break;
         case "unary":
-          out.push({ of: "expr", node: n.node.operand });
+          if (i === k) return visitAt({ of: "expr", node: n.node.operand }, steps, d + 1, each);
+          i += 1;
           break;
         case "update":
-          out.push({ of: "expr", node: n.node.operand });
+          if (i === k) return visitAt({ of: "expr", node: n.node.operand }, steps, d + 1, each);
+          i += 1;
           break;
         case "binary":
-          out.push({ of: "expr", node: n.node.left });
-          out.push({ of: "expr", node: n.node.right });
+          if (i === k) return visitAt({ of: "expr", node: n.node.left }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "expr", node: n.node.right }, steps, d + 1, each);
+          i += 1;
           break;
         case "conditional":
-          out.push({ of: "expr", node: n.node.cond });
-          out.push({ of: "expr", node: n.node.then });
-          out.push({ of: "expr", node: n.node.else });
+          if (i === k) return visitAt({ of: "expr", node: n.node.cond }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "expr", node: n.node.then }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "expr", node: n.node.else }, steps, d + 1, each);
+          i += 1;
           break;
         case "assign":
-          out.push({ of: "expr", node: n.node.target });
-          out.push({ of: "expr", node: n.node.value });
+          if (i === k) return visitAt({ of: "expr", node: n.node.target }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
           break;
         case "pipe":
-          out.push({ of: "expr", node: n.node.value });
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "match":
-          out.push({ of: "expr", node: n.node.subject });
-          for (const x1 of n.node.arms) {
-            out.push({ of: "matchArm", node: x1 });
-          }
+          if (i === k) return visitAt({ of: "expr", node: n.node.subject }, steps, d + 1, each);
+          i += 1;
+          if (k >= i && k < i + n.node.arms.length) return visitAt({ of: "matchArm", node: n.node.arms[k - i]! }, steps, d + 1, each);
+          i += n.node.arms.length;
           break;
         case "comptime":
-          out.push({ of: "expr", node: n.node.expr });
+          if (i === k) return visitAt({ of: "expr", node: n.node.expr }, steps, d + 1, each);
+          i += 1;
           break;
         case "unsafe":
-          out.push({ of: "expr", node: n.node.expr });
+          if (i === k) return visitAt({ of: "expr", node: n.node.expr }, steps, d + 1, each);
+          i += 1;
           break;
         case "destructure":
-          out.push({ of: "pattern", node: n.node.pattern });
-          out.push({ of: "expr", node: n.node.value });
+          if (i === k) return visitAt({ of: "pattern", node: n.node.pattern }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
           break;
         case "sequence":
-          for (const x1 of n.node.exprs) {
-            out.push({ of: "expr", node: x1 });
-          }
+          if (k >= i && k < i + n.node.exprs.length) return visitAt({ of: "expr", node: n.node.exprs[k - i]! }, steps, d + 1, each);
+          i += n.node.exprs.length;
           break;
         case "yield":
           if (n.node.value !== undefined) {
-            out.push({ of: "expr", node: n.node.value! });
+            if (i === k) return visitAt({ of: "expr", node: n.node.value! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "as":
-          out.push({ of: "expr", node: n.node.expr });
-          out.push({ of: "typeNode", node: n.node.type });
+          if (i === k) return visitAt({ of: "expr", node: n.node.expr }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.type }, steps, d + 1, each);
+          i += 1;
           break;
         case "satisfies":
-          out.push({ of: "expr", node: n.node.expr });
-          out.push({ of: "typeNode", node: n.node.type });
+          if (i === k) return visitAt({ of: "expr", node: n.node.expr }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.type }, steps, d + 1, each);
+          i += 1;
           break;
         case "assertion":
-          out.push({ of: "typeNode", node: n.node.type });
-          out.push({ of: "expr", node: n.node.expr });
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.type }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "expr", node: n.node.expr }, steps, d + 1, each);
+          i += 1;
           break;
       }
       break;
     case "stmt":
       switch (n.node.kind) {
         case "expr":
-          out.push({ of: "expr", node: n.node.expr });
+          if (i === k) return visitAt({ of: "expr", node: n.node.expr }, steps, d + 1, each);
+          i += 1;
           break;
         case "let":
-          for (const x1 of n.node.declarations) {
-            out.push({ of: "declarator", node: x1 });
-          }
+          if (k >= i && k < i + n.node.declarations.length) return visitAt({ of: "declarator", node: n.node.declarations[k - i]! }, steps, d + 1, each);
+          i += n.node.declarations.length;
           break;
         case "return":
           if (n.node.value !== undefined) {
-            out.push({ of: "expr", node: n.node.value! });
+            if (i === k) return visitAt({ of: "expr", node: n.node.value! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "if":
-          out.push({ of: "expr", node: n.node.cond });
-          out.push({ of: "stmts", node: n.node.then });
+          if (i === k) return visitAt({ of: "expr", node: n.node.cond }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "stmts", node: n.node.then }, steps, d + 1, each);
+          i += 1;
           if (n.node.else !== undefined) {
-            out.push({ of: "stmts", node: n.node.else! });
+            if (i === k) return visitAt({ of: "stmts", node: n.node.else! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "while":
-          out.push({ of: "expr", node: n.node.cond });
-          out.push({ of: "stmts", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.cond }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "doWhile":
-          out.push({ of: "stmts", node: n.node.body });
-          out.push({ of: "expr", node: n.node.cond });
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "expr", node: n.node.cond }, steps, d + 1, each);
+          i += 1;
           break;
         case "switch":
-          out.push({ of: "expr", node: n.node.discriminant });
-          for (const x1 of n.node.cases) {
-            out.push({ of: "switchCase", node: x1 });
-          }
+          if (i === k) return visitAt({ of: "expr", node: n.node.discriminant }, steps, d + 1, each);
+          i += 1;
+          if (k >= i && k < i + n.node.cases.length) return visitAt({ of: "switchCase", node: n.node.cases[k - i]! }, steps, d + 1, each);
+          i += n.node.cases.length;
           break;
         case "labeled":
-          out.push({ of: "stmt", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmt", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "throw":
-          out.push({ of: "expr", node: n.node.value });
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
           break;
         case "try":
-          out.push({ of: "stmts", node: n.node.block });
+          if (i === k) return visitAt({ of: "stmts", node: n.node.block }, steps, d + 1, each);
+          i += 1;
           if (n.node.param !== undefined) {
-            out.push({ of: "pattern", node: n.node.param! });
+            if (i === k) return visitAt({ of: "pattern", node: n.node.param! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.paramType !== undefined) {
-            out.push({ of: "typeNode", node: n.node.paramType! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.paramType! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.handler !== undefined) {
-            out.push({ of: "stmts", node: n.node.handler! });
+            if (i === k) return visitAt({ of: "stmts", node: n.node.handler! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.finalizer !== undefined) {
-            out.push({ of: "stmts", node: n.node.finalizer! });
+            if (i === k) return visitAt({ of: "stmts", node: n.node.finalizer! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "for":
           if (n.node.init !== undefined) {
-            out.push({ of: "stmt", node: n.node.init! });
+            if (i === k) return visitAt({ of: "stmt", node: n.node.init! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.test !== undefined) {
-            out.push({ of: "expr", node: n.node.test! });
+            if (i === k) return visitAt({ of: "expr", node: n.node.test! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.update !== undefined) {
-            out.push({ of: "expr", node: n.node.update! });
+            if (i === k) return visitAt({ of: "expr", node: n.node.update! }, steps, d + 1, each);
+            i += 1;
           }
-          out.push({ of: "stmts", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "forIn":
           switch (n.node.left.kind) {
             case "expr":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "let":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "return":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "if":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "while":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "doWhile":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "switch":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "labeled":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "break":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "continue":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "throw":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "try":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "for":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "forIn":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "forOf":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "block":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "empty":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "debugger":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "enum":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "namespace":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "declare":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "comptime":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "unsafe":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "import":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "importEquals":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "export":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "exportDefault":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "exportNamed":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "exportAll":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "exportAssign":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "exportAsNamespace":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "typeAlias":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "interface":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "function":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "class":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "ident":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "object":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "array":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "default":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "wildcard":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "literal":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "variant":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "or":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
           }
-          out.push({ of: "expr", node: n.node.right });
-          out.push({ of: "stmts", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.right }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "forOf":
           switch (n.node.left.kind) {
             case "expr":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "let":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "return":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "if":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "while":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "doWhile":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "switch":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "labeled":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "break":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "continue":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "throw":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "try":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "for":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "forIn":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "forOf":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "block":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "empty":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "debugger":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "enum":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "namespace":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "declare":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "comptime":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "unsafe":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "import":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "importEquals":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "export":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "exportDefault":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "exportNamed":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "exportAll":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "exportAssign":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "exportAsNamespace":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "typeAlias":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "interface":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "function":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "class":
-              out.push({ of: "stmt", node: n.node.left });
+              if (i === k) return visitAt({ of: "stmt", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "ident":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "object":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "array":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "default":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "wildcard":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "literal":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "variant":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
             case "or":
-              out.push({ of: "pattern", node: n.node.left });
+              if (i === k) return visitAt({ of: "pattern", node: n.node.left }, steps, d + 1, each);
+              i += 1;
               break;
           }
-          out.push({ of: "expr", node: n.node.right });
-          out.push({ of: "stmts", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.right }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "block":
-          out.push({ of: "stmts", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "enum":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.members) {
-            out.push({ of: "enumMember", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.members.length) return visitAt({ of: "enumMember", node: n.node.members[k - i]! }, steps, d + 1, each);
+          i += n.node.members.length;
           if (n.node.decorators !== undefined) {
-            for (const x1 of n.node.decorators!) {
-              out.push({ of: "expr", node: x1 });
-            }
+            if (k >= i && k < i + n.node.decorators!.length) return visitAt({ of: "expr", node: n.node.decorators![k - i]! }, steps, d + 1, each);
+            i += n.node.decorators!.length;
           }
           break;
         case "namespace":
           if (n.node.body !== undefined) {
-            out.push({ of: "stmts", node: n.node.body! });
+            if (i === k) return visitAt({ of: "stmts", node: n.node.body! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "declare":
-          out.push({ of: "stmt", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmt", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "comptime":
-          out.push({ of: "stmts", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "unsafe":
-          out.push({ of: "stmts", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "import":
           if (n.node.named !== undefined) {
-            for (const x1 of n.node.named!) {
-              out.push({ of: "specifier", node: x1 });
-            }
+            if (k >= i && k < i + n.node.named!.length) return visitAt({ of: "specifier", node: n.node.named![k - i]! }, steps, d + 1, each);
+            i += n.node.named!.length;
           }
           if (n.node.attributes !== undefined) {
-            out.push({ of: "expr", node: n.node.attributes! });
+            if (i === k) return visitAt({ of: "expr", node: n.node.attributes! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "export":
-          out.push({ of: "stmt", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmt", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "exportDefault":
           if (n.node.declaration !== undefined) {
-            out.push({ of: "stmt", node: n.node.declaration! });
+            if (i === k) return visitAt({ of: "stmt", node: n.node.declaration! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.value !== undefined) {
-            out.push({ of: "expr", node: n.node.value! });
+            if (i === k) return visitAt({ of: "expr", node: n.node.value! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "exportNamed":
-          for (const x1 of n.node.specifiers) {
-            out.push({ of: "specifier", node: x1 });
-          }
+          if (k >= i && k < i + n.node.specifiers.length) return visitAt({ of: "specifier", node: n.node.specifiers[k - i]! }, steps, d + 1, each);
+          i += n.node.specifiers.length;
           break;
         case "exportAssign":
-          out.push({ of: "expr", node: n.node.value });
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
           break;
         case "typeAlias":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          out.push({ of: "typeNode", node: n.node.type });
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.type }, steps, d + 1, each);
+          i += 1;
           if (n.node.decorators !== undefined) {
-            for (const x1 of n.node.decorators!) {
-              out.push({ of: "expr", node: x1 });
-            }
+            if (k >= i && k < i + n.node.decorators!.length) return visitAt({ of: "expr", node: n.node.decorators![k - i]! }, steps, d + 1, each);
+            i += n.node.decorators!.length;
           }
           if (n.node.js !== undefined) {
-            out.push({ of: "jsName", node: n.node.js! });
+            if (i === k) return visitAt({ of: "jsName", node: n.node.js! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "interface":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.extends) {
-            out.push({ of: "typeNode", node: x1 });
-          }
-          for (const x1 of n.node.members) {
-            out.push({ of: "typeMember", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.extends.length) return visitAt({ of: "typeNode", node: n.node.extends[k - i]! }, steps, d + 1, each);
+          i += n.node.extends.length;
+          if (k >= i && k < i + n.node.members.length) return visitAt({ of: "typeMember", node: n.node.members[k - i]! }, steps, d + 1, each);
+          i += n.node.members.length;
           if (n.node.decorators !== undefined) {
-            for (const x1 of n.node.decorators!) {
-              out.push({ of: "expr", node: x1 });
-            }
+            if (k >= i && k < i + n.node.decorators!.length) return visitAt({ of: "expr", node: n.node.decorators![k - i]! }, steps, d + 1, each);
+            i += n.node.decorators!.length;
           }
           if (n.node.js !== undefined) {
-            out.push({ of: "jsName", node: n.node.js! });
+            if (i === k) return visitAt({ of: "jsName", node: n.node.js! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.jsClass !== undefined) {
             for (const x1 of n.node.jsClass!.constructors) {
-              for (const x2 of x1) {
-                out.push({ of: "param", node: x2 });
-              }
+              if (k >= i && k < i + x1.length) return visitAt({ of: "param", node: x1[k - i]! }, steps, d + 1, each);
+              i += x1.length;
             }
-            for (const x1 of n.node.jsClass!.statics) {
-              out.push({ of: "typeMember", node: x1 });
-            }
+            if (k >= i && k < i + n.node.jsClass!.statics.length) return visitAt({ of: "typeMember", node: n.node.jsClass!.statics[k - i]! }, steps, d + 1, each);
+            i += n.node.jsClass!.statics.length;
           }
           if (n.node.jsSource !== undefined) {
-            out.push({ of: "stmt", node: n.node.jsSource! });
+            if (i === k) return visitAt({ of: "stmt", node: n.node.jsSource! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "function":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returnType !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returnType! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returnType! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.throws !== undefined) {
-            out.push({ of: "typeNode", node: n.node.throws! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.throws! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.body !== undefined) {
-            out.push({ of: "stmts", node: n.node.body! });
+            if (i === k) return visitAt({ of: "stmts", node: n.node.body! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.decorators !== undefined) {
-            for (const x1 of n.node.decorators!) {
-              out.push({ of: "expr", node: x1 });
-            }
+            if (k >= i && k < i + n.node.decorators!.length) return visitAt({ of: "expr", node: n.node.decorators![k - i]! }, steps, d + 1, each);
+            i += n.node.decorators!.length;
           }
           if (n.node.js !== undefined) {
-            out.push({ of: "jsName", node: n.node.js! });
+            if (i === k) return visitAt({ of: "jsName", node: n.node.js! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "class":
-          for (const x1 of n.node.decorators) {
-            out.push({ of: "expr", node: x1 });
-          }
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
+          if (k >= i && k < i + n.node.decorators.length) return visitAt({ of: "expr", node: n.node.decorators[k - i]! }, steps, d + 1, each);
+          i += n.node.decorators.length;
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
           if (n.node.extends !== undefined) {
-            out.push({ of: "expr", node: n.node.extends! });
+            if (i === k) return visitAt({ of: "expr", node: n.node.extends! }, steps, d + 1, each);
+            i += 1;
           }
-          for (const x1 of n.node.implements) {
-            out.push({ of: "typeNode", node: x1 });
-          }
-          for (const x1 of n.node.members) {
-            out.push({ of: "classMember", node: x1 });
-          }
+          if (k >= i && k < i + n.node.implements.length) return visitAt({ of: "typeNode", node: n.node.implements[k - i]! }, steps, d + 1, each);
+          i += n.node.implements.length;
+          if (k >= i && k < i + n.node.members.length) return visitAt({ of: "classMember", node: n.node.members[k - i]! }, steps, d + 1, each);
+          i += n.node.members.length;
           break;
       }
       break;
     case "tupleElement":
-      out.push({ of: "typeNode", node: n.node.type });
+      if (i === k) return visitAt({ of: "typeNode", node: n.node.type }, steps, d + 1, each);
+      i += 1;
       break;
     case "typeMember":
       switch (n.node.kind) {
         case "property":
           if (typeof n.node.name !== "string") {
-            out.push({ of: "expr", node: n.node.name });
+            if (i === k) return visitAt({ of: "expr", node: n.node.name }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.type !== undefined) {
-            out.push({ of: "typeNode", node: n.node.type! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.type! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "method":
           if (typeof n.node.name !== "string") {
-            out.push({ of: "expr", node: n.node.name });
+            if (i === k) return visitAt({ of: "expr", node: n.node.name }, steps, d + 1, each);
+            i += 1;
           }
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returns !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returns! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returns! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.throws !== undefined) {
-            out.push({ of: "typeNode", node: n.node.throws! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.throws! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "call":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returns !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returns! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returns! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "construct":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returns !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returns! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returns! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "index":
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
-          out.push({ of: "typeNode", node: n.node.type });
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.type }, steps, d + 1, each);
+          i += 1;
           break;
         case "get":
           if (typeof n.node.name !== "string") {
-            out.push({ of: "expr", node: n.node.name });
+            if (i === k) return visitAt({ of: "expr", node: n.node.name }, steps, d + 1, each);
+            i += 1;
           }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returns !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returns! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returns! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "set":
           if (typeof n.node.name !== "string") {
-            out.push({ of: "expr", node: n.node.name });
+            if (i === k) return visitAt({ of: "expr", node: n.node.name }, steps, d + 1, each);
+            i += 1;
           }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returns !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returns! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returns! }, steps, d + 1, each);
+            i += 1;
           }
           break;
       }
@@ -2287,440 +2463,514 @@ export function pushChildren(n: AnyNode, out: Mut<AnyNode[]>): void {
       switch (n.node.kind) {
         case "property":
           if (typeof n.node.key !== "string") {
-            out.push({ of: "expr", node: n.node.key });
+            if (i === k) return visitAt({ of: "expr", node: n.node.key }, steps, d + 1, each);
+            i += 1;
           }
-          out.push({ of: "expr", node: n.node.value });
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
           break;
         case "shorthand":
           if (n.node.default !== undefined) {
-            out.push({ of: "expr", node: n.node.default! });
+            if (i === k) return visitAt({ of: "expr", node: n.node.default! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "spread":
-          out.push({ of: "expr", node: n.node.value });
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
           break;
         case "method":
           if (typeof n.node.key !== "string") {
-            out.push({ of: "expr", node: n.node.key });
+            if (i === k) return visitAt({ of: "expr", node: n.node.key }, steps, d + 1, each);
+            i += 1;
           }
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returnType !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returnType! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returnType! }, steps, d + 1, each);
+            i += 1;
           }
-          out.push({ of: "stmts", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "get":
           if (typeof n.node.key !== "string") {
-            out.push({ of: "expr", node: n.node.key });
+            if (i === k) return visitAt({ of: "expr", node: n.node.key }, steps, d + 1, each);
+            i += 1;
           }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returnType !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returnType! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returnType! }, steps, d + 1, each);
+            i += 1;
           }
-          out.push({ of: "stmts", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "set":
           if (typeof n.node.key !== "string") {
-            out.push({ of: "expr", node: n.node.key });
+            if (i === k) return visitAt({ of: "expr", node: n.node.key }, steps, d + 1, each);
+            i += 1;
           }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returnType !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returnType! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returnType! }, steps, d + 1, each);
+            i += 1;
           }
-          out.push({ of: "stmts", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
       }
       break;
     case "classNode":
-      for (const x1 of n.node.decorators) {
-        out.push({ of: "expr", node: x1 });
-      }
-      for (const x1 of n.node.typeParams) {
-        out.push({ of: "typeParam", node: x1 });
-      }
+      if (k >= i && k < i + n.node.decorators.length) return visitAt({ of: "expr", node: n.node.decorators[k - i]! }, steps, d + 1, each);
+      i += n.node.decorators.length;
+      if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+      i += n.node.typeParams.length;
       if (n.node.extends !== undefined) {
-        out.push({ of: "expr", node: n.node.extends! });
+        if (i === k) return visitAt({ of: "expr", node: n.node.extends! }, steps, d + 1, each);
+        i += 1;
       }
-      for (const x1 of n.node.implements) {
-        out.push({ of: "typeNode", node: x1 });
-      }
-      for (const x1 of n.node.members) {
-        out.push({ of: "classMember", node: x1 });
-      }
+      if (k >= i && k < i + n.node.implements.length) return visitAt({ of: "typeNode", node: n.node.implements[k - i]! }, steps, d + 1, each);
+      i += n.node.implements.length;
+      if (k >= i && k < i + n.node.members.length) return visitAt({ of: "classMember", node: n.node.members[k - i]! }, steps, d + 1, each);
+      i += n.node.members.length;
       break;
     case "classMember":
       switch (n.node.kind) {
         case "field":
-          for (const x1 of n.node.decorators) {
-            out.push({ of: "expr", node: x1 });
-          }
+          if (k >= i && k < i + n.node.decorators.length) return visitAt({ of: "expr", node: n.node.decorators[k - i]! }, steps, d + 1, each);
+          i += n.node.decorators.length;
           if (typeof n.node.name !== "string") {
-            out.push({ of: "expr", node: n.node.name });
+            if (i === k) return visitAt({ of: "expr", node: n.node.name }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.type !== undefined) {
-            out.push({ of: "typeNode", node: n.node.type! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.type! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.init !== undefined) {
-            out.push({ of: "expr", node: n.node.init! });
+            if (i === k) return visitAt({ of: "expr", node: n.node.init! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "method":
-          for (const x1 of n.node.decorators) {
-            out.push({ of: "expr", node: x1 });
-          }
+          if (k >= i && k < i + n.node.decorators.length) return visitAt({ of: "expr", node: n.node.decorators[k - i]! }, steps, d + 1, each);
+          i += n.node.decorators.length;
           if (typeof n.node.name !== "string") {
-            out.push({ of: "expr", node: n.node.name });
+            if (i === k) return visitAt({ of: "expr", node: n.node.name }, steps, d + 1, each);
+            i += 1;
           }
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returnType !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returnType! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returnType! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.throws !== undefined) {
-            out.push({ of: "typeNode", node: n.node.throws! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.throws! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.body !== undefined) {
-            out.push({ of: "stmts", node: n.node.body! });
+            if (i === k) return visitAt({ of: "stmts", node: n.node.body! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "constructor":
-          for (const x1 of n.node.decorators) {
-            out.push({ of: "expr", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.decorators.length) return visitAt({ of: "expr", node: n.node.decorators[k - i]! }, steps, d + 1, each);
+          i += n.node.decorators.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.throws !== undefined) {
-            out.push({ of: "typeNode", node: n.node.throws! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.throws! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.body !== undefined) {
-            out.push({ of: "stmts", node: n.node.body! });
+            if (i === k) return visitAt({ of: "stmts", node: n.node.body! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "get":
-          for (const x1 of n.node.decorators) {
-            out.push({ of: "expr", node: x1 });
-          }
+          if (k >= i && k < i + n.node.decorators.length) return visitAt({ of: "expr", node: n.node.decorators[k - i]! }, steps, d + 1, each);
+          i += n.node.decorators.length;
           if (typeof n.node.name !== "string") {
-            out.push({ of: "expr", node: n.node.name });
+            if (i === k) return visitAt({ of: "expr", node: n.node.name }, steps, d + 1, each);
+            i += 1;
           }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returnType !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returnType! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returnType! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.throws !== undefined) {
-            out.push({ of: "typeNode", node: n.node.throws! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.throws! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.body !== undefined) {
-            out.push({ of: "stmts", node: n.node.body! });
+            if (i === k) return visitAt({ of: "stmts", node: n.node.body! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "set":
-          for (const x1 of n.node.decorators) {
-            out.push({ of: "expr", node: x1 });
-          }
+          if (k >= i && k < i + n.node.decorators.length) return visitAt({ of: "expr", node: n.node.decorators[k - i]! }, steps, d + 1, each);
+          i += n.node.decorators.length;
           if (typeof n.node.name !== "string") {
-            out.push({ of: "expr", node: n.node.name });
+            if (i === k) return visitAt({ of: "expr", node: n.node.name }, steps, d + 1, each);
+            i += 1;
           }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returnType !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returnType! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returnType! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.throws !== undefined) {
-            out.push({ of: "typeNode", node: n.node.throws! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.throws! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.body !== undefined) {
-            out.push({ of: "stmts", node: n.node.body! });
+            if (i === k) return visitAt({ of: "stmts", node: n.node.body! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "index":
-          for (const x1 of n.node.decorators) {
-            out.push({ of: "expr", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
-          out.push({ of: "typeNode", node: n.node.type });
+          if (k >= i && k < i + n.node.decorators.length) return visitAt({ of: "expr", node: n.node.decorators[k - i]! }, steps, d + 1, each);
+          i += n.node.decorators.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.type }, steps, d + 1, each);
+          i += 1;
           break;
         case "staticBlock":
-          for (const x1 of n.node.decorators) {
-            out.push({ of: "expr", node: x1 });
-          }
-          out.push({ of: "stmts", node: n.node.body });
+          if (k >= i && k < i + n.node.decorators.length) return visitAt({ of: "expr", node: n.node.decorators[k - i]! }, steps, d + 1, each);
+          i += n.node.decorators.length;
+          if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
       }
       break;
     case "param":
-      out.push({ of: "pattern", node: n.node.pattern });
+      if (i === k) return visitAt({ of: "pattern", node: n.node.pattern }, steps, d + 1, each);
+      i += 1;
       if (n.node.type !== undefined) {
-        out.push({ of: "typeNode", node: n.node.type! });
+        if (i === k) return visitAt({ of: "typeNode", node: n.node.type! }, steps, d + 1, each);
+        i += 1;
       }
       if (n.node.default !== undefined) {
-        out.push({ of: "expr", node: n.node.default! });
+        if (i === k) return visitAt({ of: "expr", node: n.node.default! }, steps, d + 1, each);
+        i += 1;
       }
-      for (const x1 of n.node.decorators) {
-        out.push({ of: "expr", node: x1 });
-      }
+      if (k >= i && k < i + n.node.decorators.length) return visitAt({ of: "expr", node: n.node.decorators[k - i]! }, steps, d + 1, each);
+      i += n.node.decorators.length;
       break;
     case "pattern":
       switch (n.node.kind) {
         case "object":
-          for (const x1 of n.node.props) {
-            out.push({ of: "patternProp", node: x1 });
-          }
+          if (k >= i && k < i + n.node.props.length) return visitAt({ of: "patternProp", node: n.node.props[k - i]! }, steps, d + 1, each);
+          i += n.node.props.length;
           if (n.node.rest !== undefined) {
-            out.push({ of: "pattern", node: n.node.rest! });
+            if (i === k) return visitAt({ of: "pattern", node: n.node.rest! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "array":
           for (const x1 of n.node.elements) {
             if (x1 !== undefined) {
-              out.push({ of: "pattern", node: x1! });
+              if (i === k) return visitAt({ of: "pattern", node: x1! }, steps, d + 1, each);
+              i += 1;
             }
           }
           if (n.node.rest !== undefined) {
-            out.push({ of: "pattern", node: n.node.rest! });
+            if (i === k) return visitAt({ of: "pattern", node: n.node.rest! }, steps, d + 1, each);
+            i += 1;
           }
           break;
         case "default":
-          out.push({ of: "pattern", node: n.node.target });
-          out.push({ of: "expr", node: n.node.value });
+          if (i === k) return visitAt({ of: "pattern", node: n.node.target }, steps, d + 1, each);
+          i += 1;
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
           break;
         case "expr":
-          out.push({ of: "expr", node: n.node.expr });
+          if (i === k) return visitAt({ of: "expr", node: n.node.expr }, steps, d + 1, each);
+          i += 1;
           break;
         case "literal":
-          out.push({ of: "expr", node: n.node.value });
+          if (i === k) return visitAt({ of: "expr", node: n.node.value }, steps, d + 1, each);
+          i += 1;
           break;
         case "variant":
           if (n.node.args !== undefined) {
-            for (const x1 of n.node.args!) {
-              out.push({ of: "pattern", node: x1 });
-            }
+            if (k >= i && k < i + n.node.args!.length) return visitAt({ of: "pattern", node: n.node.args![k - i]! }, steps, d + 1, each);
+            i += n.node.args!.length;
           }
           break;
         case "or":
-          for (const x1 of n.node.patterns) {
-            out.push({ of: "pattern", node: x1 });
-          }
+          if (k >= i && k < i + n.node.patterns.length) return visitAt({ of: "pattern", node: n.node.patterns[k - i]! }, steps, d + 1, each);
+          i += n.node.patterns.length;
           break;
       }
       break;
     case "matchArm":
-      out.push({ of: "pattern", node: n.node.pattern });
+      if (i === k) return visitAt({ of: "pattern", node: n.node.pattern }, steps, d + 1, each);
+      i += 1;
       if (n.node.guard !== undefined) {
-        out.push({ of: "expr", node: n.node.guard! });
+        if (i === k) return visitAt({ of: "expr", node: n.node.guard! }, steps, d + 1, each);
+        i += 1;
       }
       switch (n.node.body.kind) {
         case "int":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "float":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "bigint":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "null":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "this":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "super":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "regex":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "template":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "tagged":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "bool":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "string":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "ident":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "spread":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "array":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "object":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "function":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "arrow":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "member":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "index":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "call":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "new":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "instantiation":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "meta":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "import":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "nonNull":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "throw":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "class":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "privateName":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "unary":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "update":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "binary":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "conditional":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "assign":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "pipe":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "topic":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "match":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "comptime":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "unsafe":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "destructure":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "sequence":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "yield":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "as":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "satisfies":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "assertion":
-          out.push({ of: "expr", node: n.node.body });
+          if (i === k) return visitAt({ of: "expr", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
         case "block":
-          out.push({ of: "stmt", node: n.node.body });
+          if (i === k) return visitAt({ of: "stmt", node: n.node.body }, steps, d + 1, each);
+          i += 1;
           break;
       }
       break;
     case "patternProp":
       if (typeof n.node.key !== "string") {
-        out.push({ of: "expr", node: n.node.key });
+        if (i === k) return visitAt({ of: "expr", node: n.node.key }, steps, d + 1, each);
+        i += 1;
       }
-      out.push({ of: "pattern", node: n.node.value });
+      if (i === k) return visitAt({ of: "pattern", node: n.node.value }, steps, d + 1, each);
+      i += 1;
       break;
     case "specifier":
       break;
     case "enumMember":
       if (n.node.init !== undefined) {
-        out.push({ of: "expr", node: n.node.init! });
+        if (i === k) return visitAt({ of: "expr", node: n.node.init! }, steps, d + 1, each);
+        i += 1;
       }
       if (n.node.payload !== undefined) {
-        for (const x1 of n.node.payload!) {
-          out.push({ of: "typeNode", node: x1 });
-        }
+        if (k >= i && k < i + n.node.payload!.length) return visitAt({ of: "typeNode", node: n.node.payload![k - i]! }, steps, d + 1, each);
+        i += n.node.payload!.length;
       }
       break;
     case "switchCase":
       if (n.node.test !== undefined) {
-        out.push({ of: "expr", node: n.node.test! });
+        if (i === k) return visitAt({ of: "expr", node: n.node.test! }, steps, d + 1, each);
+        i += 1;
       }
-      out.push({ of: "stmts", node: n.node.body });
+      if (i === k) return visitAt({ of: "stmts", node: n.node.body }, steps, d + 1, each);
+      i += 1;
       break;
     case "declarator":
-      out.push({ of: "pattern", node: n.node.target });
+      if (i === k) return visitAt({ of: "pattern", node: n.node.target }, steps, d + 1, each);
+      i += 1;
       if (n.node.type !== undefined) {
-        out.push({ of: "typeNode", node: n.node.type! });
+        if (i === k) return visitAt({ of: "typeNode", node: n.node.type! }, steps, d + 1, each);
+        i += 1;
       }
       if (n.node.init !== undefined) {
-        out.push({ of: "expr", node: n.node.init! });
+        if (i === k) return visitAt({ of: "expr", node: n.node.init! }, steps, d + 1, each);
+        i += 1;
       }
       break;
     case "typeParam":
       if (n.node.constraint !== undefined) {
-        out.push({ of: "typeNode", node: n.node.constraint! });
+        if (i === k) return visitAt({ of: "typeNode", node: n.node.constraint! }, steps, d + 1, each);
+        i += 1;
       }
       if (n.node.default !== undefined) {
-        out.push({ of: "typeNode", node: n.node.default! });
+        if (i === k) return visitAt({ of: "typeNode", node: n.node.default! }, steps, d + 1, each);
+        i += 1;
       }
       break;
     case "typeAlias":
       switch (n.node.kind) {
         case "typeAlias":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          out.push({ of: "typeNode", node: n.node.type });
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (i === k) return visitAt({ of: "typeNode", node: n.node.type }, steps, d + 1, each);
+          i += 1;
           if (n.node.decorators !== undefined) {
-            for (const x1 of n.node.decorators!) {
-              out.push({ of: "expr", node: x1 });
-            }
+            if (k >= i && k < i + n.node.decorators!.length) return visitAt({ of: "expr", node: n.node.decorators![k - i]! }, steps, d + 1, each);
+            i += n.node.decorators!.length;
           }
           if (n.node.js !== undefined) {
-            out.push({ of: "jsName", node: n.node.js! });
+            if (i === k) return visitAt({ of: "jsName", node: n.node.js! }, steps, d + 1, each);
+            i += 1;
           }
           break;
       }
@@ -2728,81 +2978,80 @@ export function pushChildren(n: AnyNode, out: Mut<AnyNode[]>): void {
     case "interface":
       switch (n.node.kind) {
         case "interface":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.extends) {
-            out.push({ of: "typeNode", node: x1 });
-          }
-          for (const x1 of n.node.members) {
-            out.push({ of: "typeMember", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.extends.length) return visitAt({ of: "typeNode", node: n.node.extends[k - i]! }, steps, d + 1, each);
+          i += n.node.extends.length;
+          if (k >= i && k < i + n.node.members.length) return visitAt({ of: "typeMember", node: n.node.members[k - i]! }, steps, d + 1, each);
+          i += n.node.members.length;
           if (n.node.decorators !== undefined) {
-            for (const x1 of n.node.decorators!) {
-              out.push({ of: "expr", node: x1 });
-            }
+            if (k >= i && k < i + n.node.decorators!.length) return visitAt({ of: "expr", node: n.node.decorators![k - i]! }, steps, d + 1, each);
+            i += n.node.decorators!.length;
           }
           if (n.node.js !== undefined) {
-            out.push({ of: "jsName", node: n.node.js! });
+            if (i === k) return visitAt({ of: "jsName", node: n.node.js! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.jsClass !== undefined) {
             for (const x1 of n.node.jsClass!.constructors) {
-              for (const x2 of x1) {
-                out.push({ of: "param", node: x2 });
-              }
+              if (k >= i && k < i + x1.length) return visitAt({ of: "param", node: x1[k - i]! }, steps, d + 1, each);
+              i += x1.length;
             }
-            for (const x1 of n.node.jsClass!.statics) {
-              out.push({ of: "typeMember", node: x1 });
-            }
+            if (k >= i && k < i + n.node.jsClass!.statics.length) return visitAt({ of: "typeMember", node: n.node.jsClass!.statics[k - i]! }, steps, d + 1, each);
+            i += n.node.jsClass!.statics.length;
           }
           if (n.node.jsSource !== undefined) {
-            out.push({ of: "stmt", node: n.node.jsSource! });
+            if (i === k) return visitAt({ of: "stmt", node: n.node.jsSource! }, steps, d + 1, each);
+            i += 1;
           }
           break;
       }
       break;
     case "jsName":
       if (n.node.overloads !== undefined) {
-        for (const x1 of n.node.overloads!) {
-          out.push({ of: "func", node: x1 });
-        }
+        if (k >= i && k < i + n.node.overloads!.length) return visitAt({ of: "func", node: n.node.overloads![k - i]! }, steps, d + 1, each);
+        i += n.node.overloads!.length;
       }
       break;
     case "func":
       switch (n.node.kind) {
         case "function":
-          for (const x1 of n.node.typeParams) {
-            out.push({ of: "typeParam", node: x1 });
-          }
-          for (const x1 of n.node.params) {
-            out.push({ of: "param", node: x1 });
-          }
+          if (k >= i && k < i + n.node.typeParams.length) return visitAt({ of: "typeParam", node: n.node.typeParams[k - i]! }, steps, d + 1, each);
+          i += n.node.typeParams.length;
+          if (k >= i && k < i + n.node.params.length) return visitAt({ of: "param", node: n.node.params[k - i]! }, steps, d + 1, each);
+          i += n.node.params.length;
           if (n.node.returnType !== undefined) {
-            out.push({ of: "typeNode", node: n.node.returnType! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.returnType! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.throws !== undefined) {
-            out.push({ of: "typeNode", node: n.node.throws! });
+            if (i === k) return visitAt({ of: "typeNode", node: n.node.throws! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.body !== undefined) {
-            out.push({ of: "stmts", node: n.node.body! });
+            if (i === k) return visitAt({ of: "stmts", node: n.node.body! }, steps, d + 1, each);
+            i += 1;
           }
           if (n.node.decorators !== undefined) {
-            for (const x1 of n.node.decorators!) {
-              out.push({ of: "expr", node: x1 });
-            }
+            if (k >= i && k < i + n.node.decorators!.length) return visitAt({ of: "expr", node: n.node.decorators![k - i]! }, steps, d + 1, each);
+            i += n.node.decorators!.length;
           }
           if (n.node.js !== undefined) {
-            out.push({ of: "jsName", node: n.node.js! });
+            if (i === k) return visitAt({ of: "jsName", node: n.node.js! }, steps, d + 1, each);
+            i += 1;
           }
           break;
       }
       break;
     case "stmts":
-      for (const x of n.node) {
-        out.push({ of: "stmt", node: x });
-      }
+      if (k < n.node.length) return visitAt({ of: "stmt", node: n.node[k]! }, steps, d + 1, each);
       break;
   }
+  if (d + 1 === steps.length && k === 0) {
+    steps.pop();
+    return 0;
+  }
+  return -1;
 }
 
 // The id of `n`, or -1 when `n` has no id.

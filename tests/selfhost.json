@@ -9,7 +9,7 @@
     "debuginfo.ts": "argument of type 'number' is not assignable to parameter of type 'usize'; convert it with 'as usize'",
     "dependencies.ts": "'process.env' is read by key, as in 'process.env.HOME' or 'process.env[name]'",
     "deps.ts": "'Object' has no 'fromEntries' yet; it has 'keys', 'values' and 'entries'",
-    "doc.ts": "can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy",
+    "doc.ts": "'states[0]' can't be moved out of its array; use 'states[0].clone()' to take a copy, or 'pop()' to take the last element out",
     "fmt.ts": "cannot find type 'object'",
     "git.ts": "'process.env' is read by key, as in 'process.env.HOME' or 'process.env[name]'",
     "js.ts": "unknown function 'structuredClone'",

@@ -132,7 +132,16 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
 
   const eachWalker = makeWalker((of, val) => [`v({ of: ${JSON.stringify(of)}, node: ${val} });`]);
   const collectWalker = makeWalker((of, val) => [`collectIdsNode({ of: ${JSON.stringify(of)}, node: ${val} }, seen, order, shared);`]);
-  const pushWalker = makeWalker((of, val) => [`out.push({ of: ${JSON.stringify(of)}, node: ${val} });`]);
+  const stepWalker = makeWalker(
+    (of, val) => [
+      `if (i === k) return visitAt({ of: ${JSON.stringify(of)}, node: ${val} }, steps, d + 1, each);`,
+      `i += 1;`,
+    ],
+    (of, val) => [
+      `if (k >= i && k < i + ${val}.length) return visitAt({ of: ${JSON.stringify(of)}, node: ${val}[k - i]! }, steps, d + 1, each);`,
+      `i += ${val}.length;`,
+    ],
+  );
 
   const hasId = (name: string) => shapes(aliases.get(name)!).every((s) => s.fields.some((f) => f.name === "id"));
   const currentMethod = (name: string) => (name === "Expr" ? "current" : `current${name}`);
@@ -490,9 +499,12 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
     const body = type === "Stmt[]" ? [`for (const x of n.node) {`, `  collectIdsNode({ of: "stmt", node: x }, seen, order, shared);`, `}`] : collectWalker.children(type, "n.node");
     return [`    case ${JSON.stringify(of)}:`, ...body.map((l) => `      ${l}`), `      break;`];
   });
-  const pushCases = tagged.flatMap(([of, type]) => {
-    const body = type === "Stmt[]" ? [`for (const x of n.node) {`, `  out.push({ of: "stmt", node: x });`, `}`] : pushWalker.children(type, "n.node");
-    return [`    case ${JSON.stringify(of)}:`, ...body.map((l) => `      ${l}`), `      break;`];
+  const stepCases = tagged.flatMap(([of, type]) => {
+    const body =
+      type === "Stmt[]"
+        ? [`if (k < n.node.length) return visitAt({ of: "stmt", node: n.node[k]! }, steps, d + 1, each);`, `break;`]
+        : [...stepWalker.children(type, "n.node"), `break;`];
+    return [`    case ${JSON.stringify(of)}:`, ...body.map((l) => `      ${l}`)];
   });
   const nodeIdCases = tagged.flatMap(([of, type], idx) => {
     const outerLabel = idx === tagged.length - 1 ? `    default:` : `    case ${JSON.stringify(of)}:`;
@@ -545,12 +557,29 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
     `  }`,
     `}`,
     ``,
-    `// Appends each node \`n\` holds to \`out\`, in the order \`forEachChild\` gives them, for a walk`,
-    `// that keeps its own stack.`,
-    `export function pushChildren(n: AnyNode, out: Mut<AnyNode[]>): void {`,
-    `  switch (n.of) {`,
-    ...pushCases,
+    `// Reborrows \`n\` so a walk can pass a copy of the tagged reference to a callback.`,
+    `export function reborrowAnyNode(n: Ref<AnyNode>): AnyNode {`,
+    ...tagged.slice(0, -1).map(([of]) => `  if (n.of === ${JSON.stringify(of)}) return { of: ${JSON.stringify(of)}, node: n.node };`),
+    `  return { of: "stmts", node: n.node };`,
+    `}`,
+    ``,
+    `// Walks down \`steps\` from \`n\`, calling \`each\` on every first child along the way until a leaf`,
+    `// or a node \`each\` skips is reached, or gives -1 when \`steps[d]\` is past the last child at \`d\`.`,
+    `export function visitAt(n: AnyNode, steps: Mut<usize[]>, d: usize, each: (n: AnyNode) => boolean): i32 {`,
+    `  if (d === steps.length) {`,
+    `    if (n.of !== "stmts" && !each(reborrowAnyNode(n))) return 0;`,
+    `    steps.push(0);`,
     `  }`,
+    `  const k = steps[d]!;`,
+    `  let i: usize = 0;`,
+    `  switch (n.of) {`,
+    ...stepCases,
+    `  }`,
+    `  if (d + 1 === steps.length && k === 0) {`,
+    `    steps.pop();`,
+    `    return 0;`,
+    `  }`,
+    `  return -1;`,
     `}`,
     ``,
     `// The id of \`n\`, or -1 when \`n\` has no id.`,
