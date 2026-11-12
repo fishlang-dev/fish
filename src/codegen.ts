@@ -164,6 +164,9 @@ function innerOf(e: Ref<Expr>): Ref<Expr> {
   return e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe" ? e.expr : e;
 }
 
+// A failure that has nothing read before it to drop.
+function noUndo(_cg: Mut<Codegen>): void {}
+
 function sharedPrefix(which: string): string {
   return which === "shared" ? "shared" : which === "Rc" ? "rc" : "weak";
 }
@@ -6801,7 +6804,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Goes on when a reading step succeeded, an i32 or i1 that isn't zero; otherwise the reading
   // function fails, after `undo` drops what it had made.
-  jsonGuard(this: Mut<this>, ok: string, width: "i32" | "i1", undo?: (cg: Mut<Codegen>) => void) {
+  jsonGuard(this: Mut<this>, ok: string, width: "i32" | "i1", undo: (cg: Mut<Codegen>) => void) {
     const [bad, good] = [this.label(), this.label()];
     let test = ok;
     if (width === "i32") {
@@ -6810,18 +6813,18 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     this.emit(`br i1 ${test}, label %${good}, label %${bad}`);
     this.startBlock(bad);
-    undo?.(this);
+    undo(this);
     this.emit("ret i1 false");
     this.startBlock(good);
   }
 
 
   // Fails the reading function with "expected <what>" at the reader's place.
-  jsonExpected(this: Mut<this>, r: string, what: string, undo?: (cg: Mut<Codegen>) => void) {
+  jsonExpected(this: Mut<this>, r: string, what: string, undo: (cg: Mut<Codegen>) => void) {
     const ignored = this.temp();
     const line = `${ignored} = call i32 @fsh_rt_json_expected(ptr ${r}, ptr ${this.cString(what)})`;
     this.emit(line);
-    undo?.(this);
+    undo(this);
     this.emit("ret i1 false");
     const label2 = this.label();
     this.startBlock(label2);
@@ -6835,13 +6838,13 @@ class Codegen implements PrintHost, ComptimeHost {
     if (t === "null") {
       const ok = this.temp();
       this.emit(`${ok} = call i32 @fsh_rt_json_null(ptr ${r})`);
-      this.jsonGuard(ok, "i32");
+      this.jsonGuard(ok, "i32", noUndo);
       return "zeroinitializer";
     }
     if (t === "boolean") {
       const [slot, ok, v, b] = [this.alloca("i32"), this.temp(), this.temp(), this.temp()];
       this.emit(`${ok} = call i32 @fsh_rt_json_bool(ptr ${r}, ptr ${slot})`);
-      this.jsonGuard(ok, "i32");
+      this.jsonGuard(ok, "i32", noUndo);
       this.emit(`${v} = load i32, ptr ${slot}`);
       this.emit(`${b} = trunc i32 ${v} to i1`);
       return b;
@@ -6850,7 +6853,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const [slot, ok, v] = [this.alloca("ptr"), this.temp(), this.temp()];
       const line = `${ok} = call i32 @fsh_rt_json_text(ptr ${r}, ptr ${slot}, ptr ${this.cString("string")})`;
       this.emit(line);
-      this.jsonGuard(ok, "i32");
+      this.jsonGuard(ok, "i32", noUndo);
       this.emit(`${v} = load ptr, ptr ${slot}`);
       return v;
     }
@@ -6858,7 +6861,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const [slot, ok, v] = [this.alloca("double"), this.temp(), this.temp()];
       const line2 = `${ok} = call i32 @fsh_rt_json_float(ptr ${r}, ptr ${slot}, ptr ${this.cString(t)})`;
       this.emit(line2);
-      this.jsonGuard(ok, "i32");
+      this.jsonGuard(ok, "i32", noUndo);
       this.emit(`${v} = load double, ptr ${slot}`);
       if (t === "f64") return v;
       const narrow = this.temp();
@@ -6870,7 +6873,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const [slot, ok, v] = [this.alloca("i128"), this.temp(), this.temp()];
       const line3 = `${ok} = call i32 @fsh_rt_json_int(ptr ${r}, ptr ${slot}, i32 ${bits}, i32 ${signed ? 1 : 0}, ptr ${this.cString(t)})`;
       this.emit(line3);
-      this.jsonGuard(ok, "i32");
+      this.jsonGuard(ok, "i32", noUndo);
       this.emit(`${v} = load i128, ptr ${slot}`);
       if (bits === 128) return v;
       const narrow = this.temp();
@@ -6880,10 +6883,10 @@ class Codegen implements PrintHost, ComptimeHost {
     const c = this.tables.typing.rec(t as Exclude<Type, string>);
     if (c.kind === "recursive") {
       const [ok, v] = this.jsonRead(r, c.of);
-      this.jsonGuard(ok, "i1");
+      this.jsonGuard(ok, "i1", noUndo);
       return this.convert(v, c.of, t);
     }
-    if (c.kind === "array") return this.readElements(r, t as Exclude<Type, string> as ArrayType);
+    if (c.kind === "array") return this.readElements(r, t as Exclude<Type, string> as ArrayType, false, 0, noUndo);
     if (c.kind === "map") return this.readEntries(r, t as Exclude<Type, string> as MapType);
     if (c.kind === "union") return c.members.every((m) => this.recOf(m)?.kind === "variant") ? this.readVariant(r, t as Exclude<Type, string> as UnionType) : this.readMember(r, t as Exclude<Type, string> as UnionType);
     if (c.kind === "variant") return this.readVariant(r, t as Exclude<Type, string> as VariantType);
@@ -6925,23 +6928,25 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // An array's elements, each pushed as it is read; a failure drops what was read. `after` reads
   // on from a rest tuple's fixed elements, `from` of them, which `undo` drops on a failure.
-  readElements(this: Mut<this>, r: string, t: ArrayType, after?: { from: usize; undo: (cg: Mut<Codegen>) => void }): string {
+  // `opened`: a tuple's rest, read on from element `from` of an array already opened, with what
+  // was read before it dropped by `earlier` if this part fails.
+  readElements(this: Mut<this>, r: string, t: ArrayType, opened: boolean, from: usize, earlier: (cg: Mut<Codegen>) => void): string {
     const array = this.alloca(ARRAY);
     this.emit(`store ${ARRAY} zeroinitializer, ptr ${array}`);
     const undo = (cg: Mut<Codegen>) => {
-      after?.undo(this);
+      earlier(cg);
       const held = cg.temp();
       cg.emit(`${held} = load ${ARRAY}, ptr ${array}`);
       cg.dispose(held, t);
     };
-    if (after === undefined) {
-      const opened = this.temp();
-      const line = `${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${this.cString("array")})`;
+    if (!opened) {
+      const started = this.temp();
+      const line = `${started} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${this.cString("array")})`;
       this.emit(line);
-      this.jsonGuard(opened, "i32");
+      this.jsonGuard(started, "i32", noUndo);
     }
     const index = this.alloca("i64");
-    this.emit(`store i64 ${after?.from ?? 0}, ptr ${index}`);
+    this.emit(`store i64 ${from}, ptr ${index}`);
     const [head, item, done] = [this.label(), this.label(), this.label()];
     this.emit(`br label %${head}`);
     this.startBlock(head);
@@ -6985,7 +6990,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const opened = this.temp();
     const line = `${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${this.cString("array")})`;
     this.emit(line);
-    this.jsonGuard(opened, "i32");
+    this.jsonGuard(opened, "i32", noUndo);
     const read: { v: string; type: Type; i: usize }[] = [];
     // Optional elements are read into slots, empty until read, since the array may end first.
     const required = this.tables.typing.rec(t).required ?? order.length;
@@ -7048,7 +7053,7 @@ class Codegen implements PrintHost, ComptimeHost {
     });
     if (rest !== undefined) {
       // The fixed elements dominate the rest's reads, so its failures can drop them.
-      read.push({ v: this.readElements(r, rest.f.type as ArrayType, { from: order.length, undo }), type: rest.f.type, i: rest.i });
+      read.push({ v: this.readElements(r, rest.f.type as ArrayType, true, order.length, undo), type: rest.f.type, i: rest.i });
     } else {
       const right = step(this, order.length, 0);
       const [bad, good] = [this.label(), this.label()];
@@ -7097,7 +7102,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const opened = this.temp();
     const line2 = `${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 123, ptr ${this.cString("object")})`;
     this.emit(line2);
-    this.jsonGuard(opened, "i32");
+    this.jsonGuard(opened, "i32", noUndo);
     const first = this.alloca("i32");
     this.emit(`store i32 1, ptr ${first}`);
     const [head, entry, next, done] = [this.label(), this.label(), this.label(), this.label()];
@@ -7274,7 +7279,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       cg.emit(`call void @fsh_rt_str_release(ptr ${name})`);
       cg.emit(`call void @fsh_rt_json_restore(ptr ${r}, ptr ${mark})`);
-      cg.jsonExpected(r, `one of ${names}`);
+      cg.jsonExpected(r, `one of ${names}`, noUndo);
       cg.emit(`br label %${done}`);
     };
     this.startBlock(named);
@@ -7287,7 +7292,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const opened = this.temp();
     const line3 = `${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 123, ptr ${this.cString(`one of ${names}`)})`;
     this.emit(line3);
-    this.jsonGuard(opened, "i32");
+    this.jsonGuard(opened, "i32", noUndo);
     const [more, one] = [this.temp(), this.temp()];
     this.emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 125, i32 1)`);
     this.emit(`${one} = icmp sgt i32 ${more}, 0`);
@@ -7299,7 +7304,7 @@ class Codegen implements PrintHost, ComptimeHost {
     });
     const [keySlot, gotKey, key] = [this.alloca("ptr"), this.temp(), this.temp()];
     this.emit(`${gotKey} = call i32 @fsh_rt_json_key(ptr ${r}, ptr ${keySlot})`);
-    this.jsonGuard(gotKey, "i32");
+    this.jsonGuard(gotKey, "i32", noUndo);
     this.emit(`${key} = load ptr, ptr ${keySlot}`);
     const path = this.temp();
     this.emit(`${path} = call i64 @fsh_rt_json_field_path(ptr ${r}, ptr ${key})`);
