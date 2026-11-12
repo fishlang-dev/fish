@@ -65,10 +65,10 @@ export const DYN = "{ ptr, ptr }";
 // `text` gives a pointer to a literal's string block, which lives for the whole program.
 // `deep` compares two values of one type holding objects, arrays or instances, part by part.
 // `inspect` gives the string `console.log` prints for a value laid out as Node lays one out.
-// `noted` holds what checking recorded, the program's types among it. `operandOf` gives the value of an operand of a test,
+// `tables` holds what checking recorded, the program's types among it. `operandOf` gives the value of an operand of a test,
 // and `valueType` its type.
 export interface Slots extends Builder {
-  noted: Tables;
+  tables: Tables;
   text(this: Mut<this>, value: string): string;
   deep(this: Mut<this>, a: string, b: string, type: Type): string;
   inspect(this: Mut<this>, v: string, type: Type): string;
@@ -121,60 +121,60 @@ export class Conversions<H extends Slots> {
   }
 
   ll(t: Type): string {
-    return llvmOf(this.host.noted.typing, t);
+    return llvmOf(this.host.tables.typing, t);
   }
 
   // A union's members, or none for any other type.
   membersOf(t: Type): Type[] {
     let out: Type[] = [];
     if (typeof t === "string") return out;
-    const r = this.host.noted.typing.rec(t);
+    const r = this.host.tables.typing.rec(t);
     if (r.kind === "union") for (const m of r.members) out.push(m);
     return out;
   }
 
   isUnion(t: Type): boolean {
-    return typeof t !== "string" && this.host.noted.typing.rec(t).kind === "union";
+    return typeof t !== "string" && this.host.tables.typing.rec(t).kind === "union";
   }
 
   // What a reference points to or a recursive type's block holds, or undefined.
   heldIn(t: Type): Type | undefined {
     if (typeof t === "string") return undefined;
-    const r = this.host.noted.typing.rec(t);
+    const r = this.host.tables.typing.rec(t);
     return r.kind === "ref" ? r.to : r.kind === "recursive" ? r.of : undefined;
   }
 
   // What a recursive type's block holds, or undefined.
   blockOf(t: Type): Type | undefined {
     if (typeof t === "string") return undefined;
-    const r = this.host.noted.typing.rec(t);
+    const r = this.host.tables.typing.rec(t);
     return r.kind === "recursive" ? r.of : undefined;
   }
 
   // What a reference points to, or undefined.
   refTo(t: Type): Type | undefined {
     if (typeof t === "string") return undefined;
-    const r = this.host.noted.typing.rec(t);
+    const r = this.host.tables.typing.rec(t);
     return r.kind === "ref" ? r.to : undefined;
   }
 
   verdict(test: usize, m: Type): Verdict {
-    return this.host.noted.keyTests.getById(test)!.get(m)!;
+    return this.host.tables.keyTests.getById(test)!.get(m)!;
   }
 
   wants(this: Mut<this>, w: Ref<Wanted>, m: Type): boolean {
-    if (w.by === "kind") return ofKind(this.host.noted.typing, m, w.kind);
-    if (w.by === "category") return category(this.host.noted.typing, m) === w.name;
+    if (w.by === "kind") return ofKind(this.host.tables.typing, m, w.kind);
+    if (w.by === "category") return category(this.host.tables.typing, m) === w.name;
     if (w.by === "key") return this.verdict(w.test, m) === "yes";
     if (w.by === "present") return m !== "null";
-    return w.unknown ? this.host.noted.typing.unknownGives(m, w.type) : this.host.noted.typing.fits(m, w.type);
+    return w.unknown ? this.host.tables.typing.unknownGives(m, w.type) : this.host.tables.typing.fits(m, w.type);
   }
 
   // Lowers `typeof x === "name"`, `x instanceof Map` and `Array.isArray(x)`, or `x === v` with
   // x a union, to a check of x's tag, and of its payload when v isn't a literal. Undefined for
   // any other comparison. `guarded` says the test's left operand is kept from its right one.
   test(this: Mut<this>, e: Ref<Expr>, guarded: boolean): string | undefined {
-    const instance = this.host.noted.kindTests.get(e);
+    const instance = this.host.tables.kindTests.get(e);
     if (instance !== undefined) {
       const tested = testedOf(e);
       const type = this.host.valueType(tested);
@@ -182,7 +182,7 @@ export class Conversions<H extends Slots> {
       return this.holdsWhere(v, type, { by: "kind", kind: instance });
     }
     if (e.kind !== "binary") return undefined;
-    if (this.host.noted.keyTests.has(e)) {
+    if (this.host.tables.keyTests.has(e)) {
       const v = this.host.operandOf(e.right, e, guarded);
       const type = this.host.valueType(e.right);
       return this.hasKey(v, type, e.id, textOf(e.left));
@@ -191,9 +191,9 @@ export class Conversions<H extends Slots> {
       const type = this.host.valueType(e.left);
       const c = this.host.valueType(e.right);
       const v = this.host.operandOf(e.left, e, guarded);
-      if (!this.isUnion(type)) return String(this.host.noted.typing.isSubclass(type, c));
+      if (!this.isUnion(type)) return String(this.host.tables.typing.isSubclass(type, c));
       let sub: Type[] = [];
-      for (const m of this.membersOf(type)) if (this.host.noted.typing.isSubclass(m, c)) sub.push(m);
+      for (const m of this.membersOf(type)) if (this.host.tables.typing.isSubclass(m, c)) sub.push(m);
       return this.holds(v, type as UnionType, sub);
     }
     if (e.op !== "===" && e.op !== "!==") return undefined;
@@ -204,8 +204,8 @@ export class Conversions<H extends Slots> {
       const type = this.host.valueType(kind.operand);
       const name = textOf(kind.name);
       const to = this.refTo(type);
-      const through = to !== undefined && this.host.noted.typing.isPlainJs(to);
-      if (this.host.noted.typing.isPlainJs(type) || through) {
+      const through = to !== undefined && this.host.tables.typing.isPlainJs(to);
+      if (this.host.tables.typing.isPlainJs(type) || through) {
         const box = through ? this.host.temp() : v;
         const found = this.host.temp();
         if (through) this.host.emit(`${box} = load ptr, ptr ${v}`);
@@ -253,9 +253,9 @@ export class Conversions<H extends Slots> {
     const verdict = this.verdict(test, type);
     if (verdict !== "both") return String(verdict === "yes");
     const holder = type as ObjectType | ClassType;
-    const field = this.host.noted.typing.field(holder, key)!.type;
+    const field = this.host.tables.typing.field(holder, key)!.type;
     const read = this.host.temp();
-    const path = this.host.noted.typing.fieldPath(holder, key).join(", ");
+    const path = this.host.tables.typing.fieldPath(holder, key).join(", ");
     this.host.emit(`${read} = extractvalue ${this.ll(type)} ${v}, ${path}`);
     return this.holdsWhere(read, field, { by: "present" });
   }
@@ -272,11 +272,11 @@ export class Conversions<H extends Slots> {
       return this.equals(loaded, aBlock, b, bType);
     }
     if (this.blockOf(bType) !== undefined && aType !== bType) return this.equals(b, bType, a, aType);
-    const bBase = baseOf(this.host.noted.typing, bType);
+    const bBase = baseOf(this.host.tables.typing, bType);
     if (this.isUnion(aType)) {
       // An unknown holds JavaScript's numbers, which are equal across the kinds Fish has.
-      const unknown = this.host.noted.typing.rec(aType as UnionType).unknown === true;
-      const other = literalOf(this.host.noted.typing, bType) ?? b;
+      const unknown = this.host.tables.typing.rec(aType as UnionType).unknown === true;
+      const other = literalOf(this.host.tables.typing, bType) ?? b;
       const u = this.branch(a, aType as UnionType, "boolean");
       for (let i: usize = 0; i < u.members.length; i++) {
         const m = u.members[i]!;
@@ -296,11 +296,11 @@ export class Conversions<H extends Slots> {
       return this.equals(loaded, aTo, b, bType);
     }
     if (this.refTo(bType) !== undefined) return this.equals(b, bType, a, aType);
-    const aLiteral = literalOf(this.host.noted.typing, aType);
-    const bLiteral = literalOf(this.host.noted.typing, bType);
+    const aLiteral = literalOf(this.host.tables.typing, aType);
+    const bLiteral = literalOf(this.host.tables.typing, bType);
     if (aLiteral !== undefined && bLiteral !== undefined) return String(this.sameLiteral(aType, bType));
-    const aBase = baseOf(this.host.noted.typing, aType);
-    if (aBase === bBase && compound(this.host.noted.typing, aType)) return this.host.deep(a, b, aType);
+    const aBase = baseOf(this.host.tables.typing, aType);
+    if (aBase === bBase && compound(this.host.tables.typing, aType)) return this.host.deep(a, b, aType);
     if (aBase !== bBase || typeof aBase !== "string") return "false";
     if (aBase === "null") return "true";
     if (aBase === "bigint") {
@@ -325,8 +325,8 @@ export class Conversions<H extends Slots> {
 
   // Whether two literal types hold one value.
   sameLiteral(a: Type, b: Type): boolean {
-    const x = this.host.noted.typing.rec(a as LiteralType);
-    const y = this.host.noted.typing.rec(b as LiteralType);
+    const x = this.host.tables.typing.rec(a as LiteralType);
+    const y = this.host.tables.typing.rec(b as LiteralType);
     return x.value === y.value;
   }
 
@@ -354,9 +354,9 @@ export class Conversions<H extends Slots> {
     // The checker found the field on every member, so each is an object or an instance.
     const holder = member as ObjectType | ClassType;
     const value = this.host.temp();
-    const path = this.host.noted.typing.fieldPath(holder, name).join(", ");
+    const path = this.host.tables.typing.fieldPath(holder, name).join(", ");
     this.host.emit(`${value} = extractvalue ${this.ll(member)} ${part}, ${path}`);
-    const type = this.host.noted.typing.field(holder, name)!.type;
+    const type = this.host.tables.typing.field(holder, name)!.type;
     return this.convert(value, type, to);
   }
 
@@ -398,7 +398,7 @@ export class Conversions<H extends Slots> {
   fromUnknown(this: Mut<this>, v: string, from: UnionType, to: Type): string {
     const members = this.membersOf(from);
     let held: Type[] = [];
-    for (const m of members) if (this.host.noted.typing.unknownGives(m, to)) held.push(m);
+    for (const m of members) if (this.host.tables.typing.unknownGives(m, to)) held.push(m);
     if (held.length === 1 && held[0] === to) return this.payload(v, from, to);
     const result = this.host.alloca(this.ll(to));
     const tag = this.host.temp();
@@ -411,7 +411,7 @@ export class Conversions<H extends Slots> {
       const member = held[i]!;
       this.host.startBlock(cases[i]!);
       const part = this.payload(v, from, member);
-      const kept = this.isUnion(to) && this.host.noted.typing.membersFor(member, to as UnionType).length > 0;
+      const kept = this.isUnion(to) && this.host.tables.typing.membersFor(member, to as UnionType).length > 0;
       const number = isNumeric(member) && member !== "f64" && !kept;
       let made: string;
       if (number) {
@@ -466,7 +466,7 @@ export class Conversions<H extends Slots> {
   // Whether a member holds itself with members `w` answers differently for, so its block has
   // to be looked into.
   mixed(this: Mut<this>, m: Type, w: Ref<Wanted>): boolean {
-    const inner = this.host.noted.typing.unfold(m);
+    const inner = this.host.tables.typing.unfold(m);
     if (inner === m || !this.isUnion(inner)) return false;
     let yes = false;
     let no = false;
@@ -544,12 +544,12 @@ export class Conversions<H extends Slots> {
 
   isJsValue(t: Type): boolean {
     if (typeof t === "string") return false;
-    const r = this.host.noted.typing.rec(t);
+    const r = this.host.tables.typing.rec(t);
     return r.kind === "block" && r.which === "JsValue";
   }
 
   kindOf(t: Type): string {
-    return typeof t === "string" ? "" : this.host.noted.typing.rec(t).kind;
+    return typeof t === "string" ? "" : this.host.tables.typing.rec(t).kind;
   }
 
   // A member of another kind than the narrowed type, an empty one or a scalar where an
@@ -557,7 +557,7 @@ export class Conversions<H extends Slots> {
   // So is a string or boolean literal where the narrowed type is of another kind.
   absent(member: Type, to: Type): boolean {
     if (typeof member !== "string") {
-      const lit = this.host.noted.typing.rec(member);
+      const lit = this.host.tables.typing.rec(member);
       if (lit.kind === "literal") return (typeof lit.value === "string" && to !== "string") || (typeof lit.value === "boolean" && to !== "boolean");
       return false;
     }
@@ -571,8 +571,8 @@ export class Conversions<H extends Slots> {
     // Types that lower to the same one, as a field's type written with `?` and the type read from
     // it do, are laid out the same.
     if (from === to) return v;
-    const lowFrom = this.host.noted.typing.lower(from);
-    const lowTo = this.host.noted.typing.lower(to);
+    const lowFrom = this.host.tables.typing.lower(from);
+    const lowTo = this.host.tables.typing.lower(to);
     if (lowFrom === lowTo) return v;
     // A recursive type's value lives in its block: read where another type is wanted, it is
     // loaded, and a value meeting one moves into a new block.
@@ -586,7 +586,7 @@ export class Conversions<H extends Slots> {
     const toBlock = this.blockOf(to);
     if (toBlock !== undefined && !this.within(to, from)) {
       const block = this.host.temp();
-      this.host.emit(`${block} = call ptr @fsh_rt_alloc(i64 ${byteSize(this.host.noted.typing, toBlock)})`);
+      this.host.emit(`${block} = call ptr @fsh_rt_alloc(i64 ${byteSize(this.host.tables.typing, toBlock)})`);
       const inner = this.convert(v, from, toBlock);
       this.host.emit(`store ${this.ll(toBlock)} ${inner}, ptr ${block}`);
       return block;
@@ -600,7 +600,7 @@ export class Conversions<H extends Slots> {
     // Stored callables taking and giving the same types share a layout and a vtable shape.
     if (fk === "dyn" && tk === "dyn") return v;
     // A string literal's type takes no space; as a string, it is its static block.
-    const literal = literalOf(this.host.noted.typing, from);
+    const literal = literalOf(this.host.tables.typing, from);
     if (to === "string" && literal !== undefined) return this.host.text(literal);
     // Code holding a `never` value never runs.
     if (from === "never") return "undef";
@@ -609,15 +609,15 @@ export class Conversions<H extends Slots> {
     // An empty array literal holds no element to convert, and an array of JS values holds the
     // same boxes whichever shape each is declared to have.
     if (fk === "array" && tk === "array") {
-      const fromElement = this.host.noted.typing.rec(from as ArrayType).element;
-      const toElement = this.host.noted.typing.rec(to as ArrayType).element;
+      const fromElement = this.host.tables.typing.rec(from as ArrayType).element;
+      const toElement = this.host.tables.typing.rec(to as ArrayType).element;
       if (fromElement === "never" || (this.isJsValue(fromElement) && this.isJsValue(toElement))) return v;
     }
     // A reference read where its value is wanted loads it; a mutable one lent as shared is the
     // same pointer.
     // A reference going into a `Ref<T> | null` is its pointer, as the payload.
     const fromTo = this.refTo(from);
-    if (fromTo !== undefined && this.host.noted.typing.optionRef(to) === undefined) {
+    if (fromTo !== undefined && this.host.tables.typing.optionRef(to) === undefined) {
       const toTo = this.refTo(to);
       if (toTo !== undefined) return this.lend(v, fromTo, toTo);
       const loaded = this.host.temp();
@@ -627,7 +627,7 @@ export class Conversions<H extends Slots> {
     // A literal's value is known, so leaving one makes a constant, and entering one keeps nothing.
     if (literal !== undefined && tk !== "union") return literal;
     if (tk === "literal") return "zeroinitializer";
-    if (fk === "union" && this.host.noted.typing.rec(from as UnionType).unknown === true) return this.fromUnknown(v, from as UnionType, to);
+    if (fk === "union" && this.host.tables.typing.rec(from as UnionType).unknown === true) return this.fromUnknown(v, from as UnionType, to);
     if (tk === "union") {
       return fk === "union" ? this.retag(v, from as UnionType, to as UnionType) : this.inject(v, from, to as UnionType);
     }
@@ -659,7 +659,7 @@ export class Conversions<H extends Slots> {
       const type = fields[i]![1];
       const at = i + (embeds !== undefined ? 1 : 0);
       // An optional field the value leaves out is empty.
-      const given = this.host.noted.typing.field(from, name);
+      const given = this.host.tables.typing.field(from, name);
       if (given === undefined) {
         const empty = this.convert("zeroinitializer", "null", type);
         result = this.inserted(result, to, empty, type, at);
@@ -667,7 +667,7 @@ export class Conversions<H extends Slots> {
       }
       const givenType = given.type;
       const part = this.host.temp();
-      const path = this.host.noted.typing.fieldPath(from as ObjectType | ClassType, name).join(", ");
+      const path = this.host.tables.typing.fieldPath(from as ObjectType | ClassType, name).join(", ");
       this.host.emit(`${part} = extractvalue ${this.ll(from)} ${v}, ${path}`);
       const made = this.convert(part, givenType, type);
       result = this.inserted(result, to, made, type, at);
@@ -678,14 +678,14 @@ export class Conversions<H extends Slots> {
   // The class a class embeds as its base, or undefined.
   baseClass(t: Type): Type | undefined {
     if (typeof t === "string") return undefined;
-    const r = this.host.noted.typing.rec(t);
+    const r = this.host.tables.typing.rec(t);
     return r.kind === "class" ? r.base : undefined;
   }
 
   // An object's or instance's own fields, each as its name and type.
   fieldsOf(t: ObjectType | ClassType): [string, Type][] {
     let out: [string, Type][] = [];
-    const r = this.host.noted.typing.rec(t);
+    const r = this.host.tables.typing.rec(t);
     for (const f of r.fields) out.push([f.name, f.type]);
     return out;
   }
@@ -734,8 +734,8 @@ export class Conversions<H extends Slots> {
       }
     }
     if (!holds) return false;
-    if (this.host.noted.typing.rec(from).unknown !== true) return true;
-    for (const m of members) if (m !== to && this.host.noted.typing.unknownGives(m, to)) return false;
+    if (this.host.tables.typing.rec(from).unknown !== true) return true;
+    for (const m of members) if (m !== to && this.host.tables.typing.unknownGives(m, to)) return false;
     return true;
   }
 
@@ -753,13 +753,13 @@ export class Conversions<H extends Slots> {
     seen.set(pair, true);
     let same = false;
     if (ak === "recursive") same = this.alike(this.blockOf(a)!, this.blockOf(b)!, seen);
-    else if (ak === "array") same = this.alike(this.host.noted.typing.rec(a as ArrayType).element, this.host.noted.typing.rec(b as ArrayType).element, seen);
+    else if (ak === "array") same = this.alike(this.host.tables.typing.rec(a as ArrayType).element, this.host.tables.typing.rec(b as ArrayType).element, seen);
     else if (ak === "union") {
       const xs = this.membersOf(a);
       const ys = this.membersOf(b);
       same = xs.length === ys.length;
       for (let i: usize = 0; same && i < xs.length; i++) same = this.alike(xs[i]!, ys[i]!, seen);
-    } else if (ak === "object" && this.host.noted.typing.rec(a as ObjectType).tuple === this.host.noted.typing.rec(b as ObjectType).tuple) {
+    } else if (ak === "object" && this.host.tables.typing.rec(a as ObjectType).tuple === this.host.tables.typing.rec(b as ObjectType).tuple) {
       const xs = this.fieldsOf(a as ObjectType);
       const ys = this.fieldsOf(b as ObjectType);
       same = xs.length === ys.length;
@@ -771,8 +771,8 @@ export class Conversions<H extends Slots> {
 
   // Sets the tag of the member `from` goes into, and stores its value as the payload.
   inject(this: Mut<this>, v: string, from: Type, to: UnionType): string {
-    const found = this.host.noted.typing.membersFor(from, to);
-    assert(found.length > 0, `internal error: '${this.host.noted.typing.show(from)}' has no member in '${this.host.noted.typing.show(to)}' to go into`);
+    const found = this.host.tables.typing.membersFor(from, to);
+    assert(found.length > 0, `internal error: '${this.host.tables.typing.show(from)}' has no member in '${this.host.tables.typing.show(to)}' to go into`);
     const member = found[0]!;
     const slot = this.host.alloca(this.ll(to));
     this.host.emit(`store i32 ${this.membersOf(to).indexOf(member)}, ptr ${slot}`);
@@ -805,8 +805,8 @@ export class Conversions<H extends Slots> {
   opened(this: Mut<this>, m: Type, to: UnionType): boolean {
     const of = this.blockOf(m);
     if (of === undefined || !this.isUnion(of)) return false;
-    if (this.host.noted.typing.membersFor(m, to).length > 0) return false;
-    for (const x of this.membersOf(of)) if (this.host.noted.typing.membersFor(x, to).length > 0) return true;
+    if (this.host.tables.typing.membersFor(m, to).length > 0) return false;
+    for (const x of this.membersOf(of)) if (this.host.tables.typing.membersFor(x, to).length > 0) return true;
     return false;
   }
 
@@ -821,7 +821,7 @@ export class Conversions<H extends Slots> {
     let held: Type[] = [];
     let open: boolean[] = [];
     for (const m of members) {
-      const direct = this.host.noted.typing.membersFor(m, to).length > 0;
+      const direct = this.host.tables.typing.membersFor(m, to).length > 0;
       const through = !direct && this.opened(m, to);
       if (!direct && !through) continue;
       held.push(m);
