@@ -1029,7 +1029,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // the closure's address and its body's code, and the caller drops the closure once the call
   // returns. A walker given a different closure by every caller is otherwise copied for each.
   sharing(): Map<InstanceId, Share> {
-    const groups = new Map<string, InstanceId[]>();
+    let groups = new Map<string, InstanceId[]>();
     let found = new Map<InstanceId, Set<usize>>();
     for (const i of this.instances) {
       const at = this.callbacksOnlyCalled(i);
@@ -1080,7 +1080,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // is used some other way.
   callbacksOnlyCalled(i: InstanceId): Set<usize> {
     const b = this.bodyAt(i);
-    const at = new Set<usize>();
+    let at = new Set<usize>();
     if (b.self !== undefined || b.closure !== undefined || b.generator === true || b.async === true || b.foreign === true || b.rust !== undefined || b.js !== undefined || b.exported === true || b.comptime !== undefined || this.inst(i).symbol === "main") return at;
     if (b.params.some((p) => p.comptime || p.rest)) return at;
     b.params.forEach((p, k) => {
@@ -3415,7 +3415,7 @@ class Codegen implements PrintHost, ComptimeHost {
       if (abstract(this, m.returns) || i >= methods.length || methods[i] === undefined) made.push("null");
       else made.push(this.methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!));
     }
-    return [...made, ...this.tables.typing.rec(this.tables.typing.rec(to).of).fields.map((f, i) => this.fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i]))];
+    return [...made, ...this.tables.typing.rec(this.tables.typing.rec(to).of).fields.map((f, i) => this.fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i as usize]))];
   }
 
 
@@ -3611,7 +3611,7 @@ class Codegen implements PrintHost, ComptimeHost {
           const self = r?.kind === "class" && owner !== undefined && owner !== type ? cg.upcast("%p", type as ClassType, owner) : "%p";
           cg.emit(`${frame} = insertvalue ${cg.llvm(future)} zeroinitializer, ptr ${self}, 1`);
         }
-        params.slice(0, taken).forEach((p, i) => {
+        params.slice(0, taken as i64).forEach((p, i) => {
           const next = cg.temp();
           cg.emit(`${next} = insertvalue ${cg.llvm(future)} ${frame}, ${p}, ${i + 2}`);
           frame = next;
@@ -4338,7 +4338,8 @@ class Codegen implements PrintHost, ComptimeHost {
         return;
       // A comptime block runs while compiling and leaves nothing to run.
       case "comptime":
-        comptimeBlock(this, this.current, s);
+        const part = this.current;
+        comptimeBlock(this, part, s);
         return;
       case "if": {
         const cond = this.value(s.cond);
@@ -4708,7 +4709,7 @@ class Codegen implements PrintHost, ComptimeHost {
       held.push({ slot: this.pending[i]!.slot!, type });
     }
     const [ok, pad, caught] = [this.label(), this.label(), this.temp()];
-    this.emit(`${assign}invoke ${call.slice("call ".length)} to label %${ok} unwind label %${pad}`);
+    this.emit(`${assign}invoke ${call.slice("call ".length as i64)} to label %${ok} unwind label %${pad}`);
     this.startBlock(pad);
     this.emit(`${caught} = landingpad { ptr, i32 } cleanup`);
     cleanup?.(this);
@@ -5557,15 +5558,18 @@ class Codegen implements PrintHost, ComptimeHost {
       const lower2 = this.tables.typing.lower(to);
       const line = `${held} = load ${this.llvm(lower2)}, ptr ${v}`;
       this.emit(line);
-      this.jsonWrite(w, held, this.writtenPart(written, t, (cg, x) => { const held = cg.tables.typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to);
+      const part = this.writtenPart(written, t, (cg, x) => { const held = cg.tables.typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to;
+      this.jsonWrite(w, held, part);
       return;
     }
     if (r.kind === "array" || r.kind === "fixed") {
-      this.jsonElements(w, v, t as ArrayType | FixedType, this.writtenPart(written, t, (cg, x) => cg.tables.typing.rec(x as ArrayType).element) ?? r.element);
+      const part2 = this.writtenPart(written, t, (cg, x) => cg.tables.typing.rec(x as ArrayType).element) ?? r.element;
+      this.jsonElements(w, v, t as ArrayType | FixedType, part2);
       return;
     }
     if (r.kind === "map") {
-      this.jsonEntries(w, v, t as MapType, this.writtenPart(written, t, (cg, x) => cg.tables.typing.rec(x as MapType).value) ?? r.value);
+      const part3 = this.writtenPart(written, t, (cg, x) => cg.tables.typing.rec(x as MapType).value) ?? r.value;
+      this.jsonEntries(w, v, t as MapType, part3);
       return;
     }
     if (r.kind === "union") {
@@ -5611,7 +5615,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       this.jsonRaw(w, "[");
       order.forEach(({ i }, n) => {
-        this.present(length, n, (cg) => {
+        this.present(length, n as usize, (cg) => {
           if (n > 0) cg.jsonRaw(w, ",");
           const x = cg.temp();
           cg.emit(`${x} = extractvalue ${cg.llvm(t)} ${v}, ${i}`);
@@ -5847,7 +5851,7 @@ class Codegen implements PrintHost, ComptimeHost {
         put(this, 0, "i32", String(FARG_KINDS.string));
         const text2 = this.text(x);
         put(this, 3, "ptr", text2);
-      } else if (typeof x === "boolean") whole(this, FARG_KINDS.boolean, x ? "1" : "0");
+      } else if (typeof x === "boolean") whole(this, FARG_KINDS.boolean as i32, x ? "1" : "0");
       else whole(this, FARG_KINDS.int, String(x));
       return;
     }
@@ -6021,7 +6025,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (r.kind === "object") {
       const [order, rest] = this.tupleOrder(t as ObjectType);
       const length = r.required === undefined ? undefined : this.tupleLength(v, t as ObjectType);
-      order.forEach(({ f, i }, n) => this.present(length, n, (cg) => {
+      order.forEach(({ f, i }, n) => this.present(length, n as usize, (cg) => {
         if (n > 0) comma(cg);
         const x = cg.temp();
         cg.emit(`${x} = extractvalue ${cg.llvm(t)} ${v}, ${i}`);
@@ -6170,7 +6174,8 @@ class Codegen implements PrintHost, ComptimeHost {
       const lower2 = this.tables.typing.lower(to);
       const line = `${held} = load ${this.llvm(lower2)}, ptr ${v}`;
       this.emit(line);
-      return this.inspectTree(held, this.writtenPart(written, t, (cg, x) => { const held = cg.tables.typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to, "%d");
+      const part = this.writtenPart(written, t, (cg, x) => { const held = cg.tables.typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to;
+      return this.inspectTree(held, part, "%d");
     }
     // A typed array prints as an array under its name, an ArrayBuffer as its bytes in hex.
     const typed = this.tables.typing.typedName(written);
@@ -6213,10 +6218,14 @@ class Codegen implements PrintHost, ComptimeHost {
     const next = this.temp();
     this.emit(`${next} = add i64 %d, 1`);
     if (r.kind === "array" || r.kind === "fixed") {
-      const inspectElements2 = this.inspectElements(v, t as ArrayType | FixedType, this.writtenPart(written, t, (cg, x) => cg.tables.typing.rec(x as ArrayType).element) ?? r.element, next, typed === "Float32Array");
+      const part2 = this.writtenPart(written, t, (cg, x) => cg.tables.typing.rec(x as ArrayType).element) ?? r.element;
+      const inspectElements2 = this.inspectElements(v, t as ArrayType | FixedType, part2, next, typed === "Float32Array");
       return named(this, inspectElements2);
     }
-    if (r.kind === "map") return this.inspectEntries(v, t as MapType, this.writtenPart(written, t, (cg, x) => cg.tables.typing.rec(x as MapType).value) ?? r.value, next);
+    if (r.kind === "map") {
+      const part3 = this.writtenPart(written, t, (cg, x) => cg.tables.typing.rec(x as MapType).value) ?? r.value;
+      return this.inspectEntries(v, t as MapType, part3, next);
+    }
     if (r.kind === "union") {
       const members = this.writtenMembers(written, t as UnionType);
       const result = this.alloca("ptr");
@@ -6267,7 +6276,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const node = this.temp();
       this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length !== undefined ? length : `${order.length}`})`);
       order.forEach(({ i }, n) => {
-        this.present(length, n, (cg) => {
+        this.present(length, n as usize, (cg) => {
           const x = cg.temp();
           cg.emit(`${x} = extractvalue ${cg.llvm(t)} ${v}, ${i}`);
           const line8 = `call void @fsh_rt_insp_push(ptr ${node}, ptr ${cg.inspectTree(x, as[i]!.type, next)})`;
@@ -7062,7 +7071,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const done = this.label();
     this.emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
     const groups = new Map<string, VariantType[]>();
-    const parts: (Type | VariantType[])[] = [];
+    let parts: (Type | VariantType[])[] = [];
     const members2 = this.tables.typing.rec(t).members;
     for (const m of members2) {
       const variant = this.recOf(m);
@@ -10132,7 +10141,7 @@ class Codegen implements PrintHost, ComptimeHost {
     };
     args.forEach((a, i) => {
       const rustCrossing2 = rustCrossing(this.tables.typing, this.inst(target).signature![i as usize]!);
-      const part2 = this.inst(target).signature![i]!;
+      const part2 = this.inst(target).signature![i as usize]!;
       return passed.push(...pass(this, rustCrossing2, part2, a.slice(a.lastIndexOf(" ") + 1)));
     });
     const gives = rustGiven(this.tables.typing, this.tables.arenas, this.inst(target));
@@ -11830,7 +11839,8 @@ class Codegen implements PrintHost, ComptimeHost {
         return String(e.value);
       case "comptime":
         this.bakeable(this.cur().types.get(e)!, { start: e.start, end: e.end });
-        const comptimeValue2 = comptimeValue(this, this.current, e);
+        const part2 = this.current;
+        const comptimeValue2 = comptimeValue(this, part2, e);
         return this.bake(comptimeValue2, this.cur().types.get(e)!);
       // A string literal on its own has only its literal type, which takes no space.
       case "string":
