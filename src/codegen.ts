@@ -160,7 +160,7 @@ function stmtKey(s: Ref<Stmt>): Stmt {
   return { id: s.id, kind: "empty", start: s.start, end: s.end };
 }
 
-function exprKey(e: Ref<Expr>): Expr {
+function exprKey(e: Ref<{ id: usize; start: usize; end: usize }>): Expr {
   return { id: e.id, kind: "this", start: e.start, end: e.end };
 }
 
@@ -1078,14 +1078,15 @@ class Codegen implements PrintHost, ComptimeHost {
     const out = new Map<InstanceId, Share>();
     for (const group of groups.values()) {
       if (group.length < 2) continue;
-      const template = group.map((id) => this.tables.arenas.instanceOf(id)).toSorted((a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0))[0]!;
+      let template = group[0]!;
+      for (const id of group) if (this.inst(id).symbol < this.inst(template).symbol) template = id;
       for (const id of group) {
         const i = this.tables.arenas.instanceOf(id);
         const b = bodyOf(this.tables.arenas, i);
         const code = new Map<usize, InstanceId | undefined>();
         const items = found.get(i.id)!;
         for (const k of items) code.set(k, this.calledThrough(i.id, (b.params[k]!.pattern as { name: string }).name));
-        out.set(i.id, { template: template.id, at: found.get(i.id)!, code });
+        out.set(i.id, { template, at: found.get(i.id)!, code });
       }
     }
     return out;
@@ -2539,7 +2540,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // A package's class's static member, read or called on the class itself.
   jsStatic(this: Mut<this>, e: Ref<Expr>, name: Ref<JsName>): string | undefined {
     const c = this.jsExport(name, { start: e.start, end: e.end });
-    let result: string | undefined;
+    let result: string | undefined = undefined;
     if (e.kind === "member") result = this.jsGet(c, e.name, this.cur().types.get(e)!, `'${name.name}.${e.name}' is`, { start: e.start, end: e.end });
     else if (e.kind === "call" && e.callee.kind === "member") {
       const method = e.callee.name;
@@ -2985,15 +2986,18 @@ class Codegen implements PrintHost, ComptimeHost {
     if (r.kind === "param") return this.jsMatches(box, r.concrete!);
     if (r.kind === "union") {
       // Any member, the rest tried only while none has matched.
-      const [first, ...rest] = r.members;
-      return rest.reduce((any, member) => {
+      const members = [...r.members];
+      let any = this.jsMatches(box, members[0]!);
+      for (let i: usize = 1; i < members.length; i++) {
+        const member = members[i]!;
         const none = this.temp();
         this.emit(`${none} = xor i1 ${any}, true`);
         const later = this.both(none, (cg) => cg.jsMatches(box, member));
         const v = this.temp();
         this.emit(`${v} = or i1 ${any}, ${later}`);
-        return v;
-      }, this.jsMatches(box, first!));
+        any = v;
+      }
+      return any;
     }
     if (r.kind === "array" || r.kind === "fixed" || (r.kind === "object" && r.tuple === true)) {
       const is2 = is(this, 10);
@@ -3514,7 +3518,7 @@ class Codegen implements PrintHost, ComptimeHost {
       };
       // A closure may take fewer parameters than its callable passes: the rest are dropped here.
       const taken = cg.bodyAt(target).closure !== undefined ? cg.bodyAt(target).params.length : m.params.length;
-      m.params.slice(taken as i64).forEach((p, i) => cg.dispose(`%a${taken + i}`, p));
+      for (let i: usize = taken; i < m.params.length; i++) cg.dispose(`%a${i}`, m.params[i]!);
       const args = m.params.slice(0, taken).map((p, i) => `${cg.llvm(p)} %a${i}`);
       const give = (cg: Mut<Codegen>, v: string | undefined) => (m.throws !== undefined ? cg.succeeded(m, v) : cg.emit(v === undefined ? "ret void" : `ret ${returns} ${v}`));
       let result: string | undefined;
@@ -4869,12 +4873,15 @@ class Codegen implements PrintHost, ComptimeHost {
       case "any":
         return;
       case "literal":
-        let chosen: string;
+        let chosen = "false";
         if (info.member !== undefined) {
           chosen = this.conversions().equals(v, info.type, "zeroinitializer", info.member);
         } else {
-          const operand = this.value((p as Extract<Pattern, { kind: "literal" }>).value);
-          chosen = this.conversions().equals(v, info.type, operand, this.valueType((p as Extract<Pattern, { kind: "literal" }>).value));
+          assert(p.kind === "literal", "internal error: a literal test without its literal");
+          if (p.kind === "literal") {
+            const operand = this.value(p.value);
+            chosen = this.conversions().equals(v, info.type, operand, this.valueType(p.value));
+          }
         }
         pass(this, chosen);
         return;
@@ -4950,7 +4957,7 @@ class Codegen implements PrintHost, ComptimeHost {
   bindAll(this: Mut<this>, p: Ref<Pattern>, v: string, at: string | undefined, move: boolean) {
     const info = this.cur().patterns.get(p)!;
     if (info.kind === "any" && p.kind === "ident") {
-      const local = this.resolved(p as Ref<Expr>);
+      const local = this.resolved(exprKey(p));
       this.reserve(local);
       // A binding borrowing the part points where it lives; one of a part that is itself a
       // reference, like a `Mut` field, holds that reference.
