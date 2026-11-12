@@ -2437,7 +2437,7 @@ function fround(v: f64): f64 {
 }
 
 // A bigint as the nearest float, read through its digits, which Fish and JavaScript both parse.
-function toFloat(b: bigint): f64 {
+export function toFloat(b: bigint): f64 {
   return Number(b.toString())!;
 }
 
