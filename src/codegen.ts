@@ -2203,7 +2203,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
       const target = this.callOf(callback)!;
       const slice2 = [`ptr ${part(this, found, 4)}`].slice(0, this.bodyAt(target).params.length);
-      const gives = this.invoke(target, env, slice2, e, undefined, drop);
+      const gives = this.invoke(target, env, slice2, exprKey(e), undefined, drop);
       if (gives !== undefined && this.needsDrop(this.tables.typing.rec(closure).returns)) this.dispose(gives, this.tables.typing.rec(closure).returns);
       this.emit(`br label %${done}`);
       this.startBlock(done);
@@ -2438,7 +2438,7 @@ class Codegen implements PrintHost, ComptimeHost {
         }
       };
       const slice2 = passed.slice(0, cg.bodyAt(target).params.length);
-      const gives = cg.invoke(target, env, slice2, e, undefined, unwound);
+      const gives = cg.invoke(target, env, slice2, exprKey(e), undefined, unwound);
       if (gives !== undefined && cg.needsDrop(cg.tables.typing.rec(closure).returns)) cg.dispose(gives, cg.tables.typing.rec(closure).returns);
     });
     if (this.needsDrop(closure)) {
@@ -3983,7 +3983,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`${inside} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 1`);
     const target = this.callOf(callback)!;
     const chosen = this.bodyAt(target).params.length > 0 ? [`ptr ${inside}`] : [];
-    const result = this.invoke(target, env, chosen, e, leftovers);
+    const result = this.invoke(target, env, chosen, exprKey(e), leftovers);
     this.emit(`call void @${rc ? (reading ? "fsh_rt_rc_read_end" : "fsh_rt_rc_write_end") : reading ? "fsh_rt_read_unlock" : "fsh_rt_unlock"}(ptr ${at})`);
     if ((result !== undefined && result !== "") && !this.cur().types.has(e) && this.needsDrop(this.inst(target).returns)) this.pending.push({ v: result, type: this.inst(target).returns });
     return result;
@@ -7734,7 +7734,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
     };
     const slice2 = passed.slice(0, this.bodyAt(target).params.length);
-    const gives = this.invoke(target, env, slice2, e, undefined, unwound)!;
+    const gives = this.invoke(target, env, slice2, exprKey(e), undefined, unwound)!;
     if (method === "map") this.appended(out, this.tables.typing.rec(closure).returns, gives);
     else if (method === "forEach") {
       // What the callback gives is dropped; JavaScript's forEach ignores it.
@@ -9166,7 +9166,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${code} = extractvalue ${PAIR} ${both}, 1`);
       const part4 = this.bodyAt(target).params.length;
       const values = this.argValues(e.args, target, part4);
-      const result = this.invoke(target, env, values, e, undefined, undefined, code);
+      const result = this.invoke(target, env, values, exprKey(e), undefined, undefined, code);
       if ((result !== undefined && result !== "") && this.cur().types.has(e)) {
         const part5 = this.inst(target).returns;
         const get2 = this.cur().types.get(e)!;
@@ -9629,7 +9629,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
     };
     const chosen2 = (share !== undefined ? this.symbol(share.template) : undefined);
-    const result = this.invoke(target, pointer, values, e, leftovers, undefined, chosen2);
+    const result = this.invoke(target, pointer, values, exprKey(e), leftovers, undefined, chosen2);
     // A call through a type parameter returns what its bound's method declares.
     if ((result !== undefined && result !== "") && this.cur().types.has(e)) {
       const part8 = this.inst(target).returns;
@@ -10242,7 +10242,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // Calls a function with its arguments' values, after the instance when it is a method.
   // `after` runs once the call returns, and before an error it raises goes on.
   // `after` runs once the call is over, however it ended; `unwound` only when it panicked.
-  invoke(this: Mut<this>, target: InstanceId, pointer: string | undefined, args: Ref<string[]>, at?: Ref<Expr>, after?: (cg: Mut<Codegen>) => void, unwound?: (cg: Mut<Codegen>) => void, via?: string): string | undefined {
+  invoke(this: Mut<this>, target: InstanceId, pointer: string | undefined, args: Ref<string[]>, at?: Expr, after?: (cg: Mut<Codegen>) => void, unwound?: (cg: Mut<Codegen>) => void, via?: string): string | undefined {
     const cleanup = after !== undefined || unwound !== undefined ? (cg: Mut<Codegen>) => (after?.(cg), unwound?.(cg)) : undefined;
     const type = this.inst(target).returns;
     if (this.bodyAt(target).rust !== undefined) return this.rustInvoke(target, pointer, args, at!, cleanup, after);
@@ -12324,7 +12324,7 @@ class Codegen implements PrintHost, ComptimeHost {
         // A Rust type's constructor gives the handle to the value it boxed.
         if (this.bodyAt(this.callOf(e)!).rust !== undefined) {
           const argValues2 = this.argValues(e.args ?? [], this.callOf(e)!);
-          return this.invoke(this.callOf(e)!, undefined, argValues2, e)!;
+          return this.invoke(this.callOf(e)!, undefined, argValues2, exprKey(e))!;
         }
         // The constructor fills in a slot, which then holds the new instance. The slot starts
         // empty, so a field's first assignment has nothing to drop.
@@ -12333,7 +12333,7 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`store ${this.llvm(type)} zeroinitializer, ptr ${instance}`);
         // A panic in the constructor drops the fields it has set. One that throws has set none.
         const argValues3 = this.argValues(e.args ?? [], this.callOf(e)!);
-        this.invoke(this.callOf(e)!, instance, argValues3, e, undefined, (cg) => {
+        this.invoke(this.callOf(e)!, instance, argValues3, exprKey(e), undefined, (cg) => {
           const unstash2 = cg.unstash(instance, type);
           cg.dispose(unstash2, type);
         });
@@ -13250,7 +13250,7 @@ class Codegen implements PrintHost, ComptimeHost {
         }
       };
       const slice2 = passed.slice(0, this.bodyAt(target).params.length);
-      const gives = this.invoke(target, env, slice2, e, undefined, unwound)!;
+      const gives = this.invoke(target, env, slice2, exprKey(e), undefined, unwound)!;
       const text = this.convert(gives, this.tables.typing.rec(closure!).returns, "string");
       this.emit(`call void @fsh_rt_regex_put(ptr ${it}, ptr ${text})`);
       this.dispose(text, "string");
