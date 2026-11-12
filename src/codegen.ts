@@ -1511,7 +1511,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // `x.checkedAdd(y)` and its kin: checked gives null when the operation overflowed, and
   // overflowing pairs the wrapped value with whether it did, the intrinsic's own `{ iN, i1 }`.
   integerMethodCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>): string {
-    const callee = e.callee;
+    const callee: Ref<Expr> = e.callee;
     if (callee.kind !== "member") return "";
     const type = this.tables.typing.lower(this.valueType(callee.object)) as Integer;
     const [family, operation] = integerMethod(callee.name)!;
@@ -3514,7 +3514,7 @@ class Codegen implements PrintHost, ComptimeHost {
       };
       // A closure may take fewer parameters than its callable passes: the rest are dropped here.
       const taken = cg.bodyAt(target).closure !== undefined ? cg.bodyAt(target).params.length : m.params.length;
-      m.params.slice(taken).forEach((p, i) => cg.dispose(`%a${taken + i}`, p));
+      m.params.slice(taken as i64).forEach((p, i) => cg.dispose(`%a${taken + i}`, p));
       const args = m.params.slice(0, taken).map((p, i) => `${cg.llvm(p)} %a${i}`);
       const give = (cg: Mut<Codegen>, v: string | undefined) => (m.throws !== undefined ? cg.succeeded(m, v) : cg.emit(v === undefined ? "ret void" : `ret ${returns} ${v}`));
       let result: string | undefined;
@@ -5438,7 +5438,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // `JSON.stringify(x)`: x written into a new writer, whose text becomes the string.
   stringifyCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>): string {
-    const x = e.args[0]!;
+    const x: Ref<Expr> = e.args[0]!;
     const v = this.value(x);
     const w = this.temp();
     this.emit(`${w} = call ptr @fsh_rt_json_new()`);
@@ -5691,7 +5691,7 @@ class Codegen implements PrintHost, ComptimeHost {
     let out: JsonField[] = [];
     const fields = this.tables.typing.rec(c).fields;
     for (let i: usize = 0; i < fields.length; i++) {
-      const f = fields[i]!;
+      const f: Ref<Field> = fields[i]!;
       if (!f.name.startsWith("#")) out.push({ name: f.name, type: f.type, path: [offset + i], omit: f.optional !== undefined });
     }
     return out;
@@ -5819,7 +5819,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // formats one: a literal holding a percent sign, or a string known only at run time.
   formats(this: Mut<this>, args: Ref<Expr[]>): boolean {
     if (args.length < 2) return false;
-    const first = args[0]!;
+    const first: Ref<Expr> = args[0]!;
     if (first.kind === "string") return first.value.includes("%");
     const t = this.tables.typing.lower(this.printedType(first));
     const text = (cg: Mut<Codegen>, m: Type) => {
@@ -5886,7 +5886,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const text2 = this.text(x);
         put(this, 3, "ptr", text2);
       } else if (typeof x === "boolean") whole(this, FARG_KINDS.boolean as i32, x ? "1" : "0");
-      else whole(this, FARG_KINDS.int, String(x));
+      else whole(this, FARG_KINDS.int as i32, String(x));
       return;
     }
     if (t === "string") {
@@ -7108,7 +7108,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const result = this.alloca(this.llvm(t));
     const done = this.label();
     this.emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
-    const groups = new Map<string, VariantType[]>();
+    let groups = new Map<string, VariantType[]>();
     let parts: (Type | VariantType[])[] = [];
     const members2 = this.tables.typing.rec(t).members;
     for (const m of members2) {
@@ -8459,7 +8459,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Whether an expression makes a value of its own, rather than reading one that lives somewhere.
   // A conditional or `??` makes one from whichever side it gives.
-  fresh(this: Mut<this>, e: Ref<Expr>): boolean {
+  fresh(this: Mut<this>, eGiven: Ref<Expr>): boolean {
+    let e: Ref<Expr> = eGiven;
     while (this.wraps(e)) e = e.expr;
     if (!this.needsDrop(this.cur().types.get(e))) return false;
     switch (e.kind) {
@@ -8496,7 +8497,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // What a wrapper with no conversion of its own hands on, so it owns what its operand owns.
-  handedOn(this: Mut<this>, e: Ref<Expr>): Expr {
+  handedOn(this: Mut<this>, eGiven: Ref<Expr>): Expr {
+    let e: Ref<Expr> = eGiven;
     while (this.wraps(e) && !this.cur().coercions.has(e)) e = e.expr;
     return e;
   }
@@ -9951,7 +9953,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Whether a field read reaches into a shared value's block through its interior-mutable
   // fields, where it is read in place.
-  inBlock(e: Ref<Expr>): boolean {
+  inBlock(eGiven: Ref<Expr>): boolean {
+    let e: Ref<Expr> = eGiven;
     for (; e.kind === "member" && !this.cur().calls.has(e); e = e.object) {
       const holder = this.referent(this.cur().types.get(e.object)!);
       const kind = this.recOf(holder)?.kind;
@@ -12410,7 +12413,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Writes a value to a place, giving the assignment's value: what was written, or, for a setter,
   // which keeps what it is given, a copy of its own released when the statement ends.
-  store(this: Mut<this>, target: Ref<Expr>, result: string): string {
+  store(this: Mut<this>, targetGiven: Ref<Expr>, result: string): string {
+    let target: Ref<Expr> = targetGiven;
     target = bare(target);
     const setter = this.setterOf(target);
     if (setter !== undefined && target.kind === "member") {
@@ -12485,7 +12489,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // Where an assignment target lives: a variable's slot, or a field inside one.
-  address(this: Mut<this>, target: Ref<Expr>): string {
+  address(this: Mut<this>, targetGiven: Ref<Expr>): string {
+    let target: Ref<Expr> = targetGiven;
     target = bare(target);
     if (target.kind === "this") return "%this";
     if (target.kind === "index") return this.element(target);
@@ -12528,7 +12533,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Whether an expression names somewhere a value lives: a variable, `this`, or a field of one,
   // but not a variable narrowed to part of a union, an enum's member or a union's shared field.
-  lendable(this: Mut<this>, e: Ref<Expr>): boolean {
+  lendable(this: Mut<this>, eGiven: Ref<Expr>): boolean {
+    let e: Ref<Expr> = eGiven;
     let through = false;
     for (e = bare(e); e.kind === "member" && !this.cur().calls.has(e); e = bare(e.object)) {
       through = true;
@@ -12557,7 +12563,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // The type a place is stored as. Read through a type parameter's bound, a field may have a
   // wider type than the one it is stored with.
-  stored(this: Mut<this>, e: Ref<Expr>): Type {
+  stored(this: Mut<this>, eGiven: Ref<Expr>): Type {
+    let e: Ref<Expr> = eGiven;
     e = bare(e);
     if (e.kind === "index" && this.indexes(this.valueType(e.object))) return this.placeType(e);
     if (e.kind !== "member" || this.cur().calls.has(e)) return this.cur().types.get(e)!;
