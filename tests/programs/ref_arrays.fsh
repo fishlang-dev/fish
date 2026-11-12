@@ -3915,3 +3915,87 @@ function main() {
   eat(b3);
   console.log(y.s);
 }
+// case: ref_arrays_lifetime_returned
+// expect: a1
+class B { s: string; constructor(s: string) { this.s = s; } }
+function both<A extends Lifetime>(x: Ref<B, A>, _other: Ref<B>): Ref<B, A>[] { return [x]; }
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 2);
+  const rs = both(b1, b2);
+  eat(b2);
+  console.log(rs[0].s);
+}
+// case: ref_arrays_lifetime_returned_moved
+// error: cannot move 'b1' while 'rs' borrows 'b1' and is used later
+class B { s: string; constructor(s: string) { this.s = s; } }
+function both<A extends Lifetime>(x: Ref<B, A>, _other: Ref<B>): Ref<B, A>[] { return [x]; }
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 2);
+  const rs = both(b1, b2);
+  eat(b1);
+  console.log(rs[0].s);
+}
+// case: ref_arrays_lifetime_alias
+// expect: a1 1
+class B { s: string; constructor(s: string) { this.s = s; } }
+type Stack<A extends Lifetime> = { items: Ref<B, A>[]; n: i64 };
+function start<A extends Lifetime>(x: Ref<B, A>, _other: Ref<B>): Stack<A> { return { items: [x], n: 1 }; }
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 2);
+  const st = start(b1, b2);
+  eat(b2);
+  console.log(st.items[0].s, st.n);
+}
+// case: ref_arrays_lifetime_alias_moved
+// error: cannot move 'b1' while 'st' borrows 'b1' and is used later
+class B { s: string; constructor(s: string) { this.s = s; } }
+type Stack<A extends Lifetime> = { items: Ref<B, A>[]; n: i64 };
+function start<A extends Lifetime>(x: Ref<B, A>, _other: Ref<B>): Stack<A> { return { items: [x], n: 1 }; }
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 2);
+  const st = start(b1, b2);
+  eat(b1);
+  console.log(st.items[0].s, st.n);
+}
+// case: ref_arrays_lifetime_class
+// expect: a1
+// expect: b2
+class B { s: string; constructor(s: string) { this.s = s; } }
+class Stack<A extends Lifetime> {
+  items: Ref<B, A>[] = [];
+  add(this: Mut<this>, x: Ref<B, A>): void { this.items.push(x); }
+  top(): Ref<B, A> { return this.items[this.items.length - 1]; }
+}
+function main() {
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 2);
+  let st = new Stack();
+  st.add(b1);
+  console.log(st.top().s);
+  st.add(b2);
+  console.log(st.top().s);
+}
+// case: ref_arrays_lifetime_class_moved
+// error: cannot move 'b1'
+class B { s: string; constructor(s: string) { this.s = s; } }
+class Stack<A extends Lifetime> {
+  items: Ref<B, A>[] = [];
+  add(this: Mut<this>, x: Ref<B, A>): void { this.items.push(x); }
+  top(): Ref<B, A> { return this.items[this.items.length - 1]; }
+}
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let b1 = new B("a" + 1);
+  let st = new Stack();
+  st.add(b1);
+  eat(b1);
+  console.log(st.top().s);
+}

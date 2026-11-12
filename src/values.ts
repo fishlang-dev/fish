@@ -524,9 +524,9 @@ export class Expressions<C extends Context> implements Union<C> {
   private isArray(t: Type): t is ArrayType {
     return this.recOf(t)?.kind === "array";
   }
-  // Whether a value holds an array of references, which only a few operations are checked for.
+  // Whether a value holds an array of references, growable or fixed.
   private holdsRefArray(t: Type): boolean {
-    return this.ctx.typing().holdsPart(t, (u) => this.isArray(u) && this.ctx.typing().holdsRef(this.ctx.typing().rec(u).element), true);
+    return this.ctx.typing().holdsPart(t, (u) => (this.isArray(u) && this.ctx.typing().holdsRef(this.ctx.typing().rec(u).element)) || (this.isFixed(u) && this.ctx.typing().holdsRef(this.ctx.typing().rec(u).element)), true);
   }
   private isFixed(t: Type): t is FixedType {
     return this.recOf(t)?.kind === "fixed";

@@ -144,15 +144,50 @@ function main() {
 // A fixed array read through a reference.
 function main() { let a: FixedArray<string, 2> = FixedArray.filled("s" + 1); a[1] = "t"; const r: Ref<FixedArray<string, 2>> = a; console.log(r[0], r[1], r.length); }
 // case: fixed_refs
-// error: fixed arrays of references are not supported yet
+// expect: o1 o1 2
+class B { s: string; constructor(s: string) { this.s = s; } }
 function main() {
-  const o = "o" + 1;
-  let a: FixedArray<Ref<string>, 2> = [o, o];
-  {
-    const s = "x" + 1;
-    a = [s, s];
-  }
-  console.log(a[0]);
+  let o = new B("o" + 1);
+  const a: FixedArray<Ref<B>, 2> = [o, o];
+  console.log(a[0].s, a[1].s, a.length);
+}
+// case: fixed_refs_loop
+// expect: a1
+// expect: b2
+class B { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 2);
+  const a: FixedArray<Ref<B>, 2> = [b1, b2];
+  for (const r of a) console.log(r.s);
+}
+// case: fixed_refs_referent_moved
+// error: cannot move 'o' while 'a' borrows 'o' and is used later
+class B { s: string; constructor(s: string) { this.s = s; } }
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let o = new B("o" + 1);
+  const a: FixedArray<Ref<B>, 2> = [o, o];
+  eat(o);
+  console.log(a[0].s);
+}
+// case: fixed_refs_element_read_then_moved
+// error: cannot move 'o'
+class B { s: string; constructor(s: string) { this.s = s; } }
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let o = new B("o" + 1);
+  const a: FixedArray<Ref<B>, 1> = [o];
+  const r: Ref<B> = a[0];
+  eat(o);
+  console.log(r.s);
+}
+// case: fixed_refs_mutable_refused
+// error: fixed arrays of mutable references are not supported yet
+class B { s: string; constructor(s: string) { this.s = s; } }
+function main() {
+  let o = new B("o" + 1);
+  const a: FixedArray<Mut<B>, 1> = [o];
 }
 // case: fixed_shared_loop
 // expect: a1
