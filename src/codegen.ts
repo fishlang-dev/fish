@@ -154,27 +154,26 @@ const DECLARED = new Set(RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.e
 // How a narrow value crosses to C, which expects it widened by its caller: a boolean, a byte
 // holding 0 or 1, and unsigned integers zero-extended, signed ones sign-extended.
 const extension = (type: Type) => (type === "boolean" || type === "u8" || type === "u16" ? "zeroext" : type === "i8" || type === "i16" ? "signext" : "");
-const crossing = (llvm: Llvm, type: Type) => [llvm(type), extension(type)].filter(Boolean).join(" ");
-const crossed = (llvm: Llvm, type: Type) => [extension(type), llvm(type)].filter(Boolean).join(" ");
-type Llvm = (t: Type) => string;
+const crossing = (typing: Ref<Typing>, type: Type) => (extension(type) === "" ? llvmOf(typing, type) : `${llvmOf(typing, type)} ${extension(type)}`);
+const crossed = (typing: Ref<Typing>, type: Type) => (extension(type) === "" ? llvmOf(typing, type) : `${extension(type)} ${llvmOf(typing, type)}`);
 
 // The C parameters a value crossing to a Rust shim is passed as: a pointer for a Rust type, a
 // string or an Option of either, which is null when empty; an array's buffer and length; and a
 // flag first for an Option of a number, a boolean or an array.
-function shimParams(llvm: Llvm, c: Crossing): string[] {
-  if (c.kind === "plain") return [crossing(llvm, c.type)];
+function shimParams(typing: Ref<Typing>, c: Crossing): string[] {
+  if (c.kind === "plain") return [crossing(typing, c.type)];
   if (c.kind === "array") return ["ptr", "i64"];
-  if (c.kind === "option" && (c.of.kind === "plain" || c.of.kind === "array")) return ["i1 zeroext", ...shimParams(llvm, c.of)];
+  if (c.kind === "option" && (c.of.kind === "plain" || c.of.kind === "array")) return ["i1 zeroext", ...shimParams(typing, c.of)];
   return ["ptr"];
 }
 
 // What a Rust shim returns for what its function gives, and the type of the slot it writes the
 // rest of it into: an array, or what an Option of a number, a boolean or an array holds.
-function shimGives(llvm: Llvm, c: Crossing | undefined): { returns: string; out?: string } {
+function shimGives(typing: Ref<Typing>, c: Crossing | undefined): { returns: string; out?: string } {
   if (!c) return { returns: "void" };
-  if (c.kind === "plain") return { returns: crossed(llvm, c.type) };
+  if (c.kind === "plain") return { returns: crossed(typing, c.type) };
   if (c.kind === "array") return { returns: "void", out: ARRAY };
-  if (c.kind === "option" && c.of.kind === "plain") return { returns: "zeroext i1", out: llvm(c.inner) };
+  if (c.kind === "option" && c.of.kind === "plain") return { returns: "zeroext i1", out: llvmOf(typing, c.inner) };
   if (c.kind === "option" && c.of.kind === "array") return { returns: "zeroext i1", out: ARRAY };
   return { returns: "ptr" };
 }
@@ -260,18 +259,7 @@ class Codegen implements PrintHost {
   optionalCalls: NodeSet<Expr>;
   presenceTests: NodeMap<Expr, { object: Expr; name: string; when: boolean; }>;
   arenas: Arenas;
-  localOf: (id: LocalId) => Local;
-  llvm: (t: Type) => string;
   names: Map<InstanceId, string>;
-  symbol: (a: Ref<Arenas>, i: Instance) => string;
-  recOf: <T extends Type>(t: T | undefined) => RecordOf<Exclude<T, string>> | undefined;
-  isRef: (t: Type) => boolean;
-  isArray: (t: Type) => t is ArrayType;
-  indexes: (t: Type) => boolean;
-  isDyn: (t: Type) => t is DynType;
-  relays: (from: Type, to: DynType) => boolean;
-  referent: (t: Type) => Type;
-  holdsRust: (t: Type) => boolean;
   unwinds: "uwtable" | "uwtable personality ptr @__gcc_personality_v0";
   framing: string[] | undefined;
   site: Span | undefined;
@@ -294,9 +282,6 @@ class Codegen implements PrintHost {
   setters: NodeMap<Expr, InstanceId>;
   coercions: NodeMap<Expr, Type>;
   jumps: NodeMap<Stmt, Stmt>;
-  localAt: (n: Expr | Stmt | Param | ObjectProp) => Local | undefined;
-  callOf: (e: Expr) => Instance | undefined;
-  setterOf: (e: Expr) => Instance | undefined;
   self: ClassType | undefined;
   captured: Map<LocalId, string>;
   known: NodeMap<Expr, string>;
@@ -369,45 +354,7 @@ class Codegen implements PrintHost {
 
     ({ asserts: this.asserts, computed: this.computed, jsAccessors: this.jsAccessors, jsCalls: this.jsCalls, jsEmptyTests: this.jsEmptyTests, jsEvaluations: this.jsEvaluations, jsExports: this.jsExports, jsMembers: this.jsMembers, jsMethods: this.jsMethods, jsNews: this.jsNews, jsOptionalOf: this.jsOptionalOf, jsStatics: this.jsStatics, timerCalls: this.timerCalls, restStarts: this.restStarts, stringBuilds: this.stringBuilds, syncFileCalls: this.syncFileCalls, combinedCalls: this.combinedCalls, formatCalls: this.formatCalls, inspectCalls: this.inspectCalls, equalities: this.equalities, jsonCalls: this.jsonCalls, dynCalls: this.dynCalls, dynMembers: this.dynMembers, boxedMembers: this.boxedMembers, fixedFills: this.fixedFills, printCalls: this.printCalls, clocks: this.clocks, fileCalls: this.fileCalls, lengthChecks: this.lengthChecks, maths: this.maths, parses: this.parses, fixedPrints: this.fixedPrints, regexCalls: this.regexCalls, regexNews: this.regexNews, regexStringCalls: this.regexStringCalls, selfCalls: this.selfCalls, kindTests: this.kindTests, keyTests: this.keyTests, typing: this.typing, regex: this.regexTables, joinCalls: this.joinCalls, integerCalls: this.integerCalls, optionalCalls: this.optionalCalls, presenceTests: this.presenceTests, arenas: this.arenas } = this.noted);
 
-    this.localOf = (id: LocalId): Local => this.arenas.localOf(id);
-
-    this.llvm = (t) => llvmOf(this.typing, t);
-
     this.names = symbolNames(this.arenas);
-
-    // Instances made while compiling, as comptime makes, are named once they are met.
-    this.symbol = (a: Ref<Arenas>, i: Instance): string => {
-      if (!this.names.has(i.id)) this.names = symbolNames(a);
-      return symbolIn(a, i, this.names);
-    };
-
-    this.recOf = <T extends Type>(t: T | undefined) => (t === undefined || typeof t === "string" ? undefined : this.typing.rec(t as Exclude<T, string>));
-
-    this.isRef = (t: Type) => this.recOf(t)?.kind === "ref";
-
-    this.isArray = (t: Type): t is ArrayType => this.recOf(t)?.kind === "array";
-
-    // Whether indexing a value reads an element: an array's, or a fixed array's, through a
-    // reference too.
-    this.indexes = (t: Type): boolean => {
-      const held = this.referent(t);
-      const kind = this.recOf(held)?.kind;
-      return kind === "array" || kind === "fixed";
-    };
-
-    this.isDyn = (t: Type): t is DynType => this.recOf(t)?.kind === "dyn";
-
-    this.relays = (from: Type, to: DynType) => this.isDyn(from) && this.typing.callableOf.has(this.typing.rec(from).of) && this.typing.callableOf.has(this.typing.rec(to).of) && !this.typing.sameCallable(from, to);
-
-    // What a reference points to, or the type itself.
-    this.referent = (t: Type): Type => {
-      if (typeof t === "string") return t;
-      const r = this.typing.rec(t);
-      return r.kind === "ref" ? r.to : t;
-    };
-
-    // Whether a value of the type holds a Rust handle, which only moves.
-    this.holdsRust = (t: Type) => this.typing.holdsPart(t, (u) => rustClassOf(this.typing, u) !== undefined);
 
     this.unwinds = this.panic === "abort" ? "uwtable" : UNWINDS;
 
@@ -452,12 +399,6 @@ class Codegen implements PrintHost {
     this.current = this.instances[0]!;
 
     ({ types: this.types, locals: this.locals, calls: this.calls, setters: this.setters, coercions: this.coercions, jumps: this.jumps } = this.current);
-
-    this.localAt = (n: Expr | Stmt | Param | ObjectProp) => this.arenas.localOf(this.locals.get(n));
-
-    this.callOf = (e: Expr) => this.arenas.instanceOf(this.calls.get(e));
-
-    this.setterOf = (e: Expr) => this.arenas.instanceOf(this.setters.get(e));
 
     // The class of the constructor or method being emitted, whose instance `%this` points to.
   
@@ -625,12 +566,12 @@ class Codegen implements PrintHost {
           if (this.declaredRust.has(rust)) continue;
           this.declaredRust.add(rust);
           const self = bodyOf(this.noted.arenas, instance).self && !bodyOf(this.noted.arenas, instance).self!.constructor ? ["ptr"] : [];
-          const gives = shimGives(this.llvm, rustGiven(this.noted.typing, this.noted.arenas, instance));
-          const params = [...self, ...instance.signature!.flatMap((t) => shimParams(this.llvm, rustCrossing(this.typing, t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
+          const gives = shimGives(this.typing, rustGiven(this.noted.typing, this.noted.arenas, instance));
+          const params = [...self, ...instance.signature!.flatMap((t) => shimParams(this.typing, rustCrossing(this.typing, t))), ...(gives.out ? ["ptr"] : []), ...(instance.throws ? ["ptr"] : []), "ptr"];
           this.out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`, "");
           continue;
         }
-        if (!DECLARED.has(bodyOf(this.noted.arenas, instance).name)) this.out.push(`declare ${crossed(this.llvm, instance.returns)} ${this.symbol(this.noted.arenas, instance)}(${instance.signature!.map((t) => crossing(this.llvm, t)).join(", ")})`, "");
+        if (!DECLARED.has(bodyOf(this.noted.arenas, instance).name)) this.out.push(`declare ${crossed(this.typing, instance.returns)} ${this.symbol(this.noted.arenas, instance)}(${instance.signature!.map((t) => crossing(this.typing, t)).join(", ")})`, "");
         continue;
       }
       this.current = instance;
@@ -809,6 +750,72 @@ class Codegen implements PrintHost {
     ...this.filled,
     "",
   ].join("\n");
+  }
+
+  localOf(this: Mut<this>, id: LocalId): Local {
+    return this.arenas.localOf(id);
+  }
+
+  llvm(this: Mut<this>, t: Type): string {
+    return llvmOf(this.typing, t);
+  }
+
+  // Instances made while compiling, as comptime makes, are named once they are met.
+  symbol(this: Mut<this>, a: Ref<Arenas>, i: Instance): string {
+  if (!this.names.has(i.id)) this.names = symbolNames(a);
+  return symbolIn(a, i, this.names);
+}
+
+  recOf<T extends Type>(this: Mut<this>, t: T | undefined): RecordOf<Exclude<T, string>> | undefined {
+    return (t === undefined || typeof t === "string" ? undefined : this.typing.rec(t as Exclude<T, string>));
+  }
+
+  isRef(this: Mut<this>, t: Type): boolean {
+    return this.recOf(t)?.kind === "ref";
+  }
+
+  isArray(this: Mut<this>, t: Type): t is ArrayType {
+    return this.recOf(t)?.kind === "array";
+  }
+
+  // Whether indexing a value reads an element: an array's, or a fixed array's, through a
+  // reference too.
+  indexes(this: Mut<this>, t: Type): boolean {
+  const held = this.referent(t);
+  const kind = this.recOf(held)?.kind;
+  return kind === "array" || kind === "fixed";
+}
+
+  isDyn(this: Mut<this>, t: Type): t is DynType {
+    return this.recOf(t)?.kind === "dyn";
+  }
+
+  relays(this: Mut<this>, from: Type, to: DynType): boolean {
+    return this.isDyn(from) && this.typing.callableOf.has(this.typing.rec(from).of) && this.typing.callableOf.has(this.typing.rec(to).of) && !this.typing.sameCallable(from, to);
+  }
+
+  // What a reference points to, or the type itself.
+  referent(this: Mut<this>, t: Type): Type {
+  if (typeof t === "string") return t;
+  const r = this.typing.rec(t);
+  return r.kind === "ref" ? r.to : t;
+}
+
+  // Whether a value of the type holds a Rust handle, which only moves.
+  holdsRust(this: Mut<this>, t: Type): boolean {
+    return this.typing.holdsPart(t, (u) => rustClassOf(this.typing, u) !== undefined);
+  }
+
+  localAt(this: Mut<this>, n: Expr | Stmt | Param | ObjectProp): Local | undefined {
+    return this.arenas.localOf(this.locals.get(n));
+  }
+
+  callOf(this: Mut<this>, e: Expr): Instance | undefined {
+    return this.arenas.instanceOf(this.calls.get(e));
+  }
+
+  setterOf(this: Mut<this>, e: Expr): Instance | undefined {
+    return this.arenas.instanceOf(this.setters.get(e));
   }
 
   // The integer operators, lowered into the function being emitted.
@@ -8755,8 +8762,8 @@ class Codegen implements PrintHost {
     if (bodyOf(this.noted.arenas, target).rust) return this.rustInvoke(target, pointer, args, at!, cleanup, after);
     const values = pointer ? [`ptr ${pointer}`, ...args] : args;
     // A narrow value crosses to C widened, both ways.
-    const passed = bodyOf(this.noted.arenas, target).foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(this.llvm, target.signature![i]!)} `)) : values;
-    const call = `call ${bodyOf(this.noted.arenas, target).foreign ? crossed(this.llvm, type) : this.resultType(target)} ${via ?? this.symbol(this.noted.arenas, target)}(${passed.join(", ")})`;
+    const passed = bodyOf(this.noted.arenas, target).foreign ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(this.typing, target.signature![i]!)} `)) : values;
+    const call = `call ${bodyOf(this.noted.arenas, target).foreign ? crossed(this.typing, type) : this.resultType(target)} ${via ?? this.symbol(this.noted.arenas, target)}(${passed.join(", ")})`;
     if (type === "void" && !target.throws) {
       this.unwinding(call, undefined, cleanup);
       after?.();
@@ -8825,7 +8832,7 @@ class Codegen implements PrintHost {
     const pass = (c: Crossing, t: Type, v: string): string[] => {
       switch (c.kind) {
         case "plain":
-          return [`${crossing(this.llvm, t)} ${v}`];
+          return [`${crossing(this.typing, t)} ${v}`];
         case "handle":
           return [`ptr ${v}`];
         case "string":
@@ -8872,7 +8879,7 @@ class Codegen implements PrintHost {
     };
     args.forEach((a, i) => passed.push(...pass(rustCrossing(this.typing, target.signature![i]!), target.signature![i]!, a.slice(a.lastIndexOf(" ") + 1))));
     const gives = rustGiven(this.noted.typing, this.noted.arenas, target);
-    const shim = shimGives(this.llvm, gives);
+    const shim = shimGives(this.typing, gives);
     const out = shim.out ? this.alloca(shim.out) : undefined;
     if (out) passed.push(`ptr ${out}`);
     const err = target.throws ? this.alloca("ptr") : undefined;
@@ -9967,7 +9974,7 @@ class Codegen implements PrintHost {
     // A library's panics all unwind, the runtime's default, whichever way the build chose: the
     // abort happens here, before C sees the unwind.
     const call = `${i.returns === "void" ? "" : "%r = "}invoke ${this.llvm(i.returns)} ${this.symbol(this.noted.arenas, i)}(${params.map(([t, a]) => `${this.llvm(t)} ${a}`).join(", ")})`;
-    const head = `define ${crossed(this.llvm, i.returns)} @"${bodyOf(this.noted.arenas, i).name}"(${params.map(([t, a]) => `${crossing(this.llvm, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
+    const head = `define ${crossed(this.typing, i.returns)} @"${bodyOf(this.noted.arenas, i).name}"(${params.map(([t, a]) => `${crossing(this.typing, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
     const done = i.returns === "void" ? "  ret void" : `  ret ${this.llvm(i.returns)} %r`;
     return [head, "entry:", `  ${call} to label %ok unwind label %pad`, "ok:", done, "pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  call void @abort()", "  unreachable", "}", ""];
   }
