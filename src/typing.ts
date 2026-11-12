@@ -394,7 +394,7 @@ export function idOf(t: usize | string): usize {
   return typeof t === "string" ? PRIMITIVE_IDS.get(t)! : t;
 }
 
-const literalText = (v: string | bigint | boolean): string => (typeof v === "string" ? v : typeof v === "bigint" ? `${v}` : `${v}`);
+export const literalText = (v: string | bigint | boolean): string => (typeof v === "string" ? v : typeof v === "bigint" ? `${v}` : `${v}`);
 
 // The type an id keys.
 const typeAt = (id: usize): Type => (id <= PRIMITIVES.length ? PRIMITIVES[id - 1]! : (id as Exclude<Type, string>));

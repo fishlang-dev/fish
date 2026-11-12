@@ -9,7 +9,7 @@ import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { CheckedHost, comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, untagged, type Value } from "./comptime.ts";
 import { Printer, RUNTIME, type PrintHost } from "./runtime.ts";
 import type { ArithmeticOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { ARRAY, DYN, compound, Conversions, layoutOf } from "./layout.ts";
+import { ARRAY, DYN, compound, Conversions, llvmOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
 import { EMBEDDED, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, type InterfaceType, type ClosureType, type FixedType, type RefType, INTEGERS, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
@@ -371,7 +371,7 @@ class Codegen implements PrintHost {
 
     this.localOf = (id: LocalId): Local => this.arenas.localOf(id);
 
-    this.llvm = layoutOf(this.typing);
+    this.llvm = (t) => llvmOf(this.typing, t);
 
     this.names = symbolNames(this.arenas);
 
@@ -831,6 +831,12 @@ class Codegen implements PrintHost {
 
   convert(this: Mut<this>, v: string, from: Type, to: Type): string {
     return this.conversions().convert(v, from, to);
+  }
+
+  // The value of `x`, an operand of the test `e`; a guarded test keeps its left operand from
+  // what its right one may do.
+  operandOf(this: Mut<this>, x: Ref<Expr>, e: Ref<Expr>, guarded: boolean): string {
+    return guarded && e.kind === "binary" && x.id === e.left.id ? this.operand(x, [e.right]) : this.value(x);
   }
 
   deep(this: Mut<this>, a: string, b: string, type: Type): string {
@@ -2335,7 +2341,17 @@ class Codegen implements PrintHost {
       this.emit(`call void @fsh_rt_block_retain(ptr ${v})`);
       return v;
     }
-    if (r?.kind === "union") return this.conversions().eachMember(v, type as UnionType, this.typing.blockType("JsValue"), (part, m) => this.toJs(part, m, empty, declared));
+    if (r?.kind === "union") {
+      const box = this.typing.blockType("JsValue");
+      const conversions = this.conversions();
+      const b = conversions.branch(v, type as UnionType, box);
+      for (let i: usize = 0; i < b.members.length; i++) {
+        const part = conversions.arm(b, i, v, type as UnionType);
+        const made = this.toJs(part, b.members[i]!, empty, declared);
+        conversions.armDone(b, box, made);
+      }
+      return conversions.joined(b, box);
+    }
     // A Fish future as a JS promise, settled by a task that awaits it, spawned now.
     if (this.isPromised(type)) {
       const [settleAt, frame] = [this.alloca("ptr"), this.alloca(`{ ${DYN}, ptr }`)];
@@ -7895,7 +7911,7 @@ class Codegen implements PrintHost {
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return this.value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
       if (this.maths.has(e)) return this.mathCall(e);
-      if (this.kindTests.has(e)) return this.conversions().test(e, ((e) => this.value(e)), ((e) => this.valueType(e)))!;
+      if (this.kindTests.has(e)) return this.conversions().test(e, false)!;
       if (this.syncFileCalls.has(e)) return this.syncFile(e, this.syncFileCalls.get(e)!);
       // `Promise.all` and `Promise.race`: their futures moved into the combined one's frame.
       if (this.combinedCalls.has(e)) {
@@ -8392,8 +8408,7 @@ class Codegen implements PrintHost {
     const union = this.recOf(whole);
     if (union?.kind !== "union") return;
     // An `unknown` holding any number holds JavaScript's `number`, read as an f64.
-    const gives = (m: Type) => (union.unknown ? this.typing.unknownGives(m, type) : this.typing.fits(m, type));
-    const [held, wrong, bad] = [this.conversions().holdsWhere(v, whole as UnionType, gives), this.temp(), this.temp()];
+    const [held, wrong, bad] = [this.conversions().holdsWhere(v, whole as UnionType, { by: "gives", type, unknown: union.unknown === true }), this.temp(), this.temp()];
     this.emit(`${wrong} = xor i1 ${answer}, ${held}`);
     this.emit(`${bad} = select i1 ${answer}, i1 ${yes ? wrong : "false"}, i1 ${no ? wrong : "false"}`);
     const [fail, ok] = [this.label(), this.label()];
@@ -10645,7 +10660,7 @@ class Codegen implements PrintHost {
           return same;
         }
         const first = (x: Expr) => (x === e.left ? this.operand(x, [e.right]) : this.value(x));
-        const tested = this.conversions().test(e, first, ((e) => this.valueType(e)));
+        const tested = this.conversions().test(e, true);
         if (tested) return tested;
         const condition = COMPARISON[e.op];
         const [a, b] = [first(e.left), this.value(e.right)];
