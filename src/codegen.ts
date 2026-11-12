@@ -1124,7 +1124,7 @@ class Codegen implements PrintHost, ComptimeHost {
         let code = new Map<usize, InstanceId | undefined>();
         const items = found.get(i.id)!;
         for (const k of items) {
-          const pattern = b.params[k]!.pattern;
+          const pattern: Ref<Pattern> = b.params[k]!.pattern;
           code.set(k, this.calledThrough(i.id, pattern.kind === "ident" ? pattern.name : ""));
         }
         out.set(i.id, { template, at: found.get(i.id)!, code });
@@ -2232,7 +2232,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const found = this.temp();
       this.emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
       const target = this.callOf(callback)!;
-      const slice2 = [`ptr ${part(this, found, 4)}`].slice(0, this.bodyAt(target).params.length);
+      const slice2 = [`ptr ${part(this, found, 4)}`].slice(0, this.bodyAt(target).params.length as i64);
       const gives = this.invoke(target, env, slice2, exprKey(e), undefined, drop);
       if (gives !== undefined && this.needsDrop(this.tables.typing.rec(closure).returns)) this.dispose(gives, this.tables.typing.rec(closure).returns);
       this.emit(`br label %${done}`);
@@ -2268,6 +2268,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // `for...of` over a Map's entries or a Set's members, in insertion order. The table's pointer
   // and the entry reached live in slots, so a generator's loop may stop at a `yield`; the loop
   // owns the table only when it was made for it.
+  /** @throws {CompileError} */
   mapLoop(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "forIn" | "forOf" }>>, t: MapType) {
     const local = this.resolved(s.left as Stmt);
     const entry = this.entryType(t);
@@ -4065,6 +4066,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // `for...of` over a fixed array: each element where it lives, as an array's loop gives them;
   // a temporary is held in a slot of the loop's own.
+  /** @throws {CompileError} */
   fixedLoop(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "forIn" | "forOf" }>>, type: FixedType) {
     const local = this.resolved(s.left as Stmt);
     this.scopes.push({ transient: false, held: [] });
@@ -4145,6 +4147,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // `for...of` over a string: each code point as a new string, until the runtime gives none. The
   // loop holds a reference to the string, so changing the variable it came from changes nothing.
+  /** @throws {CompileError} */
   stringLoop(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "forIn" | "forOf" }>>) {
     const local = this.resolved(s.left as Stmt);
     this.scopes.push({ transient: false, held: [] });
@@ -4191,6 +4194,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // `for...of` over a generator: each `next()` gives the variable its value, until it finishes.
   // The loop owns a generator it was given, and drops it once the loop ends however it ends; one
   // it borrows through a `Mut` stays with its owner.
+  /** @throws {CompileError} */
   generatorLoop(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "forIn" | "forOf" }>>, iterated: Type, right: Ref<Expr>) {
     const local = this.resolved(s.left as Stmt);
     const generator = this.referent(iterated) as GeneratorType;
@@ -4247,6 +4251,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // `next()` or a Channel's `receive()`, until the generator finishes or the channel is closed
   // and drained. The loop owns a generator it was given, as a generator's loop does, and a count
   // on its channel.
+  /** @throws {CompileError} */
   awaitLoop(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "forIn" | "forOf" }>>, iterated: Type) {
     const local = this.resolved(s.left as Stmt);
     const base = this.cur().frame!.loops.get(s)!;
@@ -4891,6 +4896,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // The checker made sure some arm matches. As a value, each arm gives one of its own. A value
   // the match made is its own, in a slot its bindings move parts out of, dropped with what is
   // left once the match ends; a place is read where it lives, and bindings point into it.
+  /** @throws {CompileError} */
   lowerMatch(this: Mut<this>, e: Ref<Extract<Expr, { kind: "match" }>>, wanted: boolean): string | undefined {
     const type = this.valueType(e.subject);
     this.scopes.push({ transient: true, held: [] });
@@ -5438,7 +5444,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const end = this.label();
       this.emit(`switch i32 ${tag}, label %${end} [ ${owners.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i as usize]!}`).join(" ")} ]`);
       owners.forEach((m, i) => {
-        this.startBlock(cases[i]!);
+        this.startBlock(cases[i as usize]!);
         // One member's copy, made on its own path, so nothing else is pending beside it.
         const convert2 = this.convert("%v", type, m);
         const part = each(this, convert2, m, false);
@@ -8100,7 +8106,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const args = this.delivered((cg) => {
       let given: string[] = [];
       for (let i: usize = 0; i < e.args.length; i++) {
-        const a = e.args[i]!;
+        const a: Ref<Expr> = e.args[i]!;
         if ((method === "splice" && i >= 2) || method === "unshift" || (method === "fill" && i === 0)) {
           const owned3 = cg.owned(a);
           given.push(cg.hand(owned3, element));
@@ -8967,6 +8973,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  /** @throws {CompileError} */
   scoped(this: Mut<this>, body: Ref<Stmt[]>) {
     this.scopes.push({ transient: false, held: [] });
     for (const each of body) this.statement(each);
@@ -13525,6 +13532,7 @@ class Codegen implements PrintHost, ComptimeHost {
 }
 
 // The LLVM IR of a checked program.
+/** @throws {CompileError} */
 export function codegen(checked: Checked, options: Options): string {
   return new Codegen(checked, options).module();
 }
