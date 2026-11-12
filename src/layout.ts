@@ -98,7 +98,7 @@ function testedOf(e: Ref<Expr>): Ref<Expr> {
   return e;
 }
 
-const textOf = (e: Ref<Expr>): string => (e.kind === "string" ? e.value : "");
+export const textOf = (e: Ref<Expr>): string => (e.kind === "string" ? e.value : "");
 
 // A literal type's value as text, or undefined for any other type.
 function literalOf(typing: Ref<Typing>, t: Type): string | undefined {

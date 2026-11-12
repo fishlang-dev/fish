@@ -12,10 +12,10 @@ import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, toFloat, untagged, type ComptimeHost, type Value } from "./comptime.ts";
 import { Printer, RUNTIME, type PrintHost } from "./runtime.ts";
 import type { ArithmeticOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { ARRAY, DYN, compound, Conversions, llvmOf } from "./layout.ts";
+import { ARRAY, DYN, compound, Conversions, llvmOf, textOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
+import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.ts";
 import type { Tables } from "./compilation.ts";
 import type { Kind, Verdict } from "./narrow.ts";
@@ -5575,8 +5575,15 @@ class Codegen implements PrintHost, ComptimeHost {
   // their keys, which spelling changes, so a written member may sit at another index.
   writtenMembers(this: Mut<this>, written: Type, t: UnionType): Type[] {
     const spelled = this.writtenShape(written, t) as UnionType | undefined;
-    const as = spelled !== undefined ? [...this.tables.typing.rec(spelled).members] : [];
-    return this.tables.typing.rec(t).members.map((m) => as.find((s) => this.tables.typing.lower(s) === m) ?? m);
+    let as: Type[] = [];
+    if (spelled !== undefined) for (const s of this.tables.typing.rec(spelled).members) as.push(s);
+    let out: Type[] = [];
+    for (const m of this.tables.typing.rec(t).members) {
+      let found: Type | undefined = undefined;
+      for (const s of as) if (found === undefined && this.tables.typing.lower(s) === m) found = s;
+      out.push(found !== undefined ? found : m);
+    }
+    return out;
   }
 
 
@@ -5677,7 +5684,8 @@ class Codegen implements PrintHost, ComptimeHost {
     const base = this.tables.typing.rec(c).base;
     let out: JsonField[] = [];
     if (base !== undefined) for (const f of this.jsonFields(base)) out.push({ name: f.name, type: f.type, path: [0, ...f.path], omit: f.omit });
-    for (const f of this.ownJsonFields(c, base !== undefined ? 1 : 0)) out.push(f);
+    const own = this.ownJsonFields(c, base !== undefined ? 1 : 0);
+    for (const f of own) out.push({ name: f.name, type: f.type, path: [...f.path], omit: f.omit });
     return out;
   }
 
@@ -5841,11 +5849,12 @@ class Codegen implements PrintHost, ComptimeHost {
   // What each argument's description needs: a literal format says which specifier takes each,
   // so only that is built; one read at run time may ask anything of any.
   formatNeeds(this: Mut<this>, args: Ref<Expr[]>): { text: boolean; depth: i64 }[] {
-    if (args.length < 2 || args[0]!.kind !== "string") {
+    const format = args.length >= 2 && args[0]!.kind === "string" ? textOf(args[0]!) : undefined;
+    if (format === undefined) {
       const inspected = !this.formats(args);
       return args.map(() => (inspected ? { text: false, depth: 2 } : { text: true, depth: 4 }));
     }
-    const { specs, rest } = formatPlan((args[0]! as Ref<Extract<Expr, { kind: "string" }>>).value, args.length);
+    const { specs, rest } = formatPlan(format, args.length);
     const DEPTHS: Record<string, i64> = { s: 0, O: 2, o: 4 };
     return args.map((_, i) => {
       if (i === 0 || i >= rest) return { text: false, depth: 2 };
@@ -6377,7 +6386,12 @@ class Codegen implements PrintHost, ComptimeHost {
   // Whether a class is the prelude's Error, or extends it.
   errorClass(t: ClassType): boolean {
     if (this.tables.typing.rec(t).generic?.name === "AggregateError") return true;
-    for (let c: ClassType | undefined = t; c !== undefined; c = this.tables.typing.rec(c).base) if (this.tables.typing.rec(c).name === "Error" && this.tables.typing.rec(c).generic === undefined) return true;
+    let c: ClassType | undefined = t;
+    while (c !== undefined) {
+      const held: ClassRecord = this.tables.typing.rec(c);
+      if (held.name === "Error" && held.generic === undefined) return true;
+      c = held.base;
+    }
     return false;
   }
 
@@ -6489,7 +6503,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${embedded.path.join(", ")}`);
       this.emit(`${size} = call i64 @fsh_rt_map_size(ptr ${x})`);
       this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 ${this.tables.typing.rec(embedded.type).set ? 5 : 4}, i64 ${size})`);
-      const line2 = `call void @fsh_rt_insp_named(ptr ${node}, ptr ${this.cString((r as { name: string }).name.replace(/[@<].*$/, ""))})`;
+      const line2 = `call void @fsh_rt_insp_named(ptr ${node}, ptr ${this.cString(this.tables.typing.rec(t as ClassType).name.replace(/[@<].*$/, ""))})`;
       this.emit(line2);
     } else {
       const line3 = `${node} = call ptr @fsh_rt_insp_object(ptr ${this.cString(r.kind === "class" ? r.name.replace(/[@<].*$/, "") : "")})`;
@@ -6801,7 +6815,9 @@ class Codegen implements PrintHost, ComptimeHost {
     if (c.kind === "union") return c.members.every((m) => this.recOf(m)?.kind === "variant") ? this.readVariant(r, t as Exclude<Type, string> as UnionType) : this.readMember(r, t as Exclude<Type, string> as UnionType);
     if (c.kind === "variant") return this.readVariant(r, t as Exclude<Type, string> as VariantType);
     if (c.kind === "object" && this.tables.typing.isTuple(t)) return this.readTuple(r, t as Exclude<Type, string> as ObjectType);
-    const fields = c.kind === "class" ? this.jsonFields(t as Exclude<Type, string> as ClassType) : c.fields.map((f, i) => ({ name: f.name, type: f.type, path: [i as usize] }));
+    let fields: JsonField[] = [];
+    if (c.kind === "class") fields = this.jsonFields(t as Exclude<Type, string> as ClassType);
+    else for (let i: usize = 0; i < c.fields.length; i++) fields.push({ name: c.fields[i]!.name, type: c.fields[i]!.type, path: [i] });
     return this.readObject(r, t as Exclude<Type, string>, fields);
   }
 
@@ -6811,7 +6827,8 @@ class Codegen implements PrintHost, ComptimeHost {
     const [mark, start] = [this.alloca("[3 x i64]"), this.temp()];
     this.emit(`${start} = call i32 @fsh_rt_json_peek(ptr ${r})`);
     this.emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
-    const what = typeof this.tables.typing.rec(t).value === "string" ? JSON.stringify(this.tables.typing.rec(t).value) : literalText(this.tables.typing.rec(t).value);
+    const literal = this.tables.typing.rec(t).value;
+    const what = typeof literal === "string" ? JSON.stringify(literal) : literalText(literal);
     const base = typeof this.tables.typing.rec(t).value === "string" ? "string" : typeof this.tables.typing.rec(t).value === "boolean" ? "boolean" : "i64";
     const v = this.readParts(r, base);
     const same = this.temp();
@@ -7115,25 +7132,24 @@ class Codegen implements PrintHost, ComptimeHost {
     const result = this.alloca(this.llvm(t));
     const done = this.label();
     this.emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
-    let groups = new Map<string, VariantType[]>();
-    let parts: (Type | VariantType[])[] = [];
-    const members2 = this.tables.typing.rec(t).members;
+    // Each member in order, an enum's members together where its first one is.
+    let groups = new Map<string, Type[]>();
+    let parts: { member: Type; group: string }[] = [];
+    const members2 = [...this.tables.typing.rec(t).members];
     for (const m of members2) {
       const variant = this.recOf(m);
-      if (variant?.kind !== "variant") {
-        parts.push(m);
+      if (variant === undefined || variant.kind !== "variant") {
+        parts.push({ member: m, group: "" });
         continue;
       }
-      let group = groups.get(variant.enum);
-      if (group === undefined) {
-        group = [];
-        groups.set(variant.enum, group);
-        parts.push(group);
+      if (!groups.has(variant.enum)) {
+        groups.set(variant.enum, []);
+        parts.push({ member: m, group: variant.enum });
       }
-      group.push(m as VariantType);
+      groups.get(variant.enum)!.push(m);
     }
     for (const part of parts) {
-      const m = Array.isArray(part) ? this.tables.typing.unionType(part) : part;
+      const m = part.group === "" ? part.member : this.tables.typing.unionType([...groups.get(part.group)!]);
       const [ok, v] = this.jsonRead(r, m);
       const [won, lost] = [this.label(), this.label()];
       this.emit(`br i1 ${ok}, label %${won}, label %${lost}`);
@@ -7158,7 +7174,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // A data enum's member, tagged as serde writes it: a bare name, or an object of one key, the
   // name, holding its value or an array of its values.
   readVariant(this: Mut<this>, r: string, t: UnionType | VariantType): string {
-    const variants = this.tables.typing.rec(t).kind === "union" ? (this.tables.typing.rec(t as UnionType).members as VariantType[]) : [t as VariantType];
+    const variants = this.tables.typing.rec(t).kind === "union" ? this.tables.typing.rec(t as UnionType).members.map((m) => m as VariantType) : [t as VariantType];
     const result = this.alloca(this.llvm(t));
     const [named, keyed, done] = [this.label(), this.label(), this.label()];
     const names = variants.map((v) => this.tables.typing.rec(v).member).join(", ");
