@@ -607,6 +607,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
   // Emits every instance and gives the module's IR.
+  /** @throws {CompileError} */
   module(this: Mut<this>): string {
     // Top-level consts and comptime blocks run while compiling, every one of them, so one that
     // fails is reported even when nothing reads it; none is compiled.
@@ -2165,7 +2166,11 @@ class Codegen implements PrintHost, ComptimeHost {
     if (name === "forEach") return this.eachEntry(e, t, map);
     // The key is owned for the call: kept when it goes in, dropped once it has been looked up.
     // A panic in the value's argument drops the key made before it.
-    const [key, given] = this.delivered<[string, string | undefined]>((cg): [string, string | undefined] => [cg.hand(cg.owned(e.args[0]!), cg.tables.typing.rec(t).key), name === "set" ? cg.hand(cg.owned(e.args[1]!), cg.tables.typing.rec(t).value) : undefined]);
+    const [key, given] = this.delivered<[string, string | undefined]>((cg): [string, string | undefined] => {
+      const owned2 = cg.owned(e.args[0]!);
+      const hand2 = cg.hand(owned2, cg.tables.typing.rec(t).key);
+      return [hand2, name === "set" ? cg.hand(cg.owned(e.args[1]!), cg.tables.typing.rec(t).value) : undefined];
+    });
     if (name === "set" || name === "add") {
       this.inserted(t, map, key, given);
       return at;
@@ -3801,7 +3806,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const optional = this.tables.optionalCallables.get(e);
     if (optional !== undefined) return this.optionalCallableCall(e, object, optional, info.index);
     const t = this.referent(this.valueType(object)) as DynType;
-    const m = this.tables.typing.rec(this.tables.typing.rec(t).of).methods[info.index]!;
+    const m: Ref<Method> = this.tables.typing.rec(this.tables.typing.rec(t).of).methods[info.index]!;
     const [data, table] = this.opened(object, info.owned);
     const fn = this.vslot(table, info.index);
     const called = (cg: Mut<Codegen>) => cg.dynInvoke(e, m, fn, data);
@@ -4417,6 +4422,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  /** @throws {CompileError} */
   statement(this: Mut<this>, s: Ref<Stmt>): void {
     if (this.cur().unreached?.has(s) === true) return;
     const outer = this.siteNow();
@@ -4624,7 +4630,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const subject = this.kept(s.discriminant, tested, written);
         // A subject the switch made is released on the way into the body that runs, and stays
         // pending through the tests, so an error raised in one drops it too.
-        const held = this.pending.slice(this.floor);
+        const held = this.pending.slice(this.floor as i64);
         const enter = (cg: Mut<Codegen>, body: string) => {
           if (held.length === 0) return body;
           const via = cg.label();
@@ -5110,7 +5116,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const data = this.temp();
       this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
       info.items.forEach((item, i) => {
-        const { v: element, at: elementAt } = this.loadElement(data, info.element, i);
+        const { v: element, at: elementAt } = this.loadElement(data, info.element, i as usize);
         this.bindAll(item, element, elementAt, move);
       });
       return;
@@ -5385,7 +5391,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const owners = r.members.filter(((type) => this.needsDrop(type)));
       const cases = owners.map(() => this.label());
       const end = this.label();
-      this.emit(`switch i32 ${tag}, label %${end} [ ${owners.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i]!}`).join(" ")} ]`);
+      this.emit(`switch i32 ${tag}, label %${end} [ ${owners.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i as usize]!}`).join(" ")} ]`);
       owners.forEach((m, i) => {
         this.startBlock(cases[i]!);
         // One member's copy, made on its own path, so nothing else is pending beside it.
@@ -5523,8 +5529,10 @@ class Codegen implements PrintHost, ComptimeHost {
       const [x, y] = [this.alloca(this.llvm(type)), this.alloca(this.llvm(type))];
       this.emit(`store ${this.llvm(type)} ${a}, ptr ${x}`);
       this.emit(`store ${this.llvm(type)} ${b}, ptr ${y}`);
-      const upcast2 = this.upcast(x, type as ClassType, this.bodyAt(own).owner!);
-      const list = [`ptr ${this.upcast(y, type as ClassType, this.bodyAt(own).owner!)}`];
+      const part = this.bodyAt(own).owner!;
+      const upcast2 = this.upcast(x, type as ClassType, part);
+      const part2 = this.bodyAt(own).owner!;
+      const list = [`ptr ${this.upcast(y, type as ClassType, part2)}`];
       return this.invoke(own, upcast2, list)!;
     }
     // An object, an instance or an enum's member: its fields, a base first.
@@ -7054,7 +7062,7 @@ class Codegen implements PrintHost, ComptimeHost {
       return right;
     };
     order.forEach(({ f, i }, n) => {
-      const right = step(this, n, 1);
+      const right = step(this, n as usize, 1);
       const [bad, good] = [this.label(), this.label()];
       // Where an optional element would be, the array may end instead.
       this.emit(`br i1 ${right}, label %${good}, label %${n < required ? bad : finish}`);
@@ -7989,7 +7997,9 @@ class Codegen implements PrintHost, ComptimeHost {
     let index: string | undefined = undefined;
     let given: string | undefined = undefined;
     const placed = method !== "with" ? undefined : this.delivered<[string, string]>((cg): [string, string] => {
-      const [i, v] = [cg.value(e.args[0]!), cg.hand(cg.owned(e.args[1]!), element)];
+      const operand = cg.value(e.args[0]!);
+      const owned2 = cg.owned(e.args[1]!);
+      const [i, v] = [operand, cg.hand(owned2, element)];
       const [negative, fromEnd, k, outside, fail, ok] = [cg.temp(), cg.temp(), cg.temp(), cg.temp(), cg.label(), cg.label()];
       cg.emit(`${negative} = icmp slt i64 ${i}, 0`);
       cg.emit(`${fromEnd} = add i64 ${length}, ${i}`);
@@ -9237,7 +9247,10 @@ class Codegen implements PrintHost, ComptimeHost {
       // statement, it is dropped after it.
       const built = this.recOf(this.cur().types.get(e.callee));
       if (built?.kind === "variant") {
-        const values = this.delivered((cg) => e.args.map((a, i) => cg.hand(cg.owned(a), built.fields[i]!.type)));
+        const values = this.delivered((cg) => e.args.map((a, i) => {
+            const owned2 = cg.owned(a);
+            return cg.hand(owned2, built.fields[i]!.type);
+          }));
         let result = "zeroinitializer";
         values.forEach((v, i) => {
           const next = this.temp();
@@ -12165,7 +12178,10 @@ class Codegen implements PrintHost, ComptimeHost {
         const fixed = this.recOf(made);
         // A fixed array's literal is its elements in place.
         if (fixed?.kind === "fixed") {
-          const values = this.delivered((cg) => (e.elements as Expr[]).map((x) => cg.hand(cg.owned(x), fixed.element)));
+          const values = this.delivered((cg) => (e.elements as Expr[]).map((x) => {
+              const owned3 = cg.owned(x);
+              return cg.hand(owned3, fixed.element);
+            }));
           return values.reduce((whole, v, i) => {
             const next = this.temp();
             this.emit(`${next} = insertvalue ${this.llvm(made)} ${whole}, ${this.llvm(fixed.element)} ${v}, ${i}`);
@@ -12175,7 +12191,10 @@ class Codegen implements PrintHost, ComptimeHost {
         const type = made as ArrayType;
         const t = this.llvm(this.tables.typing.rec(type).element);
         if (e.elements.some((x) => x?.kind === "spread")) return this.spreadArray(e.elements as Expr[], type);
-        const values = this.delivered((cg) => (e.elements as Expr[]).map((x) => cg.hand(cg.owned(x), cg.tables.typing.rec(type).element)));
+        const values = this.delivered((cg) => (e.elements as Expr[]).map((x) => {
+            const owned4 = cg.owned(x);
+            return cg.hand(owned4, cg.tables.typing.rec(type).element);
+          }));
         const n = String(values.length);
         const data = this.temp();
         const line4 = `${data} = call ptr @fsh_rt_array_alloc(i64 ${this.bytes(this.tables.typing.rec(type).element, n)})`;
