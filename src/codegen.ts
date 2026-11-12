@@ -14,7 +14,7 @@ import { ARRAY, DYN, compound, Conversions, llvmOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
 import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
-import { forEachChild, NodeMap, walkWhile, type AnyNode, type NodeSet } from "./nodes.ts";
+import { forEachChild, NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.ts";
 import type { Tables } from "./compilation.ts";
 import type { Kind, Verdict } from "./narrow.ts";
 
@@ -1047,27 +1047,34 @@ class Codegen implements PrintHost {
       let calls = 0;
       // A generic function value runs another instance for each type it is called with.
       let runs = new Set<InstanceId>();
-      function visit(cg: Mut<Codegen>, n: AnyNode, nested: boolean): void {
-        let inner = nested;
-        if (n.of === "expr") {
+      // Inside a nested arrow or function only reading it counts: its calls aren't the body's.
+      for (const st of b.body) {
+        walkWhile({ of: "stmt", node: st }, (n) => {
+          if (n.of === "objectProp" && n.node.kind === "shorthand" && n.node.name === name) uses++;
+          if (n.of !== "expr") return true;
           const e = n.node;
-          if (e.kind === "arrow" || e.kind === "function") inner = true;
           if (e.kind === "ident" && e.name === name) uses++;
-          if (e.kind === "call" && !nested) {
-            const target = cg.inst(i).calls.get(e);
+          if (e.kind === "arrow" || e.kind === "function") {
+            walk(n, (m) => {
+              if (m.of === "expr" && m.node.kind === "ident" && m.node.name === name) uses++;
+              if (m.of === "objectProp" && m.node.kind === "shorthand" && m.node.name === name) uses++;
+            });
+            return false;
+          }
+          if (e.kind === "call") {
+            const target = this.inst(i).calls.get(e);
             if (e.callee.kind === "ident" && e.callee.name === name && e.args.every((a) => a.kind !== "spread")) {
               calls++;
               if (target !== undefined) runs.add(target);
             }
-            e.args.forEach((a, j) => {
-              if (a.kind === "ident" && a.name === name && j === k && target !== undefined && cg.sameFunction(cg.noted.arenas.instanceOf(target).id, i)) calls++;
-            });
+            for (let j: usize = 0; j < e.args.length; j++) {
+              const a = e.args[j]!;
+              if (a.kind === "ident" && a.name === name && j === (k as usize) && target !== undefined && this.sameFunction(target, i)) calls++;
+            }
           }
-        }
-        if (n.of === "objectProp" && n.node.kind === "shorthand" && n.node.name === name) uses++;
-        forEachChild(n, (c) => visit(cg, c, inner));
+          return true;
+        });
       }
-      for (const st of b.body) visit(this, { of: "stmt", node: st }, false);
       // A call through the pair passes an environment and builds no frame, so it can only run a
       // plain closure: a generic function value's instance takes no environment.
       const plain = [...runs].every((r) => {
@@ -1556,7 +1563,8 @@ class Codegen implements PrintHost {
       if (call.kind === "call" && call.callee.kind === "ident" && call.callee.name === "cString" && !this.cur().calls.has(call) && !this.reserved.has(call)) {
         const held = this.alloca(ARRAY);
         this.allocas.push(`  store ${ARRAY} zeroinitializer, ptr ${held}`);
-        this.scopes[this.scopes.length - 1]!.held.push({ slot: held, type: this.noted.typing.arrayType("u8") });
+        const part = { slot: held, type: this.noted.typing.arrayType("u8") };
+        this.scopes[this.scopes.length - 1]!.held.push(part);
         this.reserved.set(call, held);
       }
       return true;
@@ -10038,7 +10046,7 @@ class Codegen implements PrintHost {
       return slot;
     };
     args.forEach((a, i) => {
-      const rustCrossing2 = rustCrossing(this.noted.typing, this.inst(target).signature![i]!);
+      const rustCrossing2 = rustCrossing(this.noted.typing, this.inst(target).signature![i as usize]!);
       const part2 = this.inst(target).signature![i]!;
       return passed.push(...pass(this, rustCrossing2, part2, a.slice(a.lastIndexOf(" ") + 1)));
     });
