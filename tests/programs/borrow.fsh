@@ -1198,3 +1198,334 @@ function main() {
   const r: Mut<I> = (c ? h.b : h.k) as I;
   r.items.push("z");
 }
+// case: borrow_argument_call_result_move
+class B { s: string; constructor(s: string) { this.s = s; } }
+function eat(_b: B) {}
+function id(x: Ref<B>): Ref<B> { return x; }
+function show(x: Ref<B>, y: B) { console.log(x.s, y.s); }
+function main() {
+  let b1 = new B("a");
+  let r: Ref<B> = b1;
+  show(id(r), b1);
+}
+// error: cannot move 'b1' while 'r' borrows 'b1' and is used later
+// case: borrow_argument_coalesce_move
+class B { s: string; constructor(s: string) { this.s = s; } }
+function eat(_b: B) {}
+function show(x: Ref<B>, y: B) { console.log(x.s, y.s); }
+function main() {
+  let b1 = new B("a"); let b2 = new B("b");
+  let o: Ref<B> | null = b1;
+  let r: Ref<B> = b2;
+  show(o ?? r, b1);
+}
+// error: cannot move 'b1' while 'o' borrows 'b1' and is used later
+// case: borrow_argument_object_field_move
+class B { s: string; constructor(s: string) { this.s = s; } }
+function eat(_b: B) {}
+function show(x: Ref<B>, y: B) { console.log(x.s, y.s); }
+function main() {
+  let b1 = new B("a");
+  let r: Ref<B> = b1;
+  show({ node: r }.node, b1);
+}
+// error: cannot move 'b1' while 'r' borrows 'b1' and is used later
+// case: borrow_argument_method_result_move
+class B { s: string; constructor(s: string) { this.s = s; } }
+function eat(_b: B) {}
+class K { r: Ref<B>; constructor(r: Ref<B>) { this.r = r; } get(): Ref<B> { return this.r; } }
+function show(x: Ref<B>, y: B) { console.log(x.s, y.s); }
+function main() {
+  let b1 = new B("a");
+  let k = new K(b1);
+  show(k.get(), b1);
+}
+// error: cannot move 'b1' while 'k' borrows 'b1' and is used later
+// case: borrow_argument_assigned_in_call
+// error: cannot move 'b1' while 'r' borrows 'b1' and is used later
+class B { s: string; constructor(s: string) { this.s = s; } }
+function show(x: Ref<B>, _b: B) { console.log(x.s); }
+function main() {
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 1);
+  let r: Ref<B> = b2;
+  show(r = b1, b1);
+}
+// case: borrow_argument_assigned_in_call_kept
+// expect: a1
+// expect: a1
+class B { s: string; constructor(s: string) { this.s = s; } }
+function show(x: Ref<B>) { console.log(x.s); }
+function main() {
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 1);
+  let r: Ref<B> = b2;
+  show(r = b1);
+  console.log(r.s);
+}
+// case: borrow_argument_assigned_owned_in_call
+// error: cannot move 'c' while 'c' is lent to 'shown' for this call
+class B { s: string; constructor(s: string) { this.s = s; } }
+function eat(_b: B): i64 { return 1; }
+function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+function main() {
+  let b1 = new B("a" + 1);
+  let c = new B("c" + 1);
+  shown(c = b1, eat(c));
+}
+// case: borrow_receiver_assigned_owned_in_call
+// error: cannot move 'c' while 'c' is lent to 'len' for this call
+class B { s: string; constructor(s: string) { this.s = s; } len(n: i64): i64 { return (this.s.length as i64) + n; } }
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let c = new B("c" + 1);
+  console.log((c = new B("n" + 1)).len(eat(c)));
+}
+// case: borrow_assignment_to_owned_held
+// error: cannot move 'c' while 'y' borrows 'c' and is used later
+class B { s: string; constructor(s: string) { this.s = s; } }
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let b1 = new B("a" + 1);
+  let c = new B("c" + 1);
+  const y: Ref<B> = (c = b1);
+  eat(c);
+  console.log(y.s);
+}
+// case: borrow_argument_assigned_lend_ends
+// expect: a1
+class B { s: string; constructor(s: string) { this.s = s; } }
+function eat(_b: B): i64 { return 1; }
+function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+function main() {
+  let b1 = new B("a" + 1);
+  let b2 = new B("b" + 1);
+  let r: Ref<B> = b2;
+  shown(r = b1, 1);
+  eat(b1);
+}
+// case: borrow_argument_field_of_assignment
+// error: cannot move 'h' while 'h.b' is lent to 'shown' for this call
+class B { s: string; constructor(s: string) { this.s = s; } }
+class H { b: B = new B("h" + 1); }
+function eatH(_h: H): i64 { return 1; }
+function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+function main() {
+  let h = new H();
+  shown((h = new H()).b, eatH(h));
+}
+// case: borrow_argument_bang_of_assignment
+// error: cannot move 'c'
+class B { s: string; constructor(s: string) { this.s = s; } }
+function eat(_b: B): i64 { return 1; }
+function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+function main() {
+  let b1 = new B("a" + 1);
+  let c = new B("c" + 1);
+  shown((c = b1)!, eat(c));
+}
+// case: borrow_argument_method_of_assignment
+// error: cannot move 'c'
+class B { s: string; constructor(s: string) { this.s = s; } me(): Ref<B> { return this; } }
+function eat(_b: B): i64 { return 1; }
+function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+function main() {
+  let b1 = new B("a" + 1);
+  let c = new B("c" + 1);
+  shown((c = b1).me(), eat(c));
+}
+// case: borrow_loop_over_assignment
+// error: cannot change 'xs'
+class B { s: string; constructor(s: string) { this.s = s; } }
+function mkA(): B[] { return [new B("m" + 1), new B("m" + 2)]; }
+function main() {
+  let xs: B[] = [new B("x" + 1)];
+  for (const x of (xs = mkA())) {
+    xs.pop();
+    console.log(x.s);
+  }
+}
+// case: borrow_argument_field_of_assignment_kept
+// expect: h1
+class B { s: string; constructor(s: string) { this.s = s; } }
+class H { b: B = new B("h" + 1); }
+function eatH(_h: H): i64 { return 1; }
+function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+function main() {
+  let h = new H();
+  shown((h = new H()).b, 1);
+  eatH(h);
+}
+// case: borrow_argument_field_of_assignment_holding_reference
+// error: cannot move 'kh' while 'kh.own' is lent to 'shown' for this call
+class B { s: string; constructor(s: string) { this.s = s; } }
+class KH { r: Ref<B>; own: B; constructor(r: Ref<B>) { this.r = r; this.own = new B("own" + 1); } }
+function eatKH(_h: KH): i64 { return 1; }
+function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+function main() {
+  let b1 = new B("a" + 1);
+  let kh = new KH(b1);
+  shown((kh = new KH(b1)).own, eatKH(kh));
+}
+// case: borrow_assignment_holding_reference_held
+// error: cannot move 'kh' while 'y' borrows 'kh' and is used later
+class B { s: string; constructor(s: string) { this.s = s; } }
+class KH { r: Ref<B>; own: B; constructor(r: Ref<B>) { this.r = r; this.own = new B("own" + 1); } }
+function eatKH(_h: KH): i64 { return 1; }
+function main() {
+  let b1 = new B("a" + 1);
+  let kh = new KH(b1);
+  const y: Ref<KH> = (kh = new KH(b1));
+  eatKH(kh);
+  console.log(y.own.s);
+}
+// case: borrow_assignment_through_mut_held
+// error: cannot change 'r' while 'y' borrows 'r' and is used later
+class B { s: string; constructor(s: string) { this.s = s; } }
+function f(r: Mut<B>) {
+  const y: Ref<B> = (r = new B("f" + 1));
+  r = new B("g" + 1);
+  console.log(y.s);
+}
+function main() { let b = new B("a" + 1); f(b); }
+// case: borrow_argument_field_of_assignment_through_mut
+// error: cannot mutably lend 'r' while 'r.b' is lent to 'shown' for this call
+class B { s: string; constructor(s: string) { this.s = s; } }
+class H { b: B = new B("h" + 1); }
+function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+function replH(h: Mut<H>): i64 { h = new H(); return 1; }
+function f(r: Mut<H>) { shown((r = new H()).b, replH(r)); }
+function main() { let h = new H(); f(h); }
+// case: borrow_loop_over_assignment_through_mut
+// error: cannot change 'r' while a 'for...of' loop is reading 'r'
+class B { s: string; constructor(s: string) { this.s = s; } }
+function mkA(): B[] { return [new B("m" + 1), new B("m" + 2)]; }
+function f(r: Mut<B[]>) { for (const e of (r = mkA())) { r.pop(); console.log(e.s); } }
+function main() { let xs = mkA(); f(xs); }
+// case: borrow_literal_later_property_moves
+// error: cannot move 'b' while the new object being built borrows 'b'
+class B { s: string; constructor(s: string) { this.s = s; } }
+type P = { a: Ref<B>; n: i64 };
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let b = new B("b" + 1);
+  const o: P = { a: b, n: eat(b) };
+  console.log(o.a.s);
+}
+// case: borrow_literal_later_element_changes
+// error: cannot mutably lend 'xs' while the new object being built borrows 'xs[...]'
+class B { s: string; constructor(s: string) { this.s = s; } }
+function clear(xs: Mut<B[]>): i64 { xs.pop(); return 1; }
+function main() {
+  let xs: B[] = [new B("x" + 1)];
+  const o: [Ref<B>, i64] = [xs[0], clear(xs)];
+  console.log(o[0].s);
+}
+// case: borrow_literal_reference_then_change
+// error: cannot mutably lend 'xs' while 'r' borrows
+class B { s: string; constructor(s: string) { this.s = s; } }
+type P = { a: Ref<B>; n: i64 };
+function clear(xs: Mut<B[]>): i64 { xs.pop(); return 1; }
+function main() {
+  let xs: B[] = [new B("x" + 1)];
+  const r: Ref<B> = xs[0];
+  const o: P = { a: r, n: clear(xs) };
+  console.log(o.a.s);
+}
+// case: borrow_literal_copies_read_twice
+// expect: x1 2
+class B { s: string; constructor(s: string) { this.s = s; } }
+class H { b: B = new B("x" + 1); get(this: Mut<this>): Ref<B> { return this.b; } }
+function main() {
+  let h = new H();
+  const o = { name: h.get().s, size: h.get().s.length };
+  console.log(o.name, o.size);
+}
+// case: borrow_literal_shorthand_then_move
+// error: cannot move 'b' while the new object being built borrows 'b'
+class B { s: string; constructor(s: string) { this.s = s; } }
+type PB = { b: Ref<B>; n: i64 };
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let b = new B("a" + 1);
+  const o: PB = { b, n: eat(b) };
+  console.log(o.b.s);
+}
+// case: borrow_literal_shorthand_shared_beside_mutable
+// error: borrowed mutably and shared in one value
+class B { s: string; constructor(s: string) { this.s = s; } }
+type PRM = { xs: Ref<B[]>; m: Mut<B[]> };
+function main() {
+  let xs: B[] = [new B("x" + 1)];
+  let o: PRM = { xs, m: xs };
+  const e: Ref<B> = o.xs[0];
+  o.m.pop();
+  console.log(e.s);
+}
+// case: borrow_literal_nested_shorthand_then_move
+// error: cannot move 'b' while the new object being built borrows 'b'
+class B { s: string; constructor(s: string) { this.s = s; } }
+type PB = { b: Ref<B>; n: i64 };
+function eat(_b: B): i64 { return 1; }
+function main() {
+  let b = new B("a" + 1);
+  const o: { p: PB; n: i64 } = { p: { b, n: 1 }, n: eat(b) };
+  console.log(o.p.b.s);
+}
+// case: borrow_literal_reference_read_for_copy
+// expect: 1 1
+class B { n: i64; constructor(n: i64) { this.n = n; } }
+function clear(xs: Mut<B[]>): i64 { xs.pop(); return 1; }
+function main() {
+  let xs: B[] = [new B(1)];
+  const r: Ref<B> = xs[0];
+  const o = { n: r.n, m: clear(xs) };
+  console.log(o.n, o.m);
+}
+// case: borrow_literal_abandoned_by_error
+// expect: c
+// expect: 2
+class B { s: string; n: i64; constructor(s: string, n: i64) { this.s = s; this.n = n; } }
+type P = { a: Ref<B>; n: i64 };
+function grow(xs: Mut<B[]>): i64 { xs.push(new B("g" + 1, 9)); return xs.length as i64; }
+function risky(n: i64): i64 throws Error { if (n > 5) throw new Error("big"); return n; }
+function main() {
+  let xs: B[] = [new B("x" + 1, 9)];
+  try {
+    const o: P = { a: xs[0], n: risky(9) };
+    console.log(o.n);
+  } catch (e) {
+    console.log("c");
+  }
+  grow(xs);
+  console.log(xs.length);
+}
+// case: borrow_literal_nested_reference_read_for_copy
+// expect: y1 1 2
+class B { s: string; n: i64; constructor(s: string, n: i64) { this.s = s; this.n = n; } }
+function grow(xs: Mut<B[]>): i64 { xs.push(new B("g" + 1, 9)); return xs.length as i64; }
+function main() {
+  let xs: B[] = [new B("x" + 1, 1)];
+  let y = new B("y" + 1, 5);
+  const r: Ref<B> = xs[0];
+  const o: { in: { a: Ref<B>; k: i64 }; g: i64 } = { in: { a: y, k: r.n }, g: grow(xs) };
+  console.log(o.in.a.s, o.in.k, o.g);
+}
+// case: borrow_literal_holds_through_inner_try
+// error: cannot mutably lend 'xs' while the new object being built borrows 'xs[...]'
+class B { s: string; n: i64; constructor(s: string, n: i64) { this.s = s; this.n = n; } }
+type P = { a: Ref<B>; n: i64 };
+function grow(xs: Mut<B[]>): i64 { xs.pop(); xs.push(new B("g" + 1, 9)); return xs.length as i64; }
+function risky(n: i64): i64 throws Error { if (n > 5) throw new Error("big"); return n; }
+function main() {
+  let xs: B[] = [new B("x" + 1, 9)];
+  const o: P = { a: xs[0], n: match (xs.length) {
+    case 1 => {
+      let k: i64 = 0;
+      try { k = risky(9); } catch (e) { k = grow(xs); }
+      return k;
+    },
+    case _ => 0,
+  } };
+  console.log(o.a.s, o.n);
+}

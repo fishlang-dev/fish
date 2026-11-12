@@ -3,7 +3,7 @@
     "arithmetic.ts": "'{ ... }' can't take method 'emit' out of 'Builder'; call it on the value, as in 'x.emit()'",
     "astgen.ts": "only declarations are allowed at the top level; move this into main()",
     "bundle.ts": "'node:url' is a Node module Fish's std doesn't have yet",
-    "codegen.ts": "closures returning references are not supported yet",
+    "codegen.ts": "can't return a reference to 'tables.arenas', which belongs to this function and is gone once it returns; return an owned value instead",
     "codes.ts": "operator '!' cannot be applied to type 'null | { long?: { example: string; fixed: string; text: string }; title: string }'",
     "comments.ts": "cannot find type 'object'",
     "debuginfo.ts": "argument of type 'number' is not assignable to parameter of type 'usize'; convert it with 'as usize'",

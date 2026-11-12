@@ -3059,7 +3059,7 @@ export class Expressions<C extends Context> implements Union<C> {
       return this.callMade(made);
     }
     if (!ARRAY_METHODS.has(callee.name)) throw new CompileError("E0502", `arrays have no method '${callee.name}' yet${didYouMean(callee.name, [...ARRAY_METHODS])}`, callee.start, callee.end);
-    if (callee.name !== "push" && callee.name !== "pop" && this.ctx.typing().holdsRef(this.ctx.typing().rec(array).element)) throw unsupported(`calls to '${callee.name}' on arrays of references`, callee);
+    if (REF_ARRAY_REFUSED.has(callee.name) && this.ctx.typing().holdsRef(this.ctx.typing().rec(array).element)) throw unsupported(`calls to '${callee.name}' on arrays of references`, callee);
     if (this.linked(callee)) throw unsupported("optional chains calling array methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${callee.name}' takes no type arguments`, e.start, e.end);
     // Methods giving clones of the elements refuse elements that can't be cloned.
@@ -3158,6 +3158,7 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     const signature = this.ctx.tables().typing.functionType(acc !== undefined ? ["accumulator", "value", "index"] : ["value", "index"], params.slice(), "void");
     this.ctx.tables().typing.openThrows.add(signature);
+    if (name === "map" || reducing) this.ctx.tables().elementArrows.add(cloneExpr(callback));
     this.expect(callback, signature);
     const called = this.value(callback);
     const c = this.recOf(called);
@@ -3176,7 +3177,7 @@ export class Expressions<C extends Context> implements Union<C> {
       throw new CompileError("E0506", `'${name}''s callback has to give a 'boolean', since Fish has no truthiness; this one gives '${this.ctx.typing().show(gives)}'`, callback.start, callback.end);
     }
     if (acc !== undefined && !this.ctx.tables().typing.fits(gives, acc)) throw new CompileError("E0506", `'${name}''s callback gives the next accumulator, a '${this.ctx.typing().show(acc)}', but this one gives '${this.ctx.typing().show(gives)}'`, callback.start, callback.end);
-    if (name === "map" && (gives === "void" || this.ctx.typing().holdsRef(gives))) throw new CompileError("E0506", `'map''s callback has to give a value to keep, not '${this.ctx.typing().show(gives)}'`, callback.start, callback.end);
+    if (name === "map" && gives === "void") throw new CompileError("E0506", `'map''s callback has to give a value to keep, not '${this.ctx.typing().show(gives)}'`, callback.start, callback.end);
     const many = this.ctx.tables().typing.lower(gives);
     if (name === "flatMap" && (typeof many === "string" || this.ctx.typing().rec(many).kind !== "array")) {
       throw new CompileError("E0506", `'flatMap''s callback gives an array for each element, whose elements make up the result; this one gives '${this.ctx.typing().show(gives)}'`, callback.start, callback.end);
@@ -4342,7 +4343,6 @@ export class Expressions<C extends Context> implements Union<C> {
   private spreadFrom(this: Mut<this>, x: Ref<Extract<Expr, { kind: "spread" }>>, source: Ref<Expr>): Type {
     const t = this.value(source);
     const held = this.heldBy(t)!;
-    if (this.holdsRefArray(held)) throw unsupported("spreads of arrays of references", source);
     const at = { start: source.start, end: source.end };
     let from: Expr | undefined = undefined;
     if ((this.dictOf(held) !== undefined)) throw this.notIterable(at);
@@ -6796,7 +6796,6 @@ export class Expressions<C extends Context> implements Union<C> {
     const stored = this.ctx.tables().typing.lower(receiver);
     // A generator runs once, through its frame, so there is no second one to make.
     if (this.recOf(stored)?.kind === "generator") throw new CompileError("E0213", "a generator can't be cloned: it runs once, and a copy would share its place in the run", e.start, e.end);
-    if (this.holdsRefArray(receiver)) throw unsupported("clones of arrays of references", e);
     // A copy of a value holding references borrows what it does.
     if (this.ctx.typing().holdsRef(receiver)) this.ctx.borrowsFrom().set(cloneExpr(e), [cloneExpr(callee.object)]);
     if (stored !== receiver && this.isClassType(stored) && this.cls(stored).methods.has("clone")) {
@@ -8291,6 +8290,9 @@ export class Expressions<C extends Context> implements Union<C> {
     for (const x of e.elements) {
       if (x === undefined || x.kind !== "spread") continue;
       const t = this.spreadElements(x);
+      // Owned elements spread where references are wanted would each need borrowing in place.
+      const wanted = this.ctx.exprsState.wanted.get(e);
+      if (wanted !== undefined && t !== "never" && this.ctx.typing().holdsRef(wanted) && !this.ctx.typing().holdsRef(t)) throw unsupported("spreads of owned values into arrays of references", x.value);
       spreads.set(cloneExpr(x), t);
       spreadTypes.push(t);
     }
@@ -8786,7 +8788,6 @@ export class Expressions<C extends Context> implements Union<C> {
     this.ctx.exprsState.once.add(cloneExpr(e.right));
     const l = this.unfoldedThrough(left);
     const r = this.unfoldedThrough(right);
-    if (l !== "null" && r !== "null" && (this.holdsRefArray(l) || this.holdsRefArray(r))) throw unsupported("comparisons of arrays of references", e);
     if (!objectsMeet(this.ctx.tables().typing, l, r)) return undefined;
     this.ctx.exprsState.once.delete(e.left);
     this.ctx.exprsState.once.delete(e.right);
@@ -8917,7 +8918,6 @@ export class Expressions<C extends Context> implements Union<C> {
     for (const a of args) {
       const type = a.kind === "string" ? "void" : this.read(a);
       if (this.ctx.typing().holdsPart(type, (u) => rustClassOf(this.ctx.typing(), u) !== undefined, true)) throw new CompileError("E1004", `printing a '${this.ctx.typing().show(type)}' isn't supported, since it holds a Rust value; print what its methods give`, a.start, a.end);
-      if (this.holdsRefArray(type)) throw unsupported("prints of arrays of references", a);
       if (this.printable(type)) continue;
       this.ctx.tables().printed.add(cloneExpr(a));
       const part = this.ctx.typing().uninspectable(type);
@@ -9466,7 +9466,7 @@ export class Expressions<C extends Context> implements Union<C> {
   private elementOutlives(this: Mut<this>, target: Ref<Local>, e: Ref<Expr>): boolean {
     if (e.kind === "nonNull") return this.elementOutlives(target, e.expr);
     if (e.kind === "index") return this.arrayOutlives(target, e.object);
-    if (e.kind === "call" && e.callee.kind === "member" && e.callee.name === "pop") return this.arrayOutlives(target, e.callee.object);
+    if (e.kind === "call" && e.callee.kind === "member" && ["pop", "at", "find", "findLast", "shift"].includes(e.callee.name)) return this.arrayOutlives(target, e.callee.object);
     return false;
   }
 
@@ -10985,6 +10985,9 @@ function floatInto(from: Type, to: Type): string {
 // The array methods that change their array, which a subarray's copy can't take.
 const SUBARRAY_WRITES = new Set(["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "copyWithin", "set", "reserve", "shrinkToFit"]);
 const TYPED_MEMBERS = new Set(["byteLength", "byteOffset", "buffer", "BYTES_PER_ELEMENT"]);
+// The methods an array of references refuses: what each gives back, or is given to keep, would
+// borrow nothing.
+const REF_ARRAY_REFUSED = new Set(["entries", "values"]);
 const ARRAY_METHODS = new Set(["push", "pop", "sort", "at", ...Object.keys(ITERATORS), ...Object.keys(BYTE_METHODS), ...CALLBACK_METHODS, ...READING_METHODS, ...COPYING_METHODS, ...CHANGING_METHODS]);
 
 // Whether `name` is a member of the Map or Set a class embeds.

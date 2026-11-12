@@ -3768,7 +3768,7 @@ class BodyChecker implements Context, GuardHost {
       this.cx.tables.typing.setRec(future, r);
     }
     const type: Type = generatorType !== undefined ? generatorType : future !== undefined ? future : gives;
-    if (this.f().closure !== undefined && this.cx.tables.typing.holdsRef(type)) throw unsupported("closures returning references", this.returnSpan(true));
+    if (this.f().closure !== undefined && this.f().closure!.givesRefs !== true && this.cx.tables.typing.holdsRef(type)) throw unsupported("closures returning references", this.returnSpan(true));
     if (this.f().closure === undefined) this.cx.lifetimes(this.f());
     // A returned value holding references may point into any parameter, or `this`.
     let everything: Origin[] = [];
@@ -3777,7 +3777,8 @@ class BodyChecker implements Context, GuardHost {
     const ref = this.cx.isRef(type) ? type : this.cx.tables.typing.optionRef(type);
     const signature = cloneSignature(this.f());
     const params = this.state.params.slice();
-    const origins: Origin[] = ref !== undefined ? this.cx.originsOf(signature, params, ref) : this.cx.tables.typing.holdsRef(type) ? this.cx.heldOrigins(signature) ?? everything : [];
+    // An array method's callback may give back any of what it is handed.
+    const origins: Origin[] = this.f().closure !== undefined && this.f().closure!.givesRefs === true ? everything : ref !== undefined ? this.cx.originsOf(signature, params, ref) : this.cx.tables.typing.holdsRef(type) ? this.cx.heldOrigins(signature) ?? everything : [];
     if (gives !== "void" && this.state.generatorType === undefined && !alwaysReturns(this.f().body, this.cx.broken, this.cx.continued)) {
       const at = this.returnSpan();
       throw new CompileError("E0601", "not all code paths return a value", at.start, at.end);
@@ -4917,9 +4918,10 @@ class BodyChecker implements Context, GuardHost {
     const parent = this.instance().id;
     const self = this.cx.tables.nestedFunctions.get(e);
     const made: true | undefined = this.cx.tables.madeArrows.has(e) ? true : undefined;
+    const givesRefs: true | undefined = this.cx.tables.elementArrows.has(e) ? true : undefined;
     const name = this.f().name;
     const bodyId = this.cx.tables.arenas.addBody({
-      id: bodyNodeId, name, params, returnType: e.returnType === undefined ? undefined : cloneTypeNode(e.returnType), throws: e.throws === undefined ? undefined : cloneTypeNode(e.throws), start: e.start, end: e.end, async: e.async ? true : undefined, closure: { value, parent, expected, move: e.move || owning, unsafe, self, made },
+      id: bodyNodeId, name, params, returnType: e.returnType === undefined ? undefined : cloneTypeNode(e.returnType), throws: e.throws === undefined ? undefined : cloneTypeNode(e.throws), start: e.start, end: e.end, async: e.async ? true : undefined, closure: { value, parent, expected, move: e.move || owning, unsafe, self, made, givesRefs },
       body: stmts,
     }).bodyId;
     let siblings: usize = 0;

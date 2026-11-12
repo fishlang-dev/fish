@@ -6057,7 +6057,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
     }
     const slot = elementAt(i);
     const given = typing.rec(closure).params[reducing ? 1 : 0];
-    const passed = given === undefined ? [] : [isRef(given) ? `ptr ${slot}` : `${llvm(given)} ${convert(copied(load(slot), element), element, given)}`];
+    const passed = given === undefined ? [] : [isRef(given) && !isRef(element) ? `ptr ${slot}` : `${llvm(given)} ${convert(copied(load(slot), element), element, given)}`];
     if (typing.rec(closure).params.length > (reducing ? 2 : 1)) passed.push(`i64 ${i}`);
     if (reducing) {
       const acc = temp();
@@ -6171,7 +6171,7 @@ export function codegen(checked: Checked, { src, file, release, panic, library =
       thunk(through, "i32", () => {
         const arg = (p: string, given: Type | undefined): string[] => {
           if (given === undefined) return [];
-          if (isRef(given)) return [`ptr ${p}`];
+          if (isRef(given) && !isRef(element)) return [`ptr ${p}`];
           const v = temp();
           emit(`${v} = load ${llvm(element)}, ptr ${p}`);
           return [`${llvm(given)} ${convert(copied(v, element), element, given)}`];

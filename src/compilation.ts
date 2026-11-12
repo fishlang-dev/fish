@@ -162,6 +162,8 @@ export type Tables = {
   // The arrows the checker writes around a function given as a value or a timer's callback, which
   // keep no frame in a backtrace, since nobody wrote them.
   madeArrows: NodeSet<Expr>;
+  // The arrows written as the callback of an array's `map` or `reduce`, which may give references.
+  elementArrows: NodeSet<Expr>;
   // The `fill length` checks that panic on a negative length.
   lengthChecks: NodeSet<Expr>;
   // The `fileRead` and `fileWrite` calls of the std's file module.
@@ -379,6 +381,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     namedParams: new NodeMap<Param, { fn: string; names: string[]; clones: boolean[] }>(),
     presetParams: new NodeMap<Param, Type>(),
     madeArrows: new NodeSet<Expr>(),
+    elementArrows: new NodeSet<Expr>(),
     lengthChecks: new NodeSet<Expr>(),
     fileCalls: new NodeSet<Expr>(),
     syncFileCalls: new NodeMap<Expr, string>(),
