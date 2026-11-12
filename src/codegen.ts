@@ -148,7 +148,14 @@ export const symbolIn = (arenas: Ref<Arenas>, i: Ref<Instance>, names: Ref<Map<I
   return b.rust !== undefined ? `@"${trusted(b.rust).symbol}"` : b.foreign === true ? `@"${b.name}"` : `@"fsh.${quoted(names.get(i.id) ?? shortened(i.symbol))}"`;
 };
 
+// A field as JSON reads and writes it: where it sits, and whether an empty one is left out.
+type JsonField = { name: string; type: Type; path: usize[]; omit?: boolean };
+
 // A node standing for another as a key of a table, which reads only its id.
+function sharedPrefix(which: string): string {
+  return which === "shared" ? "shared" : which === "Rc" ? "rc" : "weak";
+}
+
 function stmtKey(s: Ref<Stmt>): Stmt {
   return { id: s.id, kind: "empty", start: s.start, end: s.end };
 }
@@ -5235,7 +5242,7 @@ class Codegen implements PrintHost, ComptimeHost {
     } else if (r.kind === "recursive") {
       result = kind === "drop" ? this.dropBlock(type as RecursiveType) : this.copyBlock(type as RecursiveType);
     } else if (r.kind === "shared") {
-      if (kind === "copy") this.emit(`call void @fsh_rt_${{ shared: "shared", Rc: "rc", Weak: "weak" }[this.tables.typing.rec(type as SharedType).which]}_retain(ptr %v)`);
+      if (kind === "copy") this.emit(`call void @fsh_rt_${sharedPrefix(this.tables.typing.rec(type as SharedType).which)}_retain(ptr %v)`);
       else this.dropShared(type as SharedType);
     } else if (r.kind === "dyn") {
       // Through the vtable: its drop frees the block; its copy gives a new block. A Dyn moved
@@ -5544,6 +5551,12 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // The class `written` spells where `lowered` is a class, or `lowered` itself.
+  classShape(written: Type, lowered: Exclude<Type, string>): ClassType {
+    const shaped = this.writtenShape(written, lowered);
+    return (shaped !== undefined ? shaped : lowered) as ClassType;
+  }
+
   // The record of `written` where it has the same shape as `lowered`.
   writtenShape(written: Type, lowered: Exclude<Type, string>) {
     const r = this.recOf(written);
@@ -5604,7 +5617,7 @@ class Codegen implements PrintHost, ComptimeHost {
       return;
     }
     if (r.kind === "class") {
-      this.jsonObject(w, v, t as ClassType, this.jsonFields((this.writtenShape(written, t) as ClassType | undefined) ?? (t as ClassType)));
+      this.jsonObject(w, v, t as ClassType, this.jsonFields(this.classShape(written, t)));
       return;
     }
     const object = t as ObjectType;
@@ -5645,14 +5658,20 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // A class's fields JSON writes, a base's first, each with where it sits in the instance.
   // An object's fields as JSON writes them, typed and marked optional as the object was written.
-  objectJsonFields(object: ObjectType, as: Ref<Field[]>) {
-    const { fields } = this.tables.typing.rec(object);
-    return fields.map((f, i) => ({ name: f.name, type: as[i as usize]!.type, path: [i], omit: as[i as usize]!.optional !== undefined }));
+  objectJsonFields(object: ObjectType, as: Ref<Field[]>): JsonField[] {
+    let out: JsonField[] = [];
+    const count = this.tables.typing.rec(object).fields.length;
+    for (let i: usize = 0; i < count; i++) out.push({ name: this.tables.typing.rec(object).fields[i]!.name, type: as[i]!.type, path: [i], omit: as[i]!.optional !== undefined });
+    return out;
   }
 
 
-  jsonFields(c: ClassType): { name: string; type: Type; path: usize[]; omit?: boolean }[] {
-    return this.tables.typing.rec(c).base !== undefined ? [...this.jsonFields(this.tables.typing.rec(c).base!).map((f) => ({ ...f, path: [0, ...f.path] })), ...this.ownJsonFields(c, 1)] : this.ownJsonFields(c, 0);
+  jsonFields(c: ClassType): JsonField[] {
+    const base = this.tables.typing.rec(c).base;
+    let out: JsonField[] = [];
+    if (base !== undefined) for (const f of this.jsonFields(base)) out.push({ name: f.name, type: f.type, path: [0, ...f.path], omit: f.omit });
+    for (const f of this.ownJsonFields(c, base !== undefined ? 1 : 0)) out.push(f);
+    return out;
   }
 
 
@@ -5668,15 +5687,20 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  ownJsonFields(c: ClassType, offset: usize) {
-    const { fields } = this.tables.typing.rec(c);
-    return fields.flatMap((f, i) => (f.name.startsWith("#") ? [] : [{ name: f.name, type: f.type, path: [offset + (i as usize)], omit: f.optional !== undefined }]));
+  ownJsonFields(c: ClassType, offset: usize): JsonField[] {
+    let out: JsonField[] = [];
+    const fields = this.tables.typing.rec(c).fields;
+    for (let i: usize = 0; i < fields.length; i++) {
+      const f = fields[i]!;
+      if (!f.name.startsWith("#")) out.push({ name: f.name, type: f.type, path: [offset + i], omit: f.optional !== undefined });
+    }
+    return out;
   }
 
 
   // An object's fields; one spelled `x?: T` is left out while empty, so whether a comma is
   // needed is known only as the fields are written.
-  jsonObject(this: Mut<this>, w: string, v: string, t: Type, fields: Ref<{ name: string; type: Type; path: usize[]; omit?: boolean }[]>) {
+  jsonObject(this: Mut<this>, w: string, v: string, t: Type, fields: Ref<JsonField[]>) {
     this.jsonRaw(w, "{");
     const dynamic = fields.some((f) => f.omit === true);
     const wrote = dynamic ? this.alloca("i1") : "";
@@ -6035,12 +6059,16 @@ class Codegen implements PrintHost, ComptimeHost {
     if (r.kind === "object") {
       const [order, rest] = this.tupleOrder(t as ObjectType);
       const length = r.required === undefined ? undefined : this.tupleLength(v, t as ObjectType);
-      order.forEach(({ f, i }, n) => this.present(length, n as usize, (cg) => {
-        if (n > 0) comma(cg);
-        const x = cg.temp();
-        cg.emit(`${x} = extractvalue ${cg.llvm(t)} ${v}, ${i}`);
-        cg.jsTextInto(b, x, f.type);
-      }));
+      for (let n: usize = 0; n < order.length; n++) {
+        const i = order[n]!.i;
+        const part = order[n]!.f.type;
+        this.present(length, n, (cg) => {
+          if (n > 0) comma(cg);
+          const x = cg.temp();
+          cg.emit(`${x} = extractvalue ${cg.llvm(t)} ${v}, ${i}`);
+          cg.jsTextInto(b, x, part);
+        });
+      }
       if (rest === undefined) return;
       const many = this.temp();
       this.emit(`${many} = extractvalue ${this.llvm(t)} ${v}, ${rest.i}`);
@@ -6302,7 +6330,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       return node;
     }
-    const fields = r.kind === "class" ? this.jsonFields((this.writtenShape(written, t) as ClassType | undefined) ?? (t as ClassType)) : this.objectJsonFields(object, as);
+    const fields = r.kind === "class" ? this.jsonFields(this.classShape(written, t)) : this.objectJsonFields(object, as);
     if (r.kind === "class" && this.errorClass(t as ClassType)) return this.errorTree(v, t as ClassType, fields, next);
     const name = r.kind === "class" ? r.name.replace(/[@<].*$/, "") : "";
     const embedded = r.kind === "class" ? this.embeddedField(t as ClassType) : undefined;
@@ -6350,7 +6378,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // An Error as Node prints one with its stack left out: its header, then the fields beyond
   // Error's own and its cause, read through what ErrorLike gives.
   // `shell`, past the depth, it keeps only whether it has more than its header to show.
-  errorTree(this: Mut<this>, v: string, t: ClassType, fields: Ref<{ name: string; type: Type; path: usize[]; omit?: boolean }[]>, depth: string, shell = false): string {
+  errorTree(this: Mut<this>, v: string, t: ClassType, fields: Ref<JsonField[]>, depth: string, shell = false): string {
     const blank = (cg: Mut<Codegen>) => {
       const b = cg.temp();
       const line = `${b} = call ptr @fsh_rt_insp_text(ptr ${cg.cString("")})`;
@@ -6445,7 +6473,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     const spelled = this.writtenShape(written, t) as ObjectType | undefined;
     const as = this.recOf(spelled)?.fields.length === this.tables.typing.rec(object).fields.length ? this.tables.typing.rec(spelled!).fields : this.tables.typing.rec(object).fields;
-    const fields = r.kind === "class" ? this.jsonFields((spelled as ClassType | undefined) ?? (t as ClassType)) : this.objectJsonFields(object, as);
+    const fields = r.kind === "class" ? this.jsonFields(this.classShape(written, t)) : this.objectJsonFields(object, as);
     // Past the depth, an Error is its header alone, or its class's name when it has more to show.
     if (r.kind === "class" && this.errorClass(t as ClassType)) return this.errorTree(v, t as ClassType, fields, "0", true);
     const embedded = r.kind === "class" ? this.embeddedField(t as ClassType) : undefined;
