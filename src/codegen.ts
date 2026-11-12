@@ -15,7 +15,7 @@ import type { ArithmeticOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, 
 import { ARRAY, DYN, compound, Conversions, llvmOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
+import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.ts";
 import type { Tables } from "./compilation.ts";
 import type { Kind, Verdict } from "./narrow.ts";
@@ -1031,9 +1031,8 @@ class Codegen implements PrintHost, ComptimeHost {
         parts.push(`${name}=${this.tables.typing.keyOf(t)}`);
       }
       const key = parts.join("|");
-      let group = groups.get(key);
-      if (group === undefined) groups.set(key, (group = []));
-      group.push(i);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(i);
     }
     const out = new Map<InstanceId, Share>();
     for (const group of groups.values()) {
@@ -1181,8 +1180,9 @@ class Codegen implements PrintHost, ComptimeHost {
       return lines;
     };
     // Each constant's value, computed while compiling, before the filler that stores it.
+    const constants = [...this.constantGlobals.keys()];
     let computed: Value[] = [];
-    for (const [c] of this.constantGlobals) computed.push(comptimeBody(this, c));
+    for (const c of constants) computed.push(comptimeBody(this, c));
     const filler = made(this, '@"fsh.constants"', (cg) => {
       let at: usize = 0;
       for (const [c, name] of [...cg.constantGlobals]) {
@@ -1485,7 +1485,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (family !== "overflowing") return v;
     const pair = this.temp();
     this.emit(`${pair} = insertvalue { ${t}, i1 } undef, ${t} ${v}, 0`);
-    this.emit(`${result} = insertvalue { ${t}, i1 } ${pair}, i1 ${over}, 1`);
+    this.emit(`${result} = insertvalue { ${t}, i1 } ${pair}, i1 ${over!}, 1`);
     return result;
   }
 
@@ -2413,12 +2413,10 @@ class Codegen implements PrintHost, ComptimeHost {
       const held = to ?? this.cur().types.get(a)!;
       if (this.isCallback(held) || this.isPromised(held)) {
         const owned2 = this.owned(a);
-        const chosen = (i as usize) < optional.length && optional[i as usize]! ? "undefined" : "null";
-        return this.toJs(owned2, held, chosen);
+        return this.toJs(owned2, held, (i as usize) < optional.length && optional[i as usize]! ? "undefined" : "null");
       }
       const jsOperand2 = this.jsOperand(a);
-      const chosen2 = (i as usize) < optional.length && optional[i as usize]! ? "undefined" : "null";
-      return this.toJs(jsOperand2, this.cur().types.get(a)!, chosen2, this.cur().coercions.get(a));
+      return this.toJs(jsOperand2, this.cur().types.get(a)!, (i as usize) < optional.length && optional[i as usize]! ? "undefined" : "null", this.cur().coercions.get(a));
     });
     const argv = this.alloca(`[${Math.max(boxes.length, 1)} x ptr]`);
     boxes.forEach((box, i) => {
@@ -2500,7 +2498,7 @@ class Codegen implements PrintHost, ComptimeHost {
     let result: string | undefined;
     if (e.kind === "member") result = this.jsGet(c, e.name, this.cur().types.get(e)!, `'${name.name}.${e.name}' is`, { start: e.start, end: e.end });
     else {
-      const call = e as Extract<Expr, { kind: "call" }>;
+      const call = e as Ref<Extract<Expr, { kind: "call" }>>;
       const method = (call.callee as Extract<Expr, { kind: "member" }>).name;
       result = this.jsMethod(c, method, call.args, this.cur().types.get(call), `'${name.name}.${method}' gave`, call);
     }
@@ -2969,7 +2967,10 @@ class Codegen implements PrintHost, ComptimeHost {
     const shape = r.kind === "block" ? this.tables.typing.jsShape(m as BlockType) : undefined;
     let all = is(this, 9);
     let shaped: { name: string; type: Type }[] = [];
-    if (shape !== undefined) for (const f of this.tables.typing.rec(shape).fields) shaped.push({ name: f.name, type: f.type });
+    if (shape !== undefined) {
+      const written = this.tables.typing.rec(shape).fields;
+      for (const f of written) shaped.push({ name: f.name, type: f.type });
+    }
     for (const f of shaped) {
       if (this.tables.typing.isOption(f.type)) continue;
       const ft = typeof f.type === "string" ? undefined : this.tables.typing.rec(f.type);
@@ -3228,7 +3229,7 @@ class Codegen implements PrintHost, ComptimeHost {
       slots = [this.dynRelease(type, n), "@fsh_rt_dyn_retain", own === true ? this.dynClone(type, n, table, true) : "@fsh_rt_dyn_retain"];
     } else {
       // A Rust value is never copied, so a Dyn holding one panics if it ever is.
-      let rust: string | undefined;
+      let rust: string | undefined = undefined;
       this.tables.typing.holdsPart(type, (u) => {
         if (rust === undefined) rust = rustClassOf(this.tables.typing, u)?.name;
         return rust !== undefined;
@@ -3381,8 +3382,14 @@ class Codegen implements PrintHost, ComptimeHost {
     const r = this.recOf(type);
     if (r?.kind === "generator") return [this.generatorNext(type as GeneratorType, n)];
     const abstract = (cg: Mut<Codegen>, t: Type) => cg.recOf(t)?.kind === "interface" && cg.tables.typing.promiseElement(t) === undefined;
-    const made = this.tables.typing.rec(this.tables.typing.rec(to).of).methods.map((m, i) => (abstract(this, m.returns) || (i as usize) >= methods.length || methods[i as usize] === undefined ? "null" : this.methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, this.tables.arenas.instanceOf(methods[i as usize]!).id)));
-    return [...made, ...this.tables.typing.rec(this.tables.typing.rec(to).of).fields.map((f, i) => this.fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, this.tables.arenas.instanceOf(fields[i])?.id))];
+    const declared = this.tables.typing.rec(this.tables.typing.rec(to).of).methods.map((m) => copyMethod(m));
+    let made: string[] = [];
+    for (let i: usize = 0; i < declared.length; i++) {
+      const m = declared[i]!;
+      if (abstract(this, m.returns) || i >= methods.length || methods[i] === undefined) made.push("null");
+      else made.push(this.methodThunk(`@"fsh.dyn.${n}.${m.name}"`, type, m, methods[i]!));
+    }
+    return [...made, ...this.tables.typing.rec(this.tables.typing.rec(to).of).fields.map((f, i) => this.fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i]))];
   }
 
 
@@ -3444,7 +3451,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const self = upcasts ? cg.upcast("%p", type as ClassType, owner!) : "%p";
       // Given up, the block is freed once the method returns or unwinds: its value dropped first,
       // or for a base's owning method, the derived fields it doesn't know of.
-      const giveUp = m.owned !== true ? undefined : (cg: Mut<Codegen>) => {
+      const giveUp: ((cg: Mut<Codegen>) => void) | undefined = m.owned !== true ? undefined : (cg: Mut<Codegen>) => {
         if (cg.bodyAt(target).self?.owned !== true) {
           const v = cg.temp();
           cg.emit(`${v} = load ${cg.llvm(type)}, ptr %p`);
