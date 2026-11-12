@@ -36,10 +36,10 @@ export const rustSymbol = (crate: string, path: string) => `fsh_rust_${[crate.re
 
 // A Rust name the shim or the IR is about to be written from, checked again there, since the
 // tree it came through isn't trusted to hold only what the declarations gave.
-export function trusted(name: RustName): RustName {
+export function trusted(name: Ref<RustName>): RustName {
   const { crate, path, symbol } = name;
   assert(validCrate(crate) && path.split("::").every((p) => RUST_NAME.test(p)) && symbol === rustSymbol(crate, path), `internal error: a Rust function's name isn't one a declaration gives: ${JSON.stringify(name)}`);
-  return name;
+  return { crate, path, symbol };
 }
 
 // The symbol of the shim function that drops a Rust type's boxed value. No member's symbol ends

@@ -60,9 +60,14 @@ function onPath(typing: Typing, of: Type): boolean {
 // an f32 must be a float's value.
 function floatConstant(value: f64, type: "f32" | "f64"): string {
   let view = new DataView(new ArrayBuffer(8));
-  view.setFloat64(0, type === "f32" ? Math.fround(value) : value);
+  // An f32's value is the double nearest it, read back from the float's own four bytes.
+  if (type === "f32") {
+    view.setFloat32(0, value);
+    value = view.getFloat32(0);
+  }
+  view.setFloat64(0, value);
   let out = "0x";
-  for (let i: usize = 0; i < 8; i++) out += hexByte(view.getUint8(i) as usize);
+  for (let i: i64 = 0; i < 8; i++) out += hexByte(view.getUint8(i) as usize);
   return out;
 }
 
@@ -95,26 +100,26 @@ export function shortened(name: string): string {
     if (inText || c === "\"") continue;
     if (c === "<") {
       if (depth === 0) {
-        out += name.slice(from, i + 1);
+        out += name.slice(from as i64, (i + 1) as i64);
         from = i + 1;
       }
       depth++;
     } else if (c === ">" && depth > 0 && name[i - 1] !== "=") {
       depth--;
       if (depth === 0) {
-        const inner = name.slice(from, i);
+        const inner = name.slice(from as i64, i as i64);
         out += inner.length > LONGEST_ARGUMENTS ? `#${digest(inner)}` : inner;
         from = i;
       }
     }
   }
-  return out + name.slice(from);
+  return out + name.slice(from as i64);
 }
 
 // A type as a panic message names it: shortened, then cut off past a line's worth.
 function brief(shown: string): string {
   const short = shortened(shown);
-  return short.length <= 2 * LONGEST_ARGUMENTS ? short : `${short.slice(0, 2 * LONGEST_ARGUMENTS)}...`;
+  return short.length <= 2 * LONGEST_ARGUMENTS ? short : `${short.slice(0, (2 * LONGEST_ARGUMENTS) as i64)}...`;
 }
 
 // Each instance's name in the IR: two instances whose types read alike, as two classes made from
@@ -144,7 +149,7 @@ function byName(lines: string[]): string[] {
   let chunks: string[][] = [];
   for (const line of lines) {
     if (line.startsWith("define ") || line.startsWith("declare ")) chunks.push([line]);
-    else chunks.at(-1)!.push(line);
+    else chunks[chunks.length - 1]!.push(line);
   }
   let names: string[] = [];
   let order: usize[] = [];
@@ -1384,8 +1389,13 @@ class Codegen implements PrintHost {
       this.body.push(`  ;fsh.at ${this.site.start}`);
       this.marked = { start: this.site.start, end: this.site.end };
     }
-    const callee = this.framingOn && this.site !== undefined ? CALLEE.exec(line)?.[1] : undefined;
-    if (callee && !QUIET.test(callee)) this.body.push(`  store ptr ${this.cString(this.where(this.site!))}, ptr %fsh.site`);
+    const called = this.framingOn && this.site !== undefined ? CALLEE.exec(line) : null;
+    const site = this.site;
+    if (called !== null && !QUIET.test(called[1]!) && site !== undefined) {
+      const at = this.where({ start: site.start, end: site.end });
+      const text = this.cString(at);
+      this.body.push(`  store ptr ${text}, ptr %fsh.site`);
+    }
     this.body.push(`  ${line}`);
   }
 
@@ -11459,7 +11469,7 @@ function breadcrumbs(text: string): usize[] {
   for (let unit = 0; unit < text.length; unit++) {
     const c = text.charCodeAt(unit);
     const second = c >= 0xdc00 && c < 0xe000 && unit > 0 && text.charCodeAt(unit - 1) >= 0xd800 && text.charCodeAt(unit - 1) < 0xdc00;
-    if (unit % STRIDE === 0) crumbs.push(at * 2 + (second ? 1 : 0));
+    if (unit % STRIDE === 0) crumbs.push((at * 2 + (second ? 1 : 0)) as usize);
     const paired = c >= 0xd800 && c < 0xdc00 && text.charCodeAt(unit + 1) >= 0xdc00 && text.charCodeAt(unit + 1) < 0xe000;
     if (!paired) at += second ? 4 : c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
   }
@@ -11477,9 +11487,19 @@ function wtf8(text: string): u8[] {
       i++;
     }
     if (c < 0x80) out.push(c as u8);
-    else if (c < 0x800) out.push((0xc0 | (c >> 6)) as u8, (0x80 | (c & 63)) as u8);
-    else if (c < 0x10000) out.push((0xe0 | (c >> 12)) as u8, (0x80 | ((c >> 6) & 63)) as u8, (0x80 | (c & 63)) as u8);
-    else out.push((0xf0 | (c >> 18)) as u8, (0x80 | ((c >> 12) & 63)) as u8, (0x80 | ((c >> 6) & 63)) as u8, (0x80 | (c & 63)) as u8);
+    else if (c < 0x800) {
+      out.push((0xc0 | (c >> 6)) as u8);
+      out.push((0x80 | (c & 63)) as u8);
+    } else if (c < 0x10000) {
+      out.push((0xe0 | (c >> 12)) as u8);
+      out.push((0x80 | ((c >> 6) & 63)) as u8);
+      out.push((0x80 | (c & 63)) as u8);
+    } else {
+      out.push((0xf0 | (c >> 18)) as u8);
+      out.push((0x80 | ((c >> 12) & 63)) as u8);
+      out.push((0x80 | ((c >> 6) & 63)) as u8);
+      out.push((0x80 | (c & 63)) as u8);
+    }
   }
   return out;
 }
