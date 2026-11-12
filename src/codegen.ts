@@ -663,12 +663,14 @@ class Codegen implements PrintHost, ComptimeHost {
             this.allocas.push("  %this = load ptr, ptr %this.at");
           }
         }
-        for (const [local, i] of this.inst(instance).frame!.locals) {
+        const locals2 = this.inst(instance).frame!.locals;
+        for (const [local, i] of locals2) {
           const slot3 = this.slot(local);
           field(this, slot3, i);
         }
         // A `for await` loop's third field is the future it awaits.
-        for (const [s, i] of this.inst(instance).frame!.loops) [i, i + 1, ...((s as { await?: boolean }).await === true ? [i + 2] : [])].forEach((j) => field(this, `%loop${j}`, j));
+        const loops2 = this.inst(instance).frame!.loops;
+        for (const [s, i] of loops2) [i, i + 1, ...((s as { await?: boolean }).await === true ? [i + 2] : [])].forEach((j) => field(this, `%loop${j}`, j));
         for (const i of this.inst(instance).frame!.awaits.values()) field(this, `%await${i}`, i);
         this.startBlock(this.resuming.start);
         // The first `next`'s value has no `yield` to go to.
@@ -1064,7 +1066,8 @@ class Codegen implements PrintHost, ComptimeHost {
         const i = this.tables.arenas.instanceOf(id);
         const b = bodyOf(this.tables.arenas, i);
         const code = new Map<usize, InstanceId | undefined>();
-        for (const k of found.get(i.id)!) code.set(k, this.calledThrough(i.id, (b.params[k]!.pattern as { name: string }).name));
+        const items = found.get(i.id)!;
+        for (const k of items) code.set(k, this.calledThrough(i.id, (b.params[k]!.pattern as { name: string }).name));
         out.set(i.id, { template: template.id, at: found.get(i.id)!, code });
       }
     }
@@ -1139,7 +1142,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // The closure's body a call of the parameter `name` runs, in `i`.
   calledThrough(i: InstanceId, name: string): InstanceId | undefined {
     let found: InstanceId | undefined = undefined;
-    for (const st of this.bodyAt(i).body) {
+    const body2 = this.bodyAt(i).body;
+    for (const st of body2) {
       walkWhile({ of: "stmt", node: st }, (n) => {
         if (found !== undefined) return false;
         if (n.of === "expr" && n.node.kind === "call" && n.node.callee.kind === "ident" && n.node.callee.name === name) {
@@ -4195,7 +4199,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // The two shapes `next()` gives: finished, and holding a value.
   nextShapes(this: Mut<this>, yields: Type): [ObjectType, ObjectType] {
     const nextResult2 = this.tables.typing.nextResult(yields) as UnionType;
-    const members = this.tables.typing.rec(nextResult2).members as ObjectType[];
+    const members = this.tables.typing.rec(nextResult2).members.map((m) => m as ObjectType);
     const finished = members.find((m) => this.tables.typing.rec(m).fields.length === 1)!;
     return [finished, members.find((m) => m !== finished)!];
   }
@@ -4841,7 +4845,7 @@ class Codegen implements PrintHost, ComptimeHost {
       cg.emit(`br i1 ${condition}, label %${ok}, label %${no}`);
       cg.startBlock(ok);
     };
-    const matched = typeof info.type === "string" ? undefined : this.tables.typing.rec(info.type);
+    const matched = typeof info.type === "string" ? undefined : this.tables.typing.rec(info.type as Exclude<Type, string>);
     const union = matched?.kind === "union" ? (info.type as UnionType) : undefined;
     switch (info.kind) {
       case "any":
@@ -5089,8 +5093,11 @@ class Codegen implements PrintHost, ComptimeHost {
     // A lock is its word, then what it holds.
     if (r.kind === "interior") return isLock(r) ? [[r.of, 1]] : [];
     if (r.kind !== "object" && r.kind !== "class" && r.kind !== "closure" && r.kind !== "variant" && r.kind !== "generator" && r.kind !== "future") return [];
-    const base: [Type, usize][] = r.kind === "class" && r.base !== undefined ? [[r.base, 0]] : [];
-    return [...base, ...(r.kind === "generator" || r.kind === "future" ? r.frame : r.fields).map((f, i): [Type, usize] => [f.type, i + base.length])];
+    let out: [Type, usize][] = r.kind === "class" && r.base !== undefined ? [[r.base, 0]] : [];
+    const offset = out.length;
+    const held = r.kind === "generator" || r.kind === "future" ? r.frame : r.fields;
+    for (let i: usize = 0; i < held.length; i++) out.push([held[i]!.type, i + offset]);
+    return out;
   }
 
 
@@ -5428,7 +5435,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // Writes a value as JSON, through the function made for its type when it has parts.
   // The type as written is kept beside the lowered one, which forgets how a field was
   // spelled: an empty `x?: T` is left out, as JavaScript leaves out an undefined field.
-  jsonWrite(this: Mut<this>, w: string, v: string, type: Type) {
+  jsonWrite(this: Mut<this>, w: string, v: string, type: Type): void {
     const t = this.tables.typing.lower(type);
     if (typeof t === "string" || this.tables.typing.rec(t).kind === "literal") {
       this.jsonScalar(w, v, t);
@@ -5521,7 +5528,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // A part of `written` where `lowered` has the same shape, so its spelling can be read.
-  writtenPart(written: Type, lowered: Exclude<Type, string>, part: (cg: Mut<Codegen>, t: Exclude<Type, string>) => Type | undefined): Type | undefined {
+  writtenPart(this: Mut<this>, written: Type, lowered: Exclude<Type, string>, part: (cg: Mut<Codegen>, t: Exclude<Type, string>) => Type | undefined): Type | undefined {
     return typeof written !== "string" && this.tables.typing.rec(written).kind === this.tables.typing.rec(lowered).kind ? part(this, written) : undefined;
   }
 
@@ -5537,7 +5544,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // their keys, which spelling changes, so a written member may sit at another index.
   writtenMembers(this: Mut<this>, written: Type, t: UnionType): Type[] {
     const spelled = this.writtenShape(written, t) as UnionType | undefined;
-    return this.tables.typing.rec(t).members.map((m) => this.recOf(spelled)?.members.find((s) => this.tables.typing.lower(s) === m) ?? m);
+    const as = spelled !== undefined ? [...this.tables.typing.rec(spelled).members] : [];
+    return this.tables.typing.rec(t).members.map((m) => as.find((s) => this.tables.typing.lower(s) === m) ?? m);
   }
 
 
@@ -5648,7 +5656,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   ownJsonFields(c: ClassType, offset: usize) {
     const { fields } = this.tables.typing.rec(c);
-    return fields.flatMap((f, i) => (f.name.startsWith("#") ? [] : [{ name: f.name, type: f.type, path: [offset + i], omit: f.optional !== undefined }]));
+    return fields.flatMap((f, i) => (f.name.startsWith("#") ? [] : [{ name: f.name, type: f.type, path: [offset + (i as usize)], omit: f.optional !== undefined }]));
   }
 
 
@@ -5656,7 +5664,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // needed is known only as the fields are written.
   jsonObject(this: Mut<this>, w: string, v: string, t: Type, fields: Ref<{ name: string; type: Type; path: usize[]; omit?: boolean }[]>) {
     this.jsonRaw(w, "{");
-    const dynamic = fields.some((f) => f.omit);
+    const dynamic = fields.some((f) => f.omit === true);
     const wrote = dynamic ? this.alloca("i1") : "";
     if (dynamic) this.emit(`store i1 false, ptr ${wrote}`);
     fields.forEach((f, n) => {
@@ -5772,8 +5780,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // Whether a first argument may be a format, a string with more arguments after it, as Node
   // formats one: a literal holding a percent sign, or a string known only at run time.
   formats(this: Mut<this>, args: Ref<Expr[]>): boolean {
-    const [first] = args;
-    if (first === undefined || args.length < 2) return false;
+    if (args.length < 2) return false;
+    const first = args[0]!;
     if (first.kind === "string") return first.value.includes("%");
     const t = this.tables.typing.lower(this.printedType(first));
     const text = (cg: Mut<Codegen>, m: Type) => {
@@ -5788,12 +5796,11 @@ class Codegen implements PrintHost, ComptimeHost {
   // What each argument's description needs: a literal format says which specifier takes each,
   // so only that is built; one read at run time may ask anything of any.
   formatNeeds(this: Mut<this>, args: Ref<Expr[]>): { text: boolean; depth: i64 }[] {
-    const [first] = args;
-    if (first?.kind !== "string" || args.length < 2) {
+    if (args.length < 2 || args[0]!.kind !== "string") {
       const inspected = !this.formats(args);
       return args.map(() => (inspected ? { text: false, depth: 2 } : { text: true, depth: 4 }));
     }
-    const { specs, rest } = formatPlan(first.value, args.length);
+    const { specs, rest } = formatPlan((args[0]! as Ref<Extract<Expr, { kind: "string" }>>).value, args.length);
     const DEPTHS: Record<string, i64> = { s: 0, O: 2, o: 4 };
     return args.map((_, i) => {
       if (i === 0 || i >= rest) return { text: false, depth: 2 };
@@ -5806,7 +5813,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // An argument's description: its kind and value, and for a value with parts its String(x) when
   // `need.text` and its inspect tree, cut at `need.depth`, when that isn't -1. A union is
   // described by its member.
-  describe(this: Mut<this>, at: string, v: string, type: Type, need: Ref<{ text: boolean; depth: i64 }>) {
+  describe(this: Mut<this>, at: string, v: string, type: Type, need: Ref<{ text: boolean; depth: i64 }>): void {
     const t = this.tables.typing.lower(type);
     const r = this.recOf(t);
     const put = (cg: Mut<Codegen>, index: usize, of: string, x: string) => {
@@ -5898,7 +5905,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  jsTextInto(this: Mut<this>, b: string, v: string, type: Type) {
+  jsTextInto(this: Mut<this>, b: string, v: string, type: Type): void {
     const t = this.tables.typing.lower(type);
     const raw = (cg: Mut<Codegen>, s: string) => {
       const line = `call void @fsh_rt_text_raw(ptr ${b}, ptr ${cg.cString(s)})`;
@@ -6258,7 +6265,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const [order, rest] = this.tupleOrder(object);
       const length = this.tables.typing.rec(object).required === undefined ? undefined : this.tupleLength(v, object);
       const node = this.temp();
-      this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length ?? order.length})`);
+      this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length !== undefined ? length : `${order.length}`})`);
       order.forEach(({ i }, n) => {
         this.present(length, n, (cg) => {
           const x = cg.temp();
@@ -6413,7 +6420,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     const object = t as ObjectType;
     if (r.kind === "object" && this.tables.typing.isTuple(object)) {
-      const line = `${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${this.tables.typing.rec(object).required === undefined && this.tables.typing.rec(object).rest === undefined ? this.tables.typing.rec(object).fields.length : this.tupleLength(v, object)})`;
+      const line = `${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${this.tables.typing.rec(object).required === undefined && this.tables.typing.rec(object).rest === undefined ? `${this.tables.typing.rec(object).fields.length}` : this.tupleLength(v, object)})`;
       this.emit(line);
       return node;
     }
@@ -6740,7 +6747,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (c.kind === "union") return c.members.every((m) => this.recOf(m)?.kind === "variant") ? this.readVariant(r, t as Exclude<Type, string> as UnionType) : this.readMember(r, t as Exclude<Type, string> as UnionType);
     if (c.kind === "variant") return this.readVariant(r, t as Exclude<Type, string> as VariantType);
     if (c.kind === "object" && this.tables.typing.isTuple(t)) return this.readTuple(r, t as Exclude<Type, string> as ObjectType);
-    const fields = c.kind === "class" ? this.jsonFields(t as Exclude<Type, string> as ClassType) : c.fields.map((f, i) => ({ name: f.name, type: f.type, path: [i] }));
+    const fields = c.kind === "class" ? this.jsonFields(t as Exclude<Type, string> as ClassType) : c.fields.map((f, i) => ({ name: f.name, type: f.type, path: [i as usize] }));
     return this.readObject(r, t as Exclude<Type, string>, fields);
   }
 
@@ -6750,7 +6757,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const [mark, start] = [this.alloca("[3 x i64]"), this.temp()];
     this.emit(`${start} = call i32 @fsh_rt_json_peek(ptr ${r})`);
     this.emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
-    const what = typeof this.tables.typing.rec(t).value === "string" ? JSON.stringify(this.tables.typing.rec(t).value) : String(this.tables.typing.rec(t).value);
+    const what = typeof this.tables.typing.rec(t).value === "string" ? JSON.stringify(this.tables.typing.rec(t).value) : literalText(this.tables.typing.rec(t).value);
     const base = typeof this.tables.typing.rec(t).value === "string" ? "string" : typeof this.tables.typing.rec(t).value === "boolean" ? "boolean" : "i64";
     const v = this.readParts(r, base);
     const same = this.temp();
@@ -7056,7 +7063,8 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`call void @fsh_rt_json_save(ptr ${r}, ptr ${mark})`);
     const groups = new Map<string, VariantType[]>();
     const parts: (Type | VariantType[])[] = [];
-    for (const m of this.tables.typing.rec(t).members) {
+    const members2 = this.tables.typing.rec(t).members;
+    for (const m of members2) {
       const variant = this.recOf(m);
       if (variant?.kind !== "variant") {
         parts.push(m);
@@ -8692,7 +8700,9 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Releases the values made since `mark` that nothing took over, newest first.
   settle(this: Mut<this>, mark: usize = this.floor) {
-    for (const { v, type } of this.pending.splice(mark as i64).reverse()) this.dispose(v, type);
+    let reversed = this.pending.splice(mark as i64);
+    reversed.reverse();
+    for (const { v, type } of reversed) this.dispose(v, type);
   }
 
 
@@ -8707,7 +8717,9 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Drops what the scopes from `depth` inward own, innermost and newest first, emptying each.
   drop(this: Mut<this>, depth: usize) {
-    for (const scope of this.scopes.slice(depth as i64).reverse()) {
+    let reversed = this.scopes.slice(depth as i64);
+    reversed.reverse();
+    for (const scope of reversed) {
       for (const { slot, type } of [...scope.held].reverse()) {
         const v = this.temp();
         this.emit(`${v} = load ${this.llvm(type)}, ptr ${slot}`);
@@ -10363,7 +10375,9 @@ class Codegen implements PrintHost, ComptimeHost {
     const region = this.finallies.at(-1);
     const toRegion = region !== undefined && this.handlers.length <= region.handlers;
     const kept = toRegion ? region.floor : this.handlers.at(-1)?.floor ?? 0;
-    for (const { v, type } of this.pending.slice(kept).reverse()) this.dispose(v, type);
+    let reversed = this.pending.slice(kept);
+    reversed.reverse();
+    for (const { v, type } of reversed) this.dispose(v, type);
     if (region !== undefined && toRegion) {
       this.drop(region.depth);
       const kept = this.stash(region, "error", to, error);
