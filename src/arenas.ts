@@ -22,6 +22,11 @@ export class Arenas {
   private locals: Local[] = [];
   private classes: ClassInfo[] = [];
 
+  // How many instances there are; their ids run from 1 to this.
+  instanceCount(): usize {
+    return this.instances.length;
+  }
+
   instanceOf(id: InstanceId): Ref<Instance>;
   instanceOf(id: InstanceId | undefined): Ref<Instance> | undefined;
   instanceOf(id: InstanceId | undefined): Ref<Instance> | undefined {

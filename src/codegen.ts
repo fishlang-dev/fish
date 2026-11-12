@@ -18,7 +18,15 @@ import type { Tables } from "./compilation.ts";
 import type { Kind, Verdict } from "./narrow.ts";
 
 // Every instance to compile, as records.
-export const compiledOf = ({ instances, tables }: Checked): Instance[] => instances.map((i) => tables.arenas.instanceOf(i));
+export function compiledOf(checked: Ref<Checked>): Ref<Instance>[] {
+  let out: Ref<Instance>[] = [];
+  for (const i of checked.instances) out.push(checked.tables.arenas.instanceOf(i));
+  return out;
+}
+
+const HEX_DIGITS = "0123456789ABCDEF";
+// A byte as two hexadecimal digits.
+const hexByte = (b: usize): string => `${HEX_DIGITS[b >> 4]!}${HEX_DIGITS[b & 15]!}`;
 
 const COMPARISON: Partial<Record<BinaryOp, string>> = {
   "===": "eq", "!==": "ne", "<": "slt", "<=": "sle", ">": "sgt", ">=": "sge",
@@ -51,9 +59,11 @@ function onPath(typing: Typing, of: Type): boolean {
 // A float constant as LLVM writes one exactly: the bits of the double holding it, which for
 // an f32 must be a float's value.
 function floatConstant(value: f64, type: "f32" | "f64"): string {
-  const view = new DataView(new ArrayBuffer(8));
+  let view = new DataView(new ArrayBuffer(8));
   view.setFloat64(0, type === "f32" ? Math.fround(value) : value);
-  return `0x${view.getBigUint64(0).toString(16).toUpperCase().padStart(16, "0")}`;
+  let out = "0x";
+  for (let i: usize = 0; i < 8; i++) out += hexByte(view.getUint8(i) as usize);
+  return out;
 }
 
 // The callee of a call or invoke line, and the callees a frame's site needn't be stored before:
@@ -66,11 +76,11 @@ const QUIET = /^@(llvm\.|printf$|dprintf$|fflush$|fsh_rt_str_retain$|fsh_rt_str_
 
 // A name inside LLVM's quotes. A generic class's instance is named by its type arguments, and a
 // test by its name, which may hold quotes, so those are escaped as LLVM spells them.
-const quoted = (name: string) => name.replace(/["\\]/g, (c) => `\\${c.charCodeAt(0).toString(16).toUpperCase()}`);
+const quoted = (name: string) => name.replace(/["\\]/g, (c) => `\\${hexByte(c.charCodeAt(0) as usize)}`);
 // A symbol with each type argument list longer than this written as a hash of it: a generic
 // class made from a structural type spells its fields in its name, which every method's symbol
 // and frame name repeats.
-const LONGEST_ARGUMENTS = 160;
+const LONGEST_ARGUMENTS: usize = 160;
 export function shortened(name: string): string {
   if (name.length <= LONGEST_ARGUMENTS) return name;
   let out = "";
@@ -111,10 +121,9 @@ function brief(shown: string): string {
 // arguments shown the same way, are told apart by a count after the first.
 export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
   let known = new Map<InstanceId, string>();
-  const seen = new Map<string, usize>();
-  for (let id = 1; ; id++) {
+  let seen = new Map<string, usize>();
+  for (let id: usize = 1; id <= arenas.instanceCount(); id++) {
     const x = arenas.instanceOf(id as InstanceId);
-    if (x === undefined) break;
     const name = shortened(x.symbol);
     const n = (seen.get(name) ?? 0) + 1;
     seen.set(name, n);
@@ -126,19 +135,27 @@ export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
 // An instance's name in the IR, from the names `symbolNames` gave the compilation's instances.
 export const symbolIn = (arenas: Ref<Arenas>, i: Instance, names: Ref<Map<InstanceId, string>>) => {
   const b = bodyOf(arenas, i);
-  return b.rust ? `@"${trusted(b.rust).symbol}"` : b.foreign ? `@"${b.name}"` : `@"fsh.${quoted(names.get(i.id) ?? shortened(i.symbol))}"`;
+  return b.rust !== undefined ? `@"${trusted(b.rust).symbol}"` : b.foreign === true ? `@"${b.name}"` : `@"fsh.${quoted(names.get(i.id) ?? shortened(i.symbol))}"`;
 };
 
 // Function definitions and declarations, each with the lines after it, in order of the symbols
 // they name.
 function byName(lines: string[]): string[] {
-  const chunks: string[][] = [];
+  let chunks: string[][] = [];
   for (const line of lines) {
     if (line.startsWith("define ") || line.startsWith("declare ")) chunks.push([line]);
     else chunks.at(-1)!.push(line);
   }
-  const named = chunks.map((c) => [/@("[^"]*"|[\w.$-]+)\(/.exec(c[0]!)![1]!, c] as const);
-  return named.toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).flatMap(([, c]) => c);
+  let names: string[] = [];
+  let order: usize[] = [];
+  for (let i: usize = 0; i < chunks.length; i++) {
+    names.push(/@("[^"]*"|[\w.$-]+)\(/.exec(chunks[i]![0]!)![1]!);
+    order.push(i);
+  }
+  const sorted = order.toSorted((a, b) => (names[a]! < names[b]! ? -1 : names[a]! > names[b]! ? 1 : 0));
+  let out: string[] = [];
+  for (const i of sorted) for (const line of chunks[i]!) out.push(line);
+  return out;
 }
 
 // The `Math` functions LLVM's intrinsics compute exactly. The rest call the runtime's
@@ -149,7 +166,15 @@ const MATH_INTRINSICS = new Set(["floor", "ceil", "trunc", "sqrt"]);
 const BACKWARD: Record<string, string> = { findLast: "find", findLastIndex: "findIndex", reduceRight: "reduce" };
 
 // The C functions the runtime prelude already declares, which a `declare function` reuses.
-const DECLARED = new Set(RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []));
+function declared(): Set<string> {
+  let out = new Set<string>();
+  for (const line of RUNTIME) {
+    const found = /^declare [^@]*@([\w.]+)\(/.exec(line);
+    if (found !== null) out.add(found[1]!);
+  }
+  return out;
+}
+const DECLARED = declared();
 
 // How a narrow value crosses to C, which expects it widened by its caller: a boolean, a byte
 // holding 0 or 1, and unsigned integers zero-extended, signed ones sign-extended.
@@ -170,7 +195,7 @@ function shimParams(typing: Ref<Typing>, c: Crossing): string[] {
 // What a Rust shim returns for what its function gives, and the type of the slot it writes the
 // rest of it into: an array, or what an Option of a number, a boolean or an array holds.
 function shimGives(typing: Ref<Typing>, c: Crossing | undefined): { returns: string; out?: string } {
-  if (!c) return { returns: "void" };
+  if (c === undefined) return { returns: "void" };
   if (c.kind === "plain") return { returns: crossed(typing, c.type) };
   if (c.kind === "array") return { returns: "void", out: ARRAY };
   if (c.kind === "option" && c.of.kind === "plain") return { returns: "zeroext i1", out: llvmOf(typing, c.inner) };
@@ -179,7 +204,7 @@ function shimGives(typing: Ref<Typing>, c: Crossing | undefined): { returns: str
 }
 
 // What a Rust function gives, as it crosses: a constructor gives its handle.
-const rustGiven = (typing: Typing, arenas: Ref<Arenas>, i: Instance): Crossing | undefined => (bodyOf(arenas, i).self?.constructor ? rustCrossing(typing, bodyOf(arenas, i).owner!, true) : i.returns === "void" ? undefined : rustCrossing(typing, i.returns, true));
+const rustGiven = (typing: Typing, arenas: Ref<Arenas>, i: Instance): Crossing | undefined => (bodyOf(arenas, i).self?.constructor === true ? rustCrossing(typing, bodyOf(arenas, i).owner!, true) : i.returns === "void" ? undefined : rustCrossing(typing, i.returns, true));
 
 // A library has no C `main`; each export gets a C function under its own name instead.
 // `sources` holds the program's files other than the entry, for panic locations.
@@ -305,7 +330,7 @@ class Codegen implements PrintHost {
   spills: { slot: string; type: Type; copy: { v: string; type: Type } }[];
   fixed: NodeMap<Expr, string>;
   texts: Map<string, string>;
-  bigConstants: Map<bigint, string>;
+  bigConstants: Map<string, string>;
   cStrings: Map<string, string>;
   tables: Set<string>;
   glue: { drop: TypeMap<Type, string>; copy: TypeMap<Type, string>; };
@@ -460,7 +485,7 @@ class Codegen implements PrintHost {
     // Each literal's string block, made once.
     this.texts = new Map<string, string>();
 
-    this.bigConstants = new Map<bigint, string>();
+    this.bigConstants = new Map<string, string>();
 
     this.cStrings = new Map<string, string>();
 
@@ -1365,7 +1390,7 @@ class Codegen implements PrintHost {
 
 
   emit(this: Mut<this>, line: string) {
-    if (this.body === this.debugging && this.site && this.site !== this.marked) {
+    if (this.body === this.debugging && this.site !== undefined && this.site !== this.marked) {
       this.body.push(`  ;fsh.at ${this.site.start}`);
       this.marked = this.site;
     }
@@ -11387,12 +11412,12 @@ class Codegen implements PrintHost {
   // A bigint known while compiling, as a constant the runtime never counts or frees.
   bigConstant(this: Mut<this>, value: bigint): string {
     const key = String(value);
-    const made = this.bigConstants.get(value);
+    const made = this.bigConstants.get(`${value}`);
     if (made) return made;
     const limbs: bigint[] = [];
     for (let m = value < 0n ? -value : value; m > 0n; m >>= 32n) limbs.push(m & 0xffffffffn);
     const name = `@.bigint.${this.stableId("bigint constant", key, key)}`;
-    this.bigConstants.set(value, name);
+    this.bigConstants.set(`${value}`, name);
     const words = limbs.length === 0 ? "i32 0" : limbs.map((l) => `i32 ${BigInt.asIntN(32, l)}`).join(", ");
     this.globals.push(`${name} = private unnamed_addr constant { i64, i32, i64, [${Math.max(limbs.length, 1)} x i32] } { i64 -1, i32 ${value < 0n ? 1 : 0}, i64 ${limbs.length}, [${Math.max(limbs.length, 1)} x i32] [${words}] }`);
     return name;
@@ -11406,7 +11431,7 @@ class Codegen implements PrintHost {
     let lit = "";
     for (const b of bytes) {
       const plain = b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c;
-      lit += plain ? String.fromCharCode(b) : "\\" + b.toString(16).padStart(2, "0").toUpperCase();
+      lit += plain ? String.fromCharCode(b) : "\\" + hexByte(b as usize);
     }
     const name = `@.text.${this.stableId("text constant", lit, value)}`;
     this.texts.set(value, name);
@@ -11425,7 +11450,7 @@ class Codegen implements PrintHost {
     let lit = "";
     for (const b of bytes) {
       const plain = b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c;
-      lit += plain ? String.fromCharCode(b) : "\\" + b.toString(16).padStart(2, "0").toUpperCase();
+      lit += plain ? String.fromCharCode(b) : "\\" + hexByte(b as usize);
     }
     // Keyed by its bytes, which two strings with lone surrogates may share.
     const made = this.cStrings.get(lit);
@@ -11443,12 +11468,12 @@ export function codegen(checked: Checked, options: Options): string {
 }
 
 // The runtime's breadcrumb stride, in UTF-16 units.
-const STRIDE = 64;
+const STRIDE: usize = 64;
 
 // Where every STRIDE-th UTF-16 unit of a string is: its character's byte offset times two,
 // plus one when the unit is a pair's second half.
 function breadcrumbs(text: string): usize[] {
-  const crumbs: usize[] = [];
+  let crumbs: usize[] = [];
   let at = 0;
   for (let unit = 0; unit < text.length; unit++) {
     const c = text.charCodeAt(unit);
@@ -11462,7 +11487,7 @@ function breadcrumbs(text: string): usize[] {
 
 // A string's WTF-8 bytes: UTF-8, with a lone surrogate in its 3-byte form.
 function wtf8(text: string): u8[] {
-  const out: u8[] = [];
+  let out: u8[] = [];
   for (let i = 0; i < text.length; i++) {
     let c = text.charCodeAt(i) as u32;
     const next = text.charCodeAt(i + 1);
