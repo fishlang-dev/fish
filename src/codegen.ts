@@ -911,6 +911,28 @@ class Codegen implements PrintHost, ComptimeHost {
     return saved;
   }
 
+  // Sets aside the instructions of the function being emitted, keeping what it has pending and
+  // its scopes, while a helper with no values of its own is made.
+  setAsideBody(this: Mut<this>): Emission {
+    const saved: Emission = { allocas: this.allocas.splice(0, this.allocas.length as i64), body: this.body.splice(0, this.body.length as i64), temps: this.temps, labels: this.labels, block: this.block, pending: [], scopes: [], framingOn: this.framingOn, debuggingOn: this.debuggingOn };
+    this.temps = 0;
+    this.labels = 0;
+    this.block = "entry";
+    this.framingOn = false;
+    this.debuggingOn = false;
+    return saved;
+  }
+
+  takeUpBody(this: Mut<this>, saved: Emission): void {
+    this.allocas = saved.allocas;
+    this.body = saved.body;
+    this.temps = saved.temps;
+    this.labels = saved.labels;
+    this.block = saved.block;
+    this.framingOn = saved.framingOn;
+    this.debuggingOn = saved.debuggingOn;
+  }
+
   // Starts an empty function in place of the one being emitted.
   startFresh(this: Mut<this>): void {
     this.allocas = [];
@@ -3568,7 +3590,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const params = m.params.map((p, i) => `${this.llvm(p)} %a${i}`);
     this.thunk(name, DYN, (cg) => {
       const taken = closure ? cg.bodyAt(target).params.length : m.params.length;
-      m.params.slice(taken as i64).forEach((p, i) => cg.dispose(`%a${taken + i}`, p));
+      for (let i: usize = taken; i < m.params.length; i++) cg.dispose(`%a${i}`, m.params[i]!);
       let made: string;
       let future: FutureType;
       if (cg.inst(target).future !== undefined) {
@@ -3674,7 +3696,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // A stored callable's call is its one method's, on the callee itself.
   dynCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, callee: Ref<Expr>): string | undefined {
     const info = this.tables.dynCalls.get(e)!;
-    const object = info.callable ?? (callee as Extract<Expr, { kind: "member" }>).object;
+    const object = info.callable ?? (callee as Ref<Extract<Expr, { kind: "member" }>>).object;
     const optional = this.tables.optionalCallables.get(e);
     if (optional !== undefined) return this.optionalCallableCall(e, object, optional, info.index);
     const t = this.referent(this.valueType(object)) as DynType;
@@ -3689,11 +3711,12 @@ class Codegen implements PrintHost, ComptimeHost {
   // nothing when it isn't. The Option is read in place; the callable stays its.
   optionalCallableCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, object: Ref<Expr>, union: UnionType, index: usize): string | undefined {
     const dyn = this.tables.typing.rec(union).members.find((m) => m !== "null")! as DynType;
-    const m = this.tables.typing.rec(this.tables.typing.rec(dyn).of).methods[index]!;
+    const m = copyMethod(this.tables.typing.rec(this.tables.typing.rec(dyn).of).methods[index]!);
     const held = this.temp();
     const line = `${held} = load ${this.llvm(union)}, ptr ${this.receiver(object)}`;
     this.emit(line);
-    const none = this.conversions().holds(held, union, ["null"]);
+    const empty: Type[] = ["null"];
+    const none = this.conversions().holds(held, union, empty);
     return this.whenPresent(e, none, m.returns, (cg) => {
       const d = cg.convert(held, union, dyn);
       const [data, table] = [cg.temp(), cg.temp()];
@@ -3793,8 +3816,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const name = `@fsh.element.drop.${this.stableId("element.drop", described2, typeOwner(type))}`;
     this.elementDrops.set(type, name);
     // The function being emitted keeps what it has pending and its scopes while this one is made.
-    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, framingOn: this.framingOn, debuggingOn: this.debuggingOn };
-    [this.allocas, this.body, this.temps, this.labels, this.block, this.framingOn, this.debuggingOn] = [[], [], 0, 0, "entry", false, false];
+    const saved = this.setAsideBody();
     const v = this.temp();
     this.emit(`${v} = load ${this.llvm(type)}, ptr %p`);
     this.dispose(v, type);
@@ -3805,7 +3827,7 @@ class Codegen implements PrintHost, ComptimeHost {
     for (const pushed of this.body) this.out.push(pushed);
     this.out.push("}");
     this.out.push("");
-    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, framingOn: this.framingOn, debuggingOn: this.debuggingOn } = saved);
+    this.takeUpBody(saved);
     return name;
   }
 
@@ -4282,8 +4304,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
   resolved(node: Ref<Expr | Stmt | Param | ObjectProp>): LocalId {
     const local = this.localAt(node);
-    if (local === undefined) assert(false, "internal error: unresolved name");
-    return local;
+    assert(local !== undefined, "internal error: unresolved name");
+    return local!;
   }
 
 
@@ -4670,10 +4692,16 @@ class Codegen implements PrintHost, ComptimeHost {
     // A landing pad reads the statement's values back from slots: at -O0 on AArch64, LLVM loses
     // the second register of a two-register value carried into one. Each call stores them
     // again, since a value may reach it along a path no earlier store was on.
-    const held = this.pending.filter((p) => this.needsDrop(p.type));
-    for (const p of held) {
-      if (p.slot === undefined) p.slot = this.alloca(this.llvm(p.type));
-      this.emit(`store ${this.llvm(p.type)} ${p.v}, ptr ${p.slot}`);
+    let held: { slot: string; type: Type }[] = [];
+    for (let i: usize = 0; i < this.pending.length; i++) {
+      const type = this.pending[i]!.type;
+      if (!this.needsDrop(type)) continue;
+      if (this.pending[i]!.slot === undefined) {
+        const slot = this.alloca(this.llvm(type));
+        this.pending[i]!.slot = slot;
+      }
+      this.emit(`store ${this.llvm(type)} ${this.pending[i]!.v}, ptr ${this.pending[i]!.slot!}`);
+      held.push({ slot: this.pending[i]!.slot!, type });
     }
     const [ok, pad, caught] = [this.label(), this.label(), this.temp()];
     this.emit(`${assign}invoke ${call.slice("call ".length)} to label %${ok} unwind label %${pad}`);
@@ -4900,7 +4928,7 @@ class Codegen implements PrintHost, ComptimeHost {
   bindAll(this: Mut<this>, p: Ref<Pattern>, v: string, at: string | undefined, move: boolean) {
     const info = this.cur().patterns.get(p)!;
     if (info.kind === "any" && p.kind === "ident") {
-      const local = this.resolved(p as Expr);
+      const local = this.resolved(p as Ref<Expr>);
       this.reserve(local);
       // A binding borrowing the part points where it lives; one of a part that is itself a
       // reference, like a `Mut` field, holds that reference.
@@ -5145,7 +5173,10 @@ class Codegen implements PrintHost, ComptimeHost {
     const saved = this.setAside();
     const t = this.llvm(type);
     const each = (cg: Mut<Codegen>, v: string, part: Type, track = true) => {
-      if (kind === "drop") return (cg.dispose(v, part), v);
+      if (kind === "drop") {
+        cg.dispose(v, part);
+        return v;
+      }
       const made = cg.copied(v, part);
       if (track) cg.pending.push({ v: made, type: part });
       return made;
@@ -11511,11 +11542,10 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // The instructions dropping `%v` of `type`, as a helper's body.
   helperBody(drop: (cg: Mut<Codegen>, v: string) => void): string[] {
-    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, framingOn: this.framingOn, debuggingOn: this.debuggingOn };
-    [this.allocas, this.body, this.temps, this.labels, this.block, this.framingOn, this.debuggingOn] = [[], [], 0, 0, "entry", false, false];
+    const saved = this.setAsideBody();
     drop(this, "%v");
     const lines = [...this.allocas, ...this.body];
-    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, framingOn: this.framingOn, debuggingOn: this.debuggingOn } = saved);
+    this.takeUpBody(saved);
     return lines;
   }
 
