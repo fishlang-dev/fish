@@ -327,6 +327,7 @@ class Codegen implements PrintHost, ComptimeHost {
   arms: NodeMap<Stmt, { slot: string; type: Type; } | undefined>;
   scopes: Scope[];
   spills: { slot: string; type: Type; v: string }[];
+  handing: { v: string; type: Type }[];
   fixed: NodeMap<Expr, string>;
   texts: Map<string, string>;
   bigConstants: Map<string, string>;
@@ -482,6 +483,9 @@ class Codegen implements PrintHost, ComptimeHost {
 
     // Receivers copied into slots for owning methods, whose leftovers drop after the call.
     this.spills = [];
+
+    // What `hand` handed over inside each `delivered` that hasn't returned yet, innermost last.
+    this.handing = [];
 
     // The index values an assignment ran ahead of its value, by index expression.
     this.fixed = new NodeMap<Expr, string>();
@@ -2161,7 +2165,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (name === "forEach") return this.eachEntry(e, t, map);
     // The key is owned for the call: kept when it goes in, dropped once it has been looked up.
     // A panic in the value's argument drops the key made before it.
-    const [key, given] = this.delivered<[string, string | undefined]>((cg, hand): [string, string | undefined] => [hand(cg.owned(e.args[0]!), cg.tables.typing.rec(t).key), name === "set" ? hand(cg.owned(e.args[1]!), cg.tables.typing.rec(t).value) : undefined]);
+    const [key, given] = this.delivered<[string, string | undefined]>((cg): [string, string | undefined] => [cg.hand(cg.owned(e.args[0]!), cg.tables.typing.rec(t).key), name === "set" ? cg.hand(cg.owned(e.args[1]!), cg.tables.typing.rec(t).value) : undefined]);
     if (name === "set" || name === "add") {
       this.inserted(t, map, key, given);
       return at;
@@ -7984,8 +7988,8 @@ class Codegen implements PrintHost, ComptimeHost {
     // `with` checks its position, then writes over the clone's element, dropping the old one.
     let index: string | undefined = undefined;
     let given: string | undefined = undefined;
-    const placed = method !== "with" ? undefined : this.delivered<[string, string]>((cg, hand): [string, string] => {
-      const [i, v] = [cg.value(e.args[0]!), hand(cg.owned(e.args[1]!), element)];
+    const placed = method !== "with" ? undefined : this.delivered<[string, string]>((cg): [string, string] => {
+      const [i, v] = [cg.value(e.args[0]!), cg.hand(cg.owned(e.args[1]!), element)];
       const [negative, fromEnd, k, outside, fail, ok] = [cg.temp(), cg.temp(), cg.temp(), cg.temp(), cg.label(), cg.label()];
       cg.emit(`${negative} = icmp slt i64 ${i}, 0`);
       cg.emit(`${fromEnd} = add i64 ${length}, ${i}`);
@@ -8039,7 +8043,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const t = this.llvm(element);
     const size = this.bytes(element, "1");
     // What the call takes over is dropped if a later argument panics before the call.
-    const args = this.delivered((cg, hand) => e.args.map((a, i) => ((method === "splice" && i >= 2) || method === "unshift" || (method === "fill" && i === 0) ? hand(cg.owned(a), element) : cg.value(a))));
+    const args = this.delivered((cg) => e.args.map((a, i) => ((method === "splice" && i >= 2) || method === "unshift" || (method === "fill" && i === 0) ? cg.hand(cg.owned(a), element) : cg.value(a))));
     const [lengthAt, length] = [this.temp(), this.temp()];
     this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
     this.emit(`${length} = load i64, ptr ${lengthAt}`);
@@ -8876,15 +8880,19 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Owned values handed to something not yet called or built: dropped if an error leaves before
   // it takes them.
-  delivered<T>(this: Mut<this>, make: (cg: Mut<Codegen>, hand: (v: string, type: Type) => string) => T): T {
-    let handed: { v: string; type: Type }[] = [];
-    const result = make(this, (v, type) => {
-      this.pending.push({ v, type });
-      handed.push({ v, type });
-      return v;
-    });
+  delivered<T>(this: Mut<this>, make: (cg: Mut<Codegen>) => T): T {
+    const mark = this.handing.length;
+    const result = make(this);
+    const handed = this.handing.splice(mark as i64);
     this.pending = this.pending.filter((entry) => !handed.some((h) => h.v === entry.v && h.type === entry.type));
     return result;
+  }
+
+  // A value handed over inside `delivered`: pending until whatever takes it is called.
+  hand(this: Mut<this>, v: string, type: Type): string {
+    this.pending.push({ v, type });
+    this.handing.push({ v, type });
+    return v;
   }
 
 
@@ -9229,7 +9237,7 @@ class Codegen implements PrintHost, ComptimeHost {
       // statement, it is dropped after it.
       const built = this.recOf(this.cur().types.get(e.callee));
       if (built?.kind === "variant") {
-        const values = this.delivered((cg, hand) => e.args.map((a, i) => hand(cg.owned(a), built.fields[i]!.type)));
+        const values = this.delivered((cg) => e.args.map((a, i) => cg.hand(cg.owned(a), built.fields[i]!.type)));
         let result = "zeroinitializer";
         values.forEach((v, i) => {
           const next = this.temp();
@@ -9668,7 +9676,7 @@ class Codegen implements PrintHost, ComptimeHost {
   argValues(this: Mut<this>, args: Ref<Expr[]>, target: InstanceId, taken: usize = args.length): string[] {
     // A comptime parameter's argument was computed while compiling, and isn't passed.
     const passed = (cg: Mut<Codegen>, i: usize) => i >= cg.bodyAt(target).params.length || cg.bodyAt(target).params[i]!.comptime !== true;
-    const values = this.delivered((cg, hand) => args.flatMap((a, i) => (!passed(cg, i as usize) ? [] : i < taken ? [`${cg.llvm(cg.valueType(a))} ${cg.pairOf(a) !== undefined ? cg.owned(a) : hand(cg.owned(a), cg.valueType(a))}`] : (cg.value(a), []))));
+    const values = this.delivered((cg) => args.flatMap((a, i) => (!passed(cg, i as usize) ? [] : i < taken ? [`${cg.llvm(cg.valueType(a))} ${cg.pairOf(a) !== undefined ? cg.owned(a) : cg.hand(cg.owned(a), cg.valueType(a))}`] : (cg.value(a), []))));
     // A left-out optional parameter is empty, and a left-out rest parameter an empty array.
     for (const p of this.bodyAt(target).params.slice(args.length)) {
       const type = this.loc(this.inst(target).locals.get(p)!).type;
@@ -12157,7 +12165,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const fixed = this.recOf(made);
         // A fixed array's literal is its elements in place.
         if (fixed?.kind === "fixed") {
-          const values = this.delivered((cg, hand) => (e.elements as Expr[]).map((x) => hand(cg.owned(x), fixed.element)));
+          const values = this.delivered((cg) => (e.elements as Expr[]).map((x) => cg.hand(cg.owned(x), fixed.element)));
           return values.reduce((whole, v, i) => {
             const next = this.temp();
             this.emit(`${next} = insertvalue ${this.llvm(made)} ${whole}, ${this.llvm(fixed.element)} ${v}, ${i}`);
@@ -12167,7 +12175,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const type = made as ArrayType;
         const t = this.llvm(this.tables.typing.rec(type).element);
         if (e.elements.some((x) => x?.kind === "spread")) return this.spreadArray(e.elements as Expr[], type);
-        const values = this.delivered((cg, hand) => (e.elements as Expr[]).map((x) => hand(cg.owned(x), cg.tables.typing.rec(type).element)));
+        const values = this.delivered((cg) => (e.elements as Expr[]).map((x) => cg.hand(cg.owned(x), cg.tables.typing.rec(type).element)));
         const n = String(values.length);
         const data = this.temp();
         const line4 = `${data} = call ptr @fsh_rt_array_alloc(i64 ${this.bytes(this.tables.typing.rec(type).element, n)})`;
@@ -12294,9 +12302,9 @@ class Codegen implements PrintHost, ComptimeHost {
         const type = this.cur().types.get(e) as ObjectType;
         if (e.props.some((p) => p.kind === "spread")) return this.spreadObject(e, type);
         // Properties run in source order, then fill the fields in their sorted order.
-        const values = this.delivered((cg, hand) => new Map(e.props.map((p) => {
+        const values = this.delivered((cg) => new Map(e.props.map((p) => {
           const [name, v] = cg.property(p, type);
-          return [name, hand(v, cg.tables.typing.field(type, name)!.type)];
+          return [name, cg.hand(v, cg.tables.typing.field(type, name)!.type)];
         })));
         let result = "undef";
         this.tables.typing.rec(type).fields.forEach((f, i) => {
