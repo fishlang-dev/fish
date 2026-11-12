@@ -623,7 +623,7 @@ class Codegen implements PrintHost {
           else this.allocas.push(`  %this.at = getelementptr ${this.resuming.frame}, ptr %frame, i32 0, i32 1`, "  %this = load ptr, ptr %this.at");
         }
         for (const [local, i] of this.inst(instance).frame!.locals) {
-          const slot3 = this.slot(this.localOf(local));
+          const slot3 = this.slot(local);
           field(this, slot3, i);
         }
         // A `for await` loop's third field is the future it awaits.
@@ -640,24 +640,24 @@ class Codegen implements PrintHost {
       const params = f.params.flatMap((p, k) => {
         const local = this.resolved(p);
         if (shared?.at.has(k) === true) {
-          const at = `%"${local.name}.pair.${local.id}"`;
+          const at = `%"${this.loc(local).name}.pair.${this.loc(local).id}"`;
           this.allocas.push(`  ${at} = alloca ${PAIR}`);
-          this.emit(`store ${PAIR} %"${local.name}.arg", ptr ${at}`);
-          this.pairs.set(local.localId, at);
-          return [`${PAIR} %"${local.name}.arg"`];
+          this.emit(`store ${PAIR} %"${this.loc(local).name}.arg", ptr ${at}`);
+          this.pairs.set(local, at);
+          return [`${PAIR} %"${this.loc(local).name}.arg"`];
         }
         this.reserve(local);
         const slot2 = this.slot(local);
-        this.own(slot2, local.type);
+        this.own(slot2, this.loc(local).type);
         if (this.resuming !== undefined) return [""];
         // A comptime parameter isn't passed: its instance knows its value.
         if (p.comptime) {
-          const line3 = `store ${this.llvm(local.type)} ${this.bake(comptimeParameter(this.noted, this.inst(instance), p), local.type)}, ptr ${this.slot(local)}`;
+          const line3 = `store ${this.llvm(this.loc(local).type)} ${this.bake(comptimeParameter(this.noted, this.inst(instance), p), this.loc(local).type)}, ptr ${this.slot(local)}`;
           return void this.emit(line3), [];
         }
-        const line4 = `store ${this.llvm(local.type)} %"${local.name}.arg", ptr ${this.slot(local)}`;
+        const line4 = `store ${this.llvm(this.loc(local).type)} %"${this.loc(local).name}.arg", ptr ${this.slot(local)}`;
         this.emit(line4);
-        return [`${this.llvm(local.type)} %"${local.name}.arg"`];
+        return [`${this.llvm(this.loc(local).type)} %"${this.loc(local).name}.arg"`];
       });
       // A constructor or method works on its instance through a pointer, and a closure on what
       // it captured.
@@ -772,8 +772,8 @@ class Codegen implements PrintHost {
   ].join("\n");
   }
 
-  localOf(id: LocalId): Local {
-    return this.noted.arenas.localOf(id);
+  loc(id: LocalId): Ref<Local> {
+    return this.noted.arenas.localOf(id)!;
   }
 
   llvm(t: Type): string {
@@ -826,8 +826,8 @@ class Codegen implements PrintHost {
     return this.noted.typing.holdsPart(t, (u) => rustClassOf(this.noted.typing, u) !== undefined);
   }
 
-  localAt(n: Ref<Expr | Stmt | Param | ObjectProp>): Local | undefined {
-    return this.noted.arenas.localOf(this.cur().locals.get(n));
+  localAt(n: Ref<Expr | Stmt | Param | ObjectProp>): LocalId | undefined {
+    return this.cur().locals.get(n);
   }
 
   callOf(e: Ref<Expr>): InstanceId | undefined {
@@ -956,12 +956,12 @@ class Codegen implements PrintHost {
       const b = bodyOf(this.noted.arenas, this.inst(i));
       const parts = [`${b.name}@${b.start}`, this.noted.typing.keyOf(this.inst(i).returns), this.inst(i).throws === undefined ? "" : this.noted.typing.keyOf(this.inst(i).throws!)];
       b.params.forEach((p, k) => {
-        const local = this.localOf(this.inst(i).locals.get(p)!);
+        const local = this.loc(this.inst(i).locals.get(p)!);
         if (!at.has(k)) return void parts.push(this.noted.typing.keyOf(local.type));
         // What calling it gives and takes, which every instance sharing the code must agree on: as
         // types, since one IR shape can hold values that are dropped or dispatched differently.
         const target = this.calledThrough(i, p.pattern.kind === "ident" ? p.pattern.name : "");
-        parts.push(target === undefined ? "*" : `*${this.inst(target).throws === undefined ? "" : this.noted.typing.keyOf(this.inst(target).throws!)}*${this.noted.typing.keyOf(this.inst(target).returns)}(${bodyOf(this.noted.arenas, this.inst(target)).params.map((q) => this.noted.typing.keyOf(this.localOf(this.inst(target).locals.get(q)!).type)).join(",")})`);
+        parts.push(target === undefined ? "*" : `*${this.inst(target).throws === undefined ? "" : this.noted.typing.keyOf(this.inst(target).throws!)}*${this.noted.typing.keyOf(this.inst(target).returns)}(${bodyOf(this.noted.arenas, this.inst(target)).params.map((q) => this.noted.typing.keyOf(this.loc(this.inst(target).locals.get(q)!).type)).join(",")})`);
       });
       for (const [name, t] of [...this.inst(i).bindings].sort(([a], [b]) => (a < b ? -1 : 1))) {
         const k = name.startsWith("#") ? Number(name.slice(1)) : -1;
@@ -999,7 +999,7 @@ class Codegen implements PrintHost {
     if (b.params.some((p) => p.comptime || p.rest)) return at;
     b.params.forEach((p, k) => {
       if (p.pattern.kind !== "ident" || p.optional || p.default !== undefined) return;
-      if (this.recOf(this.localOf(this.inst(i).locals.get(p)!).type)?.kind !== "closure") return;
+      if (this.recOf(this.loc(this.inst(i).locals.get(p)!).type)?.kind !== "closure") return;
       const name = p.pattern.name;
       let uses = 0;
       let calls = 0;
@@ -2093,7 +2093,7 @@ class Codegen implements PrintHost {
     this.scopes.push({ transient: false, held: [] });
     this.reserve(local);
     const slot2 = this.slot(local);
-    this.own(slot2, local.type);
+    this.own(slot2, this.loc(local).type);
     // Each part is a pointer into the entry, or a copy when it copies.
     const piece = (cg: Mut<Codegen>, i: 3 | 4, type: Type, given: Type) => {
       const part = cg.temp();
@@ -2104,17 +2104,17 @@ class Codegen implements PrintHost {
       return cg.copied(v, type);
     };
     if (this.noted.typing.rec(t).set) {
-      const line3 = `store ${this.llvm(local.type)} ${piece(this, 3, this.noted.typing.rec(t).key, local.type)}, ptr ${this.slot(local)}`;
+      const line3 = `store ${this.llvm(this.loc(local).type)} ${piece(this, 3, this.noted.typing.rec(t).key, this.loc(local).type)}, ptr ${this.slot(local)}`;
       this.emit(line3);
     }
     else {
-      const [k, v] = this.noted.typing.elementsOf(local.type as ObjectType);
+      const [k, v] = this.noted.typing.elementsOf(this.loc(local).type as ObjectType);
       const [first, pair] = [this.temp(), this.temp()];
-      const line5 = `${first} = insertvalue ${this.llvm(local.type)} undef, ${this.llvm(k!)} ${piece(this, 3, this.noted.typing.rec(t).key, k!)}, 0`;
+      const line5 = `${first} = insertvalue ${this.llvm(this.loc(local).type)} undef, ${this.llvm(k!)} ${piece(this, 3, this.noted.typing.rec(t).key, k!)}, 0`;
       this.emit(line5);
-      const line6 = `${pair} = insertvalue ${this.llvm(local.type)} ${first}, ${this.llvm(v!)} ${piece(this, 4, this.noted.typing.rec(t).value, v!)}, 1`;
+      const line6 = `${pair} = insertvalue ${this.llvm(this.loc(local).type)} ${first}, ${this.llvm(v!)} ${piece(this, 4, this.noted.typing.rec(t).value, v!)}, 1`;
       this.emit(line6);
-      const line4 = `store ${this.llvm(local.type)} ${pair}, ptr ${this.slot(local)}`;
+      const line4 = `store ${this.llvm(this.loc(local).type)} ${pair}, ptr ${this.slot(local)}`;
       this.emit(line4);
     }
     s.body.forEach(((s) => this.statement(s)));
@@ -3722,7 +3722,7 @@ class Codegen implements PrintHost {
     this.scopes.push({ transient: false, held: [] });
     this.reserve(local);
     const slot2 = this.slot(local);
-    this.own(slot2, local.type);
+    this.own(slot2, this.loc(local).type);
     let base = held;
     if (lent) {
       base = this.temp();
@@ -3730,14 +3730,14 @@ class Codegen implements PrintHost {
     }
     const at = this.temp();
     this.emit(`${at} = getelementptr ${this.llvm(type)}, ptr ${base}, i64 0, i64 ${i}`);
-    if (this.isRef(local.type)) {
+    if (this.isRef(this.loc(local).type)) {
       const line3 = `store ptr ${at}, ptr ${this.slot(local)}`;
       this.emit(line3);
     }
     else {
       const v = this.temp();
       this.emit(`${v} = load ${this.llvm(this.noted.typing.rec(type).element)}, ptr ${at}`);
-      const line4 = `store ${this.llvm(local.type)} ${this.copied(v, this.noted.typing.rec(type).element)}, ptr ${this.slot(local)}`;
+      const line4 = `store ${this.llvm(this.loc(local).type)} ${this.copied(v, this.noted.typing.rec(type).element)}, ptr ${this.slot(local)}`;
       this.emit(line4);
     }
     s.body.forEach(((s) => this.statement(s)));
@@ -3837,11 +3837,11 @@ class Codegen implements PrintHost {
     this.scopes.push({ transient: false, held: [] });
     this.reserve(local);
     const slot2 = this.slot(local);
-    this.own(slot2, local.type);
+    this.own(slot2, this.loc(local).type);
     const nextResult3 = this.noted.typing.nextResult(this.noted.typing.rec(generator).yields);
     const [shaped, v] = [this.convert(result, nextResult3, more), this.temp()];
     this.emit(`${v} = extractvalue ${this.llvm(more)} ${shaped}, 1`);
-    const line4 = `store ${this.llvm(local.type)} ${v}, ptr ${this.slot(local)}`;
+    const line4 = `store ${this.llvm(this.loc(local).type)} ${v}, ptr ${this.slot(local)}`;
     this.emit(line4);
     s.body.forEach(((s) => this.statement(s)));
     this.drop(this.scopes.length - 1);
@@ -3920,9 +3920,9 @@ class Codegen implements PrintHost {
       const line7 = `br i1 ${this.conversions().holds(result, gives, ["null"])}, label %${end}, label %${loop}`;
       this.emit(line7);
       this.startBlock(loop);
-      v = this.convert(result, gives, local.type);
+      v = this.convert(result, gives, this.loc(local).type);
     } else {
-      const [finished, more] = this.nextShapes(local.type);
+      const [finished, more] = this.nextShapes(this.loc(local).type);
       const line8 = `br i1 ${this.conversions().holds(result, gives, [finished])}, label %${end}, label %${loop}`;
       this.emit(line8);
       this.startBlock(loop);
@@ -3934,8 +3934,8 @@ class Codegen implements PrintHost {
     this.scopes.push({ transient: false, held: [] });
     this.reserve(local);
     const slot2 = this.slot(local);
-    this.own(slot2, local.type);
-    const line10 = `store ${this.llvm(local.type)} ${v}, ptr ${this.slot(local)}`;
+    this.own(slot2, this.loc(local).type);
+    const line10 = `store ${this.llvm(this.loc(local).type)} ${v}, ptr ${this.slot(local)}`;
     this.emit(line10);
     s.body.forEach(((s) => this.statement(s)));
     this.drop(this.scopes.length - 1);
@@ -4033,28 +4033,28 @@ class Codegen implements PrintHost {
 
 
   // A variable's slot: an alloca, or in a generator, the frame's field, reached on entry.
-  reserve(this: Mut<this>, local: Ref<Local>) {
+  reserve(this: Mut<this>, local: LocalId) {
     const slot2 = this.slot(local);
     if (!this.framed.has(slot2)) {
-      const line = `  ${this.slot(local)} = alloca ${this.llvm(local.type)}`;
+      const line = `  ${this.slot(local)} = alloca ${this.llvm(this.loc(local).type)}`;
       this.allocas.push(line);
     }
   }
 
 
-  slot(this: Mut<this>, local: Ref<Local>): string {
-    const at = this.captured.get(local.localId);
+  slot(this: Mut<this>, local: LocalId): string {
+    const at = this.captured.get(local);
     if ((at !== undefined && at !== "")) return at;
-    let n = this.numbered.get(local.localId);
-    if (n === undefined) this.numbered.set(local.localId, (n = this.numbered.size));
+    let n = this.numbered.get(local);
+    if (n === undefined) this.numbered.set(local, (n = this.numbered.size));
     // Its number follows a dot, as no other name in a function's IR puts one. Quoted unless
     // plain, so any name a variable may have, `café` or a pattern's `[a, b]`, is a valid one.
-    const name = `${local.name === "%" ? "topic" : local.name}.${n}`;
+    const name = `${this.loc(local).name === "%" ? "topic" : this.loc(local).name}.${n}`;
     return /^[-\w$.]+$/.test(name) ? `%${name}` : `%"${name}"`;
   }
 
 
-  resolved(node: Ref<Expr | Stmt | Param | ObjectProp>): Local {
+  resolved(node: Ref<Expr | Stmt | Param | ObjectProp>): LocalId {
     const local = this.localAt(node);
     if (local === undefined) throw new Error("internal error: unresolved name");
     return local;
@@ -4193,19 +4193,19 @@ class Codegen implements PrintHost {
         this.scopes.push({ transient: false, held: [] });
         this.reserve(local);
         const slot2 = this.slot(local);
-        this.own(slot2, local.type);
+        this.own(slot2, this.loc(local).type);
         const at = this.temp();
         this.emit(`${data} = extractvalue ${ARRAY} ${array}, 0`);
         this.emit(`${at} = getelementptr ${this.llvm(this.noted.typing.rec(type).element)}, ptr ${data}, i64 ${i}`);
         // A reference element is itself the loop's value; any other reference borrows the slot.
-        if (this.isRef(local.type) && !this.isRef(this.noted.typing.rec(type).element)) {
+        if (this.isRef(this.loc(local).type) && !this.isRef(this.noted.typing.rec(type).element)) {
           const line3 = `store ptr ${at}, ptr ${this.slot(local)}`;
           this.emit(line3);
         }
         else {
           const v = this.temp();
           this.emit(`${v} = load ${this.llvm(this.noted.typing.rec(type).element)}, ptr ${at}`);
-          const line4 = `store ${this.llvm(local.type)} ${this.copied(v, this.noted.typing.rec(type).element)}, ptr ${this.slot(local)}`;
+          const line4 = `store ${this.llvm(this.loc(local).type)} ${this.copied(v, this.noted.typing.rec(type).element)}, ptr ${this.slot(local)}`;
           this.emit(line4);
         }
         s.body.forEach(((s) => this.statement(s)));
@@ -4363,7 +4363,7 @@ class Codegen implements PrintHost {
           if (local !== undefined) {
             this.reserve(local);
             const slot3 = this.slot(local);
-            this.own(slot3, local.type);
+            this.own(slot3, this.loc(local).type);
             const line5 = `store ${this.llvm(type)} ${caught}, ptr ${this.slot(local)}`;
             this.emit(line5);
           } else this.dispose(caught, type);
@@ -4396,10 +4396,10 @@ class Codegen implements PrintHost {
         const local = this.resolved(s);
         this.reserve(local);
         const slot4 = this.slot(local);
-        this.own(slot4, local.type);
+        this.own(slot4, this.loc(local).type);
         // A variable declared without a value starts empty, as a moved-out one is.
         const init = s.declarations[0]!.init;
-        const line6 = `store ${this.llvm(local.type)} ${init !== undefined ? this.owned(init) : "zeroinitializer"}, ptr ${this.slot(local)}`;
+        const line6 = `store ${this.llvm(this.loc(local).type)} ${init !== undefined ? this.owned(init) : "zeroinitializer"}, ptr ${this.slot(local)}`;
         this.emit(line6);
         this.settle();
         return;
@@ -4523,8 +4523,8 @@ class Codegen implements PrintHost {
     this.scopes.push({ transient: true, held: [] });
     this.reserve(local);
     const slot2 = this.slot(local);
-    this.own(slot2, local.type);
-    const line = `store ${this.llvm(local.type)} ${this.owned(e.value)}, ptr ${this.slot(local)}`;
+    this.own(slot2, this.loc(local).type);
+    const line = `store ${this.llvm(this.loc(local).type)} ${this.owned(e.value)}, ptr ${this.slot(local)}`;
     this.emit(line);
     const mark = this.pending.length;
     const type = this.cur().types.get(e);
@@ -4650,7 +4650,7 @@ class Codegen implements PrintHost {
       this.reserve(local);
       // A binding borrowing the part points where it lives; one of a part that is itself a
       // reference, like a `Mut` field, holds that reference.
-      if (this.isRef(local.type) && local.type !== info.type) {
+      if (this.isRef(this.loc(local).type) && this.loc(local).type !== info.type) {
         let pointer = at;
         if ((pointer === undefined || pointer === "")) {
           pointer = this.alloca(this.llvm(info.type));
@@ -4661,10 +4661,10 @@ class Codegen implements PrintHost {
         return;
       }
       const slot2 = this.slot(local);
-      this.own(slot2, local.type);
+      this.own(slot2, this.loc(local).type);
       const taken = move && (at !== undefined && at !== "") && this.needsDrop(info.type);
       if (taken) this.emit(`store ${this.llvm(info.type)} zeroinitializer, ptr ${at}`);
-      const line2 = `store ${this.llvm(local.type)} ${taken ? v : this.copied(v, info.type)}, ptr ${this.slot(local)}`;
+      const line2 = `store ${this.llvm(this.loc(local).type)} ${taken ? v : this.copied(v, info.type)}, ptr ${this.slot(local)}`;
       this.emit(line2);
       return;
     }
@@ -8995,7 +8995,7 @@ class Codegen implements PrintHost {
     const values = this.delivered((cg, hand) => args.flatMap((a, i) => (!passed(cg, i) ? [] : i < taken ? [`${cg.llvm(cg.valueType(a))} ${cg.pairOf(a) !== undefined ? cg.owned(a) : hand(cg.owned(a), cg.valueType(a))}`] : (cg.value(a), []))));
     // A left-out optional parameter is empty, and a left-out rest parameter an empty array.
     for (const p of bodyOf(this.noted.arenas, this.inst(target)).params.slice(args.length)) {
-      const type = this.localOf(this.inst(target).locals.get(p)!).type;
+      const type = this.loc(this.inst(target).locals.get(p)!).type;
       values.push(`${this.llvm(type)} ${p.rest ? "zeroinitializer" : this.convert("zeroinitializer", "null", type)}`);
     }
     return values;
@@ -9140,7 +9140,7 @@ class Codegen implements PrintHost {
     if (arg.kind === "member") [v, whole] = [this.value(arg), this.valueType(arg)];
     else {
       const local = this.resolved(arg);
-      [v, whole] = [this.temp(), local.type];
+      [v, whole] = [this.temp(), this.loc(local).type];
       const line = `${v} = load ${this.llvm(whole)}, ptr ${this.slot(local)}`;
       this.emit(line);
     }
@@ -9394,17 +9394,16 @@ class Codegen implements PrintHost {
   environment(this: Mut<this>, inner: InstanceId, froms: Ref<(LocalId | "this")[]>): string {
     let result = "undef";
     froms.forEach((id, i) => {
-      const from = id === "this" ? id : this.localOf(id);
       const type = this.noted.typing.rec(this.inst(inner).closure!).fields[i]!.type;
-      let part = from === "this" ? "%this" : this.slot(from);
+      let part = id === "this" ? "%this" : this.slot(id);
       // A closure holding a variable's value holds a copy, or moves it in, emptying it.
       if (!this.isRef(type)) {
         part = this.temp();
-        const line = `${part} = load ${this.llvm(type)}, ptr ${this.slot(from as Local)}`;
+        const line = `${part} = load ${this.llvm(type)}, ptr ${this.slot(id as LocalId)}`;
         this.emit(line);
         if (this.noted.typing.isCopy(type)) part = this.copied(part, type);
         else {
-          const line2 = `store ${this.llvm(type)} zeroinitializer, ptr ${this.slot(from as Local)}`;
+          const line2 = `store ${this.llvm(type)} zeroinitializer, ptr ${this.slot(id as LocalId)}`;
           this.emit(line2);
         }
       }
@@ -10891,7 +10890,7 @@ class Codegen implements PrintHost {
   // A C function under an export's name, calling it. A panic can't unwind into C, so one that
   // reaches here aborts, its message already printed.
   exported(this: Mut<this>, i: InstanceId): string[] {
-    const params = bodyOf(this.noted.arenas, this.inst(i)).params.map((p, n) => [this.localOf(this.inst(i).locals.get(p)!).type, `%a${n}`] as const);
+    const params = bodyOf(this.noted.arenas, this.inst(i)).params.map((p, n) => [this.loc(this.inst(i).locals.get(p)!).type, `%a${n}`] as const);
     // A library's panics all unwind, the runtime's default, whichever way the build chose: the
     // abort happens here, before C sees the unwind.
     const call = `${this.inst(i).returns === "void" ? "" : "%r = "}invoke ${this.llvm(this.inst(i).returns)} ${this.symbol(this.noted.arenas, i)}(${params.map(([t, a]) => `${this.llvm(t)} ${a}`).join(", ")})`;
@@ -11116,11 +11115,11 @@ class Codegen implements PrintHost {
       }
       // A variable narrowed to fewer members still holds its value in its own union's payload.
       const local = object.kind === "ident" ? this.localAt(object) : undefined;
-      const whole = local?.type;
+      const whole = local !== undefined ? this.loc(local).type : undefined;
       const union = this.recOf(whole);
       if (local !== undefined && union?.kind === "union" && union.members.includes(held)) {
         const at = this.temp();
-        const line2 = `${at} = getelementptr ${this.llvm(local.type)}, ptr ${this.slot(local)}, i32 0, i32 1`;
+        const line2 = `${at} = getelementptr ${this.llvm(this.loc(local).type)}, ptr ${this.slot(local)}, i32 0, i32 1`;
         this.emit(line2);
         return at;
       }
@@ -11175,7 +11174,7 @@ class Codegen implements PrintHost {
     // A narrowed reference read at the type it was declared with is the pointer it holds.
     if (ref?.kind === "ref" && given?.kind === "ref" && e.kind === "ident" && !this.known.has(e)) {
       const local = this.localAt(e);
-      if (local !== undefined && local.type !== type && this.noted.typing.lower(local.type) === this.noted.typing.lower(to!)) {
+      if (local !== undefined && this.loc(local).type !== type && this.noted.typing.lower(this.loc(local).type) === this.noted.typing.lower(to!)) {
         const held = this.temp();
         const line = `${held} = load ptr, ptr ${this.slot(local)}`;
         this.emit(line);
@@ -11451,11 +11450,11 @@ class Codegen implements PrintHost {
         if (!this.cur().locals.has(e)) return "zeroinitializer";
         const local = this.resolved(e);
         const t = this.temp();
-        const line5 = `${t} = load ${this.llvm(local.type)}, ptr ${this.slot(local)}`;
+        const line5 = `${t} = load ${this.llvm(this.loc(local).type)}, ptr ${this.slot(local)}`;
         this.emit(line5);
         if (this.cur().copiesOut.has(e)) {
           // The box, through a reference and out of a union holding it.
-          let [held, type] = [t, local.type];
+          let [held, type] = [t, this.loc(local).type];
           if (this.isRef(type)) {
             const through = this.temp();
             this.emit(`${through} = load ${this.llvm(this.referent(type))}, ptr ${held}`);
@@ -11466,7 +11465,7 @@ class Codegen implements PrintHost {
           return this.jsRead(held, this.cur().types.get(e)!);
         }
         // Where a check narrowed the variable, its value comes out of the union.
-        return this.convert(t, local.type, this.cur().types.get(e)!);
+        return this.convert(t, this.loc(local).type, this.cur().types.get(e)!);
       }
       case "member":
         if (this.noted.maths.has(e)) return floatConstant(MATH_CONSTANTS[e.name]!, "f64");
@@ -11772,13 +11771,13 @@ class Codegen implements PrintHost {
         const local = this.resolved(p);
         const to = this.noted.typing.field(type, p.name)!.type;
         // A shorthand lent to a reference field points at its variable.
-        if (this.isRef(to) && !this.isRef(local.type)) {
+        if (this.isRef(to) && !this.isRef(this.loc(local).type)) {
           const slot2 = this.slot(local);
           put(this, p.name, slot2, to);
           continue;
         }
         const shorthand2 = this.shorthand(p, local);
-        put(this, p.name, shorthand2, local.type);
+        put(this, p.name, shorthand2, this.loc(local).type);
         continue;
       }
       if (p.kind !== "spread") throw new Error("internal error: unchecked property");
@@ -11824,28 +11823,28 @@ class Codegen implements PrintHost {
     const local = this.resolved(p);
     const to = this.noted.typing.field(object, p.name)!.type;
     // A shorthand lent to a reference field points at its variable.
-    if (this.isRef(to) && !this.isRef(local.type)) return [p.name, this.slot(local)];
-    if (this.holdsRust(local.type)) {
+    if (this.isRef(to) && !this.isRef(this.loc(local).type)) return [p.name, this.slot(local)];
+    if (this.holdsRust(this.loc(local).type)) {
       const shorthand2 = this.shorthand(p, local);
-      return [p.name, this.convert(shorthand2, local.type, to)];
+      return [p.name, this.convert(shorthand2, this.loc(local).type, to)];
     }
     const result = this.temp();
-    const line = `${result} = load ${this.llvm(local.type)}, ptr ${this.slot(local)}`;
+    const line = `${result} = load ${this.llvm(this.loc(local).type)}, ptr ${this.slot(local)}`;
     this.emit(line);
-    const convert2 = this.convert(result, local.type, to);
+    const convert2 = this.convert(result, this.loc(local).type, to);
     return [p.name, this.copied(convert2, to)];
   }
 
 
   // A shorthand property's value: its variable's, copied, or for a Rust value, moved out of it, as
   // the property written out moves it.
-  shorthand(this: Mut<this>, p: Ref<Extract<ObjectProp, { kind: "shorthand" }>>, local: Ref<Local>): string {
+  shorthand(this: Mut<this>, p: Ref<Extract<ObjectProp, { kind: "shorthand" }>>, local: LocalId): string {
     const read = this.temp();
-    const line = `${read} = load ${this.llvm(local.type)}, ptr ${this.slot(local)}`;
+    const line = `${read} = load ${this.llvm(this.loc(local).type)}, ptr ${this.slot(local)}`;
     this.emit(line);
-    if (!this.holdsRust(local.type)) return this.copied(read, local.type);
+    if (!this.holdsRust(this.loc(local).type)) return this.copied(read, this.loc(local).type);
     if (!this.cur().consumes.has(p.id)) throw new Error("internal error: a Rust value in a shorthand property isn't moved");
-    const line2 = `store ${this.llvm(local.type)} zeroinitializer, ptr ${this.slot(local)}`;
+    const line2 = `store ${this.llvm(this.loc(local).type)} zeroinitializer, ptr ${this.slot(local)}`;
     this.emit(line2);
     return read;
   }
@@ -11874,7 +11873,7 @@ class Codegen implements PrintHost {
     const type = this.cur().types.get(target)!;
     if (this.isRef(type) && this.cur().coercions.has(target)) {
       // Through the reference as stored, unless an update keeps the member it was narrowed to.
-      const whole = target.kind === "ident" && type === this.resolved(target).type;
+      const whole = target.kind === "ident" && type === this.loc(this.resolved(target)).type;
       const pointer = whole ? this.temp() : this.evaluate(target);
       if (whole) {
         const line = `${pointer} = load ptr, ptr ${this.slot(this.resolved(target))}`;
@@ -11935,7 +11934,7 @@ class Codegen implements PrintHost {
     if (target.kind !== "member") {
       const local = this.resolved(target);
       const slot2 = this.slot(local);
-      return this.narrowedPlace(slot2, local.type, this.cur().types.get(target)!);
+      return this.narrowedPlace(slot2, this.loc(local).type, this.cur().types.get(target)!);
     }
     if (this.recOf(this.referent(this.cur().types.get(target.object)!))?.kind === "shared") return this.sharedField(target)[2];
     const holder = this.stored(target.object);
@@ -11994,7 +11993,7 @@ class Codegen implements PrintHost {
     if (this.cur().copiesOut.has(e)) return false;
     const local = e.kind === "ident" ? this.localAt(e) : undefined;
     const type = this.cur().types.get(e);
-    return local !== undefined && (type === local.type || this.recOf(type)?.kind !== "union");
+    return local !== undefined && (type === this.loc(local).type || this.recOf(type)?.kind !== "union");
   }
 
 
