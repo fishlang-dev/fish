@@ -95,7 +95,7 @@ import {
   withIdTypeParam,
   type Replacements,
 } from "./rebuild.ts";
-import { collectIdsNode, forEachChild, nodeIdOf, visitAt, type AnyNode, type NodeTypes } from "./walk.ts";
+import { collectIdsNode, forEachChild, nodeIdOf, pushChildren, type AnyNode, type NodeTypes } from "./walk.ts";
 
 export { nextId, type Id, type Ids } from "./ids.ts";
 export { forEachChild, nodeIdOf, type AnyNode } from "./walk.ts";
@@ -104,7 +104,7 @@ export type NodeOf<K extends keyof NodeTypes> = NodeTypes[K];
 // The node types a walk can start from: nodes, or arrays of them.
 export type RootKind = Exclude<keyof NodeTypes, "stmts">;
 
-// Reborrows `root` so `visitAt` can be called repeatedly in a loop.
+// Reborrows `root` so a walk can hand a copy of the tagged reference on and keep its own.
 export function reborrowNode(root: Ref<AnyNode>): AnyNode {
   if (root.of === "typeNode") return { of: "typeNode", node: root.node };
   if (root.of === "expr") return { of: "expr", node: root.node };
@@ -133,20 +133,14 @@ export function reborrowNode(root: Ref<AnyNode>): AnyNode {
 // Calls `each` on `root` and every node under it, each node before those it holds; `each`
 // returning false skips those. Lists of statements are walked through, not given.
 export function walkWhile(root: AnyNode, each: (n: AnyNode) => boolean): void {
-  let steps: usize[] = [];
-  while (true) {
-    const r = visitAt(reborrowNode(root), steps, 0, (n) => each(n));
-    if (r === 0) {
-      if (steps.length === 0) return;
-      const last = steps.pop()!;
-      steps.push(last + 1);
-    } else {
-      if (steps.length === 0) return;
-      steps.pop();
-      if (steps.length === 0) return;
-      const prev = steps.pop()!;
-      steps.push(prev + 1);
-    }
+  let stack: AnyNode[] = [reborrowNode(root)];
+  let children: AnyNode[] = [];
+  while (stack.length > 0) {
+    const n = stack.pop()!;
+    if (n.of !== "stmts" && !each(reborrowNode(n))) continue;
+    pushChildren(n, children);
+    // The last child goes on first, so the first is the next one off.
+    while (children.length > 0) stack.push(children.pop()!);
   }
 }
 

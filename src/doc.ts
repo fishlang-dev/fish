@@ -22,8 +22,8 @@ export type Doc =
 export const line: Doc = { kind: "line", soft: false, hard: false, literal: false };
 export const softline: Doc = { kind: "line", soft: true, hard: false, literal: false };
 export const breakParent: Doc = { kind: "breakParent" };
-export const hardline: Doc = [{ kind: "line", soft: false, hard: true, literal: false }, breakParent];
-export const literalline: Doc = [{ kind: "line", soft: false, hard: true, literal: true }, breakParent];
+export const hardline: Doc = [{ kind: "line", soft: false, hard: true, literal: false }, { kind: "breakParent" }];
+export const literalline: Doc = [{ kind: "line", soft: false, hard: true, literal: true }, { kind: "breakParent" }];
 export const lineSuffixBoundary: Doc = { kind: "lineSuffixBoundary" };
 export const trim: Doc = { kind: "trim" };
 
