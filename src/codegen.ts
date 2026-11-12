@@ -3593,22 +3593,45 @@ class Codegen implements PrintHost {
   dynCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, callee: Ref<Expr>): string | undefined {
     const info = this.noted.dynCalls.get(e)!;
     const object = info.callable ?? (callee as Extract<Expr, { kind: "member" }>).object;
+    const optional = this.noted.optionalCallables.get(e);
+    if (optional !== undefined) return this.optionalCallableCall(e, object, optional, info.index);
     const t = this.referent(this.valueType(object)) as DynType;
     const m = this.noted.typing.rec(this.noted.typing.rec(t).of).methods[info.index]!;
     const [data, table] = this.opened(object, info.owned);
     const fn = this.vslot(table, info.index);
-    const called = (cg: Mut<Codegen>) => {
-      const args = e.args.map((a, i) => `, ${cg.llvm(m.params[i]!)} ${cg.owned(a)}`).join("");
-      // A `Promise<T>` comes back as its boxed future.
-      const gives = cg.noted.typing.promiseElement(m.returns) !== undefined ? cg.cur().types.get(e)! : m.returns;
-      const returns = m.throws !== undefined ? cg.throwing(gives, m.throws) : gives === "void" ? "void" : cg.llvm(gives);
-      const made = returns === "void" ? undefined : cg.temp();
-      cg.unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, made);
-      const result = m.throws !== undefined ? cg.unpacked(returns, made!, gives, e) : made;
-      if ((result !== undefined && result !== "") && !cg.cur().types.has(e) && cg.needsDrop(gives)) cg.pending.push({ v: result, type: gives });
-      return result;
-    };
+    const called = (cg: Mut<Codegen>) => cg.dynInvoke(e, m, fn, data);
     return this.noted.optionalCalls.has(e) ? this.slotted(e, fn, m.returns, called) : called(this);
+  }
+
+  // `f?.(x)` on an Option of a stored callable: the call when one is there, the empty Option or
+  // nothing when it isn't. The Option is read in place; the callable stays its.
+  optionalCallableCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, object: Ref<Expr>, union: UnionType, index: usize): string | undefined {
+    const dyn = this.noted.typing.rec(union).members.find((m) => m !== "null")! as DynType;
+    const m = this.noted.typing.rec(this.noted.typing.rec(dyn).of).methods[index]!;
+    const held = this.temp();
+    const line = `${held} = load ${this.llvm(union)}, ptr ${this.receiver(object)}`;
+    this.emit(line);
+    const none = this.conversions().holds(held, union, ["null"]);
+    return this.whenPresent(e, none, m.returns, (cg) => {
+      const d = cg.convert(held, union, dyn);
+      const [data, table] = [cg.temp(), cg.temp()];
+      cg.emit(`${data} = extractvalue ${DYN} ${d}, 0`);
+      cg.emit(`${table} = extractvalue ${DYN} ${d}, 1`);
+      const fn = cg.vslot(table, index);
+      return cg.dynInvoke(e, m, fn, data);
+    });
+  }
+
+  dynInvoke(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, m: Ref<Method>, fn: string, data: string): string | undefined {
+    const args = e.args.map((a, i) => `, ${this.llvm(m.params[i]!)} ${this.owned(a)}`).join("");
+    // A `Promise<T>` comes back as its boxed future.
+    const gives = this.noted.typing.promiseElement(m.returns) !== undefined ? this.cur().types.get(e)! : m.returns;
+    const returns = m.throws !== undefined ? this.throwing(gives, m.throws) : gives === "void" ? "void" : this.llvm(gives);
+    const made = returns === "void" ? undefined : this.temp();
+    this.unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, made);
+    const result = m.throws !== undefined ? this.unpacked(returns, made!, gives, e) : made;
+    if ((result !== undefined && result !== "") && !this.cur().types.has(e) && this.needsDrop(gives)) this.pending.push({ v: result, type: gives });
+    return result;
   }
 
 
@@ -3640,8 +3663,14 @@ class Codegen implements PrintHost {
 
   // `d.m?.()` through a Dyn: the empty Option when the type left the method out, its slot empty.
   slotted(this: Mut<this>, e: Ref<Expr>, fn: string, gives: Type, called: (cg: Mut<Codegen>) => string | undefined): string | undefined {
-    const [some, none, end, missing] = [this.label(), this.label(), this.label(), this.temp()];
+    const missing = this.temp();
     this.emit(`${missing} = icmp eq ptr ${fn}, null`);
+    return this.whenPresent(e, missing, gives, called);
+  }
+
+  // `called` run when `missing` is false; the empty Option in its place otherwise.
+  whenPresent(this: Mut<this>, e: Ref<Expr>, missing: string, gives: Type, called: (cg: Mut<Codegen>) => string | undefined): string | undefined {
+    const [some, none, end] = [this.label(), this.label(), this.label()];
     this.emit(`br i1 ${missing}, label %${none}, label %${some}`);
     this.startBlock(some);
     const mark = this.pending.length;

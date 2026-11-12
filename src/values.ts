@@ -464,6 +464,14 @@ export type DynTable = { methods: (InstanceId | undefined)[]; fields: (InstanceI
 type Static = { declaring: ClassId; field?: Access; getter?: BodyId; setter?: BodyId };
 
 // What checking a body's expressions keeps between uses of its expression checker.
+// Whether a parameter is written as an optional function, `f?: () => void` or `f: (() => void) | undefined`.
+function optionalFunction(p: Ref<Param>): boolean {
+  if (p.type === undefined) return false;
+  const t: Ref<TypeNode> = p.type;
+  if (t.kind === "function") return p.optional;
+  return t.kind === "union" && t.types.some((m) => m.kind === "function");
+}
+
 export class ExpressionsState {
   // The function type each arrow is given to, which types the parameters it leaves unwritten.
   expecting = new NodeMap<Expr, FunctionType>();
@@ -1580,6 +1588,7 @@ export class Expressions<C extends Context> implements Union<C> {
   }
   /** @throws {CompileError} */
   private callResult(this: Mut<this>, e: Ref<Call>, result: { type: Type; what: string }): { type: Type; what: string } {
+    if (this.ctx.view().optionalCallables.has(e)) return { type: result.type === "void" ? "void" : this.optional(result.type, { start: e.start, end: e.end }), what: result.what };
     if (e.optional && !this.ctx.view().optionalCalls.has(e)) throw unsupported("optional calls", e);
     if (e.callee.kind !== "member" || !(this.linked(e.callee) || e.optional) || result.type === "void") return result;
     return { type: this.optional(result.type, { start: e.start, end: e.end }), what: result.what };
@@ -1658,6 +1667,11 @@ export class Expressions<C extends Context> implements Union<C> {
   private calleeNow(this: Mut<this>, e: Ref<Call>): { type: Type; what: string } {
     const callee: Ref<Expr> = e.callee;
     if (this.ctx.view().blockingRuns.has(e) && callee.kind === "ident") this.blockingRun(callee);
+    if (e.optional && callee.kind === "ident" && this.ctx.lookup(callee.name, undefined) !== undefined) {
+      const read = this.value(callee);
+      const optional = this.optionalCallable(read);
+      if (optional !== undefined) return this.optionalCallableCall(e, callee, read as UnionType, optional);
+    }
     if (e.optional && callee.kind !== "member") throw unsupported("optional calls", e);
     if (callee.kind === "super") {
       if (this.ctx.st.superCall === undefined || idOfExpr(this.ctx.st.superCall!) !== e.id) throw new CompileError("E0703", "'super(...)' can only be the first statement of a derived class's constructor", e.start, e.end);
@@ -1911,6 +1925,14 @@ export class Expressions<C extends Context> implements Union<C> {
       const method = recv.kind === "class" && this.inheritedOf(receiver as ClassType, "methods", callee.name) !== undefined;
       const held = (storedType === undefined ? undefined : this.heldBy(storedType));
       if (held !== undefined && !method && this.isCallable(held)) return this.callableCall(e, callee, held as DynType);
+      // An optional one narrowed to present, after `if (o.onClick !== undefined)`.
+      const optional = held !== undefined && !method ? this.recOf(held) : undefined;
+      if (optional !== undefined && optional.kind === "union" && optional.members.some((m) => this.isCallable(m))) {
+        const read = this.value(callee);
+        if (this.isCallable(read)) return this.callableCall(e, callee, read as DynType);
+        const inner = this.optionalCallable(read);
+        if (e.optional && inner !== undefined) return this.optionalCallableCall(e, callee, read as UnionType, inner);
+      }
     }
     if (callee.kind !== "ident" && callee.kind !== "member") {
       const given = this.value(callee);
@@ -2449,6 +2471,15 @@ export class Expressions<C extends Context> implements Union<C> {
     if (a.kind === "arrow" && param !== undefined && js) {
       const want = this.ctx.tables().typing.jsTakes(param);
       this.expect(a, want);
+    }
+    // An arrow for an optional callback is stored as the callable the Option holds.
+    const optional = param !== undefined && !js ? this.recOf(param) : undefined;
+    if (a.kind === "arrow" && optional !== undefined && optional.kind === "union" && optional.members.some((m) => this.isCallable(m))) this.expect(a, param!);
+    // In a generic function, an arrow for a parameter written as an optional function is stored,
+    // so it owns what it captures.
+    if (!isKnown && a.kind === "arrow") {
+      const params = this.ctx.view().arenas.bodyOf(target).params;
+      if (i < params.length && optionalFunction(params[i]!)) this.ctx.exprsState.owning.add(cloneExpr(a));
     }
     // A literal for a tuple parameter is a tuple of its parts, in the parameter's shape.
     if (!isKnown && (a.kind === "array" || this.ctx.view().tupleLiterals.has(a))) {
@@ -9230,6 +9261,17 @@ export class Expressions<C extends Context> implements Union<C> {
       this.ctx.coercions().set(cloneExpr(e), to);
       return;
     }
+    // A closure, or a function named as a value, goes into the union's one stored callable, as an
+    // optional callback holds it.
+    let callables: DynType[] = [];
+    for (const d of dyns) if (this.ctx.typing().callableOf.has(this.ctx.typing().rec(d).of)) callables.push(d);
+    const closure = this.recOf(type);
+    if (closure !== undefined && closure.kind === "closure" && closure.generic === undefined && callables.length === 1) {
+      this.boxing(e, type, callables[0]!, message);
+      this.ctx.tables().boxedMembers.set(cloneExpr(e), callables[0]!);
+      this.ctx.coercions().set(cloneExpr(e), to);
+      return;
+    }
     const member = e.kind === "object" ? this.lentMember(e, to) : undefined;
     if (member !== undefined && e.kind === "object") type = this.lendFields(e, member, message);
     let lending = false;
@@ -10524,6 +10566,24 @@ export class Expressions<C extends Context> implements Union<C> {
   }
 
   // A call of a stored callable: whatever expression gives it, run through its one slot.
+  // The stored callable an Option holds, when it holds one and nothing else.
+  private optionalCallable(this: Mut<this>, t: Type): DynType | undefined {
+    const r = this.recOf(t);
+    if (r === undefined || r.kind !== "union" || r.members.length !== 2 || !r.members.includes("null")) return undefined;
+    const held = r.members.find((m) => m !== "null")!;
+    return this.isCallable(held) ? (held as DynType) : undefined;
+  }
+
+  // `f?.(x)`: the call when the Option holds a callable, nothing when it is empty.
+  /** @throws {CompileError} */
+  private optionalCallableCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Expr>, read: UnionType, held: DynType): { type: Type; what: string } {
+    if (e.callee.kind === "member" && this.linked(e.callee)) throw unsupported("optional calls in an optional chain", e);
+    const fn = this.ctx.typing().callableOf.get(this.ctx.typing().rec(held).of)!;
+    if (this.ctx.typing().promiseElement(this.ctx.typing().rec(fn).returns) !== undefined) throw unsupported("optional calls of functions giving a Promise", e);
+    this.ctx.tables().optionalCallables.set(cloneExpr(e), read);
+    return this.callableCall(e, callee, held);
+  }
+
   /** @throws {CompileError} */
   private callableCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Expr>, t: DynType): { type: Type; what: string } {
     const arg10396_1 = this.ctx.typing().rec(t).of;

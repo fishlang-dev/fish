@@ -9,7 +9,7 @@ import type { RegexTables } from "./regex.ts";
 import type { RustClass, RustName, RustTables } from "./rust.ts";
 import type { Locking } from "./program.ts";
 import type { TopKeys } from "./keys.ts";
-import { TypeMap, Typing, type ClassType, type DynType, type LiteralType, type Type } from "./typing.ts";
+import { TypeMap, Typing, type ClassType, type DynType, type LiteralType, type Type, type UnionType } from "./typing.ts";
 import type { DynTable } from "./values.ts";
 
 // One compilation of a program. Its front end, which keeps no state of its own, is handed the
@@ -278,6 +278,8 @@ export type Tables = {
   dynCalls: NodeMap<Expr, { index: usize; mutable: boolean; owned: boolean; callable?: Expr }>;
   // The `h.m?.()` calls of an interface's optional methods.
   optionalCalls: NodeSet<Expr>;
+  // `f?.(x)` on an Option of a stored callable: the union `f` is read as.
+  optionalCallables: NodeMap<Expr, UnionType>;
   // Each test of whether an optional method is there, `h.m !== undefined` or
   // `typeof h.m === "function"`: the receiver, the method, and what the test gives when it is.
   presenceTests: NodeMap<Expr, { object: Expr; name: string; when: boolean }>;
@@ -437,6 +439,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     jsAccessors: new NodeSet<Expr>(),
     dynCalls: new NodeMap<Expr, { index: usize; mutable: boolean; owned: boolean; callable?: Expr }>(),
     optionalCalls: new NodeSet<Expr>(),
+    optionalCallables: new NodeMap<Expr, UnionType>(),
     presenceTests: new NodeMap<Expr, { object: Expr; name: string; when: boolean }>(),
     genericStatics: new NodeMap<ClassNode, Map<string, BodyId>>(),
     classScopes: new NodeMap<TypeParam, Map<string, Type>>(),
