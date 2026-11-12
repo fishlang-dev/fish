@@ -371,15 +371,15 @@ export class Printer<H extends PrintHost> {
   }
 
   piece(this: Mut<this>, v: string, type: Type): void {
-    const kind = typeof type === "string" ? "" : this.host.typing.rec(type).kind;
+    const kind = typeof type === "string" ? "" : this.host.noted.typing.rec(type).kind;
     // Objects, arrays, Maps, Sets and unions holding them print as Node's util.inspect would.
-    if (!plain(this.host.typing, type)) {
+    if (!plain(this.host.noted.typing, type)) {
       this.flush();
       const text = this.host.inspect(v, type);
       this.host.emit(`call void @fsh_rt_str_print(i32 ${this.stream}, ptr ${text})`);
       this.host.emit(`call void @fsh_rt_str_release(ptr ${text})`);
     } else if (kind === "literal") {
-      this.literal(literalText(this.host.typing.rec(type as LiteralType).value));
+      this.literal(literalText(this.host.noted.typing.rec(type as LiteralType).value));
     } else if (type === "string") {
       // Written by the runtime, since its bytes may hold anything printf would read as format.
       this.flush();
@@ -397,7 +397,7 @@ export class Printer<H extends PrintHost> {
     } else if (type === "null") {
       this.format += "null";
     } else if (kind !== "" && kind !== "union") {
-      this.format += escape(this.host.typing.show(type));
+      this.format += escape(this.host.noted.typing.show(type));
     } else if (type === "boolean") {
       const text = this.host.temp();
       this.host.emit(`${text} = select i1 ${v}, ptr @.true, ptr @.false`);
@@ -406,9 +406,9 @@ export class Printer<H extends PrintHost> {
     } else if (kind === "union") {
       this.flush();
       const tag = this.host.temp();
-      this.host.emit(`${tag} = extractvalue ${llvmOf(this.host.typing, type)} ${v}, 0`);
+      this.host.emit(`${tag} = extractvalue ${llvmOf(this.host.noted.typing, type)} ${v}, 0`);
       let members: Type[] = [];
-      const union = this.host.typing.rec(type as UnionType);
+      const union = this.host.noted.typing.rec(type as UnionType);
       for (const m of union.members) members.push(m);
       let cases: string[] = [];
       for (let i: usize = 0; i < members.length; i++) cases.push(this.host.label());
@@ -426,7 +426,7 @@ export class Printer<H extends PrintHost> {
     } else if (type === "f32" || type === "f64") {
       // A float is written out by the runtime, as JavaScript would.
       const text = this.host.temp();
-      this.host.emit(`${text} = call ptr @fsh_rt_format_${type}(${llvmOf(this.host.typing, type)} ${v}, ptr ${this.host.alloca("[32 x i8]")})`);
+      this.host.emit(`${text} = call ptr @fsh_rt_format_${type}(${llvmOf(this.host.noted.typing, type)} ${v}, ptr ${this.host.alloca("[32 x i8]")})`);
       this.format += "%s";
       this.values.push(`, ptr ${text}`);
     } else {
