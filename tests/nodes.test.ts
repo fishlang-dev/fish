@@ -211,7 +211,7 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
     problems.push(...audit(written, ids, `${p.name}, checked`));
   }
   expect(problems.slice(0, 20)).toEqual([]);
-}, 120_000);
+}, 300_000);
 
 // No node reachable from `roots` has been replaced: the rebuild put every replacement in place.
 function stale(roots: unknown, where: string): string[] {

@@ -3768,7 +3768,7 @@ class BodyChecker implements Context, GuardHost {
       this.cx.tables.typing.setRec(future, r);
     }
     const type: Type = generatorType !== undefined ? generatorType : future !== undefined ? future : gives;
-    if (this.f().closure !== undefined && this.cx.tables.typing.holdsRef(type)) throw unsupported("closures returning references", this.returnSpan(true));
+    if (this.f().closure !== undefined && this.f().closure!.givesRefs !== true && this.cx.tables.typing.holdsRef(type)) throw unsupported("closures returning references", this.returnSpan(true));
     if (this.f().closure === undefined) this.cx.lifetimes(this.f());
     // A returned value holding references may point into any parameter, or `this`.
     let everything: Origin[] = [];
@@ -3777,7 +3777,8 @@ class BodyChecker implements Context, GuardHost {
     const ref = this.cx.isRef(type) ? type : this.cx.tables.typing.optionRef(type);
     const signature = cloneSignature(this.f());
     const params = this.state.params.slice();
-    const origins: Origin[] = ref !== undefined ? this.cx.originsOf(signature, params, ref) : this.cx.tables.typing.holdsRef(type) ? this.cx.heldOrigins(signature) ?? everything : [];
+    // An array method's callback may give back any of what it is handed.
+    const origins: Origin[] = this.f().closure !== undefined && this.f().closure!.givesRefs === true ? everything : ref !== undefined ? this.cx.originsOf(signature, params, ref) : this.cx.tables.typing.holdsRef(type) ? this.cx.heldOrigins(signature) ?? everything : [];
     if (gives !== "void" && this.state.generatorType === undefined && !alwaysReturns(this.f().body, this.cx.broken, this.cx.continued)) {
       const at = this.returnSpan();
       throw new CompileError("E0601", "not all code paths return a value", at.start, at.end);
@@ -4917,9 +4918,10 @@ class BodyChecker implements Context, GuardHost {
     const parent = this.instance().id;
     const self = this.cx.tables.nestedFunctions.get(e);
     const made: true | undefined = this.cx.tables.madeArrows.has(e) ? true : undefined;
+    const givesRefs: true | undefined = this.cx.tables.elementArrows.has(e) ? true : undefined;
     const name = this.f().name;
     const bodyId = this.cx.tables.arenas.addBody({
-      id: bodyNodeId, name, params, returnType: e.returnType === undefined ? undefined : cloneTypeNode(e.returnType), throws: e.throws === undefined ? undefined : cloneTypeNode(e.throws), start: e.start, end: e.end, async: e.async ? true : undefined, closure: { value, parent, expected, move: e.move || owning, unsafe, self, made },
+      id: bodyNodeId, name, params, returnType: e.returnType === undefined ? undefined : cloneTypeNode(e.returnType), throws: e.throws === undefined ? undefined : cloneTypeNode(e.throws), start: e.start, end: e.end, async: e.async ? true : undefined, closure: { value, parent, expected, move: e.move || owning, unsafe, self, made, givesRefs },
       body: stmts,
     }).bodyId;
     let siblings: usize = 0;
@@ -5344,6 +5346,9 @@ class BodyChecker implements Context, GuardHost {
         const referred = this.cx.isRef(through) ? this.cx.tables.typing.rec(through).to : through;
         // An `Iterable<T>` parameter is looped over as what it stands for in an instance; at its
         // definition, it gives its `T`s.
+        // Each pass would hold a second copy of a mutable reference the array keeps.
+        const looped = typeof referred === "string" ? undefined : this.cx.tables.typing.rec(referred);
+        if (looped !== undefined && (looped.kind === "array" || looped.kind === "fixed") && this.cx.tables.typing.holdsMut(looped.element)) throw unsupported("'for...of' loops over arrays of mutable references", s.right);
         const element = this.cx.tables.typing.iterableElement(referred);
         const object = element === undefined ? referred : this.cx.tables.typing.lower(referred);
         const call = element === undefined ? undefined : this.exprs().iteratorCall(s.right, object);
@@ -5628,6 +5633,9 @@ class BodyChecker implements Context, GuardHost {
           if (this.f().comptime === "const") throw new CompileError("E0801", "a top-level const holding a function is supported when its value is an arrow written in place, as in 'const f = (x: i64) => ...'; declare the function with 'function', or call it by its own name", s.value!.start, s.value!.end);
           throw unsupported("functions returned without a function return type", s.value!);
         }
+        // A top-level const lives for the whole program, with no holder for the borrow checker
+        // to follow what it borrows through.
+        if (this.f().comptime === "const" && s.value !== undefined && r?.kind !== "ref" && this.cx.tables.typing.holdsRef(type)) throw unsupported("top-level consts holding references", s.value);
         // Returns of different regexes give any regex, as TypeScript infers 'RegExp'.
         if (this.state.declared === undefined && this.cx.recOf(this.state.inferred)?.kind === "regex" && r?.kind === "regex" && this.state.inferred !== type) this.state.inferred = ANY_REGEX;
         const expected = this.state.declared ?? this.state.inferred;

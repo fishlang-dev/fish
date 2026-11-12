@@ -211,6 +211,84 @@ function main() {
   expect([code, out]).toEqual([0, "hello\nhello!\nline 9\n9\n"]);
 });
 
+// An array of references holds pointers it never frees through: pushed, read, written, popped
+// and looped over, with the buffer freed once and nothing its elements point at freed with it.
+test.skipIf(noAddress !== undefined)("arrays of references run clean under the address sanitizer", () => {
+  const src = `class Expr {
+  text: string
+  constructor(text: string) {
+    this.text = text
+  }
+}
+type AnyNode = { of: "expr"; node: Ref<Expr> } | { of: "none" }
+class Stack {
+  items: Ref<Expr>[] = []
+  add(this: Mut<this>, e: Ref<Expr>) {
+    this.items.push(e)
+  }
+}
+function main() {
+  const a = new Expr("a" + 1)
+  const b = new Expr("b" + 2)
+  let st: Ref<Expr>[] = [a]
+  for (let i = 0; i < 40; i++) st.push(i % 2 === 0 ? a : b)
+  st[0] = b
+  let total = 0
+  for (const e of st) total += e.text.length
+  while (st.length > 3) st.pop()
+  const top = st.pop()!
+  console.log(total, st.length, top.text)
+  let nodes: AnyNode[] = [{ of: "expr", node: a }, { of: "none" }]
+  nodes.push({ of: "expr", node: b })
+  for (const n of nodes) console.log(n.of === "expr" ? n.node.text : n.of)
+  const last = nodes.pop()!
+  if (last.of === "expr") console.log(last.node.text)
+  let held = new Stack()
+  held.add(a)
+  held.add(b)
+  console.log(held.items[1].text, held.items.length)
+}
+`;
+  const { code, out, err } = run("ref-arrays", src, ["--sanitize", "address"]);
+  expect(err).toBe("");
+  expect([code, out]).toEqual([0, "82 2 b2\na1\nnone\nb2\nb2\nb2 2\n"]);
+});
+
+// The array methods copy pointers between buffers and free each buffer once: copies, joins,
+// inserts, spreads, clones and what a callback gives back, with the referents untouched.
+test.skipIf(noAddress !== undefined)("array methods over references run clean under the address sanitizer", () => {
+  const src = `class Expr {
+  text: string
+  constructor(text: string) {
+    this.text = text
+  }
+}
+function main() {
+  const a = new Expr("a" + 1)
+  const b = new Expr("b" + 2)
+  const c = new Expr("c" + 3)
+  let st: Ref<Expr>[] = [a, b]
+  for (let i = 0; i < 20; i++) st.push(i % 2 === 0 ? a : b)
+  const firsts = st.filter((e) => e.text === "a1").concat(st.slice(0, 2)).toReversed()
+  st.unshift(c)
+  st.splice(1, 2, c, c)
+  const swapped = st.with(0, a).toSpliced(1, 1, b)
+  const copy = [...st, c].clone()
+  const texts = st.map((e) => e).toSorted((p, q) => p.text < q.text ? -1 : p.text > q.text ? 1 : 0)
+  const longest = st.reduce((best, e) => e.text.length > best.text.length ? e : best)
+  let owned = [new Expr("o" + 1), new Expr("o" + 2)]
+  const lent = owned.map((e) => e)
+  console.log(firsts.length, firsts[0].text, st.at(0)!.text, st.find((e) => e.text === "b2")!.text)
+  console.log(swapped.length, swapped[0].text, swapped[1].text, copy.length, texts[0].text, longest.text)
+  console.log(lent[1].text, st.shift()!.text, st.length)
+  console.log([a, b].slice(1))
+}
+`;
+  const { code, out, err } = run("ref-array-methods", src, ["--sanitize", "address"]);
+  expect(err).toBe("");
+  expect([code, out]).toEqual([0, "13 b2 c3 b2\n23 a1 b2 24 a1 c3\no2 c3 22\n[ Expr { text: 'b2' } ]\n"]);
+});
+
 // Clang's -O0 code for AArch64 misread large aggregates passed to address-sanitized functions,
 // so fetch's init arrived empty and the request went out as a bare GET.
 test.skipIf(noAddress !== undefined)("an address-sanitized fetch sends the method, headers and body it was given", async () => {

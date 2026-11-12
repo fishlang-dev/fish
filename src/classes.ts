@@ -68,7 +68,7 @@ export type Body = Span & Id & {
   // `move`: it captures everything by value.
   // A nested function's closure knows its own name, which its body calls itself by.
   // `made`: the checker wrote it around a function given as a value or a timer's callback.
-  closure?: { value?: Expr; parent: InstanceId; expected?: FunctionType; move: boolean; unsafe?: boolean; self?: string; made?: true };
+  closure?: { value?: Expr; parent: InstanceId; expected?: FunctionType; move: boolean; unsafe?: boolean; self?: string; made?: true; givesRefs?: true };
 };
 
 // A type parameter bounded by `Lifetime` names a lifetime, which is checked and erased rather

@@ -653,11 +653,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     return error;
   }
 
-  // An array of an element type. Arrays of references, and of functions, which would need their
-  // calls boxed, aren't supported yet.
+  // An array of an element type. Arrays of functions, which would need their calls boxed,
+  // aren't supported yet.
   /** @throws {CompileError} */
   private array(this: Mut<this>, element: Type, at: Ref<TypeNode>): Type {
-    if (this.host.tables.typing.holdsRef(element)) throw unsupported("arrays of references", at);
     const e = this.recOf(element);
     if (e?.kind === "closure") throw unsupported("arrays of functions", at);
     if (e?.kind === "function" && e.generic !== undefined) throw new CompileError("E0115", familyHeld("an array"), at.start, at.end);
@@ -688,7 +687,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (size === undefined) throw new CompileError("E0116", "a FixedArray's length is a number written in place, like 'FixedArray<i64, 4>'", n.start, n.end);
     const resolved = this.resolveType(of);
     const element = storable(this.host.tables.typing, resolved, spanOf(of));
-    if (this.host.tables.typing.holdsRef(element)) throw unsupported("fixed arrays of references", spanOf(of));
+    // A fixed array copies when its elements do, and a copy of a mutable reference would be a second one.
+    if (this.host.tables.typing.holdsMut(element)) throw unsupported("fixed arrays of mutable references", spanOf(of));
     // Its elements live where it does, often the stack, so all of them together are limited.
     if (size * BigInt(byteSize(this.host.tables.typing, element)) > 65536n) throw new CompileError("E0116", "a FixedArray holds at most 64 KiB inline, whatever its elements hold inline counted; use an array, 'T[]', for more", n.start, n.end);
     const e = this.recOf(element);

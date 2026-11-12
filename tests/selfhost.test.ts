@@ -116,7 +116,7 @@ test("the native comparison reports a crash after a verdict and a checker that a
 
 // How many programs parse and check alone can't reach, as measured: those with imports or
 // decorators, whose native loader and macro stage aren't compiled, and errors raised after checking.
-const UNREACHED = 319;
+const UNREACHED = 323;
 
 // The checker compiled by Fish gives each single-file test program the verdict Bun's checker gives it.
 test("the native checker accepts and rejects the test programs exactly as Bun's does", async () => {

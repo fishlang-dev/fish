@@ -355,9 +355,15 @@ function f(x: Ref<i64> | Ref<string>) {}
 function main() {}
 // error: unions of bare references are not supported yet; hold each in an object member with a tag
 // case: option_refs_array
-function f(xs: (Ref<i64> | null)[]) {}
-function main() {}
-// error: arrays of references are not supported yet
+function f(xs: (Ref<i64> | null)[]): i64 {
+  const x = xs[0]
+  return x === null ? 0 : x
+}
+function main() {
+  const n = 4 + 1
+  console.log(f([n, null]), f([null]))
+}
+// expect: 5 0
 // case: option_refs_unwrap_call
 // 'find(...)!' borrows what the lookup does.
 class Item {

@@ -307,6 +307,18 @@ test("a generic arrow const with a written type", () => {
 });
 
 // An optional interface parameter is taken, but a default on one is still refused at the parameter.
+test("values() on an array of references", () => {
+  const src = "class B {}\nfunction main() {\n  const b = new B();\n  let rs: Ref<B>[] = [b];\n  for (const r of rs.values()) {}\n}";
+  const start = src.indexOf("rs.values");
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({ message: "calls to 'values' on arrays of references are not supported yet", start, end: start + "rs.values".length }));
+});
+
+test("owned values spread into an array of references", () => {
+  const src = "class B {}\nfunction main() {\n  let xs = [new B()];\n  const rs: Ref<B>[] = [...xs];\n}";
+  const start = src.indexOf("...xs") + 3;
+  expect(() => checkSource(src)).toThrow(expect.objectContaining({ message: "spreads of owned values into arrays of references are not supported yet", start, end: start + 2 }));
+});
+
 test("a default on an interface-typed parameter", () => {
   const src = "interface Shape { area(): f64; }\nclass Sq { area(): f64 { return 1; } }\nfunction f(x: Shape = new Sq()): f64 { return x.area(); }\nfunction g(x?: Shape): f64 { return x === undefined ? 0 : x.area(); }\nfunction main() { f(); g(); }";
   const start = src.indexOf("x: Shape =");
