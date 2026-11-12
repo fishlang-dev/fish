@@ -220,6 +220,9 @@ export type Options = { src: string; file: string; release: boolean; panic: "unw
 // The owner a generated symbol is made for, when that is a type.
 const typeOwner = (t: Type): string => `type ${idOf(t)}`;
 
+// The function being emitted, set aside while another is emitted inside it.
+type Emission = { allocas: string[]; body: string[]; temps: usize; labels: usize; block: string; pending: { v: string; type: Type; slot?: string }[]; scopes: Scope[]; framingOn: boolean; debuggingOn: boolean };
+
 // What a block owns and drops at its end. A scope a match or a pipe opens for itself, which
 // ends with the expression, is transient: a C string's buffer goes to the block around it.
 type Scope = { transient: boolean; held: { slot: string; type: Type }[] };
@@ -248,9 +251,9 @@ class Codegen implements PrintHost {
   instances: Instance[];
   names: Map<InstanceId, string>;
   unwinds: "uwtable" | "uwtable personality ptr @__gcc_personality_v0";
-  framing: string[] | undefined;
+  framingOn: boolean;
   site: Span | undefined;
-  debugging: string[] | undefined;
+  debuggingOn: boolean;
   marked: Span | undefined;
   frames: boolean;
   globals: string[];
@@ -258,8 +261,8 @@ class Codegen implements PrintHost {
   out: string[];
   allocas: string[];
   body: string[];
-  temps: number;
-  labels: number;
+  temps: usize;
+  labels: usize;
   numbered: Map<LocalId, number>;
   block: string;
   current: Instance;
@@ -270,7 +273,7 @@ class Codegen implements PrintHost {
   finallies: Region[];
   exits: NodeMap<Stmt, { exit: string; next?: string; depth: usize; }>;
   pending: { v: string; type: Type; slot?: string }[];
-  floor: number;
+  floor: usize;
   reserved: NodeMap<Expr, string>;
   resuming: { type: GeneratorType | FutureType; frame: string; resumes: string[]; start: string; done: string } | undefined;
   framed: Set<string>;
@@ -511,6 +514,8 @@ class Codegen implements PrintHost {
     this.glued = new TypeSet<FutureType>();
 
 
+    this.framingOn = false;
+    this.debuggingOn = false;
     this.shares = new Map<InstanceId, Share>();
     this.pairs = new Map<LocalId, string>();
     this.main = this.instances[0]!;
@@ -576,11 +581,11 @@ class Codegen implements PrintHost {
       // hides std's internals; nor do the arrows the checker wraps around a callback.
       const from = sourceOf(this.src, this.file, f.start, this.sources).file;
       const ours = f.start < STD_BASE && !BUILT_IN.test(from) && !(this.harness && from === this.file) && !f.closure?.made;
-      this.framing = (!this.release || this.leaks) && !this.library && ours ? this.body : undefined;
+      this.framingOn = (!this.release || this.leaks) && !this.library && ours;
       this.site = undefined;
-      this.debugging = this.debug && f.start < STD_BASE && !BUILT_IN.test(from) ? this.body : undefined;
+      this.debuggingOn = this.debug && f.start < STD_BASE && !BUILT_IN.test(from);
       this.marked = undefined;
-      if (this.debugging) this.allocas.push(`  ;fsh.fn ${f.start}`);
+      if (this.debuggingOn) this.allocas.push(`  ;fsh.fn ${f.start}`);
       const machine = instance.generator ?? instance.future;
       this.resuming = machine && { type: machine, frame: this.llvm(machine), resumes: [], start: this.label(), done: this.label() };
       // A generator's variables, and its loops' state, are fields of the frame each `next()` is
@@ -692,9 +697,9 @@ class Codegen implements PrintHost {
     }
   }
 
-  this.framing = undefined;
+  this.framingOn = false;
 
-  this.debugging = undefined;
+  this.debuggingOn = false;
 
   if (this.frames) this.globals.push("@fsh_rt_frames = external thread_local global ptr");
 
@@ -805,6 +810,40 @@ class Codegen implements PrintHost {
     return new Lowering(this);
   }
 
+  // Sets the function being emitted aside and starts an empty one, which keeps no frame and
+  // carries no debug marks.
+  setAside(this: Mut<this>): Emission {
+    const saved: Emission = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes, framingOn: this.framingOn, debuggingOn: this.debuggingOn };
+    this.startFresh();
+    this.framingOn = false;
+    this.debuggingOn = false;
+    return saved;
+  }
+
+  // Starts an empty function in place of the one being emitted.
+  startFresh(this: Mut<this>): void {
+    this.allocas = [];
+    this.body = [];
+    this.temps = 0;
+    this.labels = 0;
+    this.block = "entry";
+    this.pending = [];
+    this.scopes = [];
+  }
+
+  // Takes up again a function `setAside` set aside.
+  takeUp(this: Mut<this>, saved: Emission): void {
+    this.allocas = saved.allocas;
+    this.body = saved.body;
+    this.temps = saved.temps;
+    this.labels = saved.labels;
+    this.block = saved.block;
+    this.pending = saved.pending;
+    this.scopes = saved.scopes;
+    this.framingOn = saved.framingOn;
+    this.debuggingOn = saved.debuggingOn;
+  }
+
   mayPanic(this: Mut<this>, call: string): void {
     this.unwinding(call);
   }
@@ -841,7 +880,7 @@ class Codegen implements PrintHost {
   // The record is `{ site, name, prev }`, the site first so each call's store is to the slot
   // itself; nothing else outlives the entry block, so unoptimized code spills nothing more.
   pushFrame(this: Mut<this>, i: Instance): string[] {
-    if (this.body !== this.framing) return [];
+    if (!this.framingOn) return [];
     this.frames = true;
     return [
       `  %fsh.site = alloca ${FRAME}`,
@@ -858,7 +897,7 @@ class Codegen implements PrintHost {
 
   // Every return pops it; an unwinding panic leaves it, for the runtime to reset.
   popFrame(this: Mut<this>, lines: string[]): string[] {
-    if (lines !== this.framing) return lines;
+    if (!this.framingOn) return lines;
     let n = 0;
     return lines.flatMap((line) => {
       if (!line.startsWith("  ret ")) return [line];
@@ -1026,12 +1065,11 @@ class Codegen implements PrintHost {
   fillConstants(this: Mut<this>): string[] {
     if (this.constantGlobals.size === 0) return [];
     const made = (name: string, fill: () => void) => {
-      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
-      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+      const saved = this.setAside();
       fill();
       this.emit("ret void");
       const lines = [`define internal void ${name}() {`, "entry:", ...this.allocas, ...this.body, "}", ""];
-      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
+      this.takeUp(saved);
       return lines;
     };
     const filler = made('@"fsh.constants"', () => {
@@ -1342,11 +1380,11 @@ class Codegen implements PrintHost {
 
 
   emit(this: Mut<this>, line: string) {
-    if (this.body === this.debugging && this.site !== undefined && this.site !== this.marked) {
+    if (this.debuggingOn && this.site !== undefined && (this.marked === undefined || this.site.start !== this.marked.start || this.site.end !== this.marked.end)) {
       this.body.push(`  ;fsh.at ${this.site.start}`);
-      this.marked = this.site;
+      this.marked = { start: this.site.start, end: this.site.end };
     }
-    const callee = this.body === this.framing && this.site ? CALLEE.exec(line)?.[1] : undefined;
+    const callee = this.framingOn && this.site !== undefined ? CALLEE.exec(line)?.[1] : undefined;
     if (callee && !QUIET.test(callee)) this.body.push(`  store ptr ${this.cString(this.where(this.site!))}, ptr %fsh.site`);
     this.body.push(`  ${line}`);
   }
@@ -2213,8 +2251,8 @@ class Codegen implements PrintHost {
     const names: [string, string] = [`@fsh.js.settle.${n}`, `@fsh.js.settle.drop.${n}`];
     this.settlers.set(key, names);
     const frame = `{ ${DYN}, ptr }`;
-    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes, jsSite: this.jsSite };
-    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const saved = this.setAside();
+    const site = this.jsSite;
     const [innerAt, settleAt, settle] = [this.temp(), this.temp(), this.temp()];
     this.emit(`${innerAt} = getelementptr ${frame}, ptr %frame, i32 0, i32 0`);
     this.emit(`${settleAt} = getelementptr ${frame}, ptr %frame, i32 0, i32 1`);
@@ -2237,7 +2275,7 @@ class Codegen implements PrintHost {
     this.dispose(old, type);
     this.emit("ret i32 1");
     this.out.push(`define internal i32 ${names[0]}(ptr %cx, ptr %frame) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
-    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    this.startFresh();
     const [promise, held] = [this.temp(), this.temp()];
     this.emit(`${promise} = load ${DYN}, ptr %frame`);
     this.dispose(promise, type);
@@ -2251,7 +2289,8 @@ class Codegen implements PrintHost {
       this.settledOutput = true;
       this.out.push(`define internal void @"fsh.js.settled.output"(ptr %out) {`, "entry:", "  ret void", "}", "");
     }
-    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes, jsSite: this.jsSite } = saved);
+    this.takeUp(saved);
+    this.jsSite = site;
     return names;
   }
 
@@ -2265,8 +2304,8 @@ class Codegen implements PrintHost {
     if (made) return made;
     const name = `@fsh.js.callback.${this.stableId("js.callback", `${this.noted.typing.described(type)} ${at.start}`, key)}`;
     this.callbacks.set(key, name);
-    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes, jsSite: this.jsSite };
-    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const saved = this.setAside();
+    const site = this.jsSite;
     const fn = this.noted.typing.callableOf.get(this.noted.typing.rec(type).of)!;
     const [dropping, drop, call] = [this.temp(), this.label(), this.label()];
     this.emit(`${dropping} = icmp slt i64 %argc, 0`);
@@ -2295,7 +2334,8 @@ class Codegen implements PrintHost {
       this.emit(`ret ptr ${box}`);
     }
     this.out.push(`define internal ptr ${name}(ptr %data, ptr %table, i64 %argc, ptr %argv) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
-    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes, jsSite: this.jsSite } = saved);
+    this.takeUp(saved);
+    this.jsSite = site;
     return name;
   }
 
@@ -2844,11 +2884,10 @@ class Codegen implements PrintHost {
   // Emits a thunk taking the pointer to a Dyn's block, then `params`, its body from `fill`. It
   // is a function of its own, so nothing the function being emitted holds drops in it.
   thunk(this: Mut<this>, name: string, returns: string, fill: () => void, params: string[] = []) {
-    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
-    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const saved = this.setAside();
     fill();
     this.out.push(`define internal ${returns} ${name}(${["ptr %p", ...params].join(", ")}) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
-    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
+    this.takeUp(saved);
   }
 
 
@@ -3313,14 +3352,15 @@ class Codegen implements PrintHost {
     if (made) return made;
     const name = `@fsh.element.drop.${this.stableId("element.drop", this.noted.typing.described(type), typeOwner(type))}`;
     this.elementDrops.set(type, name);
-    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block };
-    [this.allocas, this.body, this.temps, this.labels, this.block] = [[], [], 0, 0, "entry"];
+    // The function being emitted keeps what it has pending and its scopes while this one is made.
+    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, framingOn: this.framingOn, debuggingOn: this.debuggingOn };
+    [this.allocas, this.body, this.temps, this.labels, this.block, this.framingOn, this.debuggingOn] = [[], [], 0, 0, "entry", false, false];
     const v = this.temp();
     this.emit(`${v} = load ${this.llvm(type)}, ptr %p`);
     this.dispose(v, type);
     this.emit("ret void");
     this.out.push(`define internal void ${name}(ptr %p) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
-    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block } = saved);
+    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, framingOn: this.framingOn, debuggingOn: this.debuggingOn } = saved);
     return name;
   }
 
@@ -4467,8 +4507,7 @@ class Codegen implements PrintHost {
     const name = `@fsh.${kind}.${this.stableId(kind, this.noted.typing.described(type), typeOwner(type))}`;
     this.glue[kind].set(type, name);
     // A copy keeps the parts it has made pending, so a panic part way drops them.
-    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
-    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const saved = this.setAside();
     const t = this.llvm(type);
     const each = (v: string, part: Type, track = true) => {
       if (kind === "drop") return (this.dispose(v, part), v);
@@ -4579,7 +4618,7 @@ class Codegen implements PrintHost {
     }
     this.emit(kind === "drop" ? "ret void" : `ret ${t} ${result}`);
     this.out.push(`define internal ${kind === "drop" ? "void" : t} ${name}(${t} %v) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
-    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
+    this.takeUp(saved);
     return name;
   }
 
@@ -4591,12 +4630,11 @@ class Codegen implements PrintHost {
     if (!name) {
       name = `@fsh.eq.${this.stableId("eq", this.noted.typing.described(type), typeOwner(type))}`;
       this.comparers.set(type, name);
-      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
-      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+      const saved = this.setAside();
       const t = this.llvm(type);
       this.emit(`ret i1 ${this.compareParts("%a", "%b", type as Exclude<Type, string>)}`);
       this.out.push(`define internal i1 ${name}(${t} %a, ${t} %b) {`, "entry:", ...this.allocas, ...this.body, "}", "");
-      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
+      this.takeUp(saved);
     }
     const result = this.temp();
     this.emit(`${result} = call i1 ${name}(${this.llvm(type)} ${a}, ${this.llvm(type)} ${b})`);
@@ -4713,12 +4751,11 @@ class Codegen implements PrintHost {
     if (!name) {
       name = `@fsh.json.${this.stableId("json", this.noted.typing.described(written), typeOwner(written))}`;
       this.jsonWriters.set(written, name);
-      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
-      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+      const saved = this.setAside();
       this.jsonParts("%w", "%v", t, written);
       this.emit("ret void");
       this.out.push(`define internal void ${name}(ptr %w, ${this.llvm(t)} %v) {`, "entry:", ...this.allocas, ...this.body, "}", "");
-      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
+      this.takeUp(saved);
     }
     this.emit(`call void ${name}(ptr ${w}, ${this.llvm(t)} ${v})`);
   }
@@ -5170,12 +5207,11 @@ class Codegen implements PrintHost {
     if (!name) {
       name = `@fsh.text.${this.stableId("text", this.noted.typing.described(t), typeOwner(t))}`;
       this.stringers.set(t, name);
-      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
-      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+      const saved = this.setAside();
       this.jsTextParts("%b", "%v", t);
       this.emit("ret void");
       this.out.push(`define internal void ${name}(${this.llvm(t)} %v, ptr %b) {`, "entry:", ...this.allocas, ...this.body, "}", "");
-      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
+      this.takeUp(saved);
     }
     this.emit(`call void ${name}(${this.llvm(t)} ${v}, ptr ${b})`);
   }
@@ -5261,11 +5297,10 @@ class Codegen implements PrintHost {
     if (!name) {
       name = `@fsh.insp.${this.stableId("insp", this.noted.typing.described(written), typeOwner(written))}`;
       this.inspectors.set(written, name);
-      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
-      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+      const saved = this.setAside();
       this.emit(`ret ptr ${this.inspectParts("%v", t, written)}`);
       this.out.push(`define internal ptr ${name}(${this.llvm(t)} %v, i64 %d) {`, "entry:", ...this.allocas, ...this.body, "}", "");
-      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
+      this.takeUp(saved);
     }
     const node = this.temp();
     this.emit(`${node} = call ptr ${name}(${this.llvm(t)} ${v}, i64 ${depth})`);
@@ -5729,12 +5764,11 @@ class Codegen implements PrintHost {
     if (!name) {
       name = `@fsh.json.read.${this.stableId("json.read", this.noted.typing.described(t), typeOwner(t))}`;
       this.jsonReaders.set(t, name);
-      const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
-      [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+      const saved = this.setAside();
       this.emit(`store ${this.llvm(t)} ${this.readParts("%r", t)}, ptr %out`);
       this.emit("ret i1 true");
       this.out.push(`define internal i1 ${name}(ptr %r, ptr %out) {`, "entry:", ...this.allocas, ...this.body, "}", "");
-      ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
+      this.takeUp(saved);
     }
     const [slot, ok, v] = [this.alloca(this.llvm(t)), this.temp(), this.temp()];
     this.emit(`${ok} = call i1 ${name}(ptr ${r}, ptr ${slot})`);
@@ -9173,8 +9207,7 @@ class Codegen implements PrintHost {
     this.combinePolls.set(t, name);
     const { kind, futures, at, array } = this.noted.typing.combinedOf.get(t)!;
     if (array) return this.combineArray(t, name, kind, array, at as Expr);
-    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
-    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const saved = this.setAside();
     const field = (i: usize) => {
       const p = this.temp();
       this.emit(`${p} = getelementptr ${this.llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
@@ -9281,7 +9314,7 @@ class Codegen implements PrintHost {
       }
     }
     this.out.push(`define internal ${this.pollType(t)} ${name}(ptr %frame, ptr %cx) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
-    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
+    this.takeUp(saved);
     return name;
   }
 
@@ -9289,8 +9322,7 @@ class Codegen implements PrintHost {
   // `combinePoll` over an array of `Promise<T>` values. Its first poll makes the values array and
   // a flag per future, every one zero.
   combineArray(this: Mut<this>, t: FutureType, name: string, kind: "all" | "race" | "allSettled" | "any", array: ArrayType, at: Expr): string {
-    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
-    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const saved = this.setAside();
     const dyn = this.noted.typing.rec(array).element as DynType;
     const given = this.noted.typing.promiseElement(this.noted.typing.rec(dyn).of)!;
     const value = given === "void" ? "null" : given;
@@ -9444,7 +9476,7 @@ class Codegen implements PrintHost {
       finishWith(1, v);
     }
     this.out.push(`define internal ${this.pollType(t)} ${name}(ptr %frame, ptr %cx) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
-    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
+    this.takeUp(saved);
     return name;
   }
 
@@ -9609,8 +9641,7 @@ class Codegen implements PrintHost {
 
   // An async instance's cancel: the future it awaits in the state it is paused in is cancelled.
   cancelFunction(this: Mut<this>, i: Instance) {
-    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes };
-    [this.allocas, this.body, this.temps, this.labels, this.block, this.pending, this.scopes] = [[], [], 0, 0, "entry", [], []];
+    const saved = this.setAside();
     const awaits = this.awaitsOf.get(i.id) ?? [];
     const [state, done] = [this.temp(), this.label()];
     const cases = awaits.map(() => this.label());
@@ -9626,7 +9657,7 @@ class Codegen implements PrintHost {
     this.startBlock(done);
     this.emit("ret void");
     this.out.push(`define internal void ${this.cancelSymbol(i)}(ptr %frame, ptr %cx) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}", "");
-    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, pending: this.pending, scopes: this.scopes } = saved);
+    this.takeUp(saved);
   }
 
 
@@ -10096,11 +10127,11 @@ class Codegen implements PrintHost {
 
   // The instructions dropping `%v` of `type`, as a helper's body.
   helperBody(this: Mut<this>, drop: (v: string) => void): string[] {
-    const saved = [this.allocas, this.body, this.temps, this.labels, this.block] as const;
-    [this.allocas, this.body, this.temps, this.labels, this.block] = [[], [], 0, 0, "entry"];
+    const saved = { allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, framingOn: this.framingOn, debuggingOn: this.debuggingOn };
+    [this.allocas, this.body, this.temps, this.labels, this.block, this.framingOn, this.debuggingOn] = [[], [], 0, 0, "entry", false, false];
     drop("%v");
     const lines = [...this.allocas, ...this.body];
-    [this.allocas, this.body, this.temps, this.labels, this.block] = saved as unknown as [string[], string[], usize, usize, string];
+    ({ allocas: this.allocas, body: this.body, temps: this.temps, labels: this.labels, block: this.block, framingOn: this.framingOn, debuggingOn: this.debuggingOn } = saved);
     return lines;
   }
 
