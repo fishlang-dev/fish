@@ -1237,6 +1237,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // The globals are filled before main; the runtime drops them at exit, before its leak check.
+  /** @throws {CompileError} */
   fillConstants(this: Mut<this>): string[] {
     if (this.constantGlobals.size === 0) return [];
     const made = (cg: Mut<Codegen>, name: string, fill: (cg: Mut<Codegen>) => void) => {
@@ -1276,6 +1277,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // Comptime gives what can be built into the program: numbers, booleans, strings, and arrays,
   // Maps, Sets, objects, instances, unions and enums of them; a top-level const may also hold an Atomic or
   // a Lock.
+  /** @throws {CompileError} */
   bakeable(this: Mut<this>, type: Type, at: Ref<Span>, constant = false) {
     // The first part of a type comptime can't make, or undefined.
     function fault(cg: Mut<Codegen>, t: Type): Type | undefined {
@@ -1422,7 +1424,7 @@ class Codegen implements PrintHost, ComptimeHost {
       case "<<": case ">>": const line4 = `@fsh_rt_big_shift(ptr ${a}, ptr ${b}, i32 ${op === ">>" ? 1 : 0}, ptr ${this.panicAt(at)})`;
       call(this, line4, true); break;
       case "&": case "|": case "^": call(this, `@fsh_rt_big_bitwise(ptr ${a}, ptr ${b}, i32 ${["&", "|", "^"].indexOf(op)})`); break;
-      default: throw new Error(`internal error: no bigint '${op}'`);
+      default: assert(false, `internal error: no bigint '${op}'`);
     }
     return result;
   }
@@ -2416,7 +2418,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // `forEach(f)`: the arrow called with each value and its key, or each member, borrowed or copied.
   eachEntry(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, t: MapType, map: string): undefined {
     const entry = this.entryType(t);
-    const callback = e.args[0]!;
+    const callback: Ref<Expr> = e.args[0]!;
     const closure = this.cur().types.get(callback) as ClosureType;
     const target = this.callOf(callback)!;
     const env = this.alloca(this.llvm(closure));
@@ -3573,12 +3575,16 @@ class Codegen implements PrintHost, ComptimeHost {
         const shape = cg.resultType(target);
         const raw = cg.temp();
         const line = `call ${shape} ${cg.symbol(target)}(${[`ptr ${self}`, ...args].join(", ")})`;
-        cg.unwinding(line, raw, owning ? (cg: Mut<Codegen>) => cg.giveUp(target, type, upcasts, owner) : undefined);
+        const chosen = owning ? (cg: Mut<Codegen>) => cg.giveUp(target, type, upcasts, owner) : undefined;
+        cg.unwinding(line, raw, chosen);
         if (owning) cg.giveUp(target, type, upcasts, owner);
         const part2 = cg.inst(target).returns;
         const part3 = cg.inst(target).throws!;
         result = cg.failedOut(shape, raw, part2, part3, m);
-      } else result = cg.invoke(target, self, args, undefined, owning ? (cg: Mut<Codegen>) => cg.giveUp(target, type, upcasts, owner) : undefined);
+      } else {
+        const chosen2 = owning ? (cg: Mut<Codegen>) => cg.giveUp(target, type, upcasts, owner) : undefined;
+        result = cg.invoke(target, self, args, undefined, chosen2);
+      }
       if (result === undefined || m.returns === "void") {
         if (result !== undefined) {
           const part4 = cg.inst(target).returns;
@@ -4409,6 +4415,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  /** @throws {CompileError} */
   lowerStatement(this: Mut<this>, s: Ref<Stmt>) {
     switch (s.kind) {
       case "expr":
@@ -13280,6 +13287,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // A regex is a pointer to its compiled program, one constant per pattern and flags.
+  /** @throws {RegexSyntaxError} */
   regex(this: Mut<this>, t: RegexType): string {
     const key = `${this.tables.typing.rec(t).flags}/${this.tables.typing.rec(t).pattern}`;
     const made = this.regexes.get(key);
