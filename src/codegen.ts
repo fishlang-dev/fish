@@ -1071,7 +1071,7 @@ class Codegen implements PrintHost, ComptimeHost {
     for (const i of this.instances) {
       const at = this.callbacksOnlyCalled(i);
       if (at.size === 0) continue;
-      found.set(i, at);
+      found.set(i, new Set(at));
       const b = this.bodyAt(i);
       let parts = [`${b.name}@${b.start}`, this.tables.typing.keyOf(this.inst(i).returns), this.inst(i).throws === undefined ? "" : this.tables.typing.keyOf(this.inst(i).throws!)];
       b.params.forEach((p, k) => {
@@ -1407,7 +1407,10 @@ class Codegen implements PrintHost, ComptimeHost {
   bigOperate(this: Mut<this>, op: BinaryOp, a: string, b: string, at: Ref<Span>): string {
     const result = this.temp();
     // Division, powers and shifts may panic, unwinding what the statement holds.
-    const call = (cg: Mut<Codegen>, line: string, panics = false) => (panics ? cg.unwinding(`call ptr ${line}`, result) : cg.emit(`${result} = call ptr ${line}`));
+    const call = (cg: Mut<Codegen>, line: string, panics = false) => {
+      if (panics) cg.unwinding(`call ptr ${line}`, result);
+      else cg.emit(`${result} = call ptr ${line}`);
+    };
     switch (op) {
       case "+": call(this, `@fsh_rt_big_add(ptr ${a}, ptr ${b})`); break;
       case "-": call(this, `@fsh_rt_big_sub(ptr ${a}, ptr ${b})`); break;
@@ -1574,7 +1577,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const line = `call void @fsh_rt_panic_assert(ptr ${this.panicAt({ start: e.start, end: e.end })}, ptr ${message})`;
       this.unwinding(line);
     } else {
-      const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\nassertion failed: ${this.tables.asserts.get(e)}\n`)})`;
+      const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\nassertion failed: ${this.tables.asserts.get(e)!}\n`)})`;
       this.unwinding(line2);
     }
     this.emit("unreachable");
@@ -2805,7 +2808,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const parts = r.kind === "fixed" ? Array.from({ length: r.size }, () => r.element) : this.tables.typing.elementsOf(type as ObjectType);
         parts.forEach((t, i) => {
           const part = this.temp();
-          this.emit(`${part} = extractvalue ${this.llvm(type)} ${v}, ${r.kind === "fixed" ? i : this.tables.typing.fieldPath(type as ObjectType, String(i)).join(", ")}`);
+          this.emit(`${part} = extractvalue ${this.llvm(type)} ${v}, ${r.kind === "fixed" ? `${i}` : this.tables.typing.fieldPath(type as ObjectType, String(i)).join(", ")}`);
           push(this, part, t);
         });
       }
@@ -2944,7 +2947,7 @@ class Codegen implements PrintHost, ComptimeHost {
       let made = "zeroinitializer";
       parts.forEach((element, i) => {
         const next = this.temp();
-        const line10 = `${next} = insertvalue ${this.llvm(type)} ${made}, ${this.llvm(element)} ${read(this, String(i), element)}, ${r.kind === "fixed" ? i : this.tables.typing.fieldPath(type as ObjectType, String(i)).join(", ")}`;
+        const line10 = `${next} = insertvalue ${this.llvm(type)} ${made}, ${this.llvm(element)} ${read(this, String(i), element)}, ${r.kind === "fixed" ? `${i}` : this.tables.typing.fieldPath(type as ObjectType, String(i)).join(", ")}`;
         this.emit(line10);
         made = next;
       });
@@ -3445,7 +3448,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const own = table.clone;
     const name = `@fsh.dyn.clone.${n}`;
     this.thunk(name, "ptr", (cg) => {
-      const made = cg.invoke(cg.tables.arenas.instanceOf(own).id, "%p", [])!;
+      const made = cg.invoke(own, "%p", [])!;
       const block = cg.dynBlock(type, counted);
       cg.emit(`store ${cg.llvm(type)} ${made}, ptr ${block}`);
       cg.emit(`ret ptr ${block}`);
@@ -3526,6 +3529,28 @@ class Codegen implements PrintHost, ComptimeHost {
   // and its value dropped first unless the type's method took it over.
   // A throwing callable's slot gives whether the call failed, then its value and its error, as
   // its function type has them; a closure throwing nothing never fails.
+  // Given up, the block is freed once the method returns or unwinds: its value dropped first,
+  // or for a base's owning method, the derived fields it doesn't know of.
+  giveUp(this: Mut<this>, target: InstanceId, type: Type, upcasts: boolean, owner: ClassType | undefined): void {
+    if (this.bodyAt(target).self?.owned !== true) {
+      const v = this.temp();
+      this.emit(`${v} = load ${this.llvm(type)}, ptr %p`);
+      this.dispose(v, type);
+    } else if (upcasts) {
+      for (let t = type as ClassType; t !== owner; t = this.tables.typing.rec(t).base!) {
+        const at = this.upcast("%p", type as ClassType, t);
+        for (const [part, i] of this.parts(t)) {
+          if (i === 0 || !this.needsDrop(part)) continue;
+          const [slot, v] = [this.temp(), this.temp()];
+          this.emit(`${slot} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
+          this.emit(`${v} = load ${this.llvm(part)}, ptr ${slot}`);
+          this.dispose(v, part);
+        }
+      }
+    }
+    this.emit("call void @fsh_rt_free(ptr %p)");
+  }
+
   methodThunk(this: Mut<this>, name: string, type: Type, m: Ref<Method>, target: InstanceId): string {
     if (this.tables.typing.promiseElement(m.returns) !== undefined) return this.futureThunk(name, type, m, target);
     const returns = m.throws !== undefined ? this.throwing(m.returns, m.throws) : m.returns === "void" ? "void" : this.llvm(m.returns);
@@ -3534,27 +3559,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const r = cg.recOf(type);
       const upcasts = r?.kind === "class" && owner !== undefined && owner !== type;
       const self = upcasts ? cg.upcast("%p", type as ClassType, owner!) : "%p";
-      // Given up, the block is freed once the method returns or unwinds: its value dropped first,
-      // or for a base's owning method, the derived fields it doesn't know of.
-      const giveUp: ((cg: Mut<Codegen>) => void) | undefined = m.owned !== true ? undefined : (cg: Mut<Codegen>) => {
-        if (cg.bodyAt(target).self?.owned !== true) {
-          const v = cg.temp();
-          cg.emit(`${v} = load ${cg.llvm(type)}, ptr %p`);
-          cg.dispose(v, type);
-        } else if (upcasts) {
-          for (let t = type as ClassType; t !== owner; t = cg.tables.typing.rec(t).base!) {
-            const at = cg.upcast("%p", type as ClassType, t);
-            for (const [part, i] of cg.parts(t)) {
-              if (i === 0 || !cg.needsDrop(part)) continue;
-              const [slot, v] = [cg.temp(), cg.temp()];
-              cg.emit(`${slot} = getelementptr ${cg.llvm(t)}, ptr ${at}, i32 0, i32 ${i}`);
-              cg.emit(`${v} = load ${cg.llvm(part)}, ptr ${slot}`);
-              cg.dispose(v, part);
-            }
-          }
-        }
-        cg.emit("call void @fsh_rt_free(ptr %p)");
-      };
+      const owning = m.owned === true;
       // A closure may take fewer parameters than its callable passes: the rest are dropped here.
       const taken = cg.bodyAt(target).closure !== undefined ? cg.bodyAt(target).params.length : m.params.length;
       for (let i: usize = taken; i < m.params.length; i++) cg.dispose(`%a${i}`, m.params[i]!);
@@ -3568,12 +3573,12 @@ class Codegen implements PrintHost, ComptimeHost {
         const shape = cg.resultType(target);
         const raw = cg.temp();
         const line = `call ${shape} ${cg.symbol(target)}(${[`ptr ${self}`, ...args].join(", ")})`;
-        cg.unwinding(line, raw, giveUp);
-        giveUp?.(cg);
+        cg.unwinding(line, raw, owning ? (cg: Mut<Codegen>) => cg.giveUp(target, type, upcasts, owner) : undefined);
+        if (owning) cg.giveUp(target, type, upcasts, owner);
         const part2 = cg.inst(target).returns;
         const part3 = cg.inst(target).throws!;
         result = cg.failedOut(shape, raw, part2, part3, m);
-      } else result = cg.invoke(target, self, args, undefined, giveUp);
+      } else result = cg.invoke(target, self, args, undefined, owning ? (cg: Mut<Codegen>) => cg.giveUp(target, type, upcasts, owner) : undefined);
       if (result === undefined || m.returns === "void") {
         if (result !== undefined) {
           const part4 = cg.inst(target).returns;
@@ -3638,7 +3643,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // The slot of a stored callable held in one that throws more: the held one's call, its result
   // or its error passed on as this one's.
   relayThunk(this: Mut<this>, name: string, inner: DynType, m: Ref<Method>): string {
-    const held: Ref<Method> = this.tables.typing.rec(this.tables.typing.rec(inner).of).methods[0]!;
+    const held = copyMethod(this.tables.typing.rec(this.tables.typing.rec(inner).of).methods[0]!);
     this.thunk(name, this.throwing(m.returns, m.throws!), (cg) => {
       const [dyn, data, table] = [cg.temp(), cg.temp(), cg.temp()];
       cg.emit(`${dyn} = load ${DYN}, ptr %p`);
@@ -3773,7 +3778,9 @@ class Codegen implements PrintHost, ComptimeHost {
   // A stored callable's call is its one method's, on the callee itself.
   dynCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, callee: Ref<Expr>): string | undefined {
     const info = this.tables.dynCalls.get(e)!;
-    const object = info.callable !== undefined ? info.callable : callee.kind === "member" ? callee.object : callee;
+    let object: Ref<Expr> = callee;
+    if (info.callable !== undefined) object = info.callable;
+    else if (callee.kind === "member") object = callee.object;
     const optional = this.tables.optionalCallables.get(e);
     if (optional !== undefined) return this.optionalCallableCall(e, object, optional, info.index);
     const t = this.referent(this.valueType(object)) as DynType;
@@ -4327,7 +4334,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.settle();
     const result = this.answer(v, this.tables.typing.rec(this.resuming!.type as GeneratorType).yields);
     const at = this.label();
-    this.resuming!.resumes.push(at);
+    if (this.resuming !== undefined) this.resuming.resumes.push(at);
     this.emit(`store i32 ${this.resuming!.resumes.length}, ptr %state`);
     const line = `ret ${this.resultType(this.current)} ${this.yieldedAs(result)}`;
     this.emit(line);
@@ -4902,7 +4909,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(line);
     const mark = this.pending.length;
     const type = this.cur().types.get(e);
-    let v: string | undefined;
+    let v: string | undefined = undefined;
     if (wanted && type !== undefined) v = this.needsDrop(type) ? this.owned(e.body) : this.value(e.body);
     else this.effect(e.body);
     this.settle(mark);
@@ -10707,7 +10714,7 @@ class Codegen implements PrintHost, ComptimeHost {
     // A boxed future polls as a future giving what its Promise does, and throws nothing.
     const shape = this.tables.typing.rec(inner).kind === "dyn" ? this.tables.typing.handleType(this.tables.typing.promiseElement(this.tables.typing.rec(inner as DynType).of)!, undefined) : (inner as FutureType | HandleType);
     const poll = this.label();
-    this.resuming!.resumes.push(poll);
+    if (this.resuming !== undefined) this.resuming.resumes.push(poll);
     const resumed = this.resuming!.resumes.length;
     if (!this.awaitsOf.has(this.current)) this.awaitsOf.set(this.current, []);
     this.awaitsOf.get(this.current)!.push({ state: resumed, field, type: inner });
