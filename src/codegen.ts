@@ -159,6 +159,11 @@ function membersOf(typing: Ref<Typing>, t: Type): Type[] {
   return r.kind === "union" ? [...r.members] : [t];
 }
 
+// What `as`, `satisfies` or `unsafe` wraps.
+function innerOf(e: Ref<Expr>): Ref<Expr> {
+  return e.kind === "as" || e.kind === "satisfies" || e.kind === "unsafe" ? e.expr : e;
+}
+
 function sharedPrefix(which: string): string {
   return which === "shared" ? "shared" : which === "Rc" ? "rc" : "weak";
 }
@@ -4346,7 +4351,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  statement(this: Mut<this>, s: Ref<Stmt>) {
+  statement(this: Mut<this>, s: Ref<Stmt>): void {
     if (this.cur().unreached?.has(s) === true) return;
     const outer = this.siteNow();
     this.site = { start: s.start, end: s.end };
@@ -7559,7 +7564,8 @@ class Codegen implements PrintHost, ComptimeHost {
   callbackLoop(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, written: string, array: ArrayType, at: string): string | undefined {
     const backward = written === "findLast" || written === "findLastIndex" || written === "reduceRight";
     const method = written === "findLast" ? "find" : written === "findLastIndex" ? "findIndex" : written === "reduceRight" ? "reduce" : written;
-    const [callback, init] = e.args as [Expr, Expr | undefined];
+    const callback: Ref<Expr> = e.args[0]!;
+    const init = e.args.length > 1 ? e.args[1]! : undefined;
     const element = this.tables.typing.rec(array).element;
     const t = this.llvm(element);
     const closure = this.cur().types.get(callback) as ClosureType;
@@ -8162,7 +8168,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (method === "flat") {
       const inner = this.tables.typing.rec(array).element as ArrayType;
       const part = this.tables.typing.rec(array).element;
-      cloneAll(this, at, part, (cg: Mut<Codegen>, slot) => {
+      cloneAll(this, at, part, (cg: Mut<Codegen>, slot: string) => {
         const part2 = cg.tables.typing.rec(inner).element;
         cloneAll(cg, slot, part2);
       });
@@ -8425,7 +8431,7 @@ class Codegen implements PrintHost, ComptimeHost {
       array = this.value(e.object);
       index = this.value(e.index);
     } else {
-      index ??= this.value(e.index);
+      if (index === undefined) index = this.value(e.index);
       array = this.value(e.object);
     }
     const [data, length, at] = [this.temp(), this.temp(), this.temp()];
@@ -8483,13 +8489,13 @@ class Codegen implements PrintHost, ComptimeHost {
     let base: string;
     if (this.isRef(held)) {
       base = this.evaluate(e.object);
-      index ??= this.value(e.index);
+      if (index === undefined) index = this.value(e.index);
     } else if (this.lendable(e.object)) {
-      index ??= this.value(e.index);
+      if (index === undefined) index = this.value(e.index);
       base = this.address(e.object);
     } else {
       const v = this.value(e.object);
-      index ??= this.value(e.index);
+      if (index === undefined) index = this.value(e.index);
       base = this.alloca(this.llvm(type));
       this.emit(`store ${this.llvm(type)} ${v}, ptr ${base}`);
     }
@@ -8504,7 +8510,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // A conditional or `??` makes one from whichever side it gives.
   fresh(this: Mut<this>, eGiven: Ref<Expr>): boolean {
     let e: Ref<Expr> = eGiven;
-    while (this.wraps(e)) e = e.expr;
+    while (this.wraps(e)) e = innerOf(e);
     if (!this.needsDrop(this.cur().types.get(e))) return false;
     switch (e.kind) {
       case "call":
@@ -8542,7 +8548,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // What a wrapper with no conversion of its own hands on, so it owns what its operand owns.
   handedOn(this: Mut<this>, eGiven: Ref<Expr>): Expr {
     let e: Ref<Expr> = eGiven;
-    while (this.wraps(e) && !this.cur().coercions.has(e)) e = e.expr;
+    while (this.wraps(e) && !this.cur().coercions.has(e)) e = innerOf(e);
     return e;
   }
 
@@ -9677,7 +9683,7 @@ class Codegen implements PrintHost, ComptimeHost {
     // checked. A field is read again, which runs nothing: a field read through a getter isn't one
     // a check narrows. One moved into the call is gone, and nothing reads it after.
     const arg = (index < e.args.length ? e.args[index]! : undefined);
-    if (arg?.kind !== "ident" && arg?.kind !== "member") return;
+    if (arg === undefined || (arg.kind !== "ident" && arg.kind !== "member")) return;
     if (arg.kind === "member" && this.cur().consumes.has(arg.id)) return;
     let v: string, whole: Type;
     if (arg.kind === "member") [v, whole] = [this.value(arg), this.valueType(arg)];
