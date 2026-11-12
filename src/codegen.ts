@@ -7122,7 +7122,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const [bad, good] = [this.label(), this.label()];
       // Where an optional element would be, the array may end instead.
       this.emit(`br i1 ${right}, label %${good}, label %${(n as usize) < required ? bad : finish}`);
-      if (n < required) {
+      if ((n as usize) < required) {
         this.startBlock(bad);
         this.jsonExpected(r, what, undo);
         this.emit(`br label %${good}`);
@@ -7822,20 +7822,20 @@ class Codegen implements PrintHost, ComptimeHost {
         const unstash2 = cg.unstash(env, closure);
         cg.dispose(unstash2, closure);
       }
-    })!;
-    if (method === "map") this.appended(out, this.tables.typing.rec(closure).returns, gives);
+    });
+    if (method === "map") this.appended(out, this.tables.typing.rec(closure).returns, gives!);
     else if (method === "forEach") {
       // What the callback gives is dropped; JavaScript's forEach ignores it.
       if (gives !== undefined && this.needsDrop(this.tables.typing.rec(closure).returns)) this.dispose(gives, this.tables.typing.rec(closure).returns);
     } else if (method === "flatMap") {
       const many = this.alloca(ARRAY);
-      const line6 = `store ${ARRAY} ${this.convert(gives, this.tables.typing.rec(closure).returns, result)}, ptr ${many}`;
+      const line6 = `store ${ARRAY} ${this.convert(gives!, this.tables.typing.rec(closure).returns, result)}, ptr ${many}`;
       this.emit(line6);
       const line7 = `call void @fsh_rt_array_extend(ptr ${out}, ptr ${many}, i64 ${this.bytes(this.tables.typing.rec(result as ArrayType).element, "1")})`;
       this.emit(line7);
     }
     else if (reducing) {
-      const line8 = `store ${this.llvm(result)} ${this.convert(gives, this.tables.typing.rec(closure).returns, result)}, ptr ${out}`;
+      const line8 = `store ${this.llvm(result)} ${this.convert(gives!, this.tables.typing.rec(closure).returns, result)}, ptr ${out}`;
       this.emit(line8);
     }
     else {
@@ -7968,18 +7968,13 @@ class Codegen implements PrintHost, ComptimeHost {
     const [size, room, buffer] = [this.bytes(element, "1"), this.temp(), this.temp()];
     this.emit(`${room} = mul i64 ${length}, ${size}`);
     this.emit(`${buffer} = call ptr @fsh_rt_array_alloc(i64 ${room})`);
-    const leftovers = (cg: Mut<Codegen>) => {
-      if (closure !== undefined && cg.needsDrop(closure)) {
-        const unstash2 = cg.unstash(env, closure);
-        cg.dispose(unstash2, closure);
-      }
-    };
-    this.unwinding(`call void @fsh_rt_sort(ptr ${data}, i64 ${length}, i64 ${size}, ptr ${through}, ptr ${env}, ptr ${buffer})`, undefined, (cg) => {
+    const comparing: Type | undefined = closure;
+    this.unwinding(`call void @fsh_rt_sort(ptr ${data}, i64 ${length}, i64 ${size}, ptr ${through}, ptr ${env}, ptr ${buffer})`, undefined, (cg: Mut<Codegen>) => {
       cg.emit(`call void @fsh_rt_free(ptr ${buffer})`);
-      leftovers(cg);
+      if (comparing !== undefined) cg.dropStashed(env, comparing);
     });
     this.emit(`call void @fsh_rt_free(ptr ${buffer})`);
-    leftovers(this);
+    if (comparing !== undefined) this.dropStashed(env, comparing);
     return undefined;
   }
 
@@ -9070,7 +9065,7 @@ class Codegen implements PrintHost, ComptimeHost {
       case "pathReadLink":
       case "dirTemp": {
         const out = this.alloca("ptr");
-        const callee = { pathReal: "realpath", pathRealNative: "realpath_native", pathReadLink: "readlink", dirTemp: "mkdtemp" }[name];
+        const callee = name === "pathReal" ? "realpath" : name === "pathRealNative" ? "realpath_native" : name === "pathReadLink" ? "readlink" : "mkdtemp";
         this.emit(`${status} = call i32 @fsh_rt_fs_${callee}(ptr ${path}, ptr ${out}, ptr ${parts})`);
         read = { how: "load", type: "ptr", slots: [out] };
         break;
@@ -9185,9 +9180,11 @@ class Codegen implements PrintHost, ComptimeHost {
       const time = this.temp();
       this.emit(`${time} = load double, ptr ${mtime}`);
       let made = "zeroinitializer";
-      for (const [field, v] of [["0", number(this, 0)], ["1", number(this, 1)], ["2", time], ["3", number(this, 2)]] as const) {
+      const values = [number(this, 0), number(this, 1), time, number(this, 2)];
+      for (let at: usize = 0; at < values.length; at++) {
+        const field = `${at}`;
         const next = this.temp();
-        this.emit(`${next} = insertvalue ${this.llvm(tuple)} ${made}, ${this.llvm(field === "2" ? "f64" : "i64")} ${v}, ${this.tables.typing.fieldPath(tuple, field).join(", ")}`);
+        this.emit(`${next} = insertvalue ${this.llvm(tuple)} ${made}, ${this.llvm(field === "2" ? "f64" : "i64")} ${values[at]!}, ${this.tables.typing.fieldPath(tuple, field).join(", ")}`);
         made = next;
       }
       return made;
@@ -9930,7 +9927,8 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(line);
     }
     for (let held = this.recOf(whole); held?.kind === "ref" || held?.kind === "recursive"; held = this.recOf(whole)) {
-      const [inner, next] = [this.temp(), held.kind === "ref" ? held.to : held.of];
+      const inner = this.temp();
+      const next = held.kind === "ref" ? held.to : held.kind === "recursive" ? held.of : whole;
       this.emit(`${inner} = load ${this.llvm(next)}, ptr ${v}`);
       [v, whole] = [inner, next];
     }
@@ -10014,7 +10012,9 @@ class Codegen implements PrintHost, ComptimeHost {
     // assignment's own value is what the property holds, a handle as the new JS value.
     if (this.tables.jsMembers.has(target) && target.kind === "member") {
       const object = this.jsHandle(target.object);
-      const declared = this.recOf(this.tables.typing.jsShape(this.referent(this.valueType(target.object))))?.fields.find((f) => f.name === (target as Extract<Expr, { kind: "member" }>).name);
+      const shape = this.tables.typing.jsShape(this.referent(this.valueType(target.object)));
+      const name = target.name;
+      const declared = shape !== undefined ? this.tables.typing.rec(shape).fields.find((f) => f.name === name) : undefined;
       const empty = declared?.optional !== undefined ? "undefined" : "null";
       // A callback or a future goes as the stored callable or Promise it meets, as an argument does.
       const held = this.cur().coercions.get(e.value) ?? this.cur().types.get(e.value)!;
