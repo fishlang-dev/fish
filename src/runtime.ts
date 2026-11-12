@@ -1,5 +1,5 @@
 import { llvmOf, type Slots } from "./layout.ts";
-import { INTEGERS, type Integer, type Type } from "./typing.ts";
+import { integerInfo, isInteger, literalText, type LiteralType, type Type, type Typing, type UnionType } from "./typing.ts";
 
 // What compiled programs call into: libc's printf, and the C runtime. A panic is the runtime's
 // `fsh_rt_panic`, which prints its message, then aborts or unwinds, as the build chose.
@@ -349,7 +349,7 @@ export interface PrintHost extends Slots {
 export class Printer<H extends PrintHost> {
   host: Mut<H>;
   stream: 1 | 2;
-  format = "";
+  format: string = "";
   values: string[] = [];
 
   constructor(host: Mut<H>, stream: 1 | 2) {
@@ -359,31 +359,27 @@ export class Printer<H extends PrintHost> {
 
   write(this: Mut<this>, parts: (string | [string, Type])[]): void {
     this.host.emit(`call void @fsh_rt_print_begin(i32 ${this.stream})`);
-    parts.forEach((part, i) => {
+    for (let i: usize = 0; i < parts.length; i++) {
+      const part: Ref<string | [string, Type]> = parts[i]!;
       if (i > 0) this.format += " ";
       if (typeof part === "string") this.literal(part);
-      else this.piece(...part);
-    });
+      else this.piece(part[0], part[1]);
+    }
     this.format += "\n";
     this.flush();
     this.host.emit(`call void @fsh_rt_print_end(i32 ${this.stream})`);
   }
 
-  piece(this: Mut<this>, v: string, type: Type) {
+  piece(this: Mut<this>, v: string, type: Type): void {
+    const kind = typeof type === "string" ? "" : this.host.typing.rec(type).kind;
     // Objects, arrays, Maps, Sets and unions holding them print as Node's util.inspect would.
-    const plain = (t: Type): boolean => {
-      if (typeof t === "string") return true;
-      const r = this.host.typing.rec(t);
-      return r.kind === "literal" || r.kind === "pattern" || (r.kind === "union" && r.members.every(plain));
-    };
-    const r = typeof type === "string" ? undefined : this.host.typing.rec(type);
-    if (!plain(type)) {
+    if (!plain(this.host.typing, type)) {
       this.flush();
       const text = this.host.inspect(v, type);
       this.host.emit(`call void @fsh_rt_str_print(i32 ${this.stream}, ptr ${text})`);
       this.host.emit(`call void @fsh_rt_str_release(ptr ${text})`);
-    } else if (r?.kind === "literal") {
-      this.literal(String(r.value));
+    } else if (kind === "literal") {
+      this.literal(literalText(this.host.typing.rec(type as LiteralType).value));
     } else if (type === "string") {
       // Written by the runtime, since its bytes may hold anything printf would read as format.
       this.flush();
@@ -400,26 +396,32 @@ export class Printer<H extends PrintHost> {
       // Printing never happens: the value's throw has left already.
     } else if (type === "null") {
       this.format += "null";
-    } else if (r !== undefined && r.kind !== "union") {
+    } else if (kind !== "" && kind !== "union") {
       this.format += escape(this.host.typing.show(type));
     } else if (type === "boolean") {
       const text = this.host.temp();
       this.host.emit(`${text} = select i1 ${v}, ptr @.true, ptr @.false`);
       this.format += "%s";
       this.values.push(`, ptr ${text}`);
-    } else if (r?.kind === "union") {
+    } else if (kind === "union") {
       this.flush();
       const tag = this.host.temp();
       this.host.emit(`${tag} = extractvalue ${llvmOf(this.host.typing, type)} ${v}, 0`);
-      const cases = r.members.map(() => this.host.label());
+      let members: Type[] = [];
+      const union = this.host.typing.rec(type as UnionType);
+      for (const m of union.members) members.push(m);
+      let cases: string[] = [];
+      for (let i: usize = 0; i < members.length; i++) cases.push(this.host.label());
       const end = this.host.label();
       this.host.emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
-      r.members.forEach((member, i) => {
+      for (let i: usize = 0; i < members.length; i++) {
+        const member = members[i]!;
         this.host.startBlock(cases[i]!);
-        this.piece(this.host.convert(v, type, member), member);
+        const part = this.host.convert(v, type, member);
+        this.piece(part, member);
         this.flush();
         this.host.emit(`br label %${end}`);
-      });
+      }
       this.host.startBlock(end);
     } else if (type === "f32" || type === "f64") {
       // A float is written out by the runtime, as JavaScript would.
@@ -430,7 +432,8 @@ export class Printer<H extends PrintHost> {
     } else {
       // Every integer prints as a 64-bit one, extended by its signedness, but for the 128-bit
       // ones, which the runtime writes.
-      const { bits, signed } = INTEGERS[type as Integer];
+      if (!isInteger(type)) return;
+      const { bits, signed } = integerInfo(type);
       if (bits === 128) {
         const text = this.host.temp();
         this.host.emit(`${text} = call ptr @fsh_rt_format_${signed ? "i" : "u"}128(i128 ${v}, ptr ${this.host.alloca("[41 x i8]")})`);
@@ -449,7 +452,7 @@ export class Printer<H extends PrintHost> {
   }
 
   // Text holding a NUL would end printf's format early, so the runtime writes it.
-  literal(this: Mut<this>, text: string) {
+  literal(this: Mut<this>, text: string): void {
     if (!text.includes("\0")) {
       this.format += escape(text);
       return;
@@ -458,7 +461,7 @@ export class Printer<H extends PrintHost> {
     this.host.emit(`call void @fsh_rt_str_print(i32 ${this.stream}, ptr ${this.host.text(text)})`);
   }
 
-  flush(this: Mut<this>) {
+  flush(this: Mut<this>): void {
     if (this.format === "") return;
     this.host.emit(this.stream === 1 ? `call i32 (ptr, ...) @printf(ptr ${this.host.cString(this.format)}${this.values.join("")})` : `call i32 (i32, ptr, ...) @dprintf(i32 2, ptr ${this.host.cString(this.format)}${this.values.join("")})`);
     this.format = "";
@@ -467,4 +470,15 @@ export class Printer<H extends PrintHost> {
 }
 
 const escape = (text: string) => text.replaceAll("%", "%%");
+
+// Whether a value prints as text folded into the format: a primitive, a literal, a pattern, or
+// a union of those.
+function plain(typing: Ref<Typing>, t: Type): boolean {
+  if (typeof t === "string") return true;
+  const r = typing.rec(t);
+  if (r.kind === "literal" || r.kind === "pattern") return true;
+  if (r.kind !== "union") return false;
+  for (const m of r.members) if (!plain(typing, m)) return false;
+  return true;
+}
 
