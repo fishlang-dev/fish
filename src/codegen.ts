@@ -313,7 +313,6 @@ class Codegen implements PrintHost {
   main: Instance;
   start: string[];
   filled: string[];
-  result: string;
 
   constructor(checked: Checked, { src, file, release, panic, library = false, sources = [], harness = false, leaks = false, debug = false, failed }: Options) {
     this.checked = checked;
@@ -512,6 +511,15 @@ class Codegen implements PrintHost {
     this.glued = new TypeSet<FutureType>();
 
 
+    this.shares = new Map<InstanceId, Share>();
+    this.pairs = new Map<LocalId, string>();
+    this.main = this.instances[0]!;
+    this.start = [];
+    this.filled = [];
+  }
+
+  // Emits every instance and gives the module's IR.
+  module(this: Mut<this>): string {
     // Top-level consts and comptime blocks run while compiling, every one of them, so one that
     // fails is reported even when nothing reads it; none is compiled.
     for (const instance of this.instances) {
@@ -709,7 +717,7 @@ class Codegen implements PrintHost {
 
   // Definitions in order of their names, rather than of when they were made, so a function
   // has the same place among them whatever the program around it.
-  this.result = [
+  return [
     ...this.globals.toSorted(),
     // The runtime reads which way a panic goes. A library leaves it to the runtime's default, so
     // two libraries in one program don't both define it; its exports abort on a panic anyway.
@@ -11406,7 +11414,7 @@ class Codegen implements PrintHost {
 
 // The LLVM IR of a checked program.
 export function codegen(checked: Checked, options: Options): string {
-  return new Codegen(checked, options).result;
+  return new Codegen(checked, options).module();
 }
 
 // The runtime's breadcrumb stride, in UTF-16 units.
