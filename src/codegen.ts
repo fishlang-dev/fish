@@ -1738,17 +1738,17 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`${result} = load atomic ${ty}, ptr ${at} seq_cst, ${align}`);
         break;
       case "store":
-        this.emit(`store atomic ${ty} ${args[0]}, ptr ${at} seq_cst, ${align}`);
+        this.emit(`store atomic ${ty} ${(args.length > 0 ? args[0]! : undefined)}, ptr ${at} seq_cst, ${align}`);
         return undefined;
       case "compareExchange": {
         const pair = this.temp();
-        this.emit(`${pair} = cmpxchg ptr ${at}, ${ty} ${args[0]}, ${ty} ${args[1]} seq_cst seq_cst`);
+        this.emit(`${pair} = cmpxchg ptr ${at}, ${ty} ${(args.length > 0 ? args[0]! : undefined)}, ${ty} ${(args.length > 1 ? args[1]! : undefined)} seq_cst seq_cst`);
         this.emit(`${result} = extractvalue { ${ty}, i1 } ${pair}, 0`);
         break;
       }
       default: {
         const op = callee.name === "add" ? "add" : callee.name === "sub" ? "sub" : "xchg";
-        this.emit(`${result} = atomicrmw ${op} ptr ${at}, ${ty} ${args[0]} seq_cst`);
+        this.emit(`${result} = atomicrmw ${op} ptr ${at}, ${ty} ${(args.length > 0 ? args[0]! : undefined)} seq_cst`);
       }
     }
     if (!byte) return result;
@@ -4592,7 +4592,7 @@ class Codegen implements PrintHost, ComptimeHost {
         s.cases.forEach((c, i) => {
           this.startBlock(bodies[i]!);
           c.body.forEach(((s) => this.statement(s)));
-          this.emit(`br label %${bodies[i + 1] ?? end}`);
+          this.emit(`br label %${i + 1 < bodies.length ? bodies[i + 1]! : end}`);
         });
         this.startBlock(end);
         this.drop(this.scopes.length - 1);
@@ -4690,7 +4690,7 @@ class Codegen implements PrintHost, ComptimeHost {
           const chosen = this.temp();
           this.emit(`${chosen} = load i32, ptr ${region.chosen}`);
           const targets = region.exits.map(() => this.label());
-          this.emit(`switch i32 ${chosen}, label %${targets[0]} [ ${targets.map((t, i) => `i32 ${i}, label %${t}`).join(" ")} ]`);
+          this.emit(`switch i32 ${chosen}, label %${(targets.length > 0 ? targets[0]! : undefined)} [ ${targets.map((t, i) => `i32 ${i}, label %${t}`).join(" ")} ]`);
           region.exits.forEach((e, i) => {
             this.startBlock(targets[i]!);
             e.resume(this);
@@ -5303,7 +5303,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const owners = r.members.filter(((type) => this.needsDrop(type)));
       const cases = owners.map(() => this.label());
       const end = this.label();
-      this.emit(`switch i32 ${tag}, label %${end} [ ${owners.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
+      this.emit(`switch i32 ${tag}, label %${end} [ ${owners.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i]!}`).join(" ")} ]`);
       owners.forEach((m, i) => {
         this.startBlock(cases[i]!);
         // One member's copy, made on its own path, so nothing else is pending beside it.
@@ -7639,7 +7639,8 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${i} = sub i64 ${last}, ${k}`);
     }
     const slot = elementAt(this, i);
-    const given = this.tables.typing.rec(closure).params[reducing ? 1 : 0];
+    const takes = this.tables.typing.rec(closure).params;
+    const given = takes.length > (reducing ? 1 : 0) ? takes[reducing ? 1 : 0]! : undefined;
     let passed: string[];
     if (given === undefined) {
       passed = [];
@@ -7772,7 +7773,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // with the two elements, or orders numbers and strings when there is none.
   sorted(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, array: ArrayType, at: string): undefined {
     const element = this.tables.typing.rec(array).element;
-    const compare = e.args[0];
+    const compare = (e.args.length > 0 ? e.args[0]! : undefined);
     const closure = (compare !== undefined ? (this.cur().types.get(compare) as ClosureType) : undefined);
     let env = "null";
     let through: string;
@@ -7792,8 +7793,9 @@ class Codegen implements PrintHost, ComptimeHost {
           const copied2 = cg.copied(v, element);
           return [`${cg.llvm(given)} ${cg.convert(copied2, element, given)}`];
         };
-        const part = cg.tables.typing.rec(closure).params[0];
-        const part2 = cg.tables.typing.rec(closure).params[1];
+        const takes = cg.tables.typing.rec(closure).params;
+        const part = takes.length > 0 ? takes[0]! : undefined;
+        const part2 = takes.length > 1 ? takes[1]! : undefined;
         const args = [...arg(cg, "%a", part), ...arg(cg, "%b", part2)];
         const invoke2 = cg.invoke(target, "%p", args.slice(0, cg.bodyAt(target).params.length))!;
         const line2 = `ret i32 ${cg.sign(invoke2, cg.tables.typing.rec(closure).returns)}`;
@@ -8006,8 +8008,8 @@ class Codegen implements PrintHost, ComptimeHost {
       if (args.length > 1) {
         // A count below zero removes nothing, and one past the end removes what is there.
         const [negative, atLeast, over, kept] = [this.temp(), this.temp(), this.temp(), this.temp()];
-        this.emit(`${negative} = icmp slt i64 ${args[1]}, 0`);
-        this.emit(`${atLeast} = select i1 ${negative}, i64 0, i64 ${args[1]}`);
+        this.emit(`${negative} = icmp slt i64 ${(args.length > 1 ? args[1]! : undefined)}, 0`);
+        this.emit(`${atLeast} = select i1 ${negative}, i64 0, i64 ${(args.length > 1 ? args[1]! : undefined)}`);
         this.emit(`${over} = icmp sgt i64 ${atLeast}, ${room}`);
         this.emit(`${kept} = select i1 ${over}, i64 ${room}, i64 ${atLeast}`);
         count = kept;
@@ -8208,7 +8210,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`${data} = load ptr, ptr ${dataAt}`);
     const args = e.args.map((a) => this.value(a));
     const searching = method === "includes" || method === "indexOf" || method === "lastIndexOf";
-    const from = method === "slice" ? args[0] : args[1];
+    const from = method === "slice" ? (args.length > 0 ? args[0]! : undefined) : (args.length > 1 ? args[1]! : undefined);
     const start = method !== "join" && method !== "lastIndexOf" && (from !== undefined && from !== "") ? this.position(from, length) : "0";
     // `lastIndexOf` looks at every element up to where it starts searching back from, and keeps
     // the last it finds.
@@ -8242,7 +8244,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const [here, there, both, either] = [this.temp(), this.temp(), this.temp(), this.temp()];
         this.emit(`${here} = fcmp uno ${t} ${v}, ${v}`);
         const lower2 = this.tables.typing.lower(this.valueType(e.args[0]!));
-        const line2 = `${there} = fcmp uno ${this.llvm(lower2)} ${args[0]}, ${args[0]}`;
+        const line2 = `${there} = fcmp uno ${this.llvm(lower2)} ${(args.length > 0 ? args[0]! : undefined)}, ${(args.length > 0 ? args[0]! : undefined)}`;
         this.emit(line2);
         this.emit(`${both} = and i1 ${here}, ${there}`);
         this.emit(`${either} = or i1 ${same}, ${both}`);
@@ -8262,7 +8264,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const from = this.block;
       this.emit(`br i1 ${first}, label %${joined}, label %${separated}`);
       this.startBlock(separated);
-      const part = args[0] ?? this.text(",");
+      const part = (args.length > 0 ? args[0]! : undefined) ?? this.text(",");
       const withSep = this.concat(so, part);
       this.emit(`call void @fsh_rt_str_release(ptr ${so})`);
       const sepEnd = this.block;
@@ -8668,7 +8670,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`${tag} = extractvalue ${this.llvm(type)} ${v}, 0`);
     const cases = blocks.map(() => this.label());
     const end = this.label();
-    this.emit(`switch i32 ${tag}, label %${end} [ ${blocks.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i]}`).join(" ")} ]`);
+    this.emit(`switch i32 ${tag}, label %${end} [ ${blocks.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i]!}`).join(" ")} ]`);
     blocks.forEach((m, i) => {
       this.startBlock(cases[i]!);
       const line = `call void @fsh_rt_free(ptr ${this.convert(v, type, m)})`;
@@ -9144,7 +9146,7 @@ class Codegen implements PrintHost, ComptimeHost {
           this.emit(line2);
           return made;
         }
-        const list = (e.args[0] as Extract<Expr, { kind: "array" }>).elements as Expr[];
+        const list = ((e.args.length > 0 ? e.args[0]! : undefined) as Extract<Expr, { kind: "array" }>).elements as Expr[];
         const given = list.map((x) => this.owned(x));
         let frame = "zeroinitializer";
         given.forEach((v, i) => {
@@ -9532,7 +9534,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // Arguments past `taken` run for their effects only.
   argValues(this: Mut<this>, args: Ref<Expr[]>, target: InstanceId, taken: usize = args.length): string[] {
     // A comptime parameter's argument was computed while compiling, and isn't passed.
-    const passed = (cg: Mut<Codegen>, i: usize) => cg.bodyAt(target).params[i]?.comptime !== true;
+    const passed = (cg: Mut<Codegen>, i: usize) => i >= cg.bodyAt(target).params.length || cg.bodyAt(target).params[i]!.comptime !== true;
     const values = this.delivered((cg, hand) => args.flatMap((a, i) => (!passed(cg, i) ? [] : i < taken ? [`${cg.llvm(cg.valueType(a))} ${cg.pairOf(a) !== undefined ? cg.owned(a) : hand(cg.owned(a), cg.valueType(a))}`] : (cg.value(a), []))));
     // A left-out optional parameter is empty, and a left-out rest parameter an empty array.
     for (const p of this.bodyAt(target).params.slice(args.length)) {
@@ -9559,16 +9561,16 @@ class Codegen implements PrintHost, ComptimeHost {
     switch (callee.name) {
       case "charCodeAt":
         this.inBounds(s, args[0]!, { start: e.start, end: e.end });
-        this.emit(`${result} = call i16 @fsh_rt_str_unit(ptr ${s}, i64 ${args[0]})`);
+        this.emit(`${result} = call i16 @fsh_rt_str_unit(ptr ${s}, i64 ${(args.length > 0 ? args[0]! : undefined)})`);
         return given(this, result, "u16");
       case "slice":
       case "substring":
-        this.emit(`${result} = call ptr @fsh_rt_str_${callee.name}(ptr ${s}, i64 ${args[0]}, i64 ${args[1] ?? 0}, i32 ${args.length - 1})`);
+        this.emit(`${result} = call ptr @fsh_rt_str_${callee.name}(ptr ${s}, i64 ${(args.length > 0 ? args[0]! : undefined)}, i64 ${(args.length > 1 ? args[1]! : undefined) ?? 0}, i32 ${args.length - 1})`);
         return given(this, result, "string");
       // Past either end, an Option's empty value: the runtime says so with NULL or -1.
       case "at": {
         const [raw, none] = [this.temp(), this.temp()];
-        this.emit(`${raw} = call ptr @fsh_rt_str_at_or_null(ptr ${s}, i64 ${args[0]})`);
+        this.emit(`${raw} = call ptr @fsh_rt_str_at_or_null(ptr ${s}, i64 ${(args.length > 0 ? args[0]! : undefined)})`);
         this.emit(`${none} = icmp eq ptr ${raw}, null`);
         const option = this.tables.typing.unionType(["string", "null"]);
         const line = `${result} = select i1 ${none}, ${this.llvm(option)} ${this.convert("zeroinitializer", "null", option)}, ${this.llvm(option)} ${this.convert(raw, "string", option)}`;
@@ -9577,7 +9579,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       case "codePointAt": {
         const [raw, none, point] = [this.temp(), this.temp(), this.temp()];
-        this.emit(`${raw} = call i64 @fsh_rt_str_code_point_at(ptr ${s}, i64 ${args[0]})`);
+        this.emit(`${raw} = call i64 @fsh_rt_str_code_point_at(ptr ${s}, i64 ${(args.length > 0 ? args[0]! : undefined)})`);
         this.emit(`${none} = icmp slt i64 ${raw}, 0`);
         this.emit(`${point} = trunc i64 ${raw} to i32`);
         const option = this.tables.typing.unionType(["u32", "null"]);
@@ -9586,33 +9588,33 @@ class Codegen implements PrintHost, ComptimeHost {
         return given(this, result, option);
       }
       case "charAt":
-        this.emit(`${result} = call ptr @fsh_rt_str_char_at(ptr ${s}, i64 ${args[0]})`);
+        this.emit(`${result} = call ptr @fsh_rt_str_char_at(ptr ${s}, i64 ${(args.length > 0 ? args[0]! : undefined)})`);
         return given(this, result, "string");
       // A missing position is the end, which the runtime clamps to.
       case "lastIndexOf":
-        this.emit(`${result} = call i64 @fsh_rt_str_last_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? "9223372036854775807"})`);
+        this.emit(`${result} = call i64 @fsh_rt_str_last_index_of(ptr ${s}, ptr ${(args.length > 0 ? args[0]! : undefined)}, i64 ${(args.length > 1 ? args[1]! : undefined) ?? "9223372036854775807"})`);
         return given(this, result, "i64");
       // A missing position is the start, or for endsWith, the end, which the runtime clamps to.
       case "indexOf":
-        this.emit(`${result} = call i64 @fsh_rt_str_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? 0})`);
+        this.emit(`${result} = call i64 @fsh_rt_str_index_of(ptr ${s}, ptr ${(args.length > 0 ? args[0]! : undefined)}, i64 ${(args.length > 1 ? args[1]! : undefined) ?? 0})`);
         return given(this, result, "i64");
       case "includes": {
         const found = this.temp();
-        this.emit(`${found} = call i64 @fsh_rt_str_index_of(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? 0})`);
+        this.emit(`${found} = call i64 @fsh_rt_str_index_of(ptr ${s}, ptr ${(args.length > 0 ? args[0]! : undefined)}, i64 ${(args.length > 1 ? args[1]! : undefined) ?? 0})`);
         this.emit(`${result} = icmp sge i64 ${found}, 0`);
         return given(this, result, "boolean");
       }
       // An array comes back through memory, as C and LLVM return aggregates differently.
       case "split": {
         const out = this.alloca(ARRAY);
-        this.emit(`call void @fsh_rt_str_split(ptr ${out}, ptr ${s}, ptr ${args[0] ?? "null"}, i64 ${args[1] ?? "4294967295"})`);
+        this.emit(`call void @fsh_rt_str_split(ptr ${out}, ptr ${s}, ptr ${(args.length > 0 ? args[0]! : undefined) ?? "null"}, i64 ${(args.length > 1 ? args[1]! : undefined) ?? "4294967295"})`);
         this.emit(`${result} = load ${ARRAY}, ptr ${out}`);
         const arrayType2 = this.tables.typing.arrayType("string");
         return given(this, result, arrayType2);
       }
       case "replace":
       case "replaceAll":
-        this.emit(`${result} = call ptr @fsh_rt_str_${callee.name === "replace" ? "replace" : "replace_all"}(ptr ${s}, ptr ${args[0]}, ptr ${args[1]})`);
+        this.emit(`${result} = call ptr @fsh_rt_str_${callee.name === "replace" ? "replace" : "replace_all"}(ptr ${s}, ptr ${(args.length > 0 ? args[0]! : undefined)}, ptr ${(args.length > 1 ? args[1]! : undefined)})`);
         return given(this, result, "string");
       // Each join makes a new string, the one before it released.
       case "concat": {
@@ -9631,11 +9633,11 @@ class Codegen implements PrintHost, ComptimeHost {
       case "padStart":
       case "padEnd":
         // These two may panic, so a panic in them drops what is live here.
-        const line3 = `call ptr @fsh_rt_str_pad(ptr ${s}, i64 ${args[0]}, ptr ${args[1] ?? "null"}, i32 ${callee.name === "padStart" ? 1 : 0}, ptr ${this.panicAt({ start: e.start, end: e.end })})`;
+        const line3 = `call ptr @fsh_rt_str_pad(ptr ${s}, i64 ${(args.length > 0 ? args[0]! : undefined)}, ptr ${(args.length > 1 ? args[1]! : undefined) ?? "null"}, i32 ${callee.name === "padStart" ? 1 : 0}, ptr ${this.panicAt({ start: e.start, end: e.end })})`;
         this.unwinding(line3, result);
         return given(this, result, "string");
       case "repeat":
-        const line4 = `call ptr @fsh_rt_str_repeat(ptr ${s}, i64 ${args[0]}, ptr ${this.panicAt({ start: e.start, end: e.end })})`;
+        const line4 = `call ptr @fsh_rt_str_repeat(ptr ${s}, i64 ${(args.length > 0 ? args[0]! : undefined)}, ptr ${this.panicAt({ start: e.start, end: e.end })})`;
         this.unwinding(line4, result);
         return given(this, result, "string");
       case "toUpperCase":
@@ -9651,7 +9653,7 @@ class Codegen implements PrintHost, ComptimeHost {
       case "endsWith": {
         const yes = this.temp();
         const name = callee.name === "startsWith" ? "starts_with" : "ends_with";
-        this.emit(`${yes} = call i32 @fsh_rt_str_${name}(ptr ${s}, ptr ${args[0]}, i64 ${args[1] ?? (callee.name === "startsWith" ? 0 : "9223372036854775807")})`);
+        this.emit(`${yes} = call i32 @fsh_rt_str_${name}(ptr ${s}, ptr ${(args.length > 0 ? args[0]! : undefined)}, i64 ${(args.length > 1 ? args[1]! : undefined) ?? (callee.name === "startsWith" ? 0 : "9223372036854775807")})`);
         this.emit(`${result} = icmp ne i32 ${yes}, 0`);
         return given(this, result, "boolean");
       }
@@ -9674,7 +9676,7 @@ class Codegen implements PrintHost, ComptimeHost {
     // Only a variable or a field is narrowed by a predicate's answer, so only one needs its answer
     // checked. A field is read again, which runs nothing: a field read through a getter isn't one
     // a check narrows. One moved into the call is gone, and nothing reads it after.
-    const arg = e.args[index];
+    const arg = (index < e.args.length ? e.args[index]! : undefined);
     if (arg?.kind !== "ident" && arg?.kind !== "member") return;
     if (arg.kind === "member" && this.cur().consumes.has(arg.id)) return;
     let v: string, whole: Type;
@@ -9711,7 +9713,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const tag = this.temp();
       this.emit(`${tag} = extractvalue ${this.llvm(whole as UnionType)} ${v}, 0`);
       const cases = union.members.map(() => this.label());
-      this.emit(`switch i32 ${tag}, label %${cases[0]} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
+      this.emit(`switch i32 ${tag}, label %${(cases.length > 0 ? cases[0]! : undefined)} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
       union.members.forEach((m, i) => {
         this.startBlock(cases[i]!);
         const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\nthe type predicate '${name}' said '${shown(arg)}' ${is} '${brief(this.tables.typing.show(type))}', but it holds a '${brief(this.tables.typing.show(m))}'\n`)})`;
@@ -11130,7 +11132,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const [state, done] = [this.temp(), this.label()];
     const cases = awaits.map(() => this.label());
     this.emit(`${state} = load i32, ptr %frame`);
-    this.emit(`switch i32 ${state}, label %${done} [ ${awaits.map((a, n) => `i32 ${a.state}, label %${cases[n]}`).join(" ")} ]`);
+    this.emit(`switch i32 ${state}, label %${done} [ ${awaits.map((a, n) => `i32 ${a.state}, label %${cases[n]!}`).join(" ")} ]`);
     awaits.forEach((a, n) => {
       this.startBlock(cases[n]!);
       const p = this.temp();
@@ -11997,7 +11999,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const parts: string[] = [];
         e.quasis.forEach((q, i) => {
           if (q !== "") parts.push(this.text(q));
-          const x = e.exprs[i];
+          const x = (i < e.exprs.length ? e.exprs[i]! : undefined);
           if (x !== undefined) {
             const operand5 = this.operand(x, e.exprs, i + 1);
             parts.push(this.written(operand5, this.valueType(x)));
@@ -12965,7 +12967,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const tagged = element?.kind === "union";
       const tags = tagged ? [element.members.indexOf("null"), element.members.indexOf("string")] : [0, 0];
       const limit = e.args.length > 1 ? this.value(e.args[1]!) : "-1";
-      this.emit(`call void @fsh_rt_regex_split(ptr ${out}, ptr ${re}, ptr ${s}, i64 ${limit}, i32 ${tagged ? 1 : 0}, i32 ${tags[0]}, i32 ${tags[1]})`);
+      this.emit(`call void @fsh_rt_regex_split(ptr ${out}, ptr ${re}, ptr ${s}, i64 ${limit}, i32 ${tagged ? 1 : 0}, i32 ${(tags.length > 0 ? tags[0]! : undefined)}, i32 ${(tags.length > 1 ? tags[1]! : undefined)})`);
       result = this.temp();
       this.emit(`${result} = load ${ARRAY}, ptr ${out}`);
     } else result = this.regexLoop(e, name, regexT, re, s, type);
@@ -12982,7 +12984,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const global = name === "matchAll" || this.tables.typing.rec(regexT).flags.includes("g") ? 1 : this.tables.typing.rec(regexT).any === true ? -1 : 0;
     const it = this.temp();
     this.emit(`${it} = call ptr @fsh_rt_regex_iter(ptr ${re}, ptr ${s}, i32 ${global})`);
-    const given = e.args[1];
+    const given = (e.args.length > 1 ? e.args[1]! : undefined);
     const callback = given?.kind === "arrow" ? given : undefined;
     const closure = (callback !== undefined ? (this.cur().types.get(callback) as ClosureType) : undefined);
     const env = callback !== undefined ? this.alloca(this.llvm(closure!)) : "";
