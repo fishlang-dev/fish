@@ -6632,13 +6632,107 @@ static ssize_t fsh_drain(int fd, fsh_array *into) {
   return n;
 }
 
+// A started child's pipes, the input still to write to its stdin, and its pid.
+typedef struct {
+  pid_t pid;
+  int in, out, err;
+  uint8_t *input;
+  int64_t length;
+} fsh_child;
+
+// Writes input to a child's stdin and reads its stdout and stderr until both close, then waits for
+// it: numbers gets its pid, exit status (-1 when a signal ended it) and signal (0 for none). Gives
+// 0, or the errno that stopped it.
+static int fsh_child_wait(pid_t pid, int in_fd, int out_fd, int err_fd, const uint8_t *input, int64_t length, int64_t *numbers, fsh_array *out, fsh_array *err) {
+  int failure = 0;
+  int in[2] = { -1, in_fd }, outp[2] = { out_fd, -1 }, errp[2] = { err_fd, -1 };
+  // A child that exits before reading all its input mustn't end this process with SIGPIPE: the
+  // signal is held back on this thread while writing and a pending one taken.
+  sigset_t pipe_only, before;
+  sigemptyset(&pipe_only);
+  sigaddset(&pipe_only, SIGPIPE);
+  pthread_sigmask(SIG_BLOCK, &pipe_only, &before);
+  if (in[1] >= 0) fcntl(in[1], F_SETFL, fcntl(in[1], F_GETFL) | O_NONBLOCK);
+  int64_t written = 0;
+  if (in[1] >= 0 && length == 0) {
+    close(in[1]);
+    in[1] = -1;
+  }
+  while (in[1] >= 0 || outp[0] >= 0 || errp[0] >= 0) {
+    struct pollfd fds[3] = { { in[1], POLLOUT, 0 }, { outp[0], POLLIN, 0 }, { errp[0], POLLIN, 0 } };
+    if (poll(fds, 3, -1) < 0) {
+      if (errno == EINTR) continue;
+      // Closed, a child blocked writing ends with SIGPIPE rather than waiting forever.
+      failure = errno;
+      for (int i = 0; i < 3; i++) if (fds[i].fd >= 0) close(fds[i].fd);
+      break;
+    }
+    if (in[1] >= 0 && fds[0].revents) {
+      ssize_t n = write(in[1], input + written, length - written);
+      if (n > 0) written += n;
+      if ((n < 0 && errno != EAGAIN && errno != EINTR) || written == length) {
+        close(in[1]);
+        in[1] = -1;
+      }
+    }
+    if (outp[0] >= 0 && fds[1].revents) {
+      ssize_t n = fsh_drain(outp[0], out);
+      if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) {
+        close(outp[0]);
+        outp[0] = -1;
+      }
+    }
+    if (errp[0] >= 0 && fds[2].revents) {
+      ssize_t n = fsh_drain(errp[0], err);
+      if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) {
+        close(errp[0]);
+        errp[0] = -1;
+      }
+    }
+  }
+  sigset_t pending;
+  sigpending(&pending);
+  if (sigismember(&pending, SIGPIPE)) {
+    int taken;
+    sigwait(&pipe_only, &taken);
+  }
+  pthread_sigmask(SIG_SETMASK, &before, NULL);
+  int status = 0, waited;
+  while ((waited = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {}
+  // ECHILD, when the program has set SIGCHLD to be ignored: how it ended is lost.
+  if (waited < 0) failure = errno;
+  numbers[0] = pid;
+  numbers[1] = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+  numbers[2] = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+  return failure;
+}
+
+// What a child started with bit 9 left: its stdout and stderr, read until they close, and how it
+// ended, as fsh_rt_spawn_sync gives them. Blocks, so std runs it on the blocking pool.
+int32_t fsh_rt_spawn_finish(int64_t handle, int64_t *numbers, fsh_array *out, fsh_array *err, fsh_str **error) {
+  out->data = err->data = NULL;
+  out->length = out->capacity = err->length = err->capacity = 0;
+  fsh_child *child = (fsh_child *)(intptr_t)handle;
+  int failure = fsh_child_wait(child->pid, child->in, child->out, child->err, child->input, child->length, numbers, out, err);
+  fsh_rt_free(child->input);
+  fsh_rt_free(child);
+  if (!failure) return 1;
+  char code[32], text[200];
+  fsh_errno_words(failure, code, sizeof code, text, sizeof text);
+  char message[256];
+  snprintf(message, sizeof message, "%s: %s, waitpid", code, text);
+  fsh_io_parts(error, message, code, "waitpid", "");
+  return 5;
+}
+
 // spawnSync: runs a command found on PATH with its arguments, in cwd unless that is empty,
 // writing input to its stdin and reading its stdout and stderr until both close, then waiting for
 // it. Gives 1 with numbers its pid, exit status (-1 when a signal ended it) and signal (0 for
 // none), or 5 with the IoError's parts, in Node's words, when it couldn't start. flags holds two
 // bits per stream from stdin up, 0 piped, 1 inherited and 2 /dev/null; bit 6 has env, "K=V"
 // strings, replace the environment; bit 7 words a failure as Bun does; bit 8 has args begin with
-// argv[0].
+// argv[0]; bit 9 only starts the child, giving its pid and a handle that fsh_rt_spawn_finish takes;
+// bit 10 starts it in a process group of its own.
 int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd, const fsh_array *input, int64_t flags, const fsh_array *env, int64_t *numbers, fsh_array *out, fsh_array *err, fsh_str **error) {
   out->data = err->data = NULL;
   out->length = out->capacity = err->length = err->capacity = 0;
@@ -6685,10 +6779,16 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     if (dir) posix_spawn_file_actions_addchdir_np(&actions, dir);
     posix_spawnattr_t attributes;
     posix_spawnattr_init(&attributes);
+    short spawn_flags = 0;
 #ifdef __APPLE__
     // Only the three pipes reach the child, whatever other threads have open.
-    posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+    spawn_flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
 #endif
+    if (flags & 1024) {
+      spawn_flags |= POSIX_SPAWN_SETPGROUP;
+      posix_spawnattr_setpgroup(&attributes, 0);
+    }
+    posix_spawnattr_setflags(&attributes, spawn_flags);
     failure = posix_spawnp(&pid, file, &actions, &attributes, argv, envp);
     posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
@@ -6702,64 +6802,20 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
     if (in[0] >= 0) close(in[0]);
     if (outp[1] >= 0) close(outp[1]);
     if (errp[1] >= 0) close(errp[1]);
-    // A child that exits before reading all its input mustn't end this process with SIGPIPE: the
-    // signal is held back on this thread while writing and a pending one taken.
-    sigset_t pipe_only, before;
-    sigemptyset(&pipe_only);
-    sigaddset(&pipe_only, SIGPIPE);
-    pthread_sigmask(SIG_BLOCK, &pipe_only, &before);
-    if (in[1] >= 0) fcntl(in[1], F_SETFL, fcntl(in[1], F_GETFL) | O_NONBLOCK);
-    int64_t written = 0;
-    if (in[1] >= 0 && input->length == 0) {
-      close(in[1]);
-      in[1] = -1;
-    }
-    while (in[1] >= 0 || outp[0] >= 0 || errp[0] >= 0) {
-      struct pollfd fds[3] = { { in[1], POLLOUT, 0 }, { outp[0], POLLIN, 0 }, { errp[0], POLLIN, 0 } };
-      if (poll(fds, 3, -1) < 0) {
-        if (errno == EINTR) continue;
-        // Closed, a child blocked writing ends with SIGPIPE rather than waiting forever.
-        failure = errno;
-        for (int i = 0; i < 3; i++) if (fds[i].fd >= 0) close(fds[i].fd);
-        break;
-      }
-      if (in[1] >= 0 && fds[0].revents) {
-        ssize_t n = write(in[1], input->data + written, input->length - written);
-        if (n > 0) written += n;
-        if ((n < 0 && errno != EAGAIN && errno != EINTR) || written == input->length) {
-          close(in[1]);
-          in[1] = -1;
-        }
-      }
-      if (outp[0] >= 0 && fds[1].revents) {
-        ssize_t n = fsh_drain(outp[0], out);
-        if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) {
-          close(outp[0]);
-          outp[0] = -1;
-        }
-      }
-      if (errp[0] >= 0 && fds[2].revents) {
-        ssize_t n = fsh_drain(errp[0], err);
-        if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN)) {
-          close(errp[0]);
-          errp[0] = -1;
-        }
-      }
-    }
-    sigset_t pending;
-    sigpending(&pending);
-    if (sigismember(&pending, SIGPIPE)) {
-      int taken;
-      sigwait(&pipe_only, &taken);
-    }
-    pthread_sigmask(SIG_SETMASK, &before, NULL);
-    int status = 0, waited;
-    while ((waited = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {}
-    // ECHILD, when the program has set SIGCHLD to be ignored: how it ended is lost.
-    if (waited < 0) failure = errno;
-    numbers[0] = pid;
-    numbers[1] = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    numbers[2] = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+    if (flags & 512) {
+      // Started only: the pipes and the input wait in a handle for fsh_rt_spawn_finish.
+      fsh_child *child = fsh_rt_alloc(sizeof(fsh_child));
+      child->pid = pid;
+      child->in = in[1];
+      child->out = outp[0];
+      child->err = errp[0];
+      child->length = input->length;
+      child->input = fsh_rt_alloc(input->length > 0 ? input->length : 1);
+      if (input->length > 0) memcpy(child->input, input->data, input->length);
+      numbers[0] = pid;
+      numbers[1] = (int64_t)(intptr_t)child;
+      numbers[2] = 0;
+    } else failure = fsh_child_wait(pid, in[1], outp[0], errp[0], input->data, input->length, numbers, out, err);
   }
   if (failure) {
     const char *name = !skip && argv[0] ? argv[0] : file ? file : "";

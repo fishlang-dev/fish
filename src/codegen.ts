@@ -9319,6 +9319,12 @@ class Codegen implements PrintHost, ComptimeHost {
         read = { how: "spawn", type: "", slots: [numbers, out, err] };
         break;
       }
+      case "processFinish": {
+        const [numbers, out, err] = [this.alloca("[3 x i64]"), this.alloca(ARRAY), this.alloca(ARRAY)];
+        this.emit(`${status} = call i32 @fsh_rt_spawn_finish(i64 ${path}, ptr ${numbers}, ptr ${out}, ptr ${err}, ptr ${parts})`);
+        read = { how: "spawn", type: "", slots: [numbers, out, err] };
+        break;
+      }
       case "pathRemove": {
         const [recursive, force] = [this.temp(), this.temp()];
         const line5 = `${recursive} = zext i1 ${this.value(e.args[1]!)} to i32`;
@@ -9380,7 +9386,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const result = this.syncRead(e, read);
     // Unused, as a statement, what a call gives is released when the statement ends.
     const list2: Type[] = ["i64", "i64", "i64", this.tables.typing.arrayType("u8"), this.tables.typing.arrayType("u8")];
-    const gives: Record<string, Type> = { processSpawn: this.tables.typing.tupleType(list2), fileReadSync: this.tables.typing.arrayType("u8"), dirRead: this.tables.typing.arrayType("string"), pathReal: "string", pathRealNative: "string", pathReadLink: "string", dirTemp: "string", dirMake: this.tables.typing.unionType(["string", "null"]) };
+    const gives: Record<string, Type> = { processSpawn: this.tables.typing.tupleType(list2), processFinish: this.tables.typing.tupleType(list2), fileReadSync: this.tables.typing.arrayType("u8"), dirRead: this.tables.typing.arrayType("string"), pathReal: "string", pathRealNative: "string", pathReadLink: "string", dirTemp: "string", dirMake: this.tables.typing.unionType(["string", "null"]) };
     if (!this.cur().types.has(e) && gives[name] !== undefined) this.pending.push({ v: result, type: gives[name]! });
     return result;
   }

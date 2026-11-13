@@ -11043,6 +11043,8 @@ function syncFileSignatures(typing: Mut<Typing>): Record<string, [Type[], Type, 
     // flags and "K=V" environment, giving the pid, exit status (-1 for a signal), signal number,
     // stdout and stderr.
     processSpawn: [["string", strings, "string", bytes, "i64", strings], spawned, true],
+    // A handle processSpawn gave for a child it only started, giving what processSpawn gives.
+    processFinish: [["i64"], spawned, true],
   };
 }
 

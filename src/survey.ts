@@ -84,7 +84,7 @@ const RULES: Rule[] = [
   { id: "classForms", action: "unsupported", title: "abstract fields, and '#x in obj' checks" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
   { id: "process", action: "unsupported", title: "process members besides argv, env, exit, platform, arch and execPath, and writes to process.env" },
-  { id: "bunGlobals", action: "unsupported", title: "Bun members besides file, stdin, write, env, argv, sleep, sleepSync, which, spawnSync, serve and version" },
+  { id: "bunGlobals", action: "unsupported", title: "Bun members besides file, stdin, write, env, argv, sleep, sleepSync, which, spawn, spawnSync, serve and version" },
   { id: "importMeta", action: "unsupported", title: "import.meta besides its path, file, dir, url, main, dirname and filename members" },
   { id: "timerForms", action: "unsupported", title: "setImmediate, unref on a timer, and more than two arguments passed on to a timer's function" },
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
@@ -413,7 +413,7 @@ function declaresBun(s: unknown): boolean {
 // than the start of a long chain.
 // `process.env.X` or `process.env[k]`, which Fish reads but doesn't yet write.
 // The members of Bun's global that std's Bun module has.
-const BUN_MEMBERS = ["file", "stdin", "write", "env", "argv", "sleep", "sleepSync", "which", "spawnSync", "serve", "version"];
+const BUN_MEMBERS = ["file", "stdin", "write", "env", "argv", "sleep", "sleepSync", "which", "spawn", "spawnSync", "serve", "version"];
 const envEntry = (t: unknown) => isNode(t) && (t.kind === "member" || t.kind === "index") && isNode(t.object) && t.object.kind === "member" && named(t.object.object, "process") && t.object.name === "env";
 
 function classify({ path, envKeys, statementDestructures, metaRead, ownBun }: Scanning, n: Node, depth: usize, ambient: boolean, head: boolean): [string, usize, string?][] {

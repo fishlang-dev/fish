@@ -6297,8 +6297,8 @@ function hexDigit(b: u8): i64 {
 }
 `,
   // Bun's global, as the subset this module documents: file, stdin, write, env, argv, sleep,
-  // sleepSync, which, spawnSync, serve and version, each as Bun 1.4.3 gives it for the shapes here.
-  // Bun.spawn's running child and Bun.build aren't here. spawnSync's stdout and stderr are u8[],
+  // sleepSync, which, spawn, spawnSync, serve and version, each as Bun 1.4.3 gives it for the shapes
+  // here. Bun.build isn't here. spawnSync's stdout and stderr are u8[],
   // empty when not piped, where Bun gives a Buffer, or undefined.
   Bun: String.raw`
 import { statSync } from "fs";
@@ -6307,6 +6307,7 @@ import { bytes as stdinBytes } from "stdin";
 
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
 declare function usleep(microseconds: u32): i32;
+declare function kill(pid: i32, signal: i32): i32;
 
 // A file read when asked, by its path, or standard input's when name is null. Its calls take it
 // over, so a temporary's, as in Bun.file(path).text(), outlives its statement.
@@ -6443,25 +6444,28 @@ function nulFree(s: string, what: string): void throws IoError {
   throw bad;
 }
 
-// Runs a command to its end. stdin is /dev/null unless given, and stdout and stderr are piped
-// unless asked otherwise; env, when given, is the child's whole environment, and its PATH, when
-// it has one, is where the command is looked for.
-export function spawnSync(cmd: string[], options: SpawnOptions = {}): SyncSubprocess throws IoError {
+// What a spawn hands the runtime: the command's file, found on PATH unless it has a slash, its
+// stdin's bytes, the runtime's flags and the environment's "K=V" pairs. stdin is options.stdin's
+// unless given, and /dev/null when neither says.
+function spawnPlan(cmd: Ref<string[]>, options: Ref<SpawnOptions>, stdin: "inherit" | "ignore" | null, out: SpawnStdio, err: SpawnStdio): [string, u8[], i64, string[]] throws IoError {
   if (cmd.length === 0) throw new IoError("cmd must not be empty");
   for (let i: usize = 0; i < cmd.length; i++) nulFree(cmd[i], "argument 'args[" + i + "]'");
   const command = cmd[0];
   let input: u8[] = [];
   // argv[0] travels in the arguments, so the command can be its path while keeping its name.
-  let flags: i64 = 2 + 4 * streamMode(options.stdout) + 16 * streamMode(options.stderr) + 128 + 256;
-  const given = options.stdin;
-  if (given === "inherit") flags = flags - 1;
-  else if (given !== null && given !== "ignore") {
-    flags = flags - 2;
-    input = given;
+  let flags: i64 = 2 + 4 * streamMode(out) + 16 * streamMode(err) + 128 + 256;
+  const given: Ref<u8[] | "inherit" | "ignore" | null> = options.stdin;
+  if (stdin === "inherit") flags = flags - 1;
+  else if (stdin === null) {
+    if (given === "inherit") flags = flags - 1;
+    else if (given !== null && given !== "ignore") {
+      flags = flags - 2;
+      input = given.clone();
+    }
   }
   let pairs: string[] = [];
   let path = process.env.PATH ?? "";
-  const env = options.env;
+  const env: Ref<{ [name: string]: string } | null> = options.env;
   if (env !== null) {
     flags = flags + 64;
     for (const [key, value] of Object.entries(env)) {
@@ -6482,9 +6486,137 @@ export function spawnSync(cmd: string[], options: SpawnOptions = {}): SyncSubpro
     }
     file = at;
   }
+  return [file, input, flags, pairs];
+}
+
+// A signal's number, as kill() takes it, and its name, as a child's signalCode gives it.
+function signalNumber(name: string): i64 {
+  for (let n: i64 = 1; n < 65; n++) if (signalName(n) === name) return n;
+  assert(false, "Unknown signal: " + name);
+  return 0;
+}
+
+function signalName(n: i64): string {
+  return unsafe { fsh_rt_signal_name(n).isNull() ? "SIG" + n : fromCString(fsh_rt_signal_name(n)) };
+}
+
+// Runs a command to its end. stdin is /dev/null unless given, and stdout and stderr are piped
+// unless asked otherwise; env, when given, is the child's whole environment, and its PATH, when
+// it has one, is where the command is looked for.
+export function spawnSync(cmd: string[], options: SpawnOptions = {}): SyncSubprocess throws IoError {
+  const [file, input, flags, pairs] = spawnPlan(cmd, options, null, options.stdout ?? "pipe", options.stderr ?? "pipe");
   const [pid, status, signo, stdout, stderr] = processSpawn(file, cmd, options.cwd ?? "", input, flags, pairs);
-  const signal = signo === 0 ? null : unsafe { fsh_rt_signal_name(signo).isNull() ? "SIG" + signo : fromCString(fsh_rt_signal_name(signo)) };
+  const signal = signo === 0 ? null : signalName(signo);
   return new SyncSubprocess(pid, status < 0 ? null : status, signal, stdout, stderr);
+}
+
+// Bun.spawn's options this subset takes: stdio gives all three streams at once, in place of stdin,
+// stdout and stderr, and detached starts the child in a process group of its own.
+export type BunSpawnOptions = { cwd?: string; env?: { [name: string]: string }; stdin?: u8[] | "inherit" | "ignore"; stdout?: SpawnStdio; stderr?: SpawnStdio; stdio?: ["inherit" | "ignore", SpawnStdio, SpawnStdio]; detached?: boolean };
+
+// How a child is doing, and the channels its exit code and output come through. The first of
+// exited, stdout and stderr awaited claims the wait, which reads the child's output as it runs.
+type ChildState = { handle: i64; claimed: Atomic<boolean>; status: Atomic<i64>; signal: Atomic<i64>; ended: Atomic<boolean>; killed: Atomic<boolean>; exit: Channel<i64>; out: Channel<string>; err: Channel<string> };
+
+// A child Bun.spawn started, running beside the program. Unlike Bun's, its stdout and stderr are
+// given whole as text once it ends, each to the first reader, and nothing reads them or waits for
+// it until one of exited, stdout and stderr is awaited; exited can be awaited any number of times.
+export class Subprocess {
+  readonly pid: i64;
+  #state: shared<ChildState>;
+
+  constructor(pid: i64, state: shared<ChildState>) {
+    this.pid = pid;
+    this.#state = state;
+  }
+
+  // The child's exit code, or 128 and the signal that ended it, as Bun gives it.
+  get exited(): Promise<i64> {
+    return childExited(this.#state.clone());
+  }
+
+  get exitCode(): i64 | null {
+    const status = this.#state.status.load();
+    return this.#state.ended.load() && status >= 0 ? status : null;
+  }
+
+  get signalCode(): string | null {
+    const n = this.#state.signal.load();
+    return n === 0 ? null : signalName(n);
+  }
+
+  get killed(): boolean {
+    return this.#state.killed.load();
+  }
+
+  // What the child wrote, for new Response(child.stdout).text(); nothing when it wasn't piped.
+  get stdout(): Dyn<AsyncGenerator<string>> {
+    return childText(this.#state.clone(), false);
+  }
+
+  get stderr(): Dyn<AsyncGenerator<string>> {
+    return childText(this.#state.clone(), true);
+  }
+
+  // Sends the child a signal, SIGTERM unless named, unless it has already ended.
+  kill(signal: string | i64 = "SIGTERM"): void {
+    if (this.#state.ended.load()) return;
+    const n = typeof signal === "string" ? signalNumber(signal) : signal;
+    if (unsafe { kill(this.pid as i32, n as i32) } === 0) this.#state.killed.store(true);
+  }
+}
+
+// The exit code, put back for the next reader once taken.
+async function childExited(state: shared<ChildState>): Promise<i64> {
+  if (!state.claimed.exchange(true)) await childWaited(state.clone());
+  while (true) {
+    const code = await state.exit.receive();
+    if (code !== null) {
+      await state.exit.send(code);
+      return code;
+    }
+  }
+}
+
+async function* childText(state: shared<ChildState>, err: boolean): AsyncGenerator<string> {
+  if (!state.claimed.exchange(true)) await childWaited(state.clone());
+  let text: string | null = null;
+  if (err) text = await state.err.receive();
+  else text = await state.out.receive();
+  if (text !== null && text !== "") yield text;
+}
+
+// Waits for a child on the blocking pool, records how it ended, and hands its output on.
+async function childWaited(state: shared<ChildState>): Promise<void> {
+  const handle = state.handle;
+  let code: i64 = 1;
+  let stdout = "";
+  let stderr = "";
+  try {
+    const [_pid, status, signo, outBytes, errBytes] = await spawnBlocking(() => processFinish(handle));
+    state.status.store(status);
+    state.signal.store(signo);
+    code = status >= 0 ? status : 128 + signo;
+    stdout = new TextDecoder().decode(outBytes);
+    stderr = new TextDecoder().decode(errBytes);
+  } catch (_e) {
+    state.status.store(-1);
+  }
+  state.ended.store(true);
+  await state.out.send(stdout);
+  await state.err.send(stderr);
+  await state.exit.send(code);
+}
+
+// Starts a command and gives the running child at once. stdin is /dev/null, stdout piped and
+// stderr inherited unless asked otherwise, as Bun has them.
+function spawning(cmd: string[], options: BunSpawnOptions = {}): Subprocess throws IoError {
+  const stdio = options.stdio;
+  const [file, input, flags, pairs] = stdio === null ? spawnPlan(cmd, options, null, options.stdout ?? "pipe", options.stderr ?? "inherit") : spawnPlan(cmd, options, stdio[0], stdio[1], stdio[2]);
+  const group: i64 = options.detached === true ? 1024 : 0;
+  const [pid, handle, _signo, _out, _err] = processSpawn(file, cmd, options.cwd ?? "", input, flags + 512 + group, pairs);
+  const state = shared<ChildState>({ handle, claimed: new Atomic(false), status: new Atomic(-1), signal: new Atomic(0), ended: new Atomic(false), killed: new Atomic(false), exit: new Channel<i64>(1), out: new Channel<string>(1), err: new Channel<string>(1) });
+  return new Subprocess(pid, state);
 }
 
 // Bun.serve's options this subset takes. fetch is async, and the port 3000 unless given.
@@ -6498,7 +6630,7 @@ async function serving(options: BunServeOptions): Promise<void> throws IoError {
   await serve({ port, hostname: options.hostname, unix, tls: options.tls, signal: options.signal }, options.fetch);
 }
 
-export { sleeping as sleep, serving as serve };
+export { sleeping as sleep, serving as serve, spawning as spawn };
 `,
 };
 

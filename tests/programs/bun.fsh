@@ -27,9 +27,9 @@ function main(): void throws IoError {
   console.log(new TextDecoder().decode(r.stdout), r.exitCode, r.success);
 }
 // case: bun_unknown_member
-// error: 'Bun.spawn' isn't in Fish's subset of Bun yet; it has 'file', 'stdin', 'write', 'env', 'argv', 'sleepSync', 'version', 'which', 'spawnSync', 'sleep', 'serve'
+// error: 'Bun.build' isn't in Fish's subset of Bun yet; it has 'file', 'stdin', 'write', 'env', 'argv', 'sleepSync', 'version', 'which', 'spawnSync', 'sleep', 'serve', 'spawn'
 function main() {
-  Bun.spawn(["true"]);
+  Bun.build(["true"]);
 }
 // case: bun_env_write
 // error: setting 'Bun.env' isn't supported yet; it is read-only here

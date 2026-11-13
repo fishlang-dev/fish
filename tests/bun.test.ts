@@ -74,6 +74,45 @@ test("spawnSync gives Bun's exit code, signal, output and errors", () => {
   expect(out).toContain("inherited\n");
 });
 
+test("spawn gives a running child Bun's exit code, signal and output", () => {
+  compare("spawn-async", `
+  const c = Bun.spawn(["sleep", "5"]);
+  c.kill();
+  const killed = await c.exited;
+  console.log(killed, c.exitCode, c.signalCode, c.killed, c.pid > 0);
+  const d = Bun.spawn(["sh", "-c", "echo out; echo err >&2; exit 3"], { stdout: "pipe", stderr: "pipe" });
+  const out = new Response(d.stdout);
+  const err = new Response(d.stderr);
+  const [code, text, errors] = await Promise.all([d.exited, out.text(), err.text()]);
+  const again = await d.exited;
+  console.log(code, d.exitCode, d.signalCode, text, errors, again);
+  const fed = Bun.spawn(["cat"], { stdin: new TextEncoder().encode("fed in") });
+  const fedText = new Response(fed.stdout);
+  const fedOut = await fedText.text();
+  console.log(fedOut);
+  const k = Bun.spawn(["sleep", "5"]);
+  k.kill("SIGKILL");
+  const kc = await k.exited;
+  console.log(kc, k.signalCode, k.killed);
+  const big = Bun.spawn(["sh", "-c", "head -c 300000 /dev/zero"]);
+  const bigText = new Response(big.stdout);
+  const [bigCode, bigOut] = await Promise.all([big.exited, bigText.text()]);
+  console.log(bigCode, bigOut.length);
+  console.log("before the child");
+  const inherited = Bun.spawn(["sh", "-c", "echo inherited"], { stdio: ["inherit", "inherit", "inherit"] });
+  const inheritedCode = await inherited.exited;
+  console.log(inheritedCode);
+  const w = Bun.spawn(["pwd"], { cwd: "/" });
+  const where = new Response(w.stdout);
+  const whereText = await where.text();
+  console.log(whereText);
+  try {
+    Bun.spawn(["/no/such"]);
+  } catch (e) {
+    console.log(e.message);
+  }`);
+});
+
 test("which finds executables on PATH, or by a path with a slash", () => {
   compare("which", `
   console.log(Bun.which("sh"), Bun.which("no-such-x"), Bun.which("/bin/sh"), Bun.which(""), Bun.which("/tmp"));
