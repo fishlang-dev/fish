@@ -1,3 +1,4 @@
+// case: text_codec_basics
 // expect: 11 195 169
 // expect: héllo 🐟 8
 // expect: h�i�
@@ -23,4 +24,37 @@ function main() {
   let bom: u8[] = [0xEF, 0xBB, 0xBF, 0x41];
   const stripped = new TextDecoder().decode(bom);
   console.log(stripped.length, stripped);
+}
+// case: text_decoder_fatal
+// expect: hi h 1
+// expect: TypeError: The encoded data was not valid for encoding utf-8
+// expect: TypeError: The encoded data was not valid for encoding utf-8
+// expect: TypeError: The encoded data was not valid for encoding utf-8
+// expect: � h
+// fatal refuses a stray byte, a cut-short sequence and a surrogate's encoding, where the default
+// decoder gives U+FFFD; a U+FFFD that is in the input is valid.
+function decoded(bytes: u8[]): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (e) {
+    return `${e.name}: ${e.message}`;
+  }
+}
+function main() {
+  console.log(decoded([104, 105]), decoded([0xEF, 0xBB, 0xBF, 104]), decoded([0xEF, 0xBF, 0xBD]).length);
+  console.log(decoded([0xFF]));
+  console.log(decoded([0xF0, 0x9F, 0x98]));
+  console.log(decoded([0xED, 0xA0, 0x80]));
+  console.log(new TextDecoder().decode([0xFF]), new TextDecoder("utf8", { fatal: false }).decode([104]));
+}
+// case: text_decoder_fatal_uncaught
+// error: 'main' must declare 'throws TypeError'
+function main() {
+  console.log(new TextDecoder("utf-8", { fatal: true }).decode([104]));
+}
+// case: text_decoder_fatal_not_literal
+// error: 'TextDecoder' takes fatal as a literal, true or false
+function main() {
+  const fatal = true;
+  console.log(new TextDecoder("utf-8", { fatal }).decode([104]));
 }

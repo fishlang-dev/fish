@@ -338,7 +338,24 @@ class ParseArgsError {
   constructor(code: string, message: string) { this.code = code; this.message = message; }
 }
 class TextEncoder { encode(input: string): u8[] { return utf8Encode(input); } }
-class TextDecoder { decode(input: Ref<u8[]>): string { return utf8Decode(input); } }
+class TextDecoder {
+  constructor(_label?: "utf-8" | "utf8", _options?: { fatal?: false }) {}
+  decode(input: Ref<u8[]>): string { return utf8Decode(input); }
+}
+// What the loader makes 'new TextDecoder(label, { fatal: true })', whose decode throws rather than
+// give U+FFFD. Only input that isn't UTF-8 changes on its way back to bytes.
+class __FatalTextDecoder {
+  constructor(_label?: "utf-8" | "utf8", _options?: { fatal: true }) {}
+  decode(input: Ref<u8[]>): string throws TypeError {
+    const text = new TextDecoder().decode(input);
+    const back = new TextEncoder().encode(text);
+    const bom: usize = input.length >= 3 && input[0] === 0xEF && input[1] === 0xBB && input[2] === 0xBF ? 3 : 0;
+    let same = back.length + bom === input.length;
+    for (let i: usize = 0; same && i < back.length; i++) same = back[i] === input[i + bom];
+    if (!same) throw new TypeError("The encoded data was not valid for encoding utf-8");
+    return text;
+  }
+}
 `;
 
 // The Fetch API's Headers, Request and Response.
@@ -4128,6 +4145,24 @@ export class Stats {
   isSymbolicLink(): boolean { return this.kind === 3; }
 }
 
+// An entry readdir gives with withFileTypes: its name, the directory read, and its own kind, a
+// link's rather than its target's.
+export class Dirent {
+  name: string;
+  parentPath: string;
+  path: string;
+  kind: i64;
+  constructor(name: string, parentPath: string, kind: i64) {
+    this.name = name;
+    this.parentPath = parentPath;
+    this.path = parentPath;
+    this.kind = kind;
+  }
+  isFile(): boolean { return this.kind === 1; }
+  isDirectory(): boolean { return this.kind === 2; }
+  isSymbolicLink(): boolean { return this.kind === 3; }
+}
+
 declare function fsh_rt_errno_words(number: i64, code: MutPtr<u8>, codeSize: i64, text: MutPtr<u8>, textSize: i64): void;
 declare function fsh_rt_fd_flags(flags: Ptr<u8>): i64;
 declare function fsh_rt_fd_open(path: Ptr<u8>, flags: i64, mode: i64): i64;
@@ -5200,14 +5235,84 @@ export async function readlink(path: string): Promise<string> throws IoError {
 export async function realpath(path: string): Promise<string> throws IoError {
   return await spawnBlocking(() => pathRealNative(path));
 }
-`,
-  fs: String.raw`
-export function readFileSync(path: string): u8[] throws IoError {
-  return fileReadSync(path);
+
+export type FileChangeInfo = { eventType: "rename" | "change"; filename: string | null };
+
+declare function fsh_rt_watch_open(path: Ptr<u8>, recursive: i64): i64;
+declare function fsh_rt_watch_hold(handle: i64): void;
+declare function fsh_rt_watch_wait(handle: i64, out: MutPtr<u8>, size: i64): i64;
+declare function fsh_rt_watch_close(handle: i64): void;
+
+// Changes under a path as they happen, as Node's watch gives them. The watcher starts here, so a
+// missing path throws at the call, as Bun's does. Where Node's iterator throws an AbortError once
+// the signal aborts, this one ends: a generator that throws has a type no parameter can name, so
+// it couldn't be handed to a function that races its next() against a timer.
+export function watch(path: string, options: { recursive?: boolean; signal?: AbortSignal } = {}): AsyncGenerator<FileChangeInfo> throws IoError {
+  if (path.includes("\0")) throw invalid("The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received \"" + path.replaceAll("\0", "\\u0000") + "\"");
+  const handle = unsafe { fsh_rt_watch_open(cString(path), options.recursive === true ? 1 : 0) };
+  if (handle < 0) throw failed(handle, "watch", path);
+  return watchChanges(handle, options.signal ?? new AbortController().signal);
 }
 
-export function readFileSyncText(path: string): string throws IoError {
-  const bytes = fileReadSync(path);
+// A wait the iterator stops awaiting stays in its frame and is resumed by the next call, so racing
+// next() against something else loses nothing.
+async function* watchChanges(handle: i64, signal: AbortSignal): AsyncGenerator<FileChangeInfo> {
+  while (true) {
+    let got: string | null = null;
+    if (!signal.aborted) got = await Promise.race([watchWaited(handle), watchAborted(signal.clone())]);
+    if (got === null) {
+      unsafe { fsh_rt_watch_close(handle) };
+      return;
+    }
+    for (const line of got.split("\0")) {
+      if (line === "") continue;
+      const eventType: "rename" | "change" = line.startsWith("c") ? "change" : "rename";
+      yield { eventType, filename: line.slice(1) };
+    }
+  }
+}
+
+// The hold comes before the job reaches the pool, so a close racing it can't free the watcher first.
+async function watchWaited(handle: i64): Promise<string | null> {
+  unsafe { fsh_rt_watch_hold(handle) };
+  const got = await spawnBlocking(() => {
+    let out: u8[] = new Array(65536).fill(0 as u8);
+    const n = unsafe { fsh_rt_watch_wait(handle, mutPtrOf(out[0]), 65536) };
+    return new TextDecoder().decode(out.slice(0, n));
+  });
+  return got === "" ? null : got;
+}
+
+async function watchAborted(signal: AbortSignal): Promise<string | null> {
+  while (!signal.aborted) {
+    try {
+      await sleep(86400000, signal.clone());
+    } catch (_e) {}
+  }
+  return null;
+}
+`,
+  fs: String.raw`
+// A descriptor is read to its end from where it is. Standard input goes through readLine's
+// buffer, so what a line read took is still read here.
+export function readFileSync(path: string | i64): u8[] throws IoError {
+  if (typeof path === "string") return fileReadSync(path);
+  if (path === 0) {
+    const taken = __stdinTake(true);
+    if (taken === null) return [];
+    return taken;
+  }
+  let all: u8[] = [];
+  let chunk: u8[] = new Array(65536).fill(0 as u8);
+  while (true) {
+    const n = readSync(path, chunk);
+    if (n === 0) return all;
+    for (let i: i64 = 0; i < n; i++) all.push(chunk[i as usize]);
+  }
+}
+
+export function readFileSyncText(path: string | i64): string throws IoError {
+  const bytes = readFileSync(path);
   return new TextDecoder().decode(bytes);
 }
 
@@ -5233,8 +5338,22 @@ export function lstatSync(path: string): Stats throws IoError {
   return stats(path, false);
 }
 
-export function readdirSync(path: string): string[] throws IoError {
-  return dirRead(path);
+export function readdirSync(path: string): string[] throws IoError;
+export function readdirSync(path: string, options: { withFileTypes?: false }): string[] throws IoError;
+export function readdirSync(path: string, options: { withFileTypes: true }): Dirent[] throws IoError;
+export function readdirSync(path: string, options?: { withFileTypes?: boolean }): string[] | Dirent[] throws IoError {
+  const names = dirRead(path);
+  if (!(options?.withFileTypes ?? false)) return names;
+  let entries: Dirent[] = [];
+  for (const name of names) {
+    // An entry removed since the directory was read has no kind, as one of an unknown type has none.
+    let kind: i64 = 0;
+    try {
+      kind = pathStat(path + "/" + name, false)[3];
+    } catch {}
+    entries.push(new Dirent(name, path, kind));
+  }
+  return entries;
 }
 
 export function realpathSync(path: string): string throws IoError {
@@ -6212,6 +6331,12 @@ declare function fsh_rt_getenv(name: Ptr<u8>): Ptr<u8>;
 declare function fsh_rt_exit(code: i64): void;
 declare function fsh_rt_os_platform(): Ptr<u8>;
 declare function fsh_rt_os_arch(): Ptr<u8>;
+declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
+declare function fsh_rt_signal_listen(n: i64): i64;
+declare function fsh_rt_signal_count(n: i64): i64;
+declare function fsh_rt_timeout_unref(id: i64): void;
+declare function fsh_rt_kill(pid: i64, signal: i64): i64;
+declare function getpid(): i32;
 declare function fsh_rt_env_count(): i64;
 declare function fsh_rt_env_at(i: i64): Ptr<u8>;
 
@@ -6242,6 +6367,31 @@ export function execPath(): string {
   return unsafe { fromCString(fsh_rt_arg(0)) };
 }
 
+declare function fsh_rt_cwd(): Ptr<u8>;
+declare function fsh_rt_chdir(path: Ptr<u8>): i64;
+declare function fsh_rt_errno_words(number: i64, code: MutPtr<u8>, codeSize: i64, text: MutPtr<u8>, textSize: i64): void;
+
+export function cwd(): string {
+  return unsafe { fromCString(fsh_rt_cwd()) };
+}
+
+// The working directory of every task and thread at once, as it is one per process. Node's
+// error names the directory left and the one asked for, with path the one left.
+export function chdir(directory: string): void throws IoError {
+  const from = cwd();
+  const result = unsafe { fsh_rt_chdir(cString(directory)) };
+  if (result === 0) return;
+  let code: u8[] = new Array(32).fill(0 as u8);
+  let text: u8[] = new Array(200).fill(0 as u8);
+  unsafe { fsh_rt_errno_words(-result, mutPtrOf(code[0]), 32, mutPtrOf(text[0]), 200) };
+  const name = unsafe { fromCString(ptrOf(code[0])) };
+  let e = new IoError(name + ": " + unsafe { fromCString(ptrOf(text[0])) } + ", chdir '" + from + "' -> '" + directory + "'");
+  e.code = name;
+  e.syscall = "chdir";
+  e.path = from;
+  throw e;
+}
+
 // The whole environment, as Object.entries(process.env) and Object.keys(process.env) give it,
 // which the loader turns into calls of these. An entry with no '=', or no name before it, isn't
 // a variable.
@@ -6260,6 +6410,103 @@ export function __envKeys(): string[] {
   let keys: string[] = [];
   for (const [k, _v] of __envEntries()) keys.push(k);
   return keys;
+}
+
+// A signal's number from its name, as "SIGHUP", or a number given as it is.
+function signalNumberOf(signal: string | i64): i64 {
+  if (typeof signal !== "string") return signal;
+  for (let n: i64 = 1; n < 65; n++) {
+    const named = unsafe { fsh_rt_signal_name(n).isNull() ? "" : fromCString(fsh_rt_signal_name(n)) };
+    if (named === signal) return n;
+  }
+  assert(false, "Unknown signal: " + signal);
+  return 0;
+}
+
+// Counts a signal from now on, giving how many had arrived already.
+function listened(n: i64): i64 {
+  const before = unsafe { fsh_rt_signal_listen(n) };
+  assert(before >= 0, "the signal " + String(n) + " can't be listened for");
+  return before;
+}
+
+// Node's process.on: listener runs on every delivery of the signal from now on, which no longer
+// ends the program. It doesn't keep the program running. The listener is optional only so that
+// an arrow written for it is stored, owning what it captures; none listens for nothing.
+// ponytail: deliveries are seen by a 10 ms interval; wake it from the signal's thread if latency matters
+export function on(signal: string | i64, listener?: () => void): void {
+  if (listener === undefined) return;
+  const run: () => void = listener;
+  const n = signalNumberOf(signal);
+  const state = shared({ seen: new Atomic(listened(n)) });
+  const id = setInterval(() => {
+    const now = unsafe { fsh_rt_signal_count(n) };
+    while (state.seen.load() < now) {
+      state.seen.add(1);
+      run();
+    }
+  }, 10);
+  unsafe { fsh_rt_timeout_unref(id) };
+}
+
+// Node's process.once: listener runs on the next delivery only.
+export function once(signal: string | i64, listener?: () => void): void {
+  if (listener === undefined) return;
+  const run: () => void = listener;
+  const n = signalNumberOf(signal);
+  const seen = listened(n);
+  const state = shared({ id: new Atomic(-1), done: new Atomic(false) });
+  const held = state.clone();
+  const id = setInterval(() => {
+    if (held.done.load() || unsafe { fsh_rt_signal_count(n) } <= seen) return;
+    held.done.store(true);
+    clearInterval(held.id.load());
+    run();
+  }, 10);
+  state.id.store(id);
+  unsafe { fsh_rt_timeout_unref(id) };
+}
+
+// Each delivery of the signals named, by name, as they arrive. Listening starts at the call, not
+// at the first next(), so a signal sent between the two isn't lost to its default action.
+export function signals(...names: string[]): AsyncGenerator<string> {
+  let numbers: i64[] = [];
+  let seen: i64[] = [];
+  for (const name of names) {
+    const n = signalNumberOf(name);
+    numbers.push(n);
+    seen.push(listened(n));
+  }
+  return deliveries(names, numbers, seen);
+}
+
+async function* deliveries(names: string[], numbers: i64[], seen: i64[]): AsyncGenerator<string> {
+  while (true) {
+    for (let i: usize = 0; i < numbers.length; i++) {
+      const now = unsafe { fsh_rt_signal_count(numbers[i]) };
+      while (seen[i] < now) {
+        seen[i] = seen[i] + 1;
+        yield names[i];
+      }
+    }
+    await sleep(10);
+  }
+}
+
+export function pid(): i64 {
+  return unsafe { getpid() } as i64;
+}
+
+// Node's process.kill: sends the signal, SIGTERM unless named, refusing in Bun's words.
+export function kill(pid: i64, signal: string | i64 = "SIGTERM"): boolean throws IoError {
+  const failed = unsafe { fsh_rt_kill(pid, signalNumberOf(signal)) };
+  if (failed === 0) return true;
+  const code = failed === 3 ? "ESRCH" : failed === 1 ? "EPERM" : failed === 22 ? "EINVAL" : "E" + String(failed);
+  const text = failed === 3 ? "No such process" : failed === 1 ? "Operation not permitted" : "Invalid argument";
+  let e = new IoError("kill() failed: " + code + ": " + text);
+  e.code = code;
+  e.syscall = "kill";
+  throw e;
 }
 
 // Aborted by the first SIGINT or SIGTERM; a second exits at once with 130 or 143.
@@ -6681,7 +6928,7 @@ export { sleeping as sleep, serving as serve, spawning as spawn };
 // `process.argv`, called with nothing, and `env` as a table, `process.env.HOME` and
 // `process.env[name]` calling it with the key.
 export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
-  process: { argv: "value", env: "table", shutdown: "value", platform: "value", arch: "value", execPath: "value" },
+  process: { argv: "value", env: "table", shutdown: "value", platform: "value", arch: "value", execPath: "value", pid: "value" },
   Bun: { argv: "value", env: "table", stdin: "value", version: "value" },
 };
 
@@ -6778,7 +7025,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const dataViewUsed = uses(written, dataView, ["DataView"]);
   const btoaUsed = uses(written, btoa, ["btoa"]);
   const atobUsed = uses(written, atob, ["atob"]);
-  const readingUsed = uses(written, reading, ["readLine"]);
+  const readingUsed = uses(written, reading, ["readLine", "__stdinTake"]);
   // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
   // btoa and atob call them too.
   const encoding = httpUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);

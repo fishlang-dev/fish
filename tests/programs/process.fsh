@@ -38,10 +38,10 @@ function main() {
   process.exit("1");
 }
 // case: process_unknown_member
-// error: 'node:process' has no export named 'pid'
+// error: 'node:process' has no export named 'ppid'
 import process from "node:process";
 function main() {
-  console.log(process.pid);
+  console.log(process.ppid);
 }
 // case: process_named_values
 // expect: true true true
@@ -74,4 +74,66 @@ function main() {
   for (const [k, v] of all) if (k === "FISH_LEAKS") leaks = v;
   const keys = Object.keys(process.env);
   console.log(leaks, keys.includes("FISH_LEAKS"), keys.length === all.length);
+}
+// case: process_signal_listeners
+// A listener stops a signal ending the program, runs once per delivery, and doesn't keep the
+// program running after main returns.
+// expect: once
+// expect: 3
+// expect: kill() failed: ESRCH: No such process ESRCH kill
+async function main(): Promise<void> throws IoError {
+  const { promise: got, resolve } = Promise.withResolvers<string>();
+  process.once("SIGUSR1", () => resolve("once"));
+  const count = shared({ n: new Atomic(0) });
+  const counting = count.clone();
+  process.on("SIGUSR2", () => { counting.n.add(1); });
+  process.kill(process.pid, "SIGUSR1");
+  const first = await got;
+  console.log(first);
+  for (let i = 0; i < 3; i++) {
+    process.kill(process.pid, "SIGUSR2");
+    await sleep(30);
+  }
+  console.log(count.n.load());
+  try {
+    process.kill(999999, 0);
+  } catch (e) {
+    console.log(e.message, e.code, e.syscall);
+  }
+}
+// case: process_signals_generator
+// expect: SIGHUP
+// expect: SIGUSR1
+import { signals } from "node:process";
+async function main(): Promise<void> throws IoError {
+  let seen = signals("SIGHUP", "SIGUSR1");
+  process.kill(process.pid, "SIGHUP");
+  const a = await seen.next();
+  if (a.done === false) console.log(a.value);
+  process.kill(process.pid, "SIGUSR1");
+  const b = await seen.next();
+  if (b.done === false) console.log(b.value);
+}
+// case: process_cwd_chdir
+// expect: true true
+// expect: true
+// expect: ENOENT: no such file or directory, chdir '/' -> '/fish-no-such-dir' ENOENT chdir /
+// The working directory is the process's, so path.resolve sees a change made by chdir.
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
+function main(): void throws IoError {
+  const start = process.cwd();
+  const dir = realpathSync(mkdtempSync("/tmp/fish-cwd-"));
+  process.chdir(dir);
+  console.log(process.cwd() === dir, resolve("a") === dir + "/a");
+  process.chdir("..");
+  console.log(process.cwd() === realpathSync("/tmp"));
+  process.chdir("/");
+  try {
+    process.chdir("/fish-no-such-dir");
+  } catch (e) {
+    console.log(e.message, e.code, e.syscall, e.path);
+  }
+  process.chdir(start);
+  rmSync(dir, { recursive: true });
 }

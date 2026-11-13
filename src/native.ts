@@ -2913,6 +2913,11 @@ const char *fsh_rt_cwd(void) {
   return NULL;
 }
 
+// For process.chdir: 0, or -errno for the IoError.
+int64_t fsh_rt_chdir(const char *path) {
+  return chdir(path) == 0 ? 0 : -errno;
+}
+
 const char *fsh_rt_getenv(const char *name) {
   return getenv(name);
 }
@@ -4661,7 +4666,8 @@ static void *fsh_timing(void *arg) {
 // The callbacks setTimeout and setInterval set, earliest first and ties in the order set, which
 // the prelude's one timer task runs in turn. Each holds its callable's block and vtable.
 // ponytail: a sorted array, inserted into in O(n); a heap if programs keep many timers
-typedef struct { int64_t deadline, id, every; void *block; void **vtable; } fsh_timeout;
+// weak: a timer that runs while the program does but doesn't keep it running, as Node's unref.
+typedef struct { int64_t deadline, id, every; void *block; void **vtable; int32_t weak; } fsh_timeout;
 static pthread_mutex_t fsh_timeouts_lock = PTHREAD_MUTEX_INITIALIZER;
 static fsh_timeout *fsh_timeouts = NULL;
 static int64_t fsh_timeout_count = 0, fsh_timeout_capacity = 0, fsh_timeout_ids = 0;
@@ -4722,11 +4728,26 @@ int64_t fsh_rt_timeout_set(void *block, void **vtable, int64_t ms, int32_t repea
   if (ms < 1 || ms > 2147483647) ms = 1;
   pthread_mutex_lock(&fsh_timeouts_lock);
   int64_t id = ++fsh_timeout_ids;
-  fsh_timeout_insert((fsh_timeout){ fsh_now() + ms * 1000000, id, repeat ? ms : 0, block, vtable });
+  fsh_timeout_insert((fsh_timeout){ fsh_now() + ms * 1000000, id, repeat ? ms : 0, block, vtable, 0 });
   fsh_task *waiter = fsh_timeouts_changed();
   pthread_mutex_unlock(&fsh_timeouts_lock);
   fsh_timeouts_wake(waiter);
   return id;
+}
+
+// Marks a timer as one the program doesn't wait for.
+void fsh_rt_timeout_unref(int64_t id) {
+  pthread_mutex_lock(&fsh_timeouts_lock);
+  for (int64_t at = 0; at < fsh_timeout_count; at++) if (fsh_timeouts[at].id == id) fsh_timeouts[at].weak = 1;
+  fsh_task *waiter = fsh_timeouts_changed();
+  pthread_mutex_unlock(&fsh_timeouts_lock);
+  fsh_timeouts_wake(waiter);
+}
+
+// Whether any timer left keeps the program running.
+static int32_t fsh_timeouts_strong(void) {
+  for (int64_t at = 0; at < fsh_timeout_count; at++) if (!fsh_timeouts[at].weak) return 1;
+  return 0;
 }
 
 // Clears a timer, dropping its callable; one already run or cleared is left alone.
@@ -4763,7 +4784,7 @@ int32_t fsh_rt_timeout_next(fsh_task *task, void **out) {
       fsh_timeout_insert(t);
     }
     result = 1;
-  } else if (fsh_timeout_count == 0 && fsh_main_returned) result = 2;
+  } else if (!fsh_timeouts_strong() && fsh_main_returned) result = 2;
   int64_t arm = 0;
   if (result == 0) {
     __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
@@ -5523,6 +5544,66 @@ fsh_signal *fsh_rt_signal_shutdown(void) {
   pthread_once(&fsh_shutdown_once, fsh_shutdown_start);
   __atomic_fetch_add(&fsh_shutdown.count, 1, __ATOMIC_RELAXED);
   return &fsh_shutdown;
+}
+
+// Signals a program listens for, counted as they arrive. A handler only writes the signal's number
+// to a nonblocking pipe, as async-signal-safe code must, and a thread of its own counts them, so
+// std can see a new delivery by its count going up. A signal listened for this way replaces
+// whatever handled it before, the shutdown signal's SIGINT and SIGTERM handlers included.
+static int64_t fsh_signal_counts[65];
+static int fsh_signals_pipe[2] = { -1, -1 };
+static pthread_once_t fsh_signals_once = PTHREAD_ONCE_INIT;
+static int32_t fsh_signals_ready = 0;
+
+static void fsh_signals_caught(int sig) {
+  int saved = errno;
+  unsigned char number = (unsigned char)sig;
+  (void)!write(fsh_signals_pipe[1], &number, 1);
+  errno = saved;
+}
+
+static void *fsh_signals_watch(void *arg) {
+  for (;;) {
+    unsigned char number;
+    ssize_t got = read(fsh_signals_pipe[0], &number, 1);
+    if (got < 0 && errno == EINTR) continue;
+    if (got <= 0) return NULL;
+    if (number < 65) __atomic_fetch_add(&fsh_signal_counts[number], 1, __ATOMIC_RELEASE);
+  }
+}
+
+static void fsh_signals_start(void) {
+  if (pipe(fsh_signals_pipe) != 0) return;
+  fcntl(fsh_signals_pipe[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_signals_pipe[1], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_signals_pipe[1], F_SETFL, O_NONBLOCK);
+  pthread_t watcher;
+  if (pthread_create(&watcher, NULL, fsh_signals_watch, NULL) != 0) return;
+  pthread_detach(watcher);
+  fsh_signals_ready = 1;
+}
+
+// Starts counting signal n, giving how many have arrived so far, or -1 when it can't be caught.
+int64_t fsh_rt_signal_listen(int64_t n) {
+  if (n < 1 || n > 64 || n == SIGKILL || n == SIGSTOP) return -1;
+  pthread_once(&fsh_signals_once, fsh_signals_start);
+  if (!fsh_signals_ready) return -1;
+  struct sigaction caught;
+  memset(&caught, 0, sizeof caught);
+  caught.sa_handler = fsh_signals_caught;
+  sigemptyset(&caught.sa_mask);
+  caught.sa_flags = SA_RESTART;
+  if (sigaction((int)n, &caught, NULL) != 0) return -1;
+  return __atomic_load_n(&fsh_signal_counts[n], __ATOMIC_ACQUIRE);
+}
+
+int64_t fsh_rt_signal_count(int64_t n) {
+  return n < 1 || n > 64 ? 0 : __atomic_load_n(&fsh_signal_counts[n], __ATOMIC_ACQUIRE);
+}
+
+// process.kill: 0, or the errno that refused it.
+int64_t fsh_rt_kill(int64_t pid, int64_t sig) {
+  return kill((pid_t)pid, (int)sig) == 0 ? 0 : errno;
 }
 
 // The reactor: a thread waiting on kqueue (macOS) or epoll (Linux) for the sockets tasks wait
@@ -6452,6 +6533,375 @@ void fsh_rt_fd_release(fsh_fd *f) {
   if (f->fd >= 0) fsh_rt_fd_call(3, f->fd, 0);
   pthread_mutex_destroy(&f->lock);
   fsh_rt_free(f);
+}
+
+// fs/promises watch: a watcher over inotify on Linux and kqueue on macOS. Its wait runs on the
+// blocking pool and writes each change as 'c' (change) or 'r' (rename), the name relative to the
+// watched directory, and a NUL. The watcher is counted: std holds one count, each wait another,
+// so a close from the task whose signal aborted wakes a wait still blocked on another thread and
+// the last of the two frees it.
+typedef struct { char *rel; int fd; int dir; char **names; ino_t *inos; int64_t count; } fsh_watch_entry;
+typedef struct {
+  int64_t refs;
+  int32_t closed;
+  int wake[2];
+  int queue;
+  int recursive;
+  int single;
+  char *root;
+  char *base;
+  fsh_watch_entry *entries;
+  int64_t entry_count;
+  int64_t last;
+} fsh_watch;
+
+static char *fsh_watch_join(const char *a, const char *b) {
+  size_t n = strlen(a), m = strlen(b);
+  char *s = malloc(n + m + 2);
+  memcpy(s, a, n);
+  size_t at = n;
+  if (n && m) s[at++] = '/';
+  memcpy(s + at, b, m + 1);
+  return s;
+}
+
+// One write is often several kernel events, as a truncate and then the bytes, so an event the
+// same as the one just before it in a wait's batch is left out.
+static int64_t fsh_watch_put(fsh_watch *w, uint8_t *out, int64_t size, int64_t at, char kind, const char *name) {
+  int64_t n = (int64_t)strlen(name);
+  if (at + n + 2 > size) return at;
+  if (w->last >= 0 && at - w->last == n + 2 && out[w->last] == (uint8_t)kind && !memcmp(out + w->last + 1, name, (size_t)n)) return at;
+  w->last = at;
+  out[at] = (uint8_t)kind;
+  memcpy(out + at + 1, name, (size_t)n);
+  out[at + n + 1] = 0;
+  return at + n + 2;
+}
+
+// An entry's watch ends with its descriptor on macOS; on Linux it is a watch number, not a
+// descriptor, and ends with the inotify descriptor or the kernel's own IN_IGNORED.
+static void fsh_watch_drop(fsh_watch_entry *e) {
+#ifdef __APPLE__
+  if (e->fd >= 0) close(e->fd);
+#endif
+  free(e->rel);
+  for (int64_t j = 0; j < e->count; j++) free(e->names[j]);
+  free(e->names);
+  free(e->inos);
+  memset(e, 0, sizeof *e);
+  e->fd = -1;
+}
+
+static void fsh_watch_free(fsh_watch *w) {
+  for (int64_t i = 0; i < w->entry_count; i++) fsh_watch_drop(&w->entries[i]);
+  free(w->entries);
+  if (w->queue >= 0) close(w->queue);
+  close(w->wake[0]);
+  close(w->wake[1]);
+  free(w->root);
+  free(w->base);
+  free(w);
+}
+
+static void fsh_watch_release(fsh_watch *w) {
+  if (__atomic_sub_fetch(&w->refs, 1, __ATOMIC_ACQ_REL) == 0) fsh_watch_free(w);
+}
+
+static fsh_watch_entry *fsh_watch_slot(fsh_watch *w) {
+  for (int64_t i = 0; i < w->entry_count; i++)
+    if (w->entries[i].fd < 0 && !w->entries[i].rel) return &w->entries[i];
+  w->entries = realloc(w->entries, (size_t)(w->entry_count + 1) * sizeof *w->entries);
+  fsh_watch_entry *e = &w->entries[w->entry_count++];
+  memset(e, 0, sizeof *e);
+  e->fd = -1;
+  return e;
+}
+
+static int fsh_watch_is_dir(fsh_watch *w, const char *rel) {
+  char *path = fsh_watch_join(w->root, rel);
+  struct stat st;
+  int dir = lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+  free(path);
+  return dir;
+}
+
+static void fsh_watch_add(fsh_watch *w, const char *rel, int dir);
+
+#ifdef __APPLE__
+// kqueue reports a directory's own writes, not its files', so each file is watched by a
+// descriptor of its own, and a directory's names and inodes are kept to tell which entry came,
+// went, or was replaced by a rename over it.
+static void fsh_watch_scan(fsh_watch *w, const char *rel, char ***names, ino_t **inos, int64_t *count) {
+  char *path = fsh_watch_join(w->root, rel);
+  DIR *d = opendir(path);
+  free(path);
+  *names = NULL;
+  *inos = NULL;
+  *count = 0;
+  if (!d) return;
+  struct dirent *de;
+  while ((de = readdir(d))) {
+    if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+    *names = realloc(*names, (size_t)(*count + 1) * sizeof **names);
+    *inos = realloc(*inos, (size_t)(*count + 1) * sizeof **inos);
+    (*names)[*count] = strdup(de->d_name);
+    (*inos)[*count] = de->d_ino;
+    (*count)++;
+  }
+  closedir(d);
+}
+
+static void fsh_watch_child(fsh_watch *w, const char *rel, const char *name) {
+  char *child = fsh_watch_join(rel, name);
+  int dir = fsh_watch_is_dir(w, child);
+  if (!dir || w->recursive) fsh_watch_add(w, child, dir);
+  free(child);
+}
+
+static void fsh_watch_add(fsh_watch *w, const char *rel, int dir) {
+  char *path = fsh_watch_join(w->root, rel);
+  int fd = open(path, O_EVTONLY | O_CLOEXEC);
+  free(path);
+  if (fd < 0) return;
+  fsh_watch_entry *e = fsh_watch_slot(w);
+  e->fd = fd;
+  e->rel = strdup(rel);
+  e->dir = dir;
+  int64_t index = e - w->entries;
+  struct kevent ev;
+  EV_SET(&ev, fd, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_DELETE | NOTE_RENAME, 0, (void *)(intptr_t)index);
+  kevent(w->queue, &ev, 1, NULL, 0, NULL);
+  if (!dir) return;
+  char **names;
+  ino_t *inos;
+  int64_t count;
+  fsh_watch_scan(w, rel, &names, &inos, &count);
+  w->entries[index].names = names;
+  w->entries[index].inos = inos;
+  w->entries[index].count = count;
+  for (int64_t i = 0; i < count; i++) fsh_watch_child(w, rel, names[i]);
+}
+
+// Drops an entry and, under a directory, everything watched below it.
+static void fsh_watch_forget(fsh_watch *w, const char *rel) {
+  size_t n = strlen(rel);
+  for (int64_t i = 0; i < w->entry_count; i++) {
+    char *r = w->entries[i].rel;
+    if (r && (!strcmp(r, rel) || (!strncmp(r, rel, n) && r[n] == '/'))) fsh_watch_drop(&w->entries[i]);
+  }
+}
+
+static int64_t fsh_watch_diff(fsh_watch *w, int64_t index, uint8_t *out, int64_t size, int64_t at) {
+  char *rel = strdup(w->entries[index].rel);
+  char **names;
+  ino_t *inos;
+  int64_t count;
+  fsh_watch_scan(w, rel, &names, &inos, &count);
+  fsh_watch_entry *e = &w->entries[index];
+  char **old = e->names;
+  ino_t *old_inos = e->inos;
+  int64_t old_count = e->count;
+  e->names = names;
+  e->inos = inos;
+  e->count = count;
+  for (int64_t i = 0; i < old_count; i++) {
+    int64_t j = 0;
+    while (j < count && strcmp(names[j], old[i])) j++;
+    if (j < count && inos[j] == old_inos[i]) continue;
+    char *child = fsh_watch_join(rel, old[i]);
+    at = fsh_watch_put(w, out, size, at, 'r', child);
+    fsh_watch_forget(w, child);
+    free(child);
+  }
+  for (int64_t j = 0; j < count; j++) {
+    int64_t i = 0;
+    while (i < old_count && strcmp(names[j], old[i])) i++;
+    if (i < old_count && inos[j] == old_inos[i]) continue;
+    char *child = fsh_watch_join(rel, names[j]);
+    if (i == old_count) at = fsh_watch_put(w, out, size, at, 'r', child);
+    free(child);
+    fsh_watch_child(w, rel, names[j]);
+  }
+  for (int64_t i = 0; i < old_count; i++) free(old[i]);
+  free(old);
+  free(old_inos);
+  free(rel);
+  return at;
+}
+
+static int fsh_watch_start(fsh_watch *w) {
+  w->queue = kqueue();
+  if (w->queue < 0) return errno;
+  fcntl(w->queue, F_SETFD, FD_CLOEXEC);
+  struct kevent ev;
+  EV_SET(&ev, w->wake[0], EVFILT_READ, EV_ADD, 0, 0, (void *)(intptr_t)-1);
+  kevent(w->queue, &ev, 1, NULL, 0, NULL);
+  fsh_watch_add(w, "", !w->single);
+  return w->entry_count ? 0 : errno ? errno : ENOENT;
+}
+
+// One change's events, or none for a change no one asked about, as a directory's attributes: the
+// new end of what's written, -1 when nothing is waiting, -2 once woken or the queue fails.
+static int64_t fsh_watch_take(fsh_watch *w, uint8_t *out, int64_t size, int64_t at, int block) {
+  struct kevent ev;
+  struct timespec zero = { 0, 0 };
+  int n;
+  do n = kevent(w->queue, NULL, 0, &ev, 1, block ? NULL : &zero);
+  while (n < 0 && errno == EINTR);
+  if (n < 0) return -2;
+  if (n == 0) return -1;
+  int64_t index = (int64_t)(intptr_t)ev.udata;
+  if (index < 0) return -2;
+  fsh_watch_entry *e = &w->entries[index];
+  if (e->fd < 0) return at;
+  const char *name = w->single ? w->base : e->rel;
+  if (e->dir && (ev.fflags & NOTE_WRITE)) return fsh_watch_diff(w, index, out, size, at);
+  if (e->dir && !(ev.fflags & (NOTE_DELETE | NOTE_RENAME))) return at;
+  // A watched entry's own removal is told by its directory's diff; only the root has no directory.
+  if (ev.fflags & (NOTE_DELETE | NOTE_RENAME)) return index == 0 ? fsh_watch_put(w, out, size, at, 'r', w->base) : at;
+  return fsh_watch_put(w, out, size, at, 'c', name);
+}
+#else
+#include <sys/inotify.h>
+// inotify watches a directory's files itself; a recursive watch adds each directory below.
+static void fsh_watch_add(fsh_watch *w, const char *rel, int dir) {
+  char *path = fsh_watch_join(w->root, rel);
+  int wd = inotify_add_watch(w->queue, path, IN_MODIFY | IN_ATTRIB | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF | (dir ? IN_ONLYDIR : 0));
+  if (wd < 0) {
+    free(path);
+    return;
+  }
+  fsh_watch_entry *e = fsh_watch_slot(w);
+  e->fd = wd;
+  e->rel = strdup(rel);
+  e->dir = dir;
+  if (!dir || !w->recursive) {
+    free(path);
+    return;
+  }
+  DIR *d = opendir(path);
+  free(path);
+  if (!d) return;
+  struct dirent *de;
+  while ((de = readdir(d))) {
+    if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+    char *child = fsh_watch_join(rel, de->d_name);
+    if (fsh_watch_is_dir(w, child)) fsh_watch_add(w, child, 1);
+    free(child);
+  }
+  closedir(d);
+}
+
+static int fsh_watch_start(fsh_watch *w) {
+  w->queue = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
+  if (w->queue < 0) return errno;
+  errno = 0;
+  fsh_watch_add(w, "", !w->single);
+  return w->entry_count ? 0 : errno ? errno : ENOENT;
+}
+
+static int64_t fsh_watch_take(fsh_watch *w, uint8_t *out, int64_t size, int64_t at, int block) {
+  struct pollfd fds[2] = { { w->queue, POLLIN, 0 }, { w->wake[0], POLLIN, 0 } };
+  int n;
+  do n = poll(fds, 2, block ? -1 : 0);
+  while (n < 0 && errno == EINTR);
+  if (n < 0) return -2;
+  if (n == 0) return -1;
+  if (fds[1].revents) return -2;
+  // Read only what's sure to fit, so no event is read and then lost for want of room.
+  char buffer[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+  if (size - at < (int64_t)sizeof buffer + 64) return -1;
+  ssize_t got = read(w->queue, buffer, sizeof buffer);
+  if (got <= 0) return at;
+  for (char *p = buffer; p < buffer + got;) {
+    struct inotify_event *ev = (struct inotify_event *)p;
+    p += sizeof *ev + ev->len;
+    fsh_watch_entry *e = NULL;
+    for (int64_t i = 0; i < w->entry_count; i++)
+      if (w->entries[i].rel && w->entries[i].fd == ev->wd) e = &w->entries[i];
+    if (!e) continue;
+    if (ev->mask & IN_IGNORED) {
+      fsh_watch_drop(e);
+      continue;
+    }
+    char kind = ev->mask & (IN_MODIFY | IN_ATTRIB) ? 'c' : 'r';
+    if (ev->len == 0) {
+      // A directory's own events below the root are told by its parent.
+      if (e == &w->entries[0] || w->single) at = fsh_watch_put(w, out, size, at, kind, w->base);
+      continue;
+    }
+    char *child = fsh_watch_join(e->rel, ev->name);
+    at = fsh_watch_put(w, out, size, at, kind, child);
+    if (w->recursive && (ev->mask & IN_ISDIR) && (ev->mask & (IN_CREATE | IN_MOVED_TO))) fsh_watch_add(w, child, 1);
+    free(child);
+  }
+  return at;
+}
+#endif
+
+// The watcher for a path, or -errno: ENOENT for a missing one, as Node's watch throws.
+int64_t fsh_rt_watch_open(const char *path, int64_t recursive) {
+  struct stat st;
+  if (stat(path, &st) != 0) return -errno;
+  fsh_watch *w = calloc(1, sizeof *w);
+  w->refs = 1;
+  w->queue = -1;
+  w->recursive = (int)recursive;
+  w->single = !S_ISDIR(st.st_mode);
+  w->root = strdup(path);
+  const char *slash = strrchr(path, '/');
+  w->base = strdup(slash && slash[1] ? slash + 1 : path);
+  if (pipe(w->wake) != 0) {
+    int failed = errno;
+    free(w->root);
+    free(w->base);
+    free(w);
+    return -failed;
+  }
+  fcntl(w->wake[0], F_SETFD, FD_CLOEXEC);
+  fcntl(w->wake[1], F_SETFD, FD_CLOEXEC);
+  int failed = fsh_watch_start(w);
+  if (failed) {
+    fsh_watch_free(w);
+    return -failed;
+  }
+  return (int64_t)(intptr_t)w;
+}
+
+// A count for the wait about to start, taken before it reaches the blocking pool.
+void fsh_rt_watch_hold(int64_t handle) {
+  __atomic_add_fetch(&((fsh_watch *)(intptr_t)handle)->refs, 1, __ATOMIC_ACQ_REL);
+}
+
+// Blocks until there are changes, then writes them and whatever else is already waiting: the
+// bytes written, or 0 once the watcher is closed. Gives up the count fsh_rt_watch_hold took.
+int64_t fsh_rt_watch_wait(int64_t handle, uint8_t *out, int64_t size) {
+  fsh_watch *w = (fsh_watch *)(intptr_t)handle;
+  int64_t at = 0;
+  w->last = -1;
+  while (!__atomic_load_n(&w->closed, __ATOMIC_ACQUIRE)) {
+    int64_t next = fsh_watch_take(w, out, size, at, at == 0);
+    if (next == -2) break;
+    if (next == -1) {
+      if (at > 0) break;
+      continue;
+    }
+    at = next;
+    if (size - at < 4096) break;
+  }
+  if (__atomic_load_n(&w->closed, __ATOMIC_ACQUIRE)) at = 0;
+  fsh_watch_release(w);
+  return at;
+}
+
+// Ends the watcher: a wait in flight wakes and gives 0, and the last count frees it.
+void fsh_rt_watch_close(int64_t handle) {
+  fsh_watch *w = (fsh_watch *)(intptr_t)handle;
+  if (__atomic_exchange_n(&w->closed, 1, __ATOMIC_ACQ_REL)) return;
+  char byte = 1;
+  ssize_t ignored = write(w->wake[1], &byte, 1);
+  (void)ignored;
+  fsh_watch_release(w);
 }
 
 // accessSync, its mode the bits of R_OK, W_OK and X_OK, checked first as Node checks it.

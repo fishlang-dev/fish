@@ -68,3 +68,14 @@ macro function located(input: AstStmt): Ast[] {
 function main() {
   console.log(where());
 }
+// case: import_meta_main_entry
+// A script's Bun entry line says only what a native program does anyway.
+// expect: ran once
+function main() {
+  console.log("ran once");
+}
+if (import.meta.main) main();
+// case: import_meta_main_other
+// error: only declarations are allowed at the top level; move this into main()
+function main() {}
+if (import.meta.main) console.log("x");

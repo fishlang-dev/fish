@@ -85,3 +85,43 @@ declare function fsh_rt_fd_hold(fd: i64): __FileDescriptor;
 function main() {
   const held = unsafe { fsh_rt_fd_hold(1) };
 }
+// case: fs_readdir_file_types
+// expect: a false true false true
+// expect: b.txt true false false true
+// expect: c false false true true
+// expect: a,b.txt,c 3
+// A link is an entry of its own kind, not its target's.
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+function main(): void throws IoError {
+  const dir = mkdtempSync("/tmp/fish-dirent-");
+  writeFileSync(dir + "/b.txt", "hi");
+  mkdirSync(dir + "/a");
+  symlinkSync("b.txt", dir + "/c");
+  let entries = readdirSync(dir, { withFileTypes: true });
+  entries.sort((x, y) => (x.name < y.name ? -1 : x.name > y.name ? 1 : 0));
+  for (const e of entries) console.log(e.name, e.isFile(), e.isDirectory(), e.isSymbolicLink(), e.parentPath === dir);
+  let names = readdirSync(dir);
+  names.sort();
+  console.log(names.join(","), readdirSync(dir, { withFileTypes: false }).length);
+  rmSync(dir, { recursive: true });
+}
+// case: fs_readdir_file_types_missing
+// expect: ENOENT
+import { readdirSync } from "node:fs";
+function main() {
+  try {
+    readdirSync("/fish-no-such-dir", { withFileTypes: true });
+  } catch (e) {
+    console.log(e.code);
+  }
+}
+// case: fs_read_descriptor
+// expect: ab 0
+import { openSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+function main(): void throws IoError {
+  const dir = mkdtempSync("/tmp/fish-fd-");
+  writeFileSync(dir + "/in.txt", "ab");
+  const fd = openSync(dir + "/in.txt");
+  console.log(readFileSync(fd, "utf8"), readFileSync(fd).length);
+  rmSync(dir, { recursive: true });
+}

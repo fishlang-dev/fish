@@ -83,7 +83,7 @@ const RULES: Rule[] = [
   { id: "genericFunctionsHeld", action: "unsupported", title: "generic function types held in class fields, arrays or unions, which would box a family of functions" },
   { id: "classForms", action: "unsupported", title: "abstract fields, and '#x in obj' checks" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
-  { id: "process", action: "unsupported", title: "process members besides argv, env, exit, platform, arch and execPath, and writes to process.env" },
+  { id: "process", action: "unsupported", title: "process members besides argv, env, exit, platform, arch, execPath, cwd, chdir, on, once, kill and pid, and writes to process.env" },
   { id: "bunGlobals", action: "unsupported", title: "Bun members besides file, stdin, write, env, argv, sleep, sleepSync, which, spawn, spawnSync, serve and version" },
   { id: "importMeta", action: "unsupported", title: "import.meta besides its path, file, dir, url, main, dirname and filename members" },
   { id: "timerForms", action: "unsupported", title: "setImmediate, unref on a timer, and more than two arguments passed on to a timer's function" },
@@ -180,12 +180,12 @@ export function featureOf(id: string, module?: string): string | undefined {
 const STD = (name: string) => ({ name, planned: false });
 const PLANNED = (title: string) => ({ name: title, planned: true });
 const BUILTINS = new Map<string, { name: string; planned: boolean }>([
-  ["net", STD("TcpListener, TcpStream, UnixListener and UnixStream")], ["worker_threads", STD("spawn and spawnBlocking")], ["string_decoder", STD("TextDecoder")],
+  ["net", STD("TcpListener, TcpStream, UnixListener and UnixStream")], ["worker_threads", STD("spawn and spawnBlocking")], ["string_decoder", STD("TextDecoder, with fatal")],
   ["timers/promises", STD("sleep")],
   // `fetch` and `serve` are the client and the server, but importing `http` itself needs its shim.
   ["http", PLANNED("node:http server shim")], ["console", PLANNED("The rest of console")],
   ["test", PLANNED("Jest-style test API")], ["sqlite", PLANNED("SQLite binding")],
-  ["fs/promises", STD("fs/promises, for readFile, writeFile, open, access, utimes, lutimes, chmod, symlink, link, readlink and realpath")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, chmodSync, symlinkSync, linkSync, readlinkSync, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync and fsyncSync")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative, normalize, isAbsolute, parse and format")], ["crypto", STD("crypto, for createHash, createHmac, randomBytes, randomUUID, getRandomValues and hash")],
+  ["fs/promises", STD("fs/promises, for readFile, writeFile, open, access, utimes, lutimes, chmod, symlink, link, readlink, realpath and watch")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync with withFileTypes, realpathSync, mkdtempSync, rmSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, chmodSync, symlinkSync, linkSync, readlinkSync, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync and fsyncSync")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative, normalize, isAbsolute, parse and format")], ["crypto", STD("crypto, for createHash, createHmac, randomBytes, randomUUID, getRandomValues and hash")],
   // fetch and serve speak HTTPS, but importing `https` needs the same shim as `http`, and `tls`
   // Node's own connect and its sockets with events.
   ["https", PLANNED("node:http server shim")], ["tls", PLANNED("node:tls")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("child_process, for spawnSync, execFileSync and execSync")],
@@ -197,7 +197,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   // own methods, such as `toString("hex")` and `readUInt32BE`.
   // `crypto` is more than std's random functions and one-shot hashes: an import of only those is portable.
   ["readline", STD("the readLine global and the stdin module, for lines, text and bytes")], ["dgram", STD("UdpSocket")],
-  ["process", STD("process, for argv, env, exit, platform, arch and execPath")], ["perf_hooks", STD("the global performance, for now()")],
+  ["process", STD("process, for argv, env, exit, platform, arch, execPath, cwd, chdir, pid, on, once, kill and signals")], ["perf_hooks", STD("the global performance, for now()")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
 ]);
 const FEATURES = new Map(RULES.flatMap((r) => (r.feature ? [[r.id, r.feature] as const] : [])));
@@ -432,7 +432,7 @@ function classify({ path, envKeys, statementDestructures, metaRead, ownBun }: Sc
       if (["WeakMap", "WeakSet"].some((name) => named(n.callee, name))) push("collections");
       break;
     case "member":
-      if (named(n.object, "process") && !["argv", "env", "exit", "platform", "arch", "execPath"].includes(n.name as string)) push("process");
+      if (named(n.object, "process") && !["argv", "env", "exit", "platform", "arch", "execPath", "cwd", "chdir", "on", "once", "kill", "pid"].includes(n.name as string)) push("process");
       if (named(n.object, "process") && n.name === "env" && !envKeys.has(n)) push("process");
       if (!ownBun && named(n.object, "Bun") && !BUN_MEMBERS.includes(n.name as string)) push("bunGlobals");
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);

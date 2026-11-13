@@ -6034,12 +6034,32 @@ export class Expressions<C extends Context> implements Union<C> {
       return false;
     }
     if (this.isInterface(to)) return unsatisfied(given, to, this.ctx.members(), { start: a.start, end: a.end }) === undefined;
+    if (r.kind === "object" && a.kind === "object") return this.objectPasses(a, given, r.fields.slice(), p);
     if (r.kind === "literal") {
       if (a.kind === "string") return a.value === r.value;
       if (a.kind === "bool") return a.value === r.value;
       return n !== undefined && n === r.value;
     }
     return false;
+  }
+
+  // An object literal passes field by field, as TypeScript reads one, so `{ withFileTypes: true }`
+  // takes the overload wanting `true` where its type alone, widened to boolean, takes none.
+  /** @throws {CompileError} */
+  private objectPasses(this: Mut<this>, a: Ref<Extract<Expr, { kind: "object" }>>, given: Type, fields: Ref<Field[]>, p: Ref<Param>): boolean {
+    const r = this.recOf(given);
+    if (r === undefined || r.kind !== "object") return false;
+    for (const prop of a.props) if (prop.kind !== "property") return false;
+    for (const f of fields) {
+      const prop = a.props.find((q) => q.kind === "property" && q.key === f.name);
+      const held = r.fields.find((g) => g.name === f.name);
+      if (prop === undefined || prop.kind !== "property" || held === undefined) {
+        if (f.optional === undefined) return false;
+        continue;
+      }
+      if (!this.passes(prop.value, held.type, f.type, p)) return false;
+    }
+    return true;
   }
 
   // Whether an arrow passes for a function type: no more parameters than it takes, each one

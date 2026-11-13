@@ -593,6 +593,7 @@ function linkOf(ids: Ids, module: Module, index: usize, library: boolean): Linke
   if (spaces.size > 0 || valued.size > 0) throughSpaces(ids, l.body, spaces, bind, valued);
   // A file module's call naming an encoding, linked to the function giving a string.
   if ([...l.imports.values()].some(({ from }) => Object.hasOwn(ENCODED, from.path))) byEncoding(l.body, l.imports, bind);
+  if (module.src.includes("fatal")) fatalDecoders(l.body);
   renameIn(ids, l.body, (name) => void l.used.add(name));
   return l;
 }
@@ -636,6 +637,9 @@ function scoped(matters: (name: string) => boolean, visit: (n: Record<string, un
 // the entry file. They are read as members, by a literal key, or by destructuring `import.meta`
 // in a declaration; any other use is left for the checker to refuse.
 function lowerImportMeta(ids: Ids, statements: Stmt[], path: string, entry: boolean) {
+  // A script's `if (import.meta.main) main();`, as Bun runs one, says only what a native program
+  // does anyway, so it goes.
+  for (let i = statements.length - 1; i >= 0; i--) if (startsMain(statements[i]!)) statements.splice(i, 1);
   const values: Record<string, string | boolean> = { path, file: basename(path), dir: dirname(path), url: pathToFileURL(path).href, main: entry, dirname: dirname(path), filename: path };
   const rewrites = new Rewrites();
   const literal = (value: string | boolean, at: Span): Expr => (typeof value === "string" ? { id: nextId(ids), kind: "string", value, ...at } : { id: nextId(ids), kind: "bool", value, ...at });
@@ -654,6 +658,14 @@ function lowerImportMeta(ids: Ids, statements: Stmt[], path: string, entry: bool
     rewrites.replace(n, literal(values[key]!, { start: n.start, end: n.end }));
   });
   rebuiltStmts(statements, rewrites);
+}
+
+function startsMain(s: Stmt): boolean {
+  if (s.kind !== "if" || s.else !== undefined || s.then.length !== 1) return false;
+  const cond = s.cond;
+  const body = s.then[0]!;
+  const call = body.kind === "expr" ? body.expr : undefined;
+  return cond.kind === "member" && cond.object.kind === "meta" && cond.object.name === "import.meta" && cond.name === "main" && call?.kind === "call" && call.callee.kind === "ident" && call.callee.name === "main" && call.args.length === 0 && call.typeArgs.length === 0;
 }
 
 // The names a module exports.
@@ -801,6 +813,23 @@ function byEncoding(body: Stmt[], imports: Linked["imports"], bind: (alias: stri
     const alias = `${callee!.name}:text`;
     if (!imports.has(alias)) bind(alias, target.from, `${target.name}Text`, given);
     callee!.name = alias;
+    return false;
+  });
+  walk({ of: "stmts", node: body }, new Set());
+}
+
+// `new TextDecoder(label, { fatal: true })` throws where a plain decoder doesn't, so it is std's
+// class whose decode says so. The option is read while compiling, so it must be a literal.
+function fatalDecoders(body: Stmt[]) {
+  const walk = scoped((name) => name === "TextDecoder", (n, hidden) => {
+    const callee = n.callee as { kind?: string; name?: string } | undefined;
+    if (n.kind !== "new" || callee?.kind !== "ident" || callee.name !== "TextDecoder" || hidden.has("TextDecoder")) return false;
+    const options = (n.args as Expr[] | undefined)?.[1];
+    const fatal = options?.kind === "object" ? options.props.find((p) => (p.kind === "property" && p.key === "fatal") || (p.kind === "shorthand" && p.name === "fatal")) : undefined;
+    if (fatal === undefined) return false;
+    const value = fatal.kind === "property" ? fatal.value : fatal;
+    if (value.kind !== "bool") throw new CompileError("E0908", "'TextDecoder' takes fatal as a literal, true or false, so whether decode throws is known while compiling", value.start, value.end);
+    if (value.value) callee.name = "__FatalTextDecoder";
     return false;
   });
   walk({ of: "stmts", node: body }, new Set());
