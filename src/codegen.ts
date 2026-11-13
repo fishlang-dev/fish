@@ -15,7 +15,7 @@ import type { ArithmeticOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, 
 import { ARRAY, DYN, compound, Conversions, llvmOf, textOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
+import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.ts";
 import type { Tables } from "./compilation.ts";
 import type { Kind, Verdict } from "./narrow.ts";
@@ -188,8 +188,12 @@ function stmtKey(s: Ref<Stmt>): Stmt {
   return { id: s.id, kind: "empty", start: s.start, end: s.end };
 }
 
-function exprKey(e: Ref<{ id: usize; start: usize; end: usize }>): Expr {
+function exprKey(e: Ref<Expr>): Expr {
   return { id: e.id, kind: "this", start: e.start, end: e.end };
+}
+
+function keyAt(id: usize, start: usize, end: usize): Expr {
+  return { id, kind: "this", start, end };
 }
 
 // Whether an expression names a place: a variable, `this`, or a field read off one.
@@ -3683,7 +3687,7 @@ class Codegen implements PrintHost, ComptimeHost {
         return;
       }
       const part7 = cg.inst(target).returns;
-      const convert3 = this.convert(result, part7, m.returns);
+      const convert3 = cg.convert(result, part7, m.returns);
       give(cg, convert3);
     }, m.params.map((p, i) => `${this.llvm(p)} %a${i}`));
     return name;
@@ -4992,7 +4996,7 @@ class Codegen implements PrintHost, ComptimeHost {
       if (arm.body.kind === "block") {
         const given = this.label();
         this.exits.set(stmtKey(arm.body), { exit: given, depth: this.scopes.length });
-        this.arms.set(arm.body, result !== undefined && (slot !== undefined && slot !== "") ? { slot, type: result } : undefined);
+        this.arms.set(stmtKey(arm.body), result !== undefined && (slot !== undefined && slot !== "") ? { slot, type: result } : undefined);
         const outer = this.floor;
         this.floor = mark;
         this.statement(arm.body);
@@ -5173,7 +5177,7 @@ class Codegen implements PrintHost, ComptimeHost {
   bindAll(this: Mut<this>, p: Ref<Pattern>, v: string, at: string | undefined, move: boolean): void {
     const info = this.cur().patterns.get(p)!;
     if (info.kind === "any" && p.kind === "ident") {
-      const local = this.resolved(exprKey(p));
+      const local = this.resolved(keyAt(p.id, p.start, p.end));
       this.reserve(local);
       // A binding borrowing the part points where it lives; one of a part that is itself a
       // reference, like a `Mut` field, holds that reference.
@@ -9415,7 +9419,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (target === undefined) {
       if (this.tables.formatCalls.has(e)) return this.formatted(e);
       if (this.tables.inspectCalls.has(e)) {
-        const [a] = e.args as [Expr];
+        const a: Ref<Expr> = e.args[0]!;
         const [slot, result] = [this.alloca(FARG), this.temp()];
         const chosen = a.kind === "string" ? this.text(a.value) : this.value(a);
         this.describe(slot, chosen, this.printedType(a), { text: false, depth: 2 });
@@ -10374,8 +10378,16 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // A tuple's fixed elements in order, with where each is in its fields, and its rest array's.
   tupleOrder(t: ObjectType): [{ f: Field; i: usize }[], { f: Field; i: usize } | undefined] {
-    const all = this.tables.typing.rec(t).fields.map((f, i) => ({ f, i }));
-    return [all.filter(({ f }) => f.name !== "...").sort((a, b) => Number(a.f.name) - Number(b.f.name)), all.find(({ f }) => f.name === "...")];
+    let fixed: { f: Field; i: usize }[] = [];
+    let rest: { f: Field; i: usize } | undefined = undefined;
+    const fields = this.tables.typing.rec(t).fields;
+    for (let i: usize = 0; i < fields.length; i++) {
+      const f = copyField(fields[i]!);
+      if (f.name !== "...") fixed.push({ f, i });
+      else if (rest === undefined) rest = { f, i };
+    }
+    fixed.sort((a, b) => parseInt(a.f.name)! - parseInt(b.f.name)!);
+    return [fixed, rest];
   }
 
 
@@ -10660,11 +10672,13 @@ class Codegen implements PrintHost, ComptimeHost {
       cg.emit(`store ${ARRAY} ${v}, ptr ${slot}`);
       return slot;
     };
-    args.forEach((a, i) => {
-      const rustCrossing2 = rustCrossing(this.tables.typing, this.inst(target).signature![i as usize]!);
-      const part2 = this.inst(target).signature![i as usize]!;
-      return passed.push(...pass(this, rustCrossing2, part2, a.slice(a.lastIndexOf(" ") + 1)));
-    });
+    for (let i: usize = 0; i < args.length; i++) {
+      const a = args[i]!;
+      const part2 = this.inst(target).signature![i]!;
+      const rustCrossing2 = rustCrossing(this.tables.typing, part2);
+      const crossed2 = pass(this, rustCrossing2, part2, a.slice(a.lastIndexOf(" ") + 1));
+      for (const x of crossed2) passed.push(x);
+    }
     const gives = rustGiven(this.tables.typing, this.tables.arenas, this.inst(target));
     const shim = shimGives(this.tables.typing, gives);
     const out = (shim.out !== undefined && shim.out !== "") ? this.alloca(shim.out) : undefined;
@@ -10747,7 +10761,10 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // The future an async function's poll, or an async generator's resume, answers as.
   pollOf(this: Mut<this>, i: InstanceId): FutureType {
-    return this.inst(i).future ?? this.tables.typing.leafFuture("next", this.inst(i).generator!);
+    const future = this.inst(i).future;
+    if (future !== undefined) return future;
+    const generator = this.inst(i).generator!;
+    return this.tables.typing.leafFuture("next", generator);
   }
 
 
@@ -10821,7 +10838,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const at = this.finallies.length - 1;
     let i = this.finallies[at]!.exits.findIndex((e) => e.key === key);
     if (i < 0) {
-      this.finallies[at]!.exits.push({ key, resume });
+      this.finallies[at]!.exits.push({ key: key, resume: resume });
       i = (this.finallies[at]!.exits.length - 1) as i64;
     }
     this.emit(`store i32 ${i}, ptr ${this.finallies[at]!.chosen}`);
@@ -10853,7 +10870,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Jumps to a label outside the scopes from `depth` inward, dropping what they own, through
   // each `finally` whose region it leaves.
-  jump(this: Mut<this>, to: string, depth: usize) {
+  jump(this: Mut<this>, to: string, depth: usize): void {
     const inner = this.finallies.length > 0 ? this.finallies[this.finallies.length - 1]! : undefined;
     if (inner !== undefined && (parseInt(to.slice(1))! as usize) < inner.start) {
       this.drop(inner.depth);
@@ -10937,7 +10954,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // else leaves the function with it.
   // What the statement made so far, and what the scopes left own, are dropped on the way; in a
   // match arm's block, so are the values pending in the expressions it leaves.
-  route(this: Mut<this>, error: string, to: Type) {
+  route(this: Mut<this>, error: string, to: Type): void {
     const region = this.finallies.length > 0 ? this.finallies[this.finallies.length - 1]! : undefined;
     const toRegion = region !== undefined && this.handlers.length <= region.handlers;
     const kept = region !== undefined && toRegion ? region.floor : this.handlers.length > 0 ? this.handlers[this.handlers.length - 1]!.floor : 0;
