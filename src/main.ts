@@ -647,7 +647,7 @@ else if (import.meta.main) {
         fail(`fishc survey: the plan '${values.plan}' can't be read: ${e instanceof Error ? e.message : e}`);
       }
       const ranking = rank(dirs, values.self, plan);
-      console.log(values.json ? JSON.stringify(ranking, null, 2) : formatRanking(ranking));
+      console.log(values.json ? JSON.stringify(ranking, null, 2) : formatRanking(ranking, plan !== undefined));
     } else if (values.compare !== undefined) {
       let then;
       try {

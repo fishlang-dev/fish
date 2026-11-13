@@ -76,7 +76,6 @@ function eachChild(node: AnyNode, step: ChildStep): void {
 }
 
 type HoistEnv = { names: Names; ids: Ids };
-type CapturedFn = (local: Local, name: string) => void;
 
 class Hoister {
   ids: Ids;
@@ -318,21 +317,20 @@ class Hoister {
   }
 }
 
-// Each name made is noted in `names`, and each node made numbered from `ids`. `captured`, when
-// given, is told of each local class or enum using a variable around it, which is otherwise an
-// error.
+// The declarations hoisting made program-wide, and, when asked for, where each local class or
+// enum using a variable around it starts, in the order found.
+export type Hoisted = { hoisted: Stmt[]; captured: usize[] };
+
+// Each name made is noted in `names`, and each node made numbered from `ids`. A local class or
+// enum using a variable around it is an error, unless `collect` asks for them to be listed.
 /** @throws {CompileError} */
-export function hoistLocals(env: Mut<HoistEnv>, program: Mut<Stmt[]>, captured?: CapturedFn): Stmt[] {
-  let h = new Hoister(env.ids.last, captured !== undefined);
+export function hoistLocals(env: Mut<HoistEnv>, program: Mut<Stmt[]>, collect: boolean = false): Hoisted {
+  let h = new Hoister(env.ids.last, collect);
   for (const s of program) h.visit({ of: "stmt", node: s }, undefined);
   env.ids.last = h.ids.last;
   for (const name of h.localNames) env.names.local.add(name);
-  if (captured !== undefined) {
-    for (let c = h.capturedLocals; c.length > 0; ) {
-      const [loc, used] = c.shift()!;
-      captured(loc, used);
-    }
-  }
+  let captured: usize[] = [];
+  for (const [loc, _used] of h.capturedLocals) captured.push(loc.start);
   rebuiltStmts(h.hoisted, h.rewrites);
   // A local declared in a hoisted class's method leaves that method too; the hoisted
   // declarations themselves are evicted only from where they were written, so only their
@@ -354,7 +352,7 @@ export function hoistLocals(env: Mut<HoistEnv>, program: Mut<Stmt[]>, captured?:
     } else h.hoisted.push(s);
   }
   rebuiltStmts(program, h.rewrites);
-  return h.hoisted;
+  return { hoisted: h.hoisted, captured };
 }
 
 // The outer type parameters each local uses, itself or through a local it names, in the order

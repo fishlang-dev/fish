@@ -99,12 +99,12 @@ test("forms that look alike are told apart", () => {
   expect(counts("import path from \"node:path\";\nexport const b = path.isAbsolute(x) ? path.format(path.parse(x)) : x;\n")).toEqual({});
   expect(counts("function f() {\n  console.error(1);\n  console.warn(2);\n  console.info(3);\n  const t = Date.now() + performance.now();\n}\n")).toEqual({ console: 1 });
   expect(counts("function f() {\n  const a = process.argv[2];\n  const h = process.env.HOME;\n  process.exit(1);\n}\n")).toEqual({});
-  expect(counts("function f() {\n  process.env.X = \"y\";\n  delete process.env.Y;\n  const p = process.pid;\n}\n")).toEqual({ process: 3, R3: 1 });
-  expect(counts("function f() {\n  const { HOME } = process.env;\n  const k = Object.keys(process.env);\n  const h = process.env?.HOME;\n  process.env.N++;\n}\n")).toEqual({ process: 4 });
+  expect(counts("function f() {\n  process.env.X = \"y\";\n  delete process.env.Y;\n  const p = process.ppid;\n}\n")).toEqual({ process: 3, R3: 1 });
+  expect(counts("function f() {\n  const { HOME } = process.env;\n  const k = Object.keys(process.env);\n  const e = process.env;\n  const h = process.env?.HOME;\n  process.env.N++;\n}\n")).toEqual({ process: 4 });
   expect(counts("async function f() {\n  const t = await Bun.file(\"a\").text();\n  Bun.spawnSync([\"ls\"], { cwd: Bun.env.HOME });\n  await Bun.sleep(1);\n  return Bun.which(\"sh\") + Bun.version;\n}\n")).toEqual({});
-  expect(counts("function f() {\n  const c = Bun.spawn([\"ls\"]);\n  return Bun.build({ entrypoints: [] });\n}\n")).toEqual({ bunGlobals: 2 });
+  expect(counts("function f() {\n  const c = Bun.gc(true);\n  return Bun.build({ entrypoints: [] });\n}\n")).toEqual({ bunGlobals: 2 });
   expect(counts("const Bun = { spawn() {} };\nfunction f() {\n  Bun.spawn();\n}\n")).toEqual({});
-  expect(counts("import { which, sleep, serve } from \"bun\";\nimport { spawn } from \"bun\";\n")).toEqual({ bunModules: 1 });
+  expect(counts("import { which, sleep, serve } from \"bun\";\nimport { password } from \"bun\";\n")).toEqual({ bunModules: 1 });
   expect(counts("type F = (x: number) => void;\nconst g = function () { return 1; };\n")).toEqual({ A9: 1 });
   expect(counts("declare const DEV: boolean;\nlet a = 1;\nexport let b = 2;\nfor (const x of [1]) {}\n")).toEqual({ A4: 2 });
   expect(counts("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n")).toEqual({});
@@ -271,14 +271,15 @@ test("the curve picks the feature freeing the most lines first, and frees a file
   });
 });
 
-test("a project using Buffer waits on Buffer, though std has typed arrays, base64 and hex", () => {
+test("a project using Buffer ports, but for the Buffer members std lacks, found by name", () => {
   projects([{
     "a.ts": "import { Buffer } from \"node:buffer\";\nexport function pack(a: Uint8Array): Buffer {\n  const head = Buffer.alloc(4);\n  head.writeUInt32BE(a.length, 0);\n  return Buffer.concat([head, Buffer.from(a)]);\n}\n",
     "b.ts": "export const one = 1;\n",
   }], (dirs) => {
     const r = rank(dirs);
     expect(r.curve.start.share).toBeLessThan(100);
-    expect(r.curve.steps.map((s) => s.feature)).toEqual(["Buffer"]);
+    expect(r.curve.steps.map((s) => s.feature)).toEqual(["Node built-ins"]);
+    expect(scanFiles(dirs[0]!).map(featuresOf)).toEqual([["Node built-ins"], []]);
   });
 });
 
@@ -317,7 +318,7 @@ test("ties go to the feature carrying most of what waits, then to the name, desp
   // add to just under 1; B and Z weigh exactly 1, tied with A, which comes first by name.
   const unit = (lines: number, waits: string[]) => ({ lines, waits: new Set(waits), rules: [] as [string, string][] });
   const units = [...Array.from({ length: 10 }, (_, i) => unit(1, ["A", ...Array.from({ length: 9 }, (_, k) => `F${i}-${k}`)])), unit(2, ["B", "Z"])];
-  expect(stepsOf(units, 12).steps.slice(0, 2).map((s) => s.feature)).toEqual(["A", "B"]);
+  expect(stepsOf(units, 12, undefined).steps.slice(0, 2).map((s) => s.feature)).toEqual(["A", "B"]);
 });
 
 test("a plan names each feature's item and whether it is done", () => {
@@ -326,7 +327,7 @@ test("a plan names each feature's item and whether it is done", () => {
     expect(Object.fromEntries(r.curve.steps.map((s) => [s.feature, s.plan]))).toEqual({
       "The rest of console": { item: "7", done: false }, "for...in": { item: "9b", done: true }, "Namespaces": null,
     });
-    expect(formatRanking(r)).toContain("(plan item 9b, done)");
+    expect(formatRanking(r, true)).toContain("(plan item 9b, done)");
   });
   project({ "plan.md": "- [ ] 1. **`for...in`** - keys\r\n- [x]  2.  **Regex**\r\n- [ ] 3. **Regex**\r\n" }, (dir) => {
     const plan = readPlan(join(dir, "plan.md"));
@@ -512,21 +513,21 @@ test("node:readline waits on nothing, as readLine and the stdin module replace i
 
 test("each Node built-in waits on the feature that replaces it, and the ranking names those features", () => {
   project({
-    "a.ts": "import { isatty } from \"node:tty\";\nimport { createHash } from \"crypto\";\n",
+    "a.ts": "import { isatty } from \"node:tty\";\nimport { EventEmitter } from \"node:events\";\n",
     "b.ts": "import { setTimeout } from \"node:timers/promises\";\n",
     "c.ts": "import vm from \"vm\";\nimport d = require(\"tty\");\n",
-    "plan.md": "- [ ] 1. **Terminal detection and styled text**\n- [ ] 2. **createHash, createHmac and randomBytes from node:crypto**\n",
+    "plan.md": "- [ ] 1. **Terminal detection and styled text**\n- [ ] 2. **EventTarget and EventEmitter**\n",
   }, (dir) => {
     // `timers/promises` is std's sleep, so b.ts waits on nothing.
-    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["Terminal detection and styled text", "createHash, createHmac and randomBytes from node:crypto"], [], ["Node built-ins", "Terminal detection and styled text"]]);
+    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([["EventTarget and EventEmitter", "Terminal detection and styled text"], [], ["Node built-ins", "Terminal detection and styled text"]]);
     const steps = rank([dir], undefined, readPlan(join(dir, "plan.md"))).curve.steps;
     expect(steps.map((s) => [s.feature, s.rules, s.plan])).toEqual([
       ["Terminal detection and styled text", ["nodeBuiltins"], { item: "1", done: false }],
       // Each frees one 2-line file, so the tie goes by name.
+      ["EventTarget and EventEmitter", ["nodeBuiltins"], { item: "2", done: false }],
       ["Node built-ins", ["nodeBuiltins"], null],
-      ["createHash, createHmac and randomBytes from node:crypto", ["nodeBuiltins"], { item: "2", done: false }],
     ]);
-    expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["tty", "crypto", "timers/promises"]);
+    expect(survey(dir).waiting.find((r) => r.id === "nodeBuiltins")!.examples.map((e) => e.module)).toEqual(["tty", "events", "timers/promises"]);
   });
   project({
     "a.ts": "export * from \"zlib\";\nexport { isatty } from \"node:tty\";\n",
@@ -569,15 +570,15 @@ test("child_process's sync calls are std's, and spawn still waits", () => {
 
 test("the report lists each Node built-in with its files and what replaces it", () => {
   project({
-    "a.ts": "import { isatty } from \"node:tty\";\nimport { createHash } from \"crypto\";\n",
+    "a.ts": "import { isatty } from \"node:tty\";\nimport { EventEmitter } from \"node:events\";\n",
     "b.ts": "import tty from \"node:tty\";\nimport http from \"node:http\";\n",
     "c.ts": "import vm from \"vm\";\nimport net from \"node:net\";\nimport { createSocket } from \"node:dgram\";\n",
   }, (dir) => {
     const r = survey(dir);
     expect(r.builtins).toEqual([
       { module: "tty", files: 2, equivalent: { name: "Terminal detection and styled text", planned: true } },
-      { module: "crypto", files: 1, equivalent: { name: "createHash, createHmac and randomBytes from node:crypto", planned: true } },
       { module: "dgram", files: 1, equivalent: { name: "UdpSocket", planned: false } },
+      { module: "events", files: 1, equivalent: { name: "EventTarget and EventEmitter", planned: true } },
       { module: "http", files: 1, equivalent: { name: "node:http server shim", planned: true } },
       { module: "net", files: 1, equivalent: { name: "TcpListener, TcpStream, UnixListener and UnixStream", planned: false } },
       { module: "vm", files: 1 },
@@ -649,10 +650,10 @@ test("for await over an array of promises is a guided rewrite, counted as Fish r
 test("std's random functions and hash make Math.random, crypto imports of them, and uuid and nanoid portable", () => {
   project({
     "a.ts": "import { randomUUID, getRandomValues, hash } from \"node:crypto\";\nexport const id = randomUUID() + Math.random();\n",
-    "b.ts": "import { randomUUID, createHash } from \"crypto\";\n",
+    "b.ts": "import { randomUUID, createHash } from \"crypto\";\nimport { EventEmitter } from \"node:events\";\n",
     "package.json": JSON.stringify({ dependencies: { uuid: "1", nanoid: "1" } }),
   }, (dir) => {
-    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([[], ["createHash, createHmac and randomBytes from node:crypto"]]);
+    expect(scanFiles(dir).filter((f) => f.file.endsWith(".ts")).map(featuresOf)).toEqual([[], ["EventTarget and EventEmitter"]]);
     expect(Object.fromEntries(dependencies(dir)!.list.map((x) => [x.name, [x.group, x.equivalent?.name]]))).toEqual({
       nanoid: ["std", "crypto.getRandomValues, to build IDs from"], uuid: ["std", "crypto.randomUUID, for v4 only"],
     });
@@ -679,14 +680,14 @@ test("static file packages are replaced by Router.static", () => {
   });
 });
 
-test("randomBytes waits on Buffer, since Node's gives a Buffer and std's a u8[]", () => {
+test("randomBytes gives a Buffer, so Buffer methods called on it port", () => {
   project({
     "a.ts": "import { randomBytes } from \"node:crypto\";\nexport const t = randomBytes(16).toString(\"hex\");\n",
     "b.ts": "import crypto from \"crypto\";\nexport const b = crypto.randomBytes(8).readUInt32BE(0) + crypto.randomUUID().length;\n",
-    "c.ts": "import { randomBytes, createHash } from \"crypto\";\n",
+    "c.ts": "import { randomBytes, createCipheriv } from \"crypto\";\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([["Buffer"], ["Buffer"], ["Buffer", "createHash, createHmac and randomBytes from node:crypto"]]);
-    expect(survey(dir).builtins!.map((b) => b.module)).toEqual(["buffer", "crypto"]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Node built-ins"]]);
+    expect(survey(dir).builtins!.map((b) => b.module)).toEqual(["crypto"]);
   });
 });
 
@@ -702,18 +703,18 @@ test("node:assert ports for its default export and ok, and its other names wait 
   });
 });
 
-test("an import whose missing names wait on different features waits on each, and isn't freed by one", () => {
+test("crypto names std lacks still wait when randomBytes beside them ports", () => {
   projects([
-    { "a.ts": "import { randomBytes, createHash } from \"node:crypto\";\nconsole.log(randomBytes(4), createHash(\"sha1\"));\n" },
+    { "a.ts": "import { randomBytes, createCipheriv } from \"node:crypto\";\nconsole.log(randomBytes(4), createCipheriv);\n" },
     { "b.ts": "import { randomBytes, randomInt } from \"crypto\";\nconsole.log(randomBytes(4), randomInt(3));\n" },
-    { "c.ts": "import crypto from \"crypto\";\nconsole.log(crypto.randomBytes(4), crypto.createHash(\"md5\"), crypto.randomUUID());\n" },
+    { "c.ts": "import crypto from \"crypto\";\nconsole.log(crypto.randomBytes(4), crypto.createCipheriv, crypto.randomUUID());\n" },
   ], ([a, b, c]) => {
-    for (const [dir, other] of [[a!, "createHash, createHmac and randomBytes from node:crypto"], [b!, "Node built-ins"], [c!, "createHash, createHmac and randomBytes from node:crypto"]] as const) {
-      expect(scanFiles(dir).map(featuresOf)).toEqual([[other, "Buffer"].sort()]);
+    for (const [dir, other] of [[a!, "Node built-ins"], [b!, "Node built-ins"], [c!, "Node built-ins"]] as const) {
+      expect(scanFiles(dir).map(featuresOf)).toEqual([[other]]);
       const steps = rank([dir]).curve.steps;
-      expect(steps.map((s) => [s.gained.files, s.portable.share])).toEqual([[0, 0], [1, 100]]);
+      expect(steps.map((s) => [s.gained.files, s.portable.share])).toEqual([[1, 100]]);
     }
-    expect(survey(b!).builtins!.map((x) => [x.module, x.equivalent?.name])).toEqual([["buffer", "Buffer"], ["crypto.randomInt", undefined]]);
+    expect(survey(b!).builtins!.map((x) => [x.module, x.equivalent?.name])).toEqual([["crypto.randomInt", undefined]]);
   });
 });
 
