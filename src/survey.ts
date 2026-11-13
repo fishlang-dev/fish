@@ -3,12 +3,18 @@ import { join, relative } from "node:path";
 import { CompileError, locate } from "./diag.ts";
 import { dependencies, formatDependencies, type Dependencies } from "./deps.ts";
 import { hoistLocals } from "./locals.ts";
-import { isNode, named, surveyHits, type Node } from "./migrate.ts";
+import { surveyHits } from "./migrate.ts";
 import { nextId, renumberStmts } from "./nodes.ts";
 import { parse, type Stmt } from "./parser.ts";
 import { STD_MODULES, stdModule } from "./std.ts";
 import { findTypings } from "./typings.ts";
 import { IMPORT_META_MEMBERS } from "./unsupported.ts";
+
+// A node of a parsed tree as the survey's walks read it: by its kind, with its other fields looked
+// up by name.
+type Node = { kind: string; start: usize; end: usize; [key: string]: unknown };
+const isNode = (v: unknown): v is Node => typeof v === "object" && v !== null && typeof (v as Node).kind === "string" && typeof (v as Node).start === "number";
+const named = (n: unknown, name: string) => isNode(n) && n.kind === "ident" && n.name === name;
 
 // `fishc survey`: how hard an existing TypeScript project is to port, read from its syntax alone.
 // The grade counts the work a person does, the migration lint's rejected constructs and guided

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { CompileError } from "../src/diag.ts";
 import { directive, fix, migrations, rejects, surveyHits } from "../src/migrate.ts";
-import { parse, parseWithComments } from "../src/parser.ts";
+import { parse, parseWithComments, type Expr, type Stmt } from "../src/parser.ts";
 
 // Each hit in `src` as its rule and the text it spans, in source order.
 function hits(src: string): [string, string][] {
@@ -71,7 +71,8 @@ test("R7 finds an enum merged with a namespace, and declarations under export de
 });
 
 test("a very long array is walked without overflowing the stack", () => {
-  const program = [{ kind: "expr", start: 0, end: 1, expr: { kind: "array", start: 0, end: 1, elements: Array.from({ length: 1_000_000 }, () => ({ kind: "int", start: 0, end: 1, value: 1n })) } }];
+  const elements: Expr[] = Array.from({ length: 1_000_000 }, (_, i) => ({ id: i + 2, kind: "int" as const, start: 0, end: 1, value: 1n }));
+  const program: Stmt[] = [{ id: 0, kind: "expr", start: 0, end: 1, expr: { id: 1, kind: "array", start: 0, end: 1, elements } }];
   expect(rejects(program)).toEqual([]);
 });
 

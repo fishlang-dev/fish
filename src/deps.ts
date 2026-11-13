@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 // The dependencies a project's package.json names, sorted by what a port to Fish does with them:
@@ -13,40 +13,58 @@ export type Dependency = {
 export type Dependencies = { counts: Record<Group, usize>; list: Dependency[]; problem?: string };
 
 // What replaces a package: Fish's std, or a planned feature named by its title.
-const IN_STD = (name: string) => ({ name, planned: false });
-const PLANNED = (title: string) => ({ name: title, planned: true });
-const EQUIVALENTS = new Map<string, { name: string; planned: boolean }>(Object.entries({
-  ...Object.fromEntries(["express", "hono", "fastify", "koa", "polka", "restify", "@hono/node-server"].map((p) => [p, IN_STD("serve and Router")])),
+type Equivalent = { name: string; planned: boolean };
+const IN_STD = (name: string): Equivalent => ({ name, planned: false });
+const PLANNED = (title: string): Equivalent => ({ name: title, planned: true });
+const EQUIVALENTS = equivalents();
+
+function equivalents(): Map<string, Equivalent> {
+  let m = new Map<string, Equivalent>();
+  add(m, ["express", "hono", "fastify", "koa", "polka", "restify", "@hono/node-server"], IN_STD("serve and Router"));
   // async-mutex holds its lock across `await`, which a Semaphore's permit can and a Lock can't.
-  "async-mutex": IN_STD("Semaphore"), "p-limit": IN_STD("Semaphore"), "abort-controller": IN_STD("AbortController"),
-  ...Object.fromEntries(["url-parse", "whatwg-url", "query-string", "querystringify"].map((p) => [p, IN_STD("URL and URLSearchParams")])),
-  ...Object.fromEntries(["node-fetch", "axios", "undici", "got", "cross-fetch", "superagent", "ky"].map((p) => [p, IN_STD("fetch")])),
-  ...Object.fromEntries(["commander", "yargs", "minimist", "meow", "cac"].map((p) => [p, PLANNED("Typed CLI arguments")])),
-  ...Object.fromEntries(["dotenv", "env-var"].map((p) => [p, PLANNED("Typed configuration from the environment")])),
+  m.set("async-mutex", IN_STD("Semaphore"));
+  m.set("p-limit", IN_STD("Semaphore"));
+  m.set("abort-controller", IN_STD("AbortController"));
+  add(m, ["url-parse", "whatwg-url", "query-string", "querystringify"], IN_STD("URL and URLSearchParams"));
+  add(m, ["node-fetch", "axios", "undici", "got", "cross-fetch", "superagent", "ky"], IN_STD("fetch"));
+  add(m, ["commander", "yargs", "minimist", "meow", "cac"], PLANNED("Typed CLI arguments"));
+  add(m, ["dotenv", "env-var"], PLANNED("Typed configuration from the environment"));
   // ws is mostly a server's; a program using its client waits on the WebSocket client.
-  ...Object.fromEntries(["ws", "express-ws", "@hono/node-ws"].map((p) => [p, IN_STD("Router.ws, for a server")])),
-  uuid: IN_STD("crypto.randomUUID, for v4 only"), nanoid: IN_STD("crypto.getRandomValues, to build IDs from"),
-  ...Object.fromEntries(["dayjs", "date-fns", "moment", "luxon"].map((p) => [p, PLANNED("Date parsing and formatting")])),
-  ...Object.fromEntries(["pino", "winston", "bunyan"].map((p) => [p, PLANNED("Structured logging")])),
-  ...Object.fromEntries(["pg", "postgres"].map((p) => [p, IN_STD("the postgres module's Pool")])),
-  ...Object.fromEntries(["better-sqlite3", "sqlite3"].map((p) => [p, PLANNED("SQLite binding")])),
-  ...Object.fromEntries(["ioredis", "redis"].map((p) => [p, PLANNED("Redis client")])),
-  ...Object.fromEntries(["glob", "fast-glob", "globby"].map((p) => [p, PLANNED("Glob")])),
-  "fs-extra": PLANNED("Directory operations"), chokidar: PLANNED("File watching"), tmp: PLANNED("Temporary files and directories"),
-  ...Object.fromEntries(["execa", "cross-spawn"].map((p) => [p, PLANNED("Streaming child processes")])),
-  ...Object.fromEntries(["node-cron", "cron"].map((p) => [p, PLANNED("Scheduled jobs")])),
-  cors: PLANNED("CORS middleware"), compression: PLANNED("Response compression"), "express-rate-limit": PLANNED("Rate-limiting middleware"),
-  ...Object.fromEntries(["cookie", "cookie-parser"].map((p) => [p, IN_STD("req.cookies and res.cookies")])),
-  ...Object.fromEntries(["serve-static", "@fastify/static", "koa-static", "sirv"].map((p) => [p, IN_STD("Router.static")])),
-  ...Object.fromEntries(["marked", "markdown-it"].map((p) => [p, PLANNED("Markdown to HTML")])),
-  ...Object.fromEntries(["sanitize-html", "dompurify"].map((p) => [p, PLANNED("HTML sanitization")])),
-  ...Object.fromEntries(["csv-parse", "papaparse"].map((p) => [p, PLANNED("CSV reading and writing")])),
-  nodemailer: PLANNED("SMTP email client"), eventemitter3: PLANNED("EventTarget and EventEmitter"),
-  ...Object.fromEntries(["inquirer", "prompts"].map((p) => [p, PLANNED("Interactive prompts")])),
-  ...Object.fromEntries(["jest", "vitest", "mocha"].map((p) => [p, PLANNED("Jest-style test API")])),
-  "@grpc/grpc-js": PLANNED("gRPC"), "@aws-sdk/client-s3": PLANNED("S3-compatible storage client"),
-  ...Object.fromEntries(["bcryptjs", "bcrypt", "argon2", "jsonwebtoken", "jose"].map((p) => [p, PLANNED("Auth primitives")])),
-}));
+  add(m, ["ws", "express-ws", "@hono/node-ws"], IN_STD("Router.ws, for a server"));
+  m.set("uuid", IN_STD("crypto.randomUUID, for v4 only"));
+  m.set("nanoid", IN_STD("crypto.getRandomValues, to build IDs from"));
+  add(m, ["dayjs", "date-fns", "moment", "luxon"], PLANNED("Date parsing and formatting"));
+  add(m, ["pino", "winston", "bunyan"], PLANNED("Structured logging"));
+  add(m, ["pg", "postgres"], IN_STD("the postgres module's Pool"));
+  add(m, ["better-sqlite3", "sqlite3"], PLANNED("SQLite binding"));
+  add(m, ["ioredis", "redis"], PLANNED("Redis client"));
+  add(m, ["glob", "fast-glob", "globby"], PLANNED("Glob"));
+  m.set("fs-extra", PLANNED("Directory operations"));
+  m.set("chokidar", PLANNED("File watching"));
+  m.set("tmp", PLANNED("Temporary files and directories"));
+  add(m, ["execa", "cross-spawn"], PLANNED("Streaming child processes"));
+  add(m, ["node-cron", "cron"], PLANNED("Scheduled jobs"));
+  m.set("cors", PLANNED("CORS middleware"));
+  m.set("compression", PLANNED("Response compression"));
+  m.set("express-rate-limit", PLANNED("Rate-limiting middleware"));
+  add(m, ["cookie", "cookie-parser"], IN_STD("req.cookies and res.cookies"));
+  add(m, ["serve-static", "@fastify/static", "koa-static", "sirv"], IN_STD("Router.static"));
+  add(m, ["marked", "markdown-it"], PLANNED("Markdown to HTML"));
+  add(m, ["sanitize-html", "dompurify"], PLANNED("HTML sanitization"));
+  add(m, ["csv-parse", "papaparse"], PLANNED("CSV reading and writing"));
+  m.set("nodemailer", PLANNED("SMTP email client"));
+  m.set("eventemitter3", PLANNED("EventTarget and EventEmitter"));
+  add(m, ["inquirer", "prompts"], PLANNED("Interactive prompts"));
+  add(m, ["jest", "vitest", "mocha"], PLANNED("Jest-style test API"));
+  m.set("@grpc/grpc-js", PLANNED("gRPC"));
+  m.set("@aws-sdk/client-s3", PLANNED("S3-compatible storage client"));
+  add(m, ["bcryptjs", "bcrypt", "argon2", "jsonwebtoken", "jose"], PLANNED("Auth primitives"));
+  return m;
+}
+
+function add(m: Mut<Map<string, Equivalent>>, names: Ref<string[]>, e: Ref<Equivalent>) {
+  for (const p of names) m.set(p, { name: e.name, planned: e.planned });
+}
 
 // Packages a native addon builds or loads its compiled code through.
 const NATIVE_HELPERS = new Set(["node-gyp-build", "bindings", "node-addon-api", "prebuild", "prebuild-install", "nan", "node-pre-gyp", "@mapbox/node-pre-gyp"]);
@@ -54,36 +72,105 @@ const NATIVE_HELPERS = new Set(["node-gyp-build", "bindings", "node-addon-api", 
 // `@esbuild/darwin-arm64`, `sharp-linux-x64` or `turbo-darwin-64`.
 const PLATFORMS = /(^|[-/@])(darwin|linux|win32|freebsd|android)-(x64|arm64|ia32|arm|64|universal|x86|ppc64|s390x|riscv64|loong64|mips64el)([-.]|$)/;
 
+// The fields of a package.json read here. Fish checks them as it parses; TypeScript doesn't, so
+// each is still checked where it is read.
+type PackageFields = {
+  dependencies?: { [name: string]: string }; devDependencies?: { [name: string]: string };
+  optionalDependencies?: { [name: string]: string }; gypfile?: boolean;
+};
+
+const isObject = (v: Ref<unknown>): boolean => typeof v === "object" && v !== null && !Array.isArray(v);
+
+// What a failed read or parse says, or `otherwise` for what isn't an Error, as Fish's JsonError
+// and IoError aren't.
+function messageOf(e: Ref<unknown>, otherwise: string): string {
+  return e instanceof Error ? e.message : otherwise;
+}
+
+// A package.json's fields, or why it can't be read. A file whose fields have other types than
+// these reads as having none of them.
+/** @throws {IoError} */
+function readPackage(path: string): PackageFields | string {
+  const text = readFileSync(path, "utf8").replace(/^\uFEFF/, "");
+  try {
+    const v: unknown = JSON.parse(text);
+    if (!isObject(v)) return "it isn't an object";
+  } catch (e) {
+    return messageOf(e, "it isn't JSON");
+  }
+  try {
+    return JSON.parse<PackageFields>(text);
+  } catch (_e) {
+    return {};
+  }
+}
+
 // The project's dependencies, or nothing when it has no package.json.
 export function dependencies(dir: string): Dependencies | undefined {
   const path = join(dir, "package.json");
   if (!existsSync(path)) return undefined;
-  const counts: Record<Group, usize> = { std: 0, planned: 0, native: 0, pure: 0, unknown: 0 };
-  let manifest: Record<string, unknown>;
+  let counts: Record<Group, usize> = { std: 0, planned: 0, native: 0, pure: 0, unknown: 0 };
+  let manifest: PackageFields = {};
   try {
-    manifest = JSON.parse(readFileSync(path, "utf8").replace(/^\uFEFF/, ""));
-    if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) throw new Error("it isn't an object");
+    const read = readPackage(path);
+    if (typeof read === "string") return { counts, list: [], problem: `package.json can't be read: ${read}` };
+    manifest = read;
   } catch (e) {
-    return { counts, list: [], problem: `package.json can't be read: ${e instanceof Error ? e.message : e}` };
+    return { counts, list: [], problem: `package.json can't be read: ${messageOf(e, "it can't be opened")}` };
   }
-  const named = (field: string, dev: boolean) => {
-    const deps = manifest[field];
-    if (typeof deps !== "object" || deps === null || Array.isArray(deps)) return [];
-    return Object.entries(deps).filter(([, version]) => typeof version === "string").map(([name, version]) => ({ name, version: version as string, dev }));
-  };
   // A package in both lists counts once, as the dependency it is at run time.
-  const runtime = named("dependencies", false);
-  const dev = named("devDependencies", true).filter((d) => !runtime.some((r) => r.name === d.name));
-  const list = [...runtime, ...dev].map(({ name, version, dev }) => {
+  const runtime = named(manifest.dependencies, false);
+  let devs = named(manifest.devDependencies, true);
+  let devOnly: Named[] = [];
+  while (devs.length > 0) {
+    const d = devs.shift()!;
+    if (!runtime.some((r) => r.name === d.name)) devOnly.push(d);
+  }
+  let list: Dependency[] = [];
+  for (const { name, version, dev } of [...runtime, ...devOnly]) {
     const kind = kindOf(installed(dir, name));
     const equivalent = EQUIVALENTS.get(name);
-    const group: Group = equivalent ? (equivalent.planned ? "planned" : "std") : kind;
-    counts[group]++;
-    return { name, version, dev, group, kind, ...(equivalent && { equivalent }) };
-  });
+    let group: Group = kind;
+    if (equivalent !== undefined) group = equivalent.planned ? "planned" : "std";
+    bump(counts, group);
+    let d: Dependency = { name, version, dev, group, kind };
+    if (equivalent !== undefined) d.equivalent = equivalent;
+    list.push(d);
+  }
   // Yarn's Plug'n'Play keeps packages in zip archives, with no node_modules to read.
   const pnp = existsSync(join(dir, ".pnp.cjs")) && !existsSync(join(dir, "node_modules"));
-  return { counts, list, ...(pnp && { problem: "this project installs with Yarn Plug'n'Play, whose packages Fish can't read, so they show as not installed" }) };
+  let result: Dependencies = { counts, list };
+  if (pnp) result.problem = "this project installs with Yarn Plug'n'Play, whose packages Fish can't read, so they show as not installed";
+  return result;
+}
+
+type Named = { name: string; version: string; dev: boolean };
+
+function named(deps: Ref<{ [name: string]: string } | undefined>, dev: boolean): Named[] {
+  let out: Named[] = [];
+  if (deps === undefined || !isObject(deps)) return out;
+  for (const [name, version] of Object.entries(deps)) {
+    if (typeof (version as unknown) === "string") out.push({ name, version, dev });
+  }
+  return out;
+}
+
+function bump(counts: Mut<Record<Group, usize>>, g: Group) {
+  switch (g) {
+    case "std": counts.std++; break;
+    case "planned": counts.planned++; break;
+    case "native": counts.native++; break;
+    case "pure": counts.pure++; break;
+    case "unknown": counts.unknown++; break;
+  }
+}
+
+function countOf(counts: Ref<Record<Group, usize>>, g: Group): usize {
+  if (g === "std") return counts.std;
+  if (g === "planned") return counts.planned;
+  if (g === "native") return counts.native;
+  if (g === "pure") return counts.pure;
+  return counts.unknown;
 }
 
 // Where a package is installed, found as Node finds it: in the project's node_modules or that of
@@ -95,48 +182,83 @@ function installed(dir: string, name: string): string {
   }
 }
 
+function keysOf(deps: Ref<{ [name: string]: string } | undefined>): string[] {
+  if (deps === undefined || !isObject(deps)) return [];
+  return Object.keys(deps);
+}
+
 // Whether an installed package is a native addon, plain JavaScript, or not installed.
 function kindOf(dir: string): "native" | "pure" | "unknown" {
-  let pkg: Record<string, unknown>;
+  let pkg: PackageFields = {};
   try {
-    pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8").replace(/^\uFEFF/, ""));
-  } catch {
+    const read = readPackage(join(dir, "package.json"));
+    if (typeof read === "string") {
+      // A package.json that isn't an object still parsed, and reads as one with no fields.
+      if (read !== "it isn't an object") return "unknown";
+    } else {
+      pkg = read;
+    }
+  } catch (_e) {
     return "unknown";
   }
-  const names = (field: string) => (typeof pkg[field] === "object" && pkg[field] !== null ? Object.keys(pkg[field] as object) : []);
   if (pkg.gypfile === true || existsSync(join(dir, "binding.gyp"))) return "native";
   // Only what installs with it counts: an installed package's dev dependencies never do.
-  if ([...names("dependencies"), ...names("optionalDependencies")].some((d) => NATIVE_HELPERS.has(d))) return "native";
+  const optional = keysOf(pkg.optionalDependencies);
+  if ([...keysOf(pkg.dependencies), ...optional].some((d) => NATIVE_HELPERS.has(d))) return "native";
   // Prebuilt N-API packages list one package per platform as optional dependencies.
-  if (names("optionalDependencies").some((d) => PLATFORMS.test(d))) return "native";
+  if (optional.some((d) => PLATFORMS.test(d))) return "native";
   return hasAddon(dir, 2) ? "native" : "pure";
 }
 
-// Whether a compiled `.node` file sits in a directory or the levels below it.
+// Whether a compiled `.node` file sits in a directory or the levels below it. Entries are read
+// with lstat, as a directory listing's entry types are, so a symlink is neither.
 function hasAddon(dir: string, depth: usize): boolean {
-  let entries;
+  let names: string[] = [];
   try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
+    names = readdirSync(dir);
+  } catch (_e) {
     return false;
   }
-  return entries.some((e) => (e.isFile() && e.name.endsWith(".node")) || (e.isDirectory() && depth > 0 && e.name !== "node_modules" && hasAddon(join(dir, e.name), depth - 1)));
+  for (const name of names) {
+    let file = false;
+    let directory = false;
+    try {
+      const st = lstatSync(join(dir, name));
+      file = st.isFile();
+      directory = st.isDirectory();
+    } catch (_e) {
+      continue;
+    }
+    if (file && name.endsWith(".node")) return true;
+    if (directory && depth > 0 && name !== "node_modules" && hasAddon(join(dir, name), depth - 1)) return true;
+  }
+  return false;
 }
 
-const GROUP_TITLES: Record<Group, string> = { std: "in std", planned: "planned", native: "native", pure: "pure", unknown: "not installed" };
+const GROUPS: Group[] = ["std", "planned", "native", "pure", "unknown"];
 
-export function formatDependencies(d: Dependencies): string[] {
-  if (d.problem && d.list.length === 0) return ["", "dependencies", `  ${d.problem}`];
+function groupTitle(g: Group): string {
+  if (g === "std") return "in std";
+  if (g === "unknown") return "not installed";
+  return g;
+}
+
+export function formatDependencies(d: Ref<Dependencies>): string[] {
+  const problem = d.problem;
+  if (problem !== undefined && problem !== "" && d.list.length === 0) return ["", "dependencies", `  ${problem}`];
   const dev = d.list.filter((x) => x.dev).length;
-  return [
-    "",
-    `dependencies (${d.list.length}${dev ? `, ${dev} dev` : ""})`,
-    ...(d.problem ? [`  ${d.problem}`] : []),
-    ...(Object.keys(GROUP_TITLES) as Group[]).filter((g) => d.counts[g] > 0).map((g) => {
-      const members = d.list.filter((x) => x.group === g);
-      const names = members.slice(0, 10).map((x) => (x.equivalent ? `${x.name} (${x.equivalent.name})` : x.name));
-      const more = members.length > 10 ? `, and ${members.length - 10} more` : "";
-      return `  ${`${GROUP_TITLES[g]}:`.padEnd(15)}${String(members.length).padStart(4)}  ${names.join(", ")}${more}`;
-    }),
-  ];
+  let lines = ["", `dependencies (${d.list.length}${dev > 0 ? `, ${dev} dev` : ""})`];
+  if (problem !== undefined && problem !== "") lines.push(`  ${problem}`);
+  for (const g of GROUPS) {
+    if (countOf(d.counts, g) === 0) continue;
+    const members = d.list.filter((x) => x.group === g);
+    let names: string[] = [];
+    for (const x of members.slice(0, 10)) {
+      const e: Ref<Equivalent | undefined> = x.equivalent;
+      names.push(e !== undefined ? `${x.name} (${e.name})` : x.name);
+    }
+    const more = members.length > 10 ? `, and ${members.length - 10} more` : "";
+    lines.push(`  ${`${groupTitle(g)}:`.padEnd(15)}${String(members.length).padStart(4)}  ${names.join(", ")}${more}`);
+  }
+  return lines;
 }
