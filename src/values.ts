@@ -5398,7 +5398,7 @@ export class Expressions<C extends Context> implements Union<C> {
       return this.timerHelper(e, "timeout clear", [cleared]);
     }
     if (e.args.length === 0) throw new CompileError("E0504", `'${name}' takes the function to run, then the milliseconds to wait`, e.start, e.end);
-    if (!this.ctx.st.runtime && !this.ctx.st.async) throw new CompileError("E0301", `'${name}' can only be used inside an 'async' function here, where the runtime is running`, e.callee.start, e.callee.end);
+    if (!this.ctx.st.runtime && !this.ctx.st.async && e.start < STD_BASE && stdModuleAt(this.ctx.tables().files, e.start) === undefined) throw new CompileError("E0301", `'${name}' can only be used inside an 'async' function here, where the runtime is running`, e.callee.start, e.callee.end);
     this.ctx.tables().timerNames.set(cloneExpr(e), name);
     if (e.args.length > 4) throw new CompileError("E0504", `'${name}' passes at most two arguments on to its function so far; pass the rest through an arrow, as in '${name}(() => f(a, b, c), ms)'`, e.args[4]!.start, e.args[e.args.length - 1]!.end);
     // What it passes on is captured when the timer is set, so each is a name or a literal, which
