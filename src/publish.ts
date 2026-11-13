@@ -95,7 +95,7 @@ function readsBack(files: { path: string; data: Uint8Array }[], lib: string) {
         if (specifier === undefined || !/^\.\.?(\/|$)/.test(specifier)) continue;
         let found: string | undefined;
         try {
-          found = resolveSpecifier(file, specifier, s);
+          found = resolveSpecifier(file, specifier, s, []);
         } catch (e) {
           if (!(e instanceof CompileError)) throw e;
         }

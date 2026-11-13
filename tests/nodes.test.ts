@@ -535,7 +535,13 @@ const IN_PLACE = [
   // lists, each where the list is read next;
   "check.ts: list.splice(", "check.ts: list[i] = block;", "check.ts: while (added.length > 0) list.splice(", "check.ts: while (parts.length > 0) list.splice(", "check.ts: let removed = list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
   "check.ts: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.ts: if (inserted !== undefined && inserted.length > 0",
-  "modules.ts: l.body[at] =", "macros.ts: statements.splice(", "modules.ts: for (let i = statements.length - 1; i >= 0; i--) if (startsMain(",
+  "modules.ts: let removed = l.body.splice(at, 1);", "modules.ts: l.body.splice(at, 0, {", "macros.ts: statements.splice(", "modules.ts: if (startsMain(statements[i]!)) statements.splice(",
+  // a file's statements lent to linking and put back where they were;
+  "modules.ts: let taken = m.statements.splice(0);",
+  // a package's function just made, given the overloads it lists before any tree holds it;
+  "modules.ts: if (listed.length > 0 && made.kind === \"function\" && made.js !== undefined) made.js.overloads =",
+  // the edits a rebuild makes to the node it is handed, which it owns there, as a rename does;
+  "modules.ts: if (at !== undefined && n.kind === \"call\") n.args.splice(", "modules.ts: let props = n.props.splice(0);", "modules.ts: if (!isEncoding(p)) n.props.push(p);",
 ];
 
 // Lowering records a replacement in a rewrite table, which a rebuild puts in place, rather than
