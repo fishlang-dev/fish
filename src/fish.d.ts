@@ -19,3 +19,15 @@ type Lifetime = unknown;
 type Ref<T, L extends Lifetime = Lifetime> = T;
 type Mut<T, L extends Lifetime = Lifetime> = T;
 type Brand<T, Tag> = T & { readonly __brand?: Tag };
+// Fish's JSON.parse<T>, which checks the value against T as it parses it; TypeScript takes the
+// text's word for it, so code reading it still checks what it can't trust.
+interface JSON {
+  parse<T = any>(text: string): T;
+}
+// What a failed file or process call throws in Fish; in Node, an errno error with the same fields.
+interface IoError {
+  message: string;
+  code: string;
+  syscall: string;
+  path: string | null;
+}

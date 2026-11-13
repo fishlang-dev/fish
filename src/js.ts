@@ -1,127 +1,210 @@
 import { CompileError } from "./diag.ts";
-import type { ClassNode, Func, Interface, JsName, Param, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
+import type { ClassMember, ClassNode, Declarator, Expr, Func, Interface, JsName, Param, PropertyName, Span, Stmt, TypeMember, TypeNode } from "./parser.ts";
 import type { Declared } from "./typings.ts";
-import { nextId, renumberStmt, walk, type Ids } from "./nodes.ts";
+import { nextId, renumberStmt, Rewrites, walk, type Ids } from "./nodes.ts";
+import { cloneExpr, cloneParam, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltStmt } from "./rebuild.ts";
 
 export type { JsName };
 
 // Types a declaration file writes that Fish has under another name: TypeScript's one number
 // type is an f64, and a value it leaves untyped is an opaque JS handle.
-const LOWERED: Record<string, string> = { number: "f64", any: "JsValue", unknown: "JsValue", object: "JsValue" };
+const LOWERED = new Map<string, string>([["number", "f64"], ["any", "JsValue"], ["unknown", "JsValue"], ["object", "JsValue"]]);
 
-const KINDS: Partial<Record<Stmt["kind"], string>> = { enum: "an enum", namespace: "a namespace" };
+function kindShown(kind: string): string {
+  return kind === "enum" ? "an enum" : kind === "namespace" ? "a namespace" : "a declaration";
+}
 
 // The declaration a name stands for, as a statement of the program: a copy of it under that name,
 // its types lowered to Fish's and marked as JS. A function stays one, a const becomes a function
 // read as a value, an interface or an object type alias a JS handle's shape, and a class the
 // shape of its instances with its constructors and statics. Its spans stay those of its file.
-export function jsDeclaration(ids: Ids, declared: Declared, name: string, specifier: string, pkg: usize, at: Span, exported: string = name): Stmt {
-  const d = unwrap(renumberStmt(structuredClone(declared.at), () => nextId(ids)));
+/** @throws {CompileError} */
+export function jsDeclaration(ids: Mut<Ids>, declared: Ref<Declared>, scope: Ref<Stmt[]>, name: string, specifier: string, pkg: usize, at: Ref<Span>, exported: string = name): Stmt {
+  const d = lowerTypes(copied(ids, declared.at));
   const js: JsName = { module: specifier, package: pkg, name: exported };
-  lowerTypes(d);
   switch (d.kind) {
     case "function":
       return { ...d, name, body: undefined, js };
     case "let": {
-      const one = d.declarations.find((x) => x.target.kind === "ident" && x.target.name === name) ?? d.declarations[0]!;
-      const type: TypeNode = one.type ?? { id: nextId(ids), kind: "ref", name: "JsValue", args: [], start: d.start, end: d.end };
-      return { id: nextId(ids), kind: "function", name, async: false, generator: false, macro: false, typeParams: [], params: [], returnType: type, body: undefined, js: { ...js, const: true }, start: one.start, end: one.end };
+      const found = d.declarations.findIndex((x) => x.target.kind === "ident" && x.target.name === name);
+      const one: Ref<Declarator> = d.declarations[found >= 0 ? (found as usize) : 0]!;
+      const type: TypeNode = one.type !== undefined ? cloneTypeNode(one.type) : { id: nextId(ids), kind: "ref", name: "JsValue", args: [], start: d.start, end: d.end };
+      const read: JsName = { module: specifier, package: pkg, name: exported, const: true };
+      return { id: nextId(ids), kind: "function", name, async: false, generator: false, macro: false, typeParams: [], params: [], returnType: type, body: undefined, js: read, start: one.start, end: one.end };
     }
     case "interface": {
       // Every declaration of the interface where it is declared adds to it, as TypeScript
       // merges them.
-      const merged = declared.scope.flatMap((x) => {
-        const u = unwrap(x);
-        return u !== unwrap(declared.at) && u.kind === "interface" && u.name === d.name ? unwrap(renumberStmt(structuredClone(x), () => nextId(ids))) : [];
-      }) as Interface[];
-      merged.forEach(lowerTypes);
-      return { ...d, name, js, jsSource: declared.at, members: shapeMembers(ids, [...d.members, ...merged.flatMap((m) => m.members)]) } as Stmt;
+      const first = unwrapped(declared.at).id;
+      let members: TypeMember[] = [...d.members];
+      for (const x of scope) {
+        const u = unwrapped(x);
+        if (u.id === first || u.kind !== "interface" || u.name !== d.name) continue;
+        const other = lowerTypes(copied(ids, x));
+        if (other.kind === "interface") members = members.concat(other.members);
+      }
+      const shape: Interface = { ...d, name, js, jsSource: cloneStmt(declared.at), members: shapeMembers(ids, members) };
+      return shape;
     }
     case "typeAlias":
       return { ...d, name, js };
-    case "class":
-      return { ...classShape(ids, d, name, js), jsSource: declared.at } as Stmt;
+    case "class": {
+      const shape: Interface = { ...classShape(ids, d, name, js), jsSource: cloneStmt(declared.at) };
+      return shape;
+    }
     default:
-      throw new CompileError("E1005", `'${name}' from '${specifier}' is ${KINDS[d.kind] ?? "a declaration"}, which can't be imported from a package yet`, at.start, at.end);
+      throw new CompileError("E1005", `'${name}' from '${specifier}' is ${kindShown(d.kind)}, which can't be imported from a package yet`, at.start, at.end);
   }
 }
 
 // The other signatures of a function declared more than once, each as a function of its own,
 // named apart; the first declared is `name`'s, which lists them, as a call tries them in order.
-export function jsOverloads(ids: Ids, declared: Declared, made: Stmt, name: string, specifier: string, pkg: usize): Func[] {
-  const first = unwrap(declared.at);
+export function jsOverloads(ids: Mut<Ids>, declared: Ref<Declared>, scope: Ref<Stmt[]>, made: Ref<Stmt>, name: string, specifier: string, pkg: usize): Func[] {
+  const first = unwrapped(declared.at);
   if (first.kind !== "function" || made.kind !== "function") return [];
-  const others = declared.scope.filter((s) => s !== declared.at && unwrap(s).kind === "function" && (unwrap(s) as { name: string }).name === first.name);
-  const signatures = others.map((s, i) => {
-    const d = unwrap(renumberStmt(structuredClone(s), () => nextId(ids))) as Extract<Stmt, { kind: "function" }>;
-    lowerTypes(d);
-    return { ...d, name: `${name} signature ${i + 2}`, body: undefined, js: { module: specifier, package: pkg, name } };
-  });
+  const firstId = first.id;
+  const firstName = first.name;
+  let signatures: Func[] = [];
+  for (const s of scope) {
+    const u = unwrapped(s);
+    if (u.id === firstId || u.kind !== "function" || u.name !== firstName) continue;
+    const d = lowerTypes(copied(ids, s));
+    if (d.kind !== "function") continue;
+    signatures.push({ ...d, name: `${name} signature ${signatures.length + 2}`, body: undefined, js: { module: specifier, package: pkg, name } });
+  }
   return signatures;
+}
+
+// A member's name, when it is written as one rather than computed.
+function memberName(m: Ref<TypeMember>): string | undefined {
+  if (m.kind === "property" || m.kind === "method" || m.kind === "get" || m.kind === "set") {
+    const name: Ref<PropertyName> = m.name;
+    return typeof name === "string" ? name : undefined;
+  }
+  return undefined;
+}
+
+function classMemberName(m: Ref<ClassMember>): string | undefined {
+  if (m.kind === "field" || m.kind === "method" || m.kind === "get" || m.kind === "set") {
+    const name: Ref<PropertyName> = m.name;
+    return typeof name === "string" ? name : undefined;
+  }
+  return undefined;
+}
+
+function nameCopy(n: Ref<PropertyName>): PropertyName {
+  return typeof n === "string" ? n : cloneExpr(n);
+}
+
+function untyped(ids: Mut<Ids>, at: Ref<Span>): TypeNode {
+  return { id: nextId(ids), kind: "ref", name: "JsValue", args: [], start: at.start, end: at.end };
 }
 
 // An interface's members as a shape's: an accessor a property, read-only unless it has a setter;
 // a method declared with several signatures by its first; one marked optional as any other.
 // ponytail: an absent optional method throws in JS when called; `?.()` on handles would check
-function shapeMembers(ids: Ids, members: TypeMember[]): TypeMember[] {
-  const seen = new Set<string>();
-  return members.flatMap((m): TypeMember[] => {
-    const name = "name" in m && typeof m.name === "string" ? m.name : undefined;
-    if (m.kind === "set") return [];
-    if (name !== undefined && seen.has(name)) return [];
+function shapeMembers(ids: Mut<Ids>, members: TypeMember[]): TypeMember[] {
+  let setters = new Set<string>();
+  for (const m of members) {
+    const name = memberName(m);
+    if (m.kind === "set" && name !== undefined) setters.add(name);
+  }
+  let seen = new Set<string>();
+  let out: TypeMember[] = [];
+  while (members.length > 0) {
+    const m = members.shift()!;
+    const name = memberName(m);
+    if (m.kind === "set") continue;
+    if (name !== undefined && seen.has(name)) continue;
     if (name !== undefined) seen.add(name);
     if (m.kind === "get") {
-      const settable = members.some((x) => x.kind === "set" && x.name === name);
-      return [{ id: nextId(ids), kind: "property", name: m.name, optional: false, readonly: !settable, type: m.returns ?? { id: nextId(ids), kind: "ref", name: "JsValue", args: [], start: m.start, end: m.end }, start: m.start, end: m.end }];
-    }
-    return [m.kind === "method" && m.optional ? { ...m, id: nextId(ids), optional: false } : m];
-  });
+      const span = { start: m.start, end: m.end };
+      const type = m.returns ?? untyped(ids, span);
+      out.push({ id: nextId(ids), kind: "property", name: m.name, optional: false, readonly: name === undefined || !setters.has(name), type, start: m.start, end: m.end });
+    } else if (m.kind === "method" && m.optional) out.push({ ...m, id: nextId(ids), optional: false });
+    else out.push(m);
+  }
+  return out;
+}
+
+function hasMember(members: Ref<TypeMember[]>, name: string): boolean {
+  return members.some((x) => memberName(x) === name);
 }
 
 // A class as the shape of its instances: its public fields, accessors and methods; its
 // constructors' parameters and its static members kept beside them.
-function classShape(ids: Ids, c: ClassNode, name: string, js: JsName): Interface {
-  const members: TypeMember[] = [];
-  const statics: TypeMember[] = [];
-  const constructors: Param[][] = [];
-  const untyped = (at: Span): TypeNode => ({ id: nextId(ids), kind: "ref", name: "JsValue", args: [], start: at.start, end: at.end });
+function classShape(ids: Mut<Ids>, c: Ref<ClassNode>, name: string, js: JsName): Interface {
+  let members: TypeMember[] = [];
+  let statics: TypeMember[] = [];
+  let constructors: Param[][] = [];
+  let setters = new Set<string>();
   for (const m of c.members) {
-    const hidden = m.modifiers.includes("private") || m.modifiers.includes("protected") || (typeof (m as { name?: unknown }).name === "string" && ((m as { name: string }).name).startsWith("#"));
+    const named = classMemberName(m);
+    if (m.kind === "set" && named !== undefined) setters.add(named);
+  }
+  for (const m of c.members) {
+    const named = classMemberName(m);
+    const hidden = m.modifiers.includes("private") || m.modifiers.includes("protected") || (named !== undefined && named.startsWith("#"));
     if (hidden) continue;
-    const into = m.modifiers.includes("static") ? statics : members;
-    const known = (n: unknown) => into.some((x) => "name" in x && x.name === n);
-    if (m.kind === "constructor") constructors.push(m.params);
-    else if (m.kind === "field") into.push({ id: nextId(ids), kind: "property", name: m.name, optional: m.optional, readonly: m.modifiers.includes("readonly"), type: m.type ?? untyped(m), start: m.start, end: m.end });
-    else if (m.kind === "method" && !known(m.name)) into.push({ id: nextId(ids), kind: "method", name: m.name, optional: false, typeParams: m.typeParams, params: m.params, returns: m.returnType ?? untyped(m), start: m.start, end: m.end });
-    else if (m.kind === "get" && !known(m.name)) {
-      const settable = c.members.some((x) => x.kind === "set" && x.name === m.name);
-      into.push({ id: nextId(ids), kind: "property", name: m.name, optional: false, readonly: !settable, type: m.returnType ?? untyped(m), start: m.start, end: m.end });
+    const isStatic = m.modifiers.includes("static");
+    const known = named !== undefined && (isStatic ? hasMember(statics, named) : hasMember(members, named));
+    let made: TypeMember | undefined = undefined;
+    if (m.kind === "constructor") constructors.push(m.params.map((p) => cloneParam(p)));
+    else if (m.kind === "field") made = { id: nextId(ids), kind: "property", name: nameCopy(m.name), optional: m.optional, readonly: m.modifiers.includes("readonly"), type: m.type !== undefined ? cloneTypeNode(m.type) : untyped(ids, m), start: m.start, end: m.end };
+    else if (m.kind === "method" && !known) made = { id: nextId(ids), kind: "method", name: nameCopy(m.name), optional: false, typeParams: m.typeParams.map((p) => cloneTypeParam(p)), params: m.params.map((p) => cloneParam(p)), returns: m.returnType !== undefined ? cloneTypeNode(m.returnType) : untyped(ids, m), start: m.start, end: m.end };
+    else if (m.kind === "get" && !known) {
+      const settable = named !== undefined && setters.has(named);
+      made = { id: nextId(ids), kind: "property", name: nameCopy(m.name), optional: false, readonly: !settable, type: m.returnType !== undefined ? cloneTypeNode(m.returnType) : untyped(ids, m), start: m.start, end: m.end };
     }
+    if (made === undefined) continue;
+    if (isStatic) statics.push(made);
+    else members.push(made);
   }
   // A base class's instances' members are its instances' too, as an interface extends another.
-  const base = c.extends?.kind === "instantiation" ? c.extends.expr : c.extends;
-  const typeArgs = c.extends?.kind === "instantiation" ? c.extends.typeArgs : [];
-  const extended: TypeNode[] = base?.kind === "ident" ? [{ id: nextId(ids), kind: "ref", name: base.name, args: typeArgs, start: base.start, end: base.end }] : [];
-  return { id: nextId(ids), kind: "interface", name, typeParams: c.typeParams, extends: extended, members, js, jsClass: { constructors, statics }, start: c.start, end: c.end };
+  let extended: TypeNode[] = [];
+  const written: Ref<Expr | undefined> = c.extends;
+  if (written !== undefined) {
+    const base: Ref<Expr> = written.kind === "instantiation" ? written.expr : written;
+    const typeArgs: TypeNode[] = written.kind === "instantiation" ? written.typeArgs.map((t) => cloneTypeNode(t)) : [];
+    if (base.kind === "ident") extended.push({ id: nextId(ids), kind: "ref", name: base.name, args: typeArgs, start: base.start, end: base.end });
+  }
+  return { id: nextId(ids), kind: "interface", name, typeParams: c.typeParams.map((p) => cloneTypeParam(p)), extends: extended, members, js, jsClass: { constructors, statics }, start: c.start, end: c.end };
+}
+
+// A copy of a declaration, numbered anew, without its `declare` or `export`.
+function copied(ids: Mut<Ids>, s: Ref<Stmt>): Stmt {
+  return unwrap(renumberStmt(cloneStmt(s), () => nextId(ids)));
 }
 
 function unwrap(s: Stmt): Stmt {
-  return s.kind === "declare" || s.kind === "export" ? unwrap(s.body) : s;
+  if (s.kind === "declare") return unwrap(s.body);
+  if (s.kind === "export") return unwrap(s.body);
+  return s;
+}
+
+function unwrapped(s: Ref<Stmt>): Ref<Stmt> {
+  if (s.kind === "declare") return unwrapped(s.body);
+  if (s.kind === "export") return unwrapped(s.body);
+  return s;
 }
 
 // Renames the types a declaration names that Fish calls something else. Only type nodes are
 // `ref`s, so every one in the declaration is a type it names.
-function lowerTypes(declaration: Stmt) {
-  walk({ of: "stmt", node: declaration }, ({ of, node: n }) => {
-    if (of === "typeNode" && n.kind === "ref" && Object.hasOwn(LOWERED, n.name)) n.name = LOWERED[n.name]!;
+function lowerTypes(declaration: Stmt): Stmt {
+  let rewrites = new Rewrites();
+  walk({ of: "stmt", node: declaration }, (n) => {
+    if (n.of !== "typeNode" || n.node.kind !== "ref") return;
+    const lowered = LOWERED.get(n.node.name);
+    if (lowered !== undefined) rewrites.replaceTypeNode(n.node, { id: n.node.id, kind: "ref", name: lowered, args: n.node.args.map((a) => cloneTypeNode(a)), start: n.node.start, end: n.node.end });
   });
+  return rebuiltStmt(declaration, rewrites);
 }
 
 // The type names a declaration refers to, which the program needs declared beside it.
-export function referenced(declarations: Stmt[]): Set<string> {
-  const found = new Set<string>();
-  walk({ of: "stmts", node: declarations }, ({ of, node: n }) => {
-    if (of === "typeNode" && n.kind === "ref") found.add(n.name.split(".")[0]!);
+export function referenced(declarations: Ref<Stmt[]>): Set<string> {
+  let found = new Set<string>();
+  walk({ of: "stmts", node: declarations }, (n) => {
+    if (n.of === "typeNode" && n.node.kind === "ref") found.add(n.node.name.split(".")[0]!);
   });
   return found;
 }

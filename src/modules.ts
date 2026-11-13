@@ -6,7 +6,7 @@ import { dependencyLib, dependencyOf, packageOf, resolvePackages, type Package a
 import { CompileError, type Source } from "./diag.ts";
 import { NODE_MODULES } from "./survey.ts";
 import { jsDeclaration, jsOverloads, referenced } from "./js.ts";
-import { exportsOf, findTypings, type Declared, type Exports } from "./typings.ts";
+import { DeclarationReader, findTypings, type Declared, type Exports } from "./typings.ts";
 import { parse, type ClassMember, type Expr, type Func, type ObjectProp, type Param, type Pattern, type Span, type Specifier, type Stmt } from "./parser.ts";
 import { fishFiles } from "./fmt.ts";
 import { MANIFEST, type RustDependency } from "./manifest.ts";
@@ -136,7 +136,8 @@ export function load(compilation: Compilation, entry: string, src: string = read
   // imports, each where the package declares it, as JS declarations.
   const packages: Package[] = [];
   const packageModule = (from: string, specifier: string, s: Stmt, importing: Stmt[]): Module => {
-    const exports = packageExports(ids, from, specifier, s, entry);
+    const reader = new DeclarationReader();
+    const exports = packageExports(ids, reader, from, specifier, s, entry);
     const dir = dirname(realpathSync(from));
     let index = packages.findIndex((p) => p.specifier === specifier && p.dir === dir);
     if (index < 0) index = packages.push({ specifier, dir, at: s }) - 1;
@@ -159,26 +160,26 @@ export function load(compilation: Compilation, entry: string, src: string = read
     const pending: { declared: Declared; name: string }[] = [];
     const add = (declared: Declared, name: string, exported: boolean, at: Span, as: string = name) => {
       if (declaredHere.has(name)) {
-        if (declaredHere.get(name)!.at !== declared.at) throw new CompileError("E0907", `'${specifier}' declares '${name}' in two places Fish would bring together; import from its own file instead`, at.start, at.end);
+        if (declaredHere.get(name)!.at.id !== declared.at.id) throw new CompileError("E0907", `'${specifier}' declares '${name}' in two places Fish would bring together; import from its own file instead`, at.start, at.end);
         return;
       }
       declaredHere.set(name, declared);
       let made: Stmt;
       try {
-        made = jsDeclaration(ids, declared, name, specifier, index as usize, at, as);
+        made = jsDeclaration(ids, declared, reader.statementsOf(declared), name, specifier, index as usize, at, as);
       } catch (e) {
         // A declaration only referred to that Fish can't take is left out, refused where named.
         if (exported || !(e instanceof CompileError)) throw e;
         return;
       }
-      const overloads = jsOverloads(ids, declared, made, name, specifier, index as usize);
+      const overloads = jsOverloads(ids, declared, reader.statementsOf(declared), made, name, specifier, index as usize);
       if (overloads.length > 0 && made.kind === "function") made = { ...made, js: { ...made.js!, overloads } };
       const refers = referenced([made, ...overloads]);
       const base = declarationFile(declared.file);
       for (const s of [made, ...overloads]) shiftSpansStmt(s, base);
       statements.push(exported ? ({ id: nextId(ids), kind: "export", body: made, start: made.start, end: made.end } as Stmt) : made, ...overloads);
       for (const n of refers) {
-        const found = declared.resolve(n);
+        const found = reader.resolve(ids, declared, n);
         if (found) pending.push({ declared: found, name: n });
       }
     };
@@ -338,7 +339,7 @@ function membersUsed(statements: Stmt[], name: string): { name: string; start: u
 
 // The exports of the package an import names, once each name it imports is found among them;
 // a name not found is refused saying what the package exports.
-function packageExports(ids: Ids, from: string, specifier: string, s: Stmt, entry: string): Exports {
+function packageExports(ids: Ids, reader: DeclarationReader, from: string, specifier: string, s: Stmt, entry: string): Exports {
   const shown = (file: string) => relative(dirname(entry), file);
   // A name a Node module has is that module, unless an npm package of that name is installed, as
   // a bundler takes it.
@@ -347,7 +348,7 @@ function packageExports(ids: Ids, from: string, specifier: string, s: Stmt, entr
     throw new CompileError("E0908", `'${specifier}' is a Node module Fish's std doesn't have yet`, s.start, s.end);
   }
   if ("missing" in found) throw new CompileError("E0902", found.missing, s.start, s.end);
-  const exports = exportsOf(ids, found.file, specifier);
+  const exports = reader.exportsOf(ids, found.file, specifier);
   if (typeof exports === "string") throw new CompileError("E0902", exports, s.start, s.end);
   const names = s.kind === "import" ? [...(s.default ? ["default"] : []), ...(s.named ?? []).map((sp) => sp.name)]
     : s.kind === "exportNamed" ? s.specifiers.map((sp) => sp.name) : [];
