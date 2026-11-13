@@ -246,7 +246,7 @@ test("input fed to zlib in several chunks is compressed and decompressed whole",
 #include <stdio.h>
 #include <string.h>
 typedef struct { uint8_t *data; int64_t length; } fsh_zlib_run;
-fsh_zlib_run *fsh_rt_zlib_run(int64_t, int64_t, int64_t, const uint8_t *, int64_t, int64_t *);
+fsh_zlib_run *fsh_rt_zlib_run(int64_t, int64_t, int64_t, const uint8_t *, int64_t, int64_t, int64_t *);
 void fsh_rt_zlib_take(fsh_zlib_run *, uint8_t *);
 static uint8_t in[100000], packed[200000], back[100000];
 int main(void) {
@@ -254,7 +254,7 @@ int main(void) {
   int bits[] = {15, 31, -15};
   for (int k = 0; k < 3; k++) {
     int64_t r[3];
-    fsh_zlib_run *run = fsh_rt_zlib_run(0, bits[k], 6, in, sizeof in, r);
+    fsh_zlib_run *run = fsh_rt_zlib_run(0, bits[k], 6, in, sizeof in, -1, r);
     int64_t n = r[2];
     fsh_rt_zlib_take(run, packed);
     char name[16];
@@ -262,7 +262,7 @@ int main(void) {
     FILE *f = fopen(name, "wb");
     fwrite(packed, 1, n, f);
     fclose(f);
-    run = fsh_rt_zlib_run(1, bits[k], -1, packed, n, r);
+    run = fsh_rt_zlib_run(1, bits[k], -1, packed, n, -1, r);
     int64_t m = r[2];
     fsh_rt_zlib_take(run, back);
     printf("%d %lld %d\\n", (int)r[0], (long long)m, m == (int64_t)sizeof in && memcmp(in, back, sizeof in) == 0);
