@@ -1430,6 +1430,1381 @@ export function forEachChild(n: AnyNode, v: (c: AnyNode) => void): void {
   }
 }
 
+// Hands each node `n` holds to `v` as `forEachChild` does, with the name of the field it sits
+// in; a statement in a list given as `n` has none.
+export function forEachNamedChild(n: AnyNode, v: (field: string, c: AnyNode) => void): void {
+  switch (n.of) {
+    case "typeNode":
+      switch (n.node.kind) {
+        case "ref":
+          for (const x1 of n.node.args) {
+            v("args", { of: "typeNode", node: x1 });
+          }
+          break;
+        case "literal":
+          v("value", { of: "expr", node: n.node.value });
+          break;
+        case "array":
+          v("element", { of: "typeNode", node: n.node.element });
+          break;
+        case "tuple":
+          for (const x1 of n.node.elements) {
+            v("elements", { of: "tupleElement", node: x1 });
+          }
+          break;
+        case "object":
+          for (const x1 of n.node.members) {
+            v("members", { of: "typeMember", node: x1 });
+          }
+          break;
+        case "function":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          v("returns", { of: "typeNode", node: n.node.returns });
+          if (n.node.throws !== undefined) {
+            v("throws", { of: "typeNode", node: n.node.throws! });
+          }
+          break;
+        case "union":
+          for (const x1 of n.node.types) {
+            v("types", { of: "typeNode", node: x1 });
+          }
+          break;
+        case "intersection":
+          for (const x1 of n.node.types) {
+            v("types", { of: "typeNode", node: x1 });
+          }
+          break;
+        case "operator":
+          v("type", { of: "typeNode", node: n.node.type });
+          break;
+        case "indexed":
+          v("object", { of: "typeNode", node: n.node.object });
+          v("index", { of: "typeNode", node: n.node.index });
+          break;
+        case "query":
+          v("target", { of: "typeNode", node: n.node.target });
+          break;
+        case "import":
+          for (const x1 of n.node.args) {
+            v("args", { of: "typeNode", node: x1 });
+          }
+          break;
+        case "conditional":
+          v("check", { of: "typeNode", node: n.node.check });
+          v("extends", { of: "typeNode", node: n.node.extends });
+          v("then", { of: "typeNode", node: n.node.then });
+          v("else", { of: "typeNode", node: n.node.else });
+          break;
+        case "infer":
+          if (n.node.constraint !== undefined) {
+            v("constraint", { of: "typeNode", node: n.node.constraint! });
+          }
+          break;
+        case "template":
+          for (const x1 of n.node.types) {
+            v("types", { of: "typeNode", node: x1 });
+          }
+          break;
+        case "mapped":
+          v("constraint", { of: "typeNode", node: n.node.constraint });
+          if (n.node.as !== undefined) {
+            v("as", { of: "typeNode", node: n.node.as! });
+          }
+          if (n.node.type !== undefined) {
+            v("type", { of: "typeNode", node: n.node.type! });
+          }
+          break;
+        case "predicate":
+          if (n.node.type !== undefined) {
+            v("type", { of: "typeNode", node: n.node.type! });
+          }
+          break;
+      }
+      break;
+    case "expr":
+      switch (n.node.kind) {
+        case "template":
+          for (const x1 of n.node.exprs) {
+            v("exprs", { of: "expr", node: x1 });
+          }
+          break;
+        case "tagged":
+          v("tag", { of: "expr", node: n.node.tag });
+          for (const x1 of n.node.typeArgs) {
+            v("typeArgs", { of: "typeNode", node: x1 });
+          }
+          v("template", { of: "expr", node: n.node.template });
+          break;
+        case "spread":
+          v("value", { of: "expr", node: n.node.value });
+          break;
+        case "array":
+          for (const x1 of n.node.elements) {
+            if (x1 !== undefined) {
+              v("elements", { of: "expr", node: x1! });
+            }
+          }
+          break;
+        case "object":
+          for (const x1 of n.node.props) {
+            v("props", { of: "objectProp", node: x1 });
+          }
+          break;
+        case "function":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returnType !== undefined) {
+            v("returnType", { of: "typeNode", node: n.node.returnType! });
+          }
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+        case "arrow":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returnType !== undefined) {
+            v("returnType", { of: "typeNode", node: n.node.returnType! });
+          }
+          if (n.node.throws !== undefined) {
+            v("throws", { of: "typeNode", node: n.node.throws! });
+          }
+          if (Array.isArray(n.node.body)) {
+            v("body", { of: "stmts", node: n.node.body });
+          } else {
+            v("body", { of: "expr", node: n.node.body });
+          }
+          break;
+        case "member":
+          v("object", { of: "expr", node: n.node.object });
+          break;
+        case "index":
+          v("object", { of: "expr", node: n.node.object });
+          v("index", { of: "expr", node: n.node.index });
+          break;
+        case "call":
+          v("callee", { of: "expr", node: n.node.callee });
+          for (const x1 of n.node.typeArgs) {
+            v("typeArgs", { of: "typeNode", node: x1 });
+          }
+          for (const x1 of n.node.args) {
+            v("args", { of: "expr", node: x1 });
+          }
+          break;
+        case "new":
+          v("callee", { of: "expr", node: n.node.callee });
+          for (const x1 of n.node.typeArgs) {
+            v("typeArgs", { of: "typeNode", node: x1 });
+          }
+          if (n.node.args !== undefined) {
+            for (const x1 of n.node.args!) {
+              v("args", { of: "expr", node: x1 });
+            }
+          }
+          break;
+        case "instantiation":
+          v("expr", { of: "expr", node: n.node.expr });
+          for (const x1 of n.node.typeArgs) {
+            v("typeArgs", { of: "typeNode", node: x1 });
+          }
+          break;
+        case "import":
+          for (const x1 of n.node.args) {
+            v("args", { of: "expr", node: x1 });
+          }
+          break;
+        case "nonNull":
+          v("expr", { of: "expr", node: n.node.expr });
+          if (n.node.narrows !== undefined) {
+            v("narrows", { of: "typeNode", node: n.node.narrows! });
+          }
+          break;
+        case "throw":
+          v("value", { of: "expr", node: n.node.value });
+          break;
+        case "class":
+          for (const x1 of n.node.decorators) {
+            v("decorators", { of: "expr", node: x1 });
+          }
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          if (n.node.extends !== undefined) {
+            v("extends", { of: "expr", node: n.node.extends! });
+          }
+          for (const x1 of n.node.implements) {
+            v("implements", { of: "typeNode", node: x1 });
+          }
+          for (const x1 of n.node.members) {
+            v("members", { of: "classMember", node: x1 });
+          }
+          break;
+        case "unary":
+          v("operand", { of: "expr", node: n.node.operand });
+          break;
+        case "update":
+          v("operand", { of: "expr", node: n.node.operand });
+          break;
+        case "binary":
+          v("left", { of: "expr", node: n.node.left });
+          v("right", { of: "expr", node: n.node.right });
+          break;
+        case "conditional":
+          v("cond", { of: "expr", node: n.node.cond });
+          v("then", { of: "expr", node: n.node.then });
+          v("else", { of: "expr", node: n.node.else });
+          break;
+        case "assign":
+          v("target", { of: "expr", node: n.node.target });
+          v("value", { of: "expr", node: n.node.value });
+          break;
+        case "pipe":
+          v("value", { of: "expr", node: n.node.value });
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "match":
+          v("subject", { of: "expr", node: n.node.subject });
+          for (const x1 of n.node.arms) {
+            v("arms", { of: "matchArm", node: x1 });
+          }
+          break;
+        case "comptime":
+          v("expr", { of: "expr", node: n.node.expr });
+          break;
+        case "unsafe":
+          v("expr", { of: "expr", node: n.node.expr });
+          break;
+        case "destructure":
+          v("pattern", { of: "pattern", node: n.node.pattern });
+          v("value", { of: "expr", node: n.node.value });
+          break;
+        case "sequence":
+          for (const x1 of n.node.exprs) {
+            v("exprs", { of: "expr", node: x1 });
+          }
+          break;
+        case "yield":
+          if (n.node.value !== undefined) {
+            v("value", { of: "expr", node: n.node.value! });
+          }
+          break;
+        case "as":
+          v("expr", { of: "expr", node: n.node.expr });
+          v("type", { of: "typeNode", node: n.node.type });
+          break;
+        case "satisfies":
+          v("expr", { of: "expr", node: n.node.expr });
+          v("type", { of: "typeNode", node: n.node.type });
+          break;
+        case "assertion":
+          v("type", { of: "typeNode", node: n.node.type });
+          v("expr", { of: "expr", node: n.node.expr });
+          break;
+      }
+      break;
+    case "stmt":
+      switch (n.node.kind) {
+        case "expr":
+          v("expr", { of: "expr", node: n.node.expr });
+          break;
+        case "let":
+          for (const x1 of n.node.declarations) {
+            v("declarations", { of: "declarator", node: x1 });
+          }
+          break;
+        case "return":
+          if (n.node.value !== undefined) {
+            v("value", { of: "expr", node: n.node.value! });
+          }
+          break;
+        case "if":
+          v("cond", { of: "expr", node: n.node.cond });
+          v("then", { of: "stmts", node: n.node.then });
+          if (n.node.else !== undefined) {
+            v("else", { of: "stmts", node: n.node.else! });
+          }
+          break;
+        case "while":
+          v("cond", { of: "expr", node: n.node.cond });
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+        case "doWhile":
+          v("body", { of: "stmts", node: n.node.body });
+          v("cond", { of: "expr", node: n.node.cond });
+          break;
+        case "switch":
+          v("discriminant", { of: "expr", node: n.node.discriminant });
+          for (const x1 of n.node.cases) {
+            v("cases", { of: "switchCase", node: x1 });
+          }
+          break;
+        case "labeled":
+          v("body", { of: "stmt", node: n.node.body });
+          break;
+        case "throw":
+          v("value", { of: "expr", node: n.node.value });
+          break;
+        case "try":
+          v("block", { of: "stmts", node: n.node.block });
+          if (n.node.param !== undefined) {
+            v("param", { of: "pattern", node: n.node.param! });
+          }
+          if (n.node.paramType !== undefined) {
+            v("paramType", { of: "typeNode", node: n.node.paramType! });
+          }
+          if (n.node.handler !== undefined) {
+            v("handler", { of: "stmts", node: n.node.handler! });
+          }
+          if (n.node.finalizer !== undefined) {
+            v("finalizer", { of: "stmts", node: n.node.finalizer! });
+          }
+          break;
+        case "for":
+          if (n.node.init !== undefined) {
+            v("init", { of: "stmt", node: n.node.init! });
+          }
+          if (n.node.test !== undefined) {
+            v("test", { of: "expr", node: n.node.test! });
+          }
+          if (n.node.update !== undefined) {
+            v("update", { of: "expr", node: n.node.update! });
+          }
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+        case "forIn":
+          switch (n.node.left.kind) {
+            case "expr":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "let":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "return":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "if":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "while":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "doWhile":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "switch":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "labeled":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "break":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "continue":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "throw":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "try":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "for":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "forIn":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "forOf":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "block":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "empty":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "debugger":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "enum":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "namespace":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "declare":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "comptime":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "unsafe":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "import":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "importEquals":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "export":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "exportDefault":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "exportNamed":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "exportAll":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "exportAssign":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "exportAsNamespace":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "typeAlias":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "interface":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "function":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "class":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "ident":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "object":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "array":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "default":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "wildcard":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "literal":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "variant":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "or":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+          }
+          v("right", { of: "expr", node: n.node.right });
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+        case "forOf":
+          switch (n.node.left.kind) {
+            case "expr":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "let":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "return":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "if":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "while":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "doWhile":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "switch":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "labeled":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "break":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "continue":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "throw":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "try":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "for":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "forIn":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "forOf":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "block":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "empty":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "debugger":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "enum":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "namespace":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "declare":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "comptime":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "unsafe":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "import":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "importEquals":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "export":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "exportDefault":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "exportNamed":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "exportAll":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "exportAssign":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "exportAsNamespace":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "typeAlias":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "interface":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "function":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "class":
+              v("left", { of: "stmt", node: n.node.left });
+              break;
+            case "ident":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "object":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "array":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "default":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "wildcard":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "literal":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "variant":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+            case "or":
+              v("left", { of: "pattern", node: n.node.left });
+              break;
+          }
+          v("right", { of: "expr", node: n.node.right });
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+        case "block":
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+        case "enum":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.members) {
+            v("members", { of: "enumMember", node: x1 });
+          }
+          if (n.node.decorators !== undefined) {
+            for (const x1 of n.node.decorators!) {
+              v("decorators", { of: "expr", node: x1 });
+            }
+          }
+          break;
+        case "namespace":
+          if (n.node.body !== undefined) {
+            v("body", { of: "stmts", node: n.node.body! });
+          }
+          break;
+        case "declare":
+          v("body", { of: "stmt", node: n.node.body });
+          break;
+        case "comptime":
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+        case "unsafe":
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+        case "import":
+          if (n.node.named !== undefined) {
+            for (const x1 of n.node.named!) {
+              v("named", { of: "specifier", node: x1 });
+            }
+          }
+          if (n.node.attributes !== undefined) {
+            v("attributes", { of: "expr", node: n.node.attributes! });
+          }
+          break;
+        case "export":
+          v("body", { of: "stmt", node: n.node.body });
+          break;
+        case "exportDefault":
+          if (n.node.declaration !== undefined) {
+            v("declaration", { of: "stmt", node: n.node.declaration! });
+          }
+          if (n.node.value !== undefined) {
+            v("value", { of: "expr", node: n.node.value! });
+          }
+          break;
+        case "exportNamed":
+          for (const x1 of n.node.specifiers) {
+            v("specifiers", { of: "specifier", node: x1 });
+          }
+          break;
+        case "exportAssign":
+          v("value", { of: "expr", node: n.node.value });
+          break;
+        case "typeAlias":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          v("type", { of: "typeNode", node: n.node.type });
+          if (n.node.decorators !== undefined) {
+            for (const x1 of n.node.decorators!) {
+              v("decorators", { of: "expr", node: x1 });
+            }
+          }
+          if (n.node.js !== undefined) {
+            v("js", { of: "jsName", node: n.node.js! });
+          }
+          break;
+        case "interface":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.extends) {
+            v("extends", { of: "typeNode", node: x1 });
+          }
+          for (const x1 of n.node.members) {
+            v("members", { of: "typeMember", node: x1 });
+          }
+          if (n.node.decorators !== undefined) {
+            for (const x1 of n.node.decorators!) {
+              v("decorators", { of: "expr", node: x1 });
+            }
+          }
+          if (n.node.js !== undefined) {
+            v("js", { of: "jsName", node: n.node.js! });
+          }
+          if (n.node.jsClass !== undefined) {
+            for (const x1 of n.node.jsClass!.constructors) {
+              for (const x2 of x1) {
+                v("jsClass", { of: "param", node: x2 });
+              }
+            }
+            for (const x1 of n.node.jsClass!.statics) {
+              v("jsClass", { of: "typeMember", node: x1 });
+            }
+          }
+          if (n.node.jsSource !== undefined) {
+            v("jsSource", { of: "stmt", node: n.node.jsSource! });
+          }
+          break;
+        case "function":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returnType !== undefined) {
+            v("returnType", { of: "typeNode", node: n.node.returnType! });
+          }
+          if (n.node.throws !== undefined) {
+            v("throws", { of: "typeNode", node: n.node.throws! });
+          }
+          if (n.node.body !== undefined) {
+            v("body", { of: "stmts", node: n.node.body! });
+          }
+          if (n.node.decorators !== undefined) {
+            for (const x1 of n.node.decorators!) {
+              v("decorators", { of: "expr", node: x1 });
+            }
+          }
+          if (n.node.js !== undefined) {
+            v("js", { of: "jsName", node: n.node.js! });
+          }
+          break;
+        case "class":
+          for (const x1 of n.node.decorators) {
+            v("decorators", { of: "expr", node: x1 });
+          }
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          if (n.node.extends !== undefined) {
+            v("extends", { of: "expr", node: n.node.extends! });
+          }
+          for (const x1 of n.node.implements) {
+            v("implements", { of: "typeNode", node: x1 });
+          }
+          for (const x1 of n.node.members) {
+            v("members", { of: "classMember", node: x1 });
+          }
+          break;
+      }
+      break;
+    case "tupleElement":
+      v("type", { of: "typeNode", node: n.node.type });
+      break;
+    case "typeMember":
+      switch (n.node.kind) {
+        case "property":
+          if (typeof n.node.name !== "string") {
+            v("name", { of: "expr", node: n.node.name });
+          }
+          if (n.node.type !== undefined) {
+            v("type", { of: "typeNode", node: n.node.type! });
+          }
+          break;
+        case "method":
+          if (typeof n.node.name !== "string") {
+            v("name", { of: "expr", node: n.node.name });
+          }
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returns !== undefined) {
+            v("returns", { of: "typeNode", node: n.node.returns! });
+          }
+          if (n.node.throws !== undefined) {
+            v("throws", { of: "typeNode", node: n.node.throws! });
+          }
+          break;
+        case "call":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returns !== undefined) {
+            v("returns", { of: "typeNode", node: n.node.returns! });
+          }
+          break;
+        case "construct":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returns !== undefined) {
+            v("returns", { of: "typeNode", node: n.node.returns! });
+          }
+          break;
+        case "index":
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          v("type", { of: "typeNode", node: n.node.type });
+          break;
+        case "get":
+          if (typeof n.node.name !== "string") {
+            v("name", { of: "expr", node: n.node.name });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returns !== undefined) {
+            v("returns", { of: "typeNode", node: n.node.returns! });
+          }
+          break;
+        case "set":
+          if (typeof n.node.name !== "string") {
+            v("name", { of: "expr", node: n.node.name });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returns !== undefined) {
+            v("returns", { of: "typeNode", node: n.node.returns! });
+          }
+          break;
+      }
+      break;
+    case "objectProp":
+      switch (n.node.kind) {
+        case "property":
+          if (typeof n.node.key !== "string") {
+            v("key", { of: "expr", node: n.node.key });
+          }
+          v("value", { of: "expr", node: n.node.value });
+          break;
+        case "shorthand":
+          if (n.node.default !== undefined) {
+            v("default", { of: "expr", node: n.node.default! });
+          }
+          break;
+        case "spread":
+          v("value", { of: "expr", node: n.node.value });
+          break;
+        case "method":
+          if (typeof n.node.key !== "string") {
+            v("key", { of: "expr", node: n.node.key });
+          }
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returnType !== undefined) {
+            v("returnType", { of: "typeNode", node: n.node.returnType! });
+          }
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+        case "get":
+          if (typeof n.node.key !== "string") {
+            v("key", { of: "expr", node: n.node.key });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returnType !== undefined) {
+            v("returnType", { of: "typeNode", node: n.node.returnType! });
+          }
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+        case "set":
+          if (typeof n.node.key !== "string") {
+            v("key", { of: "expr", node: n.node.key });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returnType !== undefined) {
+            v("returnType", { of: "typeNode", node: n.node.returnType! });
+          }
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+      }
+      break;
+    case "classNode":
+      for (const x1 of n.node.decorators) {
+        v("decorators", { of: "expr", node: x1 });
+      }
+      for (const x1 of n.node.typeParams) {
+        v("typeParams", { of: "typeParam", node: x1 });
+      }
+      if (n.node.extends !== undefined) {
+        v("extends", { of: "expr", node: n.node.extends! });
+      }
+      for (const x1 of n.node.implements) {
+        v("implements", { of: "typeNode", node: x1 });
+      }
+      for (const x1 of n.node.members) {
+        v("members", { of: "classMember", node: x1 });
+      }
+      break;
+    case "classMember":
+      switch (n.node.kind) {
+        case "field":
+          for (const x1 of n.node.decorators) {
+            v("decorators", { of: "expr", node: x1 });
+          }
+          if (typeof n.node.name !== "string") {
+            v("name", { of: "expr", node: n.node.name });
+          }
+          if (n.node.type !== undefined) {
+            v("type", { of: "typeNode", node: n.node.type! });
+          }
+          if (n.node.init !== undefined) {
+            v("init", { of: "expr", node: n.node.init! });
+          }
+          break;
+        case "method":
+          for (const x1 of n.node.decorators) {
+            v("decorators", { of: "expr", node: x1 });
+          }
+          if (typeof n.node.name !== "string") {
+            v("name", { of: "expr", node: n.node.name });
+          }
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returnType !== undefined) {
+            v("returnType", { of: "typeNode", node: n.node.returnType! });
+          }
+          if (n.node.throws !== undefined) {
+            v("throws", { of: "typeNode", node: n.node.throws! });
+          }
+          if (n.node.body !== undefined) {
+            v("body", { of: "stmts", node: n.node.body! });
+          }
+          break;
+        case "constructor":
+          for (const x1 of n.node.decorators) {
+            v("decorators", { of: "expr", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.throws !== undefined) {
+            v("throws", { of: "typeNode", node: n.node.throws! });
+          }
+          if (n.node.body !== undefined) {
+            v("body", { of: "stmts", node: n.node.body! });
+          }
+          break;
+        case "get":
+          for (const x1 of n.node.decorators) {
+            v("decorators", { of: "expr", node: x1 });
+          }
+          if (typeof n.node.name !== "string") {
+            v("name", { of: "expr", node: n.node.name });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returnType !== undefined) {
+            v("returnType", { of: "typeNode", node: n.node.returnType! });
+          }
+          if (n.node.throws !== undefined) {
+            v("throws", { of: "typeNode", node: n.node.throws! });
+          }
+          if (n.node.body !== undefined) {
+            v("body", { of: "stmts", node: n.node.body! });
+          }
+          break;
+        case "set":
+          for (const x1 of n.node.decorators) {
+            v("decorators", { of: "expr", node: x1 });
+          }
+          if (typeof n.node.name !== "string") {
+            v("name", { of: "expr", node: n.node.name });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returnType !== undefined) {
+            v("returnType", { of: "typeNode", node: n.node.returnType! });
+          }
+          if (n.node.throws !== undefined) {
+            v("throws", { of: "typeNode", node: n.node.throws! });
+          }
+          if (n.node.body !== undefined) {
+            v("body", { of: "stmts", node: n.node.body! });
+          }
+          break;
+        case "index":
+          for (const x1 of n.node.decorators) {
+            v("decorators", { of: "expr", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          v("type", { of: "typeNode", node: n.node.type });
+          break;
+        case "staticBlock":
+          for (const x1 of n.node.decorators) {
+            v("decorators", { of: "expr", node: x1 });
+          }
+          v("body", { of: "stmts", node: n.node.body });
+          break;
+      }
+      break;
+    case "param":
+      v("pattern", { of: "pattern", node: n.node.pattern });
+      if (n.node.type !== undefined) {
+        v("type", { of: "typeNode", node: n.node.type! });
+      }
+      if (n.node.default !== undefined) {
+        v("default", { of: "expr", node: n.node.default! });
+      }
+      for (const x1 of n.node.decorators) {
+        v("decorators", { of: "expr", node: x1 });
+      }
+      break;
+    case "pattern":
+      switch (n.node.kind) {
+        case "object":
+          for (const x1 of n.node.props) {
+            v("props", { of: "patternProp", node: x1 });
+          }
+          if (n.node.rest !== undefined) {
+            v("rest", { of: "pattern", node: n.node.rest! });
+          }
+          break;
+        case "array":
+          for (const x1 of n.node.elements) {
+            if (x1 !== undefined) {
+              v("elements", { of: "pattern", node: x1! });
+            }
+          }
+          if (n.node.rest !== undefined) {
+            v("rest", { of: "pattern", node: n.node.rest! });
+          }
+          break;
+        case "default":
+          v("target", { of: "pattern", node: n.node.target });
+          v("value", { of: "expr", node: n.node.value });
+          break;
+        case "expr":
+          v("expr", { of: "expr", node: n.node.expr });
+          break;
+        case "literal":
+          v("value", { of: "expr", node: n.node.value });
+          break;
+        case "variant":
+          if (n.node.args !== undefined) {
+            for (const x1 of n.node.args!) {
+              v("args", { of: "pattern", node: x1 });
+            }
+          }
+          break;
+        case "or":
+          for (const x1 of n.node.patterns) {
+            v("patterns", { of: "pattern", node: x1 });
+          }
+          break;
+      }
+      break;
+    case "matchArm":
+      v("pattern", { of: "pattern", node: n.node.pattern });
+      if (n.node.guard !== undefined) {
+        v("guard", { of: "expr", node: n.node.guard! });
+      }
+      switch (n.node.body.kind) {
+        case "int":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "float":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "bigint":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "null":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "this":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "super":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "regex":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "template":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "tagged":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "bool":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "string":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "ident":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "spread":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "array":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "object":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "function":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "arrow":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "member":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "index":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "call":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "new":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "instantiation":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "meta":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "import":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "nonNull":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "throw":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "class":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "privateName":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "unary":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "update":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "binary":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "conditional":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "assign":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "pipe":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "topic":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "match":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "comptime":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "unsafe":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "destructure":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "sequence":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "yield":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "as":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "satisfies":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "assertion":
+          v("body", { of: "expr", node: n.node.body });
+          break;
+        case "block":
+          v("body", { of: "stmt", node: n.node.body });
+          break;
+      }
+      break;
+    case "patternProp":
+      if (typeof n.node.key !== "string") {
+        v("key", { of: "expr", node: n.node.key });
+      }
+      v("value", { of: "pattern", node: n.node.value });
+      break;
+    case "specifier":
+      break;
+    case "enumMember":
+      if (n.node.init !== undefined) {
+        v("init", { of: "expr", node: n.node.init! });
+      }
+      if (n.node.payload !== undefined) {
+        for (const x1 of n.node.payload!) {
+          v("payload", { of: "typeNode", node: x1 });
+        }
+      }
+      break;
+    case "switchCase":
+      if (n.node.test !== undefined) {
+        v("test", { of: "expr", node: n.node.test! });
+      }
+      v("body", { of: "stmts", node: n.node.body });
+      break;
+    case "declarator":
+      v("target", { of: "pattern", node: n.node.target });
+      if (n.node.type !== undefined) {
+        v("type", { of: "typeNode", node: n.node.type! });
+      }
+      if (n.node.init !== undefined) {
+        v("init", { of: "expr", node: n.node.init! });
+      }
+      break;
+    case "typeParam":
+      if (n.node.constraint !== undefined) {
+        v("constraint", { of: "typeNode", node: n.node.constraint! });
+      }
+      if (n.node.default !== undefined) {
+        v("default", { of: "typeNode", node: n.node.default! });
+      }
+      break;
+    case "typeAlias":
+      switch (n.node.kind) {
+        case "typeAlias":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          v("type", { of: "typeNode", node: n.node.type });
+          if (n.node.decorators !== undefined) {
+            for (const x1 of n.node.decorators!) {
+              v("decorators", { of: "expr", node: x1 });
+            }
+          }
+          if (n.node.js !== undefined) {
+            v("js", { of: "jsName", node: n.node.js! });
+          }
+          break;
+      }
+      break;
+    case "interface":
+      switch (n.node.kind) {
+        case "interface":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.extends) {
+            v("extends", { of: "typeNode", node: x1 });
+          }
+          for (const x1 of n.node.members) {
+            v("members", { of: "typeMember", node: x1 });
+          }
+          if (n.node.decorators !== undefined) {
+            for (const x1 of n.node.decorators!) {
+              v("decorators", { of: "expr", node: x1 });
+            }
+          }
+          if (n.node.js !== undefined) {
+            v("js", { of: "jsName", node: n.node.js! });
+          }
+          if (n.node.jsClass !== undefined) {
+            for (const x1 of n.node.jsClass!.constructors) {
+              for (const x2 of x1) {
+                v("jsClass", { of: "param", node: x2 });
+              }
+            }
+            for (const x1 of n.node.jsClass!.statics) {
+              v("jsClass", { of: "typeMember", node: x1 });
+            }
+          }
+          if (n.node.jsSource !== undefined) {
+            v("jsSource", { of: "stmt", node: n.node.jsSource! });
+          }
+          break;
+      }
+      break;
+    case "jsName":
+      if (n.node.overloads !== undefined) {
+        for (const x1 of n.node.overloads!) {
+          v("overloads", { of: "func", node: x1 });
+        }
+      }
+      break;
+    case "func":
+      switch (n.node.kind) {
+        case "function":
+          for (const x1 of n.node.typeParams) {
+            v("typeParams", { of: "typeParam", node: x1 });
+          }
+          for (const x1 of n.node.params) {
+            v("params", { of: "param", node: x1 });
+          }
+          if (n.node.returnType !== undefined) {
+            v("returnType", { of: "typeNode", node: n.node.returnType! });
+          }
+          if (n.node.throws !== undefined) {
+            v("throws", { of: "typeNode", node: n.node.throws! });
+          }
+          if (n.node.body !== undefined) {
+            v("body", { of: "stmts", node: n.node.body! });
+          }
+          if (n.node.decorators !== undefined) {
+            for (const x1 of n.node.decorators!) {
+              v("decorators", { of: "expr", node: x1 });
+            }
+          }
+          if (n.node.js !== undefined) {
+            v("js", { of: "jsName", node: n.node.js! });
+          }
+          break;
+      }
+      break;
+    case "stmts":
+      for (const x of n.node) {
+        v("", { of: "stmt", node: x });
+      }
+      break;
+  }
+}
+
 // Reborrows `n` so a walk can pass a copy of the tagged reference to a callback.
 export function reborrowAnyNode(n: Ref<AnyNode>): AnyNode {
   if (n.of === "typeNode") return { of: "typeNode", node: n.node };

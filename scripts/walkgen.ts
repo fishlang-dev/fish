@@ -45,11 +45,12 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
   // A union's members, with an alias of a union that isn't a node type, as `PropertyName`, opened.
   const expand = (m: TypeNode): TypeNode[] => (m.kind === "ref" && aliases.has(m.name) && !isNode(m.name) && !isWord(m) ? membersOf(aliases.get(m.name)) : [m]);
 
-  // Statements visiting the nodes `value`, of type `t`, holds; `leaf` emits the action for each child.
-  const makeWalker = (leaf: (of: string, val: string) => string[], arrayLeaf?: (of: string, val: string) => string[]) => {
+  // Statements visiting the nodes `value`, of type `t`, holds; `leaf` emits the action for each child,
+  // given the name of the node's field the child sits in.
+  const makeWalker = (leaf: (of: string, val: string, field: string) => string[], arrayLeaf?: (of: string, val: string) => string[]) => {
     let depth = 0;
     let nextU = 0;
-    const visits = (t: TypeNode, value: string): string[] => {
+    const visits = (t: TypeNode, value: string, field: string): string[] => {
       const f = formOf(t);
       switch (f.form) {
         case "json":
@@ -57,30 +58,30 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
         case "bigint":
           return [];
         case "node":
-          return leaf(method(f.name), value);
+          return leaf(method(f.name), value, field);
         case "union": {
           if (!holdsNodes(f.members)) return [];
           unionName(f.members);
-          return unionVisits(f.members, value);
+          return unionVisits(f.members, value, field);
         }
         case "array": {
-          if (ref(f.element, "Stmt")) return leaf("stmts", value);
+          if (ref(f.element, "Stmt")) return leaf("stmts", value, field);
           const ef = formOf(f.element);
           if (ef.form === "node" && arrayLeaf) return arrayLeaf(method(ef.name), value);
           const x = `x${++depth}`;
-          const inner = visits(f.element, x);
+          const inner = visits(f.element, x, field);
           depth--;
           return inner.length ? [`for (const ${x} of ${value}) {`, ...inner.map((l) => `  ${l}`), `}`] : [];
         }
         case "option": {
-          const inner = visits(f.inner, `${value}!`);
+          const inner = visits(f.inner, `${value}!`, field);
           return inner.length ? [`if (${value} !== undefined) {`, ...inner.map((l) => `  ${l}`), `}`] : [];
         }
         case "object":
-          return fieldVisits(f.fields, value);
+          return fieldVisits(f.fields, value, field);
       }
     };
-    const unionVisits = (members: TypeNode[], u: string): string[] => {
+    const unionVisits = (members: TypeNode[], u: string, field: string): string[] => {
       let rest = members.flatMap(expand).filter((m) => !ref(m, "string"));
       const hasString = members.flatMap(expand).some((m) => ref(m, "string"));
       const array = rest.find((m) => m.kind === "array");
@@ -90,28 +91,29 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
         const other = rest[0]!;
         inner.push(
           `if (Array.isArray(${u})) {`,
-          ...visits(array, u).map((l) => `  ${l}`),
+          ...visits(array, u, field).map((l) => `  ${l}`),
           `} else {`,
-          ...leaf(method(owner(other)), u).map((l) => `  ${l}`),
+          ...leaf(method(owner(other)), u, field).map((l) => `  ${l}`),
           `}`,
         );
       } else if (rest.length === 1) {
-        inner.push(...leaf(method(owner(rest[0]!)), u));
+        inner.push(...leaf(method(owner(rest[0]!)), u, field));
       } else {
         const seen = new Set<string>();
         inner.push(`switch (${u}.kind) {`);
         for (const m of rest) {
           const kinds = shapes(m).flatMap((s) => (s.kind === undefined || seen.has(s.kind) ? [] : [s.kind]));
           kinds.forEach((k) => seen.add(k));
-          for (const k of kinds) inner.push(`  case ${JSON.stringify(k)}:`, ...leaf(method(owner(m)), u).map((l) => `    ${l}`), `    break;`);
+          for (const k of kinds) inner.push(`  case ${JSON.stringify(k)}:`, ...leaf(method(owner(m)), u, field).map((l) => `    ${l}`), `    break;`);
         }
         inner.push(`}`);
       }
       return hasString ? [`if (typeof ${u} !== "string") {`, ...inner.map((l) => `  ${l}`), `}`] : inner;
     };
-    const fieldVisits = (fields: { name: string; optional: boolean; type: TypeNode }[], value: string): string[] =>
+    // `outer` is the node's field an object of fields sits in, which names its children's field.
+    const fieldVisits = (fields: { name: string; optional: boolean; type: TypeNode }[], value: string, outer?: string): string[] =>
       fields.flatMap((f) => {
-        const inner = visits(f.type, `${value}.${f.name}${f.optional ? "!" : ""}`);
+        const inner = visits(f.type, `${value}.${f.name}${f.optional ? "!" : ""}`, outer ?? f.name);
         return f.optional && inner.length ? [`if (${value}.${f.name} !== undefined) {`, ...inner.map((l) => `  ${l}`), `}`] : inner;
       });
     const children = (name: string, target: string): string[] => {
@@ -131,6 +133,7 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
   };
 
   const eachWalker = makeWalker((of, val) => [`v({ of: ${JSON.stringify(of)}, node: ${val} });`]);
+  const namedWalker = makeWalker((of, val, field) => [`v(${JSON.stringify(field)}, { of: ${JSON.stringify(of)}, node: ${val} });`]);
   const collectWalker = makeWalker((of, val) => [`collectIdsNode({ of: ${JSON.stringify(of)}, node: ${val} }, seen, order, shared);`]);
   const stepWalker = makeWalker(
     (of, val) => [
@@ -495,6 +498,10 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
     const body = type === "Stmt[]" ? [`for (const x of n.node) {`, `  v({ of: "stmt", node: x });`, `}`] : eachWalker.children(type, "n.node");
     return [`    case ${JSON.stringify(of)}:`, ...body.map((l) => `      ${l}`), `      break;`];
   });
+  const namedCases = tagged.flatMap(([of, type]) => {
+    const body = type === "Stmt[]" ? [`for (const x of n.node) {`, `  v("", { of: "stmt", node: x });`, `}`] : namedWalker.children(type, "n.node");
+    return [`    case ${JSON.stringify(of)}:`, ...body.map((l) => `      ${l}`), `      break;`];
+  });
   const collectCases = tagged.flatMap(([of, type]) => {
     const body = type === "Stmt[]" ? [`for (const x of n.node) {`, `  collectIdsNode({ of: "stmt", node: x }, seen, order, shared);`, `}`] : collectWalker.children(type, "n.node");
     return [`    case ${JSON.stringify(of)}:`, ...body.map((l) => `      ${l}`), `      break;`];
@@ -554,6 +561,14 @@ function sources(parserSource: string): { walk: string; rebuild: string } {
     `export function forEachChild(n: AnyNode, v: (c: AnyNode) => void): void {`,
     `  switch (n.of) {`,
     ...eachCases,
+    `  }`,
+    `}`,
+    ``,
+    `// Hands each node \`n\` holds to \`v\` as \`forEachChild\` does, with the name of the field it sits`,
+    `// in; a statement in a list given as \`n\` has none.`,
+    `export function forEachNamedChild(n: AnyNode, v: (field: string, c: AnyNode) => void): void {`,
+    `  switch (n.of) {`,
+    ...namedCases,
     `  }`,
     `}`,
     ``,

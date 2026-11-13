@@ -4,7 +4,9 @@
 export type Doc =
   | string
   | Doc[]
-  | { kind: "group"; contents: Doc; break: boolean; id: string | undefined; expandedStates: Doc[] | undefined }
+  // `propagated` marks a group whose breaks are already propagated, so a group shared by several
+  // parents is walked once.
+  | { kind: "group"; contents: Doc; break: boolean; id: string | undefined; expandedStates: Doc[] | undefined; propagated: boolean }
   | { kind: "indent"; contents: Doc }
   | { kind: "align"; n: f64; contents: Doc }
   | { kind: "line"; soft: boolean; hard: boolean; literal: boolean }
@@ -19,21 +21,45 @@ export type Doc =
   | { kind: "label"; label: string; contents: Doc }
   | { kind: "trim" };
 
-export const line: Doc = { kind: "line", soft: false, hard: false, literal: false };
-export const softline: Doc = { kind: "line", soft: true, hard: false, literal: false };
-export const breakParent: Doc = { kind: "breakParent" };
-export const hardline: Doc = [{ kind: "line", soft: false, hard: true, literal: false }, { kind: "breakParent" }];
-export const literalline: Doc = [{ kind: "line", soft: false, hard: true, literal: true }, { kind: "breakParent" }];
-export const lineSuffixBoundary: Doc = { kind: "lineSuffixBoundary" };
+// Each a fresh document, for code that owns what it builds, as Fish's does; the constants below are
+// the same documents for code that shares them.
+export function newLine(): Doc {
+  return { kind: "line", soft: false, hard: false, literal: false };
+}
+export function newSoftline(): Doc {
+  return { kind: "line", soft: true, hard: false, literal: false };
+}
+export function newBreakParent(): Doc {
+  return { kind: "breakParent" };
+}
+export function newHardline(): Doc {
+  return [{ kind: "line", soft: false, hard: true, literal: false }, { kind: "breakParent" }];
+}
+export function newLiteralline(): Doc {
+  return [{ kind: "line", soft: false, hard: true, literal: true }, { kind: "breakParent" }];
+}
+export function newLineSuffixBoundary(): Doc {
+  return { kind: "lineSuffixBoundary" };
+}
+
+export const line: Doc = newLine();
+export const softline: Doc = newSoftline();
+export const breakParent: Doc = newBreakParent();
+export const hardline: Doc = newHardline();
+export const literalline: Doc = newLiteralline();
+export const lineSuffixBoundary: Doc = newLineSuffixBoundary();
 export const trim: Doc = { kind: "trim" };
 
 export function group(contents: Doc, options: { shouldBreak?: boolean; id?: string; expandedStates?: Doc[] } = {}): Doc {
-  return { kind: "group", contents, break: options.shouldBreak === true, id: options.id, expandedStates: options.expandedStates };
+  return { kind: "group", contents, break: options.shouldBreak === true, id: options.id, expandedStates: options.expandedStates, propagated: false };
 }
 
 // The first state that fits is printed flat; when none does, the last is printed broken.
+// The group's contents are its first state itself, which propagating breaks reaches through it.
 export function conditionalGroup(states: Doc[], options: { shouldBreak?: boolean } = {}): Doc {
-  return group(states[0]!, { ...options, expandedStates: states });
+  const [first, kept] = dup(states.shift()!);
+  states.unshift(kept);
+  return group(first, { shouldBreak: options.shouldBreak, expandedStates: states });
 }
 
 export const indent = (contents: Doc): Doc => ({ kind: "indent", contents });
@@ -52,28 +78,48 @@ export function indentIfBreak(contents: Doc, options: { groupId: string; negate?
 }
 
 export function join(separator: Doc, docs: Doc[]): Doc[] {
-  const parts: Doc[] = [];
-  docs.forEach((d, i) => {
-    if (i > 0) parts.push(separator);
-    parts.push(d);
-  });
+  let parts: Doc[] = [];
+  let sep = separator;
+  // Taken from a copy, since the caller may still read `docs`.
+  let items = docs.slice();
+  items.reverse();
+  while (items.length > 0) {
+    if (parts.length > 0) {
+      const [one, rest] = dup(sep);
+      parts.push(one);
+      sep = rest;
+    }
+    parts.push(items.pop()!);
+  }
   return parts;
 }
 
-type Mode = "break" | "flat";
-type Indentation = { value: string; length: usize };
-type Command = { ind: Indentation; mode: Mode; doc: Doc };
+// Gives two owned handles to `x`: a copy in Fish, and the same object in JS, so a document
+// shared by two parents stays one, as Prettier's are.
+function dup<T>(x: T): [T, T] {
+  let m = new Map<usize, T>();
+  m.set(0, x);
+  return [m.get(0)!, m.get(0)!];
+}
 
-const root: Indentation = { value: "", length: 0 };
-const deeper = (ind: Indentation, by: string): Indentation => ({ value: ind.value + by, length: ind.length + by.length });
+type Mode = "break" | "flat";
+
+// The layout works through a stack of commands held as parallel lists: each a document, borrowed
+// from the one being printed, laid out in a mode at an indentation and its width, with `at` the
+// parts of a fill already laid out. The comments waiting for the line's end are held alike.
+
+const INFINITY: f64 = 1.0 / 0.0;
+const HARD_LINE: Doc = { kind: "line", soft: false, hard: true, literal: false };
 
 // ponytail: width counts code points, not East Asian wide characters as two; Prettier's
 // getStringWidth does, so a line of wide characters may break later than Prettier's.
-const width = (s: string) => [...s].length;
+function width(s: string): usize {
+  return [...s].length;
+}
 
 // Trailing spaces and tabs written so far, removed before a newline, giving how many went.
-function trimEnd(out: string[]): usize {
-  let removed = 0;
+function trimEnd(out: Mut<string[]>): usize {
+  let removed: usize = 0;
   while (out.length > 0) {
     const last = out[out.length - 1]!;
     const kept = last.replace(/[ \t]*$/, "");
@@ -87,271 +133,414 @@ function trimEnd(out: string[]): usize {
   return removed;
 }
 
+// Whether a document breaks the group enclosing it, passed down rather than returned so that
+// propagating breaks makes no tuple for each document.
+type Breaks = { found: boolean };
+
 // Marks every group holding a hard line, or a group already marked, as broken, as Prettier does
-// before printing; a group with alternative states is left to choose among them.
-function propagateBreaks(doc: Doc) {
-  const seen = new Set<Doc>();
-  const stack: Extract<Doc, { kind: "group" }>[] = [];
-  const breakTop = () => {
-    const top = stack[stack.length - 1];
-    if (top && !top.expandedStates && !top.break) top.break = true;
-  };
-  const visit = (d: Doc) => {
-    if (typeof d === "string") return;
-    if (Array.isArray(d)) return d.forEach(visit);
-    switch (d.kind) {
-      case "breakParent":
-        breakTop();
-        return;
-      case "group": {
-        stack.push(d);
-        if (!seen.has(d)) {
-          seen.add(d);
-          if (d.expandedStates) d.expandedStates.forEach(visit);
-          else visit(d.contents);
-        }
-        stack.pop();
-        if (d.break) breakTop();
-        return;
+// before printing; a group with alternative states is left to choose among them. Gives `doc`
+// back, setting `breaks.found` when it breaks the group enclosing it. It changes `doc` in place,
+// so a part shared by several parents is one document still.
+function propagateBreaks(doc: Doc, breaks: Mut<Breaks>): Doc {
+  let d = doc;
+  if (typeof d === "string") return d;
+  if (Array.isArray(d)) return propagateAll(d, breaks);
+  if (d.kind === "group") {
+    const outer = breaks.found;
+    if (!d.propagated) {
+      d.propagated = true;
+      breaks.found = false;
+      if (d.expandedStates !== undefined) {
+        const states = propagateAll(d.expandedStates, breaks);
+        d.expandedStates = states;
+      } else {
+        const contents = propagateBreaks(d.contents, breaks);
+        d.contents = contents;
       }
-      case "fill":
-        return d.parts.forEach(visit);
-      case "ifBreak":
-        visit(d.breakContents);
-        return visit(d.flatContents);
-      case "indent":
-      case "align":
-      case "indentIfBreak":
-      case "lineSuffix":
-      case "label":
-        return visit(d.contents);
-      case "line":
-      case "lineSuffixBoundary":
-      case "trim":
-        return;
+      if (breaks.found && d.expandedStates === undefined) d.break = true;
     }
-  };
-  visit(doc);
+    breaks.found = outer || d.break;
+    return d;
+  }
+  if (d.kind === "breakParent") {
+    breaks.found = true;
+    return d;
+  }
+  if (d.kind === "fill") {
+    d.parts = propagateAll(d.parts, breaks);
+    return d;
+  }
+  if (d.kind === "ifBreak") {
+    d.breakContents = propagateBreaks(d.breakContents, breaks);
+    d.flatContents = propagateBreaks(d.flatContents, breaks);
+    return d;
+  }
+  if (d.kind === "indent") {
+    d.contents = propagateBreaks(d.contents, breaks);
+    return d;
+  }
+  if (d.kind === "align") {
+    d.contents = propagateBreaks(d.contents, breaks);
+    return d;
+  }
+  if (d.kind === "indentIfBreak") {
+    d.contents = propagateBreaks(d.contents, breaks);
+    return d;
+  }
+  if (d.kind === "lineSuffix") {
+    d.contents = propagateBreaks(d.contents, breaks);
+    return d;
+  }
+  if (d.kind === "label") {
+    d.contents = propagateBreaks(d.contents, breaks);
+    return d;
+  }
+  return d;
 }
 
-// Whether `next`, and then the commands after it up to the first line break, fit in `room`.
-function fits(next: Command, rest: Command[], room: i64, hasLineSuffix: boolean, modes: Map<string, Mode>, mustBeFlat = false): boolean {
-  let restAt = rest.length;
-  const cmds: { mode: Mode; doc: Doc }[] = [next];
-  const out: string[] = [];
+// Each of `docs` with its breaks propagated, kept in the same array.
+function propagateAll(docs: Doc[], breaks: Mut<Breaks>): Doc[] {
+  let items = docs;
+  // A list holding only text, lines and break markers has nothing inside to mark, which is most.
+  let flat = true;
+  let breakParent = false;
+  for (let i: usize = 0; i < items.length && flat; i++) {
+    const d: Ref<Doc> = items[i]!;
+    if (typeof d === "string") continue;
+    if (Array.isArray(d)) flat = false;
+    else if (d.kind === "breakParent") breakParent = true;
+    else if (d.kind !== "line" && d.kind !== "lineSuffixBoundary" && d.kind !== "trim") flat = false;
+  }
+  if (flat) {
+    if (breakParent) breaks.found = true;
+    return items;
+  }
+  // Taken out from the end and put back from the other, which keeps the order and is cheaper
+  // than copying the list.
+  let taken: Doc[] = [];
+  while (items.length > 0) taken.push(items.pop()!);
+  while (taken.length > 0) items.push(propagateBreaks(taken.pop()!, breaks));
+  return items;
+}
+
+// Whether `next`, laid out in `mode`, and then the commands after it up to the first line break,
+// fit in `room`.
+function fits(mode: Mode, next: Ref<Doc>[], restDocs: Ref<Ref<Doc>[]>, restModes: Ref<Mode[]>, restAts: Ref<usize[]>, room: i64, hasLineSuffix: boolean, modes: Ref<Map<string, Mode>>, mustBeFlat = false): boolean {
+  let left = room;
+  let suffix = hasLineSuffix;
+  let restAt = restDocs.length;
+  let cmdModes: Mode[] = [];
+  let cmds: Ref<Doc>[] = [];
+  let ats: usize[] = [];
+  for (let i = next.length; i > 0; i--) {
+    cmdModes.push(mode);
+    cmds.push(next[i - 1]!);
+    ats.push(0);
+  }
+  let out: string[] = [];
   // A line's space counts only once something follows it on the line.
   let pendingSpace = false;
-  while (room >= 0) {
+  while (left >= 0) {
     if (cmds.length === 0) {
       if (restAt === 0) return true;
-      cmds.push(rest[--restAt]!);
+      restAt--;
+      cmdModes.push(restModes[restAt]!);
+      cmds.push(restDocs[restAt]!);
+      ats.push(restAts[restAt]!);
       continue;
     }
-    const { mode, doc } = cmds.pop()!;
+    const at: Mode = cmdModes.pop()!;
+    const doc: Ref<Doc> = cmds.pop()!;
+    const from = ats.pop()!;
     if (typeof doc === "string") {
       if (doc.length > 0 && pendingSpace) {
         out.push(" ");
-        room--;
+        left--;
         pendingSpace = false;
       }
       out.push(doc);
-      room -= width(doc) as i64;
+      left -= width(doc) as i64;
       continue;
     }
     if (Array.isArray(doc)) {
-      for (let i = doc.length - 1; i >= 0; i--) cmds.push({ mode, doc: doc[i]! });
+      for (let i = doc.length; i > 0; i--) {
+        cmdModes.push(at);
+        cmds.push(doc[i - 1]!);
+        ats.push(0);
+      }
       continue;
     }
-    switch (doc.kind) {
-      case "fill":
-        for (let i = doc.parts.length - 1; i >= doc.printed; i--) cmds.push({ mode, doc: doc.parts[i]! });
-        break;
-      case "indent":
-      case "align":
-      case "indentIfBreak":
-      case "label":
-        cmds.push({ mode, doc: doc.contents });
-        break;
-      case "trim":
-        room += trimEnd(out) as i64;
-        break;
-      case "group": {
-        if (mustBeFlat && doc.break) return false;
-        const groupMode: Mode = doc.break ? "break" : mode;
-        const contents = doc.expandedStates && groupMode === "break" ? doc.expandedStates[doc.expandedStates.length - 1]! : doc.contents;
-        cmds.push({ mode: groupMode, doc: contents });
-        break;
+    if (doc.kind === "fill") {
+      const printed = from > doc.printed ? from : doc.printed;
+      for (let i = doc.parts.length; i > printed; i--) {
+        cmdModes.push(at);
+        cmds.push(doc.parts[i - 1]!);
+        ats.push(0);
       }
-      case "ifBreak": {
-        const groupMode = doc.groupId ? (modes.get(doc.groupId) ?? "flat") : mode;
-        cmds.push({ mode, doc: groupMode === "break" ? doc.breakContents : doc.flatContents });
-        break;
-      }
-      case "line":
-        if (mode === "break" || doc.hard) return true;
-        if (!doc.soft) pendingSpace = true;
-        break;
-      case "lineSuffix":
-        hasLineSuffix = true;
-        break;
-      case "lineSuffixBoundary":
-        // A pending line suffix, such as a trailing comment, would have to print here.
-        if (hasLineSuffix) return false;
-        break;
-      case "breakParent":
-        break;
+    } else if (doc.kind === "indent" || doc.kind === "align" || doc.kind === "indentIfBreak" || doc.kind === "label") {
+      cmdModes.push(at);
+      cmds.push(doc.contents);
+      ats.push(0);
+    } else if (doc.kind === "trim") {
+      left += trimEnd(out) as i64;
+    } else if (doc.kind === "group") {
+      if (mustBeFlat && doc.break) return false;
+      const groupMode: Mode = doc.break ? "break" : at;
+      cmdModes.push(groupMode);
+      if (doc.expandedStates !== undefined && groupMode === "break") cmds.push(doc.expandedStates[doc.expandedStates.length - 1]!);
+      else cmds.push(doc.contents);
+      ats.push(0);
+    } else if (doc.kind === "ifBreak") {
+      const groupMode = doc.groupId !== undefined && doc.groupId !== "" ? (modes.get(doc.groupId) ?? "flat") : at;
+      cmdModes.push(at);
+      if (groupMode === "break") cmds.push(doc.breakContents);
+      else cmds.push(doc.flatContents);
+      ats.push(0);
+    } else if (doc.kind === "line") {
+      if (at === "break" || doc.hard) return true;
+      if (!doc.soft) pendingSpace = true;
+    } else if (doc.kind === "lineSuffix") {
+      suffix = true;
+    } else if (doc.kind === "lineSuffixBoundary") {
+      // A pending line suffix, such as a trailing comment, would have to print here.
+      if (suffix) return false;
     }
   }
   return false;
 }
 
-function startsWithHardLine(doc: Doc): boolean {
+function startsWithHardLine(doc: Ref<Doc>): boolean {
   if (Array.isArray(doc)) return doc.length > 0 && startsWithHardLine(doc[0]!);
   return typeof doc === "object" && doc.kind === "line" && doc.hard;
 }
 
 // Lays `doc` out at `printWidth` columns with two-space indentation.
-export function print(doc: Doc, printWidth = 80): string {
-  propagateBreaks(doc);
-  const modes = new Map<string, Mode>();
-  const cmds: Command[] = [{ ind: root, mode: "break", doc }];
-  const out: string[] = [];
-  const suffixes: Command[] = [];
-  const suffixEndsLine: boolean[] = [];
-  let pos = 0;
+export function print(doc: Doc, printWidth: f64 = 80): string {
+  let breaks: Breaks = { found: false };
+  const laid = propagateBreaks(doc, breaks);
+  let modes = new Map<string, Mode>();
+  let cDocs: Ref<Doc>[] = [];
+  let cModes: Mode[] = [];
+  let cIndents: string[] = [];
+  let cWidths: usize[] = [];
+  let cAts: usize[] = [];
+  cDocs.push(laid);
+  cModes.push("break");
+  cIndents.push("");
+  cWidths.push(0);
+  cAts.push(0);
+  let out: string[] = [];
+  let sDocs: Ref<Doc>[] = [];
+  let sModes: Mode[] = [];
+  let sIndents: string[] = [];
+  let sWidths: usize[] = [];
+  let sOwnLine: boolean[] = [];
+  let sEndsLine: boolean[] = [];
+  let pos: i64 = 0;
   let remeasure = false;
-  while (cmds.length > 0) {
-    const { ind, mode, doc } = cmds.pop()!;
+  while (cDocs.length > 0) {
+    const doc: Ref<Doc> = cDocs.pop()!;
+    const mode = cModes.pop()!;
+    const ind = cIndents.pop()!;
+    const indWidth = cWidths.pop()!;
+    const from = cAts.pop()!;
     if (typeof doc === "string") {
+      if (cDocs.length > 0) pos += width(doc) as i64;
       out.push(doc);
-      if (cmds.length > 0) pos += width(doc) as i64;
     } else if (Array.isArray(doc)) {
-      for (let i = doc.length - 1; i >= 0; i--) cmds.push({ ind, mode, doc: doc[i]! });
-    } else {
-      switch (doc.kind) {
-        case "indent":
-          cmds.push({ ind: deeper(ind, "  "), mode, doc: doc.contents });
-          break;
-        case "align":
-          cmds.push({ ind: doc.n === -Infinity ? root : deeper(ind, " ".repeat(doc.n as usize)), mode, doc: doc.contents });
-          break;
-        case "trim":
-          pos -= trimEnd(out) as i64;
-          break;
-        case "group": {
-          if (mode === "flat" && !remeasure) {
-            cmds.push({ ind, mode: doc.break ? "break" : "flat", doc: doc.contents });
-          } else {
-            remeasure = false;
-            const next: Command = { ind, mode: "flat", doc: doc.contents };
-            const room = printWidth - pos;
-            if (!doc.break && fits(next, cmds, room, suffixes.length > 0, modes)) {
-              cmds.push(next);
-            } else if (doc.expandedStates) {
-              const last = doc.expandedStates[doc.expandedStates.length - 1]!;
-              if (doc.break) {
-                cmds.push({ ind, mode: "break", doc: last });
-              } else {
-                let chosen: Command = { ind, mode: "break", doc: last };
-                for (const state of doc.expandedStates.slice(1)) {
-                  const flat: Command = { ind, mode: "flat", doc: state };
-                  if (fits(flat, cmds, room, suffixes.length > 0, modes)) {
-                    chosen = flat;
-                    break;
-                  }
-                }
-                cmds.push(chosen);
-              }
-            } else {
-              cmds.push({ ind, mode: "break", doc: doc.contents });
-            }
-          }
-          if (doc.id) modes.set(doc.id, cmds[cmds.length - 1]!.mode);
-          break;
+      for (let i = doc.length; i > 0; i--) { cDocs.push(doc[i - 1]!); cModes.push(mode); cIndents.push(ind); cWidths.push(indWidth); cAts.push(0); }
+    } else if (doc.kind === "indent") {
+      cDocs.push(doc.contents);
+      cModes.push(mode);
+      cIndents.push(ind + "  ");
+      cWidths.push(indWidth + 2);
+      cAts.push(0);
+    } else if (doc.kind === "align") {
+      if (doc.n === -INFINITY) { cDocs.push(doc.contents); cModes.push(mode); cIndents.push(""); cWidths.push(0); cAts.push(0); }
+      else { cDocs.push(doc.contents); cModes.push(mode); cIndents.push(ind + " ".repeat(doc.n as usize)); cWidths.push(indWidth + (doc.n as usize)); cAts.push(0); }
+    } else if (doc.kind === "trim") {
+      pos -= trimEnd(out) as i64;
+    } else if (doc.kind === "group") {
+      let chosen: Mode = "break";
+      if (mode === "flat" && !remeasure) {
+        chosen = doc.break ? "break" : "flat";
+        cDocs.push(doc.contents);
+        cModes.push(chosen);
+        cIndents.push(ind);
+        cWidths.push(indWidth);
+        cAts.push(0);
+      } else {
+        remeasure = false;
+        const room = roomLeft(printWidth, pos);
+        const contents: Ref<Doc>[] = [doc.contents];
+        if (!doc.break && fits("flat", contents, cDocs, cModes, cAts, room, sDocs.length > 0, modes)) {
+          chosen = "flat";
+          cDocs.push(doc.contents);
+          cModes.push("flat");
+          cIndents.push(ind);
+          cWidths.push(indWidth);
+          cAts.push(0);
+        } else if (doc.expandedStates !== undefined) {
+          const states: Ref<Doc[]> = doc.expandedStates;
+          const fitting = doc.break ? 0 : firstFitting(states, cDocs, cModes, cAts, room, sDocs.length > 0, modes);
+          if (fitting > 0) {
+            chosen = "flat";
+            cDocs.push(states[fitting]!);
+            cModes.push("flat");
+            cIndents.push(ind);
+            cWidths.push(indWidth);
+            cAts.push(0);
+          } else { cDocs.push(states[states.length - 1]!); cModes.push("break"); cIndents.push(ind); cWidths.push(indWidth); cAts.push(0); }
+        } else {
+          cDocs.push(doc.contents);
+          cModes.push("break");
+          cIndents.push(ind);
+          cWidths.push(indWidth);
+          cAts.push(0);
         }
-        case "fill": {
-          const room = printWidth - pos;
-          const at = doc.printed;
-          const content = doc.parts[at];
-          const whitespace = doc.parts[at + 1];
-          if (content === undefined) break;
-          const contentFlat: Command = { ind, mode: "flat", doc: content };
-          const contentBreak: Command = { ind, mode: "break", doc: content };
-          const contentFits = fits(contentFlat, [], room, suffixes.length > 0, modes, true);
-          if (whitespace === undefined) {
-            cmds.push(contentFits ? contentFlat : contentBreak);
-            break;
-          }
-          const whitespaceFlat: Command = { ind, mode: "flat", doc: whitespace };
-          const whitespaceBreak: Command = { ind, mode: "break", doc: whitespace };
-          if (doc.parts.length - at === 2) {
-            if (contentFits) cmds.push(whitespaceFlat, contentFlat);
-            else cmds.push(whitespaceBreak, contentBreak);
-            break;
-          }
-          const remaining: Command = { ind, mode, doc: { ...doc, printed: at + 2 } };
-          const pairFits = fits({ ind, mode: "flat", doc: [content, whitespace, doc.parts[at + 2]!] }, [], room, suffixes.length > 0, modes, true);
-          if (pairFits) cmds.push(remaining, whitespaceFlat, contentFlat);
-          else if (contentFits) cmds.push(remaining, whitespaceBreak, contentFlat);
-          else cmds.push(remaining, whitespaceBreak, contentBreak);
-          break;
-        }
-        case "ifBreak":
-        case "indentIfBreak": {
-          const groupMode = doc.groupId ? (modes.get(doc.groupId) ?? "flat") : mode;
-          if (doc.kind === "ifBreak") {
-            cmds.push({ ind, mode, doc: groupMode === "break" ? doc.breakContents : doc.flatContents });
-          } else {
-            const indented = groupMode === "break" ? !doc.negate : doc.negate;
-            cmds.push({ ind, mode, doc: indented ? indent(doc.contents) : doc.contents });
-          }
-          break;
-        }
-        case "lineSuffix":
-          // A suffix after one that ends its line starts a line of its own.
-          suffixes.push({ ind, mode, doc: suffixEndsLine.at(-1) && !startsWithHardLine(doc.contents) ? [hardline, doc.contents] : doc.contents });
-          suffixEndsLine.push(doc.endsLine);
-          break;
-        case "lineSuffixBoundary":
-          if (suffixes.length > 0) cmds.push({ ind, mode, doc: { kind: "line", soft: false, hard: true, literal: false } });
-          break;
-        case "line": {
-          if (mode === "flat" && !doc.hard) {
-            if (!doc.soft) {
-              out.push(" ");
-              pos += 1;
-            }
-            break;
-          }
-          if (mode === "flat") remeasure = true;
-          if (suffixes.length > 0) {
-            cmds.push({ ind, mode, doc }, ...suffixes.reverse());
-            suffixes.length = 0;
-            suffixEndsLine.length = 0;
-            break;
-          }
-          if (doc.literal) {
-            out.push("\n");
-            pos = 0;
-          } else {
-            pos -= trimEnd(out) as i64;
-            out.push("\n" + ind.value);
-            pos = ind.length as i64;
-          }
-          break;
-        }
-        case "label":
-          cmds.push({ ind, mode, doc: doc.contents });
-          break;
-        case "breakParent":
-          break;
       }
+      if (doc.id !== undefined && doc.id !== "") modes.set(doc.id, chosen);
+    } else if (doc.kind === "fill") {
+      const room = roomLeft(printWidth, pos);
+      const at = from > doc.printed ? from : doc.printed;
+      if (at < doc.parts.length) {
+        const content: Ref<Doc>[] = [doc.parts[at]!];
+        const contentFits = fits("flat", content, [], [], [], room, sDocs.length > 0, modes, true);
+        const contentMode: Mode = contentFits ? "flat" : "break";
+        if (at + 1 === doc.parts.length) {
+          cDocs.push(doc.parts[at]!);
+          cModes.push(contentMode);
+          cIndents.push(ind);
+          cWidths.push(indWidth);
+          cAts.push(0);
+        } else if (doc.parts.length - at === 2) {
+          cDocs.push(doc.parts[at + 1]!);
+          cModes.push(contentMode);
+          cIndents.push(ind);
+          cWidths.push(indWidth);
+          cAts.push(0);
+          cDocs.push(doc.parts[at]!);
+          cModes.push(contentMode);
+          cIndents.push(ind);
+          cWidths.push(indWidth);
+          cAts.push(0);
+        } else {
+          const pair: Ref<Doc>[] = [doc.parts[at]!, doc.parts[at + 1]!, doc.parts[at + 2]!];
+          const pairFits = fits("flat", pair, [], [], [], room, sDocs.length > 0, modes, true);
+          const whitespaceMode: Mode = pairFits ? "flat" : "break";
+          const partMode: Mode = pairFits || contentFits ? "flat" : "break";
+          cDocs.push(doc);
+          cModes.push(mode);
+          cIndents.push(ind);
+          cWidths.push(indWidth);
+          cAts.push(at + 2);
+          cDocs.push(doc.parts[at + 1]!);
+          cModes.push(whitespaceMode);
+          cIndents.push(ind);
+          cWidths.push(indWidth);
+          cAts.push(0);
+          cDocs.push(doc.parts[at]!);
+          cModes.push(partMode);
+          cIndents.push(ind);
+          cWidths.push(indWidth);
+          cAts.push(0);
+        }
+      }
+    } else if (doc.kind === "ifBreak") {
+      const groupMode = doc.groupId !== undefined && doc.groupId !== "" ? (modes.get(doc.groupId) ?? "flat") : mode;
+      cDocs.push(groupMode === "break" ? doc.breakContents : doc.flatContents);
+      cModes.push(mode);
+      cIndents.push(ind);
+      cWidths.push(indWidth);
+      cAts.push(0);
+    } else if (doc.kind === "indentIfBreak") {
+      const groupMode = doc.groupId !== "" ? (modes.get(doc.groupId) ?? "flat") : mode;
+      const indented = groupMode === "break" ? !doc.negate : doc.negate;
+      if (indented) { cDocs.push(doc.contents); cModes.push(mode); cIndents.push(ind + "  "); cWidths.push(indWidth + 2); cAts.push(0); }
+      else { cDocs.push(doc.contents); cModes.push(mode); cIndents.push(ind); cWidths.push(indWidth); cAts.push(0); }
+    } else if (doc.kind === "lineSuffix") {
+      // A suffix after one that ends its line starts a line of its own.
+      const afterEnding = sEndsLine.length > 0 && sEndsLine[sEndsLine.length - 1]!;
+      sDocs.push(doc.contents);
+      sModes.push(mode);
+      sIndents.push(ind);
+      sWidths.push(indWidth);
+      sOwnLine.push(afterEnding && !startsWithHardLine(doc.contents));
+      sEndsLine.push(doc.endsLine);
+    } else if (doc.kind === "lineSuffixBoundary") {
+      if (sDocs.length > 0) { cDocs.push(HARD_LINE); cModes.push(mode); cIndents.push(ind); cWidths.push(indWidth); cAts.push(0); }
+    } else if (doc.kind === "line") {
+      if (mode === "flat" && !doc.hard) {
+        if (!doc.soft) {
+          out.push(" ");
+          pos += 1;
+        }
+      } else {
+        if (mode === "flat") remeasure = true;
+        if (sDocs.length > 0) {
+          cDocs.push(doc);
+          cModes.push(mode);
+          cIndents.push(ind);
+          cWidths.push(indWidth);
+          cAts.push(0);
+          while (sDocs.length > 0) {
+            const suffixDoc: Ref<Doc> = sDocs.pop()!;
+            const suffixMode = sModes.pop()!;
+            const suffixIndent = sIndents.pop()!;
+            const suffixWidth = sWidths.pop()!;
+            cDocs.push(suffixDoc);
+            cModes.push(suffixMode);
+            cIndents.push(suffixIndent);
+            cWidths.push(suffixWidth);
+            cAts.push(0);
+            if (sOwnLine.pop()!) { cDocs.push(hardline); cModes.push(suffixMode); cIndents.push(suffixIndent); cWidths.push(suffixWidth); cAts.push(0); }
+          }
+          sEndsLine = [];
+        } else if (doc.literal) {
+          out.push("\n");
+          pos = 0;
+        } else {
+          pos -= trimEnd(out) as i64;
+          out.push("\n" + ind);
+          pos = indWidth as i64;
+        }
+      }
+    } else if (doc.kind === "label") {
+      cDocs.push(doc.contents);
+      cModes.push(mode);
+      cIndents.push(ind);
+      cWidths.push(indWidth);
+      cAts.push(0);
     }
-    if (cmds.length === 0 && suffixes.length > 0) {
-      cmds.push(...suffixes.reverse());
-      suffixes.length = 0;
-      suffixEndsLine.length = 0;
+    if (cDocs.length === 0 && sDocs.length > 0) {
+      while (sDocs.length > 0) {
+        const suffixDoc: Ref<Doc> = sDocs.pop()!;
+        const suffixMode = sModes.pop()!;
+        const suffixIndent = sIndents.pop()!;
+        const suffixWidth = sWidths.pop()!;
+        cDocs.push(suffixDoc);
+        cModes.push(suffixMode);
+        cIndents.push(suffixIndent);
+        cWidths.push(suffixWidth);
+        cAts.push(0);
+        if (sOwnLine.pop()!) { cDocs.push(hardline); cModes.push(suffixMode); cIndents.push(suffixIndent); cWidths.push(suffixWidth); cAts.push(0); }
+      }
+      sEndsLine = [];
     }
   }
   return out.join("");
+}
+
+// The first of `states` after the first that fits flat, or 0 when none does.
+function firstFitting(states: Ref<Doc[]>, restDocs: Ref<Ref<Doc>[]>, restModes: Ref<Mode[]>, restAts: Ref<usize[]>, room: i64, hasLineSuffix: boolean, modes: Ref<Map<string, Mode>>): usize {
+  for (let i: usize = 1; i < states.length; i++) {
+    const state: Ref<Doc>[] = [states[i]!];
+    if (fits("flat", state, restDocs, restModes, restAts, room, hasLineSuffix, modes)) return i;
+  }
+  return 0;
+}
+
+// What is left of the line at column `pos`, which a width of Infinity never runs out of.
+function roomLeft(printWidth: f64, pos: i64): i64 {
+  return printWidth === INFINITY ? 9007199254740991 : (printWidth as i64) - pos;
 }
