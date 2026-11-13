@@ -233,3 +233,28 @@ function main() {
   console.log(p.toString());
   console.log(p.get("b"));
 }
+// case: url_file_urls
+// expect: file:///tmp/a%20b%23c%3Fd%25e%5Cf/%C3%A9
+// expect: file:///x/y/
+// expect: /tmp/a b#c/é
+// expect: /tmp/a b#c?d%e\f/é
+// expect: true
+// expect: The URL must be of scheme file
+// expect: File URL path must not include encoded / characters
+// expect: URI malformed
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { dirname } from "node:path";
+function main() throws TypeError {
+  console.log(pathToFileURL("/tmp/a b#c?d%e\\f/é").href);
+  console.log(pathToFileURL("/x/y/").href);
+  console.log(fileURLToPath("file:///tmp/a%20b%23c/%C3%A9"));
+  console.log(fileURLToPath(pathToFileURL("/tmp/a b#c?d%e\\f/é")));
+  console.log(dirname(fileURLToPath(import.meta.url)).endsWith("/programs"));
+  for (const u of ["http://x/y", "file:///a%2Fb", "file:///a%FF"]) {
+    try {
+      fileURLToPath(u);
+    } catch (e) {
+      console.log(e.message);
+    }
+  }
+}

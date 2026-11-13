@@ -543,16 +543,16 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
   }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins"]]);
   });
-  // The global URL and URLSearchParams are std's, but Fish refuses importing them from url, and
-  // querystring has no std module.
+  // The global URL and URLSearchParams are std's, but Fish's url module has only the file URL
+  // functions, so importing URL from it is refused, and querystring has no std module.
   project({
     "a.ts": "const u = new URL(\"http://h/?a=1\");\nconst p = new URLSearchParams(u.search);\n",
     "b.ts": "import { URL } from \"node:url\";\nimport qs from \"querystring\";\n",
   }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["import.meta.url and file URLs", "node:querystring"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], ["Node built-ins", "node:querystring"]]);
     expect(survey(dir).builtins).toEqual([
       { module: "querystring", files: 1, equivalent: { name: "node:querystring", planned: true } },
-      { module: "url", files: 1, equivalent: { name: "import.meta.url and file URLs", planned: true } },
+      { module: "url", files: 1, equivalent: { name: "url, for fileURLToPath and pathToFileURL", planned: false } },
     ]);
   });
 });

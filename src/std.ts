@@ -6191,6 +6191,72 @@ export function exit(code: i64 = 0): never {
   while (true) {}
 }
 `,
+  // node:url's file URL functions, as Node gives them on POSIX. URL and URLSearchParams are globals.
+  url: String.raw`
+import { platform } from "os";
+import { resolve } from "path";
+
+// The path made absolute and percent-encoded where a URL's path can't hold it as written, with
+// '%', '\' and tabs and newlines encoded too, as Node does. A trailing slash stays.
+export function pathToFileURL(path: string): URL {
+  let resolved = resolve(path);
+  if (path.endsWith("/") && !resolved.endsWith("/")) resolved = resolved + "/";
+  const bytes = new TextEncoder().encode(resolved);
+  const hex = "0123456789ABCDEF";
+  let out = "file://";
+  for (const b of bytes) {
+    const c = b as i64;
+    if (c <= 32 || c >= 127 || c === 34 || c === 35 || c === 37 || c === 60 || c === 62 || c === 63 || c === 92 || c === 96 || c === 123 || c === 125) {
+      out = out + "%" + hex[(c >> 4) as usize] + hex[(c & 15) as usize];
+    } else out = out + String.fromCharCode(c as u16);
+  }
+  try {
+    return new URL(out);
+  } catch (_e) {
+    assert(false, "a file URL built from a path always parses");
+    return pathToFileURL("/");
+  }
+}
+
+// The path a file: URL names, decoded. A host, an encoded '/' or a scheme other than file: is
+// refused, as Node refuses them.
+export function fileURLToPath(url: string | URL): string throws TypeError {
+  const u = typeof url === "string" ? new URL(url) : url;
+  if (u.protocol !== "file:") throw new TypeError("The URL must be of scheme file");
+  if (u.hostname !== "") throw new TypeError("File URL host must be \"localhost\" or empty on " + platform());
+  const pathname = u.pathname;
+  if (pathname.includes("%2f") || pathname.includes("%2F")) throw new TypeError("File URL path must not include encoded / characters");
+  const bytes = new TextEncoder().encode(pathname);
+  let out: u8[] = [];
+  let i: usize = 0;
+  while (i < bytes.length) {
+    const high = i + 2 < bytes.length ? hexDigit(bytes[i + 1]) : -1;
+    const low = i + 2 < bytes.length ? hexDigit(bytes[i + 2]) : -1;
+    if (bytes[i] !== 37) {
+      out.push(bytes[i]);
+      i += 1;
+    } else if (high < 0 || low < 0) throw new TypeError("URI malformed");
+    else {
+      out.push((high * 16 + low) as u8);
+      i += 3;
+    }
+  }
+  // Bytes that aren't UTF-8 decode to U+FFFD, so they don't encode back to themselves.
+  const decoded = new TextDecoder().decode(out);
+  const again = new TextEncoder().encode(decoded);
+  if (again.length !== out.length) throw new TypeError("URI malformed");
+  for (let k: usize = 0; k < out.length; k++) if (again[k] !== out[k]) throw new TypeError("URI malformed");
+  return decoded;
+}
+
+function hexDigit(b: u8): i64 {
+  const c = b as i64;
+  if (c >= 48 && c <= 57) return c - 48;
+  if (c >= 65 && c <= 70) return c - 55;
+  if (c >= 97 && c <= 102) return c - 87;
+  return -1;
+}
+`,
   // Bun's global, as the subset this module documents: file, stdin, write, env, argv, sleep,
   // sleepSync, which, spawnSync, serve and version, each as Bun 1.4.3 gives it for the shapes here.
   // Bun.spawn's running child and Bun.build aren't here. spawnSync's stdout and stderr are u8[],
