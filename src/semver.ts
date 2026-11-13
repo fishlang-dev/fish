@@ -6,33 +6,43 @@ const VERSION = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?
 
 export function parseVersion(text: string): Version | undefined {
   const m = VERSION.exec(text.trim());
-  if (!m) return undefined;
+  if (m === null) return undefined;
   const pre = identifiers(m[4]);
-  return pre && { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]), pre };
+  if (pre === undefined) return undefined;
+  return { major: whole(m[1]!), minor: whole(m[2]!), patch: whole(m[3]!), pre };
+}
+
+// A run of digits as a number; the patterns here only give it digits.
+function whole(digits: string): u64 {
+  return parseInt(digits)! as u64;
 }
 
 // A pre-release's identifiers, numbers as numbers; a number with a leading zero isn't one.
 function identifiers(text: string | undefined): (string | u64)[] | undefined {
   if (text === undefined) return [];
   const parts = text.split(".");
-  if (parts.some((p) => /^0\d/.test(p) || (/^\d+$/.test(p) && !Number.isSafeInteger(Number(p))))) return undefined;
-  return parts.map((p) => (/^\d+$/.test(p) ? Number(p) : p));
+  if (parts.some((p) => /^0\d/.test(p) || (/^\d+$/.test(p) && !Number.isSafeInteger(parseFloat(p)!)))) return undefined;
+  return parts.map((p): string | u64 => (/^\d+$/.test(p) ? whole(p) : p));
 }
 
-export const formatVersion = (v: Version) => `${v.major}.${v.minor}.${v.patch}${v.pre.length ? `-${v.pre.join(".")}` : ""}`;
+export const formatVersion = (v: Version) => `${v.major}.${v.minor}.${v.patch}${v.pre.length > 0 ? `-${v.pre.join(".")}` : ""}`;
 
 // Precedence as semver 2.0 orders it: a pre-release before its release, numeric identifiers
 // below alphanumeric ones, a shorter list of identifiers first when the rest are equal.
-export function compare(a: Version, b: Version): i64 {
-  for (const k of ["major", "minor", "patch"] as const) if (a[k] !== b[k]) return a[k] < b[k] ? -1 : 1;
+export function compare(a: Ref<Version>, b: Ref<Version>): i64 {
+  if (a.major !== b.major) return a.major < b.major ? -1 : 1;
+  if (a.minor !== b.minor) return a.minor < b.minor ? -1 : 1;
+  if (a.patch !== b.patch) return a.patch < b.patch ? -1 : 1;
   if (a.pre.length === 0 || b.pre.length === 0) return (b.pre.length as i64) - (a.pre.length as i64);
-  for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i++) {
-    const [x, y] = [a.pre[i], b.pre[i]];
-    if (x === undefined) return -1;
-    if (y === undefined) return 1;
+  for (let i: usize = 0; i < a.pre.length || i < b.pre.length; i++) {
+    if (i >= a.pre.length) return -1;
+    if (i >= b.pre.length) return 1;
+    const x = a.pre[i]!;
+    const y = b.pre[i]!;
     if (x === y) continue;
-    if (typeof x !== typeof y) return typeof x === "number" ? -1 : 1;
-    return x < y ? -1 : 1;
+    if (typeof x === "string" && typeof y === "string") return x < y ? -1 : 1;
+    if (typeof x !== "string" && typeof y !== "string") return x < y ? -1 : 1;
+    return typeof x === "string" ? 1 : -1;
   }
   return 0;
 }
@@ -52,12 +62,12 @@ const PARTIAL = /^v?(\d+|[xX*])(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?(?:-([0-9A-Za
 function partial(text: string): Partial | undefined {
   if (text === "") return { pre: [] };
   const m = PARTIAL.exec(text);
-  if (!m) return undefined;
-  const part = (p: string | undefined) => (p === undefined || /^[xX*]$/.test(p) ? undefined : Number(p));
+  if (m === null) return undefined;
+  const part = (p: string | undefined): u64 | undefined => (p === undefined || /^[xX*]$/.test(p) ? undefined : whole(p));
   const [major, minor, patch] = [part(m[1]), part(m[2]), part(m[3])];
   if ((major === undefined && minor !== undefined) || (minor === undefined && patch !== undefined)) return undefined;
   const pre = identifiers(m[4]);
-  if (!pre || (pre.length > 0 && patch === undefined)) return undefined;
+  if (pre === undefined || (pre.length > 0 && patch === undefined)) return undefined;
   return { major, minor, patch, pre };
 }
 
@@ -77,7 +87,10 @@ function comparators(op: string, p: Partial): Comparator[] {
   }
   if (major === undefined) return op === "<" || op === ">" ? [{ op: "<", version: at(0, 0, 0, [0]), bound: true }] : [];
   const exact = patch !== undefined;
-  if (exact) return [{ op: (op || "=") as Op, version: low }];
+  if (exact) {
+    const written: Op = op === "<" ? "<" : op === "<=" ? "<=" : op === ">" ? ">" : op === ">=" ? ">=" : "=";
+    return [{ op: written, version: low }];
+  }
   // A partial version with `>`, `<=` or nothing reaches past the parts left out.
   const next = minor === undefined ? at(major + 1) : at(major, minor + 1);
   switch (op) {
@@ -96,46 +109,49 @@ function comparators(op: string, p: Partial): Comparator[] {
 
 // An npm range: sets joined by `||`, each of comparators separated by spaces or a hyphen range.
 export function parseRange(text: string): Range | undefined {
-  const sets: Range = [];
+  let sets: Range = [];
   for (const raw of text.split("||")) {
     const set = raw.trim().replace(/(\^|~|>=?|<=?|=)\s+/g, "$1");
     const hyphen = /^(\S+)\s+-\s+(\S+)$/.exec(set);
-    if (hyphen) {
-      const [from, to] = [partial(hyphen[1]!), partial(hyphen[2]!)];
-      if (!from || !to) return undefined;
+    if (hyphen !== null) {
+      const from = partial(hyphen[1]!);
+      const to = partial(hyphen[2]!);
+      if (from === undefined || to === undefined) return undefined;
       const low = comparators(">=", from);
-      const high = to.patch !== undefined ? [{ op: "<=" as Op, version: at(to.major!, to.minor!, to.patch, to.pre) }] : comparators("<=", to);
+      const high: Comparator[] = to.patch !== undefined ? [{ op: "<=" as Op, version: at(to.major!, to.minor!, to.patch, to.pre) }] : comparators("<=", to);
       sets.push([...low, ...high]);
       continue;
     }
-    const parts: Comparator[] = [];
+    let parts: Comparator[] = [];
     for (const word of set === "" ? [""] : set.split(/\s+/)) {
       const m = /^(\^|~|>=|<=|>|<|=)?(.*)$/.exec(word)!;
-      const p = m[1] && m[2] === "" ? undefined : partial(m[2]!);
-      if (!p) return undefined;
-      parts.push(...comparators(m[1] ?? "", p));
+      const p = m[1] !== undefined && m[2] === "" ? undefined : partial(m[2]!);
+      if (p === undefined) return undefined;
+      parts = parts.concat(comparators(m[1] ?? "", p));
     }
     sets.push(parts);
   }
   return sets;
 }
 
-function holds(c: Comparator, v: Version): boolean {
+function holds(c: Ref<Comparator>, v: Ref<Version>): boolean {
   const order = compare(v, c.version);
   return c.op === "<" ? order < 0 : c.op === "<=" ? order <= 0 : c.op === ">" ? order > 0 : c.op === ">=" ? order >= 0 : order === 0;
 }
 
 // Whether `v` is in `range`. A pre-release counts only where a comparator of the same set names a
 // pre-release of the same major, minor and patch, as npm keeps unstable versions opt-in.
-export function satisfies(v: Version, range: Range): boolean {
+export function satisfies(v: Ref<Version>, range: Ref<Range>): boolean {
   return range.some((set) => {
     if (!set.every((c) => holds(c, v))) return false;
     if (v.pre.length === 0) return true;
-    return set.some((c) => !c.bound && c.version.pre.length > 0 && c.version.major === v.major && c.version.minor === v.minor && c.version.patch === v.patch);
+    return set.some((c) => c.bound !== true && c.version.pre.length > 0 && c.version.major === v.major && c.version.minor === v.minor && c.version.patch === v.patch);
   });
 }
 
 // The highest of `versions` in `range`.
-export function maxSatisfying(versions: Version[], range: Range): Version | undefined {
-  return versions.filter((v) => satisfies(v, range)).sort(compare).at(-1);
+export function maxSatisfying(versions: Ref<Version[]>, range: Ref<Range>): Version | undefined {
+  let matching = versions.filter((v) => satisfies(v, range));
+  matching.sort(compare);
+  return matching.at(-1);
 }

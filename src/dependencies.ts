@@ -354,7 +354,8 @@ function locked(file: string, src: string): Map<string, Table> {
     const found = toml.get("package") ?? [];
     return new Map((Array.isArray(found) ? found : [found]).map((t) => [String(t.keys.get("name")?.value.value), t]));
   } catch (e) {
-    throw inManifest(e, file, src);
+    if (e instanceof CompileError) throw inManifest(e, file, src);
+    throw e;
   }
 }
 

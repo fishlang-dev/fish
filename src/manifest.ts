@@ -27,288 +27,415 @@ export const NAME_RULE = "a package name is lowercase letters, digits and '-', s
 export const validName = (name: string) => /^[a-z][a-z0-9-]{0,63}$/.test(name);
 
 export type Spanned<T> = { value: T; start: usize; end: usize };
-export type Entries = Map<string, { key: Spanned<string>; value: Spanned<TomlValue> }>;
-export type TomlValue = string | i64 | boolean | Entries | Spanned<TomlValue>[];
+export type Entries = Map<string, { key: Spanned<string>; value: SpannedValue }>;
+export type TomlValue = string | i64 | boolean | Entries | SpannedValue[];
+// Named, so the type in TomlValue's arrays and the one written elsewhere are the same to Fish.
+export type SpannedValue = { value: TomlValue; start: usize; end: usize };
 export type Table = { start: usize; end: usize; keys: Entries };
+
+// TOML's one-character escapes in a basic string.
+const SIMPLE_ESCAPES = new Map<string, string>([['"', '"'], ["\\", "\\"], ["n", "\n"], ["t", "\t"], ["r", "\r"], ["b", "\b"], ["f", "\f"]]);
+
+// One `[table]` or `[[table]]` header and the keys under it, as written.
+type Section = { name: string; array: boolean; table: Table };
+
+// A position in TOML source and the reading done from it. Every read is through `char`, which gives
+// "" past the end.
+class TomlReader {
+  src: string;
+  at: usize;
+
+  constructor(src: string) {
+    this.src = src;
+    this.at = 0;
+  }
+
+  char(k: usize): string {
+    return this.src.charAt(k as i64);
+  }
+
+  ahead(text: string): boolean {
+    return this.src.startsWith(text, this.at as i64);
+  }
+
+  space(this: Mut<this>) {
+    while (this.char(this.at) === " " || this.char(this.at) === "\t") this.at++;
+  }
+
+  comment(this: Mut<this>) {
+    if (this.char(this.at) === "#") while (this.at < this.src.length && this.char(this.at) !== "\n") this.at++;
+  }
+
+  /** @throws {CompileError} */
+  endOfLine(this: Mut<this>) {
+    this.space();
+    this.comment();
+    if (this.ahead("\r\n")) this.at++;
+    if (this.at < this.src.length && this.char(this.at) !== "\n") throw new CompileError("E0904", "expected the end of the line here", this.at, this.at + 1);
+    this.at++;
+  }
+
+  /** @throws {CompileError} */
+  key(this: Mut<this>): Spanned<string> {
+    const start = this.at;
+    if (this.char(this.at) === '"' || this.char(this.at) === "'") {
+      const s = this.string();
+      return { value: s.value, start, end: this.at };
+    }
+    while (/^[A-Za-z0-9_-]$/.test(this.char(this.at))) this.at++;
+    if (this.at === start) throw new CompileError("E0904", "expected a key here", start, start + 1);
+    if (this.char(this.at) === ".") throw unread(this.at, "a dotted key");
+    return { value: this.src.slice(start as i64, this.at as i64), start, end: this.at };
+  }
+
+  /** @throws {CompileError} */
+  string(this: Mut<this>): Spanned<string> {
+    const start = this.at;
+    const quote = this.char(this.at);
+    if (this.ahead(quote.repeat(3))) throw unread(this.at, "a multi-line string");
+    this.at++;
+    let value = "";
+    while (this.char(this.at) !== quote) {
+      if (this.at >= this.src.length || this.char(this.at) === "\n") throw new CompileError("E0904", "this string isn't closed on its line", start, this.at);
+      if (quote === '"' && this.char(this.at) === "\\") {
+        const simple = SIMPLE_ESCAPES.get(this.char(this.at + 1));
+        if (simple !== undefined) {
+          value += simple;
+          this.at += 2;
+          continue;
+        }
+        const escape = this.char(this.at + 1);
+        const hex: usize = escape === "u" ? 4 : escape === "U" ? 8 : 0;
+        const digits = this.src.slice((this.at + 2) as i64, (this.at + 2 + hex) as i64);
+        const code = hex === 0 || !/^[0-9A-Fa-f]+$/.test(digits) || digits.length !== hex ? -1 : parseInt(digits, 16)!;
+        if (code < 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) throw new CompileError("E0904", "this escape isn't one TOML has", this.at, this.at + 2);
+        value += String.fromCodePoint(code as u32);
+        this.at += 2 + hex;
+        continue;
+      }
+      value += this.char(this.at);
+      this.at++;
+    }
+    this.at++;
+    return { value, start, end: this.at };
+  }
+
+  // One `key = value` into `keys`, a key given twice refused.
+  /** @throws {CompileError} */
+  entry(this: Mut<this>, keys: Mut<Entries>) {
+    const k = this.key();
+    this.space();
+    if (this.char(this.at) !== "=") throw new CompileError("E0904", "expected '=' after the key", this.at, this.at + 1);
+    this.at++;
+    this.space();
+    const v = this.value();
+    if (keys.has(k.value)) throw new CompileError("E0904", `'${k.value}' is given twice`, k.start, k.end);
+    keys.set(k.value, { key: k, value: v });
+  }
+
+  // `{ a = 1, b = "x" }`, on one line, as TOML has it.
+  /** @throws {CompileError} */
+  inline(this: Mut<this>): SpannedValue {
+    const start = this.at;
+    let keys: Entries = new Map();
+    this.at++;
+    this.space();
+    if (this.char(this.at) === "}") {
+      this.at++;
+      return { value: keys, start, end: this.at };
+    }
+    for (;;) {
+      this.entry(keys);
+      this.space();
+      if (this.char(this.at) === "}") break;
+      if (this.char(this.at) !== ",") throw new CompileError("E0904", "expected ',' or '}' in this inline table", this.at, this.at + 1);
+      this.at++;
+      this.space();
+    }
+    this.at++;
+    return { value: keys, start, end: this.at };
+  }
+
+  /** @throws {CompileError} */
+  value(this: Mut<this>): SpannedValue {
+    const start = this.at;
+    const first = this.char(this.at);
+    if (first === '"' || first === "'") {
+      const s = this.string();
+      return { value: s.value, start: s.start, end: s.end };
+    }
+    if (first === "{") return this.inline();
+    if (first === "[") return this.array();
+    const found = /^[^\s#,}\]]+/.exec(this.src.slice(this.at as i64));
+    const word = found === null ? "" : found[0]!;
+    this.at += word.length;
+    if (word === "true" || word === "false") return { value: word === "true", start, end: this.at };
+    if (/^[+-]?(0|[1-9]\d*)$/.test(word)) return { value: parseInt(word)!, start, end: this.at };
+    if (word === "") throw new CompileError("E0904", "expected a value after '='", start, start + 1);
+    throw unread(start, "this value");
+  }
+
+  // Blank space, line ends and comments, which an array may hold between its values.
+  gap(this: Mut<this>) {
+    for (;;) {
+      this.space();
+      this.comment();
+      if (this.char(this.at) === "\n") this.at += 1;
+      else if (this.ahead("\r\n")) this.at += 2;
+      else return;
+    }
+  }
+
+  // `["a", "b"]`, over several lines if need be, with a trailing comma allowed.
+  /** @throws {CompileError} */
+  array(this: Mut<this>): SpannedValue {
+    const start = this.at;
+    let values: SpannedValue[] = [];
+    this.at++;
+    for (this.gap(); this.char(this.at) !== "]"; this.gap()) {
+      if (this.at >= this.src.length) throw new CompileError("E0904", "this array isn't closed", start, start + 1);
+      values.push(this.value());
+      this.gap();
+      if (this.char(this.at) === "]") break;
+      if (this.char(this.at) !== ",") throw new CompileError("E0904", "expected ',' or ']' in this array", this.at, this.at + 1);
+      this.at++;
+    }
+    this.at++;
+    const all: TomlValue = values;
+    return { value: all, start, end: this.at };
+  }
+}
+
+function unread(start: usize, what: string): CompileError {
+  return new CompileError("E0904", `${what} is TOML Fish doesn't read in a manifest yet`, start, start + 1);
+}
 
 // The TOML a manifest and a lockfile use: comments, `[table]` and `[[array of tables]]` headers,
 // bare and quoted keys, basic and literal strings, integers, booleans and inline tables. Anything
 // else is refused where it starts rather than misread.
+/** @throws {CompileError} */
 export function parseToml(src: string): Map<string, Table | Table[]> {
-  const tables = new Map<string, Table | Table[]>();
-  let current: Table = { start: 0, end: 0, keys: new Map() };
-  tables.set("", current);
-  let at = 0;
-  const unread = (start: usize, what: string) => new CompileError("E0904", `${what} is TOML Fish doesn't read in a manifest yet`, start, start + 1);
-  const space = () => {
-    while (at < src.length && (src[at] === " " || src[at] === "\t")) at++;
-  };
-  const endOfLine = () => {
-    space();
-    if (src[at] === "#") while (at < src.length && src[at] !== "\n") at++;
-    if (src.startsWith("\r\n", at)) at++;
-    if (at < src.length && src[at] !== "\n") throw new CompileError("E0904", "expected the end of the line here", at, at + 1);
-    at++;
-  };
-  const key = (): Spanned<string> => {
-    const start = at;
-    if (src[at] === '"' || src[at] === "'") {
-      const s = string();
-      return { value: s.value, start, end: at };
-    }
-    while (at < src.length && /[A-Za-z0-9_-]/.test(src[at]!)) at++;
-    if (at === start) throw new CompileError("E0904", "expected a key here", start, start + 1);
-    if (src[at] === ".") throw unread(at, "a dotted key");
-    return { value: src.slice(start, at), start, end: at };
-  };
-  const string = (): Spanned<string> => {
-    const start = at;
-    const quote = src[at]!;
-    if (src.startsWith(quote.repeat(3), at)) throw unread(at, "a multi-line string");
-    at++;
-    let value = "";
-    while (src[at] !== quote) {
-      if (at >= src.length || src[at] === "\n") throw new CompileError("E0904", "this string isn't closed on its line", start, at);
-      if (quote === '"' && src[at] === "\\") {
-        const escape = src[at + 1];
-        const simple: Record<string, string> = { '"': '"', "\\": "\\", n: "\n", t: "\t", r: "\r", b: "\b", f: "\f" };
-        if (escape !== undefined && escape in simple) {
-          value += simple[escape];
-          at += 2;
-          continue;
-        }
-        const hex = escape === "u" ? 4 : escape === "U" ? 8 : 0;
-        const digits = src.slice(at + 2, at + 2 + hex);
-        const code = parseInt(digits, 16);
-        if (hex === 0 || !/^[0-9A-Fa-f]+$/.test(digits) || digits.length !== hex || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) throw new CompileError("E0904", "this escape isn't one TOML has", at, at + 2);
-        value += String.fromCodePoint(code);
-        at += 2 + hex;
-        continue;
-      }
-      value += src[at];
-      at++;
-    }
-    at++;
-    return { value, start, end: at };
-  };
-  // One `key = value` into `keys`, a key given twice refused.
-  const entry = (keys: Entries) => {
-    const k = key();
-    space();
-    if (src[at] !== "=") throw new CompileError("E0904", "expected '=' after the key", at, at + 1);
-    at++;
-    space();
-    const v = value();
-    if (keys.has(k.value)) throw new CompileError("E0904", `'${k.value}' is given twice`, k.start, k.end);
-    keys.set(k.value, { key: k, value: v });
-  };
-  // `{ a = 1, b = "x" }`, on one line, as TOML has it.
-  const inline = (): Spanned<Entries> => {
-    const start = at;
-    const keys: Entries = new Map();
-    at++;
-    space();
-    if (src[at] === "}") {
-      at++;
-      return { value: keys, start, end: at };
-    }
-    for (;;) {
-      entry(keys);
-      space();
-      if (src[at] === "}") break;
-      if (src[at] !== ",") throw new CompileError("E0904", "expected ',' or '}' in this inline table", at, at + 1);
-      at++;
-      space();
-    }
-    at++;
-    return { value: keys, start, end: at };
-  };
-  const value = (): Spanned<TomlValue> => {
-    const start = at;
-    if (src[at] === '"' || src[at] === "'") return string();
-    if (src[at] === "{") return inline();
-    if (src[at] === "[") return array();
-    const word = /^[^\s#,}\]]+/.exec(src.slice(at))?.[0] ?? "";
-    at += word.length;
-    if (word === "true" || word === "false") return { value: word === "true", start, end: at };
-    if (/^[+-]?(0|[1-9]\d*)$/.test(word)) return { value: Number(word), start, end: at };
-    if (word === "") throw new CompileError("E0904", "expected a value after '='", start, start + 1);
-    throw unread(start, "this value");
-  };
-  // Blank space, line ends and comments, which an array may hold between its values.
-  const gap = () => {
-    for (;;) {
-      space();
-      if (src[at] === "#") while (at < src.length && src[at] !== "\n") at++;
-      if (src[at] === "\n" || src.startsWith("\r\n", at)) at += src[at] === "\n" ? 1 : 2;
-      else return;
-    }
-  };
-  // `["a", "b"]`, over several lines if need be, with a trailing comma allowed.
-  const array = (): Spanned<TomlValue> => {
-    const start = at;
-    const values: Spanned<TomlValue>[] = [];
-    at++;
-    for (gap(); src[at] !== "]"; gap()) {
-      if (at >= src.length) throw new CompileError("E0904", "this array isn't closed", start, start + 1);
-      values.push(value());
-      gap();
-      if (src[at] === "]") break;
-      if (src[at] !== ",") throw new CompileError("E0904", "expected ',' or ']' in this array", at, at + 1);
-      at++;
-    }
-    at++;
-    return { value: values, start, end: at };
-  };
-  while (at < src.length) {
-    space();
-    if (src[at] === "\n" || src[at] === "#" || src.startsWith("\r\n", at) || at >= src.length) {
-      endOfLine();
+  let r = new TomlReader(src);
+  let sections: Section[] = [{ name: "", array: false, table: { start: 0, end: 0, keys: new Map() } }];
+  // Whether each table named so far is an array of tables.
+  let arrays = new Map<string, boolean>([["", false]]);
+  while (r.at < src.length) {
+    r.space();
+    if (r.char(r.at) === "\n" || r.char(r.at) === "#" || r.ahead("\r\n") || r.at >= src.length) {
+      r.endOfLine();
       continue;
     }
-    if (src[at] === "[") {
-      const start = at;
-      const array = src[at + 1] === "[";
-      at += array ? 2 : 1;
-      space();
-      const name = key();
-      space();
-      if (!src.startsWith(array ? "]]" : "]", at)) throw new CompileError("E0904", `expected '${array ? "]]" : "]"}' to close the table's name`, at, at + 1);
-      at += array ? 2 : 1;
-      current = { start, end: at, keys: new Map() };
-      const had = tables.get(name.value);
-      if (array && (had === undefined || Array.isArray(had))) {
-        if (had) had.push(current);
-        else tables.set(name.value, [current]);
-      } else if (had !== undefined) {
-        throw new CompileError("E0904", `the table [${name.value}] is given twice`, start, at);
-      } else tables.set(name.value, current);
-      endOfLine();
+    if (r.char(r.at) === "[") {
+      const start = r.at;
+      const array = r.char(r.at + 1) === "[";
+      r.at += array ? 2 : 1;
+      r.space();
+      const name = r.key();
+      r.space();
+      if (!r.ahead(array ? "]]" : "]")) throw new CompileError("E0904", `expected '${array ? "]]" : "]"}' to close the table's name`, r.at, r.at + 1);
+      r.at += array ? 2 : 1;
+      const had = arrays.get(name.value);
+      if (had !== undefined && !(array && had)) throw new CompileError("E0904", `the table [${name.value}] is given twice`, start, r.at);
+      arrays.set(name.value, array);
+      sections.push({ name: name.value, array, table: { start, end: r.at, keys: new Map() } });
+      r.endOfLine();
       continue;
     }
-    entry(current.keys);
-    endOfLine();
+    r.entry(sections[sections.length - 1]!.table.keys);
+    r.endOfLine();
+  }
+  let tables = new Map<string, Table | Table[]>();
+  while (sections.length > 0) {
+    const s = sections.shift()!;
+    const had = tables.get(s.name);
+    if (!s.array) tables.set(s.name, s.table);
+    else if (had === undefined) tables.set(s.name, [s.table]);
+    else if (Array.isArray(had)) tables.set(s.name, [...had, s.table]);
   }
   return tables;
 }
 
 // What a package's `fish.toml` says, checked: a `[package]` with a name and version, an optional
 // entry, and nothing a manifest doesn't have, so a misspelled key isn't silently ignored.
+/** @throws {CompileError} */
 export function readManifest(src: string, dir: string): Manifest {
   const tables = parseToml(src);
-  const known: Record<string, string[]> = { "": [], package: ["name", "version", "entry", "lib", "edition"], dependencies: [], "rust-dependencies": [], registry: ["url"] };
+  const known = new Map<string, string[]>([["", []], ["package", ["name", "version", "entry", "lib", "edition"]], ["dependencies", []], ["rust-dependencies", []], ["registry", ["url"]]]);
   for (const [name, found] of tables) {
-    const table = Array.isArray(found) ? found[0]! : found;
-    if (!(name in known) || Array.isArray(found)) throw new CompileError("E0905", `a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies] and [registry]`, table.start, table.end);
-    for (const { key } of table.keys.values()) {
-      if (name !== "dependencies" && name !== "rust-dependencies" && !known[name]!.includes(key.value)) {
-        throw new CompileError("E0905", name === "" ? `'${key.value}' belongs in a table, such as [package]` : `[${name}] has no key '${key.value}'; it has ${known[name]!.join(", ")}`, key.start, key.end);
+    const keys = known.get(name);
+    const missing = `a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies] and [registry]`;
+    if (Array.isArray(found)) throw new CompileError("E0905", missing, found[0]!.start, found[0]!.end);
+    if (keys === undefined) throw new CompileError("E0905", missing, found.start, found.end);
+    for (const { key } of found.keys.values()) {
+      if (name !== "dependencies" && name !== "rust-dependencies" && !keys.includes(key.value)) {
+        throw new CompileError("E0905", name === "" ? `'${key.value}' belongs in a table, such as [package]` : `[${name}] has no key '${key.value}'; it has ${keys.join(", ")}`, key.start, key.end);
       }
     }
   }
-  const pkg = tables.get("package") as Table | undefined;
-  if (!pkg) throw new CompileError("E0905", `${MANIFEST} needs a [package] table with the package's name and version`, 0, 1);
-  const text = (field: string): Spanned<string> | undefined => {
-    const found = pkg.keys.get(field);
-    if (found && typeof found.value.value !== "string") throw new CompileError("E0905", `'${field}' is a string, as in ${field} = "..."`, found.value.start, found.value.end);
-    return found?.value as Spanned<string> | undefined;
-  };
-  const required = (field: string): Spanned<string> => text(field) ?? (() => { throw new CompileError("E0905", `[package] needs a '${field}'`, pkg.start, pkg.end); })();
-  const name = required("name");
+  const pkg = tables.get("package");
+  if (pkg === undefined || Array.isArray(pkg)) throw new CompileError("E0905", `${MANIFEST} needs a [package] table with the package's name and version`, 0, 1);
+  const name = required(pkg, "name");
   if (!validName(name.value)) throw new CompileError("E0905", NAME_RULE, name.start, name.end);
-  const version = required("version");
+  const version = required(pkg, "version");
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/.test(version.value)) {
     throw new CompileError("E0905", "a version is MAJOR.MINOR.PATCH, as in \"0.1.0\", with an optional pre-release such as \"1.0.0-beta.1\"", version.start, version.end);
   }
-  const file = (field: string, fallback: string) => {
-    const found = text(field);
-    if (found && !found.value.endsWith(".fsh")) throw new CompileError("E0905", `the ${field} is a .fsh file, as in ${field} = "${fallback}"`, found.start, found.end);
-    if (found && (isAbsolute(found.value) || normalize(found.value).split(sep)[0] === "..")) throw new CompileError("E0905", `the ${field} is a file inside the package, as in ${field} = "${fallback}"`, found.start, found.end);
-    return found?.value ?? fallback;
-  };
-  const entry = file("entry", "src/main.fsh");
-  const lib = file("lib", "src/lib.fsh");
-  const edition = text("edition");
-  if (edition && edition.value !== "native" && edition.value !== "ts-compat") throw new CompileError("E0905", `'${edition.value}' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated`, edition.start, edition.end);
-  const listed = tables.get("dependencies") as Table | undefined;
-  const dependencies = [...(listed?.keys.values() ?? [])].map(({ key, value }) => dependency(key, value));
-  const crates = tables.get("rust-dependencies") as Table | undefined;
-  const rustDependencies = crates && [...crates.keys.values()].map(({ key, value }) => rustDependency(key, value));
-  // Rust spells a crate's '-' as '_', so two such names would be one crate in Rust code.
-  const spelled = new Map<string, string>();
-  for (const d of rustDependencies ?? []) {
-    const other = spelled.get(d.name.replace(/-/g, "_"));
-    if (other !== undefined) throw new CompileError("E0905", `'${d.name}' and '${other}' are the same crate in Rust, which reads '-' as '_'; list it once`, d.start, d.end);
-    spelled.set(d.name.replace(/-/g, "_"), d.name);
+  const entry = packageFile(pkg, "entry", "src/main.fsh");
+  const lib = packageFile(pkg, "lib", "src/lib.fsh");
+  const edition = textIn(pkg.keys, "edition", true);
+  if (edition !== undefined && edition.value !== "native" && edition.value !== "ts-compat") throw new CompileError("E0905", `'${edition.value}' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated`, edition.start, edition.end);
+  const chosen: Edition = edition !== undefined && edition.value === "ts-compat" ? "ts-compat" : "native";
+  let dependencies: Dependency[] = [];
+  const listed = tables.get("dependencies");
+  if (listed !== undefined && !Array.isArray(listed)) for (const e of listed.keys.values()) dependencies.push(dependency(e.key, e.value));
+  let rustDependencies: RustDependency[] | undefined = undefined;
+  const crates = tables.get("rust-dependencies");
+  if (crates !== undefined && !Array.isArray(crates)) {
+    let all: RustDependency[] = [];
+    // Rust spells a crate's '-' as '_', so two such names would be one crate in Rust code.
+    let spelled = new Map<string, string>();
+    for (const e of crates.keys.values()) {
+      const d = rustDependency(e.key, e.value);
+      const other = spelled.get(d.name.replace(/-/g, "_"));
+      if (other !== undefined) throw new CompileError("E0905", `'${d.name}' and '${other}' are the same crate in Rust, which reads '-' as '_'; list it once`, d.start, d.end);
+      spelled.set(d.name.replace(/-/g, "_"), d.name);
+      all.push(d);
+    }
+    rustDependencies = all;
   }
-  const registry = (tables.get("registry") as Table | undefined)?.keys.get("url")?.value;
-  if (registry && (typeof registry.value !== "string" || registry.value.startsWith("-"))) throw new CompileError("E0905", "the registry's url is a string naming its index, as in url = \"https://...\"", registry.start, registry.end);
-  return { name: name.value, version: version.value, entry, lib, edition: (edition?.value ?? "native") as Edition, dependencies, ...(rustDependencies && { rustDependencies }), ...(registry && { registry: registry.value as string }), dir };
+  let registry: string | undefined = undefined;
+  const index = tables.get("registry");
+  if (index !== undefined && !Array.isArray(index)) {
+    const url = index.keys.get("url");
+    if (url !== undefined) {
+      const written = url.value.value;
+      if (typeof written !== "string" || written.startsWith("-")) throw new CompileError("E0905", "the registry's url is a string naming its index, as in url = \"https://...\"", url.value.start, url.value.end);
+      registry = written;
+    }
+  }
+  return { name: name.value, version: version.value, entry, lib, edition: chosen, dependencies, rustDependencies, registry, dir };
+}
+
+// The string at `field` in `keys`, if it is there; anything else there is refused, with how a
+// string is written when `example` says so.
+/** @throws {CompileError} */
+function textIn(keys: Ref<Entries>, field: string, example: boolean): Spanned<string> | undefined {
+  const found = keys.get(field);
+  if (found === undefined) return undefined;
+  const written = found.value.value;
+  if (typeof written !== "string") throw new CompileError("E0905", example ? `'${field}' is a string, as in ${field} = "..."` : `'${field}' is a string`, found.value.start, found.value.end);
+  return { value: written, start: found.value.start, end: found.value.end };
+}
+
+/** @throws {CompileError} */
+function required(pkg: Ref<Table>, field: string): Spanned<string> {
+  const found = textIn(pkg.keys, field, true);
+  if (found === undefined) throw new CompileError("E0905", `[package] needs a '${field}'`, pkg.start, pkg.end);
+  return found;
+}
+
+// The package's `entry` or `lib`, a .fsh file inside it, or `fallback` when it names none.
+/** @throws {CompileError} */
+function packageFile(pkg: Ref<Table>, field: string, fallback: string): string {
+  const found = textIn(pkg.keys, field, true);
+  if (found === undefined) return fallback;
+  if (!found.value.endsWith(".fsh")) throw new CompileError("E0905", `the ${field} is a .fsh file, as in ${field} = "${fallback}"`, found.start, found.end);
+  if (isAbsolute(found.value) || normalize(found.value).split(sep)[0] === "..") throw new CompileError("E0905", `the ${field} is a file inside the package, as in ${field} = "${fallback}"`, found.start, found.end);
+  return found.value;
 }
 
 // A `[rust-dependencies]` entry in one of Cargo's forms: `name = "1.2"`, or a table with `version`,
 // `features`, `default-features`, and `path`, or `git` with one of `rev`, `tag` and `branch`.
-function rustDependency(key: Spanned<string>, value: Spanned<TomlValue>): RustDependency {
-  const at = { name: key.value, start: key.start, end: value.end };
+/** @throws {CompileError} */
+function rustDependency(key: Ref<Spanned<string>>, value: Ref<SpannedValue>): RustDependency {
+  let made: RustDependency = { name: key.value, start: key.start, end: value.end };
   if (!validCrate(key.value)) throw new CompileError("E0905", `'${key.value}' isn't a crate name; a crate's name is letters, digits, '_' and '-', starting with a letter or '_'`, key.start, key.end);
-  if (typeof value.value === "string") return { ...at, version: value.value };
+  if (typeof value.value === "string") {
+    made.version = value.value;
+    return made;
+  }
   const form = "a Rust dependency is a version, as in \"1.2\", or a table as Cargo takes it, as in { version = \"1.2\", features = [\"derive\"] }, { path = \"../crate\" } or { git = \"https://...\", rev = \"<commit>\" }";
   if (!(value.value instanceof Map)) throw new CompileError("E0905", form, value.start, value.end);
-  const entries = value.value;
+  const entries: Ref<Entries> = value.value;
   const keys = ["version", "features", "default-features", "path", "git", "rev", "tag", "branch"];
   for (const { key: k } of entries.values()) {
     if (!keys.includes(k.value)) throw new CompileError("E0905", `a Rust dependency has no key '${k.value}'; it has ${keys.join(", ")}`, k.start, k.end);
   }
-  const text = (field: string): Spanned<string> | undefined => {
-    const found = entries.get(field);
-    if (found && typeof found.value.value !== "string") throw new CompileError("E0905", `'${field}' is a string`, found.value.start, found.value.end);
-    return found?.value as Spanned<string> | undefined;
-  };
-  const [version, path, git, rev, tag, branch] = ["version", "path", "git", "rev", "tag", "branch"].map(text);
-  const features = entries.get("features")?.value;
-  const named = Array.isArray(features?.value) ? features.value : undefined;
-  if (features && (!named || named.some((f) => typeof f.value !== "string"))) throw new CompileError("E0905", "'features' is a list of strings, as in features = [\"derive\"]", features.start, features.end);
-  const defaults = entries.get("default-features")?.value;
-  if (defaults && typeof defaults.value !== "boolean") throw new CompileError("E0905", "'default-features' is true or false", defaults.start, defaults.end);
-  if (path && git) throw new CompileError("E0905", "a Rust dependency comes from a path or from git, not both", value.start, value.end);
-  if (!version && !path && !git) throw new CompileError("E0905", form, value.start, value.end);
-  const pins = [rev, tag, branch].filter((p) => p !== undefined);
-  if (pins.length > 0 && !git) throw new CompileError("E0905", "rev, tag and branch choose a git dependency's commit; this one isn't from git", pins[0]!.start, pins[0]!.end);
+  const version = textIn(entries, "version", false);
+  const path = textIn(entries, "path", false);
+  const git = textIn(entries, "git", false);
+  const rev = textIn(entries, "rev", false);
+  const tag = textIn(entries, "tag", false);
+  const branch = textIn(entries, "branch", false);
+  let named: string[] | undefined = undefined;
+  const features = entries.get("features");
+  if (features !== undefined) {
+    const list = features.value.value;
+    const wrong = "'features' is a list of strings, as in features = [\"derive\"]";
+    if (!Array.isArray(list)) throw new CompileError("E0905", wrong, features.value.start, features.value.end);
+    let all: string[] = [];
+    for (const f of list) {
+      if (typeof f.value !== "string") throw new CompileError("E0905", wrong, features.value.start, features.value.end);
+      all.push(f.value);
+    }
+    named = all;
+  }
+  let on: boolean | undefined = undefined;
+  const defaults = entries.get("default-features");
+  if (defaults !== undefined) {
+    const written = defaults.value.value;
+    if (typeof written !== "boolean") throw new CompileError("E0905", "'default-features' is true or false", defaults.value.start, defaults.value.end);
+    on = written;
+  }
+  if (path !== undefined && git !== undefined) throw new CompileError("E0905", "a Rust dependency comes from a path or from git, not both", value.start, value.end);
+  if (version === undefined && path === undefined && git === undefined) throw new CompileError("E0905", form, value.start, value.end);
+  let pins: { start: usize; end: usize }[] = [];
+  if (rev !== undefined) pins.push({ start: rev.start, end: rev.end });
+  if (tag !== undefined) pins.push({ start: tag.start, end: tag.end });
+  if (branch !== undefined) pins.push({ start: branch.start, end: branch.end });
+  if (pins.length > 0 && git === undefined) throw new CompileError("E0905", "rev, tag and branch choose a git dependency's commit; this one isn't from git", pins[0]!.start, pins[0]!.end);
   if (pins.length > 1) throw new CompileError("E0905", "a git dependency takes one of rev, tag and branch", pins[1]!.start, pins[1]!.end);
-  return {
-    ...at, ...(version && { version: version.value }), ...(named && { features: named.map((f) => f.value as string) }), ...(defaults && { defaultFeatures: defaults.value as boolean }),
-    ...(path && { path: path.value }), ...(git && { git: git.value }), ...(rev && { rev: rev.value }), ...(tag && { tag: tag.value }), ...(branch && { branch: branch.value }),
-  };
+  if (version !== undefined) made.version = version.value;
+  if (named !== undefined) made.features = named;
+  if (on !== undefined) made.defaultFeatures = on;
+  if (path !== undefined) made.path = path.value;
+  if (git !== undefined) made.git = git.value;
+  if (rev !== undefined) made.rev = rev.value;
+  if (tag !== undefined) made.tag = tag.value;
+  if (branch !== undefined) made.branch = branch.value;
+  return made;
 }
 
 // A `[dependencies]` entry: `{ path = "..." }`, or `{ git = "...", rev = "..." }` pinned to a commit.
-function dependency(key: Spanned<string>, value: Spanned<TomlValue>): Dependency {
-  const at = { name: key.value, start: key.start, end: value.end };
+/** @throws {CompileError} */
+function dependency(key: Ref<Spanned<string>>, value: Ref<SpannedValue>): Dependency {
   if (!validName(key.value)) throw new CompileError("E0905", `'${key.value}' isn't a package name: ${NAME_RULE}`, key.start, key.end);
   const form = "a dependency is a table naming where it comes from, as in { version = \"^1.2.0\" }, { path = \"../util\" } or { git = \"https://...\", rev = \"<commit>\" }";
   if (!(value.value instanceof Map)) throw new CompileError("E0905", form, value.start, value.end);
-  const entries = value.value;
-  const text = (field: string): Spanned<string> | undefined => {
-    const found = entries.get(field);
-    if (found && typeof found.value.value !== "string") throw new CompileError("E0905", `'${field}' is a string`, found.value.start, found.value.end);
-    return found?.value as Spanned<string> | undefined;
-  };
+  const entries: Ref<Entries> = value.value;
   for (const { key: k } of entries.values()) {
     if (!["version", "path", "git", "rev"].includes(k.value)) throw new CompileError("E0905", `a dependency has no key '${k.value}'; it has version, path, or git and rev`, k.start, k.end);
   }
-  const [version, path, git, rev] = [text("version"), text("path"), text("git"), text("rev")];
-  if ([version, path, git].filter(Boolean).length > 1) throw new CompileError("E0905", "a dependency comes from one place: the registry by version, a path, or git", value.start, value.end);
-  if (version) {
-    if (rev) throw new CompileError("E0905", "rev pins a git dependency; a registry one is chosen by its version range", rev.start, rev.end);
-    if (!parseRange(version.value)) throw new CompileError("E0905", `'${version.value}' isn't a version range; write one as package.json does, as in "^1.2.0" or ">=1.0.0 <2.0.0"`, version.start, version.end);
-    return { ...at, version: version.value };
+  const version = textIn(entries, "version", false);
+  const path = textIn(entries, "path", false);
+  const git = textIn(entries, "git", false);
+  const rev = textIn(entries, "rev", false);
+  const places = (version !== undefined ? 1 : 0) + (path !== undefined ? 1 : 0) + (git !== undefined ? 1 : 0);
+  if (places > 1) throw new CompileError("E0905", "a dependency comes from one place: the registry by version, a path, or git", value.start, value.end);
+  const name = key.value;
+  const start = key.start;
+  const end = value.end;
+  if (version !== undefined) {
+    if (rev !== undefined) throw new CompileError("E0905", "rev pins a git dependency; a registry one is chosen by its version range", rev.start, rev.end);
+    if (parseRange(version.value) === undefined) throw new CompileError("E0905", `'${version.value}' isn't a version range; write one as package.json does, as in "^1.2.0" or ">=1.0.0 <2.0.0"`, version.start, version.end);
+    return { name, start, end, version: version.value };
   }
-  if (path) return { ...at, path: path.value };
-  if (!git) throw new CompileError("E0905", form, value.start, value.end);
+  if (path !== undefined) return { name, start, end, path: path.value };
+  if (git === undefined) throw new CompileError("E0905", form, value.start, value.end);
   if (git.value.startsWith("-")) throw new CompileError("E0905", "a git URL can't start with '-'", git.start, git.end);
-  if (!rev) throw new CompileError("E0905", "a git dependency is pinned to a commit, as in rev = \"3f2a9c1\"; branches and tags move", value.start, value.end);
+  if (rev === undefined) throw new CompileError("E0905", "a git dependency is pinned to a commit, as in rev = \"3f2a9c1\"; branches and tags move", value.start, value.end);
   if (!/^[0-9a-f]{7,40}$/.test(rev.value)) throw new CompileError("E0905", "rev is a commit's hash, 7 to 40 lowercase hex digits; branches and tags move", rev.start, rev.end);
-  return { ...at, git: git.value, rev: rev.value };
+  return { name, start, end, git: git.value, rev: rev.value };
 }
 
 // The nearest `fish.toml` at or above `from`.
@@ -322,43 +449,67 @@ export function findManifest(from: string): string | undefined {
 
 // Reads and checks the manifest at `file`, whose entry, or lib, must exist when `needs` says so.
 // An error in it renders against it, wherever it was reached from.
+/** @throws {CompileError | IoError} */
 export function loadManifest(file: string, needs?: "entry" | "lib"): Manifest {
   const src = readFileSync(file, "utf8");
   try {
     const manifest = readManifest(src, dirname(file));
-    const pkg = parseToml(src).get("package") as Table;
-    for (const field of ["entry", "lib"] as const) {
-      const at = pkg.keys.get(field)?.value ?? pkg;
-      const path = join(manifest.dir, manifest[field]);
+    const pkg = packageTable(src);
+    for (const field of ["entry", "lib"]) {
+      const at = spanOf(pkg, field);
+      const named = field === "entry" ? manifest.entry : manifest.lib;
+      const path = join(manifest.dir, named);
       if (!existsSync(path)) {
-        if (field === needs) throw new CompileError("E0905", `the ${field} '${manifest[field]}' doesn't exist; create it, or name another with ${field} = "..."`, at.start, at.end);
+        if (field === needs) throw new CompileError("E0905", `the ${field} '${named}' doesn't exist; create it, or name another with ${field} = "..."`, at.start, at.end);
         continue;
       }
       // A dependency's link can't carry the file out of the package either; the program's own may.
-      if (needs === "lib" && !realpathSync(path).startsWith(realpathSync(manifest.dir) + sep)) throw new CompileError("E0905", `the ${field} '${manifest[field]}' leads outside the package; it is a file inside it`, at.start, at.end);
+      if (needs === "lib" && !realpathSync(path).startsWith(realpathSync(manifest.dir) + sep)) throw new CompileError("E0905", `the ${field} '${named}' leads outside the package; it is a file inside it`, at.start, at.end);
     }
     return manifest;
   } catch (e) {
-    throw inManifest(e, file, src);
+    if (e instanceof CompileError) throw inManifest(e, file, src);
+    throw e;
   }
 }
 
+// The [package] table of a manifest `readManifest` has already accepted.
+/** @throws {CompileError} */
+function packageTable(src: string): Table {
+  const pkg = parseToml(src).get("package");
+  if (pkg === undefined || Array.isArray(pkg)) throw new CompileError("E0905", `${MANIFEST} needs a [package] table with the package's name and version`, 0, 1);
+  return pkg;
+}
+
+// Where a [package] table's `field` is written, or the table's own place without it.
+function spanOf(pkg: Ref<Table>, field: string): { start: usize; end: usize } {
+  const entry = pkg.keys.get(field);
+  return entry !== undefined ? { start: entry.value.start, end: entry.value.end } : { start: pkg.start, end: pkg.end };
+}
+
 // An error about the manifest at `file`, at its `entry` or `lib` key or else its [package] table.
-export function fieldError(file: string, field: "entry" | "lib", message: string): unknown {
+/** @throws {CompileError | IoError} */
+export function fieldError(file: string, field: "entry" | "lib", message: string): CompileError {
   const src = readFileSync(file, "utf8");
-  const pkg = parseToml(src).get("package") as Table;
-  const at = pkg.keys.get(field)?.value ?? pkg;
+  const pkg = packageTable(src);
+  const at = spanOf(pkg, field);
   return inManifest(new CompileError("E0905", message, at.start, at.end), file, src);
 }
 
 // Has a compile error found in the manifest at `file` render against that file.
-export function inManifest(e: unknown, file: string, src: string = readFileSync(file, "utf8")): unknown {
-  if (e instanceof CompileError && e.sources.length === 0) e.sources = [{ base: 0, src, file: relative(process.cwd(), file) || file }];
+/** @throws {IoError} */
+export function inManifest(e: CompileError, file: string, given?: string): CompileError {
+  if (e.sources.length === 0) {
+    const src = given ?? readFileSync(file, "utf8");
+    const shown = relative(resolve(), file);
+    e.sources = [{ base: 0, src, file: shown !== "" ? shown : file }];
+  }
   return e;
 }
 
 // A new package named `name` in `dir`: its manifest, and a greeting entry and a `.gitignore`
 // where there are none, so a directory already holding code keeps it.
+/** @throws {IoError} */
 export function createPackage(dir: string, name: string): void {
   mkdirSync(join(dir, "src"), { recursive: true });
   writeFileSync(join(dir, MANIFEST), `[package]\nname = "${name}"\nversion = "0.1.0"\n\n[dependencies]\n`);
@@ -369,23 +520,26 @@ export function createPackage(dir: string, name: string): void {
 }
 
 // Whether `dir` is missing or holds nothing, so a new package can be made there.
-export const vacant = (dir: string) => !existsSync(dir) || readdirSync(dir).length === 0;
+/** @throws {IoError} */
+export function vacant(dir: string): boolean {
+  return !existsSync(dir) || readdirSync(dir).length === 0;
+}
 
 // `fish.toml`'s text with `line` added to its [dependencies], after the last entry there or a new
 // table at the end, every other byte as it was.
 export function withDependency(src: string, line: string): string {
   // A file written with CRLF line ends keeps them.
   const eol = src.includes("\r\n") ? "\r\n" : "\n";
-  const lines = src.split("\n");
+  let lines = src.split("\n");
   const header = lines.findIndex((l) => /^\s*\[\s*("dependencies"|'dependencies'|dependencies)\s*\]\s*(#.*)?\r?$/.test(l));
   if (header < 0) return `${src}${src === "" || src.endsWith("\n") ? "" : eol}${eol}[dependencies]${eol}${line}${eol}`;
-  let at = header;
-  for (let i = header + 1; i < lines.length && !/^\s*\[/.test(lines[i]!); i++) if (/^\s*[^\s#]/.test(lines[i]!)) at = i;
+  let at = header as usize;
+  for (let i = at + 1; i < lines.length && !/^\s*\[/.test(lines[i]!); i++) if (/^\s*[^\s#]/.test(lines[i]!)) at = i;
   // A line added after a last line that has no line end takes over that missing end: the old last
   // line gets one, and the new one, now last, goes without.
   const last = at === lines.length - 1 && !src.endsWith("\n");
   if (last) lines[at] += eol === "\r\n" ? "\r" : "";
   else if (eol === "\r\n") line += "\r";
-  lines.splice(at + 1, 0, line);
+  lines.splice((at + 1) as i64, 0, line);
   return lines.join("\n");
 }

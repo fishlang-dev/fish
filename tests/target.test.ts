@@ -18,10 +18,11 @@ test("the host's triple", () => {
 });
 
 test("the host's libc is the running process's, whatever is on disk", () => {
-  expect(runsOnMusl({ glibcVersionRuntime: "2.41" })).toBe(false);
-  expect(runsOnMusl({})).toBe(true);
+  expect(runsOnMusl("7f00-7f10 r-xp 00000000 08:01 12 /usr/lib/x86_64-linux-gnu/libc.so.6\n")).toBe(false);
+  expect(runsOnMusl("7f00-7f10 r-xp 00000000 08:01 12 /lib/ld-musl-x86_64.so.1\n")).toBe(true);
+  expect(runsOnMusl("")).toBe(false);
   if (process.platform === "linux") expect(hostTriple()!.endsWith("-musl")).toBe(runsOnMusl());
-  // Off Linux the process has no glibc and no musl loader is on disk, so the two ways of asking differ.
+  // Off Linux there are no mappings to read, so a Linux triple asked for there is glibc's.
   expect(hostTriple("linux", "arm64")).toBe(runsOnMusl() ? "aarch64-unknown-linux-musl" : "aarch64-unknown-linux-gnu");
 });
 

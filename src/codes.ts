@@ -685,9 +685,9 @@ To fix it, remove it, or name it with a leading '_' when it is unused on purpose
 export function explain(code: string): string | undefined {
   const name = code.toUpperCase();
   const found = CODES[name];
-  if (!found) return undefined;
+  if (found === undefined) return undefined;
   const head = `${name}: ${found.title}`;
-  if (!found.long) return `${head}\n\nThis code has no longer explanation yet; its message says what went wrong and what to change.`;
+  if (found.long === undefined) return `${head}\n\nThis code has no longer explanation yet; its message says what went wrong and what to change.`;
   const indent = (text: string) => text.split("\n").map((line) => `    ${line}`).join("\n");
   const fails = name.startsWith("W") ? "warns" : "fails";
   return `${head}\n\n${found.long.text}\n\nFor example, this ${fails}:\n\n${indent(found.long.example)}\n\nand this compiles:\n\n${indent(found.long.fixed)}`;
