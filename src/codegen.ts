@@ -12817,7 +12817,7 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`store ${this.llvm(type)} zeroinitializer, ptr ${instance}`);
         // A panic in the constructor drops the fields it has set. One that throws has set none.
         const argValues3 = this.argValues(e.args ?? [], this.callOf(e)!);
-        const part5 = { unwound: (cg) => {
+        const part5 = { unwound: (cg: Mut<Codegen>) => {
           const unstash2 = cg.unstash(instance, type);
           cg.dispose(unstash2, type);
         } };
