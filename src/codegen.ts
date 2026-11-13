@@ -170,6 +170,10 @@ function innerOf<A extends Lifetime>(e: Ref<Expr, A>): Ref<Expr, A> {
 // The runtime function releasing each kind of handle block.
 const RELEASES = new Map<string, string>([["Semaphore", "fsh_rt_semaphore_release"], ["Permit", "fsh_rt_permit_drop"], ["Channel", "fsh_rt_channel_release"], ["AbortController", "fsh_rt_signal_release"], ["AbortSignal", "fsh_rt_signal_release"], ["TcpListener", "fsh_rt_socket_release"], ["TcpStream", "fsh_rt_socket_release"], ["UnixListener", "fsh_rt_socket_release"], ["UnixStream", "fsh_rt_socket_release"], ["UdpSocket", "fsh_rt_socket_release"], ["FileJob", "fsh_rt_file_job_release"], ["JsValue", "fsh_rt_js_release"], ["FileDescriptor", "fsh_rt_fd_release"]]);
 
+// What a Rust call's argument leaves to give up once the call returns: an owned value dropped,
+// an owned array given up, or an Option's array given up when there is one.
+type RustGiven = { kind: "dispose" | "array" | "optionArray"; v: string; t: Type; handles: boolean; none: string; inner: string; innerType: Type };
+
 // A failure that has nothing read before it to drop.
 function noUndo(_cg: Mut<Codegen>): void {}
 
@@ -10621,88 +10625,18 @@ class Codegen implements PrintHost, ComptimeHost {
   // then each argument as it crosses, owned strings and arrays given up once Rust has made its
   // own of them; what it gives made into a Fish value; and a panic in it raised at the call.
   rustInvoke(this: Mut<this>, target: InstanceId, pointer: string | undefined, args: Ref<string[]>, at: Ref<Expr>, cleanup?: (cg: Mut<Codegen>) => void, after?: (cg: Mut<Codegen>) => void): string | undefined {
-    const load = (cg: Mut<Codegen>, type: string, from: string) => {
-      const v = cg.temp();
-      cg.emit(`${v} = load ${type}, ptr ${from}`);
-      return v;
-    };
-    const part = (cg: Mut<Codegen>, whole: string, i: usize) => {
-      const v = cg.temp();
-      cg.emit(`${v} = extractvalue ${ARRAY} ${whole}, ${i}`);
-      return v;
-    };
     let passed: string[] = [];
-    let given: (() => void)[] = [];
+    let given: RustGiven[] = [];
     if ((pointer !== undefined && pointer !== "") && this.bodyAt(target).self !== undefined && !this.bodyAt(target).self!.constructor) {
-      passed.push(`ptr ${load(this, "ptr", pointer)}`);
+      passed.push(`ptr ${this.loaded(pointer, "ptr")}`);
       // A method taking its object over leaves the place it was in empty, as one in Fish does.
       if (this.bodyAt(target).self!.owned === true) this.emit(`store ptr null, ptr ${pointer}`);
     }
-    // An owned array is given up once Rust has its elements: Rust has made its own strings and
-    // numbers, and taken the Rust values, which leave only the buffer.
-    const giveUp = (cg: Mut<Codegen>, v: string, c: Extract<Crossing, { kind: "array" }>, t: Type) => {
-      if (c.element.kind !== "handle") {
-        cg.dispose(v, t);
-        return;
-      }
-      const emptied = cg.temp();
-      cg.emit(`${emptied} = insertvalue ${ARRAY} ${v}, i64 0, 1`);
-      cg.dispose(emptied, t);
-    };
-    function pass(cg: Mut<Codegen>, c: Crossing, t: Type, v: string): string[] {
-      switch (c.kind) {
-        case "plain":
-          return [`${crossing(cg.tables.typing, t)} ${v}`];
-        case "handle":
-          return [`ptr ${v}`];
-        case "string":
-          given.push(() => cg.dispose(v, t));
-          return [`ptr ${v}`];
-        case "lent":
-          return [`ptr ${load(cg, "ptr", v)}`];
-        case "array": {
-          const whole = c.lent ? load(cg, ARRAY, v) : v;
-          if (!c.lent) given.push(() => giveUp(cg, v, c, t));
-          return [`ptr ${part(cg, whole, 0)}`, `i64 ${part(cg, whole, 1)}`];
-        }
-        case "option": {
-          const none = cg.conversions().holds(v, t as UnionType, ["null"]);
-          const inner = cg.convert(v, t, c.inner);
-          if (c.of.kind === "string") given.push(() => cg.dispose(v, t));
-          if (c.of.kind === "array" && !c.of.lent) {
-            const array = c.of;
-            given.push(() => {
-              const [some, done] = [cg.label(), cg.label()];
-              cg.emit(`br i1 ${none}, label %${done}, label %${some}`);
-              cg.startBlock(some);
-              giveUp(cg, inner, array, c.inner);
-              cg.emit(`br label %${done}`);
-              cg.startBlock(done);
-            });
-          }
-          if (c.of.kind === "plain" || c.of.kind === "array") {
-            const some = cg.temp();
-            cg.emit(`${some} = xor i1 ${none}, true`);
-            const chosen = c.of.kind === "array" ? spilled(cg, inner) : inner;
-            return [`i1 zeroext ${some}`, ...pass(cg, c.of.kind === "array" ? { ...c.of, lent: true } : c.of, c.inner, chosen)];
-          }
-          const p = cg.temp();
-          cg.emit(`${p} = select i1 ${none}, ptr null, ptr ${inner}`);
-          return [`ptr ${p}`];
-        }
-      }
-    }
-    // An Option's array is read where it is spilled, as a lent one is.
-    const spilled = (cg: Mut<Codegen>, v: string) => {
-      const slot = cg.alloca(ARRAY);
-      cg.emit(`store ${ARRAY} ${v}, ptr ${slot}`);
-      return slot;
-    };
     for (let i: usize = 0; i < args.length; i++) {
       const a = args[i]!;
       const part2 = this.inst(target).signature![i]!;
       const rustCrossing2 = rustCrossing(this.tables.typing, part2);
-      const crossed2 = pass(this, rustCrossing2, part2, a.slice(a.lastIndexOf(" ") + 1));
+      const crossed2 = this.rustPass(rustCrossing2, part2, a.slice(a.lastIndexOf(" ") + 1), given, false);
       for (const x of crossed2) passed.push(x);
     }
     const gives = rustGiven(this.tables.typing, this.tables.arenas, this.inst(target));
@@ -10720,9 +10654,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const call = `call ${shim.returns} ${this.symbol(target)}(${passed.join(", ")})`;
     const result = shim.returns === "void" ? undefined : this.temp();
     this.unwinding(call, result, cleanup);
-    for (const g of given) {
-      g();
-    }
+    for (const g of given) this.rustGiveUp(g);
     this.rustPanic(caught, { start: at.start, end: at.end });
     after?.(this);
     if ((err !== undefined && err !== "")) {
@@ -10731,20 +10663,104 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     if (gives === undefined) return undefined;
     const type = this.bodyAt(target).self?.constructor === true ? this.bodyAt(target).owner! : this.inst(target).returns;
-    if (gives.kind !== "option") return gives.kind === "array" ? load(this, ARRAY, out!) : result;
+    if (gives.kind !== "option") return gives.kind === "array" ? this.loaded(out!, ARRAY) : result;
     const some = gives.of.kind === "plain" || gives.of.kind === "array" ? result! : this.temp();
     if (some !== result) this.emit(`${some} = icmp ne ptr ${result}, null`);
     let inner: string;
     if (gives.of.kind === "plain") {
       const llvm2 = this.llvm(gives.inner);
-      inner = load(this, llvm2, out!);
+      inner = this.loaded(out!, llvm2);
     } else {
-      inner = gives.of.kind === "array" ? load(this, ARRAY, out!) : result!;
+      inner = gives.of.kind === "array" ? this.loaded(out!, ARRAY) : result!;
     }
     const made = this.temp();
     const line = `${made} = select i1 ${some}, ${this.llvm(type)} ${this.convert(inner, gives.inner, type)}, ${this.llvm(type)} ${this.convert("zeroinitializer", "null", type)}`;
     this.emit(line);
     return made;
+  }
+
+
+  // A value loaded from a slot.
+  loaded(this: Mut<this>, from: string, type: string): string {
+    const v = this.temp();
+    this.emit(`${v} = load ${type}, ptr ${from}`);
+    return v;
+  }
+
+  // A part of an array's value: its data, then its length.
+  arrayPart(this: Mut<this>, whole: string, i: usize): string {
+    const v = this.temp();
+    this.emit(`${v} = extractvalue ${ARRAY} ${whole}, ${i}`);
+    return v;
+  }
+
+  // An argument as it crosses to a Rust shim, noting in `given` what is given up once Rust has
+  // made its own of it. `lent`: an array read from where it is spilled, as a lent one is.
+  rustPass(this: Mut<this>, c: Ref<Crossing>, t: Type, v: string, given: Mut<RustGiven[]>, lent: boolean): string[] {
+    if (c.kind === "plain") return [`${crossing(this.tables.typing, t)} ${v}`];
+    if (c.kind === "handle") return [`ptr ${v}`];
+    if (c.kind === "string") {
+      given.push({ kind: "dispose", v, t, handles: false, none: "", inner: "", innerType: t });
+      return [`ptr ${v}`];
+    }
+    if (c.kind === "lent") return [`ptr ${this.loaded(v, "ptr")}`];
+    if (c.kind === "array") {
+      const isLent = c.lent || lent;
+      const whole = isLent ? this.loaded(v, ARRAY) : v;
+      if (!isLent) given.push({ kind: "array", v, t, handles: c.element.kind === "handle", none: "", inner: "", innerType: t });
+      const data = this.arrayPart(whole, 0);
+      const length = this.arrayPart(whole, 1);
+      return [`ptr ${data}`, `i64 ${length}`];
+    }
+    const absent: Type[] = ["null"];
+    const none = this.conversions().holds(v, t as UnionType, absent);
+    const inner = this.convert(v, t, c.inner);
+    if (c.of.kind === "string") given.push({ kind: "dispose", v, t, handles: false, none: "", inner: "", innerType: t });
+    if (c.of.kind === "array" && !c.of.lent) given.push({ kind: "optionArray", v, t, handles: c.of.element.kind === "handle", none, inner, innerType: c.inner });
+    if (c.of.kind === "plain" || c.of.kind === "array") {
+      const some = this.temp();
+      this.emit(`${some} = xor i1 ${none}, true`);
+      let chosen = inner;
+      if (c.of.kind === "array") {
+        chosen = this.alloca(ARRAY);
+        this.emit(`store ${ARRAY} ${inner}, ptr ${chosen}`);
+      }
+      const more = this.rustPass(c.of, c.inner, chosen, given, c.of.kind === "array");
+      return [`i1 zeroext ${some}`, ...more];
+    }
+    const p = this.temp();
+    this.emit(`${p} = select i1 ${none}, ptr null, ptr ${inner}`);
+    return [`ptr ${p}`];
+  }
+
+  // What an argument gave Rust is given up once the shim returns: an owned string dropped, and
+  // an owned array given up once Rust has its elements, which leaves only the buffer when they
+  // are Rust values Rust took.
+  rustGiveUp(this: Mut<this>, g: Ref<RustGiven>): void {
+    if (g.kind === "dispose") {
+      this.dispose(g.v, g.t);
+      return;
+    }
+    if (g.kind === "array") {
+      this.giveUpArray(g.v, g.handles, g.t);
+      return;
+    }
+    const [some, done] = [this.label(), this.label()];
+    this.emit(`br i1 ${g.none}, label %${done}, label %${some}`);
+    this.startBlock(some);
+    this.giveUpArray(g.inner, g.handles, g.innerType);
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
+  }
+
+  giveUpArray(this: Mut<this>, v: string, handles: boolean, t: Type): void {
+    if (!handles) {
+      this.dispose(v, t);
+      return;
+    }
+    const emptied = this.temp();
+    this.emit(`${emptied} = insertvalue ${ARRAY} ${v}, i64 0, 1`);
+    this.dispose(emptied, t);
   }
 
 
