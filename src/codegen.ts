@@ -714,7 +714,9 @@ class Codegen implements PrintHost, ComptimeHost {
         }
         // A `for await` loop's third field is the future it awaits.
         const loops2 = this.inst(instance).frame!.loops;
-        for (const [s, i] of loops2) [i, i + 1, ...((s as { await?: boolean }).await === true ? [i + 2] : [])].forEach((j) => field(this, `%loop${j}`, j));
+        for (const [s, i] of loops2) for (const j of [i, i + 1, ...((s as { await?: boolean }).await === true ? [i + 2] : [])]) {
+          field(this, `%loop${j}`, j);
+        }
         for (const i of this.inst(instance).frame!.awaits.values()) field(this, `%await${i}`, i);
         this.startBlock(this.resuming.start);
         // The first `next`'s value has no `yield` to go to.
@@ -1090,18 +1092,21 @@ class Codegen implements PrintHost, ComptimeHost {
       found.set(i, new Set([...at]));
       const b = this.bodyAt(i);
       let parts = [`${b.name}@${b.start}`, this.tables.typing.keyOf(this.inst(i).returns), this.inst(i).throws === undefined ? "" : this.tables.typing.keyOf(this.inst(i).throws!)];
-      b.params.forEach((p, k) => {
+      let kAt: usize = 0;
+      for (const p of b.params) {
+        const k = kAt;
+        kAt++;
         const get2 = this.inst(i).locals.get(p)!;
         const local = this.loc(get2);
         if (!at.has(k as usize)) {
           parts.push(this.tables.typing.keyOf(local.type));
-          return;
+          continue;
         }
         // What calling it gives and takes, which every instance sharing the code must agree on: as
         // types, since one IR shape can hold values that are dropped or dispatched differently.
         const target = this.calledThrough(i, p.pattern.kind === "ident" ? p.pattern.name : "");
         parts.push(target === undefined ? "*" : `*${this.inst(target).throws === undefined ? "" : this.tables.typing.keyOf(this.inst(target).throws!)}*${this.tables.typing.keyOf(this.inst(target).returns)}(${this.bodyAt(target).params.map((q) => this.tables.typing.keyOf(this.loc(this.inst(target).locals.get(q)!).type)).join(",")})`);
-      });
+      }
       let bound = [...this.inst(i).bindings];
       bound.sort(([a], [b]) => (a < b ? -1 : 1));
       for (const [name, t] of bound) {
@@ -1142,11 +1147,14 @@ class Codegen implements PrintHost, ComptimeHost {
     let at = new Set<usize>();
     if (b.self !== undefined || b.closure !== undefined || b.generator === true || b.async === true || b.foreign === true || b.rust !== undefined || b.js !== undefined || b.exported === true || b.comptime !== undefined || this.inst(i).symbol === "main") return at;
     if (b.params.some((p) => p.comptime || p.rest)) return at;
-    b.params.forEach((p, k) => {
-      if (p.pattern.kind !== "ident" || p.optional || p.default !== undefined) return;
+    let kAt: usize = 0;
+    for (const p of b.params) {
+      const k = kAt;
+      kAt++;
+      if (p.pattern.kind !== "ident" || p.optional || p.default !== undefined) continue;
       const get2 = this.inst(i).locals.get(p)!;
       const part = this.loc(get2).type;
-      if (this.recOf(part)?.kind !== "closure") return;
+      if (this.recOf(part)?.kind !== "closure") continue;
       const name = p.pattern.name;
       let uses = 0;
       let calls = 0;
@@ -1188,7 +1196,7 @@ class Codegen implements PrintHost, ComptimeHost {
         return called.closure !== undefined && called.async !== true && called.generator !== true;
       });
       if (uses > 0 && uses === calls && runs.size <= 1 && plain) at.add(k as usize);
-    });
+    }
     return at;
   }
 
@@ -1857,13 +1865,16 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     const n = list.elements.length;
     const handles = this.alloca(`[${Math.max(n, 1)} x ptr]`);
-    list.elements.forEach((x, i) => {
+    let iAt: usize = 0;
+    for (const x of list.elements) {
+      const i = iAt;
+      iAt++;
       const [handle, at] = [this.temp(), this.temp()];
       const line = `${handle} = load ptr, ptr ${this.value(x!)}`;
       this.emit(line);
       this.emit(`${at} = getelementptr [${Math.max(n, 1)} x ptr], ptr ${handles}, i32 0, i32 ${i}`);
       this.emit(`store ptr ${handle}, ptr ${at}`);
-    });
+    }
     return `ptr ${handles}, i64 ${n}`;
   }
 
@@ -2526,11 +2537,14 @@ class Codegen implements PrintHost, ComptimeHost {
       return this.toJs(jsOperand2, get2, (i as usize) < optional.length && optional[i as usize]! ? "undefined" : "null", get3);
     });
     const argv = this.alloca(`[${Math.max(boxes.length, 1)} x ptr]`);
-    boxes.forEach((box, i) => {
+    let iAt: usize = 0;
+    for (const box of boxes) {
+      const i = iAt;
+      iAt++;
       const at = this.temp();
       this.emit(`${at} = getelementptr [${boxes.length} x ptr], ptr ${argv}, i32 0, i32 ${i}`);
       this.emit(`store ptr ${box}, ptr ${at}`);
-    });
+    }
     return argv;
   }
 
@@ -2835,11 +2849,14 @@ class Codegen implements PrintHost, ComptimeHost {
         });
       } else {
         const parts = r.kind === "fixed" ? Array.from({ length: r.size }, () => r.element) : this.tables.typing.elementsOf(type as ObjectType);
-        parts.forEach((t, i) => {
+        let iAt: usize = 0;
+        for (const t of parts) {
+          const i = iAt;
+          iAt++;
           const part = this.temp();
           this.emit(`${part} = extractvalue ${this.llvm(type)} ${v}, ${r.kind === "fixed" ? `${i}` : this.tables.typing.fieldPath(type as ObjectType, String(i)).join(", ")}`);
           push(this, part, t);
-        });
+        }
       }
       return box;
     }
@@ -2977,12 +2994,15 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${enough} = icmp ${r.kind === "fixed" ? "eq" : "sge"} i64 ${length}, ${parts.filter((p) => r.kind === "fixed" || !this.tables.typing.isOption(p)).length}`);
       expect(this, enough);
       let made = "zeroinitializer";
-      parts.forEach((element, i) => {
+      let iAt: usize = 0;
+      for (const element of parts) {
+        const i = iAt;
+        iAt++;
         const next = this.temp();
         const line10 = `${next} = insertvalue ${this.llvm(type)} ${made}, ${this.llvm(element)} ${read(this, String(i), element)}, ${r.kind === "fixed" ? `${i}` : this.tables.typing.fieldPath(type as ObjectType, String(i)).join(", ")}`;
         this.emit(line10);
         made = next;
-      });
+      }
       this.emit(`call void @fsh_rt_js_release(ptr ${box})`);
       return made;
     }
@@ -3295,12 +3315,15 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(line);
     const name = (e.callee as Extract<Expr, { kind: "member" }>).name;
     const args = e.args.slice(0, name === "sendTo" ? 3 : name === "connect" ? 2 : name === "send" ? 1 : 0);
-    args.forEach((arg, i) => {
+    let iAt: usize = 0;
+    for (const arg of args) {
+      const i = iAt;
+      iAt++;
       const type = this.tables.typing.rec(future).frame[(2 + i) as usize]!.type;
       const [v, next] = [type === "i64" ? this.value(arg) : this.owned(arg), this.temp()];
       this.emit(`${next} = insertvalue ${this.llvm(future)} ${frame}, ${this.llvm(type)} ${v}, ${2 + i}`);
       frame = next;
-    });
+    }
     return this.signalled(e, future, frame);
   }
 
@@ -3735,11 +3758,14 @@ class Codegen implements PrintHost, ComptimeHost {
           const self = r?.kind === "class" && owner !== undefined && owner !== type ? cg.upcast("%p", type as ClassType, owner) : "%p";
           cg.emit(`${frame} = insertvalue ${cg.llvm(future)} zeroinitializer, ptr ${self}, 1`);
         }
-        params.slice(0, taken as i64).forEach((p, i) => {
+        let iAt: usize = 0;
+        for (const p of params.slice(0, taken as i64)) {
+          const i = iAt;
+          iAt++;
           const next = cg.temp();
           cg.emit(`${next} = insertvalue ${cg.llvm(future)} ${frame}, ${p}, ${i + 2}`);
           frame = next;
-        });
+        }
         made = frame;
       } else {
         future = (cg.inst(target).returns as FutureType);
@@ -4697,8 +4723,11 @@ class Codegen implements PrintHost, ComptimeHost {
         // The cases share one scope.
         this.scopes.push({ transient: false, held: [] });
         // The tests run in order; when none matches, control goes to `default`, wherever it sits.
-        s.cases.forEach((c, i) => {
-          if (c.test === undefined) return;
+        let iAt: usize = 0;
+        for (const c of s.cases) {
+          const i = iAt;
+          iAt++;
+          if (c.test === undefined) continue;
           const test = this.value(c.test);
           // Anything but two values of one primitive type, such as a union or an enum member,
           // compares by value.
@@ -4710,7 +4739,7 @@ class Codegen implements PrintHost, ComptimeHost {
           const line7 = `br i1 ${equal}, label %${enter(this, bodies[i]!)}, label %${next}`;
           this.emit(line7);
           this.startBlock(next);
-        });
+        }
         const fallback = s.cases.findIndex((c) => c.test === undefined);
         const line8 = `br label %${enter(this, fallback < 0 ? end : bodies[fallback]!)}`;
         this.emit(line8);
@@ -4720,11 +4749,14 @@ class Codegen implements PrintHost, ComptimeHost {
           for (const { v, type } of held) this.dispose(v, type);
           this.emit(`br label %${body}`);
         }
-        s.cases.forEach((c, i) => {
+        let iAt2: usize = 0;
+        for (const c of s.cases) {
+          const i = iAt2;
+          iAt2++;
           this.startBlock(bodies[i]!);
           c.body.forEach(((s) => this.statement(s)));
           this.emit(`br label %${i + 1 < bodies.length ? bodies[i + 1]! : end}`);
-        });
+        }
         this.startBlock(end);
         this.drop(this.scopes.length - 1);
         this.scopes.pop();
@@ -4827,10 +4859,13 @@ class Codegen implements PrintHost, ComptimeHost {
           this.emit(`${chosen} = load i32, ptr ${region.chosen}`);
           const targets = region.exits.map(() => this.label());
           this.emit(`switch i32 ${chosen}, label %${targets[0]!} [ ${targets.map((t, i) => `i32 ${i}, label %${t}`).join(" ")} ]`);
-          region.exits.forEach((e, i) => {
+          let iAt3: usize = 0;
+          for (const e of region.exits) {
+            const i = iAt3;
+            iAt3++;
             this.startBlock(targets[i]!);
             e.resume(this);
-          });
+          }
           this.scopes.pop();
         }
         this.startBlock(after);
@@ -5059,11 +5094,14 @@ class Codegen implements PrintHost, ComptimeHost {
           pass(this, holds2);
         }
         const payload = union !== undefined ? this.convert(v, info.type, info.variant) : v;
-        info.args.forEach((arg, i) => {
+        let iAt: usize = 0;
+        for (const arg of info.args) {
+          const i = iAt;
+          iAt++;
           const field = this.temp();
           this.emit(`${field} = extractvalue ${this.llvm(info.variant)} ${payload}, ${i}`);
           this.tested(arg, field, no);
-        });
+        }
         return;
       }
       case "object": {
@@ -5085,20 +5123,26 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`${same} = icmp eq i64 ${length}, ${info.items.length}`);
         pass(this, same);
         this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
-        info.items.forEach((item, i) => {
+        let iAt2: usize = 0;
+        for (const item of info.items) {
+          const i = iAt2;
+          iAt2++;
           const part = this.loadElement(data, info.element, i as usize).v;
           this.tested(item, part, no);
-        });
+        }
         return;
       }
       case "or": {
         const yes = this.label();
-        info.alternatives.forEach((alt, i) => {
+        let iAt3: usize = 0;
+        for (const alt of info.alternatives) {
+          const i = iAt3;
+          iAt3++;
           const next = (i as usize) < info.alternatives.length - 1 ? this.label() : no;
           this.tested(alt, v, next);
           this.emit(`br label %${yes}`);
           if (next !== no) this.startBlock(next);
-        });
+        }
         this.startBlock(yes);
         return;
       }
@@ -5141,12 +5185,15 @@ class Codegen implements PrintHost, ComptimeHost {
       const inUnion = info.type !== info.variant;
       const payload = inUnion ? this.convert(v, info.type, info.variant) : v;
       const payloadAt = (at !== undefined && at !== "") && inUnion ? this.partAt(this.llvm(info.type), at, 1) : at;
-      info.args.forEach((arg, i) => {
+      let iAt: usize = 0;
+      for (const arg of info.args) {
+        const i = iAt;
+        iAt++;
         const field = this.temp();
         this.emit(`${field} = extractvalue ${this.llvm(info.variant)} ${payload}, ${i}`);
         const chosen = payloadAt !== undefined ? this.partAt(this.llvm(info.variant), payloadAt, i as usize) : undefined;
         this.bindAll(arg, field, chosen, move);
-      });
+      }
       return;
     }
     if (info.kind === "object") {
@@ -5171,10 +5218,13 @@ class Codegen implements PrintHost, ComptimeHost {
     if (info.kind === "array") {
       const data = this.temp();
       this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
-      info.items.forEach((item, i) => {
+      let iAt2: usize = 0;
+      for (const item of info.items) {
+        const i = iAt2;
+        iAt2++;
         const { v: element, at: elementAt } = this.loadElement(data, info.element, i as usize);
         this.bindAll(item, element, elementAt, move);
-      });
+      }
       return;
     }
     if (info.kind === "some") {
@@ -5449,7 +5499,10 @@ class Codegen implements PrintHost, ComptimeHost {
       const cases = owners.map(() => this.label());
       const end = this.label();
       this.emit(`switch i32 ${tag}, label %${end} [ ${owners.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i as usize]!}`).join(" ")} ]`);
-      owners.forEach((m, i) => {
+      let iAt: usize = 0;
+      for (const m of owners) {
+        const i = iAt;
+        iAt++;
         this.startBlock(cases[i as usize]!);
         // One member's copy, made on its own path, so nothing else is pending beside it.
         const convert2 = this.convert("%v", type, m);
@@ -5459,7 +5512,7 @@ class Codegen implements PrintHost, ComptimeHost {
           this.emit(line);
         }
         this.emit(`br label %${end}`);
-      });
+      }
       this.startBlock(end);
       if (copy !== "") {
         result = this.temp();
@@ -5787,12 +5840,15 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       this.jsonRaw(w, `{${JSON.stringify(r.member)}:`);
       if (r.fields.length > 1) this.jsonRaw(w, "[");
-      r.fields.forEach((f, i) => {
+      let iAt: usize = 0;
+      for (const f of r.fields) {
+        const i = iAt;
+        iAt++;
         if (i > 0) this.jsonRaw(w, ",");
         const x = this.temp();
         this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${i}`);
         this.jsonWrite(w, x, f.type);
-      });
+      }
       this.jsonRaw(w, r.fields.length > 1 ? "]}" : "}");
       return;
     }
@@ -5817,14 +5873,17 @@ class Codegen implements PrintHost, ComptimeHost {
         return;
       }
       this.jsonRaw(w, "[");
-      order.forEach(({ i }, n) => {
+      let nAt: usize = 0;
+      for (const { i } of order) {
+        const n = nAt;
+        nAt++;
         this.present(length, n as usize, (cg) => {
           if (n > 0) cg.jsonRaw(w, ",");
           const x = cg.temp();
           cg.emit(`${x} = extractvalue ${cg.llvm(t)} ${v}, ${i}`);
           cg.jsonWrite(w, x, as[i]!.type);
         });
-      });
+      }
       if (rest !== undefined) {
         const many3 = many(this);
         this.jsonElements(w, many3, rest.f.type as ArrayType, this.tables.typing.rec(as[rest.i]!.type as ArrayType).element, true);
@@ -5886,7 +5945,10 @@ class Codegen implements PrintHost, ComptimeHost {
     const dynamic = fields.some((f) => f.omit === true);
     const wrote = dynamic ? this.alloca("i1") : "";
     if (dynamic) this.emit(`store i1 false, ptr ${wrote}`);
-    fields.forEach((f, n) => {
+    let nAt: usize = 0;
+    for (const f of fields) {
+      const n = nAt;
+      nAt++;
       const x = this.temp();
       this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${f.path.join(", ")}`);
       const after = this.label();
@@ -5914,7 +5976,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.jsonWrite(w, x, f.type);
       this.emit(`br label %${after}`);
       this.startBlock(after);
-    });
+    }
     this.jsonRaw(w, "}");
   }
 
@@ -5977,12 +6039,15 @@ class Codegen implements PrintHost, ComptimeHost {
     const n = e.args.length;
     const slots = this.alloca(`[${n} x ${FARG}]`);
     const needs = this.formatNeeds(e.args);
-    e.args.forEach((a, i) => {
+    let iAt: usize = 0;
+    for (const a of e.args) {
+      const i = iAt;
+      iAt++;
       const v = a.kind === "string" ? this.text(a.value) : this.operand(a, e.args, (i + 1) as usize);
       const at = this.temp();
       this.emit(`${at} = getelementptr [${n} x ${FARG}], ptr ${slots}, i32 0, i32 ${i}`);
       this.describe(at, v, this.printedType(a), needs[i as usize]!);
-    });
+    }
     const result = this.temp();
     const line = `call ptr @fsh_rt_format(ptr ${slots}, i64 ${n}, ptr ${this.panicAt({ start: e.start, end: e.end })})`;
     this.unwinding(line, result);
@@ -6052,12 +6117,15 @@ class Codegen implements PrintHost, ComptimeHost {
       const cases = r.members.map(() => this.label());
       const end = this.label();
       this.emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
-      r.members.forEach((m, i) => {
+      let iAt: usize = 0;
+      for (const m of r.members) {
+        const i = iAt;
+        iAt++;
         this.startBlock(cases[i as usize]!);
         const convert2 = this.convert(v, t, m);
         this.describe(at, convert2, members[i as usize]!, need);
         this.emit(`br label %${end}`);
-      });
+      }
       this.startBlock(end);
       return;
     }
@@ -6181,12 +6249,15 @@ class Codegen implements PrintHost, ComptimeHost {
       const cases = r.members.map(() => this.label());
       const end = this.label();
       this.emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
-      r.members.forEach((m, i) => {
+      let iAt: usize = 0;
+      for (const m of r.members) {
+        const i = iAt;
+        iAt++;
         this.startBlock(cases[i as usize]!);
         const convert2 = this.convert(v, t, m);
         this.jsTextInto(b, convert2, m);
         this.emit(`br label %${end}`);
-      });
+      }
       this.startBlock(end);
       return;
     }
@@ -6454,7 +6525,10 @@ class Codegen implements PrintHost, ComptimeHost {
       const done = this.label();
       const cases = r.members.map(() => this.label());
       this.emit(`switch i32 ${tag}, label %${done} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
-      r.members.forEach((m, i) => {
+      let iAt: usize = 0;
+      for (const m of r.members) {
+        const i = iAt;
+        iAt++;
         this.startBlock(cases[i as usize]!);
         const member = this.tables.typing.lower(m);
         let x = "zeroinitializer";
@@ -6469,7 +6543,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const line5 = `store ptr ${this.inspectTree(x, members[i as usize]!, "%d")}, ptr ${result}`;
         this.emit(line5);
         this.emit(`br label %${done}`);
-      });
+      }
       this.startBlock(done);
       const node = this.temp();
       this.emit(`${node} = load ptr, ptr ${result}`);
@@ -6479,12 +6553,15 @@ class Codegen implements PrintHost, ComptimeHost {
       const node = this.temp();
       const line6 = `${node} = call ptr @fsh_rt_insp_variant(ptr ${this.cString(r.member)})`;
       this.emit(line6);
-      r.fields.forEach((f, i) => {
+      let iAt2: usize = 0;
+      for (const f of r.fields) {
+        const i = iAt2;
+        iAt2++;
         const x = this.temp();
         this.emit(`${x} = extractvalue ${this.llvm(t)} ${v}, ${i}`);
         const line7 = `call void @fsh_rt_insp_push(ptr ${node}, ptr ${this.inspectTree(x, f.type, "%d")})`;
         this.emit(line7);
-      });
+      }
       return node;
     }
     const object = t as ObjectType;
@@ -6495,14 +6572,17 @@ class Codegen implements PrintHost, ComptimeHost {
       const length = this.tables.typing.rec(object).required === undefined ? undefined : this.tupleLength(v, object);
       const node = this.temp();
       this.emit(`${node} = call ptr @fsh_rt_insp_list(i32 3, i64 ${length !== undefined ? length : `${order.length}`})`);
-      order.forEach(({ i }, n) => {
+      let nAt: usize = 0;
+      for (const { i } of order) {
+        const n = nAt;
+        nAt++;
         this.present(length, n as usize, (cg) => {
           const x = cg.temp();
           cg.emit(`${x} = extractvalue ${cg.llvm(t)} ${v}, ${i}`);
           const line8 = `call void @fsh_rt_insp_push(ptr ${node}, ptr ${cg.inspectTree(x, as[i]!.type, next)})`;
           cg.emit(line8);
         });
-      });
+      }
       // A rest tuple's further elements join its own, as one array.
       if (rest !== undefined) {
         const x = this.temp();
@@ -7101,11 +7181,13 @@ class Codegen implements PrintHost, ComptimeHost {
       return v;
     };
     const undo = (cg: Mut<Codegen>) => {
-      read.forEach((x) => cg.dispose(x.v, x.type));
-      slots.forEach((x) => {
+      for (const x of read) {
+        cg.dispose(x.v, x.type);
+      }
+      for (const x of slots) {
         const loaded2 = loaded(cg, x);
         cg.dispose(loaded2, x.type);
-      });
+      }
     };
     const what = rest !== undefined ? `an array of at least ${order.length}` : required === order.length ? `an array of ${order.length}` : `an array of ${required} to ${order.length}`;
     const finish = this.label();
@@ -7118,7 +7200,10 @@ class Codegen implements PrintHost, ComptimeHost {
       cg.emit(`${right} = icmp eq i32 ${more}, ${wanted}`);
       return right;
     };
-    order.forEach(({ f, i }, n) => {
+    let nAt: usize = 0;
+    for (const { f, i } of order) {
+      const n = nAt;
+      nAt++;
       const right = step(this, n as usize, 1);
       const [bad, good] = [this.label(), this.label()];
       // Where an optional element would be, the array may end instead.
@@ -7140,7 +7225,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const line4 = `store ${this.llvm(lower5)} ${v}, ptr ${slots[n - required]!.slot}`;
         this.emit(line4);
       }
-    });
+    }
     if (rest !== undefined) {
       // The fixed elements dominate the rest's reads, so its failures can drop them.
       read.push({ v: this.readElements(r, rest.f.type as ArrayType, true, order.length, undo), type: rest.f.type, i: rest.i });
@@ -7542,7 +7627,10 @@ class Codegen implements PrintHost, ComptimeHost {
     const done = this.label();
     const cases = this.tables.typing.rec(t).members.map(() => this.label());
     this.emit(`switch i32 ${tag}, label %${done} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
-    this.tables.typing.rec(t).members.forEach((m, i) => {
+    let iAt: usize = 0;
+    for (const m of this.tables.typing.rec(t).members) {
+      const i = iAt;
+      iAt++;
       this.startBlock(cases[i as usize]!);
       const member = this.tables.typing.lower(m);
       if (typeof member === "string" && (member === "null" || member === "never")) this.jsonRaw(w, "null");
@@ -7556,7 +7644,7 @@ class Codegen implements PrintHost, ComptimeHost {
         this.jsonWrite(w, x, written[i as usize]!);
       }
       this.emit(`br label %${done}`);
-    });
+    }
     this.startBlock(done);
   }
 
@@ -8123,12 +8211,15 @@ class Codegen implements PrintHost, ComptimeHost {
       const [dataAt, data] = [cg.temp(), cg.temp()];
       cg.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
       cg.emit(`${data} = load ptr, ptr ${dataAt}`);
-      values.forEach((v, i) => {
+      let iAt: usize = 0;
+      for (const v of values) {
+        const i = iAt;
+        iAt++;
         const [index, slot] = [cg.temp(), cg.temp()];
         cg.emit(`${index} = add i64 ${from}, ${i}`);
         cg.emit(`${slot} = getelementptr ${t}, ptr ${data}, i64 ${index}`);
         cg.emit(`store ${t} ${v}, ptr ${slot}`);
-      });
+      }
     };
     if (method === "reverse") {
       this.emit(`call void @fsh_rt_array_reverse(ptr ${at}, i64 ${size})`);
@@ -8821,12 +8912,15 @@ class Codegen implements PrintHost, ComptimeHost {
     const cases = blocks.map(() => this.label());
     const end = this.label();
     this.emit(`switch i32 ${tag}, label %${end} [ ${blocks.map((m, i) => `i32 ${r.members.indexOf(m)}, label %${cases[i as usize]!}`).join(" ")} ]`);
-    blocks.forEach((m, i) => {
+    let iAt: usize = 0;
+    for (const m of blocks) {
+      const i = iAt;
+      iAt++;
       this.startBlock(cases[i as usize]!);
       const line = `call void @fsh_rt_free(ptr ${this.convert(v, type, m)})`;
       this.emit(line);
       this.emit(`br label %${end}`);
-    });
+    }
     this.startBlock(end);
   }
 
@@ -9328,13 +9422,16 @@ class Codegen implements PrintHost, ComptimeHost {
             return cg.hand(owned2, built.fields[i]!.type);
           }));
         let result = "zeroinitializer";
-        values.forEach((v, i) => {
+        let iAt: usize = 0;
+        for (const v of values) {
+          const i = iAt;
+          iAt++;
           const next = this.temp();
           const get8 = this.cur().types.get(e.callee) as VariantType;
           const line25 = `${next} = insertvalue ${this.llvm(get8)} ${result === "zeroinitializer" ? "undef" : result}, ${this.llvm(built.fields[i]!.type)} ${v}, ${i}`;
           this.emit(line25);
           result = next;
-        });
+        }
         if (!this.cur().types.has(e)) this.pending.push({ v: result, type: this.cur().types.get(e.callee)! });
         return result;
       }
@@ -9356,11 +9453,14 @@ class Codegen implements PrintHost, ComptimeHost {
         const list = ((e.args.length > 0 ? e.args[0]! : undefined) as Extract<Expr, { kind: "array" }>).elements as Expr[];
         const given = list.map((x) => this.owned(x));
         let frame = "zeroinitializer";
-        given.forEach((v, i) => {
+        let iAt2: usize = 0;
+        for (const v of given) {
+          const i = iAt2;
+          iAt2++;
           const next = this.temp();
           this.emit(`${next} = insertvalue ${this.llvm(t)} ${frame}, ${this.llvm(this.valueType(list[i]!))} ${v}, ${1 + 3 * i}`);
           frame = next;
-        });
+        }
         return frame;
       }
       if (this.tables.jsEvaluations.has(e)) {
@@ -9711,11 +9811,14 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(line23);
         frame = next;
       }
-      values.forEach((v, i) => {
+      let iAt3: usize = 0;
+      for (const v of values) {
+        const i = iAt3;
+        iAt3++;
         const next = this.temp();
         this.emit(`${next} = insertvalue ${this.llvm(machine)} ${frame}, ${v}, ${i + first}`);
         frame = next;
-      });
+      }
       if (!this.cur().types.has(e)) this.pending.push({ v: frame, type: machine });
       return frame;
     }
@@ -9955,12 +10058,15 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${tag} = extractvalue ${this.llvm(whole as UnionType)} ${v}, 0`);
       const cases = union.members.map(() => this.label());
       this.emit(`switch i32 ${tag}, label %${cases[0]!} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
-      union.members.forEach((m, i) => {
+      let iAt: usize = 0;
+      for (const m of union.members) {
+        const i = iAt;
+        iAt++;
         this.startBlock(cases[i]!);
         const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\nthe type predicate '${name}' said '${shown(arg)}' ${is} '${brief(this.tables.typing.show(type))}', but it holds a '${brief(this.tables.typing.show(m))}'\n`)})`;
         this.unwinding(line2);
         this.emit("unreachable");
-      });
+      }
     }
     this.startBlock(ok);
   }
@@ -10204,7 +10310,10 @@ class Codegen implements PrintHost, ComptimeHost {
   // where each lives, or a copy, or the value moved in.
   environment(this: Mut<this>, inner: InstanceId, froms: Ref<(LocalId | "this")[]>): string {
     let result = "undef";
-    froms.forEach((id, i) => {
+    let iAt: usize = 0;
+    for (const id of froms) {
+      const i = iAt;
+      iAt++;
       const type = this.tables.typing.rec(this.inst(inner).closure!).fields[i as usize]!.type;
       let part = id === "this" ? "%this" : this.slot(id);
       // A closure holding a variable's value holds a copy, or moves it in, emptying it.
@@ -10223,7 +10332,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const line3 = `${next} = insertvalue ${this.llvm(part2)} ${result}, ${this.llvm(type)} ${part}, ${i}`;
       this.emit(line3);
       result = next;
-    });
+    }
     return froms.length === 0 ? "zeroinitializer" : result;
   }
 
@@ -10533,7 +10642,9 @@ class Codegen implements PrintHost, ComptimeHost {
     const call = `call ${shim.returns} ${this.symbol(target)}(${passed.join(", ")})`;
     const result = shim.returns === "void" ? undefined : this.temp();
     this.unwinding(call, result, cleanup);
-    given.forEach((g) => g());
+    for (const g of given) {
+      g();
+    }
     this.rustPanic(caught, { start: at.start, end: at.end });
     after?.(this);
     if ((err !== undefined && err !== "")) {
@@ -10953,7 +11064,10 @@ class Codegen implements PrintHost, ComptimeHost {
         });
       }
     });
-    futures.forEach((f, i) => {
+    let iAt: usize = 0;
+    for (const f of futures) {
+      const i = iAt;
+      iAt++;
       const [futureAt, valueAt, doneAt] = [field(this, 1 + 3 * i), field(this, 2 + 3 * i), field(this, 3 + 3 * i)];
       const [d, over, skip, go] = [this.temp(), this.temp(), this.label(), this.label()];
       const fr = this.tables.typing.rec(f);
@@ -11017,18 +11131,21 @@ class Codegen implements PrintHost, ComptimeHost {
         }
       } else this.emit("unreachable");
       this.startBlock(skip);
-    });
+    }
     if (kind === "race") finishWith(this, 0);
     else {
       let all = "true";
-      futures.forEach((_, i) => {
+      let iAt2: usize = 0;
+      for (const _ of futures) {
+        const i = iAt2;
+        iAt2++;
         const [d, over, both] = [this.temp(), this.temp(), this.temp()];
         const line4 = `${d} = load i32, ptr ${field(this, 3 + 3 * i)}`;
         this.emit(line4);
         this.emit(`${over} = icmp eq i32 ${d}, 2`);
         this.emit(`${both} = and i1 ${all}, ${over}`);
         all = both;
-      });
+      }
       const [waiting, ready] = [this.label(), this.label()];
       this.emit(`br i1 ${all}, label %${ready}, label %${waiting}`);
       this.startBlock(waiting);
@@ -11056,13 +11173,16 @@ class Codegen implements PrintHost, ComptimeHost {
       } else {
         const tuple = this.tables.typing.rec(t).gives as ObjectType;
         let made = "zeroinitializer";
-        moved.forEach((v, i) => {
+        let iAt3: usize = 0;
+        for (const v of moved) {
+          const i = iAt3;
+          iAt3++;
           const next = this.temp();
           const kept6 = kept(this, i);
           const line7 = `${next} = insertvalue ${this.llvm(tuple)} ${made}, ${this.llvm(kept6)} ${v}, ${this.tables.typing.fieldPath(tuple, String(i)).join(", ")}`;
           this.emit(line7);
           made = next;
-        });
+        }
         finishWith(this, 1, made);
       }
     }
@@ -11276,12 +11396,15 @@ class Codegen implements PrintHost, ComptimeHost {
     const [bytes, data] = [this.temp(), this.temp()];
     this.emit(`${bytes} = mul i64 ${errors.length}, ${this.sizeOf(element)}`);
     this.emit(`${data} = call ptr @fsh_rt_array_alloc(i64 ${bytes})`);
-    errors.forEach(([v, from], i) => {
+    let iAt: usize = 0;
+    for (const [v, from] of errors) {
+      const i = iAt;
+      iAt++;
       const at = this.temp();
       this.emit(`${at} = getelementptr ${element}, ptr ${data}, i64 ${i}`);
       const line = `store ${element} ${this.convert(v, from, this.tables.typing.rec(list).element)}, ptr ${at}`;
       this.emit(line);
-    });
+    }
     return this.aggregateOf(type, data, String(errors.length));
   }
 
@@ -11370,12 +11493,15 @@ class Codegen implements PrintHost, ComptimeHost {
       return;
     }
     if (combined !== undefined) {
-      combined.futures.forEach((f, j) => {
+      let jAt: usize = 0;
+      for (const f of combined.futures) {
+        const j = jAt;
+        jAt++;
         const [doneAt, futureAt] = [this.temp(), this.temp()];
         this.emit(`${doneAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 ${3 + 3 * j}`);
         this.emit(`${futureAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 ${1 + 3 * j}`);
         this.whileWaiting(doneAt, (cg) => cg.cancelAt(futureAt, f));
-      });
+      }
       return;
     }
     const instance = this.futureOf.get(t as FutureType);
@@ -11438,7 +11564,10 @@ class Codegen implements PrintHost, ComptimeHost {
     const cases = awaits.map(() => this.label());
     this.emit(`${state} = load i32, ptr %frame`);
     this.emit(`switch i32 ${state}, label %${done} [ ${awaits.map((a, n) => `i32 ${a.state}, label %${cases[n]!}`).join(" ")} ]`);
-    awaits.forEach((a, n) => {
+    let nAt: usize = 0;
+    for (const a of awaits) {
+      const n = nAt;
+      nAt++;
       this.startBlock(cases[n]!);
       const p = this.temp();
       const part = this.inst(i).future ?? this.inst(i).generator!;
@@ -11446,7 +11575,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(line2);
       this.cancelAt(p, a.type);
       this.emit(`br label %${done}`);
-    });
+    }
     this.startBlock(done);
     this.emit("ret void");
     const line = `define internal void ${this.cancelSymbol(i)}(ptr %frame, ptr %cx) ${this.unwinds} {`;
@@ -12331,31 +12460,40 @@ class Codegen implements PrintHost, ComptimeHost {
         const data = this.temp();
         const line4 = `${data} = call ptr @fsh_rt_array_alloc(i64 ${this.bytes(this.tables.typing.rec(type).element, n)})`;
         this.emit(line4);
-        values.forEach((v, i) => {
+        let iAt: usize = 0;
+        for (const v of values) {
+          const i = iAt;
+          iAt++;
           const at = this.temp();
           this.emit(`${at} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
           this.emit(`store ${t} ${v}, ptr ${at}`);
-        });
+        }
         return this.built(data, n, n);
       }
       case "template": {
         // Text alone is a literal, which takes no space.
         if (e.exprs.length === 0) return "zeroinitializer";
         const parts: string[] = [];
-        e.quasis.forEach((q, i) => {
+        let iAt2: usize = 0;
+        for (const q of e.quasis) {
+          const i = iAt2;
+          iAt2++;
           if (q !== "") parts.push(this.text(q));
           const x = (i < e.exprs.length ? e.exprs[i]! : undefined);
           if (x !== undefined) {
             const operand5 = this.operand(x, e.exprs, i + 1);
             parts.push(this.written(operand5, this.valueType(x)));
           }
-        });
+        }
         const array = this.alloca(`[${parts.length} x ptr]`);
-        parts.forEach((part, i) => {
+        let iAt3: usize = 0;
+        for (const part of parts) {
+          const i = iAt3;
+          iAt3++;
           const at = this.temp();
           this.emit(`${at} = getelementptr [${parts.length} x ptr], ptr ${array}, i32 0, i32 ${i}`);
           this.emit(`store ptr ${part}, ptr ${at}`);
-        });
+        }
         const result = this.temp();
         this.emit(`${result} = call ptr @fsh_rt_str_join(ptr ${array}, i64 ${parts.length})`);
         return result;
@@ -12460,11 +12598,14 @@ class Codegen implements PrintHost, ComptimeHost {
           return [name, cg.hand(v, cg.tables.typing.field(type, name)!.type)];
         })));
         let result = "undef";
-        this.tables.typing.rec(type).fields.forEach((f, i) => {
+        let iAt4: usize = 0;
+        for (const f of this.tables.typing.rec(type).fields) {
+          const i = iAt4;
+          iAt4++;
           const next = this.temp();
           this.emit(`${next} = insertvalue ${this.llvm(type)} ${result}, ${this.llvm(f.type)} ${values.get(f.name)}, ${i}`);
           result = next;
-        });
+        }
         return result;
       }
       case "this": {
@@ -12797,13 +12938,16 @@ class Codegen implements PrintHost, ComptimeHost {
       }
     }
     let result = "undef";
-    this.tables.typing.rec(type).fields.forEach((f, i) => {
+    let iAt: usize = 0;
+    for (const f of this.tables.typing.rec(type).fields) {
+      const i = iAt;
+      iAt++;
       const part = got.get(f.name)!;
       const next = this.temp();
       const line = `${next} = insertvalue ${this.llvm(type)} ${result}, ${this.llvm(f.type)} ${this.convert(part.v, part.type, f.type)}, ${i}`;
       this.emit(line);
       result = next;
-    });
+    }
     const made = new Set(got.values());
     this.pending = this.pending.filter((entry) => !made.has(entry as { v: string; type: Type }));
     return result;
@@ -13201,25 +13345,36 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(line3);
         return this.built(data, n, n);
       }
-      v.items.forEach((item, i) => {
+      let iAt: usize = 0;
+      for (const item of v.items) {
+        const i = iAt;
+        iAt++;
         const at = this.temp();
         this.emit(`${at} = getelementptr ${t}, ptr ${data}, i64 ${i}`);
         const line4 = `store ${t} ${this.bake(item, r.element)}, ptr ${at}`;
         this.emit(line4);
-      });
+      }
       return this.built(data, n, n);
     }
     if (v !== undefined && r !== undefined && (r.kind === "object" || r.kind === "class" || r.kind === "variant")) {
       const parts: [Type, Value][] = [];
       if (r.kind === "class" && r.base !== undefined) parts.push([r.base, v]);
-      r.fields.forEach((f, i) => parts.push([f.type, v.kind === "variant" ? v.args[i] : v.kind === "record" ? v.fields.get(f.name) : undefined]));
+      let iAt2: usize = 0;
+      for (const f of r.fields) {
+        const i = iAt2;
+        iAt2++;
+        parts.push([f.type, v.kind === "variant" ? v.args[i] : v.kind === "record" ? v.fields.get(f.name) : undefined]);
+      }
       let made = "zeroinitializer";
-      parts.forEach(([part, x], i) => {
+      let iAt3: usize = 0;
+      for (const [part, x] of parts) {
+        const i = iAt3;
+        iAt3++;
         const next = this.temp();
         const line5 = `${next} = insertvalue ${this.llvm(type)} ${made}, ${this.llvm(part)} ${this.bake(x, part)}, ${i}`;
         this.emit(line5);
         made = next;
-      });
+      }
       return made;
     }
     throw new Error(`internal error: no baked form for a comptime value of type ${this.tables.typing.keyOf(type)}`);
@@ -13308,7 +13463,10 @@ class Codegen implements PrintHost, ComptimeHost {
       return result;
     };
     let built = "undef";
-    this.tables.typing.rec(match).fields.forEach((f, i) => {
+    let iAt: usize = 0;
+    for (const f of this.tables.typing.rec(match).fields) {
+      const i = iAt;
+      iAt++;
       let v: string;
       if (/^\d+$/.test(f.name)) v = capture(this, [Number(f.name)], f.type);
       else if (f.name === "index") v = at(this, 0);
@@ -13316,19 +13474,22 @@ class Codegen implements PrintHost, ComptimeHost {
       else {
         const named = f.type as ObjectType;
         let inner = "undef";
-        this.tables.typing.rec(named).fields.forEach((g, j) => {
+        let jAt: usize = 0;
+        for (const g of this.tables.typing.rec(named).fields) {
+          const j = jAt;
+          jAt++;
           const indexes = this.tables.typing.rec(regexT).captures.flatMap((c, k) => (c.name === g.name ? [k + 1] : []));
           const next = this.temp();
           const line3 = `${next} = insertvalue ${this.llvm(named)} ${inner}, ${this.llvm(g.type)} ${capture(this, indexes, g.type)}, ${j}`;
           this.emit(line3);
           inner = next;
-        });
+        }
         v = inner;
       }
       const next = this.temp();
       this.emit(`${next} = insertvalue ${this.llvm(match)} ${built}, ${this.llvm(f.type)} ${v}, ${i}`);
       built = next;
-    });
+    }
     return built;
   }
 
