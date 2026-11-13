@@ -6,7 +6,6 @@ import { selfOf, type Checked, type Instance, type Local, type Type } from "./ch
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.ts";
 import { formatPlan, printStream, integerMethod, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.ts";
 import { compile as compileRegex, parsePattern, type RegexSyntaxError, type RegexTables } from "./regex.ts";
-import { ASSIGNMENTS } from "./operators.ts";
 import { Lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, toFloat, untagged, type ComptimeHost, type Value } from "./comptime.ts";
@@ -174,8 +173,19 @@ const RELEASES = new Map<string, string>([["Semaphore", "fsh_rt_semaphore_releas
 // an owned array given up, or an Option's array given up when there is one.
 type RustGiven = { kind: "dispose" | "array" | "optionArray"; v: string; t: Type; handles: boolean; none: string; inner: string; innerType: Type };
 
+// What runs around a call: `after` once it is over, however it ended, and `unwound` only when it
+// panicked or raised.
+type Hooks = { after?: (cg: Mut<Codegen>) => void; unwound?: (cg: Mut<Codegen>) => void };
+const NO_HOOKS: Hooks = {};
+
 // A failure that has nothing read before it to drop.
 function noUndo(_cg: Mut<Codegen>): void {}
+
+// How a place is written: a variable, `this`, or a field read off one.
+function placeName(x: Ref<Expr>): string {
+  if (x.kind === "member") return `${placeName(x.object)}.${x.name}`;
+  return x.kind === "ident" ? x.name : "this";
+}
 
 // The object a member or index expression reads from.
 function partOf<A extends Lifetime>(e: Ref<Expr, A>): Ref<Expr, A> {
@@ -2260,7 +2270,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${found} = call ptr @fsh_rt_map_at(ptr ${map}, i64 ${i})`);
       const target = this.callOf(callback)!;
       const slice2 = [`ptr ${part(this, found, 4)}`].slice(0, this.bodyAt(target).params.length as i64);
-      const gives = this.invoke(target, env, slice2, exprKey(e), undefined, (cg: Mut<Codegen>) => cg.dropStashed(env, closure));
+      const gives = this.invoke(target, env, slice2, exprKey(e), { unwound: (cg: Mut<Codegen>) => cg.dropStashed(env, closure) });
       if (gives !== undefined && this.needsDrop(this.tables.typing.rec(closure).returns)) this.dispose(gives, this.tables.typing.rec(closure).returns);
       this.emit(`br label %${done}`);
       this.startBlock(done);
@@ -2494,12 +2504,12 @@ class Codegen implements PrintHost, ComptimeHost {
         return `${cg.llvm(given)} ${cg.convert(copied2, type, given)}`;
       });
       const slice2 = passed.slice(0, cg.bodyAt(target).params.length as i64);
-      const gives = cg.invoke(target, env, slice2, exprKey(e), undefined, (cg: Mut<Codegen>) => {
+      const gives = cg.invoke(target, env, slice2, exprKey(e), { unwound: (cg: Mut<Codegen>) => {
         if (cg.needsDrop(closure)) {
           const unstash2 = cg.unstash(env, closure);
           cg.dispose(unstash2, closure);
         }
-      });
+      } });
       if (gives !== undefined && cg.needsDrop(cg.tables.typing.rec(closure).returns)) cg.dispose(gives, cg.tables.typing.rec(closure).returns);
     });
     if (this.needsDrop(closure)) {
@@ -3612,6 +3622,13 @@ class Codegen implements PrintHost, ComptimeHost {
     return via;
   }
 
+  // A slot of a socket task's frame, and a name for what is read from it.
+  taskField(this: Mut<this>, inner: Type, at: string, i: usize): [string, string] {
+    const [ptr, v] = [this.temp(), this.temp()];
+    this.emit(`${ptr} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 ${i}`);
+    return [ptr, v];
+  }
+
   // A closure stashed in `env` for a loop's calls, dropped once they are over or one panics.
   dropStashed(this: Mut<this>, env: string, closure: Type): void {
     if (!this.needsDrop(closure)) return;
@@ -3671,7 +3688,7 @@ class Codegen implements PrintHost, ComptimeHost {
         result = cg.failedOut(shape, raw, part2, part3, m);
       } else {
         const chosen2 = owning ? (cg: Mut<Codegen>) => cg.giveUp(target, type, upcasts, owner) : undefined;
-        result = cg.invoke(target, self, args, undefined, chosen2);
+        result = cg.invoke(target, self, args, undefined, { after: chosen2 });
       }
       if (result === undefined || m.returns === "void") {
         if (result !== undefined) {
@@ -3922,7 +3939,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const returns = m.throws !== undefined ? this.throwing(gives, m.throws) : gives === "void" ? "void" : this.llvm(gives);
     const made = returns === "void" ? undefined : this.temp();
     this.unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, made);
-    const result = m.throws !== undefined ? this.unpacked(returns, made!, gives, e) : made;
+    const result = m.throws !== undefined ? this.unpacked(returns, made!, gives, e, NO_HOOKS, true) : made;
     if ((result !== undefined && result !== "") && !this.cur().types.has(e) && this.needsDrop(gives)) this.pending.push({ v: result, type: gives });
     return result;
   }
@@ -4095,7 +4112,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`${inside} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 1`);
     const target = this.callOf(callback)!;
     const chosen = this.bodyAt(target).params.length > 0 ? [`ptr ${inside}`] : [];
-    const result = this.invoke(target, env, chosen, exprKey(e), leftovers);
+    const result = this.invoke(target, env, chosen, exprKey(e), { after: leftovers });
     this.emit(`call void @${rc ? (reading ? "fsh_rt_rc_read_end" : "fsh_rt_rc_write_end") : reading ? "fsh_rt_read_unlock" : "fsh_rt_unlock"}(ptr ${at})`);
     if ((result !== undefined && result !== "") && !this.cur().types.has(e) && this.needsDrop(this.inst(target).returns)) this.pending.push({ v: result, type: this.inst(target).returns });
     return result;
@@ -4443,7 +4460,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (g.throws !== undefined) {
       const resultType2 = this.resultType(target);
       const nextResult2 = this.tables.typing.nextResult(g.yields);
-      return this.unpacked(resultType2, result, nextResult2, raising)!;
+      return this.unpacked(resultType2, result, nextResult2, raising, NO_HOOKS, true)!;
     }
     return result;
   }
@@ -4920,9 +4937,15 @@ class Codegen implements PrintHost, ComptimeHost {
   // scope's variables, runs `cleanup` for what the call itself held, and lets the unwind go on.
   // Variables not yet set, or already dropped, are empty, so dropping every scope is safe.
   unwinding(this: Mut<this>, call: string, result?: string, cleanup?: (cg: Mut<Codegen>) => void) {
+    const hooks: Hooks = cleanup !== undefined ? { after: cleanup } : {};
+    this.unwindingWith(call, result, hooks);
+  }
+
+  // A call that may panic, run with `hooks` in its landing pad.
+  unwindingWith(this: Mut<this>, call: string, result: string | undefined, hooks: Ref<Hooks>) {
     const assign = (result !== undefined && result !== "") ? `${result} = ` : "";
     const live = this.pending.some((p) => this.needsDrop(p.type)) || this.scopes.some((s) => s.held.length > 0);
-    if (this.panic === "abort" || (!live && cleanup === undefined)) {
+    if (this.panic === "abort" || (!live && hooks.after === undefined && hooks.unwound === undefined)) {
       this.emit(assign + call);
       return;
     }
@@ -4944,7 +4967,8 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`${assign}invoke ${call.slice("call ".length as i64)} to label %${ok} unwind label %${pad}`);
     this.startBlock(pad);
     this.emit(`${caught} = landingpad { ptr, i32 } cleanup`);
-    cleanup?.(this);
+    hooks.after?.(this);
+    hooks.unwound?.(this);
     held.reverse();
     for (const p of held) {
       const v = this.temp();
@@ -7835,7 +7859,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const backward = written === "findLast" || written === "findLastIndex" || written === "reduceRight";
     const method = written === "findLast" ? "find" : written === "findLastIndex" ? "findIndex" : written === "reduceRight" ? "reduce" : written;
     const callback: Ref<Expr> = e.args[0]!;
-    const init = e.args.length > 1 ? e.args[1]! : undefined;
+    const init: Ref<Expr> | undefined = e.args.length > 1 ? e.args[1]! : undefined;
     const element = this.tables.typing.rec(array).element;
     const t = this.llvm(element);
     const closure = this.cur().types.get(callback) as ClosureType;
@@ -7937,7 +7961,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     const slice2 = passed.slice(0, this.bodyAt(target).params.length as i64);
     // A panic in the callback drops what the loop has built and what the callback captured.
-    const gives = this.invoke(target, env, slice2, exprKey(e), undefined, (cg: Mut<Codegen>) => {
+    const gives = this.invoke(target, env, slice2, exprKey(e), { unwound: (cg: Mut<Codegen>) => {
       if (building) {
         const built = cg.temp();
         cg.emit(`${built} = load ${cg.llvm(result)}, ptr ${out}`);
@@ -7947,7 +7971,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const unstash2 = cg.unstash(env, closure);
         cg.dispose(unstash2, closure);
       }
-    });
+    } });
     if (method === "map") this.appended(out, this.tables.typing.rec(closure).returns, gives!);
     else if (method === "forEach") {
       // What the callback gives is dropped; JavaScript's forEach ignores it.
@@ -9412,7 +9436,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${code} = extractvalue ${PAIR} ${both}, 1`);
       const part4 = this.bodyAt(target).params.length;
       const values = this.argValues(e.args, target, part4);
-      const result = this.invoke(target, env, values, exprKey(e), undefined, undefined, code);
+      const result = this.invoke(target, env, values, exprKey(e), undefined, code);
       if ((result !== undefined && result !== "") && this.cur().types.has(e)) {
         const part5 = this.inst(target).returns;
         const get2 = this.cur().types.get(e)!;
@@ -9894,7 +9918,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
     };
     const chosen2 = (share !== undefined ? this.symbol(share.template) : undefined);
-    const result = this.invoke(target, pointer, values, exprKey(e), leftovers, undefined, chosen2);
+    const result = this.invoke(target, pointer, values, exprKey(e), { after: leftovers }, chosen2);
     // A call through a type parameter returns what its bound's method declares.
     if ((result !== undefined && result !== "") && this.cur().types.has(e)) {
       const part8 = this.inst(target).returns;
@@ -10057,6 +10081,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
     }
     assert(false, `internal error: no lowering for the string method ${callee.name}`);
+    return "undef";
   }
 
 
@@ -10105,9 +10130,6 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`br i1 ${answer}, label %${said}, label %${saidNot}`);
     // A name spelling a long type argument list is shortened as symbols are.
     const name = shortened(this.bodyAt(this.callOf(e)!).name);
-    function shown(x: Expr): string {
-      return (x.kind === "member" ? `${shown(x.object)}.${x.name}` : x.kind === "ident" ? x.name : "this");
-    }
     const ats: string[] = [said, saidNot];
     const iss: string[] = ["is", "is not"];
     for (let k: usize = 0; k < ats.length; k++) {
@@ -10123,7 +10145,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const i = iAt;
         iAt++;
         this.startBlock(cases[i]!);
-        const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\nthe type predicate '${name}' said '${shown(arg)}' ${is} '${brief(this.tables.typing.show(type))}', but it holds a '${brief(this.tables.typing.show(m))}'\n`)})`;
+        const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\nthe type predicate '${name}' said '${placeName(arg)}' ${is} '${brief(this.tables.typing.show(type))}', but it holds a '${brief(this.tables.typing.show(m))}'\n`)})`;
         this.unwinding(line2);
         this.emit("unreachable");
       }
@@ -10206,7 +10228,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const get2 = this.cur().types.get(e.value)!;
       return this.convert(v, get2, type);
     }
-    const op = ASSIGNMENTS[e.op]!;
+    const op: BinaryOp | "=" = e.op === "=" ? "=" : (e.op.slice(0, e.op.length - 1) as BinaryOp);
     // `&&=` and `||=` skip the right side as `&&` and `||` do, and assign only when they
     // run it, which matters when the target is a setter.
     if (op === "&&" || op === "||") {
@@ -10572,48 +10594,45 @@ class Codegen implements PrintHost, ComptimeHost {
   // Calls a function with its arguments' values, after the instance when it is a method.
   // `after` runs once the call returns, and before an error it raises goes on.
   // `after` runs once the call is over, however it ended; `unwound` only when it panicked.
-  invoke(this: Mut<this>, target: InstanceId, pointer: string | undefined, args: Ref<string[]>, at?: Expr, after?: (cg: Mut<Codegen>) => void, unwound?: (cg: Mut<Codegen>) => void, via?: string): string | undefined {
-    const cleanup = after !== undefined || unwound !== undefined ? (cg: Mut<Codegen>) => {
-      after?.(cg);
-      unwound?.(cg);
-    } : undefined;
+  invoke(this: Mut<this>, target: InstanceId, pointer: string | undefined, args: Ref<string[]>, at?: Expr, given?: Hooks, via?: string): string | undefined {
+    const hooks: Hooks = given !== undefined ? given : {};
     const type = this.inst(target).returns;
-    if (this.bodyAt(target).rust !== undefined) return this.rustInvoke(target, pointer, args, at!, cleanup, after);
+    if (this.bodyAt(target).rust !== undefined) return this.rustInvoke(target, pointer, args, at!, hooks);
     const values = (pointer !== undefined && pointer !== "") ? [`ptr ${pointer}`, ...args] : args;
     // A narrow value crosses to C widened, both ways.
     const passed = this.bodyAt(target).foreign === true ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(this.tables.typing, this.inst(target).signature![i as usize]!)} `)) : values;
     const call = `call ${this.bodyAt(target).foreign === true ? crossed(this.tables.typing, type) : this.resultType(target)} ${via ?? this.symbol(target)}(${passed.join(", ")})`;
     if (type === "void" && this.inst(target).throws === undefined) {
-      this.unwinding(call, undefined, cleanup);
-      after?.(this);
+      this.unwindingWith(call, undefined, hooks);
+      hooks.after?.(this);
       return undefined;
     }
     const result = this.temp();
-    this.unwinding(call, result, cleanup);
+    this.unwindingWith(call, result, hooks);
     if (this.inst(target).throws === undefined) {
-      after?.(this);
+      hooks.after?.(this);
       return result;
     }
     const resultType2 = this.resultType(target);
-    const chosen = this.bodyAt(target).self?.constructor === true ? undefined : unwound;
-    return this.unpacked(resultType2, result, type, at!, after, chosen);
+    return this.unpacked(resultType2, result, type, at!, hooks, this.bodyAt(target).self?.constructor !== true);
   }
 
 
   // A throwing call's result: a call that failed raises its error where this function sends
   // it; one that didn't gives its value.
-  unpacked(this: Mut<this>, shape: string, result: string, type: Type, at: Ref<Expr>, after?: (cg: Mut<Codegen>) => void, unwound?: (cg: Mut<Codegen>) => void): string | undefined {
+  // `unwinds`: whether `hooks.unwound` runs when the call raises.
+  unpacked(this: Mut<this>, shape: string, result: string, type: Type, at: Ref<Expr>, hooks: Ref<Hooks>, unwinds: boolean): string | undefined {
     const [failed, bad, ok] = [this.temp(), this.label(), this.label()];
     this.emit(`${failed} = extractvalue ${shape} ${result}, 0`);
     this.emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
     this.startBlock(bad);
     const error = this.temp();
     this.emit(`${error} = extractvalue ${shape} ${result}, 2`);
-    after?.(this);
-    unwound?.(this);
+    hooks.after?.(this);
+    if (unwinds) hooks.unwound?.(this);
     this.raised(at, error);
     this.startBlock(ok);
-    after?.(this);
+    hooks.after?.(this);
     if (type === "void") return undefined;
     const got = this.temp();
     this.emit(`${got} = extractvalue ${shape} ${result}, 1`);
@@ -10624,7 +10643,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // A call of a Rust function's shim: the handle a method works on, read from where it is held,
   // then each argument as it crosses, owned strings and arrays given up once Rust has made its
   // own of them; what it gives made into a Fish value; and a panic in it raised at the call.
-  rustInvoke(this: Mut<this>, target: InstanceId, pointer: string | undefined, args: Ref<string[]>, at: Ref<Expr>, cleanup?: (cg: Mut<Codegen>) => void, after?: (cg: Mut<Codegen>) => void): string | undefined {
+  rustInvoke(this: Mut<this>, target: InstanceId, pointer: string | undefined, args: Ref<string[]>, at: Ref<Expr>, hooks: Ref<Hooks>): string | undefined {
     let passed: string[] = [];
     let given: RustGiven[] = [];
     if ((pointer !== undefined && pointer !== "") && this.bodyAt(target).self !== undefined && !this.bodyAt(target).self!.constructor) {
@@ -10653,10 +10672,10 @@ class Codegen implements PrintHost, ComptimeHost {
     passed.push(`ptr ${caught}`);
     const call = `call ${shim.returns} ${this.symbol(target)}(${passed.join(", ")})`;
     const result = shim.returns === "void" ? undefined : this.temp();
-    this.unwinding(call, result, cleanup);
+    this.unwindingWith(call, result, hooks);
     for (const g of given) this.rustGiveUp(g);
     this.rustPanic(caught, { start: at.start, end: at.end });
-    after?.(this);
+    hooks.after?.(this);
     if ((err !== undefined && err !== "")) {
       const part3 = this.inst(target).throws!;
       this.rustErr(err, part3, at);
@@ -11780,20 +11799,16 @@ class Codegen implements PrintHost, ComptimeHost {
         signal = [sig, flag];
       }
       if (socket) {
-        const [made, field] = [this.alloca(leaf.method === "read" || leaf.method === "receiveFrom" ? ARRAY : "ptr"), (i: usize) => {
-          const [ptr, v] = [this.temp(), this.temp()];
-          this.emit(`${ptr} = getelementptr ${this.llvm(inner)}, ptr ${at}, i32 0, i32 ${i}`);
-          return [ptr, v] as const;
-        }];
+        const made = this.alloca(leaf.method === "read" || leaf.method === "receiveFrom" ? ARRAY : "ptr");
         if (leaf.method === "accept") this.emit(`${outcome} = call i32 @fsh_rt_tcp_accept(ptr ${handle}, ptr %cx, ptr ${made}, ptr ${reason})`);
         else if (leaf.method === "sendTo" || leaf.method === "udpConnect") {
           const first = leaf.method === "sendTo" ? 3 : 2;
-          const [hostAt, host] = field(first);
-          const [portAt, port] = field(first + 1);
+          const [hostAt, host] = this.taskField(inner, at, first);
+          const [portAt, port] = this.taskField(inner, at, first + 1);
           this.emit(`${host} = load ptr, ptr ${hostAt}`);
           this.emit(`${port} = load i64, ptr ${portAt}`);
           if (leaf.method === "udpConnect") this.emit(`${outcome} = call i32 @fsh_rt_udp_connect(ptr ${handle}, ptr ${host}, i64 ${port}, ptr ${reason})`);
-          else this.emit(`${outcome} = call i32 @fsh_rt_udp_send(ptr ${handle}, ptr ${field(2)[0]}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${reason})`);
+          else this.emit(`${outcome} = call i32 @fsh_rt_udp_send(ptr ${handle}, ptr ${this.taskField(inner, at, 2)[0]}, ptr ${host}, i64 ${port}, ptr %cx, ptr ${reason})`);
         } else if (leaf.method === "receiveFrom") {
           // `receive()` gives the bytes alone; `receiveFrom()` the sender's address with them.
           const from = leaf.of === "void";
@@ -11812,17 +11827,17 @@ class Codegen implements PrintHost, ComptimeHost {
             given = withPort;
           }
         } else if (leaf.method === "read") {
-          const [maxAt, max] = field(2);
+          const [maxAt, max] = this.taskField(inner, at, 2);
           this.emit(`${max} = load i64, ptr ${maxAt}`);
           this.emit(`${outcome} = call i32 @fsh_rt_tcp_read(ptr ${handle}, i64 ${max}, ptr %cx, ptr ${made}, ptr ${reason})`);
         } else if (leaf.method === "write") {
-          const [bytesAt] = field(2);
-          const [writtenAt] = field(3);
+          const [bytesAt] = this.taskField(inner, at, 2);
+          const [writtenAt] = this.taskField(inner, at, 3);
           this.emit(`${outcome} = call i32 @fsh_rt_tcp_write(ptr ${handle}, ptr ${bytesAt}, ptr ${writtenAt}, ptr %cx, ptr ${reason})`);
         } else {
           const first = leaf.method === "bind" ? 1 : 2;
-          const [hostAt, host] = field(first);
-          const [portAt, port] = field(first + 1);
+          const [hostAt, host] = this.taskField(inner, at, first);
+          const [portAt, port] = this.taskField(inner, at, first + 1);
           this.emit(`${host} = load ptr, ptr ${hostAt}`);
           this.emit(`${port} = load i64, ptr ${portAt}`);
           if (leaf.method === "bind" && leaf.of !== "void" && !onPath(this.tables.typing, leaf.of)) this.emit(`${outcome} = call i32 @fsh_rt_udp_bind(ptr ${host}, i64 ${port}, ptr ${made}, ptr ${reason})`);
@@ -12459,7 +12474,6 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // The calls an expression makes are made from its site, once its operands' own calls are done.
-  /** @throws {RegexSyntaxError} */
   evaluate(this: Mut<this>, e: Ref<Expr>): string {
     const outer = this.siteNow();
     this.site = { start: e.start, end: e.end };
@@ -12469,7 +12483,6 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  /** @throws {RegexSyntaxError} */
   evaluated(this: Mut<this>, e: Ref<Expr>): string {
     const pair = this.pairOf(e);
     if (pair !== undefined) {
@@ -12797,10 +12810,10 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`store ${this.llvm(type)} zeroinitializer, ptr ${instance}`);
         // A panic in the constructor drops the fields it has set. One that throws has set none.
         const argValues3 = this.argValues(e.args ?? [], this.callOf(e)!);
-        this.invoke(this.callOf(e)!, instance, argValues3, exprKey(e), undefined, (cg) => {
+        this.invoke(this.callOf(e)!, instance, argValues3, exprKey(e), { unwound: (cg) => {
           const unstash2 = cg.unstash(instance, type);
           cg.dispose(unstash2, type);
-        });
+        } });
         const result = this.temp();
         this.emit(`${result} = load ${this.llvm(type)}, ptr ${instance}`);
         return result;
@@ -13751,7 +13764,7 @@ class Codegen implements PrintHost, ComptimeHost {
         }
       };
       const slice2 = passed.slice(0, this.bodyAt(target).params.length);
-      const gives = this.invoke(target, env, slice2, exprKey(e), undefined, unwound)!;
+      const gives = this.invoke(target, env, slice2, exprKey(e), { unwound: unwound })!;
       const text = this.convert(gives, this.tables.typing.rec(closure!).returns, "string");
       this.emit(`call void @fsh_rt_regex_put(ptr ${it}, ptr ${text})`);
       this.dispose(text, "string");
@@ -13776,12 +13789,16 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // A regex is a pointer to its compiled program, one constant per pattern and flags.
-  /** @throws {RegexSyntaxError} */
   regex(this: Mut<this>, t: RegexType): string {
     const key = `${this.tables.typing.rec(t).flags}/${this.tables.typing.rec(t).pattern}`;
     const made = this.regexes.get(key);
     if ((made !== undefined && made !== "")) return made;
-    const program = compileRegex(parsePattern(this.tables.typing.rec(t).pattern, this.tables.typing.rec(t).flags, this.tables.regex), this.tables.regex);
+    let program: u32[] = [];
+    try {
+      program = compileRegex(parsePattern(this.tables.typing.rec(t).pattern, this.tables.typing.rec(t).flags, this.tables.regex), this.tables.regex);
+    } catch (err) {
+      throw new CompileError("E0508", (err as RegexSyntaxError).message, 0, 0);
+    }
     const name = `@.regex.${this.stableId("regex", key)}`;
     this.globals.push(`${name} = private unnamed_addr constant [${program.length} x i32] [${program.map((w) => `i32 ${w | 0}`).join(", ")}]`);
     this.regexes.set(key, name);
