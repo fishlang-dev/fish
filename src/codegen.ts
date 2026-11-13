@@ -323,7 +323,7 @@ export type Options = { src: string; file: string; release: boolean; panic: "unw
 const typeOwner = (t: Type): string => `type ${idOf(t)}`;
 
 // The function being emitted, set aside while another is emitted inside it.
-type Emission = { allocas: string[]; body: string[]; temps: usize; labels: usize; block: string; pending: { v: string; type: Type; slot?: string }[]; scopes: Scope[]; framingOn: boolean; debuggingOn: boolean };
+type Emission = { allocas: string[]; body: string[]; temps: usize; labels: usize; block: string; pending: { v: string; type: Type; slot?: string; home?: boolean }[]; scopes: Scope[]; framingOn: boolean; debuggingOn: boolean };
 
 // What a block owns and drops at its end. A scope a match or a pipe opens for itself, which
 // ends with the expression, is transient: a C string's buffer goes to the block around it.
@@ -381,7 +381,7 @@ class Codegen implements PrintHost, ComptimeHost {
   handlers: { label: string; slot: string; depth: usize; floor: usize }[];
   finallies: Region[];
   exits: NodeMap<Stmt, { exit: string; next?: string; depth: usize; }>;
-  pending: { v: string; type: Type; slot?: string }[];
+  pending: { v: string; type: Type; slot?: string; home?: boolean }[];
   floor: usize;
   reserved: NodeMap<Expr, string>;
   resuming: { type: GeneratorType | FutureType; frame: string; resumes: string[]; start: string; done: string } | undefined;
@@ -4857,7 +4857,7 @@ class Codegen implements PrintHost, ComptimeHost {
         this.pending.splice(this.floor as i64);
         for (const [via, body] of entries) {
           this.startBlock(via);
-          for (const { v, type } of held) this.dispose(v, type);
+          for (const p of held) this.dispose(this.released(p), p.type);
           this.emit(`br label %${body}`);
         }
         let iAt2: usize = 0;
@@ -5033,7 +5033,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const slot = this.alloca(this.llvm(type));
         this.pending[i]!.slot = slot;
       }
-      this.emit(`store ${this.llvm(type)} ${this.pending[i]!.v}, ptr ${this.pending[i]!.slot!}`);
+      if (this.pending[i]!.home !== true) this.emit(`store ${this.llvm(type)} ${this.pending[i]!.v}, ptr ${this.pending[i]!.slot!}`);
       held.push({ slot: this.pending[i]!.slot!, type });
     }
     const [ok, pad, caught] = [this.label(), this.label(), this.temp()];
@@ -8647,7 +8647,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const made = this.pending.splice(mark as i64);
       const after = this.concat(before, piece);
       this.emit(`call void @fsh_rt_str_release(ptr ${before})`);
-      for (const p of made) this.dispose(p.v, p.type);
+      for (const p of made) this.dispose(this.released(p), p.type);
       this.emit(`store ptr ${after}, ptr ${out}`);
       this.emit(`br label %${next}`);
     } else {
@@ -9176,7 +9176,15 @@ class Codegen implements PrintHost, ComptimeHost {
   settle(this: Mut<this>, mark: usize = this.floor) {
     let reversed = this.pending.splice(mark as i64);
     reversed.reverse();
-    for (const { v, type } of reversed) this.dispose(v, type);
+    for (const p of reversed) this.dispose(this.released(p), p.type);
+  }
+
+  // A pending value as it is now: one whose slot is its home may have been changed there.
+  released(this: Mut<this>, p: Ref<{ v: string; type: Type; slot?: string; home?: boolean }>): string {
+    if (p.home !== true) return p.v;
+    const v = this.temp();
+    this.emit(`${v} = load ${this.llvm(p.type)}, ptr ${p.slot!}`);
+    return v;
   }
 
 
@@ -11128,7 +11136,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const kept = toRegion ? this.finallies[at]!.floor : this.handlers.length > 0 ? this.handlers[this.handlers.length - 1]!.floor : 0;
     let reversed = this.pending.slice(kept as i64);
     reversed.reverse();
-    for (const { v, type } of reversed) this.dispose(v, type);
+    for (const p of reversed) this.dispose(this.released(p), p.type);
     if (toRegion) {
       this.drop(this.finallies[at]!.depth);
       const kept = this.stash("error", to, error);
@@ -12489,6 +12497,14 @@ class Codegen implements PrintHost, ComptimeHost {
       v = read;
     }
     this.emit(`store ${type} ${v}, ptr ${spilled}`);
+    // A temporary borrowed for the call lives on in its slot, where a `Mut<this>` method changes
+    // it, so it is released from there rather than as it was read.
+    const made = owns ? undefined : this.pending.findLast((p) => p.v === read);
+    if (made !== undefined) {
+      this.allocas.push(`  store ${type} zeroinitializer, ptr ${spilled}`);
+      made.slot = spilled;
+      made.home = true;
+    }
     return spilled;
   }
 
@@ -13036,6 +13052,10 @@ class Codegen implements PrintHost, ComptimeHost {
           // A side lent out of the conditional lends what it made, which lasts the statement.
           if (lent) {
             for (const made of cg.pending.splice(mark as i64)) {
+              if (made.home === true) {
+                kept.push({ slot: made.slot!, type: made.type });
+                continue;
+              }
               const slot = cg.alloca(cg.llvm(made.type));
               cg.allocas.push(`  store ${cg.llvm(made.type)} zeroinitializer, ptr ${slot}`);
               cg.emit(`store ${cg.llvm(made.type)} ${made.v}, ptr ${slot}`);
