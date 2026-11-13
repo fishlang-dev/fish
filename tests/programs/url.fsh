@@ -249,7 +249,7 @@ function main() throws TypeError {
   console.log(pathToFileURL("/x/y/").href);
   console.log(fileURLToPath("file:///tmp/a%20b%23c/%C3%A9"));
   console.log(fileURLToPath(pathToFileURL("/tmp/a b#c?d%e\\f/é")));
-  console.log(dirname(fileURLToPath(import.meta.url)).endsWith("/programs"));
+  console.log(fileURLToPath(import.meta.url).endsWith("/url_file_urls.fsh") && dirname(import.meta.path) === import.meta.dir);
   for (const u of ["http://x/y", "file:///a%2Fb", "file:///a%FF"]) {
     try {
       fileURLToPath(u);
