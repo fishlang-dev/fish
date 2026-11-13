@@ -10210,7 +10210,12 @@ class Codegen implements PrintHost, ComptimeHost {
   // outermost first, so each runs once and before the value, as in JavaScript.
   fixing(this: Mut<this>, target: Ref<Expr>, run: (cg: Mut<Codegen>) => string): string {
     let nodes: Ref<Expr>[] = [];
-    for (let e = bare(target); e.kind === "member" || e.kind === "index"; e = bare(partOf(e))) if (e.kind === "index" && this.indexes(this.valueType(e.object))) nodes.unshift(e.index);
+    let walk = bare(target);
+    while (walk.kind === "member" || walk.kind === "index") {
+      const e = walk;
+      if (e.kind === "index" && this.indexes(this.valueType(e.object))) nodes.unshift(e.index);
+      walk = bare(partOf(e));
+    }
     for (const index of nodes) {
       const operand = this.value(index);
       this.fixed.set(index, operand);
@@ -10416,8 +10421,11 @@ class Codegen implements PrintHost, ComptimeHost {
   // Whether a field read reaches into a shared value's block through its interior-mutable
   // fields, where it is read in place.
   inBlock(eGiven: Ref<Expr>): boolean {
-    let e: Ref<Expr> = eGiven;
-    for (; e.kind === "member" && !this.cur().calls.has(e); e = partOf(e)) {
+    let walk: Ref<Expr> = eGiven;
+    while (walk.kind === "member" && !this.cur().calls.has(walk)) {
+      const e = walk;
+      if (e.kind !== "member") return false;
+      walk = e.object;
       const get2 = this.cur().types.get(e.object)!;
       const holder = this.referent(get2);
       const kind = this.recOf(holder)?.kind;
@@ -13183,21 +13191,23 @@ class Codegen implements PrintHost, ComptimeHost {
     let e: Ref<Expr> = eGiven;
     let through = false;
     for (e = bare(e); e.kind === "member" && !this.cur().calls.has(e); e = bare(partOf(e))) {
+      const at = e;
+      if (at.kind !== "member") break;
       through = true;
       // A field narrowed to several members is read as a copy, laid out as the narrower union.
-      if (this.cur().narrowedFields?.has(e) === true && !this.inPayload(e)) return false;
+      if (this.cur().narrowedFields?.has(at) === true && !this.inPayload(at)) return false;
       // A string's or an array's `length` is computed, not a field.
       // A recursive member's fields live in its block, which is a place too.
       let object: Type | undefined;
-      if (this.cur().types.has(e.object)) {
-        const get2 = this.cur().types.get(e.object)!;
+      if (this.cur().types.has(at.object)) {
+        const get2 = this.cur().types.get(at.object)!;
         object = this.tables.typing.unfold(this.referent(get2));
       } else {
         object = undefined;
       }
       // A shared value's interior-mutable field lives in its block, wherever the handle is.
       const kind = this.recOf(object)?.kind;
-      if (kind === "shared") return !this.cur().copiesOut.has(e);
+      if (kind === "shared") return !this.cur().copiesOut.has(at);
       if (kind !== "object" && kind !== "class") return false;
     }
     if (e.kind === "this") return true;
