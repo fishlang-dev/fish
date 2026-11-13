@@ -1,4 +1,3 @@
-import { join, resolve } from "node:path";
 import { CompileError } from "./diag.ts";
 import type { Package } from "./modules.ts";
 
@@ -10,19 +9,29 @@ import type { Package } from "./modules.ts";
 type Request = { specifier: string; dir: string; index: usize }[];
 // The bundled JS, or a refusal with its code: a missing package, or one needing a module Fish's
 // JS lacks.
-type Result = { js: string } | { index: usize; message: string; code: string };
-type BuildLog = { message: string; position?: { file?: string } | null };
+type Result = { js?: string; index: usize; message: string; code: string };
+type BundleInput = { request: Request; shims: [string, string][] };
 
-// Bundles the packages at `used`, the indexes of those the program's code reaches. Bun's
-// bundler runs only asynchronously, so it runs in a process of its own.
-export function bundle(packages: Package[], used: usize[]): string {
-  const request: Request = used.map((index) => ({ specifier: packages[index]!.specifier, dir: packages[index]!.dir, index }));
-  const run = Bun.spawnSync([process.execPath, import.meta.path], { stdin: new TextEncoder().encode(JSON.stringify(request)) });
-  if (run.exitCode !== 0) throw new Error(`bundling the program's packages failed:\n${run.stderr.toString()}`);
-  const result = JSON.parse(run.stdout.toString()) as Result;
-  if ("js" in result) return result.js;
-  const at = packages[result.index]!.at;
-  throw new CompileError(result.code, result.message, at.start, at.end);
+// Bundles the packages at `used`, the indexes of those the program's code reaches. Bun's bundler
+// runs in a `bun` process of its own, found on PATH, so a compiler that isn't running on Bun
+// bundles the same way.
+/** @throws {CompileError | Error | IoError} */
+export function bundle(packages: Ref<Package[]>, used: Ref<usize[]>): string {
+  let request: Request = [];
+  for (const index of used) {
+    const p: Ref<Package> = packages[index]!;
+    request.push({ specifier: p.specifier, dir: p.dir, index });
+  }
+  const bun = Bun.which("bun");
+  const first: Ref<Package> = packages[used[0]!]!;
+  if (bun === null) throw new CompileError("E0901", "bundling a program's npm packages needs Bun; install it so 'bun' is on PATH", first.at.start, first.at.end);
+  const input: BundleInput = { request, shims: SHIMS.slice() };
+  const run = Bun.spawnSync([bun, "-e", BUNDLER], { stdin: new TextEncoder().encode(JSON.stringify(input)) });
+  if (run.exitCode !== 0) throw new Error(`bundling the program's packages failed:\n${new TextDecoder().decode(run.stderr)}`);
+  const result = JSON.parse<Result>(new TextDecoder().decode(run.stdout));
+  if (result.js !== undefined) return result.js;
+  const at: Ref<Package> = packages[result.index]!;
+  throw new CompileError(result.code, result.message, at.at.start, at.at.end);
 }
 
 // The Node modules Fish's std has, as bundled JS sees them: `path` as Node's POSIX path written
@@ -287,40 +296,44 @@ export const writeFile = (path, data) => __fish.writeFile(path, data);
 export default { readFile, writeFile };
 `;
 
-// Each shim by the names a package imports it under.
-const SHIMS: Record<string, string> = { path: PATH, "path/posix": PATH, os: OS, process: PROCESS, "fs/promises": FS_PROMISES };
+// Each shim by the name a package imports it under, and the globals every bundle imports first.
+const SHIMS: [string, string][] = [["globals", GLOBALS], ["path", PATH], ["path/posix", PATH], ["os", OS], ["process", PROCESS], ["fs/promises", FS_PROMISES]];
 
+// The bundling itself, run by `bun -e`: reads { request, shims } on stdin and writes the Result.
+const BUNDLER = String.raw`
+import { join, resolve } from "node:path";
+const input = JSON.parse(await Bun.stdin.text());
+const request = input.request;
+const shims = input.shims;
 // The package a file of the bundle belongs to, as node_modules names it.
-const packageOf = (file: string) => /.*node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(file)?.[1];
-
-async function main(request: Request): Promise<Result> {
-  const files: Record<string, string> = {};
-  const virtual = (r: Request[usize]) => join(r.dir, `__fish_package_${r.index}__.js`);
-  const entry = join(request[0]!.dir, "__fish_packages__.js");
-  for (const r of request) files[virtual(r)] = `export * as ns from ${JSON.stringify(r.specifier)};\n`;
+const packageOf = (file) => /.*node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(file)?.[1];
+const virtual = (r) => join(r.dir, "__fish_package_" + r.index + "__.js");
+const shim = (name) => join(request[0].dir, "__fish_shim_" + name.replace("/", "_") + "__.js");
+async function main() {
+  const files = {};
+  const entry = join(request[0].dir, "__fish_packages__.js");
+  for (const r of request) files[virtual(r)] = "export * as ns from " + JSON.stringify(r.specifier) + ";\n";
   // The globals come first, as a module's imports run in order.
-  const shim = (name: string) => join(request[0]!.dir, `__fish_shim_${name.replace("/", "_")}__.js`);
-  files[shim("globals")] = GLOBALS;
-  for (const [name, source] of Object.entries(SHIMS)) files[shim(name)] = source;
-  files[entry] = `import ${JSON.stringify(shim("globals"))};\n${request.map((r) => `export { ns as p${r.index} } from ${JSON.stringify(virtual(r))};`).join("\n")}\n`;
-  // Bun's own helpers make `require` from node:module; a package's require of anything that
+  for (const [name, source] of shims) files[shim(name)] = source;
+  files[entry] = "import " + JSON.stringify(shim("globals")) + ";\n" + request.map((r) => "export { ns as p" + r.index + " } from " + JSON.stringify(virtual(r)) + ";").join("\n") + "\n";
+  // Bun's own helpers make require from node:module; a package's require of anything that
   // isn't bundled fails when it runs, as a require of a missing module does.
-  const requires = join(request[0]!.dir, "__fish_require__.js");
-  files[requires] = "export function createRequire() { return (name) => { throw new Error(`Cannot find module '${name}'`); }; }\n";
+  const requires = join(request[0].dir, "__fish_require__.js");
+  files[requires] = "export function createRequire() { return (name) => { throw new Error(\"Cannot find module '\" + name + \"'\"); }; }\n";
   // The import a file of the bundle is reached through: a package's own name names it, and any
   // other file is the first package's, as nothing better is known.
-  const owner = (file: string) => {
+  const owner = (file) => {
     const name = packageOf(file);
-    return request.find((r) => file === virtual(r) || (name !== undefined && (r.specifier === name || r.specifier.startsWith(`${name}/`)))) ?? request[0]!;
+    return request.find((r) => file === virtual(r) || (name !== undefined && (r.specifier === name || r.specifier.startsWith(name + "/")))) ?? request[0];
   };
-  const unbuilt = (log: BuildLog | undefined, otherwise: string): Result => {
+  const unbuilt = (log, otherwise) => {
     const r = owner(log?.position?.file ?? "");
     const said = (log?.message ?? otherwise).replace(/\s*Maybe you need to "bun install"\?$/, "");
     const bun = /cannot import Bun builtin: "([^"]+)"/.exec(said)?.[1];
-    if (bun) return { index: r.index, code: "E1005", message: `'${r.specifier}' needs Bun's own '${bun}' module, which a package's JS can't use in Fish yet` };
-    return { index: r.index, code: "E0901", message: `'${r.specifier}' has no JS Fish could bundle: ${said}` };
+    if (bun) return { index: r.index, code: "E1005", message: "'" + r.specifier + "' needs Bun's own '" + bun + "' module, which a package's JS can't use in Fish yet" };
+    return { index: r.index, code: "E0901", message: "'" + r.specifier + "' has no JS Fish could bundle: " + said };
   };
-  let built: Awaited<ReturnType<typeof Bun.build>>;
+  let built;
   try {
     built = await Bun.build({
       entrypoints: [entry],
@@ -342,33 +355,32 @@ async function main(request: Request): Promise<Result> {
       }],
     });
   } catch (e) {
-    return unbuilt((e as { errors?: BuildLog[] }).errors?.[0], String(e));
+    return unbuilt(e?.errors?.[0], String(e));
   }
-  if (!built.success) return unbuilt(built.logs.find((l) => l.level === "error") as BuildLog | undefined, "the bundler couldn't build it");
+  if (!built.success) return unbuilt(built.logs.find((l) => l.level === "error"), "the bundler couldn't build it");
   // What the bundler left outside the bundle that Node has is one of Node's own modules; any
   // other, like an optional require of a package that isn't installed, fails when it runs.
   const inputs = built.metafile?.inputs ?? {};
-  const builtIns = Object.entries(inputs).flatMap(([file, input]) => (input as { imports: { path: string; external?: boolean }[] }).imports
+  const builtIns = Object.entries(inputs).flatMap(([file, input]) => input.imports
     .filter((i) => i.external && process.getBuiltinModule(i.path) !== undefined).map((i) => ({ importer: resolve(file), name: i.path.replace(/^node:/, "") })));
-  if (builtIns.length > 0) return builtInUsed(request, builtIns[0]!, inputs, virtual);
-  return { js: await built.outputs[0]!.text() };
+  if (builtIns.length > 0) return builtInUsed(builtIns[0], inputs);
+  return { js: await built.outputs[0].text() };
 }
-
 // A Node built-in the bundle would need, said of the program's import that reaches it, through
 // the package that uses it when that is another.
-function builtInUsed(request: Request, used: { importer: string; name: string }, inputs: Record<string, { imports: { path: string; external?: boolean }[] }>, virtual: (r: Request[usize]) => string): Result {
+function builtInUsed(used, inputs) {
   const graph = new Map(Object.entries(inputs).map(([file, input]) => [resolve(file), input.imports.filter((i) => !i.external).map((i) => resolve(i.path))]));
-  const reaches = (from: string, seen: Set<string> = new Set<string>()): boolean => {
+  const reaches = (from, seen = new Set()) => {
     if (from === used.importer) return true;
     if (seen.has(from)) return false;
     seen.add(from);
     return (graph.get(from) ?? []).some((next) => reaches(next, seen));
   };
-  const r = request.find((q) => reaches(virtual(q))) ?? request[0]!;
+  const r = request.find((q) => reaches(virtual(q))) ?? request[0];
   const user = packageOf(used.importer);
-  const through = user === undefined || r.specifier === user || r.specifier.startsWith(`${user}/`) ? "" : ` through '${user}'`;
+  const through = user === undefined || r.specifier === user || r.specifier.startsWith(user + "/") ? "" : " through '" + user + "'";
   const runtime = used.name === "bun" || used.name.startsWith("bun:") ? "Bun's own" : "Node's";
-  return { index: r.index, code: "E1005", message: `'${r.specifier}' needs ${runtime} '${used.name}' module${through}, which a package's JS can't use in Fish yet` };
+  return { index: r.index, code: "E1005", message: "'" + r.specifier + "' needs " + runtime + " '" + used.name + "' module" + through + ", which a package's JS can't use in Fish yet" };
 }
-
-if (import.meta.main) console.log(JSON.stringify(await main(JSON.parse(await Bun.stdin.text()) as Request)));
+console.log(JSON.stringify(await main()));
+`;
