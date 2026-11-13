@@ -1895,6 +1895,8 @@ export class Expressions<C extends Context> implements Union<C> {
       const stored = this.ctx.typing().field(bound.kind === "object" ? (this.ctx.typing().rec(receiver as ParamType).bound as ObjectType) : (receiver as ObjectType), callee.name);
       const held = (stored === undefined ? undefined : this.heldBy(stored.type));
       if (held !== undefined && this.isCallable(held)) return this.callableCall(e, callee, held as DynType);
+      const optional = held !== undefined ? this.recOf(held) : undefined;
+      if (optional !== undefined && optional.kind === "union" && optional.members.some((m) => this.isCallable(m))) return this.optionalFieldCall(e, callee);
     }
     if (callee.kind === "member" && (recv?.kind === "param" || recv?.kind === "interface")) {
       return this.traitCall(e, callee, receiver as InterfaceType | ParamType);
@@ -1927,12 +1929,7 @@ export class Expressions<C extends Context> implements Union<C> {
       if (held !== undefined && !method && this.isCallable(held)) return this.callableCall(e, callee, held as DynType);
       // An optional one narrowed to present, after `if (o.onClick !== undefined)`.
       const optional = held !== undefined && !method ? this.recOf(held) : undefined;
-      if (optional !== undefined && optional.kind === "union" && optional.members.some((m) => this.isCallable(m))) {
-        const read = this.value(callee);
-        if (this.isCallable(read)) return this.callableCall(e, callee, read as DynType);
-        const inner = this.optionalCallable(read);
-        if (e.optional && inner !== undefined) return this.optionalCallableCall(e, callee, read as UnionType, inner);
-      }
+      if (optional !== undefined && optional.kind === "union" && optional.members.some((m) => this.isCallable(m))) return this.optionalFieldCall(e, callee);
     }
     if (callee.kind !== "ident" && callee.kind !== "member") {
       const given = this.value(callee);
@@ -10570,6 +10567,18 @@ export class Expressions<C extends Context> implements Union<C> {
   }
 
   // A call of a stored callable: whatever expression gives it, run through its one slot.
+  // A call of a field holding an optional function: `o.f?.(x)`, or `o.f(x)` once a check found
+  // it there.
+  /** @throws {CompileError} */
+  private optionalFieldCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Expr>): { type: Type; what: string } {
+    const read = this.value(callee);
+    if (this.isCallable(read)) return this.callableCall(e, callee, read as DynType);
+    const inner = this.optionalCallable(read);
+    if (e.optional && inner !== undefined) return this.optionalCallableCall(e, callee, read as UnionType, inner);
+    const name = callee.kind === "member" ? callee.name : "this function";
+    throw new CompileError("E0108", `'${name}' may be missing, since its type is optional; call it as '${callee.kind === "member" ? this.placeText(callee) : name}?.()', or check it first`, e.start, e.end);
+  }
+
   // The stored callable an Option holds, when it holds one and nothing else.
   private optionalCallable(this: Mut<this>, t: Type): DynType | undefined {
     const r = this.recOf(t);

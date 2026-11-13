@@ -92,6 +92,29 @@ function main() {
   const f: ((n: i64) => void) | undefined = (n) => console.log(words[0]!, n);
   f?.(1);
 }
+// case: optional_function_field_calls
+// expect: after 2
+// expect: after 1
+// A field holding an optional function is called with '?.()', through a reference too.
+type Hooks = { after?: (n: i64) => void; name: string };
+function run(h: Ref<Hooks>) {
+  h.after?.(1);
+}
+function main() {
+  const h: Hooks = { name: "a", after: (n) => console.log("after", n) };
+  h.after?.(2);
+  run(h);
+  const none: Hooks = { name: "b" };
+  none.after?.(3);
+  run(none);
+}
+// case: optional_function_field_unchecked
+// error: 'after' may be missing, since its type is optional; call it as 'h.after?.()', or check it first
+type Hooks = { after?: (n: i64) => void };
+function main() {
+  const h: Hooks = {};
+  h.after(1);
+}
 // case: optional_function_conditional
 // expect: give 1 t
 // expect: other 2
