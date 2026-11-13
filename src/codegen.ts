@@ -292,7 +292,10 @@ type Scope = { transient: boolean; held: { slot: string; type: Type }[] };
 // A `finally` region being emitted: the block its `finally` starts, the slot naming the way
 // control left, each way out with how to resume it, the labels made before the region, and
 // how many catches and scopes enclosed it.
-type Region = { label: string; chosen: string; exits: { key: string; resume: (cg: Mut<Codegen>) => void }[]; start: usize; handlers: usize; depth: usize; floor: usize; slots: Map<string, { slot: string; type: Type }> };
+// How a way out of a `finally` region carries on once the `finally` has run: on to a label, as
+// a jump out through more scopes, as a return of what `slot` keeps, or as a raise of it.
+type Resume = { how: "branch" | "jump" | "return" | "error"; to: string; depth: usize; slot: string; type: Type };
+type Region = { label: string; chosen: string; exits: { key: string; resume: Resume }[]; start: usize; handlers: usize; depth: usize; floor: usize; slots: Map<string, { slot: string; type: Type }> };
 
 // Lowers a checked program to LLVM IR text. The module names no target triple, so clang uses the host's.
 // User functions live under `fsh.` so the C entry point `main` can wrap Fish's `main()`.
@@ -4835,7 +4838,7 @@ class Codegen implements PrintHost, ComptimeHost {
         if (finishes) this.enter();
         const after = this.label();
         const done = (cg: Mut<Codegen>) => {
-          if (finishes) cg.exit("normal", (cg: Mut<Codegen>) => cg.emit(`br label %${after}`));
+          if (finishes) cg.exit("normal", { how: "branch", to: after, depth: 0, slot: "", type: "void" });
           else cg.emit(`br label %${after}`);
         };
         if (s.handler === undefined) {
@@ -4883,7 +4886,7 @@ class Codegen implements PrintHost, ComptimeHost {
             const i = iAt3;
             iAt3++;
             this.startBlock(targets[i]!);
-            e.resume(this);
+            this.resumeExit(e.resume);
           }
           this.scopes.pop();
         }
@@ -10218,7 +10221,7 @@ class Codegen implements PrintHost, ComptimeHost {
     while (walk.kind === "member" || walk.kind === "index") {
       const e = walk;
       if (e.kind === "index" && this.indexes(this.valueType(e.object))) nodes.unshift(e.index);
-      walk = bare(partOf(e));
+      walk = bare(partOf(walk));
     }
     for (const index of nodes) {
       const operand = this.value(index);
@@ -10437,7 +10440,7 @@ class Codegen implements PrintHost, ComptimeHost {
     while (walk.kind === "member" && !this.cur().calls.has(walk)) {
       const e = walk;
       if (e.kind !== "member") return false;
-      walk = e.object;
+      walk = partOf(walk);
       const get2 = this.cur().types.get(e.object)!;
       const holder = this.referent(get2);
       const kind = this.recOf(holder)?.kind;
@@ -10834,17 +10837,28 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Leaves a region the way `key` names, through its `finally`, which then resumes it.
   // The innermost region's way out named `key`, added the first time it is taken.
-  exit(this: Mut<this>, key: string, resume: (cg: Mut<Codegen>) => void) {
+  exit(this: Mut<this>, key: string, resume: Resume) {
     const at = this.finallies.length - 1;
     let i = this.finallies[at]!.exits.findIndex((e) => e.key === key);
     if (i < 0) {
-      this.finallies[at]!.exits.push({ key: key, resume: resume });
+      this.finallies[at]!.exits.push({ key, resume });
       i = (this.finallies[at]!.exits.length - 1) as i64;
     }
     this.emit(`store i32 ${i}, ptr ${this.finallies[at]!.chosen}`);
     this.emit(`br label %${this.finallies[at]!.label}`);
   }
 
+
+  // Carries on the way a region was left, once its `finally` has run.
+  resumeExit(this: Mut<this>, r: Ref<Resume>): void {
+    if (r.how === "branch") this.emit(`br label %${r.to}`);
+    else if (r.how === "jump") this.jump(r.to, r.depth);
+    else if (r.how === "return") this.leave(r.slot !== "" ? this.unstash(r.slot, r.type) : undefined);
+    else {
+      const error = this.unstash(r.slot, r.type);
+      this.route(error, r.type);
+    }
+  }
 
   // A slot a region keeps a value in while its `finally` runs.
   stash(this: Mut<this>, key: string, type: Type, v: string): string {
@@ -10874,7 +10888,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const inner = this.finallies.length > 0 ? this.finallies[this.finallies.length - 1]! : undefined;
     if (inner !== undefined && (parseInt(to.slice(1))! as usize) < inner.start) {
       this.drop(inner.depth);
-      this.exit(`jump ${to}`, (cg: Mut<Codegen>) => cg.jump(to, depth));
+      this.exit(`jump ${to}`, { how: "jump", to, depth, slot: "", type: "void" });
       return;
     }
     this.drop(depth);
@@ -10889,10 +10903,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const gives = this.cur().future !== undefined ? this.tables.typing.rec(this.cur().future!).gives : this.cur().returns;
     if (inner) {
       const kept = v === undefined ? undefined : this.stash("return", gives, v);
-      this.exit("return", (cg: Mut<Codegen>) => {
-        const chosen = kept !== undefined ? cg.unstash(kept, gives) : undefined;
-        cg.leave(chosen);
-      });
+      this.exit("return", { how: "return", to: "", depth: 0, slot: kept !== undefined ? kept : "", type: gives });
       return;
     }
     // A generator or a future that finishes stays finished; a future gives its value as it does.
@@ -10964,10 +10975,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (region !== undefined && toRegion) {
       this.drop(region.depth);
       const kept = this.stash("error", to, error);
-      this.exit("error", (cg: Mut<Codegen>) => {
-        const unstash2 = cg.unstash(kept, to);
-        cg.route(unstash2, to);
-      });
+      this.exit("error", { how: "error", to: "", depth: 0, slot: kept, type: to });
       return;
     }
     const handler = this.handlers.at(-1);
