@@ -6589,13 +6589,14 @@ class Codegen implements PrintHost, ComptimeHost {
       const part = this.writtenPart(written, t, (cg, x) => { const held = cg.tables.typing.rec(x); return held.kind === "ref" ? held.to : undefined; }) ?? to;
       return this.inspectTree(held, part, "%d");
     }
-    // A typed array prints as an array under its name, an ArrayBuffer as its bytes in hex.
+    // A typed array prints as an array under its name, an ArrayBuffer and a Buffer as their bytes
+    // in hex.
     const typed = this.tables.typing.typedName(written);
-    if (typed === "ArrayBuffer") {
+    if (typed === "ArrayBuffer" || typed === "Buffer") {
       const [length, data, node] = [this.temp(), this.temp(), this.temp()];
       this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
       this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
-      this.emit(`${node} = call ptr @fsh_rt_insp_buffer(ptr ${data}, i64 ${length})`);
+      this.emit(`${node} = call ptr @fsh_rt_insp_${typed === "Buffer" ? "node_buffer" : "buffer"}(ptr ${data}, i64 ${length})`);
       return node;
     }
     const named = (cg: Mut<Codegen>, node: string) => {

@@ -3658,7 +3658,7 @@ const BYTE_METHODS = ["toBase64", "toHex"];
 const BYTE_STATICS = ["fromBase64", "fromHex"];
 const URL_NAMES = ["URL", "URLSearchParams"];
 // std's names a program may declare its own of, which std's own code then reaches under another.
-const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date"];
+const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date", "RangeError"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
 export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
@@ -3941,6 +3941,184 @@ class DataView {
     unsafe { fsh_rt_bytes_copy(mutPtrOf(bits) as MutPtr<u8>, ptrOf(value) as Ptr<u8>, 8) };
     this.#write(byteOffset, 8, littleEndian === true, bits);
   }
+}
+`;
+
+// Node's Buffer statics std has.
+export const BUFFER_STATICS = ["from", "alloc", "allocUnsafe", "concat", "byteLength", "compare"];
+// Node's Buffer reads, each by the helper reading its width.
+export const BUFFER_READS: Record<string, string> = {
+  readUInt8: "u8", readUint8: "u8", readInt8: "i8",
+  readUInt16LE: "u16", readUInt16BE: "u16", readUint16LE: "u16", readUint16BE: "u16", readInt16LE: "i16", readInt16BE: "i16",
+  readUInt32LE: "u32", readUInt32BE: "u32", readUint32LE: "u32", readUint32BE: "u32", readInt32LE: "i32", readInt32BE: "i32",
+  readBigUInt64LE: "u64", readBigUInt64BE: "u64", readBigUint64LE: "u64", readBigUint64BE: "u64", readBigInt64LE: "i64", readBigInt64BE: "i64",
+  readFloatLE: "f32", readFloatBE: "f32", readDoubleLE: "f64", readDoubleBE: "f64",
+};
+export const BUFFER_ENCODINGS = ["utf8", "utf-8", "hex", "base64", "base64url", "latin1", "binary", "ascii"];
+// Node's Buffer methods a Uint8Array lacks and std doesn't have yet, refused by name.
+export const BUFFER_REFUSED = new Set([
+  ...Object.keys(BUFFER_READS).map((n) => `write${n.slice(4)}`),
+  "readUIntLE", "readUIntBE", "readIntLE", "readIntBE", "writeUIntLE", "writeUIntBE", "writeIntLE", "writeIntBE",
+  "write", "copy", "toJSON", "swap16", "swap32", "swap64", "toLocaleString", "inspect",
+]);
+// Node's Buffer, a Uint8Array whose methods the checker turns into calls of these, in a program
+// that names it. Text is built as bytes and decoded once, since appending to a string copies it.
+const BUFFER = String.raw`
+type BufferEncoding = "utf8" | "utf-8" | "hex" | "base64" | "base64url" | "latin1" | "binary" | "ascii";
+// What a Buffer's read throws for an offset outside it, with Node's code and message.
+class RangeError {
+  name: string = "RangeError";
+  message: string;
+  code: string = "";
+  cause: Dyn<ErrorLike> | null = null;
+  constructor(message?: string, options?: ErrorOptions) {
+    this.message = message ?? "";
+    this.cause = options?.cause ?? null;
+  }
+}
+// Node decodes leniently: hex up to the first pair that isn't hex, and base64 in either alphabet,
+// skipping what isn't in it and stopping at padding.
+function __arrayBufferFrom(s: string, encoding: BufferEncoding): u8[] {
+  if (encoding === "utf8" || encoding === "utf-8") return new TextEncoder().encode(s);
+  let out: u8[] = [];
+  if (encoding === "latin1" || encoding === "binary" || encoding === "ascii") {
+    for (let i: usize = 0; i < s.length; i++) out.push((s.charCodeAt(i) & 255) as u8);
+    return out;
+  }
+  const text = new TextEncoder().encode(s);
+  if (encoding === "hex") {
+    let i: usize = 0;
+    while (i + 1 < text.length) {
+      const high = __arrayHexValue(text[i] as i64);
+      const low = __arrayHexValue(text[i + 1] as i64);
+      if (high < 0 || low < 0) break;
+      out.push((high * 16 + low) as u8);
+      i += 2;
+    }
+    return out;
+  }
+  let bits = 0;
+  let count = 0;
+  for (const c of text) {
+    if (c === 61) break;
+    let v = __arrayBase64Value(c as i64, false);
+    if (v < 0) v = __arrayBase64Value(c as i64, true);
+    if (v < 0) continue;
+    bits = (bits << 6) | v;
+    count++;
+    if (count === 4) {
+      __arrayBufferPushBits(out, bits, 4);
+      bits = 0;
+      count = 0;
+    }
+  }
+  if (count > 1) __arrayBufferPushBits(out, bits << ((4 - count) * 6), count);
+  return out;
+}
+function __arrayBufferPushBits(out: Mut<u8[]>, bits: i64, count: i64): void {
+  out.push(((bits >> 16) & 255) as u8);
+  if (count > 2) out.push(((bits >> 8) & 255) as u8);
+  if (count > 3) out.push((bits & 255) as u8);
+}
+// buf.toString(encoding, start, end), the range clamped to the buffer as Node clamps it.
+function __arrayBufferText(bytes: Ref<u8[]>, encoding: BufferEncoding, start: i64, end: i64): string {
+  const n = bytes.length as i64;
+  const from = start < 0 ? 0 : start > n ? n : start;
+  const to = end > n ? n : end < from ? from : end;
+  const part = from === 0 && to === n ? bytes.clone() : bytes.slice(from, to);
+  if (encoding === "hex") return part.toHex();
+  if (encoding === "base64") return __arrayBase64Text(part, false, true);
+  if (encoding === "base64url") return __arrayBase64Text(part, true, false);
+  if (encoding === "utf8" || encoding === "utf-8") return new TextDecoder().decode(part);
+  let out: u8[] = [];
+  out.reserve(part.length as i64);
+  for (const b of part) {
+    const c = encoding === "ascii" ? b & 127 : b;
+    if (c < 128) out.push(c);
+    else {
+      out.push(192 | (c >> 6));
+      out.push(128 | (c & 63));
+    }
+  }
+  return new TextDecoder().decode(out);
+}
+function __arrayBufferAlloc(size: i64, fill: i64): u8[] {
+  return new Array(size).fill((fill & 255) as u8);
+}
+// Buffer.concat(list, totalLength), cut or padded with zeros to totalLength when it is given.
+function __arrayBufferConcat(list: Ref<u8[][]>, total: i64): u8[] {
+  let out: u8[] = [];
+  for (const b of list) for (const x of b) out.push(x);
+  if (total >= 0) {
+    while ((out.length as i64) > total) out.pop();
+    while ((out.length as i64) < total) out.push(0);
+  }
+  return out;
+}
+function __arrayBufferByteLength(s: string): usize {
+  return new TextEncoder().encode(s).length;
+}
+// -1, 0 or 1 as a sorts before, with or after b, byte by byte and then by length.
+function __arrayBufferCompare(a: Ref<u8[]>, b: Ref<u8[]>): i64 {
+  const n = a.length < b.length ? a.length : b.length;
+  for (let i: usize = 0; i < n; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  return a.length === b.length ? 0 : a.length < b.length ? -1 : 1;
+}
+function __arrayBufferEquals(a: Ref<u8[]>, b: Ref<u8[]>): boolean {
+  return __arrayBufferCompare(a, b) === 0;
+}
+// Where the UTF-8 of s first appears in bytes at or after from, which counts from the end when
+// negative, or -1.
+function __arrayBufferIndexOf(bytes: Ref<u8[]>, s: string, from: i64): i64 {
+  const needle = new TextEncoder().encode(s);
+  const n = bytes.length as i64;
+  const m = needle.length as i64;
+  let i = from >= 0 ? from : n + from < 0 ? 0 : n + from;
+  for (; i + m <= n; i++) {
+    let j = 0;
+    while (j < m && bytes[(i + j) as usize] === needle[j as usize]) j++;
+    if (j === m) return i;
+  }
+  return -1;
+}
+function __arrayBufferIncludes(bytes: Ref<u8[]>, s: string, from: i64): boolean {
+  return __arrayBufferIndexOf(bytes, s, from) >= 0;
+}
+function __arrayBufferRead(bytes: Ref<u8[]>, offset: i64, size: i64, little: boolean): u64 throws RangeError {
+  const last = (bytes.length as i64) - size;
+  if (last < 0) {
+    let e = new RangeError("Attempt to access memory outside buffer bounds");
+    e.code = "ERR_BUFFER_OUT_OF_BOUNDS";
+    throw e;
+  }
+  if (offset < 0 || offset > last) {
+    let e = new RangeError("The value of \"offset\" is out of range. It must be >= 0 and <= " + String(last) + ". Received " + String(offset));
+    e.code = "ERR_OUT_OF_RANGE";
+    throw e;
+  }
+  let v: u64 = 0;
+  for (let i = 0; i < size; i++) v = (v << 8) | (bytes[(offset + (little ? size - 1 - i : i)) as usize] as u64);
+  return v;
+}
+function __arrayBufferReadU8(b: Ref<u8[]>, o: i64, little: boolean): u8 throws RangeError { return __arrayBufferRead(b, o, 1, little) as u8; }
+function __arrayBufferReadI8(b: Ref<u8[]>, o: i64, little: boolean): i8 throws RangeError { return __arrayBufferRead(b, o, 1, little) as i8; }
+function __arrayBufferReadU16(b: Ref<u8[]>, o: i64, little: boolean): u16 throws RangeError { return __arrayBufferRead(b, o, 2, little) as u16; }
+function __arrayBufferReadI16(b: Ref<u8[]>, o: i64, little: boolean): i16 throws RangeError { return __arrayBufferRead(b, o, 2, little) as i16; }
+function __arrayBufferReadU32(b: Ref<u8[]>, o: i64, little: boolean): u32 throws RangeError { return __arrayBufferRead(b, o, 4, little) as u32; }
+function __arrayBufferReadI32(b: Ref<u8[]>, o: i64, little: boolean): i32 throws RangeError { return __arrayBufferRead(b, o, 4, little) as i32; }
+function __arrayBufferReadU64(b: Ref<u8[]>, o: i64, little: boolean): bigint throws RangeError { return BigInt(__arrayBufferRead(b, o, 8, little)); }
+function __arrayBufferReadI64(b: Ref<u8[]>, o: i64, little: boolean): bigint throws RangeError { return BigInt(__arrayBufferRead(b, o, 8, little) as i64); }
+function __arrayBufferReadF32(b: Ref<u8[]>, o: i64, little: boolean): f64 throws RangeError {
+  const bits = __arrayBufferRead(b, o, 4, little) as u32;
+  let x: f32 = 0;
+  unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 4) };
+  return x as f64;
+}
+function __arrayBufferReadF64(b: Ref<u8[]>, o: i64, little: boolean): f64 throws RangeError {
+  const bits = __arrayBufferRead(b, o, 8, little);
+  let x: f64 = 0;
+  unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 8) };
+  return x;
 }
 `;
 
@@ -4329,6 +4507,10 @@ export const STD_MODULES: Record<string, string> = {
   assert: String.raw`
 export function ok(_value: boolean, _message?: string): void {}
 `,
+  // Buffer is a global the checker knows, which an import of it from here names.
+  buffer: String.raw`
+export { Buffer };
+`,
   os: String.raw`
 declare function fsh_rt_os_hostname(): Ptr<u8>;
 declare function fsh_rt_os_tmpdir(): Ptr<u8>;
@@ -4357,7 +4539,7 @@ export function availableParallelism(): i64 {
 }
 `,
   // Web Crypto's random functions, and Node's randomBytes, from the OS's secure random source. A
-  // u8[] stands in for Uint8Array and Buffer.
+  // u8[] stands in for Uint8Array.
   crypto: String.raw`
 declare function fsh_rt_random_fill(at: MutPtr<u8>, count: usize): void;
 
@@ -4369,7 +4551,7 @@ export function getRandomValues(array: Mut<u8[]>): Mut<u8[]> {
   return array;
 }
 
-export function randomBytes(size: i64): u8[] {
+export function randomBytes(size: i64): Buffer {
   assert(size >= 0, "randomBytes takes a size of 0 or more, not " + String(size));
   let out: u8[] = new Array(size).fill(0 as u8);
   if (size > 0) unsafe { fsh_rt_random_fill(mutPtrOf(out[0]), size as usize) };
@@ -6961,7 +7143,7 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BTOA + ATOB + DATE + STDIN + TLS;
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -6979,7 +7161,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BTOA, ATOB, DATE, STDIN, TLS]) {
+  for (const text of [PRELUDE, HTTP, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -6997,6 +7179,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let bytes = sections.shift()!;
   let typed = sections.shift()!;
   let dataView = sections.shift()!;
+  let buffer = sections.shift()!;
   let btoa = sections.shift()!;
   let atob = sections.shift()!;
   let dates = sections.shift()!;
@@ -7023,12 +7206,13 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const astUsed = uses(written, ast, [...astNames, "quote", "quoteType"]);
   const jsUsed = uses(written, js, ["JsError"]) || packages;
   const dataViewUsed = uses(written, dataView, ["DataView"]);
+  const bufferUsed = mentionsName(written, "Buffer") || mentionsName(written, "BufferEncoding");
   const btoaUsed = uses(written, btoa, ["btoa"]);
   const atobUsed = uses(written, atob, ["atob"]);
   const readingUsed = uses(written, reading, ["readLine", "__stdinTake"]);
   // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
-  // btoa and atob call them too.
-  const encoding = httpUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);
+  // btoa, atob and Buffer call them too.
+  const encoding = httpUsed || bufferUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);
   const dated = httpUsed || uses(written, dates, ["Date"]);
   const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
   // The checker turns typed arrays' constructors and methods into calls of these helpers.
@@ -7045,6 +7229,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   if (astUsed) chosen = chosen.concat(ast);
   if (jsUsed) chosen = chosen.concat(js);
   if (dataViewUsed) chosen = chosen.concat(dataView);
+  if (bufferUsed) chosen = chosen.concat(buffer);
   if (btoaUsed) chosen = chosen.concat(btoa);
   if (atobUsed) chosen = chosen.concat(atob);
   if (readingUsed) chosen = chosen.concat(reading);

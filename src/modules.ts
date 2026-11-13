@@ -552,7 +552,13 @@ function linkOf(ids: Ids, module: Module, index: usize, library: boolean): Linke
       if (whole !== undefined && (stdModule(s.module) || (from?.whole && (s.namespace !== undefined || s.default !== undefined)))) spaces.set(whole, { from: from!, explicit: true });
       else if (s.namespace !== undefined) throw new CompileError("E0801", `namespace imports aren't supported yet; import the names you use, as in 'import { a, b } from "${s.module}"'`, s.start, s.end);
       else if (s.default !== undefined) bind(s.default, from!, "default", s);
-      for (const sp of s.named ?? []) bind(sp.alias ?? sp.name, from!, sp.name, sp);
+      for (const sp of s.named ?? []) {
+        if (from?.path === "std:buffer" && sp.name === "Buffer") {
+          if (sp.alias !== undefined && sp.alias !== "Buffer") throw new CompileError("E0907", "Buffer is a global, so import it under its own name, as in 'import { Buffer } from \"node:buffer\"'", sp.start, sp.end);
+          continue;
+        }
+        bind(sp.alias ?? sp.name, from!, sp.name, sp);
+      }
     } else if (s.kind === "importEquals") {
       throw new CompileError("E0801", `'import ${s.name} = ...' isn't supported yet; import what you use with 'import { a, b } from "./file"'`, s.start, s.end);
     } else if (s.kind === "exportAll") {

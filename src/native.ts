@@ -3405,6 +3405,27 @@ fsh_insp *fsh_rt_insp_buffer(const uint8_t *data, int64_t length) {
   return v;
 }
 
+// A Buffer as Node shows one at any depth: its first 50 bytes in hex, then how many more.
+fsh_insp *fsh_rt_insp_node_buffer(const uint8_t *data, int64_t length) {
+  fsh_sb b = {0};
+  fsh_sb_str(&b, "<Buffer ");
+  for (int64_t i = 0; i < length && i < 50; i++) {
+    char hex[4];
+    snprintf(hex, sizeof hex, i > 0 ? " %02x" : "%02x", data[i]);
+    fsh_sb_str(&b, hex);
+  }
+  if (length > 50) {
+    char more[64];
+    snprintf(more, sizeof more, " ... %lld more byte%s", (long long)(length - 50), length > 51 ? "s" : "");
+    fsh_sb_str(&b, more);
+  }
+  fsh_sb_str(&b, ">");
+  char *text = fsh_sb_done(&b);
+  fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, text, strlen(text));
+  fsh_rt_free(text);
+  return v;
+}
+
 // An Error as Node prints one with no stack lines: its name and message, the class's name when
 // it differs and the error's name ends in Error, as Node's improveStack writes them, bracketed.
 fsh_insp *fsh_rt_insp_error(const char *cls, fsh_str *name, fsh_str *message) {

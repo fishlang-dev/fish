@@ -68,10 +68,10 @@ const ID = comptime randomUUID();
 const N = comptime randomBytes(3);
 function main() { console.log(ID, N); }
 // case: crypto_unknown_member
-// error: 'node:crypto' has no export named 'createHash'; it has 'getRandomValues', 'randomBytes', 'randomUUID'
+// error: 'node:crypto' has no export named 'createCipheriv'
 import crypto from "node:crypto";
 function main() {
-  console.log(crypto.createHash("sha256"));
+  console.log(crypto.createCipheriv("aes-256-gcm"));
 }
 // case: crypto_sha
 // expect: a9993e364706816aba3e25717850c26c9cd0d89d

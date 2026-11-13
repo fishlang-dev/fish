@@ -207,10 +207,11 @@ const INTEGER_MAP = new Map<string, { bits: usize; signed: boolean }>([
 ]);
 export const integerInfo = (t: Integer): { bits: usize; signed: boolean } => INTEGER_MAP.get(t)!;
 
-// JavaScript's typed arrays, by the element each holds; an ArrayBuffer is its bytes.
-export const TYPED_ARRAYS = { Uint8Array: "u8", Int8Array: "i8", Uint16Array: "u16", Int16Array: "i16", Uint32Array: "u32", Int32Array: "i32", Float32Array: "f32", Float64Array: "f64", ArrayBuffer: "u8" } as const;
+// JavaScript's typed arrays, by the element each holds; an ArrayBuffer is its bytes, and Node's
+// Buffer bytes with methods of its own.
+export const TYPED_ARRAYS = { Uint8Array: "u8", Int8Array: "i8", Uint16Array: "u16", Int16Array: "i16", Uint32Array: "u32", Int32Array: "i32", Float32Array: "f32", Float64Array: "f64", ArrayBuffer: "u8", Buffer: "u8" } as const;
 // TYPED_ARRAYS' names, written out since reading an object's keys needs a value to read them from.
-const TYPED_ARRAY_KEYS: (keyof typeof TYPED_ARRAYS)[] = ["Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array", "ArrayBuffer"];
+const TYPED_ARRAY_KEYS: (keyof typeof TYPED_ARRAYS)[] = ["Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array", "Float32Array", "Float64Array", "ArrayBuffer", "Buffer"];
 export const TYPED_ARRAY_NAMES = new Set<string>([...TYPED_ARRAY_KEYS]);
 
 // The typed array a name is, if it is one.
@@ -220,12 +221,12 @@ export function typedNamed(name: string): TypedName | undefined {
 }
 const TYPED_ARRAY_MAP = new Map<string, Numeric>([
   ["Uint8Array", "u8"], ["Int8Array", "i8"], ["Uint16Array", "u16"], ["Int16Array", "i16"],
-  ["Uint32Array", "u32"], ["Int32Array", "i32"], ["Float32Array", "f32"], ["Float64Array", "f64"], ["ArrayBuffer", "u8"],
+  ["Uint32Array", "u32"], ["Int32Array", "i32"], ["Float32Array", "f32"], ["Float64Array", "f64"], ["ArrayBuffer", "u8"], ["Buffer", "u8"],
 ]);
 export const typedElement = (name: TypedName): Numeric => TYPED_ARRAY_MAP.get(name)!;
 // Written out rather than read from TYPED_ARRAYS, since a class's fields name it before Fish has
 // worked out the constant's type.
-export type TypedName = "Uint8Array" | "Int8Array" | "Uint16Array" | "Int16Array" | "Uint32Array" | "Int32Array" | "Float32Array" | "Float64Array" | "ArrayBuffer";
+export type TypedName = "Uint8Array" | "Int8Array" | "Uint16Array" | "Int16Array" | "Uint32Array" | "Int32Array" | "Float32Array" | "Float64Array" | "ArrayBuffer" | "Buffer";
 export const isTypedName = (name: string): name is TypedName => TYPED_ARRAY_MAP.has(name);
 // The bytes each element of a typed array takes, its BYTES_PER_ELEMENT.
 export const typedSize = (name: TypedName): usize => {
