@@ -81,7 +81,7 @@ export function isPrint(callee: Ref<Expr>): boolean {
 }
 
 // Where a print writes: stdout, or stderr for `console.error` and `console.warn`.
-export const printStream = (callee: Expr): 1 | 2 => (callee.kind === "member" && callee.name !== "log" ? 2 : 1);
+export const printStream = (callee: Ref<Expr>): 1 | 2 => (callee.kind === "member" && callee.name !== "log" ? 2 : 1);
 
 // Whether a value of the type can hold a float anywhere inside it.
 function holdsFloat(typing: Ref<Typing>, start: Type): boolean {
