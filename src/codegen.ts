@@ -9386,7 +9386,8 @@ class Codegen implements PrintHost, ComptimeHost {
     const result = this.syncRead(e, read);
     // Unused, as a statement, what a call gives is released when the statement ends.
     const list2: Type[] = ["i64", "i64", "i64", this.tables.typing.arrayType("u8"), this.tables.typing.arrayType("u8")];
-    const gives: Record<string, Type> = { processSpawn: this.tables.typing.tupleType(list2), processFinish: this.tables.typing.tupleType(list2), fileReadSync: this.tables.typing.arrayType("u8"), dirRead: this.tables.typing.arrayType("string"), pathReal: "string", pathRealNative: "string", pathReadLink: "string", dirTemp: "string", dirMake: this.tables.typing.unionType(["string", "null"]) };
+    const spawned = this.tables.typing.tupleType(list2);
+    const gives: Record<string, Type> = { processSpawn: spawned, processFinish: spawned, fileReadSync: this.tables.typing.arrayType("u8"), dirRead: this.tables.typing.arrayType("string"), pathReal: "string", pathRealNative: "string", pathReadLink: "string", dirTemp: "string", dirMake: this.tables.typing.unionType(["string", "null"]) };
     if (!this.cur().types.has(e) && gives[name] !== undefined) this.pending.push({ v: result, type: gives[name]! });
     return result;
   }
