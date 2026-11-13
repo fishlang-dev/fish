@@ -10827,7 +10827,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const fields = this.tables.typing.rec(thrown as ClassType).fields.map((f) => copyField(f));
       let made = "undef";
       for (let i: usize = 0; i < fields.length; i++) {
-        const f = fields[i]!;
+        const f: Ref<Field> = fields[i]!;
         const v = f.name === "name" ? this.text("Error") : f.name === "message" ? error : f.name === "cause" ? this.convert("zeroinitializer", "null", f.type) : undefined;
         assert(v !== undefined, `internal error: Error has a field '${f.name}' a Rust error doesn't fill`);
         const next = this.temp();
@@ -11330,7 +11330,7 @@ class Codegen implements PrintHost, ComptimeHost {
       // What the slots keep moves out of the frame: into the tuple, or, for an `any` every one of
       // whose futures failed, into its AggregateError.
       const moved = futures.map((_, i) => {
-        const [valueAt, v] = [field(this, 2 + 3 * i), this.temp()];
+        const [valueAt, v] = [field(this, (2 + 3 * i) as usize), this.temp()];
         const kept4 = kept(this, i);
         const line5 = `${v} = load ${this.llvm(kept4)}, ptr ${valueAt}`;
         this.emit(line5);
@@ -11838,7 +11838,7 @@ class Codegen implements PrintHost, ComptimeHost {
         if (leaf.method === "accept") this.emit(`${outcome} = call i32 @fsh_rt_tcp_accept(ptr ${handle}, ptr %cx, ptr ${made}, ptr ${reason})`);
         else if (leaf.method === "sendTo" || leaf.method === "udpConnect") {
           const first = leaf.method === "sendTo" ? 3 : 2;
-          const [hostAt, host] = this.taskField(inner, at, first);
+          const [hostAt, host] = this.taskField(inner, at, first as usize);
           const [portAt, port] = this.taskField(inner, at, first + 1);
           this.emit(`${host} = load ptr, ptr ${hostAt}`);
           this.emit(`${port} = load i64, ptr ${portAt}`);
@@ -12517,6 +12517,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // The calls an expression makes are made from its site, once its operands' own calls are done.
+  /** @throws {CompileError} */
   evaluate(this: Mut<this>, e: Ref<Expr>): string {
     const outer = this.siteNow();
     this.site = { start: e.start, end: e.end };
