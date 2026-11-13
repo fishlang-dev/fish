@@ -4827,9 +4827,13 @@ class Codegen implements PrintHost, ComptimeHost {
       // An error raised in the block is stored where the catch reads it, and the catch runs.
       // A `finally` runs however the two are left, then carries on the way they were left.
       case "try": {
-        const region = s.finalizer !== undefined ? this.enter() : undefined;
+        const finishes = s.finalizer !== undefined;
+        if (finishes) this.enter();
         const after = this.label();
-        const done = (cg: Mut<Codegen>) => (region !== undefined ? cg.exit(region, "normal", (cg) => cg.emit(`br label %${after}`)) : cg.emit(`br label %${after}`));
+        const done = (cg: Mut<Codegen>) => {
+          if (finishes) cg.exit("normal", (cg: Mut<Codegen>) => cg.emit(`br label %${after}`));
+          else cg.emit(`br label %${after}`);
+        };
         if (s.handler === undefined) {
           this.scoped(s.block);
           done(this);
@@ -4859,8 +4863,8 @@ class Codegen implements PrintHost, ComptimeHost {
           this.scopes.pop();
           done(this);
         }
-        if (region !== undefined) {
-          this.finallies.pop();
+        if (finishes) {
+          const region = this.finallies.pop()!;
           this.startBlock(region.label);
           // What a way out keeps while the finally runs is dropped if the finally leaves its own way.
           this.scopes.push({ transient: false, held: [] });
@@ -10782,26 +10786,36 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
 
-  enter(this: Mut<this>): Region {
-    const region = { label: this.label(), chosen: this.alloca("i32"), exits: [], start: this.labels, handlers: this.handlers.length, depth: this.scopes.length, floor: this.floor, slots: new Map() };
-    this.finallies.push(region);
-    return region;
+  // Opens the region of a `try` with a `finally`, the innermost until its `finally` is emitted.
+  enter(this: Mut<this>): void {
+    const label = this.label();
+    const chosen = this.alloca("i32");
+    this.finallies.push({ label, chosen, exits: [], start: this.labels, handlers: this.handlers.length, depth: this.scopes.length, floor: this.floor, slots: new Map<string, { slot: string; type: Type }>() });
   }
 
 
   // Leaves a region the way `key` names, through its `finally`, which then resumes it.
-  exit(this: Mut<this>, region: Ref<Region>, key: string, resume: (cg: Mut<Codegen>) => void) {
-    let i = region.exits.findIndex((e) => e.key === key);
-    if (i < 0) i = region.exits.push({ key, resume }) - 1;
-    this.emit(`store i32 ${i}, ptr ${region.chosen}`);
-    this.emit(`br label %${region.label}`);
+  // The innermost region's way out named `key`, added the first time it is taken.
+  exit(this: Mut<this>, key: string, resume: (cg: Mut<Codegen>) => void) {
+    const at = this.finallies.length - 1;
+    let i = this.finallies[at]!.exits.findIndex((e) => e.key === key);
+    if (i < 0) {
+      this.finallies[at]!.exits.push({ key, resume });
+      i = (this.finallies[at]!.exits.length - 1) as i64;
+    }
+    this.emit(`store i32 ${i}, ptr ${this.finallies[at]!.chosen}`);
+    this.emit(`br label %${this.finallies[at]!.label}`);
   }
 
 
   // A slot a region keeps a value in while its `finally` runs.
-  stash(this: Mut<this>, region: Ref<Region>, key: string, type: Type, v: string): string {
-    let slot = region.slots.get(key)?.slot;
-    if ((slot === undefined || slot === "")) region.slots.set(key, { slot: (slot = this.alloca(this.llvm(type))), type });
+  stash(this: Mut<this>, key: string, type: Type, v: string): string {
+    const at = this.finallies.length - 1;
+    let slot = this.finallies[at]!.slots.get(key)?.slot;
+    if (slot === undefined || slot === "") {
+      slot = this.alloca(this.llvm(type));
+      this.finallies[at]!.slots.set(key, { slot, type });
+    }
     this.emit(`store ${this.llvm(type)} ${v}, ptr ${slot}`);
     return slot;
   }
@@ -10819,10 +10833,10 @@ class Codegen implements PrintHost, ComptimeHost {
   // Jumps to a label outside the scopes from `depth` inward, dropping what they own, through
   // each `finally` whose region it leaves.
   jump(this: Mut<this>, to: string, depth: usize) {
-    const region = this.finallies.at(-1);
-    if (region !== undefined && (Number(to.slice(1)) as usize) < region.start) {
-      this.drop(region.depth);
-      this.exit(region, `jump ${to}`, (cg) => cg.jump(to, depth));
+    const inner = this.finallies.length > 0 ? this.finallies[this.finallies.length - 1]! : undefined;
+    if (inner !== undefined && (parseInt(to.slice(1))! as usize) < inner.start) {
+      this.drop(inner.depth);
+      this.exit(`jump ${to}`, (cg: Mut<Codegen>) => cg.jump(to, depth));
       return;
     }
     this.drop(depth);
@@ -10831,13 +10845,13 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // Leaves the function being emitted with a value, or with none, through any `finally`.
-  leave(this: Mut<this>, v: string | undefined) {
-    const region = this.finallies.at(-1);
-    this.drop(region?.depth ?? 0);
+  leave(this: Mut<this>, v: string | undefined): void {
+    const inner = this.finallies.length > 0;
+    this.drop(inner ? this.finallies[this.finallies.length - 1]!.depth : 0);
     const gives = this.cur().future !== undefined ? this.tables.typing.rec(this.cur().future!).gives : this.cur().returns;
-    if (region !== undefined) {
-      const kept = v === undefined ? undefined : this.stash(region, "return", gives, v);
-      this.exit(region, "return", (cg) => {
+    if (inner) {
+      const kept = v === undefined ? undefined : this.stash("return", gives, v);
+      this.exit("return", (cg: Mut<Codegen>) => {
         const chosen = kept !== undefined ? cg.unstash(kept, gives) : undefined;
         cg.leave(chosen);
       });
@@ -10903,16 +10917,16 @@ class Codegen implements PrintHost, ComptimeHost {
   // What the statement made so far, and what the scopes left own, are dropped on the way; in a
   // match arm's block, so are the values pending in the expressions it leaves.
   route(this: Mut<this>, error: string, to: Type) {
-    const region = this.finallies.at(-1);
+    const region = this.finallies.length > 0 ? this.finallies[this.finallies.length - 1]! : undefined;
     const toRegion = region !== undefined && this.handlers.length <= region.handlers;
-    const kept = toRegion ? region.floor : this.handlers.at(-1)?.floor ?? 0;
+    const kept = region !== undefined && toRegion ? region.floor : this.handlers.length > 0 ? this.handlers[this.handlers.length - 1]!.floor : 0;
     let reversed = this.pending.slice(kept);
     reversed.reverse();
     for (const { v, type } of reversed) this.dispose(v, type);
     if (region !== undefined && toRegion) {
       this.drop(region.depth);
-      const kept = this.stash(region, "error", to, error);
-      this.exit(region, "error", (cg) => {
+      const kept = this.stash("error", to, error);
+      this.exit("error", (cg: Mut<Codegen>) => {
         const unstash2 = cg.unstash(kept, to);
         cg.route(unstash2, to);
       });
