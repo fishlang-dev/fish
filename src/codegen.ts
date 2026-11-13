@@ -9909,13 +9909,19 @@ class Codegen implements PrintHost, ComptimeHost {
     const values = this.delivered((cg) => {
       let given: string[] = [];
       for (let i: usize = 0; i < args.length; i++) {
-        const a = args[i]!;
+        const a: Ref<Expr> = args[i]!;
         if (!passed(cg, i)) continue;
         if (i >= taken) {
           cg.value(a);
           continue;
         }
-        const v = cg.pairOf(a) !== undefined ? cg.owned(a) : cg.hand(cg.owned(a), cg.valueType(a));
+        let v: string;
+        if (cg.pairOf(a) !== undefined) {
+          v = cg.owned(a);
+        } else {
+          const owned2 = cg.owned(a);
+          v = cg.hand(owned2, cg.valueType(a));
+        }
         given.push(`${cg.llvm(cg.valueType(a))} ${v}`);
       }
       return given;
@@ -10046,7 +10052,7 @@ class Codegen implements PrintHost, ComptimeHost {
         return given(this, result, "boolean");
       }
     }
-    throw new Error(`internal error: no lowering for the string method ${callee.name}`);
+    assert(false, `internal error: no lowering for the string method ${callee.name}`);
   }
 
 
@@ -10571,7 +10577,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (this.bodyAt(target).rust !== undefined) return this.rustInvoke(target, pointer, args, at!, cleanup, after);
     const values = (pointer !== undefined && pointer !== "") ? [`ptr ${pointer}`, ...args] : args;
     // A narrow value crosses to C widened, both ways.
-    const passed = this.bodyAt(target).foreign === true ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(this.tables.typing, this.inst(target).signature![i]!)} `)) : values;
+    const passed = this.bodyAt(target).foreign === true ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(this.tables.typing, this.inst(target).signature![i as usize]!)} `)) : values;
     const call = `call ${this.bodyAt(target).foreign === true ? crossed(this.tables.typing, type) : this.resultType(target)} ${via ?? this.symbol(target)}(${passed.join(", ")})`;
     if (type === "void" && this.inst(target).throws === undefined) {
       this.unwinding(call, undefined, cleanup);
@@ -11158,7 +11164,7 @@ class Codegen implements PrintHost, ComptimeHost {
     };
     const cancelOthers = (cg: Mut<Codegen>, except: usize) => futures.forEach((f, j) => {
       if ((j as usize) !== except) {
-        const field2 = field(cg, 3 + 3 * j);
+        const field2 = field(cg, (3 + 3 * j) as usize);
         cg.whileWaiting(field2, (cg) => {
           const field3 = field(cg, 1 + 3 * j);
           cg.cancelAt(field3, f);
@@ -12446,6 +12452,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  /** @throws {RegexSyntaxError} */
   evaluated(this: Mut<this>, e: Ref<Expr>): string {
     const pair = this.pairOf(e);
     if (pair !== undefined) {
@@ -13026,7 +13033,7 @@ class Codegen implements PrintHost, ComptimeHost {
         put(this, p.name, shorthand2, part2);
         continue;
       }
-      if (p.kind !== "spread") throw new Error("internal error: unchecked property");
+      if (p.kind !== "spread") assert(false, "internal error: unchecked property");
       const held = this.cur().types.get(p.value)!;
       // The source's own type in this instance, its fields laid out as this instance has them.
       const source = this.tables.typing.lower(this.referent(held)) as ObjectType | ClassType;
@@ -13610,7 +13617,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // A string method given a regex: search, match, matchAll, split, replace and replaceAll.
   regexString(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, name: string): string {
-    const callee = e.callee;
+    const callee: Ref<Expr> = e.callee;
     if (callee.kind !== "member") return "";
     const regexT = this.tables.typing.lower(this.valueType(e.args[0]!)) as RegexType;
     const s = this.operand(callee.object, e.args, 0);
@@ -13698,7 +13705,7 @@ class Codegen implements PrintHost, ComptimeHost {
         if ((i as usize) < parts.length) {
           const part = this.temp();
           this.emit(`${part} = extractvalue ${this.llvm(match)} ${whole}, ${this.tables.typing.rec(match).fields.findIndex((f) => f.name === String(i))}`);
-          const copied2 = this.copied(part, parts[i]!);
+          const copied2 = this.copied(part, parts[i as usize]!);
           return `${this.llvm(p)} ${this.convert(copied2, parts[i]!, p)}`;
         }
         if (i === parts.length) {
