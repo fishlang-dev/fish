@@ -308,7 +308,9 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
 // them in declaration order. Every `.fsh` file of the package is loaded through a generated entry,
 // the harness, whose `main` runs one test by its index.
 export function buildTests(session: BuildSession, dir: string, out: string): Test[] {
-  const files = fishFiles(dir, (message) => console.error(message.replace(/^fishc fmt/, "fishc test")));
+  let problems: string[] = [];
+  const files = fishFiles(dir, problems);
+  for (const message of problems) console.error(message.replace(/^fishc fmt/, "fishc test"));
   // The harness is read as the manifest's path, which every package has and no `.fsh` file is, so
   // the files' names are written from the package's directory.
   const entry = join(dir, MANIFEST);
@@ -374,7 +376,12 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
   const files: { path: string; named: boolean }[] = [];
   for (const path of paths) {
     if (!existsSync(path)) problem(`fishc lint: can't find '${path}'`);
-    else if (statSync(path).isDirectory()) files.push(...fishFiles(path, problem).map((f) => ({ path: f, named: false })));
+    else if (statSync(path).isDirectory()) {
+      let problems: string[] = [];
+      const found = fishFiles(path, problems);
+      for (const message of problems) problem(message);
+      files.push(...found.map((f) => ({ path: f, named: false })));
+    }
     else files.push({ path, named: true });
   }
   // A manifest that can't be read is reported once, as "broken", and its files are skipped.

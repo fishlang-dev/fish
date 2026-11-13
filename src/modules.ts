@@ -231,7 +231,7 @@ export function load(compilation: Compilation, entry: string, src: string = read
     const key = `rust:${pkg.dir}:${crate}`;
     const known = byPath.get(key);
     if (known) return known;
-    const blocks = fishFiles(pkg.dir, () => {}).flatMap(blocksIn).filter((b) => b.name === `rust:${crate}`);
+    const blocks = fishFiles(pkg.dir, []).flatMap(blocksIn).filter((b) => b.name === `rust:${crate}`);
     if (blocks.length === 0) throw new CompileError("E1004", `no file of this package declares the functions of '${crate}'; declare them in one, as in 'declare module "rust:${crate}" { export function f(x: i64): i64; }'`, s.start, s.end);
     if (blocks.length > 1) throw new CompileError("E1004", `'rust:${crate}' is declared twice in this package; declare its functions in one place`, blocks[1]!.start, blocks[1]!.end);
     rust.push({ dependency, dir: pkg.dir });

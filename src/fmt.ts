@@ -1,7 +1,7 @@
 // `fishc fmt`: Fish files formatted in place, checked for CI, or piped through.
 
 import { randomBytes } from "node:crypto";
-import { accessSync, closeSync, constants, fchmodSync, fstatSync, ftruncateSync, linkSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
+import { accessSync, closeSync, constants, type Dirent, fchmodSync, fstatSync, ftruncateSync, linkSync, lstatSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { CompileError, formatError } from "./diag.ts";
 import { MANIFEST } from "./manifest.ts";
@@ -9,28 +9,42 @@ import { format } from "./printer.ts";
 
 const SKIPPED = new Set(["target", "node_modules"]);
 
-type Problem = (message: string) => void;
+// What went wrong with a file system call, as its message says.
+function reason(e: Ref<IoError>): string {
+  return e.message;
+}
 
-const reason = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const shown = (path: string) => relative(process.cwd(), path) || path;
+function shown(path: string): string {
+  const near = relative(process.cwd(), path);
+  return near !== "" ? near : path;
+}
+
+// Reports each problem found so far and empties the list, giving 1 when there was one, else `code`.
+function reported(problems: Mut<string[]>, code: i64): i64 {
+  if (problems.length === 0) return code;
+  while (problems.length > 0) console.error(problems.shift()!);
+  return 1;
+}
 
 // Every `.fsh` file under `dir`, in name order. Build output, dependencies, hidden directories and
 // packages nested below are left out; links to directories aren't followed, so a search stays
-// inside the tree and can't loop. A directory that can't be read is reported and skipped.
-export function fishFiles(dir: string, problem: Problem, top = true): string[] {
-  let entries;
+// inside the tree and can't loop. A directory that can't be read is added to `problems` and skipped.
+export function fishFiles(dir: string, problems: Mut<string[]>, top = true): string[] {
+  let entries: Dirent[] = [];
   try {
-    if (!top && lstatSync(join(dir, MANIFEST), { throwIfNoEntry: false })) return [];
-    entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    if (!top && lstatSync(join(dir, MANIFEST), { throwIfNoEntry: false }) !== undefined) return [];
+    entries = readdirSync(dir, { withFileTypes: true });
   } catch (e) {
-    problem(`fishc fmt: can't read '${shown(dir)}': ${reason(e)}`);
+    problems.push(`fishc fmt: can't read '${shown(dir)}': ${reason(e as IoError)}`);
     return [];
   }
-  const found: string[] = [];
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  let found: string[] = [];
   for (const entry of entries) {
     const path = join(dir, entry.name);
-    if (entry.isDirectory() && !SKIPPED.has(entry.name) && !entry.name.startsWith(".")) found.push(...fishFiles(path, problem, false));
-    else if (entry.isFile() && entry.name.endsWith(".fsh")) found.push(path);
+    if (entry.isDirectory() && !SKIPPED.has(entry.name) && !entry.name.startsWith(".")) {
+      for (const f of fishFiles(path, problems, false)) found.push(f);
+    } else if (entry.isFile() && entry.name.endsWith(".fsh")) found.push(path);
   }
   return found;
 }
@@ -38,34 +52,34 @@ export function fishFiles(dir: string, problem: Problem, top = true): string[] {
 // Formats the files `paths` name, a directory standing for its `.fsh` files, rewriting those that
 // change; with `check`, writes nothing and lists them instead. Gives the exit code: 1 when a file
 // isn't formatted under `check` or couldn't be formatted, else 0.
+/** @throws {IoError} */
 export function formatPaths(paths: string[], check: boolean): i64 {
   let code = 0;
-  const problem = (message: string) => {
-    console.error(message);
-    code = 1;
-  };
-  const files: string[] = [];
+  let problems: string[] = [];
+  let files: string[] = [];
   for (const path of paths) {
-    const stat = lstatSync(path, { throwIfNoEntry: false });
-    if (!stat) problem(`fishc fmt: can't find '${path}'`);
-    else if (statSync(path, { throwIfNoEntry: false })?.isDirectory()) files.push(...fishFiles(path, problem));
-    else files.push(path);
+    if (lstatSync(path, { throwIfNoEntry: false }) === undefined) problems.push(`fishc fmt: can't find '${path}'`);
+    else if (statSync(path, { throwIfNoEntry: false })?.isDirectory() === true) {
+      for (const f of fishFiles(path, problems)) files.push(f);
+    } else files.push(path);
+    code = reported(problems, code);
   }
-  const seen = new Set<string>();
+  let seen = new Set<string>();
   for (const file of files) {
-    let real: string;
-    let bytes: Buffer;
+    let real = "";
+    let bytes: Buffer = Buffer.alloc(0);
     try {
       real = realpathSync(file);
       bytes = readFileSync(real);
     } catch (e) {
-      problem(`fishc fmt: can't read '${shown(file)}': ${reason(e)}`);
+      code = reported([`fishc fmt: can't read '${shown(file)}': ${reason(e as IoError)}`], code);
       continue;
     }
     if (seen.has(real)) continue;
     seen.add(real);
-    const text = decoded(bytes, shown(file), problem);
-    const out = text === undefined ? undefined : formatted(text, shown(file), problem);
+    const text = decoded(bytes, shown(file), problems);
+    const out = text === undefined ? undefined : formatted(text, shown(file), problems);
+    code = reported(problems, code);
     if (out === undefined || out === text) continue;
     if (check) {
       console.log(shown(file));
@@ -73,28 +87,26 @@ export function formatPaths(paths: string[], check: boolean): i64 {
       continue;
     }
     const error = rewrite(real, out, bytes);
-    if (error) problem(`fishc fmt: can't write '${shown(file)}': ${error}`);
+    if (error !== undefined) code = reported([`fishc fmt: can't write '${shown(file)}': ${error}`], code);
   }
   return code;
 }
 
 // Formats standard input to standard output; with `check`, writes nothing and gives 1 when the
 // input isn't formatted.
+/** @throws {IoError} */
 export function formatStdin(check: boolean): i64 {
-  let code = 0;
-  const problem = (message: string) => {
-    console.error(message);
-    code = 1;
-  };
-  const text = decoded(readFileSync(0), "<stdin>", problem);
-  const out = text === undefined ? undefined : formatted(text, "<stdin>", problem);
+  let problems: string[] = [];
+  const text = decoded(readFileSync(0), "<stdin>", problems);
+  const out = text === undefined ? undefined : formatted(text, "<stdin>", problems);
+  const code = reported(problems, 0);
   if (out === undefined) return code;
   if (check) return out === text ? 0 : 1;
   try {
     writeAll(1, Buffer.from(out));
   } catch (e) {
     // The reader went away, as `| head` does; nothing more can be said to it.
-    if ((e as { code?: string }).code === "EPIPE") return 1;
+    if ((e as IoError).code === "EPIPE") return 1;
     throw e;
   }
   return 0;
@@ -102,33 +114,36 @@ export function formatStdin(check: boolean): i64 {
 
 // The text of `bytes`, refused rather than read with replacement characters, which would then be
 // written back over the bytes they stand for.
-function decoded(bytes: Uint8Array, name: string, problem: Problem): string | undefined {
+function decoded(bytes: Ref<Uint8Array>, name: string, problems: Mut<string[]>): string | undefined {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    problem(`fishc fmt: '${name}' isn't valid UTF-8, so it's left as it was`);
+  } catch (_e) {
+    problems.push(`fishc fmt: '${name}' isn't valid UTF-8, so it's left as it was`);
     return undefined;
   }
 }
 
-function formatted(text: string, name: string, problem: Problem): string | undefined {
+function formatted(text: string, name: string, problems: Mut<string[]>): string | undefined {
   try {
     return format(text);
   } catch (e) {
-    if (e instanceof CompileError) problem(formatError(e, name, text));
-    else problem(`fishc fmt: '${name}' was left as it was, because of a bug in the formatter (${reason(e).split(":")[0]}); please report it`);
+    if (e instanceof CompileError) problems.push(formatError(e, name, text));
+    else problems.push(`fishc fmt: '${name}' was left as it was, because of a bug in the formatter (${(e instanceof Error ? e.message : "an internal error").split(":")[0]}); please report it`);
     return undefined;
   }
 }
 
 // Writes all of `bytes` to `fd` before returning, as the process may exit straight after and a
 // pipe takes only part of a large write at once.
-function writeAll(fd: i32, bytes: Buffer) {
-  for (let at = 0; at < bytes.length; ) {
+/** @throws {IoError} */
+function writeAll(fd: i64, bytes: Ref<Buffer>) {
+  const length = bytes.length as i64;
+  let at: i64 = 0;
+  while (at < length) {
     try {
-      at += writeSync(fd, bytes, at, bytes.length - at);
+      at += writeSync(fd, bytes, at, length - at);
     } catch (e) {
-      if ((e as { code?: string }).code !== "EAGAIN") throw e;
+      if ((e as IoError).code !== "EAGAIN") throw e;
       Bun.sleepSync(1);
     }
   }
@@ -142,12 +157,13 @@ function writeAll(fd: i32, bytes: Buffer) {
 // Given `to`, the new text goes there instead and `file` is removed: the temporary file is linked
 // to `to`, which fails rather than replace a file already there, so `to` appears whole or not at
 // all, and only then is `file` removed.
-export function rewrite(file: string, text: string, original: Buffer, to?: string): string | undefined {
-  let temporary: string | undefined;
+/** @throws {IoError} */
+export function rewrite(file: string, text: string, original: Ref<Buffer>, to?: string): string | undefined {
+  let temporary: string | undefined = undefined;
   try {
     accessSync(file, constants.W_OK);
     const stat = statSync(file);
-    if (stat.nlink > 1 && to === undefined) return inPlace(file, Buffer.from(text), original, stat);
+    if (stat.nlink > 1 && to === undefined) return inPlace(file, Buffer.from(text), original, { dev: stat.dev, ino: stat.ino });
     // The name is cut short so a long one still leaves room for the suffix.
     const path = join(dirname(file), `.${basename(file).slice(0, 100)}.fmt-${randomBytes(6).toString("hex")}`);
     const fd = openSync(path, "wx", 0o600);
@@ -169,25 +185,26 @@ export function rewrite(file: string, text: string, original: Buffer, to?: strin
     try {
       unlinkSync(file);
     } catch (e) {
-      return `'${shown(to)}' was written, but '${shown(file)}' couldn't be removed: ${reason(e)}`;
+      return `'${shown(to)}' was written, but '${shown(file)}' couldn't be removed: ${reason(e as IoError)}`;
     }
     return undefined;
   } catch (e) {
-    if (temporary) rmSync(temporary, { force: true });
-    return reason(e);
+    if (temporary !== undefined) rmSync(temporary, { force: true });
+    return reason(e as IoError);
   }
 }
 
 // Writes `bytes` over `file` in place, never through a link swapped in since it was looked at;
 // if the write fails partway, as when the disk is full, the original bytes are put back.
-function inPlace(file: string, bytes: Buffer, original: Buffer, seen: { dev: u64; ino: u64 }): string | undefined {
+/** @throws {IoError} */
+function inPlace(file: string, bytes: Ref<Buffer>, original: Ref<Buffer>, seen: { dev: u64; ino: u64 }): string | undefined {
   const changed = "it changed while it was being formatted";
-  let fd: i32;
+  let fd: i64 = -1;
   try {
     fd = openSync(file, constants.O_WRONLY | constants.O_NOFOLLOW);
   } catch (e) {
     // A link put where the file was is refused rather than written through.
-    if ((e as { code?: string }).code === "ELOOP") return changed;
+    if ((e as IoError).code === "ELOOP") return changed;
     throw e;
   }
   try {
@@ -200,10 +217,11 @@ function inPlace(file: string, bytes: Buffer, original: Buffer, seen: { dev: u64
     } catch (e) {
       try {
         ftruncateSync(fd, 0);
-        for (let at = 0; at < original.length; ) at += writeSync(fd, original, at, original.length - at, at);
-        return `${reason(e)}; the original was written back`;
-      } catch {
-        return `${reason(e)}; the original couldn't be written back`;
+        const length = original.length as i64;
+        for (let at: i64 = 0; at < length; ) at += writeSync(fd, original, at, length - at, at);
+        return `${reason(e as IoError)}; the original was written back`;
+      } catch (_e) {
+        return `${reason(e as IoError)}; the original couldn't be written back`;
       }
     }
   } finally {
