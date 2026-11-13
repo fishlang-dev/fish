@@ -7190,51 +7190,26 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(line2);
       return { slot, type: f.type, i };
     });
-    const loaded = (cg: Mut<Codegen>, x: Ref<{ slot: string; type: Type }>) => {
-      const v = cg.temp();
-      const lower4 = cg.tables.typing.lower(x.type);
-      const line3 = `${v} = load ${cg.llvm(lower4)}, ptr ${x.slot}`;
-      cg.emit(line3);
-      return v;
-    };
-    const undo = (cg: Mut<Codegen>) => {
-      for (const x of read) {
-        cg.dispose(x.v, x.type);
-      }
-      for (const x of slots) {
-        const loaded2 = loaded(cg, x);
-        cg.dispose(loaded2, x.type);
-      }
-    };
     const what = rest !== undefined ? `an array of at least ${order.length}` : required === order.length ? `an array of ${order.length}` : `an array of ${required} to ${order.length}`;
     const finish = this.label();
-    // Whether an element follows, or with `wanted` 0 the array ends, failing on bad text.
-    const step = (cg: Mut<Codegen>, n: usize, wanted: 0 | 1) => {
-      const [more, readable, right] = [cg.temp(), cg.temp(), cg.temp()];
-      cg.emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 93, i32 ${n === 0 ? 1 : 0})`);
-      cg.emit(`${readable} = icmp sge i32 ${more}, 0`);
-      cg.jsonGuard(readable, "i1", undo);
-      cg.emit(`${right} = icmp eq i32 ${more}, ${wanted}`);
-      return right;
-    };
     let nAt: usize = 0;
     for (const { f, i } of order) {
       const n = nAt;
       nAt++;
-      const right = step(this, n as usize, 1);
+      const right = this.tupleStep(r, n, 1, read, slots);
       const [bad, good] = [this.label(), this.label()];
       // Where an optional element would be, the array may end instead.
       this.emit(`br i1 ${right}, label %${good}, label %${(n as usize) < required ? bad : finish}`);
       if ((n as usize) < required) {
         this.startBlock(bad);
-        this.jsonExpected(r, what, undo);
+        this.jsonExpected(r, what, (cg: Mut<Codegen>) => cg.undoRead(read, slots));
         this.emit(`br label %${good}`);
       }
       this.startBlock(good);
       const mark = this.temp();
       this.emit(`${mark} = call i64 @fsh_rt_json_index_path(ptr ${r}, i64 ${n})`);
       const [ok, v] = this.jsonRead(r, f.type);
-      this.jsonGuard(ok, "i1", undo);
+      this.jsonGuard(ok, "i1", (cg: Mut<Codegen>) => cg.undoRead(read, slots));
       this.emit(`call void @fsh_rt_json_back(ptr ${r}, i64 ${mark})`);
       if ((n as usize) < required) read.push({ v, type: f.type, i });
       else {
@@ -7245,25 +7220,57 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     if (rest !== undefined) {
       // The fixed elements dominate the rest's reads, so its failures can drop them.
-      read.push({ v: this.readElements(r, rest.f.type as ArrayType, true, order.length, undo), type: rest.f.type, i: rest.i });
+      read.push({ v: this.readElements(r, rest.f.type as ArrayType, true, order.length, (cg: Mut<Codegen>) => cg.undoRead(read, slots)), type: rest.f.type, i: rest.i });
     } else {
-      const right = step(this, order.length, 0);
+      const right = this.tupleStep(r, order.length, 0, read, slots);
       const [bad, good] = [this.label(), this.label()];
       this.emit(`br i1 ${right}, label %${good}, label %${bad}`);
       this.startBlock(bad);
-      this.jsonExpected(r, what, undo);
+      this.jsonExpected(r, what, (cg: Mut<Codegen>) => cg.undoRead(read, slots));
       this.emit(`br label %${good}`);
       this.startBlock(good);
     }
     this.emit(`br label %${finish}`);
     this.startBlock(finish);
-    return [...read, ...slots.map((x) => ({ v: loaded(this, x), type: x.type, i: x.i }))].reduce((agg, x) => {
+    let parts: { v: string; type: Type; i: usize }[] = [...read];
+    for (const x of slots) parts.push({ v: this.loadedSlot(x.slot, x.type), type: x.type, i: x.i });
+    let agg = "undef";
+    for (const x of parts) {
       const next = this.temp();
       const lower6 = this.tables.typing.lower(x.type);
       const line5 = `${next} = insertvalue ${this.llvm(t)} ${agg}, ${this.llvm(lower6)} ${x.v}, ${x.i}`;
       this.emit(line5);
-      return next;
-    }, "undef");
+      agg = next;
+    }
+    return agg;
+  }
+
+  // A value read out of a tuple element's slot.
+  loadedSlot(this: Mut<this>, slot: string, type: Type): string {
+    const v = this.temp();
+    const lower4 = this.tables.typing.lower(type);
+    const line3 = `${v} = load ${this.llvm(lower4)}, ptr ${slot}`;
+    this.emit(line3);
+    return v;
+  }
+
+  // Drops a tuple's elements read so far, when reading the rest fails.
+  undoRead(this: Mut<this>, read: Ref<{ v: string; type: Type; i: usize }[]>, slots: Ref<{ slot: string; type: Type; i: usize }[]>): void {
+    for (const x of read) this.dispose(x.v, x.type);
+    for (const x of slots) {
+      const loaded2 = this.loadedSlot(x.slot, x.type);
+      this.dispose(loaded2, x.type);
+    }
+  }
+
+  // Whether a tuple's element follows, or with `wanted` 0 its array ends, failing on bad text.
+  tupleStep(this: Mut<this>, r: string, n: usize, wanted: 0 | 1, read: Ref<{ v: string; type: Type; i: usize }[]>, slots: Ref<{ slot: string; type: Type; i: usize }[]>): string {
+    const [more, readable, right] = [this.temp(), this.temp(), this.temp()];
+    this.emit(`${more} = call i32 @fsh_rt_json_more(ptr ${r}, i32 93, i32 ${n === 0 ? 1 : 0})`);
+    this.emit(`${readable} = icmp sge i32 ${more}, 0`);
+    this.jsonGuard(readable, "i1", (cg: Mut<Codegen>) => cg.undoRead(read, slots));
+    this.emit(`${right} = icmp eq i32 ${more}, ${wanted}`);
+    return right;
   }
 
 
