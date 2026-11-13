@@ -3104,7 +3104,7 @@ export class Expressions<C extends Context> implements Union<C> {
       this.ctx.exprsState.subarrays.set(cloneExpr(made), from);
       return this.callMade(made);
     }
-    if (typed === "Buffer" && (BUFFER_METHODS.has(callee.name) || Object.hasOwn(BUFFER_READS, callee.name) || this.bufferSearch(e, callee))) return this.bufferCall(e, callee);
+    if (typed === "Buffer" && (BUFFER_METHODS.has(callee.name) || BUFFER_WIDTHS.has(callee.name) || this.bufferSearch(e, callee))) return this.bufferCall(e, callee);
     if (typed === "Buffer" && BUFFER_REFUSED.has(callee.name)) throw new CompileError("E0801", `'buf.${callee.name}' isn't supported yet; a Buffer has toString, equals, compare and the read methods, and the methods of a Uint8Array`, callee.start, callee.end);
     if (SUBARRAY_WRITES.has(callee.name)) this.readOnlySubarray(callee.object);
     // `set(source, offset?)` copies the source's elements in at the offset. The source comes
@@ -4217,19 +4217,18 @@ export class Expressions<C extends Context> implements Union<C> {
     const typed = this.ctx.tables().typing.typedArray("Buffer");
     const at = { start: e.start, end: e.end };
     const what = `'Buffer.${callee.name}'`;
-    const args = e.args;
-    const arity = (least: usize, most: usize, usage: string) => {
-      if (args.length < least || args.length > most) throw new CompileError("E0504", usage, e.start, e.end);
-    };
+    const args: Ref<Expr[]> = e.args;
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `${what} takes no type arguments`, e.start, e.end);
     this.refuseSpread(args);
     if (callee.name === "from") {
-      arity(1, 2, "'Buffer.from' takes a string and an optional encoding, or the bytes to copy");
+      this.bufferArity(e, 1, 2, "'Buffer.from' takes a string and an optional encoding, or the bytes to copy");
       const source: Ref<Expr> = args[0]!;
       const t = this.value(source);
       this.ctx.exprsState.once.add(cloneExpr(source));
-      if (stringLike(this.ctx.tables().typing, this.isRefType(t) ? this.ctx.typing().rec(t).to : t)) {
-        const call = this.typedCall("array buffer from", [cloneExpr(source), this.bufferEncoding(args[1], at)], at);
+      const held = this.isRefType(t) ? this.ctx.typing().rec(t).to : t;
+      if (stringLike(this.ctx.tables().typing, held)) {
+        const encoding = this.bufferEncoding(args.length > 1 ? args[1]! : undefined, at);
+        const call = this.typedCall("array buffer from", [cloneExpr(source), encoding], at);
         return { type: this.typedAs(e, call, typed), what };
       }
       if (args.length > 1) throw new CompileError("E0504", "'Buffer.from' takes an encoding only with a string; bytes are copied as they are", args[1]!.start, args[1]!.end);
@@ -4237,45 +4236,52 @@ export class Expressions<C extends Context> implements Union<C> {
       return { type: this.typedAs(e, made, typed), what };
     }
     if (callee.name === "alloc" || callee.name === "allocUnsafe") {
-      arity(1, 2, `${what} takes a size and an optional number to fill it with`);
+      this.bufferArity(e, 1, 2, `${what} takes a size and an optional number to fill it with`);
       const fill = args.length > 1 ? this.arrayLength(args[1]!, false) : this.intAt(0n, at);
-      const call = this.typedCall("array buffer alloc", [this.arrayLength(args[0]!, true), fill], at);
+      const size = this.arrayLength(args[0]!, true);
+      const call = this.typedCall("array buffer alloc", [size, fill], at);
       return { type: this.typedAs(e, call, typed), what };
     }
     if (callee.name === "concat") {
-      arity(1, 2, "'Buffer.concat' takes an array of Buffers and an optional total length");
+      this.bufferArity(e, 1, 2, "'Buffer.concat' takes an array of Buffers and an optional total length");
       const total = args.length > 1 ? this.arrayLength(args[1]!, false) : this.intAt(-1n, at);
       const call = this.typedCall("array buffer concat", [cloneExpr(args[0]!), total], at);
       return { type: this.typedAs(e, call, typed), what };
     }
     let call: Expr;
     if (callee.name === "byteLength") {
-      arity(1, 2, "'Buffer.byteLength' takes a string, and an optional encoding");
+      this.bufferArity(e, 1, 2, "'Buffer.byteLength' takes a string, and an optional encoding");
       const source: Ref<Expr> = args[0]!;
       const t = this.value(source);
       this.ctx.exprsState.once.add(cloneExpr(source));
       const held = this.isRefType(t) ? this.ctx.typing().rec(t).to : t;
-      if (args.length > 1 && !(args[1]!.kind === "string" && (args[1]!.value === "utf8" || args[1]!.value === "utf-8"))) throw new CompileError("E0504", "'Buffer.byteLength' counts UTF-8 here; leave the encoding out, or take the length of 'Buffer.from(s, encoding)'", args[1]!.start, args[1]!.end);
+      const encoding: Ref<Expr> | undefined = args.length > 1 ? args[1]! : undefined;
+      if (encoding !== undefined && !(encoding.kind === "string" && (encoding.value === "utf8" || encoding.value === "utf-8"))) throw new CompileError("E0504", "'Buffer.byteLength' counts UTF-8 here; leave the encoding out, or take the length of 'Buffer.from(s, encoding)'", encoding.start, encoding.end);
       call = this.isArray(held) ? { id: nextId(this.ctx.tables().ids), kind: "member", object: cloneExpr(source), name: "length", optional: false, ...at } : this.typedCall("array buffer byte length", [cloneExpr(source)], at);
     } else if (callee.name === "compare") {
-      arity(2, 2, "'Buffer.compare' takes the two Buffers to compare");
+      this.bufferArity(e, 2, 2, "'Buffer.compare' takes the two Buffers to compare");
       call = this.typedCall("array buffer compare", [cloneExpr(args[0]!), cloneExpr(args[1]!)], at);
     } else throw new CompileError("E0801", `${what} isn't supported yet; Buffer has ${BUFFER_STATICS.join(", ")}`, callee.start, callee.end);
     const made = this.become(e, call);
     return this.callMade(made);
   }
 
+  /** @throws {CompileError} */
+  private bufferArity(e: Ref<Call>, least: usize, most: usize, usage: string): void {
+    if (e.args.length < least || e.args.length > most) throw new CompileError("E0504", usage, e.start, e.end);
+  }
+
   // A Buffer's own methods, through std's Buffer helpers, which borrow it.
   /** @throws {CompileError} */
   private bufferCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>): { type: Type; what: string } {
     const at = { start: e.start, end: e.end };
-    const args = e.args;
+    const args: Ref<Expr[]> = e.args;
     if (this.linked(callee)) throw unsupported("optional chains calling Buffer methods", callee);
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${callee.name}' takes no type arguments`, e.start, e.end);
     this.refuseSpread(args);
     const object = cloneExpr(callee.object);
     let call: Expr;
-    const read = Object.hasOwn(BUFFER_READS, callee.name) ? BUFFER_READS[callee.name] : undefined;
+    const read = BUFFER_WIDTHS.get(callee.name);
     if (read !== undefined) {
       if (args.length > 1) throw new CompileError("E0504", `'${callee.name}' takes an optional offset`, e.start, e.end);
       const offset = args.length > 0 ? this.arrayLength(args[0]!, false) : this.intAt(0n, at);
@@ -4289,7 +4295,8 @@ export class Expressions<C extends Context> implements Union<C> {
       if (args.length > 3) throw new CompileError("E0504", "'toString' takes an optional encoding, start and end", e.start, e.end);
       const start = args.length > 1 ? this.arrayLength(args[1]!, false) : this.intAt(0n, at);
       const end = args.length > 2 ? this.arrayLength(args[2]!, false) : this.intAt(9223372036854775807n, at);
-      call = this.typedCall("array buffer text", [object, this.bufferEncoding(args[0], at), start, end], at);
+      const encoding = this.bufferEncoding(args.length > 0 ? args[0]! : undefined, at);
+      call = this.typedCall("array buffer text", [object, encoding, start, end], at);
     } else {
       if (args.length !== 1) throw new CompileError("E0504", `'${callee.name}' takes the Buffer to compare with`, e.start, e.end);
       call = this.typedCall(callee.name === "equals" ? "array buffer equals" : "array buffer compare", [object, cloneExpr(args[0]!)], at);
@@ -4304,7 +4311,8 @@ export class Expressions<C extends Context> implements Union<C> {
     if ((callee.name !== "indexOf" && callee.name !== "includes") || e.args.length === 0 || e.args[0]!.kind === "spread") return false;
     const t = this.value(e.args[0]!);
     this.ctx.exprsState.once.add(cloneExpr(e.args[0]!));
-    return stringLike(this.ctx.tables().typing, this.isRefType(t) ? this.ctx.typing().rec(t).to : t);
+    const held = this.isRefType(t) ? this.ctx.typing().rec(t).to : t;
+    return stringLike(this.ctx.tables().typing, held);
   }
 
   // A Buffer method's encoding, utf8 when left out; a literal one Buffer lacks is refused here,
@@ -11264,6 +11272,7 @@ function floatInto(from: Type, to: Type): string {
 const SUBARRAY_WRITES = new Set(["push", "pop", "sort", "shift", "unshift", "splice", "reverse", "fill", "copyWithin", "set", "reserve", "shrinkToFit"]);
 // Node's Buffer methods std has besides its reads.
 const BUFFER_METHODS = new Set(["toString", "equals", "compare"]);
+const BUFFER_WIDTHS = new Map<string, string>(Object.entries(BUFFER_READS));
 const TYPED_MEMBERS = new Set(["byteLength", "byteOffset", "buffer", "BYTES_PER_ELEMENT"]);
 // The methods an array of references refuses: what each gives back, or is given to keep, would
 // borrow nothing.
