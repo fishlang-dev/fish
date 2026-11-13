@@ -5359,7 +5359,7 @@ export function readlinkSync(path: string): string throws IoError {
   // Whole-buffer compression and decompression over the system zlib, which links into a program
   // only when it calls these. The async forms run the sync ones on the blocking pool.
   zlib: String.raw`
-declare function fsh_rt_zlib_run(inflating: i64, bits: i64, level: i64, data: Ptr<u8>, length: i64, result: MutPtr<i64>): Ptr<u8>;
+declare function fsh_rt_zlib_run(inflating: i64, bits: i64, level: i64, data: Ptr<u8>, length: i64, limit: i64, result: MutPtr<i64>): Ptr<u8>;
 declare function fsh_rt_zlib_take(run: Ptr<u8>, out: MutPtr<u8>): void;
 
 // What a compression or decompression throws, as Node's errors carry zlib's: the message, zlib's
@@ -5374,7 +5374,8 @@ export class ZlibError extends Error {
   }
 }
 
-export type ZlibOptions = { level?: i64 };
+// maxOutputLength caps what a call may give, as Node's does, refusing it past the cap.
+export type ZlibOptions = { level?: i64; maxOutputLength?: i64 };
 
 export const constants = { Z_NO_COMPRESSION: 0, Z_BEST_SPEED: 1, Z_BEST_COMPRESSION: 9, Z_DEFAULT_COMPRESSION: -1 };
 
@@ -5404,10 +5405,10 @@ function shown(n: i64): string {
 // Runs zlib over the whole of data; bits picks the format as windowBits does.
 function run(inflating: boolean, bits: i64, data: string | u8[], options: ZlibOptions): u8[] throws ZlibError {
   const input = typeof data === "string" ? new TextEncoder().encode(data) : data;
-  return checked(inflating, bits, options.level ?? -1, input);
+  return checked(inflating, bits, options.level ?? -1, input, options.maxOutputLength ?? -1);
 }
 
-function checked(inflating: boolean, bits: i64, level: i64, input: Ref<u8[]>): u8[] throws ZlibError {
+function checked(inflating: boolean, bits: i64, level: i64, input: Ref<u8[]>, limit: i64): u8[] throws ZlibError {
   if (level < -1 || level > 9) {
     let e = new ZlibError("The value of \"options.level\" is out of range. It must be >= -1 and <= 9. Received " + shown(level), null, "ERR_OUT_OF_RANGE");
     e.name = "RangeError";
@@ -5417,11 +5418,16 @@ function checked(inflating: boolean, bits: i64, level: i64, input: Ref<u8[]>): u
   const none: u8[] = [0 as u8];
   let result: i64[] = [0, 0, 0];
   const done = input.length === 0
-    ? unsafe { fsh_rt_zlib_run(inflating ? 1 : 0, bits, level, ptrOf(none[0]), 0, mutPtrOf(result[0])) }
-    : unsafe { fsh_rt_zlib_run(inflating ? 1 : 0, bits, level, ptrOf(input[0]), input.length as i64, mutPtrOf(result[0])) };
+    ? unsafe { fsh_rt_zlib_run(inflating ? 1 : 0, bits, level, ptrOf(none[0]), 0, limit, mutPtrOf(result[0])) }
+    : unsafe { fsh_rt_zlib_run(inflating ? 1 : 0, bits, level, ptrOf(input[0]), input.length as i64, limit, mutPtrOf(result[0])) };
   let out: u8[] = new Array(result[2] === 0 ? 1 : result[2]).fill(0 as u8);
   unsafe { fsh_rt_zlib_take(done, mutPtrOf(out[0])) };
   if (result[2] === 0) out = [];
+  if (result[0] === 2) {
+    let e = new ZlibError("Cannot create a Buffer larger than " + String(limit) + " bytes", null, "ERR_BUFFER_TOO_LARGE");
+    e.name = "RangeError";
+    throw e;
+  }
   if (result[0] !== 0) throw new ZlibError(new TextDecoder().decode(out), result[1], codeOf(result[1]));
   return out;
 }
@@ -5461,7 +5467,8 @@ export function unzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] 
 async function runAsync(inflating: boolean, bits: i64, data: string | u8[], options: ZlibOptions): Promise<u8[]> throws ZlibError {
   const input = typeof data === "string" ? new TextEncoder().encode(data) : data;
   const level = options.level ?? -1;
-  return await spawnBlocking(() => checked(inflating, bits, level, input));
+  const limit = options.maxOutputLength ?? -1;
+  return await spawnBlocking(() => checked(inflating, bits, level, input, limit));
 }
 
 export async function gzip(data: string | u8[], options: ZlibOptions = {}): Promise<u8[]> throws ZlibError {

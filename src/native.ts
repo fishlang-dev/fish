@@ -8692,7 +8692,8 @@ static fsh_zlib_run *fsh_zlib_fail(z_stream *s, fsh_zlib_run *r, int err, const 
 
 // Deflates or inflates data whole. windowBits picks the format: 15 zlib, 31 gzip, -15 raw, and
 // 47 either zlib or gzip when inflating, as unzip does. result is [failed, errno, length].
-fsh_zlib_run *fsh_rt_zlib_run(int64_t inflating, int64_t bits, int64_t level, const uint8_t *data, int64_t length, int64_t *result) {
+// limit, unless it is -1, is the most output a run may give: past it the run stops with result[0] 2.
+fsh_zlib_run *fsh_rt_zlib_run(int64_t inflating, int64_t bits, int64_t level, const uint8_t *data, int64_t length, int64_t limit, int64_t *result) {
   fsh_zlib_run *r = fsh_zlib_grow(NULL, sizeof *r);
   r->data = NULL;
   r->length = 0;
@@ -8726,6 +8727,14 @@ fsh_zlib_run *fsh_rt_zlib_run(int64_t inflating, int64_t bits, int64_t level, co
     int flush = left > 0 ? Z_NO_FLUSH : Z_FINISH;
     err = inflating ? inflate(&s, flush) : deflate(&s, flush);
     r->length += before - s.avail_out;
+    if (limit >= 0 && r->length > limit) {
+      if (inflating) inflateEnd(&s); else deflateEnd(&s);
+      r->length = 0;
+      result[0] = 2;
+      result[1] = 0;
+      result[2] = 0;
+      return r;
+    }
     if (err == Z_STREAM_END) {
       // Trailing zero bytes are padding; anything else starts another member.
       if (!inflating || !members || (s.avail_in == 0 && left == 0) || (s.avail_in > 0 ? *s.next_in : *next) == 0) break;
