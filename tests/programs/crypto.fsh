@@ -156,3 +156,17 @@ function main() {
     console.log(n, crypto.hmac("sha1", key.clone(), "x").toHex(), crypto.hmac("sha256", key, "x").toHex());
   }
 }
+// case: crypto_create_hash
+// expect: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+// expect: da39a3ee5e6b4b0d3255bfef95601890afd80709 47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=
+// expect: ID0eXO3S0Y-MWjvv8L2cHry5cJffyyiMRrAMkif94sA
+// expect: f0f06edc45a0697855c766dd91a235f449aaa384
+import { createHash, createHmac } from "node:crypto";
+function main() {
+  console.log(createHash("sha256").update("ab").update(new TextEncoder().encode("c")).digest("hex"));
+  let h = createHash("sha1");
+  h.update("");
+  console.log(h.digest("hex"), createHash("sha256").digest("base64"));
+  console.log(createHmac("sha256", "key").update("The quick brown fox").digest("base64url"));
+  console.log(createHmac("sha1", "k".repeat(100)).update("x").digest("hex"));
+}

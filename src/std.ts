@@ -4404,9 +4404,45 @@ export function hmac(algorithm: "sha1" | "sha256", key: string | u8[], data: str
 
 // Node's one-shot crypto.hash, in the text encodings it gives; base64url is unpadded, as there.
 export function hash(algorithm: "sha1" | "sha256", data: string | u8[], encoding: "hex" | "base64" | "base64url" = "hex"): string {
-  const digest = shaOf(algorithm === "sha1" ? 1 : 256, bytesOf(data));
+  return encoded(shaOf(algorithm === "sha1" ? 1 : 256, bytesOf(data)), encoding);
+}
+
+function encoded(digest: Ref<u8[]>, encoding: "hex" | "base64" | "base64url"): string {
   if (encoding === "hex") return digest.toHex();
   return encoding === "base64" ? digest.toBase64() : digest.toBase64({ alphabet: "base64url", omitPadding: true });
+}
+
+// Node's createHash and createHmac: input taken in pieces, as update(a).update(b), then hashed
+// whole by digest, which gives text in one of hash's encodings.
+export class Hash {
+  #algorithm: "sha1" | "sha256";
+  #key: u8[] | null;
+  #data: u8[];
+
+  constructor(algorithm: "sha1" | "sha256", key: u8[] | null) {
+    this.#algorithm = algorithm;
+    this.#key = key;
+    this.#data = [];
+  }
+
+  update(this: Mut<this>, data: string | u8[]): Mut<this> {
+    for (const b of bytesOf(data)) this.#data.push(b);
+    return this;
+  }
+
+  digest(encoding: "hex" | "base64" | "base64url"): string {
+    const key: Ref<u8[] | null> = this.#key;
+    if (key !== null) return encoded(hmac(this.#algorithm, key.clone(), this.#data.clone()), encoding);
+    return encoded(shaOf(this.#algorithm === "sha1" ? 1 : 256, this.#data.clone()), encoding);
+  }
+}
+
+export function createHash(algorithm: "sha1" | "sha256"): Hash {
+  return new Hash(algorithm, null);
+}
+
+export function createHmac(algorithm: "sha1" | "sha256", key: string | u8[]): Hash {
+  return new Hash(algorithm, bytesOf(key));
 }
 `,
   // The checker gives these their meaning, as each takes values of any type; a rest parameter

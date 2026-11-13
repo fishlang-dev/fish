@@ -295,7 +295,7 @@ test("unread files are left out of the steps but not the shares, and the self cu
 
 test("imports wait on other files or Node built-ins by how they are written, and npm packages run", () => {
   project({ "a.ts": "import x from \"./x\";\n", "b.ts": "import { z } from \"zod\";\nimport y from \"@s/y\";\n", "c.ts": "import tty from \"node:tty\";\nimport crypto = require(\"crypto\");\n" }, (dir) => {
-    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Terminal detection and styled text", "createHash, createHmac and randomBytes from node:crypto"]]);
+    expect(scanFiles(dir).map(featuresOf)).toEqual([[], [], ["Node built-ins", "Terminal detection and styled text"]]);
   });
   project({ "a.ts": "import w from \"ws\";\nimport { test } from \"bun:test\";\n", "b.ts": "import x from \"~/x\";\nimport y from \"@/y\";\nimport z from \"#z\";\n", "c.ts": "async function f() { return await import(\"pkg\"); }\n" }, (dir) => {
     expect(scanFiles(dir).map(featuresOf)).toEqual([["Bun's own modules"], ["Path aliases"], ["Namespace imports"]]);
