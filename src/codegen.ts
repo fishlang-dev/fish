@@ -10,7 +10,7 @@ import { Lowering } from "./arithmetic.ts";
 import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, memberOf, toFloat, untagged, type ComptimeHost, type Value } from "./comptime.ts";
 import { Printer, RUNTIME, type PrintHost } from "./runtime.ts";
-import type { ArithmeticOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
+import type { ArithmeticOp, AssignOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
 import { ARRAY, DYN, compound, Conversions, llvmOf, textOf } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
@@ -180,6 +180,27 @@ const NO_HOOKS: Hooks = {};
 
 // A failure that has nothing read before it to drop.
 function noUndo(_cg: Mut<Codegen>): void {}
+
+// The operator an assignment applies, or `=` for a plain one.
+function assignedWith(op: AssignOp): BinaryOp | "=" {
+  switch (op) {
+    case "+=": return "+";
+    case "-=": return "-";
+    case "*=": return "*";
+    case "/=": return "/";
+    case "%=": return "%";
+    case "&=": return "&";
+    case "|=": return "|";
+    case "^=": return "^";
+    case "<<=": return "<<";
+    case ">>=": return ">>";
+    case ">>>=": return ">>>";
+    case "&&=": return "&&";
+    case "||=": return "||";
+    case "**=": return "**";
+    default: return "=";
+  }
+}
 
 // How a place is written: a variable, `this`, or a field read off one.
 function placeName(x: Ref<Expr>): string {
@@ -674,9 +695,14 @@ class Codegen implements PrintHost, ComptimeHost {
           const rust = this.symbol(instance);
           if (this.declaredRust.has(rust)) continue;
           this.declaredRust.add(rust);
-          const self = this.bodyAt(instance).self !== undefined && !this.bodyAt(instance).self!.constructor ? ["ptr"] : [];
+          const self: string[] = this.bodyAt(instance).self !== undefined && !this.bodyAt(instance).self!.constructor ? ["ptr"] : [];
           const gives = shimGives(this.tables.typing, rustGiven(this.tables.typing, this.tables.arenas, this.inst(instance)));
-          const params = [...self, ...this.inst(instance).signature!.flatMap((t) => shimParams(this.tables.typing, rustCrossing(this.tables.typing, t))), ...((gives.out !== undefined && gives.out !== "") ? ["ptr"] : []), ...(this.inst(instance).throws !== undefined ? ["ptr"] : []), "ptr"];
+          let params: string[] = [...self];
+          const signature = this.inst(instance).signature!;
+          for (const t of signature) for (const p of shimParams(this.tables.typing, rustCrossing(this.tables.typing, t))) params.push(p);
+          if (gives.out !== undefined && gives.out !== "") params.push("ptr");
+          if (this.inst(instance).throws !== undefined) params.push("ptr");
+          params.push("ptr");
           this.out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`);
           this.out.push("");
           continue;
@@ -4850,7 +4876,7 @@ class Codegen implements PrintHost, ComptimeHost {
       case "throw":
         const owned2 = this.owned(s.value);
         this.raised(s, owned2);
-        this.pending.length = this.floor;
+        this.pending.splice(this.floor as i64);
         const label4 = this.label();
         this.startBlock(label4);
         return;
@@ -9466,7 +9492,8 @@ class Codegen implements PrintHost, ComptimeHost {
       if (this.tables.printCalls.has(e) && this.formats(e.args)) {
         const line = this.formatted(e);
         // The statement releases the line, as it does a format call's value it drops.
-        this.printer(printStream(e.callee)).write([[line, "string" as Type]]);
+        const piece: [string, Type] = [line, "string"];
+        this.printer(printStream(e.callee)).write([piece]);
         return undefined;
       }
       if (this.tables.printCalls.has(e)) {
@@ -10231,7 +10258,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const get2 = this.cur().types.get(e.value)!;
       return this.convert(v, get2, type);
     }
-    const op: BinaryOp | "=" = e.op === "=" ? "=" : (e.op.slice(0, e.op.length - 1) as BinaryOp);
+    const op = assignedWith(e.op);
     // `&&=` and `||=` skip the right side as `&&` and `||` do, and assign only when they
     // run it, which matters when the target is a setter.
     if (op === "&&" || op === "||") {
@@ -10797,13 +10824,16 @@ class Codegen implements PrintHost, ComptimeHost {
     this.startBlock(bad);
     if (rustClassOf(this.tables.typing, thrown) !== undefined) this.raised(at, error);
     else {
-      const made = this.tables.typing.rec(thrown as ClassType).fields.reduce((whole, f, i) => {
+      const fields = this.tables.typing.rec(thrown as ClassType).fields.map((f) => copyField(f));
+      let made = "undef";
+      for (let i: usize = 0; i < fields.length; i++) {
+        const f = fields[i]!;
         const v = f.name === "name" ? this.text("Error") : f.name === "message" ? error : f.name === "cause" ? this.convert("zeroinitializer", "null", f.type) : undefined;
-        if (v === undefined) throw new Error(`internal error: Error has a field '${f.name}' a Rust error doesn't fill`);
+        assert(v !== undefined, `internal error: Error has a field '${f.name}' a Rust error doesn't fill`);
         const next = this.temp();
-        this.emit(`${next} = insertvalue ${this.llvm(thrown)} ${whole}, ${this.llvm(f.type)} ${v}, ${i}`);
-        return next;
-      }, "undef");
+        this.emit(`${next} = insertvalue ${this.llvm(thrown)} ${made}, ${this.llvm(f.type)} ${v!}, ${i}`);
+        made = next;
+      }
       this.raised(at, made);
     }
     this.startBlock(ok);
@@ -11590,7 +11620,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // Cancels the future of type `t` at `at`, paused where it waits: it leaves the waiters of what
   // it waits on, as an abort does, passing on a wake it was given, so nothing it waited on wakes
   // the task for it or loses a wake meant for another. Its drop comes after.
-  cancelAt(this: Mut<this>, at: string, t: Type) {
+  cancelAt(this: Mut<this>, at: string, t: Type): void {
     const r = this.recOf(t);
     // A boxed future through its vtable: the slot after its poll.
     if (r?.kind === "dyn" && this.tables.typing.promiseElement(r.of) !== undefined) {
@@ -11709,7 +11739,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // An async instance's cancel: the future it awaits in the state it is paused in is cancelled.
   cancelFunction(this: Mut<this>, i: InstanceId) {
     const saved = this.setAside();
-    const awaits = this.awaitsOf.has(i) ? [...this.awaitsOf.get(i)!] : [];
+    let awaits: { state: usize; field: usize; type: Type }[] = [];
+    if (this.awaitsOf.has(i)) for (const a of this.awaitsOf.get(i)!) awaits.push({ state: a.state, field: a.field, type: a.type });
     const [state, done] = [this.temp(), this.label()];
     const cases = awaits.map(() => this.label());
     this.emit(`${state} = load i32, ptr %frame`);
@@ -11748,7 +11779,7 @@ class Codegen implements PrintHost, ComptimeHost {
     let given: string | undefined;
     // What is read only once it is ready, as reading it before would read nothing.
     let readied: (() => string | undefined) | undefined;
-    let reason: string | undefined;
+    let reason = "";
     // A joined task's panic reason, when it panicked.
     let why: string | undefined;
     // The poll result as the runtime gives it: a joined task's is its own, throwing no TaskPanic.
@@ -12032,7 +12063,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // What a joined task's await throws: a TaskPanic holding the reason it panicked with, when its
   // outcome `tag` is 3, or else the error it threw itself.
   joinError(this: Mut<this>, why: string, tag: string, result: string, joined: Ref<{ base: HandleType; panic: Type }>, thrown: Type): string {
-    const [base, panicked] = [joined.base, joined.panic as ClassType];
+    const base = joined.base;
+    const panicked = joined.panic as ClassType;
     const make = (cg: Mut<Codegen>) => {
       const [reason, made] = [cg.temp(), cg.temp()];
       cg.emit(`${reason} = load ptr, ptr ${why}`);
@@ -12105,7 +12137,8 @@ class Codegen implements PrintHost, ComptimeHost {
     // Output printed before the error stays ahead of it, as a panic's does.
     this.emit("call i32 @fflush(ptr null)");
     const thrownBy = this.inst(this.main).throws!;
-    this.printer(2).write(["Error:", [error, thrownBy]]);
+    const piece: [string, Type] = [error, thrownBy];
+    this.printer(2).write(["Error:", piece]);
     const part2 = this.inst(this.main).throws!;
     this.dispose(error, part2);
     this.emit("ret i32 1");
@@ -12137,7 +12170,8 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${error} = extractvalue ${type} ${result}, 2`);
       this.emit("call i32 @fflush(ptr null)");
       const thrownBy = this.tables.typing.rec(future).throws!;
-      this.printer(2).write(["Error:", [error, thrownBy]]);
+      const piece: [string, Type] = [error, thrownBy];
+      this.printer(2).write(["Error:", piece]);
       this.dispose(error, this.tables.typing.rec(future).throws!);
       this.emit("ret i32 1");
     } else this.emit("unreachable");
@@ -12220,7 +12254,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.glued.add(future);
       const [frame, type] = [this.llvm(future), this.pollType(future)];
       const output = `getelementptr i8, ptr %frame, i64 ${this.sizeOf(frame)}`;
-      const caught = this.panic === "abort" ? [] : ["pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  ret i32 3"];
+      const caught: string[] = this.panic === "abort" ? [] : ["pad:", "  %caught = landingpad { ptr, i32 } cleanup", "  ret i32 3"];
       const call = this.panic === "abort" ? `  %r = call ${type} ${this.symbol(this.futureOf.get(future)!)}(ptr %frame, ptr %task)` : `  %r = invoke ${type} ${this.symbol(this.futureOf.get(future)!)}(ptr %frame, ptr %task) to label %polled unwind label %pad`;
       const dropFrame = this.helperBody((cg, v) => cg.dispose(v, future));
       const dropOutput = this.outputDrop(future);
@@ -12406,7 +12440,9 @@ class Codegen implements PrintHost, ComptimeHost {
     // A narrowed reference read at the type it was declared with is the pointer it holds.
     if (ref?.kind === "ref" && given?.kind === "ref" && e.kind === "ident" && !this.known.has(e)) {
       const local = this.localAt(e);
-      if (local !== undefined && this.loc(local).type !== type && this.tables.typing.lower(this.loc(local).type) === this.tables.typing.lower(to!)) {
+      const declared = local !== undefined ? this.loc(local).type : undefined;
+      const lowered = declared !== undefined ? this.tables.typing.lower(declared) : undefined;
+      if (local !== undefined && declared !== type && lowered === this.tables.typing.lower(to!)) {
         const held = this.temp();
         const line = `${held} = load ptr, ptr ${this.slot(local)}`;
         this.emit(line);
@@ -12490,6 +12526,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  /** @throws {CompileError} */
   evaluated(this: Mut<this>, e: Ref<Expr>): string {
     const pair = this.pairOf(e);
     if (pair !== undefined) {
@@ -13071,7 +13108,10 @@ class Codegen implements PrintHost, ComptimeHost {
         put(this, p.name, shorthand2, part2);
         continue;
       }
-      if (p.kind !== "spread") assert(false, "internal error: unchecked property");
+      if (p.kind !== "spread") {
+        assert(false, "internal error: unchecked property");
+        continue;
+      }
       const held = this.cur().types.get(p.value)!;
       // The source's own type in this instance, its fields laid out as this instance has them.
       const source = this.tables.typing.lower(this.referent(held)) as ObjectType | ClassType;
@@ -13113,7 +13153,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   property(this: Mut<this>, p: Ref<ObjectProp>, object: ObjectType): [string, string] {
-    if (p.kind === "property") return [p.key as string, this.owned(p.value)];
+    if (p.kind === "property") return [typeof p.key === "string" ? p.key.slice(0) : "", this.owned(p.value)];
     assert(p.kind === "shorthand", "internal error: unchecked property");
     const local = this.resolved(p);
     const to = this.tables.typing.field(object, p.kind === "shorthand" ? p.name : "")!.type;
@@ -13415,11 +13455,11 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(line);
       return result;
     }
-    let from = isFloat(type) ? type : "i64";
+    let from: "f32" | "f64" | "i64" | "u64" = isFloat(type) ? type : "i64";
     let wide = v;
     if (isInteger(type)) {
       const { bits, signed } = integerInfo(type);
-      if (!signed) from = "u64" as typeof from;
+      if (!signed) from = "u64";
       if (bits === 128) {
         const result = this.temp();
         this.emit(`${result} = call ptr @fsh_rt_str_from_${signed ? "i" : "u"}128(i128 ${v})`);
@@ -13444,7 +13484,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const r = this.recOf(type);
     // A regex comptime made is its flags and pattern, as the interpreter holds it.
     if (r?.kind === "regex") {
-      const held: string = untagged(tagged) as string;
+      const held = (untagged(tagged) as string).slice(0);
       const slash = held.indexOf("/");
       const [flags, pattern] = [held.slice(0, slash), held.slice(slash + 1)];
       const part2 = parsePattern(pattern, flags, this.tables.regex).captures;
@@ -13637,7 +13677,9 @@ class Codegen implements PrintHost, ComptimeHost {
         for (const g of fields3) {
           const j = jAt;
           jAt++;
-          const indexes = this.tables.typing.rec(regexT).captures.flatMap((c, k) => (c.name === g.name ? [k + 1] : []));
+          let indexes: usize[] = [];
+          const captures = this.tables.typing.rec(regexT).captures;
+          for (let k: usize = 0; k < captures.length; k++) if (captures[k]!.name === g.name) indexes.push(k + 1);
           const next = this.temp();
           const line3 = `${next} = insertvalue ${this.llvm(named)} ${inner}, ${this.llvm(g.type)} ${capture(this, indexes, g.type)}, ${j}`;
           this.emit(line3);
@@ -13662,7 +13704,8 @@ class Codegen implements PrintHost, ComptimeHost {
     const re = this.value(e.args[0]!);
     // A call used as a statement has no type of its own; what it makes, from this instance's
     // regex, is dropped at its end.
-    const type = this.cur().types.get(e) ?? regexStringType(this.tables.typing, name, regexT, this.tables.typing.rec(regexT).any === true);
+    const any = this.tables.typing.rec(regexT).any === true;
+    const type = this.cur().types.get(e) ?? regexStringType(this.tables.typing, name, regexT, any);
     const call = (cg: Mut<Codegen>, line: string) => {
       const v = cg.temp();
       cg.emit(`${v} = call ${line}`);
@@ -13746,7 +13789,7 @@ class Codegen implements PrintHost, ComptimeHost {
           const copied2 = this.copied(part, parts[i as usize]!);
           return `${this.llvm(p)} ${this.convert(copied2, parts[i as usize]!, p)}`;
         }
-        if (i === parts.length) {
+        if ((i as usize) === parts.length) {
           const index = this.temp();
           this.emit(`${index} = extractvalue ${this.llvm(match)} ${whole}, ${this.tables.typing.rec(match).fields.findIndex((f) => f.name === "index")}`);
           return `i64 ${index}`;
