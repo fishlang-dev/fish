@@ -125,3 +125,72 @@ function main(): void throws IoError {
   console.log(readFileSync(fd, "utf8"), readFileSync(fd).length);
   rmSync(dir, { recursive: true });
 }
+// case: fs_stat_fields
+// expect: 1 2 true true true
+// expect: 1000000 2000000 1970-01-01T00:33:20.000Z true true
+// expect: true true true
+import { closeSync, fstatSync, linkSync, mkdtempSync, openSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+function same(a: { dev: u64; ino: u64 }, b: { dev: u64; ino: u64 }): boolean {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+function main(): void throws IoError {
+  const dir = mkdtempSync("/tmp/fish-stat-");
+  writeFileSync(dir + "/f", "hi");
+  writeFileSync(dir + "/g", "hi");
+  const one = statSync(dir + "/f").nlink;
+  linkSync(dir + "/f", dir + "/h");
+  const s = statSync(dir + "/f");
+  console.log(one, s.nlink, same(statSync(dir + "/f"), statSync(dir + "/h")), !same(statSync(dir + "/f"), statSync(dir + "/g")), s.dev === statSync(dir).dev);
+  utimesSync(dir + "/f", 1000, 2000);
+  const t = statSync(dir + "/f");
+  console.log(t.atimeMs, t.mtimeMs, t.mtime.toISOString(), t.ctimeMs > t.mtimeMs, t.birthtimeMs >= 0);
+  const fd = openSync(dir + "/f");
+  const u = fstatSync(fd);
+  console.log(same(fstatSync(fd), statSync(dir + "/f")), u.uid === t.uid && u.gid === t.gid, u.mtimeMs === t.mtimeMs && u.atimeMs === t.atimeMs && u.ctimeMs === t.ctimeMs && u.birthtimeMs === t.birthtimeMs);
+  closeSync(fd);
+  rmSync(dir, { recursive: true });
+}
+// case: fs_stat_throw_if_no_entry
+// expect: true true
+// expect: true true
+// expect: ENOENT ENOTDIR
+// expect: true
+import { lstatSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+function main(): void throws IoError {
+  const dir = mkdtempSync("/tmp/fish-stat-");
+  writeFileSync(dir + "/f", "hi");
+  symlinkSync("missing", dir + "/ln");
+  console.log(statSync(dir + "/none", { throwIfNoEntry: false }) === undefined, statSync(dir + "/f/x", { throwIfNoEntry: false }) === undefined);
+  console.log(statSync(dir + "/f", { throwIfNoEntry: false })?.isFile() ?? false, lstatSync(dir + "/ln", { throwIfNoEntry: false })?.isSymbolicLink() ?? false);
+  let codes: string[] = [];
+  for (const p of [dir + "/none", dir + "/f/x"]) {
+    try {
+      statSync(p, { throwIfNoEntry: true });
+    } catch (e) {
+      codes.push(e.code);
+    }
+  }
+  console.log(codes.join(" "));
+  console.log(statSync(dir + "/ln", { throwIfNoEntry: false }) === undefined);
+  rmSync(dir, { recursive: true });
+}
+// case: fs_open_flags
+// expect: ELOOP
+// expect: hello
+import { closeSync, constants, mkdtempSync, openSync, readFileSync, rmSync, symlinkSync, writeSync } from "node:fs";
+function main(): void throws IoError {
+  const dir = mkdtempSync("/tmp/fish-flags-");
+  symlinkSync("target", dir + "/ln");
+  try {
+    openSync(dir + "/ln", constants.O_WRONLY | constants.O_NOFOLLOW);
+  } catch (e) {
+    console.log(e.code);
+  }
+  const fd = openSync(dir + "/f", constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_TRUNC | constants.O_APPEND | constants.O_SYNC);
+  writeSync(fd, "hello");
+  closeSync(fd);
+  const r = openSync(dir + "/f", constants.O_RDONLY);
+  console.log(readFileSync(r, "utf8"));
+  closeSync(r);
+  rmSync(dir, { recursive: true });
+}

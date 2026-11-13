@@ -6464,21 +6464,56 @@ int64_t fsh_rt_fd_write(int64_t fd, const uint8_t *at, int64_t length, int64_t p
   return n < 0 ? -errno : n;
 }
 
-// fstatSync: 0 with size, mode and kind in out and the modification time in mtime, as statSync
-// gives them, or -errno.
-int64_t fsh_rt_fd_stat(int64_t fd, int64_t *out, double *mtime) {
+static double fsh_stat_ms(struct timespec t) {
+  return (double)t.tv_sec * 1000 + (double)t.tv_nsec / 1e6;
+}
+
+// What Stats holds: size, mode, kind (1 a file, 2 a directory, 3 a link, 0 anything else), nlink,
+// dev, ino, uid and gid in out, and the modification, access, change and birth times in
+// milliseconds in times. Linux's stat has no birth time, so it is 0 there, as Node gives it on a
+// file system without one.
+static void fsh_stat_fill(const struct stat *st, int64_t *out, double *times) {
+  out[0] = st->st_size;
+  out[1] = st->st_mode;
+  out[2] = S_ISREG(st->st_mode) ? 1 : S_ISDIR(st->st_mode) ? 2 : S_ISLNK(st->st_mode) ? 3 : 0;
+  out[3] = (int64_t)st->st_nlink;
+  out[4] = (int64_t)st->st_dev;
+  out[5] = (int64_t)st->st_ino;
+  out[6] = st->st_uid;
+  out[7] = st->st_gid;
+#ifdef __APPLE__
+  times[0] = fsh_stat_ms(st->st_mtimespec);
+  times[1] = fsh_stat_ms(st->st_atimespec);
+  times[2] = fsh_stat_ms(st->st_ctimespec);
+  times[3] = fsh_stat_ms(st->st_birthtimespec);
+#else
+  times[0] = fsh_stat_ms(st->st_mtim);
+  times[1] = fsh_stat_ms(st->st_atim);
+  times[2] = fsh_stat_ms(st->st_ctim);
+  times[3] = 0;
+#endif
+}
+
+// fstatSync: 0 with what Stats holds, or -errno.
+int64_t fsh_rt_fd_stat(int64_t fd, int64_t *out, double *times) {
   struct stat st;
   if (fstat((int)fd, &st) != 0) return -errno;
-  out[0] = st.st_size;
-  out[1] = st.st_mode;
-  out[2] = S_ISREG(st.st_mode) ? 1 : S_ISDIR(st.st_mode) ? 2 : S_ISLNK(st.st_mode) ? 3 : 0;
-#ifdef __APPLE__
-  struct timespec m = st.st_mtimespec;
-#else
-  struct timespec m = st.st_mtim;
-#endif
-  *mtime = (double)m.tv_sec * 1000 + (double)m.tv_nsec / 1e6;
+  fsh_stat_fill(&st, out, times);
   return 0;
+}
+
+// statSync and lstatSync: 0 with what Stats holds, or -errno.
+int64_t fsh_rt_path_stat(const char *path, int64_t follow, int64_t *out, double *times) {
+  struct stat st;
+  if ((follow ? stat(path, &st) : lstat(path, &st)) != 0) return -errno;
+  fsh_stat_fill(&st, out, times);
+  return 0;
+}
+
+// fs.constants' open flags, by their place in the list std's constants reads them in.
+int64_t fsh_rt_fd_open_flag(int64_t which) {
+  static const int64_t flags[] = {O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND, O_NOFOLLOW, O_SYNC};
+  return which >= 0 && which < (int64_t)(sizeof flags / sizeof flags[0]) ? flags[which] : 0;
 }
 
 // ftruncateSync, fchmodSync, fsyncSync and closeSync on a bare descriptor, by which: 0, or -errno.

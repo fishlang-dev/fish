@@ -4311,13 +4311,31 @@ export class Stats {
   size: i64;
   mode: i64;
   mtimeMs: f64;
+  atimeMs: f64;
+  ctimeMs: f64;
+  birthtimeMs: f64;
   kind: i64;
-  constructor(size: i64, mode: i64, mtimeMs: f64, kind: i64) {
-    this.size = size;
-    this.mode = mode;
-    this.mtimeMs = mtimeMs;
-    this.kind = kind;
+  nlink: i64;
+  dev: u64;
+  ino: u64;
+  uid: i64;
+  gid: i64;
+  // The numbers and times in the order the runtime's stat fills them.
+  constructor(numbers: Ref<i64[]>, times: Ref<f64[]>) {
+    this.size = numbers[0];
+    this.mode = numbers[1];
+    this.kind = numbers[2];
+    this.nlink = numbers[3];
+    this.dev = numbers[4] as u64;
+    this.ino = numbers[5] as u64;
+    this.uid = numbers[6];
+    this.gid = numbers[7];
+    this.mtimeMs = times[0];
+    this.atimeMs = times[1];
+    this.ctimeMs = times[2];
+    this.birthtimeMs = times[3];
   }
+  get mtime(): Date { return new Date(Math.round(this.mtimeMs) as i64); }
   isFile(): boolean { return this.kind === 1; }
   isDirectory(): boolean { return this.kind === 2; }
   isSymbolicLink(): boolean { return this.kind === 3; }
@@ -4346,7 +4364,9 @@ declare function fsh_rt_fd_flags(flags: Ptr<u8>): i64;
 declare function fsh_rt_fd_open(path: Ptr<u8>, flags: i64, mode: i64): i64;
 declare function fsh_rt_fd_read(fd: i64, at: MutPtr<u8>, length: i64, position: i64): i64;
 declare function fsh_rt_fd_write(fd: i64, at: Ptr<u8>, length: i64, position: i64): i64;
-declare function fsh_rt_fd_stat(fd: i64, out: MutPtr<i64>, mtime: MutPtr<f64>): i64;
+declare function fsh_rt_fd_stat(fd: i64, out: MutPtr<i64>, times: MutPtr<f64>): i64;
+declare function fsh_rt_path_stat(path: Ptr<u8>, follow: i64, out: MutPtr<i64>, times: MutPtr<f64>): i64;
+declare function fsh_rt_fd_open_flag(which: i64): i64;
 declare function fsh_rt_fd_call(which: i64, fd: i64, value: i64): i64;
 
 // A failed descriptor call's IoError, from the -errno the runtime gave: Node's code and words,
@@ -4397,8 +4417,12 @@ function checkMode(mode: i64): void throws IoError {
 }
 
 // Node's string flags, as "r" or "wx+", or a number given to open as it is.
-export function openSync(path: string, flags: string | i64 = "r", mode: i64 = 0o666): i64 throws IoError {
+function checkPath(path: string): void throws IoError {
   if (path.includes("\0")) throw invalid("The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received '" + path.replaceAll("\0", "\\x00") + "'");
+}
+
+export function openSync(path: string, flags: string | i64 = "r", mode: i64 = 0o666): i64 throws IoError {
+  checkPath(path);
   let bits = 0;
   if (typeof flags === "string") {
     bits = flags.includes("\0") ? -1 : unsafe { fsh_rt_fd_flags(cString(flags)) };
@@ -4472,11 +4496,46 @@ function written(fd: i64, bytes: Ref<u8[]>, offset: i64, n: i64, position: i64):
 
 export function fstatSync(fd: i64): Stats throws IoError {
   checkFd(fd);
-  let out: i64[] = [0, 0, 0];
-  let mtime: f64 = 0;
-  const r = unsafe { fsh_rt_fd_stat(fd, mutPtrOf(out[0]), mutPtrOf(mtime)) };
+  let out: i64[] = new Array(8).fill(0);
+  let times: f64[] = new Array(4).fill(0.0);
+  const r = unsafe { fsh_rt_fd_stat(fd, mutPtrOf(out[0]), mutPtrOf(times[0])) };
   if (r < 0) throw failed(r, "fstat", null);
-  return new Stats(out[0], out[1], mtime, out[2]);
+  return new Stats(out, times);
+}
+
+// A path's Stats, or undefined when it doesn't exist and throwIfNoEntry is false, as Node's.
+function pathStats(path: string, follow: boolean, throwIfNoEntry: boolean): Stats | undefined throws IoError {
+  checkPath(path);
+  let out: i64[] = new Array(8).fill(0);
+  let times: f64[] = new Array(4).fill(0.0);
+  const r = unsafe { fsh_rt_path_stat(cString(path), follow ? 1 : 0, mutPtrOf(out[0]), mutPtrOf(times[0])) };
+  if (r < 0) {
+    const e = failed(r, follow ? "stat" : "lstat", path);
+    if (!throwIfNoEntry && (e.code === "ENOENT" || e.code === "ENOTDIR")) return undefined;
+    throw e;
+  }
+  return new Stats(out, times);
+}
+
+// The open flags are the host's, which differ between macOS and Linux, so they are read from
+// the runtime when used rather than computed while compiling.
+class FsConstants {
+  F_OK: i64 = 0;
+  R_OK: i64 = 4;
+  W_OK: i64 = 2;
+  X_OK: i64 = 1;
+  COPYFILE_EXCL: i64 = 1;
+  COPYFILE_FICLONE: i64 = 2;
+  COPYFILE_FICLONE_FORCE: i64 = 4;
+  get O_RDONLY(): i64 { return unsafe { fsh_rt_fd_open_flag(0) }; }
+  get O_WRONLY(): i64 { return unsafe { fsh_rt_fd_open_flag(1) }; }
+  get O_RDWR(): i64 { return unsafe { fsh_rt_fd_open_flag(2) }; }
+  get O_CREAT(): i64 { return unsafe { fsh_rt_fd_open_flag(3) }; }
+  get O_EXCL(): i64 { return unsafe { fsh_rt_fd_open_flag(4) }; }
+  get O_TRUNC(): i64 { return unsafe { fsh_rt_fd_open_flag(5) }; }
+  get O_APPEND(): i64 { return unsafe { fsh_rt_fd_open_flag(6) }; }
+  get O_NOFOLLOW(): i64 { return unsafe { fsh_rt_fd_open_flag(7) }; }
+  get O_SYNC(): i64 { return unsafe { fsh_rt_fd_open_flag(8) }; }
 }
 
 // A negative length truncates to nothing, as Node's does.
@@ -5375,7 +5434,7 @@ export async function open(path: string, flags: string | i64 = "r", mode: i64 = 
   });
 }
 
-export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
+export const constants = new FsConstants();
 
 export async function access(path: string, mode: i64 = 0): Promise<void> throws IoError {
   await spawnBlocking(() => pathAccess(path, mode));
@@ -5507,17 +5566,16 @@ export function existsSync(path: string): boolean {
   return pathExists(path);
 }
 
-function stats(path: string, follow: boolean): Stats throws IoError {
-  const [size, mode, mtimeMs, kind] = pathStat(path, follow);
-  return new Stats(size, mode, mtimeMs, kind);
+export function statSync(path: string, options?: { throwIfNoEntry?: true }): Stats throws IoError;
+export function statSync(path: string, options: { throwIfNoEntry: false }): Stats | undefined throws IoError;
+export function statSync(path: string, options?: { throwIfNoEntry?: boolean }): Stats | undefined throws IoError {
+  return pathStats(path, true, options?.throwIfNoEntry ?? true);
 }
 
-export function statSync(path: string): Stats throws IoError {
-  return stats(path, true);
-}
-
-export function lstatSync(path: string): Stats throws IoError {
-  return stats(path, false);
+export function lstatSync(path: string, options?: { throwIfNoEntry?: true }): Stats throws IoError;
+export function lstatSync(path: string, options: { throwIfNoEntry: false }): Stats | undefined throws IoError;
+export function lstatSync(path: string, options?: { throwIfNoEntry?: boolean }): Stats | undefined throws IoError {
+  return pathStats(path, false, options?.throwIfNoEntry ?? true);
 }
 
 export function readdirSync(path: string): string[] throws IoError;
@@ -5564,7 +5622,7 @@ export function renameSync(oldPath: string, newPath: string): void throws IoErro
   pathRename(oldPath, newPath);
 }
 
-export const constants = { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 };
+export const constants = new FsConstants();
 
 export function copyFileSync(src: string, dest: string, mode: i64 = 0): void throws IoError {
   fileCopy(src, dest, mode);
