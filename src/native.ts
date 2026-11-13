@@ -2848,6 +2848,14 @@ const char *fsh_rt_os_platform(void) {
 #endif
 }
 
+const char *fsh_rt_os_arch(void) {
+#if defined(__aarch64__) || defined(__arm64__)
+  return "arm64";
+#else
+  return "x64";
+#endif
+}
+
 // The CPUs this process may run on, at least one.
 int64_t fsh_rt_os_parallelism(void) {
 #ifdef __linux__

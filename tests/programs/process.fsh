@@ -57,3 +57,11 @@ import { env } from "node:process";
 function main() {
   const e = env;
 }
+// case: process_platform_arch
+// expect: true true true true
+import { platform } from "node:process";
+function main() {
+  const p = process.platform;
+  const a = process.arch;
+  console.log(p === "darwin" || p === "linux", a === "arm64" || a === "x64", platform === p, process.execPath === process.argv[0]);
+}

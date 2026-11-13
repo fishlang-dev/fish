@@ -83,7 +83,7 @@ const RULES: Rule[] = [
   { id: "genericFunctionsHeld", action: "unsupported", title: "generic function types held in class fields, arrays or unions, which would box a family of functions" },
   { id: "classForms", action: "unsupported", title: "abstract fields, and '#x in obj' checks" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
-  { id: "process", action: "unsupported", title: "process members besides argv, env and exit, and writes to process.env" },
+  { id: "process", action: "unsupported", title: "process members besides argv, env, exit, platform, arch and execPath, and writes to process.env" },
   { id: "bunGlobals", action: "unsupported", title: "Bun members besides file, stdin, write, env, argv, sleep, sleepSync, which, spawnSync, serve and version" },
   { id: "importMeta", action: "unsupported", title: "import.meta besides its path, file, dir, url, main, dirname and filename members" },
   { id: "timerForms", action: "unsupported", title: "setImmediate, unref on a timer, and more than two arguments passed on to a timer's function" },
@@ -197,7 +197,7 @@ const BUILTINS = new Map<string, { name: string; planned: boolean }>([
   // own methods, such as `toString("hex")` and `readUInt32BE`.
   // `crypto` is more than std's random functions and one-shot hashes: an import of only those is portable.
   ["readline", STD("the readLine global and the stdin module, for lines, text and bytes")], ["dgram", STD("UdpSocket")],
-  ["process", STD("process, for argv, env and exit")], ["perf_hooks", STD("the global performance, for now()")],
+  ["process", STD("process, for argv, env, exit, platform, arch and execPath")], ["perf_hooks", STD("the global performance, for now()")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
 ]);
 const FEATURES = new Map(RULES.flatMap((r) => (r.feature ? [[r.id, r.feature] as const] : [])));
@@ -428,7 +428,7 @@ function classify({ path, envKeys, statementDestructures, metaRead, ownBun }: Sc
       if (["WeakMap", "WeakSet"].some((name) => named(n.callee, name))) push("collections");
       break;
     case "member":
-      if (named(n.object, "process") && !["argv", "env", "exit"].includes(n.name as string)) push("process");
+      if (named(n.object, "process") && !["argv", "env", "exit", "platform", "arch", "execPath"].includes(n.name as string)) push("process");
       if (named(n.object, "process") && n.name === "env" && !envKeys.has(n)) push("process");
       if (!ownBun && named(n.object, "Bun") && !BUN_MEMBERS.includes(n.name as string)) push("bunGlobals");
       if (envEntry(n) && !n.optional) envKeys.add(n.object as object);

@@ -6150,6 +6150,8 @@ declare function fsh_rt_argc(): i64;
 declare function fsh_rt_arg(i: i64): Ptr<u8>;
 declare function fsh_rt_getenv(name: Ptr<u8>): Ptr<u8>;
 declare function fsh_rt_exit(code: i64): void;
+declare function fsh_rt_os_platform(): Ptr<u8>;
+declare function fsh_rt_os_arch(): Ptr<u8>;
 
 export function argv(): string[] {
   let all: string[] = [];
@@ -6162,6 +6164,20 @@ export function env(name: string): string | null {
   const value = unsafe { fsh_rt_getenv(cString(name)) };
   if (unsafe { value.isNull() }) return null;
   return unsafe { fromCString(value) };
+}
+
+// As Node names them: "darwin" or "linux", and "arm64" or "x64", for the target built for.
+export function platform(): string {
+  return unsafe { fromCString(fsh_rt_os_platform()) };
+}
+
+export function arch(): string {
+  return unsafe { fromCString(fsh_rt_os_arch()) };
+}
+
+// The running program's absolute path, which process.argv also starts with.
+export function execPath(): string {
+  return unsafe { fromCString(fsh_rt_arg(0)) };
 }
 
 // Aborted by the first SIGINT or SIGTERM; a second exits at once with 130 or 143.
@@ -6385,7 +6401,7 @@ export { sleeping as sleep, serving as serve };
 // `process.argv`, called with nothing, and `env` as a table, `process.env.HOME` and
 // `process.env[name]` calling it with the key.
 export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
-  process: { argv: "value", env: "table", shutdown: "value" },
+  process: { argv: "value", env: "table", shutdown: "value", platform: "value", arch: "value", execPath: "value" },
   Bun: { argv: "value", env: "table", stdin: "value", version: "value" },
 };
 
