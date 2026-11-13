@@ -535,7 +535,7 @@ const IN_PLACE = [
   // lists, each where the list is read next;
   "check.ts: list.splice(", "check.ts: list[i] = block;", "check.ts: while (added.length > 0) list.splice(", "check.ts: while (parts.length > 0) list.splice(", "check.ts: let removed = list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
   "check.ts: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.ts: if (inserted !== undefined && inserted.length > 0",
-  "modules.ts: l.body[at] =", "macros.ts: statements.splice(",
+  "modules.ts: l.body[at] =", "macros.ts: statements.splice(", "modules.ts: for (let i = statements.length - 1; i >= 0; i--) if (startsMain(",
 ];
 
 // Lowering records a replacement in a rewrite table, which a rebuild puts in place, rather than
