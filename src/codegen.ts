@@ -12122,7 +12122,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const v = vs[k]!;
       const index = this.tables.typing.rec(io).fields.findIndex((f) => f.name === name);
       const next = this.temp();
-      this.emit(`${next} = insertvalue ${this.llvm(io)} ${made}, ${this.llvm(this.tables.typing.rec(io).fields[index]!.type)} ${v}, ${index}`);
+      this.emit(`${next} = insertvalue ${this.llvm(io)} ${made}, ${this.llvm(this.tables.typing.rec(io).fields[index as usize]!.type)} ${v}, ${index}`);
       made = next;
     }
     return made;
