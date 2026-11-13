@@ -9931,7 +9931,7 @@ class Codegen implements PrintHost, ComptimeHost {
       return given;
     });
     // A left-out optional parameter is empty, and a left-out rest parameter an empty array.
-    for (const p of this.bodyAt(target).params.slice(args.length)) {
+    for (const p of this.bodyAt(target).params.slice(args.length as i64)) {
       const get2 = this.inst(target).locals.get(p)!;
       const type = this.loc(get2).type;
       values.push(`${this.llvm(type)} ${p.rest ? "zeroinitializer" : this.convert("zeroinitializer", "null", type)}`);
@@ -11182,7 +11182,7 @@ class Codegen implements PrintHost, ComptimeHost {
       if ((j as usize) !== except) {
         const field2 = field(cg, (3 + 3 * j) as usize);
         cg.whileWaiting(field2, (cg) => {
-          const field3 = field(cg, 1 + 3 * j);
+          const field3 = field(cg, (1 + 3 * j) as usize);
           cg.cancelAt(field3, f);
         });
       }
@@ -12459,6 +12459,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // The calls an expression makes are made from its site, once its operands' own calls are done.
+  /** @throws {RegexSyntaxError} */
   evaluate(this: Mut<this>, e: Ref<Expr>): string {
     const outer = this.siteNow();
     this.site = { start: e.start, end: e.end };
@@ -13722,7 +13723,7 @@ class Codegen implements PrintHost, ComptimeHost {
           const part = this.temp();
           this.emit(`${part} = extractvalue ${this.llvm(match)} ${whole}, ${this.tables.typing.rec(match).fields.findIndex((f) => f.name === String(i))}`);
           const copied2 = this.copied(part, parts[i as usize]!);
-          return `${this.llvm(p)} ${this.convert(copied2, parts[i]!, p)}`;
+          return `${this.llvm(p)} ${this.convert(copied2, parts[i as usize]!, p)}`;
         }
         if (i === parts.length) {
           const index = this.temp();
