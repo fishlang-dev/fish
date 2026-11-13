@@ -173,6 +173,13 @@ const RELEASES = new Map<string, string>([["Semaphore", "fsh_rt_semaphore_releas
 // A failure that has nothing read before it to drop.
 function noUndo(_cg: Mut<Codegen>): void {}
 
+// The object a member or index expression reads from.
+function partOf<A extends Lifetime>(e: Ref<Expr, A>): Ref<Expr, A> {
+  if (e.kind === "member") return e.object;
+  if (e.kind === "index") return e.object;
+  return e;
+}
+
 function sharedPrefix(which: string): string {
   return which === "shared" ? "shared" : which === "Rc" ? "rc" : "weak";
 }
@@ -10185,8 +10192,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // Runs an assignment to a target, having first run the indexes into arrays along its path,
   // outermost first, so each runs once and before the value, as in JavaScript.
   fixing(this: Mut<this>, target: Ref<Expr>, run: (cg: Mut<Codegen>) => string): string {
-    const nodes: Expr[] = [];
-    for (let e = bare(target); e.kind === "member" || e.kind === "index"; e = bare(e.object)) if (e.kind === "index" && this.indexes(this.valueType(e.object))) nodes.unshift(e.index);
+    let nodes: Ref<Expr>[] = [];
+    for (let e = bare(target); e.kind === "member" || e.kind === "index"; e = bare(partOf(e))) if (e.kind === "index" && this.indexes(this.valueType(e.object))) nodes.unshift(e.index);
     for (const index of nodes) {
       const operand = this.value(index);
       this.fixed.set(index, operand);
@@ -10305,7 +10312,8 @@ class Codegen implements PrintHost, ComptimeHost {
     const llvm2 = this.llvm(part);
     const at = this.alloca(llvm2);
     const part2 = this.inst(target).closure!;
-    const line = `store ${this.llvm(part2)} ${this.environment(target, env)}, ptr ${at}`;
+    const froms: (LocalId | "this")[] = [...env];
+    const line = `store ${this.llvm(part2)} ${this.environment(target, froms)}, ptr ${at}`;
     this.emit(line);
     return at;
   }
@@ -10392,7 +10400,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // fields, where it is read in place.
   inBlock(eGiven: Ref<Expr>): boolean {
     let e: Ref<Expr> = eGiven;
-    for (; e.kind === "member" && !this.cur().calls.has(e); e = e.object) {
+    for (; e.kind === "member" && !this.cur().calls.has(e); e = partOf(e)) {
       const get2 = this.cur().types.get(e.object)!;
       const holder = this.referent(get2);
       const kind = this.recOf(holder)?.kind;
@@ -13005,8 +13013,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // Writes a value to a place, giving the assignment's value: what was written, or, for a setter,
   // which keeps what it is given, a copy of its own released when the statement ends.
   store(this: Mut<this>, targetGiven: Ref<Expr>, result: string): string {
-    let target: Ref<Expr> = targetGiven;
-    target = bare(target);
+    const target = bare(targetGiven);
     const setter = this.setterOf(target);
     if (setter !== undefined && target.kind === "member") {
       const type = this.cur().types.get(target)!;
@@ -13081,8 +13088,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Where an assignment target lives: a variable's slot, or a field inside one.
   address(this: Mut<this>, targetGiven: Ref<Expr>): string {
-    let target: Ref<Expr> = targetGiven;
-    target = bare(target);
+    const target = bare(targetGiven);
     if (target.kind === "this") return "%this";
     if (target.kind === "index") return this.element(target);
     if (target.kind !== "member") {
@@ -13135,7 +13141,7 @@ class Codegen implements PrintHost, ComptimeHost {
   lendable(this: Mut<this>, eGiven: Ref<Expr>): boolean {
     let e: Ref<Expr> = eGiven;
     let through = false;
-    for (e = bare(e); e.kind === "member" && !this.cur().calls.has(e); e = bare(e.object)) {
+    for (e = bare(e); e.kind === "member" && !this.cur().calls.has(e); e = bare(partOf(e))) {
       through = true;
       // A field narrowed to several members is read as a copy, laid out as the narrower union.
       if (this.cur().narrowedFields?.has(e) === true && !this.inPayload(e)) return false;
@@ -13169,8 +13175,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // The type a place is stored as. Read through a type parameter's bound, a field may have a
   // wider type than the one it is stored with.
   stored(this: Mut<this>, eGiven: Ref<Expr>): Type {
-    let e: Ref<Expr> = eGiven;
-    e = bare(e);
+    const e = bare(eGiven);
     if (e.kind === "index" && this.indexes(this.valueType(e.object))) return this.placeType(e);
     if (e.kind !== "member" || this.cur().calls.has(e)) return this.cur().types.get(e)!;
     const stored2 = this.stored(e.object);
