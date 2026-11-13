@@ -2217,7 +2217,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const [hit, miss, done] = [this.label(), this.label(), this.label()];
     // `update(k, f)`: the arrow called once with the value to change, when the key is there.
     if (name === "update") {
-      const callback = e.args[1]!;
+      const callback: Ref<Expr> = e.args[1]!;
       const closure = this.cur().types.get(callback) as ClosureType;
       const env = this.alloca(this.llvm(closure));
       const line = `store ${this.llvm(closure)} ${this.owned(callback)}, ptr ${env}`;
@@ -3000,7 +3000,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`call void @fsh_rt_js_release(ptr ${box})`);
       return made;
     }
-    throw new Error(`internal error: no reading of a '${this.tables.typing.show(type)}' out of JS`);
+    assert(false, `internal error: no reading of a '${this.tables.typing.show(type)}' out of JS`);
   }
 
 
@@ -5227,6 +5227,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // An expression run for its effect, dropping any value it makes.
+  /** @throws {CompileError} */
   effect(this: Mut<this>, e: Ref<Expr>) {
     if (e.kind === "match") {
       this.lowerMatch(e, false);
