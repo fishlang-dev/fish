@@ -2,7 +2,6 @@
   "failing": {
     "astgen.ts": "only declarations are allowed at the top level; move this into main()",
     "bundle.ts": "'node:url' is a Node module Fish's std doesn't have yet",
-    "codegen.ts": "a field can't hold a generic function type: that would box it in a Dyn, whose table holds one function, and a generic function is a family made one per call; give it one type, as '(x: i64) => i64', or take it as a parameter",
     "codes.ts": "operator '!' cannot be applied to type 'null | { long?: { example: string; fixed: string; text: string }; title: string }'",
     "comments.ts": "cannot find type 'object'",
     "dependencies.ts": "'process.env' is read by key, as in 'process.env.HOME' or 'process.env[name]'",
@@ -32,5 +31,5 @@
     "typings.ts": "'isFile' must declare 'throws IoError' after its return type since 'statSync' can throw 'IoError', or catch it with try/catch",
     "watch.ts": "'Bun.spawn' isn't in Fish's subset of Bun yet; it has 'file', 'stdin', 'write', 'env', 'argv', 'sleepSync', 'version', 'which', 'spawnSync', 'sleep', 'serve'"
   },
-  "count": 31
+  "count": 30
 }
