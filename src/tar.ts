@@ -7,37 +7,53 @@ export type TarFile = { path: string; data: Uint8Array };
 // More entries than any package needs, so a flood of tiny files is refused.
 export const MAX_ENTRIES = 10_000;
 
+// `n` rounded up to whole 512-byte blocks.
+const blocked = (n: usize): usize => n + 511 - ((n + 511) % 512);
+
+// A header field's text, up to its first NUL.
+function field(bytes: Ref<Uint8Array>, at: usize, length: usize): string {
+  return new TextDecoder().decode(bytes.subarray(at, at + length)).replace(/\0.*$/s, "");
+}
+
+/** @throws {Error} */
+function octalField(bytes: Ref<Uint8Array>, at: usize, length: usize): usize {
+  const text = field(bytes, at, length).trim();
+  if (!/^[0-7]*$/.test(text)) throw new Error("its archive has an entry of no readable size");
+  return text === "" ? 0 : (parseInt(text, 8)! as usize);
+}
+
+/** @throws {Error} */
 export function untar(bytes: Uint8Array, limit: usize): TarFile[] {
-  const files: TarFile[] = [];
-  const decode = (b: Uint8Array) => new TextDecoder().decode(b);
-  const text = (at: usize, length: usize) => decode(bytes.subarray(at, at + length)).replace(/\0.*$/s, "");
-  const octal = (at: usize, length: usize) => {
-    const field = text(at, length).trim();
-    if (!/^[0-7]*$/.test(field)) throw new Error("its archive has an entry of no readable size");
-    return field === "" ? 0 : parseInt(field, 8);
-  };
-  let at = 0;
-  let next: { path?: string; size?: usize } = {};
-  let total = 0;
+  let files: TarFile[] = [];
+  let at: usize = 0;
+  // What a pax or GNU long-name entry says of the entry after it.
+  let nextPath: string | undefined = undefined;
+  let nextSize: usize | undefined = undefined;
+  let total: usize = 0;
   let entries = 0;
   while (at + 512 <= bytes.length) {
     if (bytes.subarray(at, at + 512).every((b) => b === 0)) break;
-    if (++entries > MAX_ENTRIES) throw new Error(`its archive holds more than ${MAX_ENTRIES} entries`);
-    const size = next.size ?? octal(at + 124, 12);
-    const type = text(at + 156, 1) || "0";
-    const prefix = text(at + 257, 6).startsWith("ustar") ? text(at + 345, 155) : "";
-    const name = next.path ?? (prefix ? `${prefix}/${text(at, 100)}` : text(at, 100));
-    next = {};
+    entries++;
+    if (entries > MAX_ENTRIES) throw new Error(`its archive holds more than ${MAX_ENTRIES} entries`);
+    const size = nextSize ?? octalField(bytes, at + 124, 12);
+    const written = field(bytes, at + 156, 1);
+    const type = written !== "" ? written : "0";
+    const prefix = field(bytes, at + 257, 6).startsWith("ustar") ? field(bytes, at + 345, 155) : "";
+    const name = nextPath ?? (prefix !== "" ? `${prefix}/${field(bytes, at, 100)}` : field(bytes, at, 100));
+    nextPath = undefined;
+    nextSize = undefined;
     const data = bytes.subarray(at + 512, at + 512 + size);
     if (data.length !== size || !Number.isSafeInteger(size)) throw new Error("its archive ends partway through a file");
-    at += 512 + Math.ceil(size / 512) * 512;
+    at += 512 + blocked(size);
     if (type === "x") {
-      next = paxRecords(data);
+      const pax = paxRecords(data);
+      nextPath = pax.path;
+      nextSize = pax.size;
       continue;
     }
     if (type === "L") {
       // GNU's long name: the next entry's path, written as this entry's data.
-      next = { path: decode(data).replace(/\0.*$/s, "") };
+      nextPath = new TextDecoder().decode(data).replace(/\0.*$/s, "");
       continue;
     }
     if (type === "g") continue;
@@ -55,67 +71,92 @@ export function untar(bytes: Uint8Array, limit: usize): TarFile[] {
 
 // A pax header's `path` and `size`, from its records, each `<length> <key>=<value>\n`, the
 // length counting bytes.
-function paxRecords(records: Uint8Array): { path?: string; size?: usize } {
-  const found: { path?: string; size?: usize } = {};
-  let at = 0;
+/** @throws {Error} */
+function paxRecords(records: Ref<Uint8Array>): { path?: string; size?: usize } {
+  let found: { path?: string; size?: usize } = {};
+  const unreadable = "its archive has a pax header it can't read";
+  let at: usize = 0;
   while (at < records.length) {
-    const space = records.indexOf(0x20, at);
-    const length = Number(new TextDecoder().decode(records.subarray(at, space)));
-    if (space < 0 || !Number.isSafeInteger(length) || length <= space - at || at + length > records.length) throw new Error("its archive has a pax header it can't read");
-    const record = new TextDecoder().decode(records.subarray(space + 1, at + length - 1));
+    const space = records.indexOf(0x20, at as i64);
+    if (space < 0) throw new Error(unreadable);
+    const digits = new TextDecoder().decode(records.subarray(at, space as usize));
+    if (!/^\d+$/.test(digits)) throw new Error(unreadable);
+    const length = parseFloat(digits)! as usize;
+    if (!Number.isSafeInteger(length) || length <= (space as usize) - at || at + length > records.length) throw new Error(unreadable);
+    const record = new TextDecoder().decode(records.subarray((space as usize) + 1, at + length - 1));
     const equals = record.indexOf("=");
-    const [key, value] = [record.slice(0, equals), record.slice(equals + 1)];
+    const key = record.slice(0, equals);
+    const value = record.slice(equals + 1);
     if (key === "path") found.path = value;
     if (key === "size") {
-      if (!/^\d+$/.test(value)) throw new Error("its archive has a pax header it can't read");
-      found.size = Number(value);
+      if (!/^\d+$/.test(value)) throw new Error(unreadable);
+      found.size = parseFloat(value)! as usize;
     }
     at += length;
   }
   return found;
 }
 
+// `n` in octal digits.
+function octal(n: usize): string {
+  if (n === 0) return "0";
+  let out = "";
+  for (let k = n; k > 0; k = (k - (k % 8)) / 8) out = String(k % 8) + out;
+  return out;
+}
+
+function put(h: Mut<Uint8Array>, at: usize, value: string) {
+  h.set(new TextEncoder().encode(value), at);
+}
+
+function header(name: string, size: usize, mode: usize, type: string): Uint8Array {
+  let h = new Uint8Array(512);
+  put(h, 0, name);
+  put(h, 100, octal(mode).padStart(7, "0") + "\0");
+  put(h, 108, octal(0).padStart(7, "0") + "\0");
+  put(h, 116, octal(0).padStart(7, "0") + "\0");
+  put(h, 124, octal(size).padStart(11, "0") + "\0");
+  put(h, 136, octal(0).padStart(11, "0") + "\0");
+  put(h, 148, "        ");
+  put(h, 156, type);
+  put(h, 257, "ustar\0");
+  put(h, 263, "00");
+  let sum: usize = 0;
+  for (const b of h) sum += b as usize;
+  put(h, 148, octal(sum).padStart(6, "0") + "\0 ");
+  return h;
+}
+
+function padded(data: Ref<Uint8Array>): Uint8Array {
+  let out = new Uint8Array(blocked(data.length));
+  out.set(data);
+  return out;
+}
+
 // A tar archive of `files` in ustar form, the same bytes for the same files: entries sorted, owner
 // 0, times 0, and a pax header only for a path too long for the ustar fields.
 export function tar(files: { path: string; data: Uint8Array; executable: boolean }[]): Uint8Array {
-  const blocks: Uint8Array[] = [];
+  let blocks: Uint8Array[] = [];
   const encoder = new TextEncoder();
-  const header = (name: string, size: usize, mode: u32, type: string): Uint8Array => {
-    const h = new Uint8Array(512);
-    const put = (at: usize, value: string) => h.set(encoder.encode(value), at);
-    const octal = (at: usize, length: usize, n: usize) => put(at, n.toString(8).padStart(length - 1, "0") + "\0");
-    put(0, name);
-    octal(100, 8, mode as usize);
-    octal(108, 8, 0);
-    octal(116, 8, 0);
-    octal(124, 12, size);
-    octal(136, 12, 0);
-    put(148, "        ");
-    put(156, type);
-    put(257, "ustar\0");
-    put(263, "00");
-    const sum = h.reduce((a, b) => a + b, 0);
-    put(148, sum.toString(8).padStart(6, "0") + "\0 ");
-    return h;
-  };
-  const padded = (data: Uint8Array) => {
-    const out = new Uint8Array(Math.ceil(data.length / 512) * 512);
-    out.set(data);
-    return out;
-  };
-  for (const f of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+  let sorted = [...files];
+  sorted.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  for (const f of sorted) {
     if (encoder.encode(f.path).length > 100) {
-      const body = (n: usize) => `${n} path=${f.path}\n`;
-      let length = encoder.encode(body(0)).length;
-      while (encoder.encode(body(length)).length !== length) length = encoder.encode(body(length)).length;
-      const record = encoder.encode(body(length));
-      blocks.push(header("pax", record.length, 0o644, "x"), padded(record));
+      // The record counts its own length's digits, so the length is found by trying until it holds.
+      let length = encoder.encode(`0 path=${f.path}\n`).length;
+      while (encoder.encode(`${length} path=${f.path}\n`).length !== length) length = encoder.encode(`${length} path=${f.path}\n`).length;
+      const record = encoder.encode(`${length} path=${f.path}\n`);
+      blocks.push(header("pax", record.length, 0o644, "x"));
+      blocks.push(padded(record));
     }
-    blocks.push(header(f.path.slice(0, 100), f.data.length, f.executable ? 0o755 : 0o644, "0"), padded(f.data));
+    blocks.push(header(f.path.slice(0, 100), f.data.length, f.executable ? 0o755 : 0o644, "0"));
+    blocks.push(padded(f.data));
   }
   blocks.push(new Uint8Array(1024));
-  const out = new Uint8Array(blocks.reduce((n, b) => n + b.length, 0));
-  let at = 0;
+  let size: usize = 0;
+  for (const b of blocks) size += b.length;
+  let out = new Uint8Array(size);
+  let at: usize = 0;
   for (const b of blocks) {
     out.set(b, at);
     at += b.length;
