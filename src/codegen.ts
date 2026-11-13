@@ -4752,7 +4752,7 @@ class Codegen implements PrintHost, ComptimeHost {
           this.startBlock(next);
         }
         const fallback = s.cases.findIndex((c) => c.test === undefined);
-        const line8 = `br label %${this.enterCase(held.length > 0, entries, fallback < 0 ? end : bodies[fallback]!)}`;
+        const line8 = `br label %${this.enterCase(held.length > 0, entries, fallback < 0 ? end : bodies[fallback as usize]!)}`;
         this.emit(line8);
         this.pending.splice(this.floor as i64);
         for (const [via, body] of entries) {
@@ -5025,6 +5025,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // A pipe over a value: the value lives in the topic's slot while the right side runs, and is
   // dropped after it unless the right side moved it out.
+  /** @throws {CompileError} */
   lowerPipe(this: Mut<this>, e: Ref<Extract<Expr, { kind: "pipe" }>>, wanted: boolean): string | undefined {
     const local = this.localAt(e)!;
     this.scopes.push({ transient: true, held: [] });
@@ -5049,6 +5050,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // A `return` in a match arm's block: its value goes where the match keeps what it gives, and
   // control leaves the arm, dropping what the scopes inside it own.
+  /** @throws {CompileError} */
   given(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "return" }>>, arm: Ref<Stmt>) {
     const into = this.arms.get(arm);
     if (s.value !== undefined && into !== undefined) {
@@ -7176,7 +7178,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const line = `${opened} = call i32 @fsh_rt_json_open(ptr ${r}, i32 91, ptr ${this.cString("array")})`;
     this.emit(line);
     this.jsonGuard(opened, "i32", noUndo);
-    const read: { v: string; type: Type; i: usize }[] = [];
+    let read: { v: string; type: Type; i: usize }[] = [];
     // Optional elements are read into slots, empty until read, since the array may end first.
     const required = this.tables.typing.rec(t).required ?? order.length;
     const slots = order.slice(required as i64).map(({ f, i }) => {
@@ -10920,7 +10922,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const region = this.finallies.length > 0 ? this.finallies[this.finallies.length - 1]! : undefined;
     const toRegion = region !== undefined && this.handlers.length <= region.handlers;
     const kept = region !== undefined && toRegion ? region.floor : this.handlers.length > 0 ? this.handlers[this.handlers.length - 1]!.floor : 0;
-    let reversed = this.pending.slice(kept);
+    let reversed = this.pending.slice(kept as i64);
     reversed.reverse();
     for (const { v, type } of reversed) this.dispose(v, type);
     if (region !== undefined && toRegion) {
