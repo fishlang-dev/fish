@@ -443,18 +443,36 @@ export const MATH_FLOAT: Record<string, usize> = {
 // Number's constants, as the literals they stand for: the safe integers adapt to the integer
 // type around them as a written literal does, and the rest are f64.
 const NUMBER_CONSTANTS = ["MAX_SAFE_INTEGER", "MIN_SAFE_INTEGER", "EPSILON", "MAX_VALUE", "MIN_VALUE", "POSITIVE_INFINITY", "NEGATIVE_INFINITY", "NaN"];
-function numberConstant(name: string): { kind: "int"; value: bigint } | { kind: "float"; value: f64 } | undefined {
-  if (name === "MAX_SAFE_INTEGER") return { kind: "int", value: 9007199254740991n };
-  if (name === "MIN_SAFE_INTEGER") return { kind: "int", value: -9007199254740991n };
-  if (name === "EPSILON") return { kind: "float", value: 2.220446049250313e-16 };
-  if (name === "MAX_VALUE") return { kind: "float", value: 1.7976931348623157e308 };
-  if (name === "MIN_VALUE") return { kind: "float", value: 5e-324 };
-  if (name === "POSITIVE_INFINITY") return { kind: "float", value: 1 / 0 };
-  if (name === "NEGATIVE_INFINITY") return { kind: "float", value: -1 / 0 };
-  if (name === "NaN") return { kind: "float", value: 0 / 0 };
+function numberConstant(name: string, id: usize, at: Ref<Span>): Expr | undefined {
+  const { start, end } = at;
+  if (name === "MAX_SAFE_INTEGER") return { id, kind: "int", value: 9007199254740991n, start, end };
+  if (name === "MIN_SAFE_INTEGER") return { id, kind: "int", value: -9007199254740991n, start, end };
+  if (name === "EPSILON") return { id, kind: "float", value: 2.220446049250313e-16, start, end };
+  if (name === "MAX_VALUE") return { id, kind: "float", value: 1.7976931348623157e308, start, end };
+  if (name === "MIN_VALUE") return { id, kind: "float", value: 5e-324, start, end };
+  if (name === "POSITIVE_INFINITY") return { id, kind: "float", value: 1 / 0, start, end };
+  if (name === "NEGATIVE_INFINITY") return { id, kind: "float", value: -1 / 0, start, end };
+  if (name === "NaN") return { id, kind: "float", value: 0 / 0, start, end };
   return undefined;
 }
-const INTEGER_MAP_NAMES = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize"];
+// The sized integer type a name is, if it is one.
+function integerNamed(name: string): Integer | undefined {
+  switch (name) {
+    case "i8": return "i8";
+    case "i16": return "i16";
+    case "i32": return "i32";
+    case "i64": return "i64";
+    case "i128": return "i128";
+    case "isize": return "isize";
+    case "u8": return "u8";
+    case "u16": return "u16";
+    case "u32": return "u32";
+    case "u64": return "u64";
+    case "u128": return "u128";
+    case "usize": return "usize";
+  }
+  return undefined;
+}
 
 // Number's predicates, each the prelude helper it calls.
 const NUMBER_PREDICATES: Record<string, string> = { isNaN: "number is nan", isFinite: "number is finite", isInteger: "number is integer", isSafeInteger: "number is safe integer" };
@@ -3972,12 +3990,10 @@ export class Expressions<C extends Context> implements Union<C> {
     if (e.typeArgs.length > 0) throw new CompileError("E0106", `${what} takes no type argument`, e.start, e.end);
     if (e.args.length !== 1) throw new CompileError("E0504", `${what} takes one number`, e.start, e.end);
     const a: Ref<Expr> = e.args[0]!;
-    const ids = this.ctx.tables().ids;
-    const f64: TypeNode = { id: nextId(ids), kind: "ref", name: "f64", args: [], start: a.start, end: a.end };
-    const arg: Expr = { id: nextId(ids), kind: "as", expr: cloneExpr(a), type: f64, start: a.start, end: a.end };
-    const helper: Expr = { id: nextId(ids), kind: "ident", name: NUMBER_PREDICATES[callee.name]!, start: callee.start, end: callee.end };
-    const none: TypeNode[] = [];
-    const made = this.ctx.tables().rewrites.replace(e, { ...e, callee: helper, args: [arg], typeArgs: none });
+    const f64: TypeNode = { id: nextId(this.ctx.tables().ids), kind: "ref", name: "f64", args: [], start: a.start, end: a.end };
+    const arg: Expr = { id: nextId(this.ctx.tables().ids), kind: "as", expr: cloneExpr(a), type: f64, start: a.start, end: a.end };
+    const by = this.stdHelper(`Number.${callee.name}`, NUMBER_PREDICATES[callee.name]!, [arg], e);
+    const made = this.ctx.tables().rewrites.replace(e, by);
     return this.callMade(made);
   }
 
@@ -8150,15 +8166,17 @@ export class Expressions<C extends Context> implements Union<C> {
       return this.typeOf(made);
     }
     if (this.isNumberGlobal(e.object) && NUMBER_PREDICATES[e.name] === undefined && e.name !== "parseInt" && e.name !== "parseFloat") {
-      const constant = numberConstant(e.name);
+      const constant = numberConstant(e.name, nextId(this.ctx.tables().ids), e);
       if (constant === undefined) throw new CompileError("E0503", `'Number.${e.name}' is a function, or not in Fish yet; the constants are ${NUMBER_CONSTANTS.join(", ")}`, e.start, e.end);
-      const made = this.become(e, { id: nextId(this.ctx.tables().ids), ...constant, start: e.start, end: e.end });
+      const made = this.become(e, constant);
       return this.typeOf(made);
     }
-    if (e.object.kind === "ident" && (e.name === "MAX" || e.name === "MIN") && INTEGER_MAP_NAMES.includes(e.object.name) && this.unhidden(e.object.name)) {
-      const type = e.object.name as Integer;
-      const [low, high] = range(type);
-      const made = this.become(e, { id: nextId(this.ctx.tables().ids), kind: "int", value: e.name === "MAX" ? high : low, start: e.start, end: e.end });
+    const type = e.object.kind === "ident" && (e.name === "MAX" || e.name === "MIN") ? integerNamed(e.object.name) : undefined;
+    if (type !== undefined && this.unhidden(type)) {
+      const bounds = range(type);
+      const value: bigint = e.name === "MAX" ? bounds[1] : bounds[0];
+      const bound: Expr = { id: nextId(this.ctx.tables().ids), kind: "int", value, start: e.start, end: e.end };
+      const made = this.become(e, bound);
       this.retype(made, type, false);
       return type;
     }

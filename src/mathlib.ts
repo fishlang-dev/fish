@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { Session } from "./compilation.ts";
@@ -48,14 +48,12 @@ export type Unit = { name: string; args: string[]; stdin?: string; inputs: strin
 // A session that builds objects as well as compiling, with the caches only building reads.
 // `clang`: `clang --version`, which names the target as well as the compiler.
 // `digests`: each source a cached object depends on, hashed, by path, size and modification time.
-// `compiling`: the objects being compiled without blocking, so each is compiled once.
 // `mathUnits`: the Math runtime's objects to compile.
-export type BuildSession = Session & { clang?: string; digests: Map<string, string>; compiling: Map<string, Promise<string>>; mathUnits?: Unit[] };
+export type BuildSession = Session & { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
 
 // `session` given the caches building needs, keeping any it already has.
 export function buildSession(session: Session & Partial<BuildSession>): BuildSession {
   session.digests ??= new Map();
-  session.compiling ??= new Map();
   return session as BuildSession;
 }
 
@@ -125,29 +123,62 @@ export function cachedObject(session: BuildSession, u: Unit): string {
   return out;
 }
 
-// `cachedObject`, without blocking, each object compiled only once however many of a session's
-// builds ask.
-export function cachedObjectAsync(session: BuildSession, u: Unit): Promise<string> {
-  const { compiling } = session;
+// `cachedObject`, without blocking. A lock file beside the object keeps builds running at once, in
+// this process or another, from compiling it twice: the rest wait for it to be there instead.
+/** @throws {Error | IoError} */
+export async function cachedObjectAsync(session: BuildSession, u: Unit): Promise<string> {
   const out = objectPath(session, u);
-  if (existsSync(out)) return Promise.resolve(out);
-  let done = compiling.get(out);
-  if (!done) {
-    done = (async () => {
-      const temp = partial(out);
-      const cwd = emptyDir();
-      try {
-        const clang = Bun.spawn(command(u, temp), { stdin: input(u), stderr: "pipe", cwd });
-        const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
-        finish(u, code, stderr, temp, out);
-      } finally {
-        rmSync(cwd, { recursive: true, force: true });
-      }
-      return out;
-    })().finally(() => compiling.delete(out));
-    compiling.set(out, done);
+  const lock = `${out}.lock`;
+  while (!existsSync(out)) {
+    if (!claimed(lock)) {
+      // ponytail: polled, as no waiting a Bun and a Fish build share is cheaper; a wait on the
+      // compile itself if many builds contend.
+      await Bun.sleep(20);
+      continue;
+    }
+    try {
+      if (!existsSync(out)) await compiledAsync(u, out);
+    } catch (e) {
+      rmSync(lock, { force: true });
+      throw e;
+    }
+    rmSync(lock, { force: true });
   }
-  return done;
+  return out;
+}
+
+// Whether this build made the lock and so compiles the object. A lock older than any compile takes
+// was left by a build that died, and is cleared for the next try.
+/** @throws {IoError} */
+function claimed(lock: string): boolean {
+  mkdirSync(dirname(lock), { recursive: true });
+  try {
+    closeSync(openSync(lock, "wx"));
+    return true;
+  } catch (_e) {
+    try {
+      if (Date.now() - statSync(lock).mtimeMs > 300_000) rmSync(lock, { force: true });
+    } catch (_gone) {
+      // Removed by its build in the meantime.
+    }
+    return false;
+  }
+}
+
+/** @throws {Error | IoError} */
+async function compiledAsync(u: Unit, out: string): Promise<void> {
+  const temp = partial(out);
+  const cwd = emptyDir();
+  try {
+    const clang = Bun.spawn(command(u, temp), { stdin: input(u), stderr: "pipe", cwd });
+    const errors = new Response(clang.stderr);
+    const [code, stderr] = await Promise.all([clang.exited, errors.text()]);
+    finish(u, code, stderr, temp, out);
+  } catch (e) {
+    rmSync(cwd, { recursive: true, force: true });
+    throw e;
+  }
+  rmSync(cwd, { recursive: true, force: true });
 }
 
 function units(session: BuildSession): Unit[] {
