@@ -426,7 +426,8 @@ export class Printer<H extends PrintHost> {
     } else if (type === "f32" || type === "f64") {
       // A float is written out by the runtime, as JavaScript would.
       const text = this.host.temp();
-      this.host.emit(`${text} = call ptr @fsh_rt_format_${type}(${llvmOf(this.host.tables.typing, type)} ${v}, ptr ${this.host.alloca("[32 x i8]")})`);
+      const buffer = this.host.alloca("[32 x i8]");
+      this.host.emit(`${text} = call ptr @fsh_rt_format_${type}(${llvmOf(this.host.tables.typing, type)} ${v}, ptr ${buffer})`);
       this.format += "%s";
       this.values.push(`, ptr ${text}`);
     } else {
@@ -436,7 +437,8 @@ export class Printer<H extends PrintHost> {
       const { bits, signed } = integerInfo(type);
       if (bits === 128) {
         const text = this.host.temp();
-        this.host.emit(`${text} = call ptr @fsh_rt_format_${signed ? "i" : "u"}128(i128 ${v}, ptr ${this.host.alloca("[41 x i8]")})`);
+        const buffer = this.host.alloca("[41 x i8]");
+        this.host.emit(`${text} = call ptr @fsh_rt_format_${signed ? "i" : "u"}128(i128 ${v}, ptr ${buffer})`);
         this.format += "%s";
         this.values.push(`, ptr ${text}`);
         return;
@@ -458,12 +460,14 @@ export class Printer<H extends PrintHost> {
       return;
     }
     this.flush();
-    this.host.emit(`call void @fsh_rt_str_print(i32 ${this.stream}, ptr ${this.host.text(text)})`);
+    const bytes = this.host.text(text);
+    this.host.emit(`call void @fsh_rt_str_print(i32 ${this.stream}, ptr ${bytes})`);
   }
 
   flush(this: Mut<this>): void {
     if (this.format === "") return;
-    this.host.emit(this.stream === 1 ? `call i32 (ptr, ...) @printf(ptr ${this.host.cString(this.format)}${this.values.join("")})` : `call i32 (i32, ptr, ...) @dprintf(i32 2, ptr ${this.host.cString(this.format)}${this.values.join("")})`);
+    const format = this.host.cString(this.format);
+    this.host.emit(this.stream === 1 ? `call i32 (ptr, ...) @printf(ptr ${format}${this.values.join("")})` : `call i32 (i32, ptr, ...) @dprintf(i32 2, ptr ${format}${this.values.join("")})`);
     this.format = "";
     this.values = [];
   }

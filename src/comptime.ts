@@ -2006,7 +2006,7 @@ function isTable(v: Ref<Value>): v is Table {
   return v !== null && typeof v === "object" && v.kind === "map";
 }
 
-function isMember(v: Ref<Value>): v is Member {
+export function isMember(v: Ref<Value>): v is Member {
   return v !== null && typeof v === "object" && v.kind === "member";
 }
 

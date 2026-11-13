@@ -291,7 +291,8 @@ export class Lowering<H extends Builder> {
     const ok = this.host.label();
     this.host.emit(`br i1 ${condition}, label %${fail}, label %${ok}`);
     this.host.startBlock(fail);
-    this.host.mayPanic(`call void @fsh_rt_panic(ptr ${this.host.cString(`panicked at ${this.host.where(at)}:\n${reason}\n`)})`);
+    const message = this.host.cString(`panicked at ${this.host.where(at)}:\n${reason}\n`);
+    this.host.mayPanic(`call void @fsh_rt_panic(ptr ${message})`);
     this.host.emit("unreachable");
     this.host.startBlock(ok);
   }
