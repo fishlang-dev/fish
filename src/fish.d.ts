@@ -18,6 +18,7 @@ type f64 = number;
 type Lifetime = unknown;
 type Ref<T, L extends Lifetime = Lifetime> = T;
 type Mut<T, L extends Lifetime = Lifetime> = T;
+type Own<T> = T;
 type Brand<T, Tag> = T & { readonly __brand?: Tag };
 // Fish's JSON.parse<T>, which checks the value against T as it parses it; TypeScript takes the
 // text's word for it, so code reading it still checks what it can't trust.

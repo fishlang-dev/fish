@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -27,18 +27,25 @@ const UNITS: { source: string; flags: string[] }[] = [
 
 // FISH_CACHE_DIR, else the user's cache directory, else the system's temporary one.
 export function cacheDir(): string {
-  if (process.env.FISH_CACHE_DIR) return process.env.FISH_CACHE_DIR;
-  const base = process.env.XDG_CACHE_HOME || (homedir() ? join(homedir(), ".cache") : tmpdir());
+  const given = process.env.FISH_CACHE_DIR;
+  if (given !== undefined && given !== "") return given;
+  const xdg = process.env.XDG_CACHE_HOME;
+  const home = homedir();
+  const base = xdg !== undefined && xdg !== "" ? xdg : home !== "" ? join(home, ".cache") : tmpdir();
   return join(base, "fish");
 }
 
+/** @throws {IoError} */
 export function files(dir: string): string[] {
-  return readdirSync(dir)
-    .sort()
-    .flatMap((name) => {
-      const path = join(dir, name);
-      return statSync(path).isDirectory() ? files(path) : [path];
-    });
+  let names = readdirSync(dir);
+  names.sort();
+  let found: string[] = [];
+  for (const name of names) {
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) found = found.concat(files(path));
+    else found.push(path);
+  }
+  return found;
 }
 
 // One object clang compiles and the cache keeps: `args` are its flags and input, `stdin` its source
@@ -52,44 +59,58 @@ export type Unit = { name: string; args: string[]; stdin?: string; inputs: strin
 export type BuildSession = Session & { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
 
 // `session` given the caches building needs, keeping any it already has.
-export function buildSession(session: Session & Partial<BuildSession>): BuildSession {
-  session.digests ??= new Map();
-  return session as BuildSession;
+export function buildSession(session: Session & { clang?: string; digests?: Map<string, string>; mathUnits?: Unit[] }): BuildSession {
+  return { ...session, digests: session.digests ?? new Map<string, string>() };
 }
 
 // `clang --version`, which names the target as well as the compiler, run once a session.
-function clangVersion(session: BuildSession): string {
-  if (session.clang !== undefined) return session.clang;
+/** @throws {Error | IoError} */
+function clangVersion(session: Mut<BuildSession>): string {
+  const known = session.clang;
+  if (known !== undefined) return known;
   const clang = Bun.spawnSync(["clang", "--version"]);
-  if (clang.exitCode !== 0) throw new Error(`clang failed:\n${clang.stderr.toString()}`);
-  return (session.clang = clang.stdout.toString());
+  if (clang.exitCode !== 0) throw new Error(`clang failed:\n${new TextDecoder().decode(clang.stderr)}`);
+  const version = new TextDecoder().decode(clang.stdout);
+  session.clang = version;
+  return version;
 }
 
 // Remembered by size and modification time too, so an edit in a long-lived session is seen.
-function digestOf({ digests }: BuildSession, path: string): string {
+/** @throws {IoError} */
+function digestOf(session: Mut<BuildSession>, path: string): string {
   const { size, mtimeMs } = statSync(path);
   const key = `${path}:${size}:${mtimeMs}`;
-  let digest = digests.get(key);
-  if (digest === undefined) digests.set(key, (digest = createHash("sha256").update(readFileSync(path)).digest("hex")));
+  const known = session.digests.get(key);
+  if (known !== undefined) return known;
+  const digest = createHash("sha256").update(readFileSync(path)).digest("hex");
+  session.digests.set(key, digest);
   return digest;
 }
 
 // Where a unit's object lives, named by a hash of clang, the target, the flags and every source
 // text, so a change to any of them is a new object rather than a stale one.
-function objectPath(session: BuildSession, u: Unit): string {
-  const hash = createHash("sha256").update(clangVersion(session)).update(u.args.join("\0")).update("\0").update(u.stdin ?? "").update("\0");
-  for (const f of u.inputs) hash.update(f).update(digestOf(session, f));
+/** @throws {Error | IoError} */
+export function objectPath(session: Mut<BuildSession>, u: Ref<Unit>): string {
+  const version = clangVersion(session);
+  let hash = createHash("sha256");
+  hash.update(version).update(u.args.join("\0")).update("\0").update(u.stdin ?? "").update("\0");
+  for (const f of u.inputs) {
+    const digest = digestOf(session, f);
+    hash.update(f).update(digest);
+  }
   return join(cacheDir(), "objects", `${u.name}-${hash.digest("hex").slice(0, 16)}.o`);
 }
 
 // Each object is built into a file of its own, then renamed into place, so builds running at
 // once never see one half-written, and a failed build leaves nothing behind.
+/** @throws {IoError} */
 export function partial(out: string): string {
   mkdirSync(dirname(out), { recursive: true });
-  return `${out}.${process.pid}.${Math.random().toString(36).slice(2)}`;
+  return `${out}.${randomUUID()}`;
 }
 
-function finish(u: Unit, code: i64 | null, stderr: string, temp: string, out: string) {
+/** @throws {Error | IoError} */
+function finish(u: Ref<Unit>, code: i64 | null, stderr: string, temp: string, out: string) {
   if (code !== 0) {
     rmSync(temp, { force: true });
     throw new Error(`clang failed building ${u.name}:\n${stderr}`);
@@ -97,26 +118,30 @@ function finish(u: Unit, code: i64 | null, stderr: string, temp: string, out: st
   renameSync(temp, out);
 }
 
-const command = (u: Unit, temp: string) => ["clang", ...u.args, "-c", "-o", temp];
-const input = (u: Unit) => (u.stdin === undefined ? undefined : new TextEncoder().encode(u.stdin));
+const command = (u: Ref<Unit>, temp: string): string[] => ["clang", ...u.args, "-c", "-o", temp];
+const input = (u: Ref<Unit>): Uint8Array | undefined => (u.stdin === undefined ? undefined : new TextEncoder().encode(u.stdin));
 
 // Clang runs in an empty directory of its own, since a quoted include in source read from stdin
 // is looked for in the working directory, which no key covers.
-const emptyDir = () => mkdtempSync(join(tmpdir(), "fish-cc-"));
+/** @throws {IoError} */
+function emptyDir(): string {
+  return mkdtempSync(join(tmpdir(), "fish-cc-"));
+}
 
 // The unit's object, compiled first if the cache has none.
-export function cachedObject(session: BuildSession, u: Unit): string {
+/** @throws {Error | IoError} */
+export function cachedObject(session: Mut<BuildSession>, u: Unit): string {
   const out = objectPath(session, u);
   if (existsSync(out)) {
-    if (session.timings) session.timings.objects.cached++;
+    if (session.timings !== undefined) session.timings!.objects.cached++;
     return out;
   }
-  session.timings?.objects.built.push(u.name);
+  if (session.timings !== undefined) session.timings!.objects.built.push(u.name);
   const temp = partial(out);
   const cwd = emptyDir();
   try {
     const clang = Bun.spawnSync(command(u, temp), { stdin: input(u), cwd });
-    finish(u, clang.exitCode, clang.stderr.toString(), temp, out);
+    finish(u, clang.exitCode, new TextDecoder().decode(clang.stderr), temp, out);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
@@ -126,8 +151,15 @@ export function cachedObject(session: BuildSession, u: Unit): string {
 // `cachedObject`, without blocking. A lock file beside the object keeps builds running at once, in
 // this process or another, from compiling it twice: the rest wait for it to be there instead.
 /** @throws {Error | IoError} */
-export async function cachedObjectAsync(session: BuildSession, u: Unit): Promise<string> {
+export async function cachedObjectAsync(session: Mut<BuildSession>, u: Unit): Promise<string> {
   const out = objectPath(session, u);
+  return await objectAsync(u, out);
+}
+
+// The object at `out`, `objectPath`'s for `u`, compiled first if the cache has none. It reads no
+// session, so builds running at once can each wait on their own.
+/** @throws {Error | IoError} */
+export async function objectAsync(u: Ref<Unit>, out: string): Promise<string> {
   const lock = `${out}.lock`;
   while (!existsSync(out)) {
     if (!claimed(lock)) {
@@ -157,7 +189,7 @@ function claimed(lock: string): boolean {
     return true;
   } catch (_e) {
     try {
-      if (Date.now() - statSync(lock).mtimeMs > 300_000) rmSync(lock, { force: true });
+      if ((Date.now() as f64) - statSync(lock).mtimeMs > 300_000) rmSync(lock, { force: true });
     } catch (_gone) {
       // Removed by its build in the meantime.
     }
@@ -166,7 +198,7 @@ function claimed(lock: string): boolean {
 }
 
 /** @throws {Error | IoError} */
-async function compiledAsync(u: Unit, out: string): Promise<void> {
+async function compiledAsync(u: Ref<Unit>, out: string): Promise<void> {
   const temp = partial(out);
   const cwd = emptyDir();
   try {
@@ -181,22 +213,39 @@ async function compiledAsync(u: Unit, out: string): Promise<void> {
   rmSync(cwd, { recursive: true, force: true });
 }
 
-function units(session: BuildSession): Unit[] {
-  if (session.mathUnits) return session.mathUnits;
+/** @throws {IoError} */
+function units(session: Mut<BuildSession>): Unit[] {
+  const known: Ref<Unit[] | undefined> = session.mathUnits;
+  if (known !== undefined) return [...known];
   const inputs = [...files(LLVM_LIBC), ...files(join(CORE_MATH, "src"))];
   // A quoted include is looked for beside its source first, so the source's whole directory is
   // hashed.
-  session.mathUnits = UNITS.map(({ source, flags }) => ({ name: basename(source).replace(/\.\w+$/, ""), args: [...flags, source], inputs: [...files(dirname(source)), ...inputs] }));
-  return session.mathUnits;
+  let made: Unit[] = [];
+  for (const { source, flags } of UNITS) made.push({ name: basename(source).replace(/\.\w+$/, ""), args: [...flags, source], inputs: [...files(dirname(source)), ...inputs] });
+  session.mathUnits = [...made];
+  return made;
 }
 
 // The objects to link, built first if this clang and target have none yet. `target` is the
 // clang flags of a target other than the host's.
-export function mathObjects(session: BuildSession, target: string[] = []): string[] {
-  return units(session).map((u) => cachedObject(session, target.length === 0 ? u : { ...u, args: [...target, ...u.args] }));
+/** @throws {Error | IoError} */
+export function mathObjects(session: Mut<BuildSession>, target: string[] = []): string[] {
+  let objects: string[] = [];
+  for (const u of units(session)) objects.push(cachedObject(session, target.length === 0 ? u : { ...u, args: [...target, ...u.args] }));
+  return objects;
 }
 
-// `mathObjects`, without blocking.
-export function mathObjectsAsync(session: BuildSession): Promise<string[]> {
-  return Promise.all(units(session).map((u) => cachedObjectAsync(session, u)));
+// `mathObjects`, without blocking: every path is found first, then each object compiled in turn.
+// ponytail: one at a time, as Fish can't map to promises yet; Promise.all over them once it can.
+/** @throws {Error | IoError} */
+export async function mathObjectsAsync(session: Mut<BuildSession>): Promise<string[]> {
+  const all = units(session);
+  let outs: string[] = [];
+  for (const u of all) outs.push(objectPath(session, u));
+  let objects: string[] = [];
+  for (let i: usize = 0; i < all.length; i++) {
+    const object = await objectAsync(all[i]!, outs[i]!);
+    objects.push(object);
+  }
+  return objects;
 }

@@ -25,7 +25,7 @@ function identifiers(text: string | undefined): (string | u64)[] | undefined {
   return parts.map((p): string | u64 => (/^\d+$/.test(p) ? whole(p) : p));
 }
 
-export const formatVersion = (v: Version) => `${v.major}.${v.minor}.${v.patch}${v.pre.length > 0 ? `-${v.pre.join(".")}` : ""}`;
+export const formatVersion = (v: Ref<Version>): string => `${v.major}.${v.minor}.${v.patch}${v.pre.length > 0 ? `-${v.pre.join(".")}` : ""}`;
 
 // Precedence as semver 2.0 orders it: a pre-release before its release, numeric identifiers
 // below alphanumeric ones, a shorter list of identifiers first when the rest are equal.
