@@ -394,8 +394,8 @@ function params(list: Record<string, unknown>[], note: (id: string, offset: usiz
   }
 }
 
-// What a scan of one file at `path` notes as it goes: the `process.env` nodes read by key, which
-// Fish takes (any other use of it, it doesn't), and the destructuring assignments written as
+// What a scan of one file at `path` notes as it goes: the `process.env` nodes read by key or whole
+// through Object.entries and Object.keys, which Fish takes (any other use of it, it doesn't), and the destructuring assignments written as
 // statements of their own.
 type Scanning = { path: string; envKeys: WeakSet<object>; statementDestructures: WeakSet<object>; metaRead: WeakSet<object>; ownBun: boolean };
 
@@ -421,9 +421,13 @@ function classify({ path, envKeys, statementDestructures, metaRead, ownBun }: Sc
   const at = n.kind === "call" && isNode(n.callee) && n.callee.kind === "member" ? n.callee.end - String(n.callee.name).length : n.start;
   const push = (id: string) => found.push([id, at]);
   switch (n.kind) {
-    case "call":
+    case "call": {
       callRules(n, push);
+      // Object.entries(process.env) and Object.keys(process.env) read the whole environment.
+      const whole = (n.args as unknown[])[0];
+      if (isNode(n.callee) && n.callee.kind === "member" && named(n.callee.object, "Object") && ["entries", "keys"].includes(n.callee.name as string) && isNode(whole) && whole.kind === "member" && named(whole.object, "process") && whole.name === "env") envKeys.add(whole);
       break;
+    }
     case "new":
       if (["WeakMap", "WeakSet"].some((name) => named(n.callee, name))) push("collections");
       break;

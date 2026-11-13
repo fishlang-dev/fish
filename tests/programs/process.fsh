@@ -65,3 +65,13 @@ function main() {
   const a = process.arch;
   console.log(p === "darwin" || p === "linux", a === "arm64" || a === "x64", platform === p, process.execPath === process.argv[0]);
 }
+// case: process_env_entries
+// The runner sets FISH_LEAKS=1 in the environment it runs programs with.
+// expect: 1 true true
+function main() {
+  const all = Object.entries(process.env);
+  let leaks = "";
+  for (const [k, v] of all) if (k === "FISH_LEAKS") leaks = v;
+  const keys = Object.keys(process.env);
+  console.log(leaks, keys.includes("FISH_LEAKS"), keys.length === all.length);
+}

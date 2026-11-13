@@ -6169,6 +6169,8 @@ declare function fsh_rt_getenv(name: Ptr<u8>): Ptr<u8>;
 declare function fsh_rt_exit(code: i64): void;
 declare function fsh_rt_os_platform(): Ptr<u8>;
 declare function fsh_rt_os_arch(): Ptr<u8>;
+declare function fsh_rt_env_count(): i64;
+declare function fsh_rt_env_at(i: i64): Ptr<u8>;
 
 export function argv(): string[] {
   let all: string[] = [];
@@ -6195,6 +6197,26 @@ export function arch(): string {
 // The running program's absolute path, which process.argv also starts with.
 export function execPath(): string {
   return unsafe { fromCString(fsh_rt_arg(0)) };
+}
+
+// The whole environment, as Object.entries(process.env) and Object.keys(process.env) give it,
+// which the loader turns into calls of these. An entry with no '=', or no name before it, isn't
+// a variable.
+export function __envEntries(): [string, string][] {
+  let all: [string, string][] = [];
+  const n = unsafe { fsh_rt_env_count() };
+  for (let i: i64 = 0; i < n; i++) {
+    const entry = unsafe { fromCString(fsh_rt_env_at(i)) };
+    const at = entry.indexOf("=");
+    if (at > 0) all.push([entry.slice(0, at), entry.slice(at + 1)]);
+  }
+  return all;
+}
+
+export function __envKeys(): string[] {
+  let keys: string[] = [];
+  for (const [k, _v] of __envEntries()) keys.push(k);
+  return keys;
 }
 
 // Aborted by the first SIGINT or SIGTERM; a second exits at once with 130 or 143.

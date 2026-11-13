@@ -655,6 +655,11 @@ function lowerImportMeta(ids: Ids, statements: Stmt[], path: string, entry: bool
   rebuiltStmts(statements, rewrites);
 }
 
+// The names a module exports.
+function exportNames(from: Module): string[] {
+  return from.statements.flatMap((s) => (s.kind === "export" ? namesOf(s.body) : s.kind === "exportNamed" ? s.specifiers.map((sp) => sp.alias ?? sp.name) : []));
+}
+
 // Turns each `os.hostname` on a std module bound whole into a name imported from it, written
 // so no program can write it. A global's member the module doesn't have is left alone, since a
 // local of that name may be meant; an import's is refused. Where a function's parameter, a
@@ -702,6 +707,22 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
       rewrites.replace(n as Id, { id: 0, kind: "call", callee: { id: nextId(ids), kind: "ident", name: alias, ...at }, typeArgs: [], args: [key as Expr], optional: false, ...at });
       return true;
     }
+    // `Object.entries(process.env)` and `Object.keys(process.env)`: the whole table, through the
+    // module's own function for it, where it has one.
+    if (n.kind === "call") {
+      const callee = n.callee as { kind?: string; name?: string; object?: { kind?: string; name?: string } };
+      const args = n.args as unknown[];
+      const whole = args.length === 1 ? table(args[0]) : undefined;
+      const reader = callee.name === "entries" ? "__envEntries" : callee.name === "keys" ? "__envKeys" : undefined;
+      if (whole && reader && callee.kind === "member" && callee.object?.kind === "ident" && callee.object.name === "Object" && !hidden.has("Object") && exportNames(whole.space.from).includes(reader)) {
+        const alias = `${whole.owner}:${reader}`;
+        if (!bound.has(alias)) bind(alias, whole.space.from, reader, n as unknown as Span);
+        bound.add(alias);
+        const at = { start: n.start as usize, end: n.end as usize };
+        rewrites.replace(n as Id, { id: 0, kind: "call", callee: { id: nextId(ids), kind: "ident", name: alias, ...at }, typeArgs: [], args: [], optional: false, ...at });
+        return true;
+      }
+    }
     // A call's callee is the function itself; a value member elsewhere reads through its function.
     if (n.kind === "call") {
       const callee = n.callee as Record<string, unknown>;
@@ -722,7 +743,7 @@ function throughSpaces(ids: Ids, body: Stmt[], spaces: Map<string, { from: Modul
   // `os.hostname` into the name imported from the module, called when it is a value member.
   const rewrite = (n: Record<string, unknown>, space: { from: Module; explicit: boolean }, owner: string, read: boolean): boolean => {
     const name = n.name as string;
-    const exports = space.from.statements.flatMap((s) => (s.kind === "export" ? namesOf(s.body) : s.kind === "exportNamed" ? s.specifiers.map((sp) => sp.alias ?? sp.name) : []));
+    const exports = exportNames(space.from);
     if (!exports.includes(name)) {
       // A package's module holds only the members the file uses, so what else it has isn't listed.
       if (space.explicit && space.from.whole) throw new CompileError("E0902", `'${space.from.file}' has no export '${name}'`, n.start as usize, n.end as usize);

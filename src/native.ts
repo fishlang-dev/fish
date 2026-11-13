@@ -2917,6 +2917,20 @@ const char *fsh_rt_getenv(const char *name) {
   return getenv(name);
 }
 
+// The environment's entries as "NAME=value", in the order the OS keeps them. Nothing in Fish
+// changes the environment, so environ stays as it was read.
+int64_t fsh_rt_env_count(void) {
+  extern char **environ;
+  int64_t n = 0;
+  while (environ[n]) n++;
+  return n;
+}
+
+const char *fsh_rt_env_at(int64_t i) {
+  extern char **environ;
+  return environ[i];
+}
+
 // Date.now(): the wall clock's milliseconds since the Unix epoch.
 int64_t fsh_rt_date_now(void) {
   struct timespec t;
