@@ -24,6 +24,23 @@ function* __arrayKeys<T>(xs: Ref<T[]>): Generator<i64> {
 function* __arrayValues<T>(xs: Ref<T[]>): Generator<T> {
   for (const x of xs) yield x.clone();
 }
+// Number.isNaN and its siblings, given the number as an f64.
+function __numberIsNan(x: f64): boolean {
+  return x !== x;
+}
+
+function __numberIsFinite(x: f64): boolean {
+  return x - x === 0.0;
+}
+
+function __numberIsInteger(x: f64): boolean {
+  return __numberIsFinite(x) && Math.trunc(x) === x;
+}
+
+function __numberIsSafeInteger(x: f64): boolean {
+  return __numberIsInteger(x) && Math.abs(x) <= 9007199254740991.0;
+}
+
 function __arrayChars(s: string): string[] {
   let out: string[] = [];
   for (const c of s) out.push(c);
@@ -6607,7 +6624,7 @@ function renameOf(renaming: Ref<Renaming>, kind: string, name: string): string |
   if (renaming.kind === "json") return (kind === "ref" || kind === "typeAlias") && name === "JsonValue" ? JSON_VALUE_NAME : undefined;
   if (renaming.kind === "own") return (kind === "class" || kind === "ident" || kind === "ref") && renaming.names.has(name) ? `std ${name}` : undefined;
   const helper = kind === "function" || kind === "ident" || kind === "typeAlias" || kind === "ref" || kind === "field" || kind === "member";
-  if (!helper || !/^__(array|iter|promise|timer|timeout|router|url|date)/.test(name)) return undefined;
+  if (!helper || !/^__(array|iter|promise|timer|timeout|router|url|date|number)/.test(name)) return undefined;
   let out = "";
   for (const c of name.slice(2)) out += c >= "A" && c <= "Z" ? ` ${c.toLowerCase()}` : c;
   return out;

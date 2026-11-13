@@ -440,6 +440,24 @@ export const MATH_FLOAT: Record<string, usize> = {
   sin: 1, cos: 1, tan: 1, asin: 1, acos: 1, atan: 1, sinh: 1, cosh: 1, tanh: 1, asinh: 1, acosh: 1, atanh: 1,
   pow: 2, atan2: 2, hypot: 2,
 };
+// Number's constants, as the literals they stand for: the safe integers adapt to the integer
+// type around them as a written literal does, and the rest are f64.
+const NUMBER_CONSTANTS = ["MAX_SAFE_INTEGER", "MIN_SAFE_INTEGER", "EPSILON", "MAX_VALUE", "MIN_VALUE", "POSITIVE_INFINITY", "NEGATIVE_INFINITY", "NaN"];
+function numberConstant(name: string): { kind: "int"; value: bigint } | { kind: "float"; value: f64 } | undefined {
+  if (name === "MAX_SAFE_INTEGER") return { kind: "int", value: 9007199254740991n };
+  if (name === "MIN_SAFE_INTEGER") return { kind: "int", value: -9007199254740991n };
+  if (name === "EPSILON") return { kind: "float", value: 2.220446049250313e-16 };
+  if (name === "MAX_VALUE") return { kind: "float", value: 1.7976931348623157e308 };
+  if (name === "MIN_VALUE") return { kind: "float", value: 5e-324 };
+  if (name === "POSITIVE_INFINITY") return { kind: "float", value: 1 / 0 };
+  if (name === "NEGATIVE_INFINITY") return { kind: "float", value: -1 / 0 };
+  if (name === "NaN") return { kind: "float", value: 0 / 0 };
+  return undefined;
+}
+const INTEGER_MAP_NAMES = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize"];
+
+// Number's predicates, each the prelude helper it calls.
+const NUMBER_PREDICATES: Record<string, string> = { isNaN: "number is nan", isFinite: "number is finite", isInteger: "number is integer", isSafeInteger: "number is safe integer" };
 export const MATH_CONSTANTS: Record<string, f64> = {
   PI: 3.141592653589793, E: 2.718281828459045, LN2: 0.6931471805599453, LN10: 2.302585092994046, LOG2E: 1.4426950408889634, LOG10E: 0.4342944819032518, SQRT2: 1.4142135623730951, SQRT1_2: 0.7071067811865476,
 };
@@ -1753,6 +1771,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Object" && (this.ctx.lookup("Object", undefined) === undefined) && !this.ctx.classes().has("Object") && !this.ctx.byName().has("Object") && !this.ctx.byName().has("const Object") && !this.ctx.enums().has("Object")) return this.objectStatic(e, callee);
     if (callee.kind === "member" && this.isString(callee.object)) return this.stringStatic(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Rc" && (this.ctx.lookup("Rc", undefined) === undefined) && !this.ctx.classes().has("Rc") && !this.ctx.byName().has("Rc")) return this.ptrEq(e, callee);
+    if (callee.kind === "member" && this.isNumberGlobal(callee.object) && NUMBER_PREDICATES[callee.name] !== undefined) return this.numberPredicate(e, callee);
     if (callee.kind === "member" && this.isMath(callee.object)) {
       if (callee.optional || e.optional) throw new CompileError("E0505", "'Math' is always there, so its functions are called without '?.'", e.start, e.end);
       return this.mathCall(e, callee.name);
@@ -3937,6 +3956,29 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     const derives = this.cls(t as ClassType).node.derives;
     return derives !== undefined && derives.includes("Json");
+  }
+
+  // The global `Number`, unless a name of the program's hides it.
+  private isNumberGlobal(this: Mut<this>, e: Ref<Expr>): boolean {
+    return e.kind === "ident" && e.name === "Number" && this.unhidden("Number");
+  }
+
+  // `Number.isNaN(x)` and the other predicates call the prelude's on the number as an 'f64', which
+  // every sized integer converts to.
+  /** @throws {CompileError} */
+  private numberPredicate(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>): { type: Type; what: string } {
+    const what = `'Number.${callee.name}'`;
+    if (callee.optional || e.optional) throw new CompileError("E0505", "'Number' is always there, so its functions are called without '?.'", e.start, e.end);
+    if (e.typeArgs.length > 0) throw new CompileError("E0106", `${what} takes no type argument`, e.start, e.end);
+    if (e.args.length !== 1) throw new CompileError("E0504", `${what} takes one number`, e.start, e.end);
+    const a: Ref<Expr> = e.args[0]!;
+    const ids = this.ctx.tables().ids;
+    const f64: TypeNode = { id: nextId(ids), kind: "ref", name: "f64", args: [], start: a.start, end: a.end };
+    const arg: Expr = { id: nextId(ids), kind: "as", expr: cloneExpr(a), type: f64, start: a.start, end: a.end };
+    const helper: Expr = { id: nextId(ids), kind: "ident", name: NUMBER_PREDICATES[callee.name]!, start: callee.start, end: callee.end };
+    const none: TypeNode[] = [];
+    const made = this.ctx.tables().rewrites.replace(e, { ...e, callee: helper, args: [arg], typeArgs: none });
+    return this.callMade(made);
   }
 
   // The global `Math`, unless a name of the program's hides it.
@@ -8106,6 +8148,19 @@ export class Expressions<C extends Context> implements Union<C> {
       const size: Expr = { id: nextId(this.ctx.tables().ids), kind: "int", value: BigInt(typedSize(typedNamed(e.object.name)!)), start: e.start, end: e.end };
       const made = this.become(e, size);
       return this.typeOf(made);
+    }
+    if (this.isNumberGlobal(e.object) && NUMBER_PREDICATES[e.name] === undefined && e.name !== "parseInt" && e.name !== "parseFloat") {
+      const constant = numberConstant(e.name);
+      if (constant === undefined) throw new CompileError("E0503", `'Number.${e.name}' is a function, or not in Fish yet; the constants are ${NUMBER_CONSTANTS.join(", ")}`, e.start, e.end);
+      const made = this.become(e, { id: nextId(this.ctx.tables().ids), ...constant, start: e.start, end: e.end });
+      return this.typeOf(made);
+    }
+    if (e.object.kind === "ident" && (e.name === "MAX" || e.name === "MIN") && INTEGER_MAP_NAMES.includes(e.object.name) && this.unhidden(e.object.name)) {
+      const type = e.object.name as Integer;
+      const [low, high] = range(type);
+      const made = this.become(e, { id: nextId(this.ctx.tables().ids), kind: "int", value: e.name === "MAX" ? high : low, start: e.start, end: e.end });
+      this.retype(made, type, false);
+      return type;
     }
     if (this.isMath(e.object)) {
       if (MATH_CONSTANTS[e.name] === undefined) throw new CompileError("E0503", `'Math.${e.name}' is a function, or not in Fish yet; the constants are ${Object.keys(MATH_CONSTANTS).join(", ")}`, e.start, e.end);
