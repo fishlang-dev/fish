@@ -85,15 +85,15 @@ const sleepy = (imports: string, shown: string) => `${imports}async function mai
 const word = (name: string, value: string) => `export function ${name}(): string { return ${value}; }\n`;
 
 // Runs `fishc watch` in the package `name` holding `files` while `body` runs, then sends it
-// SIGTERM. The program's output is read from stderr, since its stdout is a pipe here, and so isn't
+// `signal`, SIGTERM unless given. The program's output is read from stderr, since its stdout is a pipe here, and so isn't
 // flushed until it exits. Gives the watcher's exit code.
-async function watching(d: string, args: string[], body: (err: { text: string }) => Promise<void>): Promise<number | null> {
+async function watching(d: string, args: string[], body: (err: { text: string }) => Promise<void>, signal: NodeJS.Signals = "SIGTERM"): Promise<number | null> {
   const watcher = Bun.spawn(["bun", MAIN, "watch", ...args], { cwd: d, stdout: "ignore", stderr: "pipe" });
   watchers.push(watcher);
   try {
     await body(collect(watcher.stderr));
   } finally {
-    watcher.kill("SIGTERM");
+    watcher.kill(signal);
     await watcher.exited;
   }
   return watcher.exitCode;
@@ -157,8 +157,9 @@ test("fishc watch sees a file deleted and recreated, and an entry that is missin
   });
 });
 
+const stubborn = (shown: string) => `declare function signal(sig: i32, handler: i64): i64;\nasync function main() {\n  unsafe { signal(15, 1); }\n  console.error("${shown}");\n  await sleep(600000);\n}\n`;
+
 test("a program that ignores SIGTERM is killed when the watcher quits during its restart", async () => {
-  const stubborn = (shown: string) => `declare function signal(sig: i32, handler: i64): i64;\nasync function main() {\n  unsafe { signal(15, 1); }\n  console.error("${shown}");\n  await sleep(600000);\n}\n`;
   const d = dir("stubborn", { "fish.toml": MANIFEST("stubborn"), "main.fsh": stubborn("one") });
   const binary = join(d, "target", "debug", "stubborn");
   const code = await watching(d, [], async (err) => {
@@ -169,5 +170,38 @@ test("a program that ignores SIGTERM is killed when the watcher quits during its
     await Bun.sleep(300);
   });
   expect(code).toBe(143);
+  expect(running(binary)).toBe("");
+});
+
+test("fishc watch notes a program's exit, rebuilds a burst of saves once, and exits 130 on SIGINT", async () => {
+  const exiting = (shown: string) => `function main() {\n  console.error("${shown}");\n  process.exit(3);\n}\n`;
+  const d = dir("burst", { "main.fsh": exiting("one") });
+  const code = await watching(d, ["main.fsh"], async (err) => {
+    await until(err, "[fishc] main.fsh exited with code 3; waiting for changes\n");
+    const at = err.text.length;
+    writeFileSync(join(d, "main.fsh"), exiting("two"));
+    writeFileSync(join(d, "main.fsh"), exiting("three"));
+    await until(err, "[fishc] main.fsh exited with code 3; waiting for changes\n", at);
+    await Bun.sleep(500);
+    expect(err.text.slice(at).split("\n").filter((l) => l.startsWith("[fishc] restarting:"))).toEqual(["[fishc] restarting: main.fsh changed"]);
+    expect(err.text.slice(at)).toContain("three\n");
+    expect(err.text.slice(at)).not.toContain("two\n");
+  }, "SIGINT");
+  expect(code).toBe(130);
+});
+
+test("a second signal kills a program the watcher is still giving its grace period", async () => {
+  const d = dir("second", { "fish.toml": MANIFEST("second"), "main.fsh": stubborn("one") });
+  const binary = join(d, "target", "debug", "second");
+  let quitting = 0;
+  const code = await watching(d, [], async (err) => {
+    await until(err, "one\n");
+    expect(running(binary)).not.toBe("");
+    quitting = performance.now();
+    watchers.at(-1)!.kill("SIGINT");
+    await Bun.sleep(300);
+  });
+  expect(performance.now() - quitting).toBeLessThan(1500);
+  expect(code).toBe(130);
   expect(running(binary)).toBe("");
 });

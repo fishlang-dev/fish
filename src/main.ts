@@ -854,14 +854,15 @@ else if (import.meta.main) {
       binary,
       args: programArgs,
       manifest: findManifest(dirname(resolve(entry))),
-      build: (loaded) => {
+      build: () => {
+        let loaded: string[] = [];
         try {
-          for (const w of timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, entry, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks, values.debug, loaded))) console.error(painted(w, entry, readFileSync(entry, "utf8"), "warning"));
-          return true;
+          for (const w of timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, entry, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks, values.debug, (files) => (loaded = files)))) console.error(painted(w, entry, readFileSync(entry, "utf8"), "warning"));
+          return { built: true, loaded };
         } catch (e) {
           if (e instanceof CompileError) console.error(painted(e, entry, readFileSync(entry, "utf8")));
           else console.error(`fishc: ${e instanceof Error ? e.message : e}`);
-          return false;
+          return { built: false, loaded };
         }
       },
       done: () => {
