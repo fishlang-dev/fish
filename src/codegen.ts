@@ -10077,7 +10077,11 @@ class Codegen implements PrintHost, ComptimeHost {
     function shown(x: Expr): string {
       return (x.kind === "member" ? `${shown(x.object)}.${x.name}` : x.kind === "ident" ? x.name : "this");
     }
-    for (const [at, is] of [[said, "is"], [saidNot, "is not"]] as const) {
+    const ats: string[] = [said, saidNot];
+    const iss: string[] = ["is", "is not"];
+    for (let k: usize = 0; k < ats.length; k++) {
+      const at = ats[k]!;
+      const is = iss[k]!;
       this.startBlock(at);
       const tag = this.temp();
       this.emit(`${tag} = extractvalue ${this.llvm(whole as UnionType)} ${v}, 0`);
@@ -10986,7 +10990,13 @@ class Codegen implements PrintHost, ComptimeHost {
   polled(this: Mut<this>, f: FutureType, tag: u8, v?: string, error?: string): string {
     let made = this.temp();
     this.emit(`${made} = insertvalue ${this.pollType(f)} zeroinitializer, i8 ${tag}, 0`);
-    for (const [part, at, type] of [[v, 1, this.tables.typing.rec(f).gives], [error, 2, this.tables.typing.rec(f).throws]] as const) {
+    const parts: (string | undefined)[] = [v, error];
+    const ats: usize[] = [1, 2];
+    const types: (Type | undefined)[] = [this.tables.typing.rec(f).gives, this.tables.typing.rec(f).throws];
+    for (let k: usize = 0; k < parts.length; k++) {
+      const part = parts[k];
+      const at = ats[k]!;
+      const type = types[k];
       if (part === undefined || type === undefined || type === "void") continue;
       const next = this.temp();
       this.emit(`${next} = insertvalue ${this.pollType(f)} ${made}, ${this.llvm(type)} ${part}, ${at}`);
@@ -11269,7 +11279,11 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`${bytes} = mul i64 ${n}, ${this.sizeOf(element)}`);
     this.emit(`${values} = call ptr @fsh_rt_array_zeroed(i64 ${bytes})`);
     this.emit(`${flags} = call ptr @fsh_rt_array_zeroed(i64 ${n})`);
-    for (const [slot, data] of [[valuesAt, values], [flagsAt, flags]] as const) {
+    const slots: string[] = [valuesAt, flagsAt];
+    const datas: string[] = [values, flags];
+    for (let k: usize = 0; k < slots.length; k++) {
+      const slot = slots[k]!;
+      const data = datas[k]!;
       const line5 = `store ptr ${data}, ptr ${part(this, slot, 0)}`;
       this.emit(line5);
       const line6 = `store i64 ${n}, ptr ${part(this, slot, 1)}`;
@@ -12076,7 +12090,11 @@ class Codegen implements PrintHost, ComptimeHost {
     const line2 = `${held} = select i1 ${none}, ${this.llvm(option)} ${this.convert("zeroinitializer", "null", option)}, ${this.llvm(option)} ${this.convert(path, "string", option)}`;
     this.emit(line2);
     let made = "zeroinitializer";
-    for (const [name, v] of [["message", orEmpty(this, message)], ["code", orEmpty(this, code)], ["syscall", orEmpty(this, syscall)], ["path", held]] as const) {
+    const names: string[] = ["message", "code", "syscall", "path"];
+    const vs: string[] = [orEmpty(this, message), orEmpty(this, code), orEmpty(this, syscall), held];
+    for (let k: usize = 0; k < names.length; k++) {
+      const name = names[k]!;
+      const v = vs[k]!;
       const index = this.tables.typing.rec(io).fields.findIndex((f) => f.name === name);
       const next = this.temp();
       this.emit(`${next} = insertvalue ${this.llvm(io)} ${made}, ${this.llvm(this.tables.typing.rec(io).fields[index]!.type)} ${v}, ${index}`);
