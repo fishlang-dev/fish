@@ -24,7 +24,8 @@ function* __arrayKeys<T>(xs: Ref<T[]>): Generator<i64> {
 function* __arrayValues<T>(xs: Ref<T[]>): Generator<T> {
   for (const x of xs) yield x.clone();
 }
-// Number.isNaN and its siblings, given the number as an f64.
+// Number.isNaN and its siblings, given the number as an f64. They leave Math alone, which a
+// program may declare a Math of its own over.
 function __numberIsNan(x: f64): boolean {
   return x !== x;
 }
@@ -34,11 +35,11 @@ function __numberIsFinite(x: f64): boolean {
 }
 
 function __numberIsInteger(x: f64): boolean {
-  return __numberIsFinite(x) && Math.trunc(x) === x;
+  return __numberIsFinite(x) && x % 1.0 === 0.0;
 }
 
 function __numberIsSafeInteger(x: f64): boolean {
-  return __numberIsInteger(x) && Math.abs(x) <= 9007199254740991.0;
+  return __numberIsInteger(x) && x <= 9007199254740991.0 && x >= -9007199254740991.0;
 }
 
 function __arrayChars(s: string): string[] {
@@ -4335,7 +4336,12 @@ export class Stats {
     this.ctimeMs = times[2];
     this.birthtimeMs = times[3];
   }
-  get mtime(): Date { return new Date(Math.round(this.mtimeMs) as i64); }
+  // Math.round, as Node rounds it, written out since a program may declare its own Math.
+  get mtime(): Date {
+    const half = this.mtimeMs + 0.5;
+    const whole = half as i64;
+    return new Date((whole as f64) > half ? whole - 1 : whole);
+  }
   isFile(): boolean { return this.kind === 1; }
   isDirectory(): boolean { return this.kind === 2; }
   isSymbolicLink(): boolean { return this.kind === 3; }
