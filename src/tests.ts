@@ -61,14 +61,16 @@ export function stripTests(loaded: Mut<Loaded>) {
   }
 }
 
-// Turns each test of `modules`, in order, into a function of its own file, `test "name"`, which
-// no program can write. A test's function throws Error, so a body may throw, and is async when
-// the body is. Names are unique across the files; a second use of one is refused.
+// Turns each test of the files at `paths`, in that order, into a function of its own file,
+// `test "name"`, which no program can write. A test's function throws Error, so a body may throw,
+// and is async when the body is. Names are unique across the files; a second use of one is refused.
 /** @throws {CompileError | Error} */
-export function liftTests(compilation: Mut<Compilation>, modules: Mut<Module[]>): Test[] {
+export function liftTests(compilation: Mut<Compilation>, modules: Mut<Module[]>, paths: Ref<string[]>): Test[] {
   let tests: Test[] = [];
-  for (let at: usize = 0; at < modules.length; at++) {
-    const module: Mut<Module> = modules[at]!;
+  for (const path of paths) {
+    const at = modules.findIndex((m) => m.path === path);
+    if (at < 0) continue;
+    const module: Mut<Module> = modules[at as usize]!;
     // Each file's tests are named before any statement moves, so a refusal leaves the file as it was.
     let symbols: (string | undefined)[] = [];
     for (const s of module.statements) {
@@ -158,12 +160,13 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
   return made;
 }
 
-// Gives each file's `main` a name no program can write, since the harness is the program's
-// `main`; a test or function calling a file's `main` still reaches it.
+// Gives the `main` of each file but the first, std's aside, a name no program can write, since
+// the harness is the program's `main`; a test or function calling a file's `main` still reaches it.
 export function hideMains(compilation: Mut<Compilation>, modules: Mut<Module[]>) {
   compilation.names.madeUp.set("file main", "'main'");
-  for (let at: usize = 0; at < modules.length; at++) {
+  for (let at: usize = 1; at < modules.length; at++) {
     const m: Mut<Module> = modules[at]!;
+    if (m.path.startsWith("std:")) continue;
     renameIn(compilation.ids, m.statements, (name) => (name === "main" ? "file main" : undefined));
   }
 }

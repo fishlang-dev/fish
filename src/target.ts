@@ -14,6 +14,11 @@ export type Target = { triple: string; compile: string[]; link: string[]; ar: st
 
 export const HOST_TARGET: Target = { triple: "", compile: [], link: [], ar: "ar" };
 
+// The host as a target, made fresh for a caller to own.
+export function hostTarget(): Target {
+  return { triple: "", compile: [], link: [], ar: "ar" };
+}
+
 const osOf = (triple: string) => (triple.includes("-apple-") ? "macOS" : "Linux");
 const musl = (triple: string) => triple.endsWith("-musl");
 

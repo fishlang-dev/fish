@@ -14061,6 +14061,15 @@ export function codegen(checked: Checked, options: Options): string {
   return new Codegen(checked, options).module();
 }
 
+// `codegen`, giving back the checked program, which what is built from the IR reads after it.
+/** @throws {CompileError} */
+export function codegenChecked(checked: Checked, options: Options): { ir: string; checked: Checked } {
+  const { instances, tables, warnings } = checked;
+  let generator = new Codegen({ instances, tables, warnings: [] }, options);
+  const ir = generator.module();
+  return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings } };
+}
+
 // The runtime's breadcrumb stride, in UTF-16 units.
 const STRIDE: usize = 64;
 

@@ -5,28 +5,28 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { bodyOf } from "./arenas.ts";
 import { C_KEYWORDS, check } from "./check.ts";
-import { compiledOf, codegen, symbolIn, symbolNames } from "./codegen.ts";
-import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newTimings, objectsNote, timed, type Compilation, type Session, type Tables } from "./compilation.ts";
+import { codegenChecked, compiledOf, symbolIn, symbolNames, type Options } from "./codegen.ts";
+import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, stageEnd, stageStart, type Compilation, type Session, type Tables } from "./compilation.ts";
+import { expanded, sourced } from "./analysis.ts";
 import { cachedSession } from "./stdcache.ts";
-import { CompileError, formatError, named, type Source } from "./diag.ts";
-import { flatten, load, type Loaded } from "./modules.ts";
+import { CompileError, copyNames, formatError, type Source } from "./diag.ts";
+import { load, type Loaded, type RustCrate } from "./modules.ts";
 import { resolvePackages } from "./dependencies.ts";
 import { pack, prepare, submit, unsafeDependencies } from "./publish.ts";
 import { openIndex, registryUrl } from "./registry_index.ts";
 import { formatVersion, parseRange, maxSatisfying } from "./semver.ts";
 import { createPackage, type Edition, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.ts";
-import { expandMacros } from "./macros.ts";
 import { parse, parseWithComments, type Stmt } from "./parser.ts";
 import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.ts";
-import { cachedObject, cachedObjectAsync, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, type BuildSession, type Unit } from "./mathlib.ts";
+import { cachedObject, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, type BuildSession, type Unit } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";
-import { dockerfile, dockerfilePath, findOpenSsl, HOST_TARGET, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.ts";
+import { dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.ts";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.ts";
-import { hideMains, harnessImports, harnessMain, liftTests, runTests, stopTests, stripTests, type Test } from "./tests.ts";
+import { hideMains, harnessImports, harnessMain, liftTests, runTests, stopTests, type Test } from "./tests.ts";
 import { formatRanking, rank, readPlan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
 import { explain } from "./codes.ts";
@@ -49,173 +49,226 @@ function painted(e: CompileError, path: string, program: string, kind = "error")
 // A library C can call: an archive to link, or a shared library to load.
 export type Library = "static" | "shared";
 
-// Checks the program whose entry is `file`, with text `src`, without building it, its package's
-// tests included. The file may be one another imports, so it needs no `main`. `read` reads the
-// files it imports. Each of these entry points compiles within a `session`, whose caches it uses.
-export function analyze(session: Session, src: string, file: string, read?: (path: string) => string): { checked: Checked; sources: Source[] } {
-  const compilation = newCompilation(session);
-  const loaded = load(compilation, file, src, read);
-  return withSources(compilation, loaded.sources, () => {
-    liftTests(compilation, loaded.modules.filter((m) => m.pkg === loaded.modules[0]!.pkg && !m.path.startsWith("std:")));
-    return { checked: check(compilation, expanded(compilation, loaded, false), false, false, true), sources: loaded.sources };
-  });
+export { analyze } from "./analysis.ts";
+
+// What compiling a program gives: its IR, the checked program, and the Rust crates its calls go to.
+type Compiled = { ir: string; checked: Checked; rust: RustCrate[] };
+
+// A build session apart: what a compilation takes, and the caches only building objects reads.
+type Caches = { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
+
+function apart(session: BuildSession): { core: Session; caches: Caches } {
+  return { core: { locking: session.locking, engineHook: session.engineHook, std: session.std, timings: session.timings, failed: session.failed }, caches: { clang: session.clang, digests: session.digests, mathUnits: session.mathUnits } };
+}
+
+function together(core: Session, caches: Caches): BuildSession {
+  return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, clang: caches.clang, digests: caches.digests, mathUnits: caches.mathUnits };
 }
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
+/** @throws {CompileError | Error | IoError} */
 export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false, debug = false): string {
-  return compiled(session, src, file, release, panic, library, leaks, debug).ir;
+  return compiledIn(newCompilation(session), src, file, release, panic, library, leaks, debug).ir;
 }
 
 // Checks the program whose entry is `file` as `compile` would, generating nothing; throws its
 // first CompileError. Gives the warnings.
+/** @throws {CompileError | Error | IoError} */
 export function checkProgram(session: Session, file: string): CompileError[] {
-  const compilation = newCompilation(session);
-  const loaded = timed(session.timings, "parse", () => load(compilation, file, readFileSync(file, "utf8")));
-  const checked = withSources(compilation, loaded.sources, () => checkedProgram(compilation, expanded(compilation, loaded, false), false));
-  for (const w of checked.warnings) w.sources = loaded.sources;
-  return checked.warnings;
+  return checkedFile(session, file).warnings;
 }
 
-// `compile`, with the Rust shim the program's calls need, built when asked for.
-// `loaded` is given the files it read or looked for, whether or not it compiles.
-function compiled(session: Session, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks = false, debug = false, loaded?: (files: string[]) => void): { ir: string; checked: Checked; shim: () => Shim | undefined; warnings: CompileError[] } {
-  const compilation = newCompilation(session);
+// `checkProgram`, giving the session back with the check's timings.
+/** @throws {CompileError | Error | IoError} */
+function checkedFile(session: Session, file: string): { warnings: CompileError[]; session: Session } {
+  const { checked } = checkedSource(newCompilation(session), file, readFileSync(file, "utf8"), false);
+  return { warnings: checked.warnings, session: checked.tables.session };
+}
+
+// The program whose entry is `file`, with text `src`, loaded and checked, with each warning given
+// its files. `loaded` is given the files it read or looked for, whether or not they load.
+/** @throws {CompileError | Error | IoError} */
+function checkedSource(compilation: Compilation, file: string, src: string, library: boolean, loaded?: (files: string[]) => void): { checked: Checked; loaded: Loaded } {
+  let program = compilation;
+  let modules = loadedFrom(program, file, src, loaded);
+  let statements: Stmt[] = [];
   try {
-    return compiledIn(compilation, src, file, release, panic, library, leaks, debug);
+    statements = expanded(program, modules, library);
+  } catch (e) {
+    if (e instanceof CompileError) throw sourced(e, copyNames(program.names), modules.sources);
+    throw e;
+  }
+  let checked = checkedProgram(program, statements, library, modules.sources);
+  for (let i: usize = 0; i < checked.warnings.length; i++) checked.warnings[i]!.sources = [...modules.sources];
+  return { checked, loaded: modules };
+}
+
+// The program's files loaded, timed as the parse stage.
+/** @throws {CompileError | Error | IoError} */
+function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, loaded?: (files: string[]) => void): Loaded {
+  const started = stageStart(compilation.session);
+  try {
+    return load(compilation, file, src);
   } finally {
-    loaded?.(compilation.looked);
+    stageEnd(compilation.session, "parse", started);
+    if (loaded !== undefined) loaded([...compilation.looked]);
   }
 }
 
-function compiledIn(compilation: Compilation, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks: boolean, debug: boolean): { ir: string; checked: Checked; shim: () => Shim | undefined; warnings: CompileError[] } {
-  const { timings } = compilation.session;
-  const loaded = timed(timings, "parse", () => load(compilation, file, src));
-  return withSources(compilation, loaded.sources, () => {
-    const checked = checkedProgram(compilation, expanded(compilation, loaded, library), library);
-    for (const w of checked.warnings) w.sources = loaded.sources;
-    const ir = timed(timings, "codegen", () => {
-      const ir = bundled(codegen(checked, { src, file, release, panic, library, sources: loaded.sources, leaks, debug, failed: compilation.session.failed }), loaded);
-      return debug ? withDebugInfo(ir, src, file, loaded.sources, release) : ir;
-    });
-    return { ir, checked, shim: () => rustShim(loaded.rust, checked), warnings: checked.warnings };
-  });
+// `check` of a whole program, timed as the check stage, its errors given the program's files.
+/** @throws {CompileError} */
+function checkedProgram(compilation: Compilation, program: Stmt[], library: boolean, sources: Ref<Source[]>): Checked {
+  const started = stageStart(compilation.session);
+  let checked: Checked | undefined = undefined;
+  try {
+    checked = check(compilation, program, library ? runtimeNames() : false);
+  } catch (e) {
+    if (e instanceof CompileError) throw sourced(e, undefined, sources);
+    throw e;
+  }
+  let done: Checked = checked!;
+  stageEnd(done.tables.session, "check", started);
+  return done;
+}
+
+// The program checked and turned into IR, timed as the codegen stage, its packages bundled in and,
+// in a debug build, its debug info added.
+/** @throws {CompileError | Error | IoError} */
+function compiledIn(compilation: Compilation, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks: boolean, debug: boolean, loaded?: (files: string[]) => void): Compiled {
+  let program = compilation;
+  // What a build's codegen fails on is collected in the session's list, when it has one.
+  const failed = program.session.failed;
+  program.session.failed = undefined;
+  let made = checkedSource(program, file, src, library, loaded);
+  return generated(made.checked, made.loaded, { src, file, release, panic, library, sources: [...made.loaded.sources], leaks, debug, failed });
+}
+
+// The IR of a checked program, timed as the codegen stage, with its packages bundled in and, in a
+// debug build, its debug info added.
+/** @throws {CompileError | Error | IoError} */
+function generated(checked: Checked, loaded: Loaded, options: Options): Compiled {
+  const names = copyNames(checked.tables.names);
+  const started = stageStart(checked.tables.session);
+  let made: { ir: string; checked: Checked } | undefined = undefined;
+  try {
+    made = codegenChecked(checked, options);
+  } catch (e) {
+    if (e instanceof CompileError) throw sourced(e, names, loaded.sources);
+    throw e;
+  }
+  let done = made!;
+  let ir = bundled(done.ir, loaded);
+  if (options.debug === true) ir = withDebugInfo(ir, options.src, options.file, loaded.sources, options.release);
+  stageEnd(done.checked.tables.session, "codegen", started);
+  return { ir, checked: done.checked, rust: loaded.rust };
 }
 
 // The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
-function bundled(ir: string, loaded: Loaded): string {
+/** @throws {Error | IoError} */
+function bundled(ir: string, loaded: Ref<Loaded>): string {
   const calls = /^\s+(?:%\S+ = )?(?:call|invoke) ptr @fsh_rt_js_export\(ptr @fsh\.js\.bundle, i64 (\d+)/gm;
-  const used = [...new Set([...ir.matchAll(calls)].map((m) => Number(m[1])))].sort((a, b) => a - b);
+  let seen = new Set<usize>();
+  for (const m of ir.matchAll(calls)) seen.add(Number(m[1]) as usize);
+  const used = [...seen].sort((a, b) => (a as i64) - (b as i64));
   if (used.length === 0) return ir;
   const bytes = new TextEncoder().encode(bundle(loaded.packages, used));
-  const text = [...bytes].map((c) => (c >= 0x20 && c < 0x7f && c !== 0x22 && c !== 0x5c ? String.fromCharCode(c) : `\\${c.toString(16).padStart(2, "0").toUpperCase()}`)).join("");
+  let text = "";
+  for (const c of bytes) text += c >= 0x20 && c < 0x7f && c !== 0x22 && c !== 0x5c ? String.fromCharCode(c) : `\\${c.toString(16).padStart(2, "0").toUpperCase()}`;
   return `${ir}\n@fsh.js.bundle = private unnamed_addr constant [${bytes.length + 1} x i8] c"${text}\\00"\n`;
-}
-
-// The program's files with their macros expanded, linked into one program. Tests not lifted
-// already are left out.
-function expanded(compilation: Compilation, loaded: Loaded, library: boolean): Stmt[] {
-  const { timings } = compilation.session;
-  timed(timings, "macros", () => {
-    stripTests(loaded);
-    expandMacros(compilation, loaded, library, (round, macros) => check(round, macros, false, true));
-  });
-  return timed(timings, "check", () => flatten(compilation, loaded, library));
-}
-
-// `check` of a whole program, timed as the check stage.
-function checkedProgram(compilation: Compilation, program: Stmt[], library: boolean): Checked {
-  return timed(compilation.session.timings, "check", () => check(compilation, program, library && RUNTIME_NAMES));
-}
-
-// Runs `run`, giving a compile error it throws the program's other files to render against, and
-// the names it made up.
-function withSources<T>({ names }: Compilation, sources: Source[], run: () => T): T {
-  try {
-    return run();
-  } catch (e) {
-    if (e instanceof CompileError) named(e, names).sources = sources;
-    throw e;
-  }
 }
 
 // The C names a library's exports can't take besides C's keywords, since an export would replace
 // them: the runtime's own calls, read from its code without its comments and strings, then the
 // math and unwinding functions the IR, or LLVM lowering it, calls, which no text names, then the
 // runtime's `Math` functions and the C ones they call.
-const NATIVE_CODE = NATIVE.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, " ");
 const LOWERED = ["fma", "feclearexcept", "feraiseexcept", "pow", "powf", "fmod", "fmodf", "sqrt", "sqrtf", "floor", "floorf", "ceil", "ceilf", "trunc", "truncf", "round", "roundf", "fabs", "fabsf", "exp", "expf", "log", "logf", "sin", "sinf", "cos", "cosf", "memset", "memmove", "memcpy", "memcmp", "bzero", "abort", "exit", "fflush", "dprintf", "printf", "malloc", "calloc", "realloc", "free", "write", "qsort"];
-export const RUNTIME_NAMES = new Set([
-  ...[...NATIVE_CODE.matchAll(/\b([a-z_][a-z0-9_]*)\s*\(/g)].map((m) => m[1]!).filter((n) => !C_KEYWORDS.has(n)),
-  ...RUNTIME.flatMap((line) => /^declare [^@]*@([\w.]+)\(/.exec(line)?.[1] ?? []),
-  ...LOWERED,
-  ...MATH_RUNTIME.map((f) => `fsh_math_${f}`),
-]);
+export function runtimeNames(): Set<string> {
+  let names = new Set<string>();
+  const code = NATIVE.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, " ");
+  for (const m of code.matchAll(/\b([a-z_][a-z0-9_]*)\s*\(/g)) if (!C_KEYWORDS.has(m[1]!)) names.add(m[1]!);
+  for (const line of RUNTIME) {
+    const m = /^declare [^@]*@([\w.]+)\(/.exec(line);
+    if (m !== null) names.add(m[1]!);
+  }
+  for (const f of LOWERED) names.add(f);
+  for (const f of MATH_RUNTIME) names.add(`fsh_math_${f}`);
+  return names;
+}
 
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
 // `<name>.h` declaring its exports beside it. Gives the warnings.
-export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, debug = false): CompileError[] {
+/** @throws {CompileError | Error | IoError} */
+export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), debug = false): CompileError[] {
   const src = readFileSync(file, "utf8");
-  const compilation = newCompilation(session);
-  const loaded = load(compilation, file, src);
-  const checked = withSources(compilation, loaded.sources, () => check(compilation, expanded(compilation, loaded, true), RUNTIME_NAMES));
-  const made = withSources(compilation, loaded.sources, () => bundled(codegen(checked, { src, file, release, panic, library: true, sources: loaded.sources, debug }), loaded));
-  const ir = debug ? withDebugInfo(made, src, file, loaded.sources, release) : made;
-  const shim = rustShim(loaded.rust, checked);
-  if (shim) refuseForeignRust(target);
+  let { core, caches } = apart(session);
+  const made = compiledIn(newCompilation(core), src, file, release, panic, true, false, debug);
+  const ir = made.ir;
+  const checked: Ref<Checked> = made.checked;
+  const shim = rustShim(made.rust, checked);
+  if (shim !== undefined) refuseForeignRust(target);
   if (!existsSync(dirname(out))) throw new Error(`can't write the library: the directory '${dirname(out)}' doesn't exist`);
   const name = basename(out).replace(/^lib/, "").replace(/\.(a|so|dylib)$/, "");
-  const at = (f: string) => join(dirname(out), f);
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   const fish = join(dir, "fish.o");
   const optimize = release ? "-O2" : "-O0";
   const g = debug ? ["-g"] : [];
-  const run = (args: string[], stdin?: string) => {
-    const done = Bun.spawnSync(args, stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) });
-    if (done.exitCode !== 0) throw new Error(`${args[0]} failed:\n${done.stderr.toString()}`);
-  };
+  // A library is never timed, so its objects are built within a session holding only the caches.
+  let building = together(newSession(), caches);
   try {
-    const objects = [...runtimeUnits(ir, release, true, target).map((u) => cachedObject(session, u)), ...mathObjects(session, target.compile)];
+    let objects: string[] = [];
+    for (const u of runtimeUnits(ir, release, true, target)) objects.push(cachedObject(building, u));
+    for (const o of mathObjects(building, target.compile)) objects.push(o);
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
       const extension = darwin ? "dylib" : "so";
-      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", at(`lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim ? [shim.lib, ...shim.links] : [])], ir);
+      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", join(dirname(out), `lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : [])], ir);
     } else {
       run(["clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize, ...g], ir);
-      const archive = shim ? join(dir, "fish.a") : at(`lib${name}.a`);
-      if (target.ar !== "ar" && !Bun.which(target.ar)) throw new Error(`fishc build: a static library for ${target.triple} is archived with llvm-ar, which isn't on PATH; install LLVM and put its bin directory on PATH, or build with --lib=shared`);
+      const archive = shim !== undefined ? join(dir, "fish.a") : join(dirname(out), `lib${name}.a`);
+      if (target.ar !== "ar" && Bun.which(target.ar) === null) throw new Error(`fishc build: a static library for ${target.triple} is archived with llvm-ar, which isn't on PATH; install LLVM and put its bin directory on PATH, or build with --lib=shared`);
       run([target.ar, "rcs", archive, fish, ...objects]);
       // The shim's archive is merged in, so the library is still one file to link.
-      if (shim && process.platform === "darwin") run(["libtool", "-static", "-o", at(`lib${name}.a`), archive, shim.lib]);
-      else if (shim) run(["ar", "-M"], `CREATE ${at(`lib${name}.a`)}\nADDLIB ${archive}\nADDLIB ${shim.lib}\nSAVE\nEND\n`);
+      if (shim !== undefined && process.platform === "darwin") run(["libtool", "-static", "-o", join(dirname(out), `lib${name}.a`), archive, shim.lib]);
+      else if (shim !== undefined) run(["ar", "-M"], `CREATE ${join(dirname(out), `lib${name}.a`)}\nADDLIB ${archive}\nADDLIB ${shim.lib}\nSAVE\nEND\n`);
     }
-    writeFileSync(at(`${name}.h`), header(name, checked.tables, compiledOf(checked).filter((i) => bodyOf(checked.tables.arenas, i).exported)));
+    let exported: Ref<Instance>[] = [];
+    for (const i of compiledOf(checked)) if (bodyOf(checked.tables.arenas, i).exported) exported.push(i);
+    writeFileSync(join(dirname(out), `${name}.h`), header(name, checked.tables, exported));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-  for (const w of checked.warnings) w.sources = loaded.sources;
-  return checked.warnings;
+  return made.checked.warnings;
+}
+
+// Runs a command to its end with `stdin` as its input when given, throwing its stderr if it fails.
+/** @throws {Error | IoError} */
+function run(args: string[], stdin?: string): void {
+  const done = stdin === undefined ? Bun.spawnSync(args) : Bun.spawnSync(args, { stdin: new TextEncoder().encode(stdin) });
+  if (done.exitCode !== 0) throw new Error(`${args[0]} failed:\n${new TextDecoder().decode(done.stderr)}`);
 }
 
 // A C header declaring a library's exports, usable from C and C++. A parameter named like a C
 // keyword is left unnamed, as C allows.
-function header(name: string, tables: Tables, exports: Instance[]): string {
+function header(name: string, tables: Ref<Tables>, exports: Ref<Ref<Instance>[]>): string {
   const guard = `${/^[A-Za-z]/.test(name) ? "" : "FISH_"}${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_H`;
-  const lines = exports.map((i) => {
-    const params = bodyOf(tables.arenas, i).params.map((p) => {
-      const { type, name } = tables.arenas.localOf(i.locals.get(p)!);
-      const c = cType(tables.typing, type);
-      const named = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !C_KEYWORDS.has(name);
-      return named ? `${c}${c.endsWith("*") ? "" : " "}${name}` : c;
-    });
-    return `${cType(tables.typing, i.returns)} ${bodyOf(tables.arenas, i).name}(${params.length > 0 ? params.join(", ") : "void"});`;
-  });
+  let lines: string[] = [];
+  for (const i of exports) {
+    let params: string[] = [];
+    for (const p of bodyOf(tables.arenas, i).params) {
+      const local = tables.arenas.localOf(i.locals.get(p)!);
+      const c = cType(tables.typing, local.type);
+      const named = /^[A-Za-z_][A-Za-z0-9_]*$/.test(local.name) && !C_KEYWORDS.has(local.name);
+      params.push(named ? `${c}${c.endsWith("*") ? "" : " "}${local.name}` : c);
+    }
+    lines.push(`${cType(tables.typing, i.returns)} ${bodyOf(tables.arenas, i).name}(${params.length > 0 ? params.join(", ") : "void"});`);
+  }
   return [`#ifndef ${guard}`, `#define ${guard}`, "", "#include <stdbool.h>", "#include <stddef.h>", "#include <stdint.h>", "", "#ifdef __cplusplus", 'extern "C" {', "#endif", "", ...lines, "", "#ifdef __cplusplus", "}", "#endif", "", `#endif`, ""].join("\n");
 }
 
 // How C names a type that crosses to it. A raw pointer's target is `const` unless it is a
 // `MutPtr`, after the `*` when the target is itself a pointer; a target C has no name for is
 // `void`.
-function cType(typing: Typing, t: Type): string {
+function cType(typing: Ref<Typing>, t: Type): string {
   if (typeof t !== "string") {
     const r = typing.rec(t);
     if (r.kind !== "pointer") return "void";
@@ -224,8 +277,9 @@ function cType(typing: Typing, t: Type): string {
     const target = r.mutable ? to : pointer ? `${to}const` : `const ${to}`;
     return `${target}${target.endsWith("*") ? "" : " "}*`;
   }
-  const names: Record<string, string> = { boolean: "bool", f32: "float", f64: "double", usize: "size_t", isize: "ptrdiff_t" };
-  if (names[t]) return names[t];
+  const names = new Map<string, string>([["boolean", "bool"], ["f32", "float"], ["f64", "double"], ["usize", "size_t"], ["isize", "ptrdiff_t"]]);
+  const known = names.get(t);
+  if (known !== undefined) return known;
   if (t in INTEGERS) return t.startsWith("u") ? `uint${t.slice(1)}_t` : `int${t.slice(1)}_t`;
   return "void";
 }
@@ -235,78 +289,116 @@ function cType(typing: Typing, t: Type): string {
 // `links` names the C libraries the program's declared functions come from. With `leaks`, the
 // program reports at exit what it never freed, by where it was allocated. `loaded` is given the
 // files the program was read from, or looked for, even when it doesn't build. Gives the warnings.
-export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = HOST_TARGET, leaks = false, debug = false, loaded?: (files: string[]) => void): CompileError[] {
-  const made = compiled(session, readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, loaded);
-  const { checked, shim, warnings } = made;
+/** @throws {CompileError | Error | IoError} */
+export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), leaks = false, debug = false, loaded?: (files: string[]) => void): CompileError[] {
+  return built(session, file, out, release, panic, links, target, leaks, debug, loaded).warnings;
+}
+
+// `build`, giving the session back, with its caches and the build's timings.
+/** @throws {CompileError | Error | IoError} */
+function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, loaded?: (files: string[]) => void): { warnings: CompileError[]; session: BuildSession } {
+  let { core, caches } = apart(session);
+  let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, loaded);
   const ir = instrumented(made.ir, target);
-  const rust = shim();
-  if (rust) refuseForeignRust(target);
-  linked(session, ir, checked, out, release, links, rust, target, leaks, debug);
-  return warnings;
+  const shim = rustShim(made.rust, made.checked);
+  if (shim !== undefined) refuseForeignRust(target);
+  const split = parts(ir, made.checked, release, target);
+  let building = together(made.checked.tables.session, caches);
+  linked(building, ir, split, out, release, links, shim, target, leaks, debug);
+  return { warnings: made.checked.warnings, session: building };
 }
 
 // Cargo isn't told the target yet, so a crate would be built for the host.
-function refuseForeignRust(target: Target) {
+/** @throws {Error} */
+function refuseForeignRust(target: Ref<Target>) {
   if (target.compile.includes("-target")) throw new Error(`fishc build: Rust crates can't be built for ${target.triple} yet; build on a ${target.triple} machine, or without --target`);
 }
 
 // A build's IR as clang is given it: a release build's as one module, so `-O2` inlines across std
 // and the program, and a dev build's as the program's part, with std's part a unit of its own that
 // the cache keeps between builds.
-function parts(ir: string, checked: Checked, release: boolean, target: Target = HOST_TARGET): { std: Unit[]; program: string } {
+function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<Target>): { std: Unit[]; program: string } {
   if (release) return { std: [], program: ir };
   const arenas = checked.tables.arenas;
-  const bodies = compiledOf(checked).filter((i) => !bodyOf(arenas, i).foreign && !bodyOf(arenas, i).rust);
   const names = symbolNames(arenas);
-  const named = (std: boolean) => bodies.filter((i) => bodyOf(arenas, i).start >= STD_BASE === std).map((i) => symbolIn(arenas, i, names));
-  const { std, program } = split(ir, named(true), named(false));
-  return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"], stdin: std, inputs: [] }], program };
+  let std: string[] = [];
+  let own: string[] = [];
+  for (const i of compiledOf(checked)) {
+    const body = bodyOf(arenas, i);
+    if (body.foreign || body.rust) continue;
+    if (body.start >= STD_BASE) std.push(symbolIn(arenas, i, names));
+    else own.push(symbolIn(arenas, i, names));
+  }
+  const halves = split(ir, std, own);
+  return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"], stdin: halves.std, inputs: [] }], program: halves.program };
 }
 
-// Builds the IR `ir`, of the checked program, into the executable `out`.
-function linked(session: BuildSession, ir: string, checked: Checked, out: string, release = false, links: string[] = [], shim?: Shim, target: Target = HOST_TARGET, leaks = false, debug = false) {
-  const { timings } = session;
-  const { std, program } = parts(ir, checked, release, target);
-  const objects = timed(timings, "runtime", () => [...[...runtimeUnits(ir, release, false, target, leaks), ...std].map((u) => cachedObject(session, u)), ...mathObjects(session, target.compile)]);
+// Builds the program's IR, split into `halves`, into the executable `out`.
+/** @throws {Error | IoError} */
+function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ std: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean) {
+  const started = stageStart(session);
+  let objects: string[] = [];
+  for (const u of runtimeUnits(ir, release, false, target, leaks)) objects.push(cachedObject(session, u));
+  for (const u of halves.std) objects.push(cachedObject(session, u));
+  for (const o of mathObjects(session, target.compile)) objects.push(o);
+  stageEnd(session, "runtime", started);
   const g = debug ? ["-g"] : [];
-  const clang = (args: string[], stdin?: string) => {
-    const done = Bun.spawnSync(args, stdin === undefined ? {} : { stdin: new TextEncoder().encode(stdin) });
-    if (done.exitCode !== 0) throw new Error(`clang failed:\n${done.stderr.toString()}`);
-  };
   const tls = runtimeLinks(ir, target);
-  if (!timings) return clang([...clangArgs(out, release, links, objects, shim, target), ...tls, ...g], program);
+  if (session.timings === undefined) {
+    clang([...clangArgs(out, release, links, objects, shim, target), ...tls, ...g], halves.program);
+    return;
+  }
   // Timed, the program is compiled and linked by two clang calls, so each is measured on its own.
-  timings.notes.set("runtime", objectsNote(timings));
+  session.timings.notes.set("runtime", objectsNote(session.timings));
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   try {
     const object = join(dir, "program.o");
-    timed(timings, "compile", () => clang(["clang", ...target.compile, "-c", "-x", "ir", "-", "-o", object, "-funwind-tables", optimization(release, target), ...g], program));
-    timed(timings, "link", () => {
-      clang([...clangArgs(out, release, links, objects, shim, target, [object]), ...tls, ...g]);
-      // On macOS the debug info stays in the object, deleted below; clang gathers it into a .dSYM
-      // only when it compiles and links in one call, so it is gathered here.
-      const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
-      if (debug && darwin) clang(["dsymutil", out]);
-    });
+    const compiling = stageStart(session);
+    clang(["clang", ...target.compile, "-c", "-x", "ir", "-", "-o", object, "-funwind-tables", optimization(release, target), ...g], halves.program);
+    stageEnd(session, "compile", compiling);
+    const linking = stageStart(session);
+    clang([...clangArgs(out, release, links, objects, shim, target, [object]), ...tls, ...g]);
+    // On macOS the debug info stays in the object, deleted below; clang gathers it into a .dSYM
+    // only when it compiles and links in one call, so it is gathered here.
+    const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
+    if (debug && darwin) clang(["dsymutil", out]);
+    stageEnd(session, "link", linking);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
+// Runs clang, or a tool beside it, throwing what it printed if it fails.
+/** @throws {Error | IoError} */
+function clang(args: string[], stdin?: string): void {
+  const done = stdin === undefined ? Bun.spawnSync(args) : Bun.spawnSync(args, { stdin: new TextEncoder().encode(stdin) });
+  if (done.exitCode !== 0) throw new Error(`clang failed:\n${new TextDecoder().decode(done.stderr)}`);
+}
+
 // `build`, with clang run without blocking, so several builds can go at once.
+/** @throws {CompileError | Error | IoError} */
 export async function buildAsync(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []): Promise<CompileError[]> {
-  const { ir, checked, shim, warnings } = compiled(session, readFileSync(file, "utf8"), file, release, panic, false);
-  const { std, program } = parts(ir, checked, release);
-  const objects = (await Promise.all([...[...runtimeUnits(ir, release), ...std].map((u) => cachedObjectAsync(session, u)), mathObjectsAsync(session)])).flat();
-  const clang = Bun.spawn([...clangArgs(out, release, links, objects, shim()), ...runtimeLinks(ir, HOST_TARGET)], { stdin: new TextEncoder().encode(program), stderr: "pipe" });
-  const [code, stderr] = await Promise.all([clang.exited, new Response(clang.stderr).text()]);
+  let { core, caches } = apart(session);
+  let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, false, false);
+  const host = hostTarget();
+  const halves = parts(made.ir, made.checked, release, host);
+  const shim = rustShim(made.rust, made.checked);
+  let building = together(made.checked.tables.session, caches);
+  // ponytail: each object in turn, as Fish can't map to promises yet; Promise.all over them once it can.
+  let objects: string[] = [];
+  for (const u of runtimeUnits(made.ir, release)) objects.push(await objectAsync(u, objectPath(building, u)));
+  for (const u of halves.std) objects.push(await objectAsync(u, objectPath(building, u)));
+  for (const o of await mathObjectsAsync(building)) objects.push(o);
+  const compiler = Bun.spawn([...clangArgs(out, release, links, objects, shim, host), ...runtimeLinks(made.ir, host)], { stdin: new TextEncoder().encode(halves.program), stderr: "pipe" });
+  const [code, stderr] = await Promise.all([compiler.exited, new Response(compiler.stderr).text()]);
   if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
-  return warnings;
+  return made.checked.warnings;
 }
 
 // Builds the tests of the package at `dir` into one program at `out`, unless it has none, and gives
 // them in declaration order. Every `.fsh` file of the package is loaded through a generated entry,
 // the harness, whose `main` runs one test by its index.
+/** @throws {CompileError | Error | IoError} */
 export function buildTests(session: BuildSession, dir: string, out: string): Test[] {
   let problems: string[] = [];
   const files = fishFiles(dir, problems);
@@ -315,17 +407,32 @@ export function buildTests(session: BuildSession, dir: string, out: string): Tes
   // the files' names are written from the package's directory.
   const entry = join(dir, MANIFEST);
   const src = harnessImports(dir, files);
-  const compilation = newCompilation(session);
-  const loaded = load(compilation, entry, src);
-  return withSources(compilation, loaded.sources, () => {
-    const tests = liftTests(compilation, files.map((f) => loaded.modules.find((m) => m.path === realpathSync(f))!));
+  let { core, caches } = apart(session);
+  let compilation = newCompilation(core);
+  let loaded = load(compilation, entry, src);
+  let tests: Test[] = [];
+  let program: Stmt[] = [];
+  try {
+    let paths: string[] = [];
+    for (const f of files) paths.push(realpathSync(f));
+    tests = liftTests(compilation, loaded.modules, paths);
     if (tests.length === 0) return tests;
-    hideMains(compilation, loaded.modules.slice(1).filter((m) => !m.path.startsWith("std:")));
-    loaded.modules[0]!.statements.push(...harnessMain(compilation.ids, tests, loaded.modules));
-    const checked = check(compilation, expanded(compilation, loaded, false));
-    linked(session, bundled(codegen(checked, { src, file: entry, release: false, panic: "unwind", sources: loaded.sources, harness: true }), loaded), checked, out, false, [], rustShim(loaded.rust, checked));
-    return tests;
-  });
+    hideMains(compilation, loaded.modules);
+    const main = harnessMain(compilation.ids, tests, loaded.modules);
+    for (const s of main) loaded.modules[0]!.statements.push(s);
+    program = expanded(compilation, loaded, false);
+  } catch (e) {
+    if (e instanceof CompileError) throw sourced(e, copyNames(compilation.names), loaded.sources);
+    throw e;
+  }
+  const checked = checkedProgram(compilation, program, false, loaded.sources);
+  const made = generated(checked, loaded, { src, file: entry, release: false, panic: "unwind", sources: [...loaded.sources], harness: true });
+  const shim = rustShim(made.rust, made.checked);
+  const host = hostTarget();
+  const halves = parts(made.ir, made.checked, false, host);
+  let building = together(made.checked.tables.session, caches);
+  linked(building, made.ir, halves, out, false, [], shim, host, false, false);
+  return tests;
 }
 
 // Runs the tests of the package at `dir` whose name holds `filter`, each in a process of its own.
@@ -530,7 +637,7 @@ export function runtimeLinks(ir: string, target: Target): string[] {
 // program's IR calls the engine, and the TLS and zlib halves when it calls those. They are built with unwind tables so a panic can unwind through
 // them, and position-independent when `pic`, for a library. A `--leaks` build's runtime records
 // each block's site, so it is an object of its own.
-export function runtimeUnits(ir: string, release: boolean, pic = false, target: Target = HOST_TARGET, leaks = false): Unit[] {
+export function runtimeUnits(ir: string, release: boolean, pic = false, target: Target = hostTarget(), leaks = false): Unit[] {
   const js = callsEngine(ir);
   const openssl = callsTls(ir) ? findOpenSsl(target) : undefined;
   const flags = [...target.compile, "-funwind-tables", "-pthread", optimization(release, target), ...(pic ? ["-fPIC"] : []), ...(js ? ["-I", ENGINE] : [])];
@@ -553,7 +660,7 @@ function optimization(release: boolean, target: Target): string {
 
 // Clang's command line for a program, its IR read from stdin unless `program` names it compiled
 // already, linked with `objects`.
-function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = HOST_TARGET, program: string[] = ["-x", "ir", "-"]): string[] {
+function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = hostTarget(), program: string[] = ["-x", "ir", "-"]): string[] {
   return ["clang", ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])];
 }
 
@@ -836,7 +943,7 @@ async function main(): Promise<void> {
     const binary = out ?? join(scratch!, basename(target, ".fsh"));
     let code = 1;
     try {
-      for (const w of timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, target, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks, values.debug))) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
+      for (const w of timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, target, binary, values.release, panic, values.link ?? [], hostTarget(), values.leaks, values.debug))) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
       const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
       // A signal ends it with 128 plus the signal's number, as a shell reports it.
       const signal = ran.signalCode;
@@ -862,7 +969,7 @@ async function main(): Promise<void> {
       build: () => {
         let loaded: string[] = [];
         try {
-          for (const w of timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, entry, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks, values.debug, (files) => (loaded = files)))) console.error(painted(w, entry, readFileSync(entry, "utf8"), "warning"));
+          for (const w of timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, entry, binary, values.release, panic, values.link ?? [], hostTarget(), values.leaks, values.debug, (files) => (loaded = files)))) console.error(painted(w, entry, readFileSync(entry, "utf8"), "warning"));
           return { built: true, loaded };
         } catch (e) {
           if (e instanceof CompileError) console.error(painted(e, entry, readFileSync(entry, "utf8")));

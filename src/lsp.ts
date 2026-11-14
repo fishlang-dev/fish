@@ -7,7 +7,7 @@ import { compiledOf } from "./codegen.ts";
 import { type Session } from "./compilation.ts";
 import { cachedSession } from "./stdcache.ts";
 import { CompileError, locate, shown, sourceOf, written, type Source } from "./diag.ts";
-import { analyze } from "./main.ts";
+import { analyze } from "./analysis.ts";
 import { STD_BASE } from "./std.ts";
 import type { Type } from "./typing.ts";
 

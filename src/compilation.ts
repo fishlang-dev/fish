@@ -527,18 +527,27 @@ export type Started = { timing: boolean; outer: f64; start: f64 };
 
 // Starts timing a stage of a compilation, when it is timed.
 export function timingStart(tables: Mut<Tables>): Started {
-  if (tables.session.timings === undefined) return { timing: false, outer: 0, start: 0 };
-  const outer = tables.session.timings.inner;
-  tables.session.timings.inner = 0;
-  return { timing: true, outer, start: now(tables.session.timings) };
+  return stageStart(tables.session);
 }
 
 // Adds a stage's own time to stage `name`, leaving out the stages inside it.
 export function timingEnd(tables: Mut<Tables>, name: string, started: Ref<Started>) {
-  if (!started.timing || tables.session.timings === undefined) return;
-  const spent = now(tables.session.timings) - started.start;
-  tables.session.timings.ms.set(name, (tables.session.timings.ms.get(name) ?? 0) + spent - tables.session.timings.inner);
-  tables.session.timings.inner = started.outer + spent;
+  stageEnd(tables.session, name, started);
+}
+
+// `timingStart` and `timingEnd` for a stage outside a check, timed on the session itself.
+export function stageStart(session: Mut<Session>): Started {
+  if (session.timings === undefined) return { timing: false, outer: 0, start: 0 };
+  const outer = session.timings.inner;
+  session.timings.inner = 0;
+  return { timing: true, outer, start: now(session.timings) };
+}
+
+export function stageEnd(session: Mut<Session>, name: string, started: Ref<Started>) {
+  if (!started.timing || session.timings === undefined) return;
+  const spent = now(session.timings) - started.start;
+  session.timings.ms.set(name, (session.timings.ms.get(name) ?? 0) + spent - session.timings.inner);
+  session.timings.inner = started.outer + spent;
 }
 
 // Runs `run`, adding its own time to stage `name` when timing.
