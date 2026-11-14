@@ -5996,8 +5996,7 @@ class Codegen implements PrintHost, ComptimeHost {
       return;
     }
     const object = t as ObjectType;
-    const spelled = this.writtenShape(written, t) as ObjectType | undefined;
-    const as = this.recOf(spelled)?.fields.length === this.tables.typing.rec(object).fields.length ? this.tables.typing.rec(spelled!).fields : this.tables.typing.rec(object).fields;
+    const as = this.spelledFields(written, object);
     if (this.tables.typing.isTuple(object)) {
       const [order, rest] = this.tupleOrder(object);
       const length = this.tables.typing.rec(object).required === undefined ? undefined : this.tupleLength(v, object);
@@ -6705,8 +6704,7 @@ class Codegen implements PrintHost, ComptimeHost {
       return node;
     }
     const object = t as ObjectType;
-    const spelled = this.writtenShape(written, t) as ObjectType | undefined;
-    const as = this.recOf(spelled)?.fields.length === this.tables.typing.rec(object).fields.length ? this.tables.typing.rec(spelled!).fields : this.tables.typing.rec(object).fields;
+    const as = r.kind === "class" ? [] : this.spelledFields(written, object);
     if (r.kind === "object" && this.tables.typing.isTuple(object)) {
       const [order, rest] = this.tupleOrder(object);
       const length = this.tables.typing.rec(object).required === undefined ? undefined : this.tupleLength(v, object);
@@ -6852,12 +6850,19 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // An object's fields in the order its written type spells them, when that type has as many.
+  spelledFields(written: Type, object: ObjectType): Field[] {
+    const spelled = this.writtenShape(written, object) as ObjectType | undefined;
+    const fields = this.tables.typing.rec(object).fields;
+    return (this.recOf(spelled)?.fields.length === fields.length ? this.tables.typing.rec(spelled!).fields : fields).slice();
+  }
+
   // A value past depth 2, as Node prints it there: its size, or its keys, with no parts inside.
   inspectShell(this: Mut<this>, v: string, t: Exclude<Type, string>, written: Type): string {
     const r = this.tables.typing.rec(t);
     const node = this.temp();
     if (r.kind === "array" || r.kind === "fixed") {
-      let length = String((r as FixedRecord).size);
+      let length = r.kind === "fixed" ? String(r.size) : "";
       if (r.kind === "array") {
         length = this.temp();
         this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
@@ -6878,9 +6883,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(line);
       return node;
     }
-    const spelled = this.writtenShape(written, t) as ObjectType | undefined;
-    const as = this.recOf(spelled)?.fields.length === this.tables.typing.rec(object).fields.length ? this.tables.typing.rec(spelled!).fields : this.tables.typing.rec(object).fields;
-    const fields = r.kind === "class" ? this.jsonFields(this.classShape(written, t)) : this.objectJsonFields(object, as);
+    const fields = r.kind === "class" ? this.jsonFields(this.classShape(written, t)) : this.objectJsonFields(object, this.spelledFields(written, object));
     // Past the depth, an Error is its header alone, or its class's name when it has more to show.
     if (r.kind === "class" && this.errorClass(t as ClassType)) return this.errorTree(v, t as ClassType, fields, "0", true);
     const embedded = r.kind === "class" ? this.embeddedField(t as ClassType) : undefined;
