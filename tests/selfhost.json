@@ -1,24 +1,8 @@
 {
   "failing": {
-    "astgen.ts": "only declarations are allowed at the top level; move this into main()",
-    "bundle.ts": "'Bun.build' isn't in Fish's subset of Bun yet; it has 'file', 'stdin', 'write', 'env', 'argv', 'sleepSync', 'version', 'which', 'spawnSync', 'sleep', 'serve', 'spawn'",
-    "comments.ts": "cannot find type 'object'",
-    "deps.ts": "'Object' has no 'fromEntries' yet; it has 'keys', 'values' and 'entries'",
-    "doc.ts": "'states[0]' can't be moved out of its array; use 'states[0].clone()' to take a copy, or 'pop()' to take the last element out",
-    "fmt.ts": "cannot find type 'object'",
     "lsp.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
-    "macros.ts": "a parameter with a default has to come after the required ones, since Fish calls leave out only trailing arguments",
     "main.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
-    "migrate.ts": "a parameter with a default has to come after the required ones, since Fish calls leave out only trailing arguments",
-    "modules.ts": "a parameter with a default has to come after the required ones, since Fish calls leave out only trailing arguments",
-    "printer.ts": "cannot find type 'object'",
-    "publish.ts": "a parameter with a default has to come after the required ones, since Fish calls leave out only trailing arguments",
-    "rank.ts": "a parameter with a default has to come after the required ones, since Fish calls leave out only trailing arguments",
-    "rustshim.ts": "a parameter with a default has to come after the required ones, since Fish calls leave out only trailing arguments",
-    "stdcache.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
-    "survey.ts": "a parameter with a default has to come after the required ones, since Fish calls leave out only trailing arguments",
-    "tests.ts": "a parameter with a default has to come after the required ones, since Fish calls leave out only trailing arguments",
-    "watch.ts": "'node:fs' has no export named 'watch'"
+    "stdcache.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm"
   },
-  "count": 19
+  "count": 3
 }

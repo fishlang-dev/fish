@@ -4857,7 +4857,10 @@ class Codegen implements PrintHost, ComptimeHost {
         this.pending.splice(this.floor as i64);
         for (const [via, body] of entries) {
           this.startBlock(via);
-          for (const p of held) this.dispose(this.released(p), p.type);
+          for (const p of held) {
+            const v = this.released(p);
+            this.dispose(v, p.type);
+          }
           this.emit(`br label %${body}`);
         }
         let iAt2: usize = 0;
@@ -8647,7 +8650,10 @@ class Codegen implements PrintHost, ComptimeHost {
       const made = this.pending.splice(mark as i64);
       const after = this.concat(before, piece);
       this.emit(`call void @fsh_rt_str_release(ptr ${before})`);
-      for (const p of made) this.dispose(this.released(p), p.type);
+      for (const p of made) {
+        const v = this.released(p);
+        this.dispose(v, p.type);
+      }
       this.emit(`store ptr ${after}, ptr ${out}`);
       this.emit(`br label %${next}`);
     } else {
@@ -9176,7 +9182,10 @@ class Codegen implements PrintHost, ComptimeHost {
   settle(this: Mut<this>, mark: usize = this.floor) {
     let reversed = this.pending.splice(mark as i64);
     reversed.reverse();
-    for (const p of reversed) this.dispose(this.released(p), p.type);
+    for (const p of reversed) {
+      const v = this.released(p);
+      this.dispose(v, p.type);
+    }
   }
 
   // A pending value as it is now: one whose slot is its home may have been changed there.
@@ -11136,7 +11145,10 @@ class Codegen implements PrintHost, ComptimeHost {
     const kept = toRegion ? this.finallies[at]!.floor : this.handlers.length > 0 ? this.handlers[this.handlers.length - 1]!.floor : 0;
     let reversed = this.pending.slice(kept as i64);
     reversed.reverse();
-    for (const p of reversed) this.dispose(this.released(p), p.type);
+    for (const p of reversed) {
+      const v = this.released(p);
+      this.dispose(v, p.type);
+    }
     if (toRegion) {
       this.drop(this.finallies[at]!.depth);
       const kept = this.stash("error", to, error);
@@ -12499,11 +12511,12 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`store ${type} ${v}, ptr ${spilled}`);
     // A temporary borrowed for the call lives on in its slot, where a `Mut<this>` method changes
     // it, so it is released from there rather than as it was read.
-    const made = owns ? undefined : this.pending.findLast((p) => p.v === read);
-    if (made !== undefined) {
+    const made = owns ? -1 : this.pending.findLastIndex((p) => p.v === read);
+    if (made >= 0) {
+      const at = made as usize;
       this.allocas.push(`  store ${type} zeroinitializer, ptr ${spilled}`);
-      made.slot = spilled;
-      made.home = true;
+      this.pending[at]!.slot = spilled;
+      this.pending[at]!.home = true;
     }
     return spilled;
   }
