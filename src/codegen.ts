@@ -4011,7 +4011,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const returns = m.throws !== undefined ? this.throwing(gives, m.throws) : gives === "void" ? "void" : this.llvm(gives);
     const made = returns === "void" ? undefined : this.temp();
     this.unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, made);
-    const result = m.throws !== undefined ? this.unpacked(returns, made!, gives, e, {}, true) : made;
+    const result = m.throws !== undefined ? this.unpacked(returns, made!, gives, e, { after: undefined, unwound: undefined }, true) : made;
     if ((result !== undefined && result !== "") && !this.cur().types.has(e) && this.needsDrop(gives)) this.pending.push({ v: result, type: gives });
     return result;
   }
@@ -4529,7 +4529,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (g.throws !== undefined) {
       const resultType2 = this.resultType(target);
       const nextResult2 = this.tables.typing.nextResult(g.yields);
-      return this.unpacked(resultType2, result, nextResult2, raising, {}, true)!;
+      return this.unpacked(resultType2, result, nextResult2, raising, { after: undefined, unwound: undefined }, true)!;
     }
     return result;
   }
