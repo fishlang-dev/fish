@@ -1,8 +1,4 @@
 {
-  "failing": {
-    "lsp.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
-    "main.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm",
-    "stdcache.ts": "can't find the package 'bun:jsc': no 'node_modules/bun:jsc' in 'src' or any directory above it; install it with npm"
-  },
-  "count": 3
+  "failing": {},
+  "count": 0
 }
