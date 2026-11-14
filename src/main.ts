@@ -703,6 +703,33 @@ export function indented(json: string): string {
   return out;
 }
 
+// A session for one build, with the lockfile kept as it is when `locked`, and timed when `timed`.
+function sessionWith(locked: boolean, timed: boolean): BuildSession {
+  let made = cachedSession();
+  made.locking.locked = locked;
+  if (timed) made.timings = newTimings();
+  return made;
+}
+
+// What one of `fishc watch`'s builds takes.
+type Rebuild = { entry: string; binary: string; links: string[]; release: boolean; panic: Panic; leaks: boolean; debug: boolean; locked: boolean; timed: boolean };
+
+// One of `fishc watch`'s builds: whether it built, and the files it read or looked for.
+function rebuilt(r: Ref<Rebuild>): { built: boolean; loaded: string[] } {
+  let loaded: string[] = [];
+  try {
+    const start = performance.now();
+    const made = built(sessionWith(r.locked, r.timed), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded);
+    reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
+    for (const w of made.warnings) console.error(painted(w, r.entry, textOf(r.entry), "warning"));
+    return { built: true, loaded };
+  } catch (e) {
+    if (e instanceof CompileError) console.error(painted(e, r.entry, textOf(r.entry)));
+    else console.error(`fishc: ${(e as { message: string }).message}`);
+    return { built: false, loaded };
+  }
+}
+
 // A file's text to show an error against, or none when it can't be read, as when it was removed
 // while being watched.
 function textOf(path: string): string {
@@ -874,12 +901,9 @@ async function main(): Promise<void> {
   for (const [k, v] of Object.entries(values)) if (v !== undefined) flags.push(k);
   const links: string[] = values.link === undefined ? [] : [...values.link];
   // Each build compiles within a session of its own, since a check uses up the one it is given.
-  const sessionFor = (): BuildSession => {
-    let made = cachedSession();
-    made.locking.locked = values.locked === true;
-    if (values.timings === true) made.timings = newTimings();
-    return made;
-  };
+  const locked = values.locked === true;
+  const timed = values.timings === true;
+  const sessionFor = (): BuildSession => sessionWith(locked, timed);
   // `fishc run` and `fishc watch` take the program's arguments after the file, or all of them with no file.
   const command = positionals.length > 0 ? positionals[0] : undefined;
   const named = positionals.length > 1 ? positionals[1] : undefined;
@@ -1119,25 +1143,14 @@ async function main(): Promise<void> {
     const entry = target;
     const scratch = out === undefined ? mkdtempSync(join(tmpdir(), "fishc-watch-")) : undefined;
     const binary = out ?? join(scratch!, basename(entry, ".fsh"));
+    // What each build takes, the callback's own, since it may run on another thread.
+    const rebuild: Rebuild = { entry: `${entry}`, binary: `${binary}`, links: [...links], release, panic, leaks, debug: values.debug === true, locked, timed };
     await watchProgram({
       entry,
       binary,
       args: programArgs,
       manifest: findManifest(dirname(resolve(entry))),
-      build: () => {
-        let loaded: string[] = [];
-        try {
-          const start = performance.now();
-          const made = built(sessionFor(), entry, binary, release, panic, [...links], hostTarget(), leaks, values.debug === true, loaded);
-          reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
-          for (const w of made.warnings) console.error(painted(w, entry, textOf(entry), "warning"));
-          return { built: true, loaded };
-        } catch (e) {
-          if (e instanceof CompileError) console.error(painted(e, entry, textOf(entry)));
-          else console.error(`fishc: ${(e as { message: string }).message}`);
-          return { built: false, loaded };
-        }
-      },
+      build: () => rebuilt(rebuild),
       done: () => {
         if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
       },
