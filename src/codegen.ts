@@ -1211,8 +1211,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       const key = parts.join("|");
       if (!groups.has(key)) groups.set(key, []);
-      let group = groups.get(key)!;
-      group.push(i);
+      groups.set(key, [...groups.get(key)!, i]);
     }
     let out = new Map<InstanceId, Share>();
     for (const group of groups.values()) {
@@ -7549,8 +7548,7 @@ class Codegen implements PrintHost, ComptimeHost {
         groups.set(variant.enum, []);
         parts.push({ member: m, group: variant.enum });
       }
-      let group = groups.get(variant.enum)!;
-      group.push(m);
+      groups.set(variant.enum, [...groups.get(variant.enum)!, m]);
     }
     for (const part of parts) {
       const m = part.group === "" ? part.member : this.tables.typing.unionType([...groups.get(part.group)!]);
@@ -11260,8 +11258,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (this.resuming !== undefined) this.resuming.resumes.push(poll);
     const resumed = this.resuming!.resumes.length;
     if (!this.awaitsOf.has(this.current)) this.awaitsOf.set(this.current, []);
-    let awaited = this.awaitsOf.get(this.current)!;
-    awaited.push({ state: resumed, field, type: inner });
+    this.awaitsOf.set(this.current, [...this.awaitsOf.get(this.current)!, { state: resumed, field, type: inner }]);
     this.emit(`br label %${poll}`);
     this.startBlock(poll);
     const step = this.pollStep(inner, at, { start: e.start, end: e.end });
