@@ -8010,11 +8010,12 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size);
   // The reactor is ready before any task can wait on a socket.
   fsh_io_start();
-  // Workers get the main thread's 8 MiB stack, not the smaller default for other threads, since
-  // an async main's calls run on them.
+  // Workers get 64 MiB stacks, since main's calls run on them: deep recursion, as a compiler's
+  // over a program's tree, goes as far as it does under a JavaScript engine. Only the pages a
+  // thread touches are ever committed.
   pthread_attr_t attr;
   pthread_attr_init(&attr);
-  pthread_attr_setstacksize(&attr, 8 << 20);
+  pthread_attr_setstacksize(&attr, 64 << 20);
   for (int64_t i = 0; i < fsh_workers; i++) pthread_create(&fsh_threads[i], &attr, fsh_work, (void *)i);
   pthread_attr_destroy(&attr);
   pthread_create(&fsh_timer_thread, NULL, fsh_timing, NULL);
