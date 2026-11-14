@@ -597,13 +597,13 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
           if (failed !== undefined) {
             const target = resolve(path);
             settled.delete(target);
-            const pointing = importers.get(target) ?? noFiles;
+            const pointing = importers.get(target) ?? [...noFiles];
             const stranded = pointing.length > 0 ? `; ${pointing.map((p) => `'${p}'`).join(", ")} already import${pointing.length === 1 ? "s" : ""} its '.fsh' name, which isn't there` : "";
             problem(`fishc lint: can't write '${shown}': ${failed}${stranded}`);
             continue;
           }
         }
-        for (const target of settledImports(path, src, settled)) importers.set(target, [...(importers.get(target) ?? noFiles), to !== undefined ? fromHere(to) : shown]);
+        for (const target of settledImports(path, src, settled)) importers.set(target, [...(importers.get(target) ?? [...noFiles]), to !== undefined ? fromHere(to) : shown]);
         if (fixed > 0) console.log(`fixed ${fixed} in ${shown}`);
         if (to !== undefined) {
           at = to;
@@ -953,7 +953,7 @@ async function main(): Promise<void> {
     const found = findManifest(process.cwd()) ?? fail(`fishc publish: no ${MANIFEST} here or in any directory above; publish runs inside a package`);
     try {
       const packed = pack(found, values["allow-dirty"] === true);
-      console.log(`packed ${packed.manifest.name} ${packed.manifest.version}: ${packed.files.length} files, ${Math.ceil(packed.bytes.length / 1024)} KiB, sha256 ${packed.sha256}`);
+      console.log(`packed ${packed.manifest.name} ${packed.manifest.version}: ${packed.files.length} files, ${Math.ceil((packed.bytes.length as f64) / 1024)} KiB, sha256 ${packed.sha256}`);
       for (const f of packed.files) console.log(`  ${f}`);
       console.log(`wrote ${relative(process.cwd(), packed.file)}`);
       const deps = unsafeDependencies(packed.manifest);
