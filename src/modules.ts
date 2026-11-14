@@ -746,7 +746,7 @@ export function flatten(compilation: Mut<Compilation>, loaded: Mut<Loaded>, libr
       if (pinned !== null) {
         const meant = String(pinned[1]);
         const there = Number(String(pinned[2]));
-        const d = there !== null && there < (all.length as number) ? local(all, there as usize, meant, new Set<string>()) : undefined;
+        const d = there !== null && there < (all.length as f64) ? local(all, there as usize, meant, new Set<string>()) : undefined;
         if (d !== undefined) to.set(name, d.unique);
         continue;
       }

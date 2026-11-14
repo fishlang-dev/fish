@@ -3958,7 +3958,7 @@ export const BUFFER_READS: Record<string, string> = {
 export const BUFFER_ENCODINGS = ["utf8", "utf-8", "hex", "base64", "base64url", "latin1", "binary", "ascii"];
 // Node's Buffer methods a Uint8Array lacks and std doesn't have yet, refused by name.
 export const BUFFER_REFUSED = new Set([
-  ...Object.keys(BUFFER_READS).map((n) => `write${n.slice(4)}`),
+  "writeUInt8", "writeUint8", "writeInt8", "writeUInt16LE", "writeUInt16BE", "writeUint16LE", "writeUint16BE", "writeInt16LE", "writeInt16BE", "writeUInt32LE", "writeUInt32BE", "writeUint32LE", "writeUint32BE", "writeInt32LE", "writeInt32BE", "writeBigUInt64LE", "writeBigUInt64BE", "writeBigUint64LE", "writeBigUint64BE", "writeBigInt64LE", "writeBigInt64BE", "writeFloatLE", "writeFloatBE", "writeDoubleLE", "writeDoubleBE",
   "readUIntLE", "readUIntBE", "readIntLE", "readIntBE", "writeUIntLE", "writeUIntBE", "writeIntLE", "writeIntBE",
   "write", "copy", "toJSON", "swap16", "swap32", "swap64", "toLocaleString", "inspect",
 ]);
