@@ -176,7 +176,6 @@ type RustGiven = { kind: "dispose" | "array" | "optionArray"; v: string; t: Type
 // What runs around a call: `after` once it is over, however it ended, and `unwound` only when it
 // panicked or raised.
 type Hooks = { after?: (cg: Mut<Codegen>) => void; unwound?: (cg: Mut<Codegen>) => void };
-const NO_HOOKS: Hooks = {};
 
 // A failure that has nothing read before it to drop.
 function noUndo(_cg: Mut<Codegen>): void {}
@@ -4012,7 +4011,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const returns = m.throws !== undefined ? this.throwing(gives, m.throws) : gives === "void" ? "void" : this.llvm(gives);
     const made = returns === "void" ? undefined : this.temp();
     this.unwinding(`call ${returns} ${fn}(ptr ${data}${args})`, made);
-    const result = m.throws !== undefined ? this.unpacked(returns, made!, gives, e, NO_HOOKS, true) : made;
+    const result = m.throws !== undefined ? this.unpacked(returns, made!, gives, e, {}, true) : made;
     if ((result !== undefined && result !== "") && !this.cur().types.has(e) && this.needsDrop(gives)) this.pending.push({ v: result, type: gives });
     return result;
   }
@@ -4530,7 +4529,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (g.throws !== undefined) {
       const resultType2 = this.resultType(target);
       const nextResult2 = this.tables.typing.nextResult(g.yields);
-      return this.unpacked(resultType2, result, nextResult2, raising, NO_HOOKS, true)!;
+      return this.unpacked(resultType2, result, nextResult2, raising, {}, true)!;
     }
     return result;
   }
