@@ -1,6 +1,6 @@
 import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.ts";
 import type { Value } from "./comptime.ts";
-import type { CompileError, Names } from "./diag.ts";
+import { copyNames, type CompileError, type Names } from "./diag.ts";
 import type { Kind, Verdict } from "./narrow.ts";
 import { Rewrites, NodeMap, NodeSet, type Id, type Ids } from "./nodes.ts";
 import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.ts";
@@ -75,6 +75,8 @@ export function newCompilation(session: Session): Compilation {
 // expanding them: what linking gave the program, its counters, names and files, with types,
 // arenas and rewrites of its own. Its session holds no std tree, since linking added std already.
 export function macroCompilation(c: Ref<Compilation>): Compilation {
+  let copied = new Set<string>();
+  for (const u of c.upcasts) copied.add(u);
   let fileNames: Map<usize, Map<string, string>> | undefined = undefined;
   if (c.fileNames !== undefined) {
     let copied = new Map<usize, Map<string, string>>();
@@ -89,12 +91,12 @@ export function macroCompilation(c: Ref<Compilation>): Compilation {
     session: { locking: { locked: false }, engineHook: c.session.engineHook, std: { tree: [], cached: false, parses: 0 } },
     ids: { last: c.ids.last },
     rewrites: new Rewrites(),
-    names: { local: new Set<string>(c.names.local), madeUp: new Map<string, string>(c.names.madeUp) },
+    names: copyNames(c.names),
     regex: { properties: new Map(), folds: new Map() },
     typing: new Typing(),
     arenas: new Arenas(),
     counts: { enums: c.counts.enums, lifts: c.counts.lifts, destructures: c.counts.destructures, expansions: c.counts.expansions, constants: c.counts.constants },
-    upcasts: new Set<string>(c.upcasts),
+    upcasts: copied,
     files: c.files.map((f) => ({ base: f.base, file: f.file, src: f.src, std: f.std })),
     rust: { names: c.rust.names.copy(), classNodes: c.rust.classNodes.copy() },
     enumInits: c.enumInits.map(([a, b, name]): [usize, usize, string] => [a, b, name]),

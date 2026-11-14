@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { constants, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { bodyOf } from "./arenas.ts";
+import { bodyOf, type Arenas } from "./arenas.ts";
 import { C_KEYWORDS, check } from "./check.ts";
 import { codegenChecked, compiledOf, symbolIn, symbolNames, type Options } from "./codegen.ts";
 import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, stageEnd, stageStart, type Compilation, type Session, type Tables } from "./compilation.ts";
@@ -171,7 +171,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
 function bundled(ir: string, loaded: Ref<Loaded>): string {
   const calls = /^\s+(?:%\S+ = )?(?:call|invoke) ptr @fsh_rt_js_export\(ptr @fsh\.js\.bundle, i64 (\d+)/gm;
   let seen = new Set<usize>();
-  for (const m of ir.matchAll(calls)) seen.add(Number(m[1]!) as usize);
+  for (const m of ir.matchAll(calls)) seen.add((Number(m[1]!) ?? 0) as usize);
   const used = [...seen].sort((a, b) => (a as i64) - (b as i64));
   if (used.length === 0) return ir;
   const bytes = new TextEncoder().encode(bundle(loaded.packages, used));
@@ -219,7 +219,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
   let building = together(newSession(), caches);
   try {
     let objects: string[] = [];
-    for (const u of runtimeUnits(ir, release, true, target)) objects.push(cachedObject(building, u));
+    for (const u of runtimeUnits(ir, release, true, copyTarget(target))) objects.push(cachedObject(building, u));
     for (const o of mathObjects(building, target.compile)) objects.push(o);
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
@@ -323,7 +323,7 @@ function refuseForeignRust(target: Ref<Target>) {
 // the cache keeps between builds.
 function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<Target>): { std: Unit[]; program: string } {
   if (release) return { std: [], program: ir };
-  const arenas = checked.tables.arenas;
+  const arenas: Ref<Arenas> = checked.tables.arenas;
   const names = symbolNames(arenas);
   let std: string[] = [];
   let own: string[] = [];
@@ -390,8 +390,14 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
   let building = together(made.checked.tables.session, caches);
   // ponytail: each object in turn, as Fish can't map to promises yet; Promise.all over them once it can.
   let objects: string[] = [];
-  for (const u of runtimeUnits(made.ir, release)) objects.push(await objectAsync(u, objectPath(building, u)));
-  for (const u of halves.std) objects.push(await objectAsync(u, objectPath(building, u)));
+  for (const u of runtimeUnits(made.ir, release)) {
+    const object = await objectAsync(u, objectPath(building, u));
+    objects.push(object);
+  }
+  for (const u of halves.std) {
+    const object = await objectAsync(u, objectPath(building, u));
+    objects.push(object);
+  }
   for (const o of await mathObjectsAsync(building)) objects.push(o);
   const compiler = Bun.spawn([...clangArgs(out, release, links, objects, shim, host), ...runtimeLinks(made.ir, host)], { stdin: new TextEncoder().encode(halves.program), stderr: "pipe" });
   const [code, stderr] = await Promise.all([compiler.exited, new Response(compiler.stderr).text()]);
@@ -444,15 +450,18 @@ export function buildTests(session: BuildSession, dir: string, out: string): Tes
 /** @throws {Error | IoError} */
 async function testPackage(session: BuildSession, dir: string, filter: string | undefined): Promise<i64> {
   const out = join(mkdtempSync(join(tmpdir(), "fishc-test-")), "tests");
-  const running = new Set<i32>();
+  let running = new Set<i32>();
   // Interrupted, the tests running and what they started end, and the build is removed.
-  for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
-    process.on(signal, () => {
-      stopTests(running);
-      rmSync(dirname(out), { recursive: true, force: true });
-      process.exit(code);
-    });
-  }
+  process.on("SIGINT", () => {
+    stopTests(running);
+    rmSync(dirname(out), { recursive: true, force: true });
+    process.exit(130);
+  });
+  process.on("SIGTERM", () => {
+    stopTests(running);
+    rmSync(dirname(out), { recursive: true, force: true });
+    process.exit(143);
+  });
   try {
     const tests = buildTests(session, dir, out);
     if (tests.length === 0) {
@@ -486,7 +495,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
     console.error(message.replace(/^fishc fmt/, "fishc lint"));
     code = 1;
   };
-  const files: { path: string; named: boolean }[] = [];
+  let files: { path: string; named: boolean }[] = [];
   for (const path of paths) {
     if (!existsSync(path)) problem(`fishc lint: can't find '${path}'`);
     else if (statSync(path).isDirectory()) {
@@ -583,7 +592,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
       hits += found.length;
       if (found.length > 0) changed++;
     } catch (e) {
-      if (!(e instanceof CompileError)) problem(`fishc lint: can't read '${shown}': ${e instanceof Error ? e.message : e}`);
+      if (!(e instanceof CompileError)) problem(`fishc lint: can't read '${shown}': ${(e as { message: string }).message}`);
       // A manifest's error carries its own source; any other is in this file.
       else problem(formatError(e, shown, src));
     }
@@ -651,7 +660,7 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
   const tls = openssl === undefined ? "" : "missing" in openssl ? "-tls-missing" : "-tls";
   const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}`;
   const source = [NATIVE, ...(js ? [JS_NATIVE] : none), ...(openssl === undefined ? none : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
-  const tlsFlags = openssl !== undefined && "compile" in openssl ? openssl.compile : [];
+  const tlsFlags = openssl !== undefined && "compile" in openssl ? openssl.compile : none;
   const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none)], stdin: source, inputs: js ? files(ENGINE) : none };
   const engine = js ? ENGINE_SOURCES.map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(ENGINE) })) : [];
   const zlib: Unit[] = callsZlib(ir) ? [{ name: "zlib", args: ["-x", "c", "-", ...flags], stdin: ZLIB_NATIVE, inputs: [] }] : [];
@@ -690,7 +699,7 @@ function checkProject(dir: string) {
   try {
     readdirSync(dir);
   } catch (e) {
-    fail(`fishc survey: '${dir}' can't be read: ${e instanceof Error ? e.message : e}`);
+    fail(`fishc survey: '${dir}' can't be read: ${(e as { message: string }).message}`);
   }
   if (sources(dir).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript files (.ts, .tsx or .mts, outside node_modules)`);
 }
@@ -737,7 +746,7 @@ async function main(): Promise<void> {
         },
       });
     } catch (e) {
-      return fail(`fishc: ${e instanceof Error ? e.message : e}`);
+      return fail(`fishc: ${(e as { message: string }).message}`);
     }
   })();
   // The options given, as Node's parseArgs keys them: those on the command line and `panic`'s default.
@@ -778,7 +787,7 @@ async function main(): Promise<void> {
       try {
         plan = values.plan !== undefined ? readPlan(values.plan) : undefined;
       } catch (e) {
-        fail(`fishc survey: the plan '${values.plan}' can't be read: ${e instanceof Error ? e.message : e}`);
+        fail(`fishc survey: the plan '${values.plan}' can't be read: ${(e as { message: string }).message}`);
       }
       const ranking = rank(dirs, values.self, plan);
       console.log(values.json === true ? JSON.stringify(ranking, null, 2) : formatRanking(ranking, plan !== undefined));
@@ -791,7 +800,7 @@ async function main(): Promise<void> {
         if (statSync(values.compare).size > 64 * 1024 * 1024) throw new Error("it is too large to be a saved survey");
         then = readReport(readFileSync(values.compare, "utf8"));
       } catch (e) {
-        fail(`fishc survey: the baseline '${values.compare}' can't be compared: ${e instanceof Error ? e.message : e}`);
+        fail(`fishc survey: the baseline '${values.compare}' can't be compared: ${(e as { message: string }).message}`);
       }
       const c = compare(then!, survey(file!));
       console.log(values.json === true ? JSON.stringify(c, null, 2) : formatComparison(c));
@@ -862,7 +871,7 @@ async function main(): Promise<void> {
         console.error(painted(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
         process.exit(1);
       }
-      fail(`fishc publish: ${e instanceof Error ? e.message : e}`);
+      fail(`fishc publish: ${(e as { message: string }).message}`);
     }
     process.exit(0);
   }
@@ -903,7 +912,7 @@ async function main(): Promise<void> {
         console.error(painted(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
         process.exit(1);
       }
-      fail(`fishc ${command}: ${e instanceof Error ? e.message : e}`);
+      fail(`fishc ${command}: ${(e as { message: string }).message}`);
     }
     process.exit(0);
   }
@@ -958,7 +967,7 @@ async function main(): Promise<void> {
       for (const w of made.warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
     } catch (e) {
       if (e instanceof CompileError) console.error(painted(e, target, readFileSync(target, "utf8")));
-      else console.error(e instanceof Error ? e.message : e);
+      else console.error((e as { message: string }).message);
       process.exit(1);
     }
     process.exit(0);
@@ -980,7 +989,7 @@ async function main(): Promise<void> {
       code = ran.exitCode ?? 128 + (found === undefined ? 0 : found[1]);
     } catch (e) {
       if (e instanceof CompileError) console.error(painted(e, target, readFileSync(target, "utf8")));
-      else console.error(e instanceof Error ? e.message : e);
+      else console.error((e as { message: string }).message);
     } finally {
       if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
     }
@@ -1007,7 +1016,7 @@ async function main(): Promise<void> {
           return { built: true, loaded };
         } catch (e) {
           if (e instanceof CompileError) console.error(painted(e, entry, readFileSync(entry, "utf8")));
-          else console.error(`fishc: ${e instanceof Error ? e.message : e}`);
+          else console.error(`fishc: ${(e as { message: string }).message}`);
           return { built: false, loaded };
         }
       },
@@ -1065,7 +1074,7 @@ async function main(): Promise<void> {
     }
   } catch (e) {
     if (e instanceof CompileError) console.error(painted(e, target!, readFileSync(target!, "utf8")));
-    else console.error(e instanceof Error ? e.message : e);
+    else console.error((e as { message: string }).message);
     process.exit(1);
   }
 }

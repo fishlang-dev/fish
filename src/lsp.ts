@@ -37,7 +37,7 @@ export function frames(buffer: Buffer): { bodies: string[]; rest: Buffer } {
       at = start;
       continue;
     }
-    const size = Number(length[1]!) as usize;
+    const size = (Number(length[1]!) ?? 0) as usize;
     if (buffer.length < start + size) break;
     bodies.push(new TextDecoder().decode(buffer.slice(start as i64, (start + size) as i64)));
     at = start + size;
@@ -66,13 +66,13 @@ function located(path: string, text: string, sources: Ref<Source[]>, start: usiz
   return { uri: pathToFileURL(resolve(dirname(path), at.file)).href, range };
 }
 
-// The diagnostics checking `text`, the document at `path`, gives, with its imports read by `read`
-// before the disk, and the checked program when there are none, with its warnings in this
+// The diagnostics checking `text`, the document at `path`, gives, with its imports read from the
+// open documents, by path, before the disk, and the checked program when there are none, with its warnings in this
 // document. An error in another file shows at the document's start, saying where it is.
 /** @throws {Error | IoError} */
-function diagnose(session: Session, path: string, text: string, read: (path: string) => string | undefined): { diagnostics: Diagnostic[]; checked?: Checked } {
+function diagnose(session: Session, path: string, text: string, open: Map<string, string>): { diagnostics: Diagnostic[]; checked?: Checked } {
   try {
-    const { checked, sources } = analyze(session, text, path, (p) => read(p));
+    const { checked, sources } = analyze(session, text, path, (p) => open.get(resolve(p)));
     const uri = pathToFileURL(path).href;
     let warnings: Diagnostic[] = [];
     for (const w of checked.warnings) {
@@ -136,7 +136,8 @@ export function hints(checked: Ref<Checked>, text: string, range: Ref<Range>): H
       found.set(at.end, hint);
     }
   }
-  const ends = [...found.keys()].sort((a, b) => (a as i64) - (b as i64));
+  let ends = [...found.keys()];
+  ends.sort((a, b) => (a as i64) - (b as i64));
   let out: Hint[] = [];
   for (const end of ends) out.push(found.get(end)!);
   return out;
@@ -184,11 +185,11 @@ class Server {
       // An open file's unsaved text, and any other's on disk.
       let open = new Map<string, string>();
       for (const [u, t] of this.documents) if (u.startsWith("file:")) open.set(resolve(fileURLToPath(u)), t);
-      const found = diagnose(cachedSession(), fileURLToPath(uri), text, (path) => open.get(resolve(path)));
+      const found = diagnose(cachedSession(), fileURLToPath(uri), text, open);
       notify("textDocument/publishDiagnostics", JSON.stringify({ uri, diagnostics: found.diagnostics }));
       this.results.set(uri, { text, checked: found.checked });
     } catch (e) {
-      notify("window/logMessage", JSON.stringify({ type: 1, message: `fishc couldn't check ${uri}: ${e instanceof Error ? e.message : String(e)}` }));
+      notify("window/logMessage", JSON.stringify({ type: 1, message: `fishc couldn't check ${uri}: ${(e as { message: string }).message}` }));
     }
   }
 
@@ -258,7 +259,7 @@ class Server {
       try {
         this.notified(method, params);
       } catch (e) {
-        notify("window/logMessage", JSON.stringify({ type: 1, message: `fishc couldn't handle '${method}': ${e instanceof Error ? e.message : String(e)}` }));
+        notify("window/logMessage", JSON.stringify({ type: 1, message: `fishc couldn't handle '${method}': ${(e as { message: string }).message}` }));
       }
       return;
     }
@@ -267,7 +268,7 @@ class Server {
     try {
       reply = this.request(method, params);
     } catch (e) {
-      reply = { code: -32603, message: e instanceof Error ? e.message : String(e) };
+      reply = { code: -32603, message: (e as { message: string }).message };
     }
     if ("result" in reply) send(`{"jsonrpc":"2.0","id":${id},"result":${reply.result}}`);
     else send(`{"jsonrpc":"2.0","id":${id},"error":${JSON.stringify({ code: reply.code, message: reply.message })}}`);

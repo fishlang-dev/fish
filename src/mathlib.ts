@@ -130,7 +130,7 @@ function emptyDir(): string {
 
 // The unit's object, compiled first if the cache has none.
 /** @throws {Error | IoError} */
-export function cachedObject(session: Mut<BuildSession>, u: Unit): string {
+export function cachedObject(session: Mut<BuildSession>, u: Ref<Unit>): string {
   const out = objectPath(session, u);
   if (existsSync(out)) {
     if (session.timings !== undefined) session.timings!.objects.cached++;
