@@ -66,7 +66,7 @@ function together(core: Session, caches: Caches): BuildSession {
 }
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
-/** @throws {CompileError | Error | IoError} */
+/** @throws {CompileError | Error | IoError | JsonError} */
 export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false, debug = false): string {
   return compiledIn(newCompilation(session), src, file, release, panic, library, leaks, debug).ir;
 }
@@ -133,7 +133,7 @@ function checkedProgram(compilation: Compilation, program: Stmt[], library: bool
 
 // The program checked and turned into IR, timed as the codegen stage, its packages bundled in and,
 // in a debug build, its debug info added.
-/** @throws {CompileError | Error | IoError} */
+/** @throws {CompileError | Error | IoError | JsonError} */
 function compiledIn(compilation: Compilation, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks: boolean, debug: boolean, loaded?: (files: string[]) => void): Compiled {
   let program = compilation;
   // What a build's codegen fails on is collected in the session's list, when it has one.
@@ -146,7 +146,7 @@ function compiledIn(compilation: Compilation, src: string, file: string, release
 
 // The IR of a checked program, timed as the codegen stage, with its packages bundled in and, in a
 // debug build, its debug info added.
-/** @throws {CompileError | Error | IoError} */
+/** @throws {CompileError | Error | IoError | JsonError} */
 function generated(checked: Checked, loaded: Loaded, options: Options): Compiled {
   const names = copyNames(checked.tables.names);
   const { src, file, release } = options;
@@ -167,7 +167,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
 }
 
 // The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
-/** @throws {Error | IoError} */
+/** @throws {CompileError | Error | IoError | JsonError} */
 function bundled(ir: string, loaded: Ref<Loaded>): string {
   const calls = /^\s+(?:%\S+ = )?(?:call|invoke) ptr @fsh_rt_js_export\(ptr @fsh\.js\.bundle, i64 (\d+)/gm;
   let seen = new Set<usize>();
@@ -237,7 +237,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
       else if (shim !== undefined) run(["ar", "-M"], `CREATE ${join(dirname(out), `lib${name}.a`)}\nADDLIB ${archive}\nADDLIB ${shim.lib}\nSAVE\nEND\n`);
     }
     let exported: Ref<Instance>[] = [];
-    for (const i of compiledOf(checked)) if (bodyOf(checked.tables.arenas, i).exported) exported.push(i);
+    for (const i of compiledOf(checked)) if (bodyOf(checked.tables.arenas, i).exported === true) exported.push(i);
     writeFileSync(join(dirname(out), `${name}.h`), header(name, checked.tables, exported));
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -348,7 +348,8 @@ function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ std: Unit[
   for (const u of halves.std) objects.push(cachedObject(session, u));
   for (const o of mathObjects(session, target.compile)) objects.push(o);
   stageEnd(session, "runtime", started);
-  const g = debug ? ["-g"] : [];
+  const none: string[] = [];
+  const g = debug ? ["-g"] : none;
   const tls = runtimeLinks(ir, target);
   if (session.timings === undefined) {
     clang([...clangArgs(out, release, links, objects, shim, copyTarget(target)), ...tls, ...g], halves.program);
@@ -402,7 +403,7 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
   }
   const math = await mathObjectsAsync(building);
   for (const o of math) objects.push(o);
-  const compiler = Bun.spawn([...clangArgs(out, release, links, objects, shim, host), ...runtimeLinks(made.ir, host)], { stdin: new TextEncoder().encode(halves.program), stderr: "pipe" });
+  const compiler = Bun.spawn([...clangArgs(out, release, links, objects, shim, copyTarget(host)), ...runtimeLinks(made.ir, host)], { stdin: new TextEncoder().encode(halves.program), stderr: "pipe" });
   const [code, stderr] = await Promise.all([compiler.exited, new Response(compiler.stderr).text()]);
   if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
   return made.checked.warnings;
@@ -454,17 +455,6 @@ export function buildTests(session: BuildSession, dir: string, out: string): Tes
 async function testPackage(session: BuildSession, dir: string, filter: string | undefined): Promise<i64> {
   const out = join(mkdtempSync(join(tmpdir(), "fishc-test-")), "tests");
   let running = new Set<i32>();
-  // Interrupted, the tests running and what they started end, and the build is removed.
-  process.on("SIGINT", () => {
-    stopTests(running);
-    removeQuietly(dirname(out));
-    process.exit(130);
-  });
-  process.on("SIGTERM", () => {
-    stopTests(running);
-    removeQuietly(dirname(out));
-    process.exit(143);
-  });
   try {
     const tests = buildTests(session, dir, out);
     if (tests.length === 0) {
@@ -472,7 +462,12 @@ async function testPackage(session: BuildSession, dir: string, filter: string | 
       return 0;
     }
     const chosen = filter === undefined ? tests : tests.filter((t) => t.name.includes(filter));
-    if (chosen.length > 0) return await runTests(running, out, chosen, dir);
+    if (chosen.length > 0) {
+      const code = await Promise.race([runTests(running, out, chosen, dir), signalled("SIGINT", 130), signalled("SIGTERM", 143)]);
+      // Interrupted, the tests still running and what they started end.
+      stopTests(running);
+      return code;
+    }
     console.error(`fishc test: no test's name contains '${filter}'`);
     return 1;
   } catch (e) {
@@ -485,13 +480,11 @@ async function testPackage(session: BuildSession, dir: string, filter: string | 
   }
 }
 
-// Removes a directory, as an interrupted run leaves it, ignoring what can't be removed.
-function removeQuietly(dir: string) {
-  try {
-    rmSync(dir, { recursive: true, force: true });
-  } catch (_e) {
-    // Gone already, or not this process's to remove.
-  }
+// The exit code a shell gives for `signal`, once it arrives.
+function signalled(signal: "SIGINT" | "SIGTERM", code: i64): Promise<i64> {
+  return new Promise<i64>((resolve) => {
+    process.once(signal, () => resolve(code));
+  });
 }
 
 // Lints the TS-compat files among `paths`, a directory standing for its `.fsh` files as for
@@ -522,7 +515,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
   const editions = new Map<string, Edition | "broken">();
   const packaged = (file: string) => {
     const manifest = findManifest(dirname(file));
-    if (!manifest) return undefined;
+    if (manifest === undefined) return undefined;
     if (!editions.has(manifest)) {
       try {
         editions.set(manifest, loadManifest(manifest).edition);
@@ -675,7 +668,7 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
   const source = [NATIVE, ...(js ? [JS_NATIVE] : none), ...(openssl === undefined ? none : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
   const tlsFlags = openssl !== undefined && "compile" in openssl ? openssl.compile : none;
   const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none)], stdin: source, inputs: js ? files(ENGINE) : none };
-  const engine = js ? ENGINE_SOURCES.map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(ENGINE) })) : [];
+  const engine: Unit[] = js ? ENGINE_SOURCES.map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(ENGINE) })) : [];
   const zlib: Unit[] = callsZlib(ir) ? [{ name: "zlib", args: ["-x", "c", "-", ...flags], stdin: ZLIB_NATIVE, inputs: [] }] : [];
   return [runtime, ...engine, ...zlib];
 }

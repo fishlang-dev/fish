@@ -264,12 +264,7 @@ class Server {
       return;
     }
     const id = JSON.stringify(got.id);
-    let reply: Reply = { code: -32603, message: "the request wasn't answered" };
-    try {
-      reply = this.request(method, params);
-    } catch (e) {
-      reply = { code: -32603, message: (e as { message: string }).message };
-    }
+    const reply = this.request(method, params);
     if ("result" in reply) send(`{"jsonrpc":"2.0","id":${id},"result":${reply.result}}`);
     else send(`{"jsonrpc":"2.0","id":${id},"error":${JSON.stringify({ code: reply.code, message: reply.message })}}`);
   }
