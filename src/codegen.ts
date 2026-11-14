@@ -8951,7 +8951,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // of, which is left empty, or else a copy holding another reference to what it owns. A
   // conversion that leaves part of a value behind copies the part it keeps.
   owned(this: Mut<this>, e: Ref<Expr>): string {
-    if (this.handedOn(e) !== e) {
+    if (this.handedOn(e).id !== e.id) {
       const handedOn2 = this.handedOn(e);
       return this.owned(handedOn2);
     }
