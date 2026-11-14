@@ -566,7 +566,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
       // A relative `.ts` import is renamed when its `.fsh` file will be there, or is and the `.ts`
       // file isn't; with both there, which is meant is for a person to say.
       let pointed = new Set<string>();
-      const fsh: Imported = (specifier) => {
+      const fsh: Imported = (specifier): "rename" | "ambiguous" | undefined => {
         const target = resolve(dirname(path), specifier);
         if (settled.has(target)) {
           pointed.add(target);
@@ -738,6 +738,7 @@ function checkProject(dir: string) {
   if (sources(dir).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript files (.ts, .tsx or .mts, outside node_modules)`);
 }
 
+/** @throws {Error | IoError | JsonError} */
 async function main(): Promise<void> {
   if (Bun.argv.length === 3 && Bun.argv[2] === "lsp") {
     await serveLsp();
