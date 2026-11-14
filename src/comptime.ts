@@ -890,7 +890,8 @@ class Interpreter<H extends ComptimeHost> {
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
   private raw(this: Mut<this>, f: usize, e: Ref<Expr>): Value | Short {
-    const type = this.inst(f).types.get(e)!;
+    // A call giving nothing has no type recorded, since no value is void.
+    const type = this.inst(f).types.get(e) ?? "void";
     switch (e.kind) {
       case "int":
         return isFloat(type) ? fit(toFloat(e.value), type) : e.value;
