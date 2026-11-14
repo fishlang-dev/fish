@@ -177,7 +177,8 @@ function bundled(ir: string, loaded: Ref<Loaded>): string {
   if (used.length === 0) return ir;
   const bytes = new TextEncoder().encode(bundle(loaded.packages, used));
   let text = "";
-  for (const c of bytes) text += c >= 0x20 && c < 0x7f && c !== 0x22 && c !== 0x5c ? String.fromCharCode(c as u16) : `\\${c.toString(16).padStart(2, "0").toUpperCase()}`;
+  const hex = "0123456789ABCDEF";
+  for (const c of bytes) text += c >= 0x20 && c < 0x7f && c !== 0x22 && c !== 0x5c ? String.fromCharCode(c as u16) : `\\${hex.charAt((c >> 4) as i64)}${hex.charAt((c & 15) as i64)}`;
   return `${ir}\n@fsh.js.bundle = private unnamed_addr constant [${bytes.length + 1} x i8] c"${text}\\00"\n`;
 }
 
@@ -216,7 +217,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
   const fish = join(dir, "fish.o");
   const optimize = release ? "-O2" : "-O0";
   const none: string[] = [];
-  const g = debug ? ["-g"] : none;
+  const g = debug ? ["-g"] : [...none];
   // A library is never timed, so its objects are built within a session holding only the caches.
   let building = together(newSession(), caches);
   try {
@@ -356,7 +357,8 @@ function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ std: Unit[
     return;
   }
   // Timed, the program is compiled and linked by two clang calls, so each is measured on its own.
-  session.timings.notes.set("runtime", objectsNote(session.timings));
+  const note = objectsNote(session.timings);
+  session.timings.notes.set("runtime", note);
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   try {
     const object = join(dir, "program.o");
@@ -483,7 +485,7 @@ async function testsIn(session: BuildSession, dir: string, out: string, filter: 
       stopTests(running);
       return code;
     }
-    console.error(`fishc test: no test's name contains '${filter}'`);
+    console.error(`fishc test: no test's name contains '${filter ?? ""}'`);
     return 1;
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
@@ -526,7 +528,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
   }
   // A manifest that can't be read is reported once, as "broken", and its files are skipped.
   let editions = new Map<string, Edition | "broken">();
-  const packaged = (file: string) => {
+  const packaged = (file: string): Edition | "broken" | undefined => {
     const manifest = findManifest(dirname(file));
     if (manifest === undefined) return undefined;
     if (!editions.has(manifest)) {
@@ -780,8 +782,8 @@ async function main(): Promise<void> {
     return made;
   };
   // `fishc run` and `fishc watch` take the program's arguments after the file, or all of them with no file.
-  const command = positionals[0];
-  const named = positionals[1];
+  const command = positionals.length > 0 ? positionals[0] : undefined;
+  const named = positionals.length > 1 ? positionals[1] : undefined;
   const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
   if (command === "explain") {

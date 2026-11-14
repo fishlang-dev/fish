@@ -579,7 +579,8 @@ export function formatTimings(timings: Ref<Timings>, stages: string[], total: f6
 }
 
 // Which cached objects a build made and how many it reused, as the runtime stage's note.
-export function objectsNote({ objects: { built, cached } }: Timings): string {
-  const cachedNote = `${cached} cached`;
+export function objectsNote(timings: Ref<Timings>): string {
+  const built: Ref<string[]> = timings.objects.built;
+  const cachedNote = `${timings.objects.cached} cached`;
   return built.length > 0 ? `built ${built.join(", ")}; ${cachedNote}` : cachedNote;
 }
