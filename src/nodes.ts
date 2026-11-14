@@ -700,6 +700,15 @@ export class Rewrites implements Replacements {
   }
 
   endRebuild(this: Mut<this>): void {
+    // A later check of the body starts from the lists checking edited, so they are rebuilt too:
+    // the body holds copies of them, not the lists themselves.
+    const prefix = this.rebuilding !== undefined ? `${this.rebuilding} ` : " ";
+    const keys = [...this.lists.keys()].filter((k) => k.startsWith(prefix));
+    for (const k of keys) {
+      let list = this.lists.get(k)!.slice();
+      rebuiltStmts(list, this);
+      this.lists.set(k, list);
+    }
     this.rebuilding = undefined;
     this.from = 0;
   }
