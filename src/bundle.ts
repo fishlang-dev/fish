@@ -15,7 +15,7 @@ type BundleInput = { request: Request; shims: [string, string][] };
 // Bundles the packages at `used`, the indexes of those the program's code reaches. Bun's bundler
 // runs in a `bun` process of its own, found on PATH, so a compiler that isn't running on Bun
 // bundles the same way.
-/** @throws {CompileError | Error | IoError} */
+/** @throws {CompileError | Error | IoError | JsonError} */
 export function bundle(packages: Ref<Package[]>, used: Ref<usize[]>): string {
   let request: Request = [];
   for (const index of used) {

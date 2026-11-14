@@ -1,62 +1,130 @@
 import { availableParallelism } from "node:os";
+import type { Subprocess } from "bun";
 import { relative } from "node:path";
 import type { Compilation } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { renameIn, type Loaded, type Module } from "./modules.ts";
-import { nextId, respanFunc, walk, type Ids } from "./nodes.ts";
+import { nextId, respanFunc, type Ids } from "./nodes.ts";
 import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
 
 // Top-level `test("name", () => { ... })` blocks: left out of a build, lifted into functions of
 // their own file for `fishc test` and the language server, and run by a generated harness.
 
 type Body = Extract<Expr, { kind: "arrow" | "function" }>;
-// `index` is the test's place in the harness's numbering; `module` is the file declaring it.
-export type Test = { name: string; module: Module; index: usize; async: boolean };
+// `index` is the test's place in the harness's numbering; `module` is the file declaring it, by
+// its name and its path.
+export type Test = { name: string; module: { file: string; path: string }; index: usize; async: boolean };
 
 const SHAPE = `a test is written as 'test("name", () => { ... })' at the top level of a file, its name a string literal`;
 
-// The name and body a top-level statement's test has, or undefined when it isn't a `test(...)` call.
-function testOf(s: Stmt): { name: Extract<Expr, { kind: "string" }>; body: Body } | undefined {
+// A top-level statement's test: its name, where the name is, and whether its body is async.
+type Found = { name: string; start: usize; end: usize; async: boolean };
+
+// The test a top-level statement is, or undefined when it isn't a `test(...)` call.
+/** @throws {CompileError} */
+function testOf(s: Ref<Stmt>): Found | undefined {
   if (s.kind !== "expr" || s.expr.kind !== "call" || s.expr.callee.kind !== "ident" || s.expr.callee.name !== "test") return undefined;
-  const { args, typeArgs, optional } = s.expr;
-  const [name, body] = args;
-  const shaped = args.length === 2 && typeArgs.length === 0 && !optional && name?.kind === "string" && (body?.kind === "arrow" || (body?.kind === "function" && !body.generator));
-  if (!shaped || body.params.length > 0 || body.typeParams.length > 0) throw new CompileError("E1106", SHAPE, s.expr.start, s.expr.end);
+  const args: Ref<Expr[]> = s.expr.args;
+  const shaped = args.length === 2 && s.expr.typeArgs.length === 0 && !s.expr.optional && args[0]!.kind === "string" && bare(args[1]!);
+  if (!shaped) throw new CompileError("E1106", SHAPE, s.expr.start, s.expr.end);
+  const name: Ref<Expr> = args[0]!;
+  const body: Ref<Expr> = args[1]!;
+  if (name.kind !== "string") return undefined;
   // `--list` and the report give each test one line.
   if (/[\n\r]/.test(name.value)) throw new CompileError("E1106", "a test's name is one line, so it can't hold a line break", name.start, name.end);
-  return { name, body };
+  return { name: name.value, start: name.start, end: name.end, async: body.kind === "arrow" ? body.async : body.kind === "function" ? body.async : false };
+}
+
+// Whether `e` is an arrow or a function that isn't a generator, taking no parameters.
+function bare(e: Ref<Expr>): boolean {
+  if (e.kind === "arrow") return e.params.length === 0 && e.typeParams.length === 0;
+  if (e.kind === "function") return !e.generator && e.params.length === 0 && e.typeParams.length === 0;
+  return false;
 }
 
 // Leaves every file's tests out, as a build does before checking.
-export function stripTests({ modules }: Loaded) {
-  for (const m of modules) m.statements = m.statements.filter((s) => !testOf(s));
+/** @throws {CompileError} */
+export function stripTests(loaded: Mut<Loaded>) {
+  for (let at: usize = 0; at < loaded.modules.length; at++) {
+    const m: Mut<Module> = loaded.modules[at]!;
+    // Every statement is looked at before any moves, so a refusal leaves the file as it was.
+    let tests: boolean[] = [];
+    for (const s of m.statements) tests.push(testOf(s) !== undefined);
+    let kept: Stmt[] = [];
+    let i: usize = 0;
+    while (m.statements.length > 0) {
+      const s = m.statements.shift()!;
+      if (!tests[i]!) kept.push(s);
+      i++;
+    }
+    m.statements = kept;
+  }
 }
 
 // Turns each test of `modules`, in order, into a function of its own file, `test "name"`, which
 // no program can write. A test's function throws Error, so a body may throw, and is async when
 // the body is. Names are unique across the files; a second use of one is refused.
-export function liftTests({ names, ids }: Compilation, modules: Module[]): Test[] {
-  const tests: Test[] = [];
-  for (const module of modules) {
-    module.statements = module.statements.map((s) => {
+/** @throws {CompileError | Error} */
+export function liftTests(compilation: Mut<Compilation>, modules: Mut<Module[]>): Test[] {
+  let tests: Test[] = [];
+  for (let at: usize = 0; at < modules.length; at++) {
+    const module: Mut<Module> = modules[at]!;
+    // Each file's tests are named before any statement moves, so a refusal leaves the file as it was.
+    let symbols: (string | undefined)[] = [];
+    for (const s of module.statements) {
       const found = testOf(s);
-      if (!found) return s;
-      const { name, body } = found;
-      const twin = tests.find((t) => t.name === name.value);
-      if (twin) throw new CompileError("E1106", `there is already a test named '${name.value}' in '${twin.module.file}'; give each test a name of its own`, name.start, name.end);
-      tests.push({ name: name.value, module, index: tests.length, async: body.async });
-      const symbol = `test ${JSON.stringify(name.value)}`;
-      names.madeUp.set(symbol, `the test '${name.value}'`);
-      return lifted(ids, symbol, body, s);
-    });
+      if (found === undefined) {
+        symbols.push(undefined);
+        continue;
+      }
+      const name = found.name;
+      const twin = tests.find((t) => t.name === name);
+      if (twin !== undefined) throw new CompileError("E1106", `there is already a test named '${name}' in '${twin.module.file}'; give each test a name of its own`, found.start, found.end);
+      tests.push({ name, module: { file: module.file, path: module.path }, index: tests.length, async: found.async });
+      const symbol = `test ${JSON.stringify(name)}`;
+      compilation.names.madeUp.set(symbol, `the test '${name}'`);
+      symbols.push(symbol);
+    }
+    let statements: Stmt[] = [];
+    let i: usize = 0;
+    while (module.statements.length > 0) {
+      const s = module.statements.shift()!;
+      const symbol = symbols[i];
+      i++;
+      if (symbol === undefined) statements.push(s);
+      else statements.push(liftedTest(compilation.ids, symbol, s));
+    }
+    module.statements = statements;
   }
   return tests;
 }
 
-function lifted(ids: Ids, name: string, body: Body, at: Span): Func {
-  const [made] = parse(`${body.async ? "async " : ""}function f(): ${body.async ? "Promise<void>" : "void"} throws Error {}`, ids) as [Func];
+// The function a test's statement becomes, `testOf` having found it to be one.
+/** @throws {CompileError | Error} */
+function liftedTest(ids: Mut<Ids>, name: string, s: Stmt): Func {
+  const at: Span = { start: s.start, end: s.end };
+  let call = s;
+  if (call.kind === "expr" && call.expr.kind === "call") {
+    const body = call.expr.args.pop();
+    if (body !== undefined && (body.kind === "arrow" || body.kind === "function")) return lifted(ids, name, body, at);
+  }
+  throw new Error("internal error: a test is no longer a call of 'test'");
+}
+
+/** @throws {CompileError | Error} */
+function lifted(ids: Mut<Ids>, name: string, body: Body, at: Ref<Span>): Func {
+  let parsed = parse(`${body.async ? "async " : ""}function f(): ${body.async ? "Promise<void>" : "void"} throws Error {}`, ids);
+  const made = parsed.shift();
+  if (made === undefined || made.kind !== "function") throw new Error("internal error: a test's function didn't parse as one");
   const placed = respanFunc(made, at);
-  const statements: Stmt[] = Array.isArray(body.body) ? body.body : [{ id: nextId(ids), kind: "expr", expr: body.body, start: body.body.start, end: body.body.end }];
+  let statements: Stmt[] = [];
+  if (body.kind === "function") statements = body.body;
+  else if (Array.isArray(body.body)) statements = body.body;
+  else {
+    const start = body.body.start;
+    const end = body.body.end;
+    statements = [{ id: nextId(ids), kind: "expr", expr: body.body, start, end }];
+  }
   return { ...placed, id: nextId(ids), name, body: statements };
 }
 
@@ -70,8 +138,9 @@ export function harnessImports(dir: string, files: string[]): string {
 // The harness's `main`. Given `--list`, it prints the test names, one per line, in order; given a
 // test's index, it runs that test, which passes when the process exits with 0. A test's function
 // is reached as `name-fsh<n>`, the name file n declares, which no program can write.
-export function harnessMain(ids: Ids, tests: Test[], modules: Module[]): Stmt[] {
-  const call = (t: Test) => `__test${t.index}`;
+/** @throws {CompileError} */
+export function harnessMain(ids: Mut<Ids>, tests: Ref<Test[]>, modules: Ref<Module[]>): Stmt[] {
+  const call = (t: Ref<Test>) => `__test${t.index}`;
   const runs = tests.map((t) => `  if (which === "${t.index}") {\n    ${t.async ? "await " : ""}${call(t)}();\n    return;\n  }\n`);
   const text = `async function main(): Promise<void> throws Error {
   const which = argv.length > 2 ? argv[2] : "";
@@ -82,19 +151,21 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
   exit(2);
 }
 `;
-  const made = parse(text, ids);
-  const named = new Map(tests.map((t) => [call(t), `test ${JSON.stringify(t.name)}-fsh${modules.indexOf(t.module)}`]));
-  walk({ of: "stmts", node: made }, ({ of, node }) => {
-    if ((of === "expr" || of === "pattern") && node.kind === "ident" && named.has(node.name)) node.name = named.get(node.name)!;
-  });
+  let made = parse(text, ids);
+  let named = new Map<string, string>();
+  for (const t of tests) named.set(call(t), `test ${JSON.stringify(t.name)}-fsh${modules.findIndex((m) => m.path === t.module.path)}`);
+  renameIn(ids, made, (name) => named.get(name));
   return made;
 }
 
 // Gives each file's `main` a name no program can write, since the harness is the program's
 // `main`; a test or function calling a file's `main` still reaches it.
-export function hideMains({ names, ids }: Compilation, modules: Module[]) {
-  names.madeUp.set("file main", "'main'");
-  for (const m of modules) renameIn(ids, m.statements, (name) => (name === "main" ? "file main" : undefined));
+export function hideMains(compilation: Mut<Compilation>, modules: Mut<Module[]>) {
+  compilation.names.madeUp.set("file main", "'main'");
+  for (let at: usize = 0; at < modules.length; at++) {
+    const m: Mut<Module> = modules[at]!;
+    renameIn(compilation.ids, m.statements, (name) => (name === "main" ? "file main" : undefined));
+  }
 }
 
 const LIMIT = 10_000;
@@ -103,58 +174,136 @@ type Outcome = { passed: boolean; output: string };
 
 // Ends every test running now, along with anything it started: `running` holds the process
 // groups of a run's tests while they run.
-export function stopTests(running: Set<i32>) {
-  for (const group of running) ended(running, group);
+export function stopTests(running: Mut<Set<i32>>) {
+  for (const group of [...running]) ended(running, group);
 }
 
-function ended(running: Set<i32>, group: i32) {
+function ended(running: Mut<Set<i32>>, group: i32) {
   running.delete(group);
   try {
-    process.kill(-group, "SIGKILL");
+    process.kill(-(group as i64), "SIGKILL");
   } catch {
     // The group is already gone.
   }
 }
 
-// Runs `test` in a process group of its own, failing it when it exits with anything but 0 or runs
-// past the limit. Once it exits, the rest of its group is killed: a child it left behind would
-// otherwise hold its output open, and the verdict is the test's own.
-async function run(running: Set<i32>, binary: string, test: Test, cwd: string): Promise<Outcome> {
+// A test running now: its place in the run, its child and the child's process group, its output
+// as it is read, when it runs past the limit, and whether it has.
+type Running = { at: usize; child: Subprocess; group: i32; output: Promise<string>; deadline: f64; late: boolean };
+
+// What a round of waiting saw first: the test at `at` exiting, or running past the limit.
+type Event = { kind: "exit"; at: usize; code: i64 } | { kind: "timeout"; at: usize };
+
+// Starts `test` in a process group of its own, noted in `running`, its output read as it runs.
+/** @throws {IoError} */
+function started(running: Mut<Set<i32>>, binary: string, test: Ref<Test>, cwd: string, at: usize): Running {
   const child = Bun.spawn([binary, String(test.index)], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
-  running.add(child.pid);
-  const output = Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
-  let late = false;
-  const timer = setTimeout(() => {
-    late = true;
-    ended(running, child.pid);
-  }, LIMIT);
-  const code = await child.exited;
-  clearTimeout(timer);
-  ended(running, child.pid);
-  const [stdout, stderr] = await output;
-  const text = stdout + stderr;
+  const group = child.pid as i32;
+  running.add(group);
+  const output: Promise<string> = outputOf(new Response(child.stdout), new Response(child.stderr));
+  return { at, child, group, output, deadline: performance.now() + (LIMIT as f64), late: false };
+}
+
+async function outputOf(stdout: Response, stderr: Response): Promise<string> {
+  const [out, err] = await Promise.all([stdout.text(), stderr.text()]);
+  return out + err;
+}
+
+// The first of the running tests to exit, or the one soonest past the limit to get there. Fish
+// drops the waits that lose a race, and a child's exit can be waited for again, so each round
+// waits afresh.
+async function nextEvent(flight: Ref<Running[]>): Promise<Event> {
+  let waits: Promise<Event>[] = [];
+  let timed = false;
+  let soonest: usize = 0;
+  let due: f64 = 0;
+  for (const r of flight) {
+    waits.push(exitOf(r.child.exited, r.at));
+    if (!r.late && (!timed || r.deadline < due)) {
+      timed = true;
+      soonest = r.at;
+      due = r.deadline;
+    }
+  }
+  if (timed) waits.push(pastLimit(Math.max(0, Math.ceil(due - performance.now())) as i64, soonest));
+  return await Promise.race(waits);
+}
+
+async function exitOf(exited: Promise<i64>, at: usize): Promise<Event> {
+  const code = await exited;
+  return { kind: "exit", at, code };
+}
+
+async function pastLimit(ms: i64, at: usize): Promise<Event> {
+  await Bun.sleep(ms);
+  return { kind: "timeout", at };
+}
+
+// A test fails when it exits with anything but 0 or runs past the limit.
+function outcome(text: string, code: i64, late: boolean, signal: string | null): Outcome {
   const passed = code === 0 && !late;
   if (late) return { passed, output: `${text}timed out after ${LIMIT / 1000}s\n` };
   if (passed || text !== "") return { passed, output: text };
-  return { passed, output: child.signalCode ? `killed by ${child.signalCode}\n` : `exited with ${code}\n` };
+  return { passed, output: signal !== null ? `killed by ${signal}\n` : `exited with ${code}\n` };
 }
 
 // Runs each of `tests` in the program `binary`, as many at once as the machine has cores, and
 // reports them in order: `ok` or `FAIL`, the file and the name, a failed test's output, then the
-// counts, noting each test's process group in `running` while it runs. Gives the exit code, 1 when
-// any failed.
-export async function runTests(running: Set<i32>, binary: string, tests: Test[], cwd: string): Promise<i64> {
-  const outcomes = tests.map(() => Promise.withResolvers<Outcome>());
-  let next = 0;
-  const worker = async () => {
-    for (let at = next++; at < tests.length; at = next++) outcomes[at]!.resolve(await run(running, binary, tests[at]!, cwd).catch((e) => ({ passed: false, output: `the test couldn't be run: ${e instanceof Error ? e.message : e}\n` })));
-  };
-  for (let n = 0; n < Math.min(availableParallelism(), tests.length); n++) void worker();
+// counts, noting each test's process group in `running` while it runs. A test past the limit has
+// its group killed; once a test exits, the rest of its group is killed, as a child it left behind
+// would otherwise hold its output open, and the verdict is the test's own. Gives the exit code, 1
+// when any failed.
+export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Ref<Test[]>, cwd: string): Promise<i64> {
+  const width = Math.min(availableParallelism(), tests.length as i64);
+  let flight: Running[] = [];
+  let done: (Outcome | undefined)[] = [];
+  for (let at: usize = 0; at < tests.length; at++) done.push(undefined);
+  let next: usize = 0;
+  let shown: usize = 0;
   let failed = 0;
-  for (const [at, test] of tests.entries()) {
-    const { passed, output } = await outcomes[at]!.promise;
-    if (!passed) failed++;
-    process.stdout.write(`${passed ? "ok" : "FAIL"} ${test.module.file} > ${test.name}\n${passed ? "" : output}`);
+  while (true) {
+    while (next < tests.length && (flight.length as i64) < width) {
+      const at = next;
+      next++;
+      try {
+        // Started before the push, so `flight` is lent to it only once nothing can throw.
+        const r = started(running, binary, tests[at]!, cwd, at);
+        flight.push(r);
+      } catch (e) {
+        done[at] = { passed: false, output: `the test couldn't be run: ${e instanceof Error ? e.message : (e as IoError).message}\n` };
+      }
+    }
+    while (shown < tests.length) {
+      const o: Ref<Outcome | undefined> = done[shown];
+      if (o === undefined) break;
+      const test: Ref<Test> = tests[shown]!;
+      if (!o.passed) failed++;
+      process.stdout.write(`${o.passed ? "ok" : "FAIL"} ${test.module.file} > ${test.name}\n${o.passed ? "" : o.output}`);
+      shown++;
+    }
+    if (shown === tests.length) break;
+    const event = await nextEvent(flight);
+    if (event.kind === "timeout") {
+      for (let i: usize = 0; i < flight.length; i++) {
+        if (flight[i]!.at !== event.at) continue;
+        flight[i]!.late = true;
+        ended(running, flight[i]!.group);
+      }
+      continue;
+    }
+    let still: Running[] = [];
+    let exited: Running | undefined = undefined;
+    while (flight.length > 0) {
+      const r = flight.shift()!;
+      if (r.at === event.at && exited === undefined) exited = r;
+      else still.push(r);
+    }
+    flight = still;
+    if (exited === undefined) continue;
+    ended(running, exited.group);
+    const text = await exited.output;
+    const signal = exited.child.signalCode;
+    done[event.at] = outcome(text, event.code, exited.late, signal === null ? null : `${signal}`);
   }
   console.log(`${tests.length - failed} passed, ${failed} failed`);
   return failed > 0 ? 1 : 0;

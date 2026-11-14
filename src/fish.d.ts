@@ -32,3 +32,9 @@ interface IoError {
   syscall: string;
   path: string | null;
 }
+// What Fish's node:zlib throws when data won't compress or expand; in Node, an Error with a code.
+declare module "node:zlib" {
+  interface ZlibError extends Error {
+    code: string;
+  }
+}

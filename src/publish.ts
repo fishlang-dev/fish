@@ -3,16 +3,17 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { dirname, join, normalize, relative, sep } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
+import type { ZlibError } from "node:zlib";
 import { MAX_DOWNLOAD, MAX_UNPACKED } from "./dependencies.ts";
 import { firstLine, git } from "./git.ts";
 import { loadManifest, MANIFEST, readManifest, type Manifest } from "./manifest.ts";
-import { MAX_ENTRIES, tar, untar } from "./tar.ts";
+import { MAX_ENTRIES, tar, untar, type TarFile } from "./tar.ts";
 import { CompileError, locate } from "./diag.ts";
 import { resolveSpecifier, specifierOf } from "./modules.ts";
-import { parse, type Stmt } from "./parser.ts";
-import { walkWhile } from "./nodes.ts";
+import { parse, type Span, type Stmt } from "./parser.ts";
+import { walkWhile, type Ids } from "./nodes.ts";
 import { cacheDir } from "./mathlib.ts";
-import { openIndex, registryUrl, resolveVersions, versions, type IndexEntry } from "./registry_index.ts";
+import { openIndex, registryUrl, resolveVersions, versions, type IndexEntry, type Request, type Unresolved } from "./registry_index.ts";
 
 // A package packed for the registry: its manifest, the archive's bytes and sha256, where it was
 // written, and the files it holds.
@@ -21,91 +22,125 @@ export type Packed = { manifest: Manifest; bytes: Uint8Array; sha256: string; fi
 // Packs the package whose manifest is `file`: the files git tracks in its directory, checked as a
 // build would check them once they come back from the registry. Refused while tracked files have
 // changes, unless `dirty` allows it.
+/** @throws {CompileError | Error | IoError | ZlibError} */
 export function pack(file: string, dirty = false): Packed {
   const manifest = loadManifest(file, "lib");
   const dir = manifest.dir;
   const outside = manifest.dependencies.find((d) => !("version" in d));
-  if (outside) throw new Error(`'${outside.name}' is a path or git dependency, and a published package depends only on the registry; give it a version range`);
+  if (outside !== undefined) throw new Error(`'${outside.name}' is a path or git dependency, and a published package depends only on the registry; give it a version range`);
   if (git(dir, "rev-parse", "--show-toplevel").exitCode !== 0) throw new Error(`the package at ${dir} isn't in a git repository; publishing packs the files git tracks`);
-  const changed = git(dir, "status", "--porcelain=v1", "-z", "--untracked-files=no", "--", ".").stdout.toString();
+  const changed = text(git(dir, "status", "--porcelain=v1", "-z", "--untracked-files=no", "--", ".").stdout);
   if (changed !== "" && !dirty) {
-    const names = changed.split("\0").filter(Boolean).map((l) => l.slice(3));
+    const names = changed.split("\0").filter((l) => l !== "").map((l) => l.slice(3));
     throw new Error(`these tracked files have changes not yet committed: ${names.join(", ")}; commit them, or publish with --allow-dirty`);
   }
   const listed = git(dir, "ls-files", "-s", "-z", "--", ".");
-  if (listed.exitCode !== 0) throw new Error(`git can't list the package's files: ${firstLine(listed.stderr.toString())}`);
-  const files = listed.stdout.toString().split("\0").filter(Boolean).map((line) => {
-    const [meta, path] = line.split("\t") as [string, string];
+  if (listed.exitCode !== 0) throw new Error(`git can't list the package's files: ${firstLine(text(listed.stderr))}`);
+  let files: { path: string; data: Uint8Array; executable: boolean }[] = [];
+  for (const line of text(listed.stdout).split("\0")) {
+    if (line === "") continue;
+    const parts = line.split("\t");
+    const meta = parts[0]!;
+    const path = parts[1]!;
     const mode = meta.split(" ")[0]!;
     if (mode === "120000") throw new Error(`'${path}' is a symbolic link, which a package can't hold`);
     if (mode === "160000") throw new Error(`'${path}' is a git submodule, which a package can't hold`);
     // With --allow-dirty the bytes come from the working tree, which may no longer match the index.
     const stat = lstatSync(join(dir, path), { throwIfNoEntry: false });
-    if (!stat) throw new Error(`git tracks '${path}' but it has been deleted; commit the deletion or restore it`);
+    if (stat === undefined) throw new Error(`git tracks '${path}' but it has been deleted; commit the deletion or restore it`);
     if (!stat.isFile() || !realpathSync(join(dir, path)).startsWith(realpathSync(dir) + sep)) throw new Error(`'${path}' is a symbolic link, leads through one, or isn't a plain file, which a package can't hold`);
-    return { path, data: new Uint8Array(readFileSync(join(dir, path))), executable: mode === "100755" };
-  });
+    files.push({ path, data: new Uint8Array(readFileSync(join(dir, path))), executable: mode === "100755" });
+  }
   if (!files.some((f) => f.path === MANIFEST)) throw new Error(`git doesn't track ${MANIFEST}; add and commit it`);
-  if (files.length > MAX_ENTRIES) throw new Error(`the package has ${files.length} files, more than the ${MAX_ENTRIES} a build accepts`);
-  const size = files.reduce((n, f) => n + f.data.length, 0);
-  if (size > MAX_UNPACKED) throw new Error(`the package's files come to more than the ${MAX_UNPACKED / 1024 / 1024} MiB a build accepts`);
-  // No name and no time in the gzip header, so the same files always make the same archive.
-  const bytes = new Uint8Array(gzipSync(tar(files), { level: 9 }));
-  if (bytes.length > MAX_DOWNLOAD) throw new Error(`the archive is larger than the ${MAX_DOWNLOAD / 1024 / 1024} MiB a build downloads`);
+  if (files.length > (MAX_ENTRIES as usize)) throw new Error(`the package has ${files.length} files, more than the ${MAX_ENTRIES} a build accepts`);
+  let size: usize = 0;
+  for (const f of files) size += f.data.length;
+  if (size > (MAX_UNPACKED as usize)) throw new Error(`the package's files come to more than the ${MAX_UNPACKED / 1024 / 1024} MiB a build accepts`);
+  // No name and no time in the gzip header, so the same files always make the same archive. The
+  // archive is made of a copy, as the files are compared with what it unpacks into.
+  const bytes = new Uint8Array(gzipSync(tar(files.map((f) => ({ path: f.path, data: f.data.slice(), executable: f.executable }))), { level: 9 }));
+  if (bytes.length > (MAX_DOWNLOAD as usize)) throw new Error(`the archive is larger than the ${MAX_DOWNLOAD / 1024 / 1024} MiB a build downloads`);
   // What a build will unpack must be exactly these files, with this manifest.
-  const back = untar(new Uint8Array(gunzipSync(bytes)), MAX_UNPACKED);
+  const back = untar(new Uint8Array(gunzipSync(bytes.slice())), MAX_UNPACKED as usize);
   const same = back.length === files.length && back.every((f) => {
     const original = files.find((o) => o.path === f.path);
-    return original !== undefined && Buffer.compare(Buffer.from(original.data), Buffer.from(f.data)) === 0;
+    return original !== undefined && sameBytes(original.data, f.data);
   });
-  if (!same) throw new Error("the archive didn't unpack back into the same files");
-  const unpacked = readManifest(new TextDecoder().decode(back.find((f) => f.path === MANIFEST)!.data), dir);
+  const inside = back.find((f) => f.path === MANIFEST);
+  if (!same || inside === undefined) throw new Error("the archive didn't unpack back into the same files");
+  const unpacked = readManifest(new TextDecoder().decode(inside.data.slice()), dir);
   if (unpacked.name !== manifest.name || unpacked.version !== manifest.version) throw new Error("the archive's fish.toml doesn't match the package's");
   readsBack(back, normalize(manifest.lib));
   const out = join(dir, "target", "publish");
   mkdirSync(out, { recursive: true });
   const archive = join(out, `${manifest.name}-${manifest.version}.tar.gz`);
-  writeFileSync(archive, bytes);
-  const unsafe = unsafeUses(back.map((f) => ({ path: f.path, text: new TextDecoder().decode(f.data) })));
-  return { manifest, bytes, sha256: createHash("sha256").update(bytes).digest("hex"), file: archive, files: files.map((f) => f.path).sort(), unsafe };
+  writeFileSync(archive, bytes.slice());
+  let sources: { path: string; text: string }[] = [];
+  for (const f of back) sources.push({ path: f.path, text: new TextDecoder().decode(f.data.slice()) });
+  const uses = unsafeUses(sources);
+  const sha256 = createHash("sha256").update(bytes.slice()).digest("hex");
+  let paths = files.map((f) => f.path);
+  paths.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return { manifest, bytes, sha256, file: archive, files: paths, unsafe: uses };
+}
+
+// What a process wrote, as text.
+function text(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes);
+}
+
+function sameBytes(a: Ref<Uint8Array>, b: Ref<Uint8Array>): boolean {
+  if (a.length !== b.length) return false;
+  for (let i: usize = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 // Refuses an archive missing its lib, or a file the lib reaches through relative imports, as
 // happens when git doesn't track one: unpacked by itself, it wouldn't build.
-function readsBack(files: { path: string; data: Uint8Array }[], lib: string) {
+/** @throws {CompileError | Error | IoError} */
+function readsBack(files: Ref<TarFile[]>, lib: string) {
   if (!files.some((f) => f.path === lib)) throw new Error(`git doesn't track the lib '${lib}', so the archive would leave it out; add and commit it`);
   const at = mkdtempSync(join(tmpdir(), "fish-publish-"));
   try {
     for (const f of files) {
       mkdirSync(dirname(join(at, f.path)), { recursive: true });
-      writeFileSync(join(at, f.path), f.data);
+      writeFileSync(join(at, f.path), f.data.slice());
     }
-    const seen = new Set<string>();
-    const visit = (file: string) => {
-      if (seen.has(file)) return;
-      seen.add(file);
-      let program: Stmt[];
-      try {
-        program = parse(readFileSync(file, "utf8"), { last: 0 });
-      } catch (e) {
-        throw new Error(`${relative(at, file)} doesn't parse: ${e instanceof Error ? e.message : e}`);
-      }
-      for (const s of program) {
-        const specifier = specifierOf(s);
-        if (specifier === undefined || !/^\.\.?(\/|$)/.test(specifier)) continue;
-        let found: string | undefined;
-        try {
-          found = resolveSpecifier(file, specifier, s, []);
-        } catch (e) {
-          if (!(e instanceof CompileError)) throw e;
-        }
-        if (found === undefined || !found.startsWith(at + sep)) throw new Error(`'${relative(at, file)}' imports '${specifier}', which the archive doesn't hold; if git doesn't track it, add and commit it`);
-        visit(found);
-      }
-    };
-    visit(join(at, lib));
+    let seen = new Set<string>();
+    visitUnpacked(at, join(at, lib), seen);
   } finally {
     rmSync(at, { recursive: true, force: true });
+  }
+}
+
+// Refuses `file`, unpacked under `at`, when it doesn't parse or imports through a relative path a
+// file the archive doesn't hold, then looks at each file it imports that way.
+/** @throws {CompileError | Error | IoError} */
+function visitUnpacked(at: string, file: string, seen: Mut<Set<string>>): void {
+  if (seen.has(file)) return;
+  seen.add(file);
+  let program: Stmt[] = [];
+  let ids: Ids = { last: 0 };
+  try {
+    program = parse(readFileSync(file, "utf8"), ids);
+  } catch (e) {
+    throw new Error(`${relative(at, file)} doesn't parse: ${e instanceof Error ? e.message : (e as IoError).message}`);
+  }
+  // Each statement is taken out of the program, since reading its specifier takes it.
+  while (program.length > 0) {
+    const s = program.shift()!;
+    const span: Span = { start: s.start, end: s.end };
+    const specifier = specifierOf(s);
+    if (specifier === undefined || !/^\.\.?(\/|$)/.test(specifier)) continue;
+    let found: string | undefined = undefined;
+    try {
+      let looked: string[] = [];
+      found = resolveSpecifier(file, specifier, span, looked);
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw e;
+    }
+    if (found === undefined || !found.startsWith(at + sep)) throw new Error(`'${relative(at, file)}' imports '${specifier}', which the archive doesn't hold; if git doesn't track it, add and commit it`);
+    visitUnpacked(at, found, seen);
   }
 }
 
@@ -114,38 +149,58 @@ export type UnsafeUse = { file: string; line: usize; col: usize; what: string };
 
 // Every `unsafe` block or expression, and every C declaration, in a package's .fsh files, as the
 // design doc asks the package manager to flag them.
-export function unsafeUses(files: { path: string; text: string }[]): UnsafeUse[] {
-  const uses: UnsafeUse[] = [];
-  for (const { path, text } of files.filter((f) => f.path.endsWith(".fsh"))) {
-    let program: Stmt[];
+/** @throws {Error} */
+export function unsafeUses(files: Ref<{ path: string; text: string }[]>): UnsafeUse[] {
+  let uses: UnsafeUse[] = [];
+  for (const f of files) {
+    if (!f.path.endsWith(".fsh")) continue;
+    const path = f.path;
+    const text = f.text;
+    let program: Stmt[] = [];
+    let ids: Ids = { last: 0 };
     try {
-      program = parse(text, { last: 0 });
+      program = parse(text, ids);
     } catch (e) {
-      throw new Error(`${path} doesn't parse: ${e instanceof Error ? e.message : e}`);
+      throw new Error(`${path} doesn't parse: ${(e as CompileError).message}`);
     }
-    const note = (node: { start: usize }, what: string) => {
-      const { line, col } = locate(text, node.start);
-      uses.push({ file: path, line, col, what });
-    };
-    walkWhile({ of: "stmts", node: program }, ({ of, node: n }) => {
-      if (of === "stmt" && n.kind === "unsafe") note(n, "unsafe block");
-      if (of === "expr" && n.kind === "unsafe") note(n, "unsafe expression");
-      if (of === "stmt" && n.kind === "declare") {
-        note(n, n.body.kind === "function" ? `C declaration of '${n.body.name}'` : "C declaration");
+    walkWhile({ of: "stmts", node: program }, (n) => {
+      if (n.of === "stmt" && n.node.kind === "unsafe") uses.push(useAt(path, text, n.node.start, "unsafe block"));
+      if (n.of === "expr" && n.node.kind === "unsafe") uses.push(useAt(path, text, n.node.start, "unsafe expression"));
+      if (n.of === "stmt" && n.node.kind === "declare") {
+        uses.push(useAt(path, text, n.node.start, n.node.body.kind === "function" ? `C declaration of '${n.node.body.name}'` : "C declaration"));
         return false;
       }
       return true;
     });
   }
-  return uses.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.line - b.line || a.col - b.col));
+  uses.sort((a, b) => {
+    if (a.file !== b.file) return a.file < b.file ? -1 : 1;
+    if (a.line !== b.line) return a.line < b.line ? -1 : 1;
+    return a.col < b.col ? -1 : a.col > b.col ? 1 : 0;
+  });
+  return uses;
+}
+
+function useAt(file: string, text: string, start: usize, what: string): UnsafeUse {
+  const { line, col } = locate(text, start);
+  return { file, line, col, what };
 }
 
 // The registry dependencies a build of this package would use that the index marks as using
 // unsafe, at the versions resolution picks.
-export function unsafeDependencies(manifest: Manifest): IndexEntry[] {
-  const roots = new Map(manifest.dependencies.map((d) => [d.name, [{ range: (d as { version: string }).version, by: manifest.name }]]));
+/** @throws {Error | IoError | Unresolved} */
+export function unsafeDependencies(manifest: Ref<Manifest>): IndexEntry[] {
+  let roots = new Map<string, Request[]>();
+  for (const d of manifest.dependencies) if ("version" in d) roots.set(d.name, [{ range: d.version, by: manifest.name }]);
   if (roots.size === 0) return [];
-  return [...resolveVersions(openIndex(registryUrl(manifest), true), roots).values()].filter((e) => e.unsafe);
+  const index = openIndex(registryUrl(manifest), true);
+  const picked = resolveVersions(index, roots);
+  let found: IndexEntry[] = [];
+  for (const name of [...picked.keys()]) {
+    const e = picked.get(name)!;
+    if (e.unsafe) found.push(e);
+  }
+  return found;
 }
 
 // A release prepared in a working clone of the index: its branch, and where the clone is.
@@ -153,78 +208,98 @@ export type Prepared = { branch: string; clone: string; archive: string; line: s
 
 // The archive and its index line committed on a branch of a full clone of the index, brought up
 // to the index's default branch first, so a version already published there is refused.
-export function prepare(packed: Packed): Prepared {
+/** @throws {Error | IoError} */
+export function prepare(packed: Ref<Packed>): Prepared {
   const { name, version } = packed.manifest;
   const url = registryUrl(packed.manifest);
-  if (!Bun.which("git")) throw new Error("publishing needs the git command, which isn't on PATH; install git");
+  if (Bun.which("git") === null) throw new Error("publishing needs the git command, which isn't on PATH; install git");
   const clone = join(cacheDir(), "publish", `${name}-${createHash("sha256").update(url).digest("hex").slice(0, 12)}`);
-  const run = (...args: string[]) => {
+  /** @throws {Error | IoError} */
+  function run(args: string[]): string {
     const done = git(clone, ...args);
-    if (done.exitCode !== 0) throw new Error(`git ${args[0]} in the index's clone failed: ${firstLine(done.stderr.toString())}`);
-    return done.stdout.toString().trim();
-  };
+    if (done.exitCode !== 0) throw new Error(`git ${args[0]} in the index's clone failed: ${firstLine(text(done.stderr))}`);
+    return text(done.stdout).trim();
+  }
   if (!existsSync(join(clone, ".git"))) {
     mkdirSync(clone, { recursive: true });
-    run("clone", "--quiet", "--", url, ".");
+    run(["clone", "--quiet", "--", url, "."]);
   } else {
-    run("fetch", "--quiet", "origin");
-    run("remote", "set-head", "origin", "--auto");
+    run(["fetch", "--quiet", "origin"]);
+    run(["remote", "set-head", "origin", "--auto"]);
   }
   const branch = `publish/${name}-${version}`;
-  const earlier = git(clone, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`).stdout.toString().trim();
-  run("checkout", "--quiet", "--force", "-B", branch, "origin/HEAD");
-  run("clean", "--quiet", "-fdx");
+  const earlier = text(git(clone, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}^{commit}`).stdout).trim();
+  run(["checkout", "--quiet", "--force", "-B", branch, "origin/HEAD"]);
+  run(["clean", "--quiet", "-fdx"]);
   if (existsSync(join(clone, name.slice(0, 2), name)) && versions(url, clone, name).some((e) => e.text === version)) {
     throw new Error(`'${name}' ${version} is already in the registry; raise the version in ${MANIFEST} to publish again`);
   }
   const archive = join("archives", name, `${version}.tar.gz`);
   mkdirSync(join(clone, "archives", name), { recursive: true });
-  writeFileSync(join(clone, archive), packed.bytes);
-  const dependencies = Object.fromEntries(packed.manifest.dependencies.map((d) => [d.name, (d as { version: string }).version]));
+  writeFileSync(join(clone, archive), packed.bytes.slice());
+  let dependencies: { [name: string]: string } = {};
+  for (const d of packed.manifest.dependencies) if ("version" in d) dependencies[d.name] = d.version;
   const line = JSON.stringify({ name, version, dependencies, sha256: packed.sha256, yanked: false, unsafe: packed.unsafe.length > 0 });
   const file = join(name.slice(0, 2), name);
   mkdirSync(join(clone, name.slice(0, 2)), { recursive: true });
   const before = existsSync(join(clone, file)) ? readFileSync(join(clone, file), "utf8") : "";
   writeFileSync(join(clone, file), `${before}${before === "" || before.endsWith("\n") ? "" : "\n"}${line}\n`);
-  run("add", "--", archive, file);
+  run(["add", "--", archive, file]);
   const committed = git(clone, "commit", "--quiet", "-m", `${name} ${version}`);
-  if (committed.exitCode !== 0) throw new Error(`can't commit the release in the index's clone: ${firstLine(committed.stderr.toString())}; set git's user.name and user.email`);
+  if (committed.exitCode !== 0) throw new Error(`can't commit the release in the index's clone: ${firstLine(text(committed.stderr))}; set git's user.name and user.email`);
   // The same release prepared again keeps its earlier commit, even on an older base, so a branch
   // already pushed to the fork can be pushed again after a failed submit.
   // An earlier commit that never got the release, as when its commit failed, holds no archive.
-  const blob = (rev: string) => git(clone, "rev-parse", "--verify", "--quiet", `${rev}:${archive}`).stdout.toString().trim();
-  if (earlier && blob(earlier) !== "" && blob(earlier) === blob("HEAD") && git(clone, "show", `${earlier}:${file}`).stdout.toString().endsWith(`${line}\n`)) {
-    run("reset", "--quiet", "--hard", earlier);
+  /** @throws {IoError} */
+  function blob(rev: string): string {
+    return text(git(clone, "rev-parse", "--verify", "--quiet", `${rev}:${archive}`).stdout).trim();
+  }
+  if (earlier !== "" && blob(earlier) !== "" && blob(earlier) === blob("HEAD") && text(git(clone, "show", `${earlier}:${file}`).stdout).endsWith(`${line}\n`)) {
+    run(["reset", "--quiet", "--hard", earlier]);
   }
   return { branch, clone, archive, line };
 }
 
 // A GitHub repository's owner/name, from an https or ssh URL, when it is one.
-const githubSlug = (url: string) => /github\.com[/:]([^/]+\/[^/.]+?)(?:\.git)?\/?$/.exec(url)?.[1];
+function githubSlug(url: string): string | undefined {
+  const found = /github\.com[/:]([^/]+\/[^/.]+?)(?:\.git)?\/?$/.exec(url);
+  return found === null ? undefined : found[1];
+}
 
 // Pushes a prepared release to the author's fork and opens a pull request against the index with
 // gh, after `confirm` agrees; the prepared branch stays either way, so a failed submit can be
 // tried again.
-export function submit(prepared: Prepared, manifest: Manifest, fork: string | undefined, confirm: (question: string) => boolean): string {
-  if (!Bun.which("gh")) throw new Error("submitting needs GitHub's gh command, which isn't on PATH; install it, or push the prepared branch and open the pull request yourself");
+/** @throws {Error | IoError} */
+export function submit(prepared: Ref<Prepared>, manifest: Ref<Manifest>, fork: string | undefined, confirm: (question: string) => boolean): string {
+  if (Bun.which("gh") === null) throw new Error("submitting needs GitHub's gh command, which isn't on PATH; install it, or push the prepared branch and open the pull request yourself");
   const index = registryUrl(manifest);
   const slug = githubSlug(index);
-  const gh = (...args: string[]) => {
+  /** @throws {Error | IoError} */
+  function gh(args: string[]): string {
     const done = Bun.spawnSync(["gh", ...args], { cwd: prepared.clone, stdout: "pipe", stderr: "pipe" });
-    if (done.exitCode !== 0) throw new Error(`gh ${args.slice(0, 2).join(" ")} failed: ${firstLine(done.stderr.toString())}; the release is still prepared on ${prepared.branch}`);
-    return done.stdout.toString().trim();
-  };
-  if (!fork && !slug) throw new Error(`the registry '${index}' isn't on GitHub, so name where to push with --fork <url>`);
-  const target = fork ?? `https://github.com/${gh("api", "user", "--jq", ".login")}/${slug!.split("/")[1]}.git`;
-  const base = git(prepared.clone, "rev-parse", "--abbrev-ref", "origin/HEAD").stdout.toString().trim().replace(/^origin\//, "") || "main";
-  const forking = fork ? "" : `fork ${slug} to your account, `;
+    if (done.exitCode !== 0) throw new Error(`gh ${args.slice(0, 2).join(" ")} failed: ${firstLine(text(done.stderr))}; the release is still prepared on ${prepared.branch}`);
+    return text(done.stdout).trim();
+  }
+  // An empty --fork names no fork to make, though the push still goes to it.
+  const forked = fork !== undefined && fork !== "";
+  if (!forked && slug === undefined) throw new Error(`the registry '${index}' isn't on GitHub, so name where to push with --fork <url>`);
+  let target = fork ?? "";
+  if (fork === undefined && slug !== undefined) target = `https://github.com/${gh(["api", "user", "--jq", ".login"])}/${slug.split("/")[1]}.git`;
+  const head = text(git(prepared.clone, "rev-parse", "--abbrev-ref", "origin/HEAD").stdout).trim().replace(/^origin\//, "");
+  const base = head !== "" ? head : "main";
+  const forking = !forked && slug !== undefined ? `fork ${slug} to your account, ` : "";
   if (!confirm(`${forking}push ${prepared.branch} to ${target} and open a pull request against ${index} (${base})? [y/N] `)) throw new Error(`nothing was pushed; the release is still prepared on ${prepared.branch}`);
-  if (!fork) gh("repo", "fork", slug!, "--clone=false", "--remote=false");
+  if (!forked && slug !== undefined) gh(["repo", "fork", slug, "--clone=false", "--remote=false"]);
   // gh's credentials, since builds' git leaves out the system config where a keychain helper lives.
   const credentials = ["-c", "credential.helper=!gh auth git-credential"];
   const pushed = git(prepared.clone, ...credentials, "push", "--quiet", "--", target, `${prepared.branch}:${prepared.branch}`);
-  if (pushed.exitCode !== 0) throw new Error(`can't push to ${target}: ${firstLine(pushed.stderr.toString())}; the release is still prepared on ${prepared.branch}`);
-  const owner = githubSlug(target)?.split("/")[0];
+  if (pushed.exitCode !== 0) throw new Error(`can't push to ${target}: ${firstLine(text(pushed.stderr))}; the release is still prepared on ${prepared.branch}`);
+  const pushedTo = githubSlug(target);
+  const owner = pushedTo === undefined ? undefined : pushedTo.split("/")[0];
   const { name, version } = manifest;
-  return gh("pr", "create", ...(slug ? ["--repo", slug] : []), "--base", base, "--head", owner ? `${owner}:${prepared.branch}` : prepared.branch, "--title", `${name} ${version}`, "--body", `Publishes ${name} ${version}: its archive and index line, prepared by fishc publish.\n\n${prepared.line}`);
+  const branch = owner !== undefined ? `${owner}:${prepared.branch}` : prepared.branch;
+  const title = `${name} ${version}`;
+  const body = `Publishes ${name} ${version}: its archive and index line, prepared by fishc publish.\n\n${prepared.line}`;
+  if (slug !== undefined) return gh(["pr", "create", "--repo", slug, "--base", base, "--head", branch, "--title", title, "--body", body]);
+  return gh(["pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body]);
 }
