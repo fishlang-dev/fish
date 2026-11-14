@@ -4270,13 +4270,14 @@ function atob(data: string): string throws TypeError {
 // runtime's blocking pool, so other tasks keep running while it waits.
 const STDIN = String.raw`
 declare function fsh_rt_stdin_take(at: MutPtr<u8>, cap: i64, whole: i64): i64;
-declare function fsh_rt_stream_write(stream: i32, bytes: Ptr<u8>, length: i64): void;
+declare function fsh_rt_prompt_write(bytes: Ptr<u8>, length: i64): void;
 
-// The next line's bytes with its newline, or with whole, all that is left; null when nothing is.
-function __stdinTake(whole: boolean): u8[] | null {
+// The next line's bytes with its newline, with mode 1 all that is left, and with mode 2 what has
+// arrived, waiting for some when nothing has; null when nothing is left.
+function __stdinTake(mode: i64): u8[] | null {
   let out: u8[] = new Array(256).fill(0 as u8);
   while (true) {
-    const n = unsafe { fsh_rt_stdin_take(mutPtrOf(out[0]), out.length as i64, whole ? 1 : 0) };
+    const n = unsafe { fsh_rt_stdin_take(mutPtrOf(out[0]), out.length as i64, mode) };
     if (n < 0) return null;
     if (n <= (out.length as i64)) return out.slice(0, n);
     out = new Array(n).fill(0 as u8);
@@ -4288,8 +4289,8 @@ function __stdinTake(whole: boolean): u8[] | null {
 // as Bun's does.
 function prompt(message?: string): string | null {
   const shown = new TextEncoder().encode((message ?? "") + " ");
-  unsafe { fsh_rt_stream_write(1, ptrOf(shown[0]), shown.length as i64) };
-  const line = __stdinTake(false);
+  unsafe { fsh_rt_prompt_write(ptrOf(shown[0]), shown.length as i64) };
+  const line = __stdinTake(0);
   if (line === null) return null;
   let end = line.length;
   if (end > 0 && line[end - 1] === 10) end--;
@@ -4299,7 +4300,7 @@ function prompt(message?: string): string | null {
 
 // The next line of standard input without its line ending, or null once input has ended.
 async function readLine(): Promise<string | null> {
-  const line = await spawnBlocking(() => __stdinTake(false));
+  const line = await spawnBlocking(() => __stdinTake(0));
   if (line === null) return null;
   let end = line.length;
   if (end > 0 && line[end - 1] === 10) end--;
@@ -5581,7 +5582,7 @@ async function watchAborted(signal: AbortSignal): Promise<string | null> {
 export function readFileSync(path: string | i64): u8[] throws IoError {
   if (typeof path === "string") return fileReadSync(path);
   if (path === 0) {
-    const taken = __stdinTake(true);
+    const taken = __stdinTake(1);
     if (taken === null) return [];
     return taken;
   }
@@ -6596,7 +6597,7 @@ export async function* lines(): AsyncGenerator<string> {
 }
 
 export async function bytes(): Promise<u8[]> {
-  const all = await spawnBlocking(() => __stdinTake(true));
+  const all = await spawnBlocking(() => __stdinTake(1));
   if (all === null) return [];
   return all;
 }
@@ -6811,6 +6812,16 @@ function streamWrite(fd: i32, bytes: Ref<u8[]>): void {
 
 export function stdout(): WriteStream {
   return new WriteStream(1);
+}
+
+// process.stdin, of which Fish has its chunks as for await reads them: the bytes standard input
+// has given since the last chunk, each read on the blocking pool.
+export async function* stdin(): AsyncGenerator<u8[]> {
+  while (true) {
+    const chunk = await spawnBlocking(() => __stdinTake(2));
+    if (chunk === null) return;
+    yield chunk;
+  }
 }
 
 export function stderr(): WriteStream {
@@ -7248,7 +7259,7 @@ export { sleeping as sleep, serving as serve, spawning as spawn };
 // `process.argv`, called with nothing, and `env` as a table, `process.env.HOME` and
 // `process.env[name]` calling it with the key.
 export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
-  process: { argv: "value", env: "table", shutdown: "value", platform: "value", arch: "value", execPath: "value", pid: "value", stdout: "value", stderr: "value" },
+  process: { argv: "value", env: "table", shutdown: "value", platform: "value", arch: "value", execPath: "value", pid: "value", stdin: "value", stdout: "value", stderr: "value" },
   Bun: { argv: "value", env: "table", stdin: "value", version: "value" },
   os: { constants: "value" },
 };

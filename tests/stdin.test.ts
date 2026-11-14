@@ -105,3 +105,13 @@ test("prompt writes its message and a space, then gives each line until input en
 `);
   expect(await piped(binary, ["fish\r\n", "two\n"])).toBe("name? [fish]\n [two]\nmore? [none]\n");
 });
+
+test("for await over process.stdin gives what has arrived as each chunk, ending with input", async () => {
+  const binary = await build("chunks", `async function main() {
+  let text = "";
+  for await (const chunk of process.stdin) text += new TextDecoder().decode(chunk);
+  console.log(text.length, text.replaceAll("\\n", "|"));
+}
+`);
+  expect(await piped(binary, ["abc", "def\n", "", "ghi"], 50)).toBe("10 abcdef|ghi\n");
+});

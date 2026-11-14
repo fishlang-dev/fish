@@ -3080,14 +3080,19 @@ static int fsh_stdin_fill(void) {
   }
 }
 
-// The next line's length with its newline, or with whole, everything left; -1 when nothing is.
-// Its bytes are copied to at and taken only when they fit in cap, so a caller whose buffer is
-// too small asks again with one of the length given.
+// The next line's length with its newline, with whole 1 everything left, and with whole 2 what
+// has arrived, waiting for a read when nothing has; -1 when nothing is left. Its bytes are copied
+// to at and taken only when they fit in cap, so a caller whose buffer is too small asks again
+// with one of the length given.
 int64_t fsh_rt_stdin_take(uint8_t *at, int64_t cap, int64_t whole) {
   pthread_mutex_lock(&fsh_stdin_lock);
   size_t n = 0, seen = 0;
   for (;;) {
-    if (!whole) {
+    if (whole == 2 && fsh_stdin_len > fsh_stdin_start) {
+      n = fsh_stdin_len - fsh_stdin_start;
+      break;
+    }
+    if (whole == 0) {
       uint8_t *from = fsh_stdin_buf + fsh_stdin_start;
       size_t left = fsh_stdin_len - fsh_stdin_start - seen;
       uint8_t *nl = left > 0 ? memchr(from + seen, '\n', left) : NULL;
@@ -4878,6 +4883,12 @@ void fsh_rt_stream_write(int32_t stream, const char *bytes, int64_t length) {
   fsh_rt_print_begin(stream);
   fwrite(bytes, 1, length, stream == 2 ? stderr : stdout);
   fsh_rt_print_end(stream);
+}
+
+// prompt's message, on stdout as process.stdout.write puts it, declared apart from it because std's
+// sections and modules share one set of names.
+void fsh_rt_prompt_write(const char *bytes, int64_t length) {
+  fsh_rt_stream_write(1, bytes, length);
 }
 
 // A Lock's word: 0 unlocked, or the token of the thread holding it. A lock is held only for a
