@@ -1275,3 +1275,12 @@ function main() {
   let xs = [1, 2];
   for (const x of xs) xs.copyWithin(0, 1);
 }
+// case: array_join_long
+// expect: 4688888 i32 0, i32 1 i32 399999
+// A long join takes time linear in its result, not in the square of it.
+function main() {
+  let parts: u32[] = [];
+  for (let i: u32 = 0; i < 400000; i++) parts.push(i);
+  const joined = parts.map((w) => `i32 ${w}`).join(", ");
+  console.log(joined.length, joined.slice(0, 12), joined.slice(-10));
+}

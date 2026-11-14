@@ -8601,8 +8601,9 @@ class Codegen implements PrintHost, ComptimeHost {
     const out = this.alloca(this.llvm(result));
     if (searching) this.emit(`store ${this.llvm(result)} ${method === "includes" ? "false" : "-1"}, ptr ${out}`);
     else if (method === "join") {
-      const line = `store ptr ${this.text("")}, ptr ${out}`;
-      this.emit(line);
+      const joining = this.temp();
+      this.emit(`${joining} = call ptr @fsh_rt_join_start()`);
+      this.emit(`store ptr ${joining}, ptr ${out}`);
     }
     else this.emit(`store ${ARRAY} zeroinitializer, ptr ${out}`);
     const index = this.alloca("i64");
@@ -8637,23 +8638,17 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`store ${this.llvm(result)} ${method === "includes" ? "true" : i}, ptr ${out}`);
       this.emit(`br label %${method === "lastIndexOf" ? next : done}`);
     } else if (method === "join") {
-      // ponytail: each element copies the text so far, quadratic in the result's length; an
-      // in-place append of a uniquely owned string makes it linear.
-      const so = this.temp();
-      this.emit(`${so} = load ptr, ptr ${out}`);
+      // The pieces are gathered and joined once at the end, so the join is linear in its length.
+      const joining = this.temp();
+      this.emit(`${joining} = load ptr, ptr ${out}`);
       const [first, separated, joined] = [this.temp(), this.label(), this.label()];
       this.emit(`${first} = icmp eq i64 ${i}, 0`);
-      const from = this.block;
       this.emit(`br i1 ${first}, label %${joined}, label %${separated}`);
       this.startBlock(separated);
       const part = (args.length > 0 ? args[0]! : undefined) ?? this.text(",");
-      const withSep = this.concat(so, part);
-      this.emit(`call void @fsh_rt_str_release(ptr ${so})`);
-      const sepEnd = this.block;
+      this.emit(`call void @fsh_rt_join_push(ptr ${joining}, ptr ${part})`);
       this.emit(`br label %${joined}`);
       this.startBlock(joined);
-      const before = this.temp();
-      this.emit(`${before} = phi ptr [ ${so}, %${from} ], [ ${withSep}, %${sepEnd} ]`);
       const mark = this.pending.length;
       const base = this.tables.typing.lower(element);
       const plain = isInteger(base) || isFloat(base) || base === "boolean";
@@ -8665,13 +8660,11 @@ class Codegen implements PrintHost, ComptimeHost {
         piece = this.written(convert2, "string");
       }
       const made = this.pending.splice(mark as i64);
-      const after = this.concat(before, piece);
-      this.emit(`call void @fsh_rt_str_release(ptr ${before})`);
+      this.emit(`call void @fsh_rt_join_push(ptr ${joining}, ptr ${piece})`);
       for (const p of made) {
         const v = this.released(p);
         this.dispose(v, p.type);
       }
-      this.emit(`store ptr ${after}, ptr ${out}`);
       this.emit(`br label %${next}`);
     } else {
       const copied2 = this.copied(v, element);
@@ -8686,6 +8679,12 @@ class Codegen implements PrintHost, ComptimeHost {
     this.startBlock(done);
     const r = this.temp();
     this.emit(`${r} = load ${this.llvm(result)}, ptr ${out}`);
+    if (method === "join") {
+      const joined = this.temp();
+      this.emit(`${joined} = call ptr @fsh_rt_join_end(ptr ${r})`);
+      if (!this.cur().types.has(e) && this.needsDrop(result)) this.pending.push({ v: joined, type: result });
+      return joined;
+    }
     if (!this.cur().types.has(e) && this.needsDrop(result)) this.pending.push({ v: r, type: result });
     return r;
   }

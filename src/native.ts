@@ -248,6 +248,30 @@ fsh_str *fsh_rt_str_concat(fsh_str *a, fsh_str *b) {
   return fsh_rt_str_join(parts, 2);
 }
 
+// The pieces of an array's join, gathered so they are joined once, in time linear in the result.
+typedef struct { fsh_str **parts; int64_t count, capacity; } fsh_joining;
+
+void *fsh_rt_join_start(void) {
+  return calloc(1, sizeof(fsh_joining));
+}
+
+void fsh_rt_join_push(fsh_joining *j, fsh_str *s) {
+  if (j->count == j->capacity) {
+    j->capacity = j->capacity > 0 ? j->capacity * 2 : 8;
+    j->parts = realloc(j->parts, (size_t)j->capacity * sizeof(fsh_str *));
+  }
+  fsh_rt_str_retain(s);
+  j->parts[j->count++] = s;
+}
+
+fsh_str *fsh_rt_join_end(fsh_joining *j) {
+  fsh_str *s = fsh_rt_str_join(j->parts, j->count);
+  for (int64_t i = 0; i < j->count; i++) fsh_rt_str_release(j->parts[i]);
+  free(j->parts);
+  free(j);
+  return s;
+}
+
 // The UTF-16 unit at byte *at, moving past it. A 4-byte character is two units: its high
 // surrogate, leaving *at on the character with *half set, then its low one.
 static uint32_t fsh_next(const unsigned char *s, int64_t *at, int *half) {
