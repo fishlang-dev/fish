@@ -198,7 +198,7 @@ test("every node of the test programs, parsed, expanded and checked, has an id o
       const compilation = newCompilation(session);
       const loaded = load(compilation, p.file, p.src);
       stripTests(loaded);
-      expandMacros(compilation, loaded, false, (macros) => check(compilation, macros, false, true));
+      expandMacros(compilation, loaded, false, (round, macros) => check(round, macros, false, true));
       written = flatten(compilation, loaded, false);
       problems.push(...audit([written, stdFor(compilation, written)], ids, p.name));
       const checked = check(compilation, written);

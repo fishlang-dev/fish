@@ -561,6 +561,10 @@ export class NodeMap<K extends Id, V> {
   forEach(each: (value: V, node: K) => void): void {
     for (const k of this.nodes.keys()) each(this.nodeValues.get(k)!, this.nodes.get(k)!);
   }
+
+  copy(): NodeMap<K, V> {
+    return new NodeMap<K, V>([...this.entries()]);
+  }
 }
 
 // A `Set` of nodes, keyed by their ids, holding each node as a `Set` holds its members. Iterating
@@ -617,6 +621,10 @@ export class NodeSet<K extends Id> {
     let out: K[] = [];
     for (const k of this.table.keys()) out.push(this.table.get(k)!);
     return out;
+  }
+
+  copy(): NodeSet<K> {
+    return new NodeSet<K>(this.items());
   }
 }
 

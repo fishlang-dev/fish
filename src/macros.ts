@@ -1,7 +1,7 @@
 import { bodyOf, type InstanceId } from "./arenas.ts";
 import type { Checked } from "./check.ts";
 import { AstValues, comptimeBody, comptimeCall, type ComptimeHost, type Value } from "./comptime.ts";
-import type { Compilation, Tables } from "./compilation.ts";
+import { macroCompilation, type Compilation, type Tables } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { flatten, type Loaded, type Module } from "./modules.ts";
 import { parse, type ClassMember, type Expr, type Func, type Param, type Pattern, type PropertyName, type Span, type Specifier, type Stmt, type TypeMember, type TypeNode, type TypeParam } from "./parser.ts";
@@ -30,9 +30,9 @@ const isExport = (d: Ref<Stmt>) => d.kind === "export" && TOP_LEVEL.has(d.body.k
 // A decorated top-level declaration: its file's place in the program and its own place there.
 type Site = { module: usize; index: usize };
 
-// Checks the macro code a round gives it.
+// Checks the macro code a round gives it, within a compilation of the round's own.
 /** @throws {CompileError} */
-export type MacroCheck = (program: Stmt[]) => Checked;
+export type MacroCheck = (compilation: Compilation, program: Stmt[]) => Checked;
 
 // Expands every file's macros in place. A round links a copy of the files, checks the macros
 // with every decorator's arguments, then applies each declaration's decorators in turn: its
@@ -84,7 +84,11 @@ export function expandMacros(compilation: Mut<Compilation>, loaded: Mut<Loaded>,
     // Checked here rather than in a helper, as a function value can't be lent to one.
     let checked: MacroHost | undefined = undefined;
     try {
-      checked = new MacroHost(checkMacros(forCheck));
+      const made = checkMacros(macroCompilation(compilation), forCheck);
+      // The ids and counts the check took stay taken, so what the macros make doesn't reuse them.
+      compilation.ids.last = made.tables.ids.last;
+      compilation.counts = { enums: made.tables.counts.enums, lifts: made.tables.counts.lifts, destructures: made.tables.counts.destructures, expansions: made.tables.counts.expansions, constants: made.tables.counts.constants };
+      checked = new MacroHost(made);
     } catch (e) {
       throw argumentError(e as CompileError, spans);
     }

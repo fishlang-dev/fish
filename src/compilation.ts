@@ -71,6 +71,35 @@ export function newCompilation(session: Session): Compilation {
   return { session, ids: { last: 0 }, rewrites: new Rewrites(), names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: new Typing(), arenas: new Arenas(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0 }, upcasts: new Set(), files: [], rust: { names: new NodeMap<Declared | ClassMember, RustName>(), classNodes: new NodeMap<ClassNode, RustClass>() }, enumInits: [], generated: new NodeSet<Id>(), looked: [] };
 }
 
+// A compilation to check one round's macros with, so the check doesn't use up the compilation
+// expanding them: what linking gave the program, its counters, names and files, with types,
+// arenas and rewrites of its own. Its session holds no std tree, since linking added std already.
+export function macroCompilation(c: Ref<Compilation>): Compilation {
+  let fileNames: Map<usize, Map<string, string>> | undefined = undefined;
+  if (c.fileNames !== undefined) {
+    let copied = new Map<usize, Map<string, string>>();
+    for (const [base, names] of c.fileNames) copied.set(base, new Map<string, string>(names));
+    fileNames = copied;
+  }
+  return {
+    session: { locking: { locked: false }, engineHook: c.session.engineHook, std: { tree: [], cached: false, parses: 0 } },
+    ids: { last: c.ids.last },
+    rewrites: new Rewrites(),
+    names: { local: new Set<string>(c.names.local), madeUp: new Map<string, string>(c.names.madeUp) },
+    regex: { properties: new Map(), folds: new Map() },
+    typing: new Typing(),
+    arenas: new Arenas(),
+    counts: { enums: c.counts.enums, lifts: c.counts.lifts, destructures: c.counts.destructures, expansions: c.counts.expansions, constants: c.counts.constants },
+    upcasts: new Set<string>(c.upcasts),
+    files: c.files.map((f) => ({ base: f.base, file: f.file, src: f.src, std: f.std })),
+    rust: { names: c.rust.names.copy(), classNodes: c.rust.classNodes.copy() },
+    enumInits: c.enumInits.map(([a, b, name]): [usize, usize, string] => [a, b, name]),
+    fileNames,
+    generated: c.generated.copy(),
+    looked: [...c.looked],
+  };
+}
+
 // The tables one check of a program fills in, by node and by type, for the rest of that check
 // and for the passes after it: moves, comptime and codegen. `check` makes a fresh set, and every
 // instance it makes holds it, so nothing one program records reaches another.

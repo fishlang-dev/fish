@@ -117,7 +117,7 @@ function expanded(compilation: Compilation, loaded: Loaded, library: boolean): S
   const { timings } = compilation.session;
   timed(timings, "macros", () => {
     stripTests(loaded);
-    expandMacros(compilation, loaded, library, (macros) => check(compilation, macros, false, true));
+    expandMacros(compilation, loaded, library, (round, macros) => check(round, macros, false, true));
   });
   return timed(timings, "check", () => flatten(compilation, loaded, library));
 }
