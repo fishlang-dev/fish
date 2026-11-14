@@ -14,7 +14,7 @@ import { load, type Loaded, type RustCrate } from "./modules.ts";
 import { resolvePackages } from "./dependencies.ts";
 import { pack, prepare, submit, unsafeDependencies } from "./publish.ts";
 import { openIndex, registryUrl } from "./registry_index.ts";
-import { formatVersion, parseRange, maxSatisfying } from "./semver.ts";
+import { formatVersion, parseRange, maxSatisfying, type Version } from "./semver.ts";
 import { createPackage, type Edition, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.ts";
 import { parse, parseWithComments, type Stmt } from "./parser.ts";
 import type { Ids } from "./nodes.ts";
@@ -252,7 +252,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
 function run(args: string[], stdin?: string): void {
   const command = args[0]!;
   const done = stdin === undefined ? Bun.spawnSync(args) : Bun.spawnSync(args, { stdin: new TextEncoder().encode(stdin) });
-  if (done.exitCode !== 0) throw new Error(`${command ?? ""} failed:\n${new TextDecoder().decode(done.stderr)}`);
+  if (done.exitCode !== 0) throw new Error(`${command} failed:\n${new TextDecoder().decode(done.stderr)}`);
 }
 
 // A C header declaring a library's exports, usable from C and C++. A parameter named like a C
@@ -993,7 +993,9 @@ async function main(): Promise<void> {
         if (manifest.dependencies.some((d) => d.name === name)) fail(`fishc add: '${name}' is already a dependency in ${MANIFEST}`);
         if (range !== undefined && (range.trim() === "" || /[\n\r"\\]/.test(range) || parseRange(range) === undefined)) fail(`fishc add: '${range}' isn't a version range; write one as package.json does, as in ^1.2.0`);
         const released = openIndex(registryUrl(manifest), true).versions(name).filter((e) => !e.yanked);
-        const latest = maxSatisfying(released.map((e) => e.version), parseRange(range ?? "*")!);
+        let versions: Version[] = [];
+        for (const e of released) versions.push({ major: e.version.major, minor: e.version.minor, patch: e.version.patch, pre: [...e.version.pre] });
+        const latest = maxSatisfying(versions, parseRange(range ?? "*")!);
         if (latest === undefined) fail(`fishc add: no version of '${name}' in the registry fits '${range ?? "*"}'`);
         const written = range ?? `^${formatVersion(latest!)}`;
         const edited = withDependency(readFileSync(found, "utf8"), `${name} = { version = "${written}" }`);
@@ -1001,7 +1003,7 @@ async function main(): Promise<void> {
         if (!readManifest(edited, manifest.dir).dependencies.some((d) => d.name === name)) fail(`fishc add: couldn't add '${name}' to ${MANIFEST}; add it by hand`);
         writeFileSync(found, edited);
         console.log(`added ${name} ${written}`);
-        const chosen = released.find((e) => e.version === latest);
+        const chosen = released.find((e) => formatVersion(e.version) === formatVersion(latest!));
         if (chosen?.unsafe) console.error(`note: '${name}' ${chosen.text} uses unsafe`);
       } else {
         if (file !== undefined && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
