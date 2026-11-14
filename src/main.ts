@@ -42,7 +42,7 @@ import { STD_BASE } from "./std.ts";
 export type Panic = "unwind" | "abort";
 
 // `formatError` for stderr, painted on a terminal unless NO_COLOR is set, or whenever FORCE_COLOR is.
-function painted(e: CompileError, path: string, program: string, kind = "error"): string {
+function painted(e: Ref<CompileError>, path: string, program: string, kind = "error"): string {
   const forced = process.env.FORCE_COLOR;
   const colour = forced !== undefined && forced !== "0" ? true : process.stderr.isTTY === true && (process.env.NO_COLOR ?? "") === "";
   return formatError(e, path, program, kind, colour);
