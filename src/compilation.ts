@@ -573,7 +573,7 @@ export function timed<T>(timings: Timings | undefined, name: string, run: Timed<
 }
 
 // One line per stage of `stages`, in that order, a stage that never ran as 0.0, then the total.
-export function formatTimings(timings: Ref<Timings>, stages: string[], total: f64): string {
+export function formatTimings(timings: Ref<Timings>, stages: Ref<string[]>, total: f64): string {
   const line = (name: string, ms: f64, note?: string) => `${name.padEnd(9)}${ms.toFixed(1).padStart(9)} ms${note !== undefined ? ` (${note})` : ""}\n`;
   return stages.map((s) => line(s, timings.ms.get(s) ?? 0, timings.notes.get(s))).join("") + line("total", total);
 }

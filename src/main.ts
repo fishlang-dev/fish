@@ -791,7 +791,7 @@ function fail(message: string): never {
 }
 
 // The time each of a build's `stages` took, printed when the build was timed.
-function reportTimings(session: Ref<Session>, stages: string[], start: f64) {
+function reportTimings(session: Ref<Session>, stages: Ref<string[]>, start: f64) {
   if (session.timings !== undefined) process.stderr.write(formatTimings(session.timings, stages, performance.now() - start));
 }
 
