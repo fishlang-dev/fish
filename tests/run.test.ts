@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { CompileError, formatError } from "../src/diag.ts";
 import { errorsOf } from "../src/lsp.ts";
 import { buildAsync } from "../src/main.ts";
@@ -41,8 +41,34 @@ const dir = join(import.meta.dir, "programs");
 const tmp = mkdtempSync(join(tmpdir(), "fishc-"));
 const jobs = Number(process.env.FISH_TEST_JOBS) || availableParallelism();
 
+// FISHC names a fishc binary, such as the one Fish builds of itself, to build every program with
+// in place of this compiler; its diagnostics are read from what it prints.
+const fishc = process.env.FISHC;
+
+// A build by FISHC that failed: what it printed, and how many errors that names.
+class Printed extends Error {
+  count: number;
+  constructor(text: string) {
+    super(text);
+    this.count = text.match(/: error\[E\d+\]/g)?.length ?? 0;
+  }
+}
+
+// Builds a program with FISHC from its own directory, so diagnostics name it as the runner does,
+// giving the warnings it printed.
+async function printedBuild(file: string, out: string, release: boolean, abort: boolean, links: string[]): Promise<string[]> {
+  const args = [fishc!, "build", basename(file), "-o", out, ...(release ? ["--release"] : []), ...(abort ? ["--panic=abort"] : []), ...links.flatMap((l) => ["--link", l])];
+  const p = Bun.spawn(args, { cwd: dirname(file), env: { ...process.env, NO_COLOR: "1" }, stdout: "pipe", stderr: "pipe" });
+  const timer = setTimeout(() => p.kill(9), 300_000);
+  const [stdout, stderr] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+  await p.exited;
+  clearTimeout(timer);
+  if (p.exitCode !== 0) throw new Printed(`${stderr}${stdout}` || `fishc build exited with ${p.exitCode ?? p.signalCode}`);
+  return stderr.split(/\n(?=\S+:\d+:\d+: warning)/).filter((w) => /: warning/.test(w));
+}
+
 // What building and running a program gave: a compile error, or its output and how it ended.
-type Outcome = { error?: unknown; warnings: CompileError[]; stdout: string; stderr: string; exitCode: number | null; signal: string | number | null; timedOut: boolean };
+type Outcome = { error?: unknown; warnings: (CompileError | string)[]; stdout: string; stderr: string; exitCode: number | null; signal: string | number | null; timedOut: boolean };
 
 let running = 0;
 const waiting: (() => void)[] = [];
@@ -71,7 +97,9 @@ async function outcome(name: string, file: string, src: string): Promise<Outcome
     }
     const out = join(tmp, name.replace(/\.fsh$/, "").replace(/[^\w.-]+/g, "_"));
     const links = [...src.matchAll(/\/\/ link: (\S+)/g)].map((m) => m[1]!);
-    const warnings = await buildAsync(session, file, out, src.includes("// mode: release"), src.includes("// mode: abort") ? "abort" : "unwind", links);
+    const release = src.includes("// mode: release");
+    const abort = src.includes("// mode: abort");
+    const warnings = fishc !== undefined ? await printedBuild(file, out, release, abort, links) : await buildAsync(session, file, out, release, abort ? "abort" : "unwind", links);
     // Every program is checked for leaks: the runtime reports what is still allocated at exit.
     const input = [...src.matchAll(/\/\/ stdin: (.*)/g)].map((m) => JSON.parse(m[1]!) as string);
     const stdin = input.length > 0 ? new TextEncoder().encode(input.join("")) : undefined;
@@ -150,17 +178,18 @@ for (const name of programs) {
     const run = await outcomes.get(name)!;
 
     if (run.error !== undefined) {
-      if (!(run.error instanceof CompileError) || errors.length === 0) throw run.error;
-      const message = formatError(run.error, label, src);
+      if (!(run.error instanceof CompileError || run.error instanceof Printed) || errors.length === 0) throw run.error;
+      const message = run.error instanceof Printed ? run.error.message : formatError(run.error, label, src);
+      const got = run.error instanceof Printed ? run.error.count : errorsOf(run.error).length;
       const counted = Number(src.match(/\/\/ errors: (\d+)/)?.[1] ?? 1);
-      if (errorsOf(run.error).length !== counted) throw new Error(`expected ${counted} error(s), got ${errorsOf(run.error).length}:\n${message}`);
+      if (got !== counted) throw new Error(`expected ${counted} error(s), got ${got}:\n${message}`);
       if (counted > 1) expect(message).toMatch(new RegExp(errors.map((e) => e.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^]*")));
       else for (const error of errors) expect(message).toContain(error);
       return;
     }
     expect(errors).toEqual([]);
     if (src.includes("// mode: parse")) return;
-    const warnings = run.warnings.map((w) => formatError(w, label, src, "warning"));
+    const warnings = run.warnings.map((w) => (typeof w === "string" ? w : formatError(w, label, src, "warning")));
     for (const text of warned) expect(warnings.join("\n")).toContain(text);
     if (warned.length > 0) for (const w of warnings) expect(warned.some((text) => w.includes(text)) ? w : "").toBe(w);
 
