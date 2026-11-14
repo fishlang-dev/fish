@@ -177,7 +177,7 @@ function bundled(ir: string, loaded: Ref<Loaded>): string {
   if (used.length === 0) return ir;
   const bytes = new TextEncoder().encode(bundle(loaded.packages, used));
   let text = "";
-  for (const c of bytes) text += c >= 0x20 && c < 0x7f && c !== 0x22 && c !== 0x5c ? String.fromCharCode(c) : `\\${c.toString(16).padStart(2, "0").toUpperCase()}`;
+  for (const c of bytes) text += c >= 0x20 && c < 0x7f && c !== 0x22 && c !== 0x5c ? String.fromCharCode(c as u16) : `\\${c.toString(16).padStart(2, "0").toUpperCase()}`;
   return `${ir}\n@fsh.js.bundle = private unnamed_addr constant [${bytes.length + 1} x i8] c"${text}\\00"\n`;
 }
 
@@ -222,7 +222,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
   try {
     let objects: string[] = [];
     for (const u of runtimeUnits(ir, release, true, copyTarget(target))) objects.push(cachedObject(building, u));
-    for (const o of mathObjects(building, target.compile)) objects.push(o);
+    for (const o of mathObjects(building, [...target.compile])) objects.push(o);
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
       const extension = darwin ? "dylib" : "so";
@@ -346,7 +346,7 @@ function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ std: Unit[
   let objects: string[] = [];
   for (const u of runtimeUnits(ir, release, false, copyTarget(target), leaks)) objects.push(cachedObject(session, u));
   for (const u of halves.std) objects.push(cachedObject(session, u));
-  for (const o of mathObjects(session, target.compile)) objects.push(o);
+  for (const o of mathObjects(session, [...target.compile])) objects.push(o);
   stageEnd(session, "runtime", started);
   const none: string[] = [];
   const g = debug ? ["-g"] : none;
@@ -404,7 +404,8 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
   const math = await mathObjectsAsync(building);
   for (const o of math) objects.push(o);
   const compiler = Bun.spawn([...clangArgs(out, release, links, objects, shim, copyTarget(host)), ...runtimeLinks(made.ir, host)], { stdin: new TextEncoder().encode(halves.program), stderr: "pipe" });
-  const [code, stderr] = await Promise.all([compiler.exited, new Response(compiler.stderr).text()]);
+  const errors = new Response(compiler.stderr);
+  const [code, stderr] = await Promise.all([compiler.exited, errors.text()]);
   if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
   return made.checked.warnings;
 }
@@ -451,9 +452,23 @@ export function buildTests(session: BuildSession, dir: string, out: string): Tes
 
 // Runs the tests of the package at `dir` whose name holds `filter`, each in a process of its own.
 // Gives the exit code.
-/** @throws {Error | IoError} */
+/** @throws {Error | IoError | JsonError} */
 async function testPackage(session: BuildSession, dir: string, filter: string | undefined): Promise<i64> {
   const out = join(mkdtempSync(join(tmpdir(), "fishc-test-")), "tests");
+  let code: i64 = 1;
+  try {
+    code = await testsIn(session, dir, out, filter);
+  } catch (e) {
+    rmSync(dirname(out), { recursive: true, force: true });
+    throw e;
+  }
+  rmSync(dirname(out), { recursive: true, force: true });
+  return code;
+}
+
+// `testPackage`'s build and run, the build at `out`.
+/** @throws {Error | IoError | JsonError} */
+async function testsIn(session: BuildSession, dir: string, out: string, filter: string | undefined): Promise<i64> {
   let running = new Set<i32>();
   try {
     const tests = buildTests(session, dir, out);
@@ -475,8 +490,6 @@ async function testPackage(session: BuildSession, dir: string, filter: string | 
     // The harness's own text is generated, and an error in it would be the compiler's.
     console.error(painted(e, relative(process.cwd(), join(dir, MANIFEST)), ""));
     return 1;
-  } finally {
-    rmSync(dirname(out), { recursive: true, force: true });
   }
 }
 
@@ -512,7 +525,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
     else files.push({ path, named: true });
   }
   // A manifest that can't be read is reported once, as "broken", and its files are skipped.
-  const editions = new Map<string, Edition | "broken">();
+  let editions = new Map<string, Edition | "broken">();
   const packaged = (file: string) => {
     const manifest = findManifest(dirname(file));
     if (manifest === undefined) return undefined;
@@ -666,7 +679,7 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
   const tls = openssl === undefined ? "" : "missing" in openssl ? "-tls-missing" : "-tls";
   const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}`;
   const source = [NATIVE, ...(js ? [JS_NATIVE] : none), ...(openssl === undefined ? none : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
-  const tlsFlags = openssl !== undefined && "compile" in openssl ? openssl.compile : none;
+  const tlsFlags = openssl !== undefined && "compile" in openssl ? openssl.compile : [...none];
   const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none)], stdin: source, inputs: js ? files(ENGINE) : none };
   const engine: Unit[] = js ? ENGINE_SOURCES.map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(ENGINE) })) : [];
   const zlib: Unit[] = callsZlib(ir) ? [{ name: "zlib", args: ["-x", "c", "-", ...flags], stdin: ZLIB_NATIVE, inputs: [] }] : [];
@@ -767,7 +780,8 @@ async function main(): Promise<void> {
     return made;
   };
   // `fishc run` and `fishc watch` take the program's arguments after the file, or all of them with no file.
-  const [command, named] = positionals;
+  const command = positionals[0];
+  const named = positionals[1];
   const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
   if (command === "explain") {
