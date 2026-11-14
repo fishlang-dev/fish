@@ -571,7 +571,14 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
         if (!existsSync(`${target.slice(0, -3)}.fsh`)) return undefined;
         return existsSync(target) ? "ambiguous" : "rename";
       };
-      const edition = typescript ? "ts-compat" : (directive(src)?.edition ?? packaged(path) ?? "native");
+      let edition: Edition | "broken" = "native";
+      const written = directive(src)?.edition;
+      if (typescript) edition = "ts-compat";
+      else if (written !== undefined) edition = written;
+      else {
+        const inPackage = packaged(path);
+        if (inPackage !== undefined) edition = inPackage;
+      }
       if (edition === "broken") continue;
       if (edition === "native") {
         if (named) console.log(`fishc lint: '${shown}' is in the native edition, so there's nothing to lint`);
@@ -638,6 +645,44 @@ function settledImports(path: string, src: string, settled: Ref<Set<string>>): s
     if (settled.has(target) && !found.includes(target)) found.push(target);
   }
   return found;
+}
+
+// Compact JSON laid out as `JSON.stringify(value, null, 2)` lays it out: each member on a line of
+// its own, two spaces deeper than its container, with empty containers kept as `{}` and `[]`.
+export function indented(json: string): string {
+  let out = "";
+  let depth = 0;
+  let quoted = false;
+  for (let i = 0; i < json.length; i++) {
+    const c = json[i]!;
+    if (quoted) {
+      out += c;
+      if (c === "\\") {
+        out += json[i + 1]!;
+        i++;
+      } else if (c === '"') quoted = false;
+      continue;
+    }
+    if (c === '"') {
+      quoted = true;
+      out += c;
+    } else if (c === "{" || c === "[") {
+      const next = json[i + 1];
+      if (next === "}" || next === "]") {
+        out += c + next;
+        i++;
+      } else {
+        depth++;
+        out += `${c}\n${"  ".repeat(depth)}`;
+      }
+    } else if (c === "}" || c === "]") {
+      depth--;
+      out += `\n${"  ".repeat(depth)}${c}`;
+    } else if (c === ",") out += `,\n${"  ".repeat(depth)}`;
+    else if (c === ":") out += ": ";
+    else out += c;
+  }
+  return out;
 }
 
 // `path` from the working directory, or as it is when that is where it is.
@@ -839,7 +884,7 @@ async function main(): Promise<void> {
         fail(`fishc survey: the plan '${values.plan ?? ""}' can't be read: ${(e as { message: string }).message}`);
       }
       const ranking = rank(dirs, values.self, plan);
-      console.log(values.json === true ? JSON.stringify(ranking, null, 2) : formatRanking(ranking, plan !== undefined));
+      console.log(values.json === true ? indented(JSON.stringify(ranking)) : formatRanking(ranking, plan !== undefined));
     } else if (values.compare !== undefined) {
       let then: SurveyReport | undefined = undefined;
       try {
@@ -852,10 +897,10 @@ async function main(): Promise<void> {
         fail(`fishc survey: the baseline '${values.compare}' can't be compared: ${(e as { message: string }).message}`);
       }
       const c = compare(then!, survey(file!));
-      console.log(values.json === true ? JSON.stringify(c, null, 2) : formatComparison(c));
+      console.log(values.json === true ? indented(JSON.stringify(c)) : formatComparison(c));
     } else {
       const report = survey(file!);
-      console.log(values.json === true ? JSON.stringify(report, null, 2) : formatReport(report));
+      console.log(values.json === true ? indented(JSON.stringify(report)) : formatReport(report));
     }
     process.exit(0);
   }

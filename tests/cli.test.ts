@@ -1,3 +1,4 @@
+import { indented } from "../src/main.ts";
 import { afterAll, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -227,4 +228,9 @@ test("fishc build and run --timings print every stage, saying which objects were
   expect([run.code, run.out]).toEqual([0, "55\n"]);
   expect(stages(run.err).map(([s]) => s)).toEqual(all);
   expect(fishc(p, "build", "main.fsh", "--lib", "--timings")).toEqual({ code: 2, out: "", err: "fishc build: '--timings' times an executable's build; leave out '--lib' to time the program it would be built from\n" });
+});
+
+test("indented lays compact JSON out as JSON.stringify does with an indent of 2", () => {
+  const values: unknown[] = [{ a: 1, b: [1, 2, { c: 'x,y:"z' }], d: {}, e: [], f: null, g: "\\" }, [], {}, [[]], "s", 3, { n: { m: {} } }];
+  for (const v of values) expect(indented(JSON.stringify(v))).toBe(JSON.stringify(v, null, 2));
 });
