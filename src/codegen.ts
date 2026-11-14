@@ -6704,7 +6704,7 @@ class Codegen implements PrintHost, ComptimeHost {
       return node;
     }
     const object = t as ObjectType;
-    const as = r.kind === "class" ? [] : this.spelledFields(written, object);
+    const as: Field[] = r.kind === "class" ? [] : this.spelledFields(written, object);
     if (r.kind === "object" && this.tables.typing.isTuple(object)) {
       const [order, rest] = this.tupleOrder(object);
       const length = this.tables.typing.rec(object).required === undefined ? undefined : this.tupleLength(v, object);

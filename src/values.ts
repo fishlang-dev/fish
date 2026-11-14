@@ -8708,7 +8708,7 @@ export class Expressions<C extends Context> implements Union<C> {
   }
 
   // Whether `whole` is a plain object type `part` fits whose fields are all among its own.
-  private holdingAll(whole: Type, part: Type): boolean {
+  private holdingAll(this: Mut<this>, whole: Type, part: Type): boolean {
     const w = this.recOf(whole);
     const p = this.recOf(part);
     if (w === undefined || p === undefined || w.kind !== "object" || p.kind !== "object" || this.ctx.typing().isTuple(whole) || this.ctx.typing().isTuple(part)) return false;
