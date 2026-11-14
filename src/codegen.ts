@@ -6852,8 +6852,9 @@ class Codegen implements PrintHost, ComptimeHost {
   // An object's fields in the order its written type spells them, when that type has as many.
   spelledFields(written: Type, object: ObjectType): Field[] {
     const spelled = this.writtenShape(written, object) as ObjectType | undefined;
-    const fields = this.tables.typing.rec(object).fields;
-    return (this.recOf(spelled)?.fields.length === fields.length ? this.tables.typing.rec(spelled!).fields : fields).slice();
+    // Any record with fields may be printed this way, not only an object's.
+    const fields = this.recOf<Type>(object)!.fields;
+    return (this.recOf<Type>(spelled)?.fields.length === fields.length ? this.recOf<Type>(spelled)!.fields : fields).slice();
   }
 
   // A value past depth 2, as Node prints it there: its size, or its keys, with no parts inside.
