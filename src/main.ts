@@ -252,7 +252,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
 function run(args: string[], stdin?: string): void {
   const command = args[0]!;
   const done = stdin === undefined ? Bun.spawnSync(args) : Bun.spawnSync(args, { stdin: new TextEncoder().encode(stdin) });
-  if (done.exitCode !== 0) throw new Error(`${command} failed:\n${new TextDecoder().decode(done.stderr)}`);
+  if (done.exitCode !== 0) throw new Error(`${command ?? ""} failed:\n${new TextDecoder().decode(done.stderr)}`);
 }
 
 // A C header declaring a library's exports, usable from C and C++. A parameter named like a C
@@ -982,7 +982,7 @@ async function main(): Promise<void> {
   if (command === "add" || command === "update") {
     const usage = "usage: fishc add <name>[@<range>]\n       fishc update [<name>]";
     if (positionals.length > 2 || (command === "add" && file === undefined) || flags.some((k) => k !== "panic")) fail(usage);
-    const found = findManifest(process.cwd()) ?? fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; make a package with 'fishc new <name>' or 'fishc init'`);
+    const found = findManifest(process.cwd()) ?? fail(`fishc ${command ?? ""}: no ${MANIFEST} here or in any directory above; make a package with 'fishc new <name>' or 'fishc init'`);
     try {
       const manifest = loadManifest(found);
       if (command === "add") {
@@ -1015,7 +1015,7 @@ async function main(): Promise<void> {
         console.error(painted(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
         process.exit(1);
       }
-      fail(`fishc ${command}: ${(e as { message: string }).message}`);
+      fail(`fishc ${command ?? ""}: ${(e as { message: string }).message}`);
     }
     process.exit(0);
   }
@@ -1026,7 +1026,7 @@ async function main(): Promise<void> {
     const dir = command === "new" ? join(process.cwd(), file!) : process.cwd();
     const name = file ?? basename(dir);
     if (!validName(name)) {
-      fail(command === "init" && file === undefined ? `fishc init: this directory's name '${name}' isn't a package name: ${NAME_RULE}; give one, as in 'fishc init my-app'` : `fishc ${command}: '${name}' isn't a package name: ${NAME_RULE}`);
+      fail(command === "init" && file === undefined ? `fishc init: this directory's name '${name}' isn't a package name: ${NAME_RULE}; give one, as in 'fishc init my-app'` : `fishc ${command ?? ""}: '${name}' isn't a package name: ${NAME_RULE}`);
     }
     if (command === "new" && !vacant(dir)) fail(`fishc new: '${file ?? ""}' already exists and isn't empty; choose another name, or run 'fishc init' inside it`);
     if (command === "init" && existsSync(join(dir, MANIFEST))) fail(`fishc init: there is already a ${MANIFEST} here`);
@@ -1040,12 +1040,12 @@ async function main(): Promise<void> {
   const lib: Library | undefined = libName === undefined ? undefined : libName === "shared" ? "shared" : "static";
   const release = values.release === true;
   const leaks = values.leaks === true;
-  if (values.sanitize !== undefined && command !== "build") fail(`fishc ${command}: '--sanitize' instruments a build; build with 'fishc build --sanitize address|thread', then run the binary it writes`);
+  if (values.sanitize !== undefined && command !== "build") fail(`fishc ${command ?? ""}: '--sanitize' instruments a build; build with 'fishc build --sanitize address|thread', then run the binary it writes`);
   let target = file;
   let out = values.out;
   // With no file, the package around the working directory is built, as cargo builds one.
   if ((command === "build" || command === "check" || command === "run" || command === "watch") && file === undefined && lib === undefined) {
-    const found = findManifest(process.cwd()) ?? fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
+    const found = findManifest(process.cwd()) ?? fail(`fishc ${command ?? ""}: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
     try {
       const manifest = loadManifest(found, "entry");
       // An entry inside a package nested here would build as that package's program.
