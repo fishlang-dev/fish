@@ -5417,7 +5417,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     if (e.kind === "unary" && e.op === "await") {
       const v = this.awaitFuture(e);
-      const gives = this.tables.typing.rec(this.valueType(e.operand) as FutureType).gives;
+      const gives = this.awaitedGives(this.valueType(e.operand));
       if (v !== undefined && this.needsDrop(gives)) this.dispose(v, gives);
       return;
     }
@@ -5432,6 +5432,15 @@ class Codegen implements PrintHost, ComptimeHost {
     if (result !== undefined && type !== undefined) this.dispose(result, type);
   }
 
+
+  // What awaiting a value of `t` gives: a future's value or a task handle's, or what a boxed
+  // future's Promise holds.
+  awaitedGives(t: Type): Type {
+    const r = this.tables.typing.rec(t as FutureType | HandleType | DynType);
+    if (r.kind === "future" || r.kind === "handle") return r.gives;
+    if (r.kind === "dyn") return this.tables.typing.promiseElement(r.of) ?? "void";
+    return "void";
+  }
 
   // Whether a value of the type owns memory it gives back when dropped: a string, or anything
   // holding one by value.
