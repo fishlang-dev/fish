@@ -8696,7 +8696,23 @@ export class Expressions<C extends Context> implements Union<C> {
         return wider;
       }
     }
+    // An object beside one it fits with no field left behind, as `{}` beside a type of optional
+    // fields, is that type, since the union of the two would be read as either.
+    const holding = this.holdingAll(then, otherwise) ? then : this.holdingAll(otherwise, then) ? otherwise : undefined;
+    if (holding !== undefined) {
+      this.coerce(e.then, then, holding, "");
+      this.coerce(e.else, otherwise, holding, "");
+      return holding;
+    }
     return bothSides<C, Expressions<C>>(this, e, then, otherwise);
+  }
+
+  // Whether `whole` is a plain object type `part` fits whose fields are all among its own.
+  private holdingAll(whole: Type, part: Type): boolean {
+    const w = this.recOf(whole);
+    const p = this.recOf(part);
+    if (w === undefined || p === undefined || w.kind !== "object" || p.kind !== "object" || this.ctx.typing().isTuple(whole) || this.ctx.typing().isTuple(part)) return false;
+    return p.fields.every((f) => w.fields.some((g) => g.name === f.name)) && this.ctx.tables().typing.fits(part, whole);
   }
 
   // The bound of a type parameter.

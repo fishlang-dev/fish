@@ -49,3 +49,28 @@ function main() {
   const k: "a" | "b" = n === 1 ? "a" : "c"
   print(k)
 }
+// case: conditional_empty_object_beside_optional_fields
+// expect: 7 none
+// expect: 1 none
+// expect: 12
+// `{}` beside a value of a type of optional fields is that type, its fields absent.
+class C { n = 0 }
+type O = { n?: i64; s?: string };
+type Hooks = { after?: (c: Mut<C>) => void; unwound?: (c: Mut<C>) => void };
+function shown(given?: O): void {
+  const o: O = given !== undefined ? given : {};
+  console.log(o.n ?? 7, o.s ?? "none");
+}
+function run(c: Mut<C>, given?: Hooks): void {
+  const hooks: Hooks = given !== undefined ? given : {};
+  hooks.after?.(c);
+  hooks.unwound?.(c);
+}
+function main() {
+  shown();
+  shown({ n: 1 });
+  let c = new C();
+  run(c);
+  run(c, { after: (x) => { x.n += 2; }, unwound: (x) => { x.n += 10; } });
+  console.log(c.n);
+}
