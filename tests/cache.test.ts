@@ -2,7 +2,7 @@ import { afterAll, expect, setDefaultTimeout, test } from "bun:test";
 import { appendFileSync, chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildAsync, compile, ENGINE, runtimeLinks, runtimeUnits } from "../src/main.ts";
+import { buildAsync, compile, engineDir, runtimeLinks, runtimeUnits } from "../src/main.ts";
 import { buildSession, cachedObject, cachedObjectAsync, files, mathObjectsAsync } from "../src/mathlib.ts";
 import { STD_SOURCE } from "../src/std.ts";
 import { newSession } from "../src/compilation.ts";
@@ -161,12 +161,12 @@ await Promise.all(${JSON.stringify(outs)}.map((out) => buildAsync(session, ${JSO
 
 test("an edit to a hashed engine header is a new object", () => {
   const ir = "  call void @fsh_rt_js_eval()";
-  for (const unit of runtimeUnits(ir, false)) expect(unit.inputs).toEqual(files(ENGINE));
+  for (const unit of runtimeUnits(ir, false)) expect(unit.inputs).toEqual(files(engineDir()));
   const was = process.env.FISH_CACHE_DIR;
   process.env.FISH_CACHE_DIR = join(root, "header");
   try {
     const copy = join(root, "engine-copy");
-    cpSync(ENGINE, copy, { recursive: true });
+    cpSync(engineDir(), copy, { recursive: true });
     const unit = () => ({ name: "header", args: ["-x", "c", "-", "-I", copy], stdin: `#include "quickjs.h"\nint fsh_probe;\n`, inputs: files(copy) });
     const before = cachedObject(session, unit());
     appendFileSync(join(copy, "cutils.h"), "\n/* edited */\n");

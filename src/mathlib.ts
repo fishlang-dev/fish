@@ -13,17 +13,22 @@ import type { Session } from "./compilation.ts";
 // The functions it defines, which an export can't replace.
 export const MATH_RUNTIME = ["acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "cbrt", "cos", "cosh", "exp", "expm1", "hypot", "log", "log10", "log1p", "log2", "pow", "sin", "sinh", "tan", "tanh"];
 
-const VENDOR = join(import.meta.dir, "..", "vendor");
-const LLVM_LIBC = join(VENDOR, "llvm-libc", "libc");
-const CORE_MATH = join(VENDOR, "core-math");
+// The vendored sources beside the compiler's own, found when a build first needs them rather than
+// while compiling, which a compiler built by Fish would otherwise do.
+function vendor(): string {
+  return join(import.meta.dir, "..", "vendor");
+}
+
 // Without contraction into fused multiply-adds, so every target computes the same steps and the
 // exact two-term arithmetic the functions round with stays exact. Position-independent, so a
 // shared library can hold them.
-const COMMON = ["-O2", "-ffp-contract=off", "-fPIC"];
-const UNITS: { source: string; flags: string[] }[] = [
-  { source: join(import.meta.dir, "runtime", "math.cpp"), flags: ["-x", "c++", "-std=c++17", "-fno-exceptions", "-fno-rtti", `-I${LLVM_LIBC}`, ...COMMON] },
-  ...["acosh", "asinh", "atanh", "cosh", "sinh", "tanh"].map((f) => ({ source: join(CORE_MATH, "src", "binary64", f, `${f}.c`), flags: ["-x", "c", "-std=c11", ...COMMON] })),
-];
+function mathSources(): { source: string; flags: string[] }[] {
+  const common = ["-O2", "-ffp-contract=off", "-fPIC"];
+  const libc = join(vendor(), "llvm-libc", "libc");
+  let sources = [{ source: join(import.meta.dir, "runtime", "math.cpp"), flags: ["-x", "c++", "-std=c++17", "-fno-exceptions", "-fno-rtti", `-I${libc}`, ...common] }];
+  for (const f of ["acosh", "asinh", "atanh", "cosh", "sinh", "tanh"]) sources.push({ source: join(vendor(), "core-math", "src", "binary64", f, `${f}.c`), flags: ["-x", "c", "-std=c11", ...common] });
+  return sources;
+}
 
 // FISH_CACHE_DIR, else the user's cache directory, else the system's temporary one.
 export function cacheDir(): string {
@@ -217,11 +222,11 @@ async function compiledAsync(u: Ref<Unit>, out: string): Promise<void> {
 function units(session: Mut<BuildSession>): Unit[] {
   const known: Ref<Unit[] | undefined> = session.mathUnits;
   if (known !== undefined) return [...known];
-  const inputs = [...files(LLVM_LIBC), ...files(join(CORE_MATH, "src"))];
+  const inputs = [...files(join(vendor(), "llvm-libc", "libc")), ...files(join(vendor(), "core-math", "src"))];
   // A quoted include is looked for beside its source first, so the source's whole directory is
   // hashed.
   let made: Unit[] = [];
-  for (const { source, flags } of UNITS) made.push({ name: basename(source).replace(/\.\w+$/, ""), args: [...flags, source], inputs: [...files(dirname(source)), ...inputs] });
+  for (const { source, flags } of mathSources()) made.push({ name: basename(source).replace(/\.\w+$/, ""), args: [...flags, source], inputs: [...files(dirname(source)), ...inputs] });
   session.mathUnits = [...made];
   return made;
 }

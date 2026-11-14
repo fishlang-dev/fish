@@ -769,8 +769,17 @@ function fixedText(src: string, shown: string, fsh: Imported): { text?: string; 
 }
 
 // The vendored JS engine, compiled into a program only when it calls the engine.
-export const ENGINE = join(import.meta.dir, "..", "vendor", "quickjs-ng");
-export const ENGINE_SOURCES = ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa.c"].map((f) => join(ENGINE, f));
+// Found when a build needs them rather than while compiling, which a compiler built by Fish would
+// otherwise do.
+export function engineDir(): string {
+  return join(import.meta.dir, "..", "vendor", "quickjs-ng");
+}
+
+export function engineSources(): string[] {
+  let sources: string[] = [];
+  for (const f of ["quickjs.c", "libregexp.c", "libunicode.c", "dtoa.c"]) sources.push(join(engineDir(), f));
+  return sources;
+}
 
 // Whether the IR calls into the JS engine: an instruction, not a declaration or a string's bytes.
 export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/m.test(ir);
@@ -802,13 +811,13 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
   const js = callsEngine(ir);
   const openssl = callsTls(ir) ? findOpenSsl(target) : undefined;
   const none: string[] = [];
-  const flags = [...target.compile, "-funwind-tables", "-pthread", optimization(release, target), ...(pic ? ["-fPIC"] : none), ...(js ? ["-I", ENGINE] : none)];
+  const flags = [...target.compile, "-funwind-tables", "-pthread", optimization(release, target), ...(pic ? ["-fPIC"] : none), ...(js ? ["-I", engineDir()] : none)];
   const tls = openssl === undefined ? "" : "missing" in openssl ? "-tls-missing" : "-tls";
   const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}`;
   const source = [NATIVE, ...(js ? [JS_NATIVE] : none), ...(openssl === undefined ? none : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
   const tlsFlags = openssl !== undefined && "compile" in openssl ? openssl.compile : [...none];
-  const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none)], stdin: source, inputs: js ? files(ENGINE) : none };
-  const engine: Unit[] = js ? ENGINE_SOURCES.map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(ENGINE) })) : [];
+  const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none)], stdin: source, inputs: js ? files(engineDir()) : none };
+  const engine: Unit[] = js ? engineSources().map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(engineDir()) })) : [];
   const zlib: Unit[] = callsZlib(ir) ? [{ name: "zlib", args: ["-x", "c", "-", ...flags], stdin: ZLIB_NATIVE, inputs: [] }] : [];
   return [runtime, ...engine, ...zlib];
 }

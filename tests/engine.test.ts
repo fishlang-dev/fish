@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CompileError } from "../src/diag.ts";
-import { buildAsync, callsEngine, compile, ENGINE, ENGINE_SOURCES } from "../src/main.ts";
+import { buildAsync, callsEngine, compile, engineDir, engineSources } from "../src/main.ts";
 import { sanitized as sanitize } from "./sanitized.ts";
 import { cachedSession } from "../src/stdcache.ts";
 
@@ -35,7 +35,7 @@ int main(void) {
 }
 `);
   const out = join(dir, "main");
-  const built = Bun.spawnSync(["clang", "-I", ENGINE, main, ...ENGINE_SOURCES, "-lm", "-pthread", "-o", out]);
+  const built = Bun.spawnSync(["clang", "-I", engineDir(), main, ...engineSources(), "-lm", "-pthread", "-o", out]);
   expect(built.exitCode).toBe(0);
   expect(Bun.spawnSync([out]).stdout.toString()).toBe("2,4,6\n");
 });
