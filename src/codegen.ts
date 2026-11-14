@@ -9081,10 +9081,13 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // Whether converting a value reads some of it out of a recursive type's block.
-  unboxes(from: Type, to: Type): boolean {
+  unboxes(this: Mut<this>, from: Type, to: Type): boolean {
     if (from === to) return false;
     const fromAll = membersOf(this.tables.typing, from);
-    const toAll = membersOf(this.tables.typing, to);
+    // A recursive type's block holds its unfolded members as they are, so a value boxed into one
+    // keeps the blocks its members own.
+    const held = this.recOf(to)?.kind === "recursive" ? this.tables.typing.unfolded(to) : to;
+    const toAll = membersOf(this.tables.typing, held);
     return fromAll.some((m) => this.recOf(m)?.kind === "recursive" && !toAll.includes(m));
   }
 
