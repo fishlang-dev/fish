@@ -27,8 +27,8 @@ import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.ts";
 import { hideMains, harnessImports, harnessMain, liftTests, runTests, stopTests, type Test } from "./tests.ts";
-import { formatRanking, rank, readPlan } from "./rank.ts";
-import { compare, formatComparison, formatReport, readReport, sources, survey } from "./survey.ts";
+import { formatRanking, rank, readPlan, type Plan } from "./rank.ts";
+import { compare, formatComparison, formatReport, readReport, sources, survey, type Report as SurveyReport } from "./survey.ts";
 import { explain } from "./codes.ts";
 import type { Checked, Instance } from "./check.ts";
 import { INTEGERS, type Type, type Typing } from "./typing.ts";
@@ -601,7 +601,7 @@ function fixes(path: string): boolean {
 // parse, which would be the lint's mistake.
 function fixedText(src: string, shown: string, fsh: Imported): { text?: string; fixed: usize } {
   try {
-    return fix(src, fsh);
+    return fix(src, (specifier) => fsh(specifier));
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
     console.error(`fishc lint: '${shown}' was left as it was, because a fix gave text that doesn't parse (${e.message}); please report it`);
@@ -626,8 +626,8 @@ export const callsZlib = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]
 
 // What links OpenSSL into a program calling the TLS runtime, when it was found, without which the
 // runtime's TLS calls say how to install it, and zlib into one calling the zlib runtime.
-export function runtimeLinks(ir: string, target: Target): string[] {
-  const zlib = callsZlib(ir) ? ["-lz"] : [];
+export function runtimeLinks(ir: string, target: Ref<Target>): string[] {
+  const zlib: string[] = callsZlib(ir) ? ["-lz"] : [];
   if (!callsTls(ir)) return zlib;
   const openssl = findOpenSsl(target);
   return [...("link" in openssl ? openssl.link : []), ...zlib];
@@ -655,7 +655,7 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
 // its sanitizers: at -O0, clang for AArch64 misreads large aggregates passed by value to an
 // address-sanitized function, so the program would quietly do something else.
 function optimization(release: boolean, target: Target): string {
-  return release ? "-O2" : target.sanitize ? "-O1" : "-O0";
+  return release ? "-O2" : target.sanitize !== undefined ? "-O1" : "-O0";
 }
 
 // Clang's command line for a program, its IR read from stdin unless `program` names it compiled
@@ -666,7 +666,12 @@ function clangArgs(out: string, release: boolean, links: string[], objects: stri
 
 function fail(message: string): never {
   console.error(message);
-  process.exit(2);
+  return process.exit(2);
+}
+
+// The time each of a build's `stages` took, printed when the build was timed.
+function reportTimings(session: Ref<Session>, stages: string[], start: f64) {
+  if (session.timings !== undefined) process.stderr.write(formatTimings(session.timings, stages, performance.now() - start));
 }
 
 // A directory `fishc survey` can read, holding TypeScript.
@@ -686,7 +691,6 @@ async function main(): Promise<void> {
     serveLsp();
     return;
   }
-  const session = cachedSession();
   // A bare `--lib` builds the default kind, a static library.
   const { values, positionals } = (() => {
     try {
@@ -727,12 +731,23 @@ async function main(): Promise<void> {
       return fail(`fishc: ${e instanceof Error ? e.message : e}`);
     }
   })();
+  // The options given, as Node's parseArgs keys them: those on the command line and `panic`'s default.
+  let flags: string[] = [];
+  for (const [k, v] of Object.entries(values)) if (v !== undefined) flags.push(k);
+  const links: string[] = values.link === undefined ? [] : [...values.link];
+  // Each build compiles within a session of its own, since a check uses up the one it is given.
+  const sessionFor = (): BuildSession => {
+    let made = cachedSession();
+    made.locking.locked = values.locked === true;
+    if (values.timings === true) made.timings = newTimings();
+    return made;
+  };
   // `fishc run` and `fishc watch` take the program's arguments after the file, or all of them with no file.
   const [command, named] = positionals;
   const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
   if (command === "explain") {
-    if (positionals.length !== 2 || Object.keys(values).some((k) => k !== "panic")) fail("usage: fishc explain <code>");
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail("usage: fishc explain <code>");
     const text = explain(named!);
     if (text === undefined) fail(`fishc explain: '${named}' isn't an error code; a code looks like E0201 or W0001, as an error shows it`);
     console.log(text);
@@ -742,24 +757,24 @@ async function main(): Promise<void> {
     const dirs = positionals.slice(1);
     const usage = "usage: fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]";
     const extra = values.self !== undefined || values.plan !== undefined;
-    if (dirs.length === 0 || (!values.rank && (dirs.length > 1 || extra))) fail(usage);
-    if (values.rank && values.compare !== undefined) fail("fishc survey: --compare compares one project's survey; rankings can't be compared yet");
+    if (dirs.length === 0 || (values.rank !== true && (dirs.length > 1 || extra))) fail(usage);
+    if (values.rank === true && values.compare !== undefined) fail("fishc survey: --compare compares one project's survey; rankings can't be compared yet");
     for (const dir of [...dirs, ...(values.self !== undefined ? [values.self] : [])]) checkProject(dir);
     // A directory given twice, or inside another given, would count its files twice.
     const real = dirs.map((d) => realpathSync(d));
     const nested = real.findIndex((d, k) => real.some((e, l) => l !== k && (d === e ? l < k : d.startsWith(e + sep))));
     if (nested >= 0) fail(`fishc survey: '${dirs[nested]}' is already surveyed as part of another directory given`);
-    if (values.rank) {
-      let plan;
+    if (values.rank === true) {
+      let plan: Plan | undefined = undefined;
       try {
         plan = values.plan !== undefined ? readPlan(values.plan) : undefined;
       } catch (e) {
         fail(`fishc survey: the plan '${values.plan}' can't be read: ${e instanceof Error ? e.message : e}`);
       }
       const ranking = rank(dirs, values.self, plan);
-      console.log(values.json ? JSON.stringify(ranking, null, 2) : formatRanking(ranking, plan !== undefined));
+      console.log(values.json === true ? JSON.stringify(ranking, null, 2) : formatRanking(ranking, plan !== undefined));
     } else if (values.compare !== undefined) {
-      let then;
+      let then: SurveyReport | undefined = undefined;
       try {
         if (!existsSync(values.compare)) throw new Error("it doesn't exist");
         if (!statSync(values.compare).isFile()) throw new Error("it isn't a file");
@@ -769,50 +784,51 @@ async function main(): Promise<void> {
       } catch (e) {
         fail(`fishc survey: the baseline '${values.compare}' can't be compared: ${e instanceof Error ? e.message : e}`);
       }
-      const c = compare(then, survey(file!));
-      console.log(values.json ? JSON.stringify(c, null, 2) : formatComparison(c));
+      const c = compare(then!, survey(file!));
+      console.log(values.json === true ? JSON.stringify(c, null, 2) : formatComparison(c));
     } else {
       const report = survey(file!);
-      console.log(values.json ? JSON.stringify(report, null, 2) : formatReport(report));
+      console.log(values.json === true ? JSON.stringify(report, null, 2) : formatReport(report));
     }
     process.exit(0);
   }
   if (command === "fmt") {
     const usage = "usage: fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]";
     const paths = positionals.slice(1);
-    if (Object.keys(values).some((k) => k !== "check" && k !== "panic") || (paths.includes("-") && paths.length > 1)) fail(usage);
+    if (flags.some((k) => k !== "check" && k !== "panic") || (paths.includes("-") && paths.length > 1)) fail(usage);
     const check = values.check === true;
     if (paths[0] === "-") process.exit(formatStdin(check));
     if (paths.length === 0) {
       const found = findManifest(process.cwd());
-      if (!found) fail(`fishc fmt: no ${MANIFEST} here or in any directory above; name the files to format, or run it inside a package`);
+      if (found === undefined) fail(`fishc fmt: no ${MANIFEST} here or in any directory above; name the files to format, or run it inside a package`);
       paths.push(dirname(found));
     }
     process.exit(formatPaths(paths, check));
   }
   if (command === "lint") {
     const paths = positionals.slice(1);
-    if (Object.keys(values).some((k) => k !== "panic" && k !== "fix") || values.panic !== "unwind") fail("usage: fishc lint [<path>...] [--fix]");
+    if (flags.some((k) => k !== "panic" && k !== "fix") || values.panic !== "unwind") fail("usage: fishc lint [<path>...] [--fix]");
     if (paths.length === 0) {
       const found = findManifest(process.cwd());
-      if (!found) fail(`fishc lint: no ${MANIFEST} here or in any directory above; name the files to lint, or run it inside a package`);
+      if (found === undefined) fail(`fishc lint: no ${MANIFEST} here or in any directory above; name the files to lint, or run it inside a package`);
       paths.push(dirname(found));
     }
     process.exit(lintPaths(paths, values.fix === true));
   }
   if (command === "test") {
     // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
-    if (positionals.length > 2 || Object.keys(values).some((k) => k !== "panic") || values.panic !== "unwind") fail("usage: fishc test [<filter>]");
+    if (positionals.length > 2 || flags.some((k) => k !== "panic") || values.panic !== "unwind") fail("usage: fishc test [<filter>]");
     const found = findManifest(process.cwd());
-    if (!found) fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
-    process.exit(await testPackage(session, dirname(found), file));
+    if (found === undefined) fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
+    process.exit(await testPackage(sessionFor(), dirname(found!), file));
   }
   if (command === "publish") {
     const usage = "usage: fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]";
     const allowed = new Set(["panic", "dry-run", "allow-dirty", "submit", "fork", "yes"]);
-    if (positionals.length > 1 || Object.keys(values).some((k) => !allowed.has(k)) || ((values.fork !== undefined || values.yes) && !values.submit) || (values.submit && values["dry-run"])) fail(usage);
+    const submitting = values.submit === true;
+    if (positionals.length > 1 || flags.some((k) => !allowed.has(k)) || ((values.fork !== undefined || values.yes === true) && !submitting) || (submitting && values["dry-run"] === true)) fail(usage);
     const found = findManifest(process.cwd());
-    if (!found) fail(`fishc publish: no ${MANIFEST} here or in any directory above; publish runs inside a package`);
+    if (found === undefined) fail(`fishc publish: no ${MANIFEST} here or in any directory above; publish runs inside a package`);
     try {
       const packed = pack(found, values["allow-dirty"] === true);
       console.log(`packed ${packed.manifest.name} ${packed.manifest.version}: ${packed.files.length} files, ${Math.ceil(packed.bytes.length / 1024)} KiB, sha256 ${packed.sha256}`);
@@ -822,10 +838,10 @@ async function main(): Promise<void> {
       if (packed.unsafe.length === 0 && deps.length === 0) console.log(`no unsafe in ${packed.manifest.name} or its dependencies`);
       for (const u of packed.unsafe) console.log(`unsafe: ${u.file}:${u.line}:${u.col} ${u.what}`);
       for (const d of deps) console.log(`unsafe: the dependency '${d.name}' ${d.text} uses unsafe`);
-      if (!values["dry-run"]) {
+      if (values["dry-run"] !== true) {
         const prepared = prepare(packed);
         console.log(`prepared ${prepared.branch} in ${prepared.clone}: ${prepared.archive} and its index line`);
-        if (!values.submit) console.log(`run 'fishc publish --submit' to push it to your fork and open a pull request`);
+        if (!submitting) console.log(`run 'fishc publish --submit' to push it to your fork and open a pull request`);
         else {
           // Pushing and opening a pull request reach outside this machine, so they're asked for.
           const confirm = (question: string) => values.yes === true || /^y(es)?$/i.test((prompt(question) ?? "").trim());
@@ -843,20 +859,22 @@ async function main(): Promise<void> {
   }
   if (command === "add" || command === "update") {
     const usage = "usage: fishc add <name>[@<range>]\n       fishc update [<name>]";
-    if (positionals.length > 2 || (command === "add" && !file) || Object.keys(values).some((k) => k !== "panic")) fail(usage);
+    if (positionals.length > 2 || (command === "add" && file === undefined) || flags.some((k) => k !== "panic")) fail(usage);
     const found = findManifest(process.cwd());
-    if (!found) fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; make a package with 'fishc new <name>' or 'fishc init'`);
+    if (found === undefined) fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; make a package with 'fishc new <name>' or 'fishc init'`);
     try {
       const manifest = loadManifest(found);
       if (command === "add") {
-        const [name, range] = file!.includes("@") ? [file!.slice(0, file!.indexOf("@")), file!.slice(file!.indexOf("@") + 1)] : [file!, undefined];
+        const at = file!.indexOf("@");
+        const name = at >= 0 ? file!.slice(0, at) : file!;
+        const range = at >= 0 ? file!.slice(at + 1) : undefined;
         if (!validName(name)) fail(`fishc add: '${name}' isn't a package name: ${NAME_RULE}`);
         if (manifest.dependencies.some((d) => d.name === name)) fail(`fishc add: '${name}' is already a dependency in ${MANIFEST}`);
-        if (range !== undefined && (range.trim() === "" || /[\n\r"\\]/.test(range) || !parseRange(range))) fail(`fishc add: '${range}' isn't a version range; write one as package.json does, as in ^1.2.0`);
+        if (range !== undefined && (range.trim() === "" || /[\n\r"\\]/.test(range) || parseRange(range) === undefined)) fail(`fishc add: '${range}' isn't a version range; write one as package.json does, as in ^1.2.0`);
         const released = openIndex(registryUrl(manifest), true).versions(name).filter((e) => !e.yanked);
         const latest = maxSatisfying(released.map((e) => e.version), parseRange(range ?? "*")!);
-        if (!latest) fail(`fishc add: no version of '${name}' in the registry fits '${range ?? "*"}'`);
-        const written = range ?? `^${formatVersion(latest)}`;
+        if (latest === undefined) fail(`fishc add: no version of '${name}' in the registry fits '${range ?? "*"}'`);
+        const written = range ?? `^${formatVersion(latest!)}`;
         const edited = withDependency(readFileSync(found, "utf8"), `${name} = { version = "${written}" }`);
         // Written only once the result still reads as the manifest with the new dependency.
         if (!readManifest(edited, manifest.dir).dependencies.some((d) => d.name === name)) fail(`fishc add: couldn't add '${name}' to ${MANIFEST}; add it by hand`);
@@ -865,9 +883,10 @@ async function main(): Promise<void> {
         const chosen = released.find((e) => e.version === latest);
         if (chosen?.unsafe) console.error(`note: '${name}' ${chosen.text} uses unsafe`);
       } else {
-        if (file && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
-        session.locking.update = file ? new Set([file]) : "all";
-        resolvePackages(join(manifest.dir, manifest.entry), session.locking);
+        if (file !== undefined && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
+        let updating = cachedSession();
+        updating.locking.update = file !== undefined ? new Set([file]) : "all";
+        resolvePackages(join(manifest.dir, manifest.entry), updating.locking);
         console.log(`updated ${relative(process.cwd(), join(manifest.dir, "fish.lock")) || "fish.lock"}`);
       }
     } catch (e) {
@@ -881,12 +900,12 @@ async function main(): Promise<void> {
   }
   if (command === "new" || command === "init") {
     const usage = "usage: fishc new <name>\n       fishc init [<name>]";
-    const flags = Object.keys(values).some((k) => k !== "panic");
-    if (positionals.length > 2 || flags || (command === "new" && !file)) fail(usage);
+    const extra = flags.some((k) => k !== "panic");
+    if (positionals.length > 2 || extra || (command === "new" && file === undefined)) fail(usage);
     const dir = command === "new" ? join(process.cwd(), file!) : process.cwd();
     const name = file ?? basename(dir);
     if (!validName(name)) {
-      fail(command === "init" && !file ? `fishc init: this directory's name '${name}' isn't a package name: ${NAME_RULE}; give one, as in 'fishc init my-app'` : `fishc ${command}: '${name}' isn't a package name: ${NAME_RULE}`);
+      fail(command === "init" && file === undefined ? `fishc init: this directory's name '${name}' isn't a package name: ${NAME_RULE}; give one, as in 'fishc init my-app'` : `fishc ${command}: '${name}' isn't a package name: ${NAME_RULE}`);
     }
     if (command === "new" && !vacant(dir)) fail(`fishc new: '${file}' already exists and isn't empty; choose another name, or run 'fishc init' inside it`);
     if (command === "init" && existsSync(join(dir, MANIFEST))) fail(`fishc init: there is already a ${MANIFEST} here`);
@@ -894,42 +913,40 @@ async function main(): Promise<void> {
     console.log(`created the package '${name}'${command === "new" ? ` in ${file}/` : ""}`);
     process.exit(0);
   }
-  const panic = values.panic as Panic;
-  const lib = values.lib as Library | undefined;
-  // Runs one build, then prints how long its `stages` took when asked; a failed build prints none.
-  const timing = <T>(stages: string[], run: () => T): T => {
-    if (!values.timings) return run();
-    const timings = (session.timings = newTimings());
-    const start = performance.now();
-    const result = run();
-    process.stderr.write(formatTimings(timings, stages, performance.now() - start));
-    return result;
-  };
-  session.locking.locked = values.locked === true;
-  if (values.sanitize && command !== "build") fail(`fishc ${command}: '--sanitize' instruments a build; build with 'fishc build --sanitize address|thread', then run the binary it writes`);
+  const panicName = values.panic ?? "unwind";
+  const panic: Panic = panicName === "abort" ? "abort" : "unwind";
+  const libName = values.lib;
+  const lib: Library | undefined = libName === undefined ? undefined : libName === "shared" ? "shared" : "static";
+  const release = values.release === true;
+  const leaks = values.leaks === true;
+  if (values.sanitize !== undefined && command !== "build") fail(`fishc ${command}: '--sanitize' instruments a build; build with 'fishc build --sanitize address|thread', then run the binary it writes`);
   let target = file;
   let out = values.out;
   // With no file, the package around the working directory is built, as cargo builds one.
-  if ((command === "build" || command === "check" || command === "run" || command === "watch") && !file && lib === undefined) {
+  if ((command === "build" || command === "check" || command === "run" || command === "watch") && file === undefined && lib === undefined) {
     const found = findManifest(process.cwd());
-    if (!found) fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
+    if (found === undefined) fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
     try {
       const manifest = loadManifest(found, "entry");
       // An entry inside a package nested here would build as that package's program.
       const holder = findManifest(dirname(realpathSync(join(manifest.dir, manifest.entry))));
-      if (holder && realpathSync(holder) !== realpathSync(found)) throw fieldError(found, "entry", `the entry '${manifest.entry}' is a file inside the package '${loadManifest(holder).name}'; a package's entry is one of its own files`);
+      if (holder !== undefined && realpathSync(holder) !== realpathSync(found!)) throw fieldError(found, "entry", `the entry '${manifest.entry}' is a file inside the package '${loadManifest(holder).name}'; a package's entry is one of its own files`);
       target = relative(process.cwd(), join(manifest.dir, manifest.entry));
-      out ??= join(manifest.dir, "target", values.release ? "release" : "debug", manifest.name);
-      if (!values["emit-llvm"] && command !== "check") mkdirSync(dirname(out), { recursive: true });
+      if (out === undefined) out = join(manifest.dir, "target", release ? "release" : "debug", manifest.name);
+      if (values["emit-llvm"] !== true && command !== "check") mkdirSync(dirname(out), { recursive: true });
     } catch (e) {
       if (!(e instanceof CompileError)) throw e;
-      console.error(painted(e, relative(process.cwd(), found), readFileSync(found, "utf8")));
+      console.error(painted(e, relative(process.cwd(), found!), readFileSync(found!, "utf8")));
       process.exit(1);
     }
   }
-  if (command === "check" && target && !values.out && !values.release && !values["emit-llvm"] && lib === undefined) {
+  const llvm = values["emit-llvm"] === true;
+  if (command === "check" && target !== undefined && values.out === undefined && !release && !llvm && lib === undefined) {
     try {
-      for (const w of timing(FRONT_END, () => checkProgram(session, target))) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
+      const start = performance.now();
+      const made = checkedFile(sessionFor(), target);
+      reportTimings(made.session, FRONT_END, start);
+      for (const w of made.warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
     } catch (e) {
       if (e instanceof CompileError) console.error(painted(e, target, readFileSync(target, "utf8")));
       else console.error(e instanceof Error ? e.message : e);
@@ -937,13 +954,16 @@ async function main(): Promise<void> {
     }
     process.exit(0);
   }
-  if (command === "run" && target && !values.out && !values["emit-llvm"] && lib === undefined) {
+  if (command === "run" && target !== undefined && values.out === undefined && !llvm && lib === undefined) {
     // A lone file's program is built where nothing else looks, and removed once it has run.
     const scratch = out === undefined ? mkdtempSync(join(tmpdir(), "fishc-run-")) : undefined;
     const binary = out ?? join(scratch!, basename(target, ".fsh"));
     let code = 1;
     try {
-      for (const w of timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, target, binary, values.release, panic, values.link ?? [], hostTarget(), values.leaks, values.debug))) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
+      const start = performance.now();
+      const made = built(sessionFor(), target, binary, release, panic, links, hostTarget(), leaks, values.debug === true);
+      reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
+      for (const w of made.warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
       const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
       // A signal ends it with 128 plus the signal's number, as a shell reports it.
       const signal = ran.signalCode;
@@ -953,11 +973,11 @@ async function main(): Promise<void> {
       if (e instanceof CompileError) console.error(painted(e, target, readFileSync(target, "utf8")));
       else console.error(e instanceof Error ? e.message : e);
     } finally {
-      if (scratch) rmSync(scratch, { recursive: true, force: true });
+      if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
     }
     process.exit(code);
   }
-  if (command === "watch" && target && !values.out && !values["emit-llvm"] && lib === undefined) {
+  if (command === "watch" && target !== undefined && values.out === undefined && !llvm && lib === undefined) {
     const entry = target;
     const scratch = out === undefined ? mkdtempSync(join(tmpdir(), "fishc-watch-")) : undefined;
     const binary = out ?? join(scratch!, basename(entry, ".fsh"));
@@ -969,7 +989,12 @@ async function main(): Promise<void> {
       build: () => {
         let loaded: string[] = [];
         try {
-          for (const w of timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, entry, binary, values.release, panic, values.link ?? [], hostTarget(), values.leaks, values.debug, (files) => (loaded = files)))) console.error(painted(w, entry, readFileSync(entry, "utf8"), "warning"));
+          const start = performance.now();
+          const made = built(sessionFor(), entry, binary, release, panic, [...links], hostTarget(), leaks, values.debug === true, (files) => {
+            loaded = files;
+          });
+          reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
+          for (const w of made.warnings) console.error(painted(w, entry, readFileSync(entry, "utf8"), "warning"));
           return { built: true, loaded };
         } catch (e) {
           if (e instanceof CompileError) console.error(painted(e, entry, readFileSync(entry, "utf8")));
@@ -978,39 +1003,51 @@ async function main(): Promise<void> {
         }
       },
       done: () => {
-        if (scratch) rmSync(scratch, { recursive: true, force: true });
+        if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
       },
     });
   }
-  if (command !== "build" || !target || values.fix || values.json || values.rank || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panic !== "unwind" && panic !== "abort") || values.link?.some((l) => l.trim() === "") || (lib !== undefined && lib !== "static" && lib !== "shared")) {
+  if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
     console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
-  if (values.timings && lib !== undefined) fail("fishc build: '--timings' times an executable's build; leave out '--lib' to time the program it would be built from");
-  if (values.leaks && lib !== undefined) fail("fishc build: '--leaks' can't build a library; build the program that uses it with '--leaks' instead");
-  if (values.static && lib !== undefined) fail("fishc build: '--static' builds an executable, not a library; leave out '--lib', or '--static'");
-  if ((values.static || values.dockerfile) && values["emit-llvm"]) fail("fishc build: '--emit-llvm' prints the IR without linking it, so '--static' and '--dockerfile' don't apply; leave them out");
-  const sanitize = values.sanitize?.flatMap((s) => s.split(","));
-  if (sanitize && lib !== undefined) fail("fishc build: '--sanitize' can't build a library; build the program that uses it with '--sanitize' instead");
-  if (sanitize && values["emit-llvm"]) fail("fishc build: '--emit-llvm' prints the IR before clang instruments it, so '--sanitize' doesn't apply; leave it out");
-  if (values.dockerfile && !values.static) fail("fishc build: '--dockerfile' writes an image holding only the binary, which needs it built with '--static'");
+  if (values.timings === true && lib !== undefined) fail("fishc build: '--timings' times an executable's build; leave out '--lib' to time the program it would be built from");
+  if (leaks && lib !== undefined) fail("fishc build: '--leaks' can't build a library; build the program that uses it with '--leaks' instead");
+  if (values.static === true && lib !== undefined) fail("fishc build: '--static' builds an executable, not a library; leave out '--lib', or '--static'");
+  if ((values.static === true || values.dockerfile === true) && llvm) fail("fishc build: '--emit-llvm' prints the IR without linking it, so '--static' and '--dockerfile' don't apply; leave them out");
+  const sanitize = values.sanitize === undefined ? undefined : values.sanitize.flatMap((s) => s.split(","));
+  if (sanitize !== undefined && lib !== undefined) fail("fishc build: '--sanitize' can't build a library; build the program that uses it with '--sanitize' instead");
+  if (sanitize !== undefined && llvm) fail("fishc build: '--emit-llvm' prints the IR before clang instruments it, so '--sanitize' doesn't apply; leave it out");
+  if (values.dockerfile === true && values.static !== true) fail("fishc build: '--dockerfile' writes an image holding only the binary, which needs it built with '--static'");
   try {
-    if (values["emit-llvm"]) process.stdout.write(timing([...FRONT_END, "codegen"], () => compile(session, readFileSync(target, "utf8"), target, values.release, panic, lib !== undefined, values.leaks, values.debug)));
-    else {
+    if (llvm) {
+      const start = performance.now();
+      const made = compiledIn(newCompilation(sessionFor()), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true);
+      reportTimings(made.checked.tables.session, [...FRONT_END, "codegen"], start);
+      process.stdout.write(made.ir);
+    } else {
       // FISH_SYSROOT is for building for another target, never the host's own plain builds.
-      const sysroot = values.sysroot ?? (values.target !== undefined && values.target !== hostTriple() ? process.env.FISH_SYSROOT || undefined : undefined);
+      const fromEnv = process.env.FISH_SYSROOT ?? "";
+      const sysroot = values.sysroot ?? (values.target !== undefined && values.target !== hostTriple() && fromEnv !== "" ? fromEnv : undefined);
       const resolved = resolveTarget(values.target, sysroot);
-      const base = values.static ? staticTarget(resolved) : resolved;
-      const platform = sanitize ? sanitizedTarget(base, sanitize) : base;
+      const base = values.static === true ? staticTarget(resolved) : resolved;
+      const platform = sanitize !== undefined ? sanitizedTarget(base, sanitize) : base;
       // A sanitizer's report names .fsh lines only when the program carries line tables.
-      const debug = values.debug || sanitize !== undefined;
-      const binary = out ?? basename(target, ".fsh");
-      const image = values.dockerfile ? dockerfilePath(binary) : undefined;
+      const debug = values.debug === true || sanitize !== undefined;
+      const binary = out ?? basename(target!, ".fsh");
+      const image = values.dockerfile === true ? dockerfilePath(binary) : undefined;
       try {
-        const warnings = lib ? buildLibrary(session, target, binary, lib, values.release, panic, values.link ?? [], platform, debug) : timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, target, binary, values.release, panic, values.link ?? [], platform, values.leaks, debug));
-        if (image) writeFileSync(image, dockerfile(binary));
-        for (const w of warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
+        let warnings: CompileError[] = [];
+        if (lib !== undefined) warnings = buildLibrary(sessionFor(), target!, binary, lib, release, panic, links, platform, debug);
+        else {
+          const start = performance.now();
+          const made = built(sessionFor(), target!, binary, release, panic, links, platform, leaks, debug);
+          reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
+          warnings = made.warnings;
+        }
+        if (image !== undefined) writeFileSync(image, dockerfile(binary));
+        for (const w of warnings) console.error(painted(w, target!, readFileSync(target!, "utf8"), "warning"));
       } catch (e) {
         // A missing header or library for another target is most often a missing or partial sysroot.
         if (e instanceof Error && platform.compile.includes("-target") && e.message.startsWith("clang failed")) e.message += `\nfishc build: building for ${platform.triple} needs its headers and libraries; check that --sysroot or FISH_SYSROOT names a complete sysroot for it`;
@@ -1018,7 +1055,7 @@ async function main(): Promise<void> {
       }
     }
   } catch (e) {
-    if (e instanceof CompileError) console.error(painted(e, target, readFileSync(target, "utf8")));
+    if (e instanceof CompileError) console.error(painted(e, target!, readFileSync(target!, "utf8")));
     else console.error(e instanceof Error ? e.message : e);
     process.exit(1);
   }

@@ -17,7 +17,7 @@ export type Repo = { dir: string; files: usize; lines: usize; unread: { files: u
 export type Ranking = { repos: Repo[]; curve: Curve; self?: { dir: string; curve: Curve } };
 
 export type Unit = { lines: usize; waits: Set<string>; rules: [string, string][] };
-type Plan = Map<string, { item: string; done: boolean }>;
+export type Plan = Map<string, { item: string; done: boolean }>;
 
 /** @throws {Error | IoError} */
 export function rank(dirs: Ref<string[]>, self?: string, plan?: Plan): Ranking {
