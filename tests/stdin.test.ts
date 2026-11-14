@@ -93,3 +93,15 @@ test("a file redirected to stdin reads like a pipe", async () => {
   expect(await new Response(proc.stdout).text()).toBe("5 first\n6 second\n5 third\nend\n");
   expect(await proc.exited).toBe(0);
 });
+
+test("prompt writes its message and a space, then gives each line until input ends", async () => {
+  const binary = await build("prompt", `function main() {
+  const a = prompt("name?");
+  console.log(\`[\${a ?? "none"}]\`);
+  const b = prompt();
+  console.log(\`[\${b ?? "none"}]\`);
+  console.log(\`[\${prompt("more?") ?? "none"}]\`);
+}
+`);
+  expect(await piped(binary, ["fish\r\n", "two\n"])).toBe("name? [fish]\n [two]\nmore? [none]\n");
+});

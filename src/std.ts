@@ -4270,6 +4270,7 @@ function atob(data: string): string throws TypeError {
 // runtime's blocking pool, so other tasks keep running while it waits.
 const STDIN = String.raw`
 declare function fsh_rt_stdin_take(at: MutPtr<u8>, cap: i64, whole: i64): i64;
+declare function fsh_rt_stream_write(stream: i32, bytes: Ptr<u8>, length: i64): void;
 
 // The next line's bytes with its newline, or with whole, all that is left; null when nothing is.
 function __stdinTake(whole: boolean): u8[] | null {
@@ -4280,6 +4281,20 @@ function __stdinTake(whole: boolean): u8[] | null {
     if (n <= (out.length as i64)) return out.slice(0, n);
     out = new Array(n).fill(0 as u8);
   }
+}
+
+// Bun's and a browser's prompt: the message and a space on standard output, then the next line of
+// standard input without its line ending, or null once input has ended. It waits on this thread,
+// as Bun's does.
+function prompt(message?: string): string | null {
+  const shown = new TextEncoder().encode((message ?? "") + " ");
+  unsafe { fsh_rt_stream_write(1, ptrOf(shown[0]), shown.length as i64) };
+  const line = __stdinTake(false);
+  if (line === null) return null;
+  let end = line.length;
+  if (end > 0 && line[end - 1] === 10) end--;
+  if (end > 0 && line[end - 1] === 13) end--;
+  return new TextDecoder().decode(line.slice(0, end as i64));
 }
 
 // The next line of standard input without its line ending, or null once input has ended.
@@ -7333,7 +7348,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const bufferUsed = mentionsName(written, "Buffer") || mentionsName(written, "BufferEncoding");
   const btoaUsed = uses(written, btoa, ["btoa"]);
   const atobUsed = uses(written, atob, ["atob"]);
-  const readingUsed = uses(written, reading, ["readLine", "__stdinTake"]);
+  const readingUsed = uses(written, reading, ["readLine", "__stdinTake", "prompt"]);
   // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
   // btoa, atob and Buffer call them too.
   const encoding = httpUsed || bufferUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);
