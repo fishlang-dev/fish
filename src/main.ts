@@ -566,17 +566,6 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
       }
       src = readFileSync(path, "utf8");
       const typescript = named && path.endsWith(".ts");
-      // A relative `.ts` import is renamed when its `.fsh` file will be there, or is and the `.ts`
-      // file isn't; with both there, which is meant is for a person to say.
-      // The callback keeps its own copy, as the files settled change as files are written.
-      let known = new Set<string>();
-      for (const t of settled) known.add(t);
-      const fsh: Imported = (specifier): "rename" | "ambiguous" | undefined => {
-        const target = resolve(dirname(path), specifier);
-        if (known.has(target)) return "rename";
-        if (!existsSync(`${target.slice(0, -3)}.fsh`)) return undefined;
-        return existsSync(target) ? "ambiguous" : "rename";
-      };
       let edition: Edition | "broken" = "native";
       const written = directive(src)?.edition;
       if (typescript) edition = "ts-compat";
@@ -598,7 +587,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
           problem(`fishc lint: '${shown}' isn't fixed, since '${fromHere(to)}', its Fish name, already exists`);
           continue;
         }
-        const { text, fixed } = fixedText(src, shown, fsh);
+        const { text, fixed } = fixedText(src, shown, importsOf(path, settled));
         if (text === undefined) {
           unfixable = true;
           continue;
@@ -624,7 +613,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
         src = text;
       }
       let numbering: Ids = { last: 0 };
-      let found = migrations(parseWithComments(src, numbering), src, fsh);
+      let found = migrations(parseWithComments(src, numbering), src, importsOf(path, settled));
       found.sort((a, b) => (a.start !== b.start ? (a.start as i64) - (b.start as i64) : (a.end as i64) - (b.end as i64)));
       if (at.endsWith(".ts")) found.unshift({ rule: "A10", action: "auto", start: 0, end: 0, message: `the file becomes '${basename(at, ".ts")}.fsh', its Fish name; 'fishc lint --fix' renames it` });
       for (const hit of found) console.log(formatError(new CompileError("E0802", hit.message ?? REJECTS[hit.rule]!, hit.start, hit.end), shown, src, `${hit.action} ${hit.rule}`));
@@ -638,6 +627,20 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
   }
   console.log(`${hits} to change in ${changed} file${changed === 1 ? "" : "s"}`);
   return hits > 0 || unfixable ? 1 : code;
+}
+
+// What a fix does to each relative `.ts` import of the file at `path`: renamed when its `.fsh` file
+// will be there, being one of `settled`, or is and the `.ts` file isn't; with both there, which is
+// meant is for a person to say. It keeps its own copy of `settled`, which changes as files are written.
+function importsOf(path: string, settled: Ref<Set<string>>): Imported {
+  let known = new Set<string>();
+  for (const t of settled) known.add(t);
+  return (specifier): "rename" | "ambiguous" | undefined => {
+    const target = resolve(dirname(path), specifier);
+    if (known.has(target)) return "rename";
+    if (!existsSync(`${target.slice(0, -3)}.fsh`)) return undefined;
+    return existsSync(target) ? "ambiguous" : "rename";
+  };
 }
 
 // The files of `settled` that the file at `path`, with text `src`, imports by a relative path,
@@ -921,8 +924,7 @@ async function main(): Promise<void> {
     const check = values.check === true;
     if (paths[0] === "-") process.exit(formatStdin(check));
     if (paths.length === 0) {
-      const found = findManifest(process.cwd());
-      if (found === undefined) fail(`fishc fmt: no ${MANIFEST} here or in any directory above; name the files to format, or run it inside a package`);
+      const found = findManifest(process.cwd()) ?? fail(`fishc fmt: no ${MANIFEST} here or in any directory above; name the files to format, or run it inside a package`);
       paths.push(dirname(found!));
     }
     process.exit(formatPaths(paths, check));
@@ -931,8 +933,7 @@ async function main(): Promise<void> {
     let paths = positionals.slice(1);
     if (flags.some((k) => k !== "panic" && k !== "fix") || values.panic !== "unwind") fail("usage: fishc lint [<path>...] [--fix]");
     if (paths.length === 0) {
-      const found = findManifest(process.cwd());
-      if (found === undefined) fail(`fishc lint: no ${MANIFEST} here or in any directory above; name the files to lint, or run it inside a package`);
+      const found = findManifest(process.cwd()) ?? fail(`fishc lint: no ${MANIFEST} here or in any directory above; name the files to lint, or run it inside a package`);
       paths.push(dirname(found!));
     }
     process.exit(lintPaths(paths, values.fix === true));
@@ -940,8 +941,7 @@ async function main(): Promise<void> {
   if (command === "test") {
     // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
     if (positionals.length > 2 || flags.some((k) => k !== "panic") || values.panic !== "unwind") fail("usage: fishc test [<filter>]");
-    const found = findManifest(process.cwd());
-    if (found === undefined) fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
+    const found = findManifest(process.cwd()) ?? fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
     const code = await testPackage(sessionFor(), dirname(found!), file);
     process.exit(code);
   }
@@ -950,8 +950,7 @@ async function main(): Promise<void> {
     const allowed = new Set(["panic", "dry-run", "allow-dirty", "submit", "fork", "yes"]);
     const submitting = values.submit === true;
     if (positionals.length > 1 || flags.some((k) => !allowed.has(k)) || ((values.fork !== undefined || values.yes === true) && !submitting) || (submitting && values["dry-run"] === true)) fail(usage);
-    const found = findManifest(process.cwd());
-    if (found === undefined) fail(`fishc publish: no ${MANIFEST} here or in any directory above; publish runs inside a package`);
+    const found = findManifest(process.cwd()) ?? fail(`fishc publish: no ${MANIFEST} here or in any directory above; publish runs inside a package`);
     try {
       const packed = pack(found, values["allow-dirty"] === true);
       console.log(`packed ${packed.manifest.name} ${packed.manifest.version}: ${packed.files.length} files, ${Math.ceil(packed.bytes.length / 1024)} KiB, sha256 ${packed.sha256}`);
@@ -983,8 +982,7 @@ async function main(): Promise<void> {
   if (command === "add" || command === "update") {
     const usage = "usage: fishc add <name>[@<range>]\n       fishc update [<name>]";
     if (positionals.length > 2 || (command === "add" && file === undefined) || flags.some((k) => k !== "panic")) fail(usage);
-    const found = findManifest(process.cwd());
-    if (found === undefined) fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; make a package with 'fishc new <name>' or 'fishc init'`);
+    const found = findManifest(process.cwd()) ?? fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; make a package with 'fishc new <name>' or 'fishc init'`);
     try {
       const manifest = loadManifest(found);
       if (command === "add") {
@@ -1047,8 +1045,7 @@ async function main(): Promise<void> {
   let out = values.out;
   // With no file, the package around the working directory is built, as cargo builds one.
   if ((command === "build" || command === "check" || command === "run" || command === "watch") && file === undefined && lib === undefined) {
-    const found = findManifest(process.cwd());
-    if (found === undefined) fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
+    const found = findManifest(process.cwd()) ?? fail(`fishc ${command}: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
     try {
       const manifest = loadManifest(found, "entry");
       // An entry inside a package nested here would build as that package's program.
