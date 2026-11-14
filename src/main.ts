@@ -574,8 +574,11 @@ function checkProject(dir: string) {
   if (sources(dir).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript files (.ts, .tsx or .mts, outside node_modules)`);
 }
 
-if (import.meta.main && Bun.argv.length === 3 && Bun.argv[2] === "lsp") serveLsp();
-else if (import.meta.main) {
+async function main(): Promise<void> {
+  if (Bun.argv.length === 3 && Bun.argv[2] === "lsp") {
+    serveLsp();
+    return;
+  }
   const session = cachedSession();
   // A bare `--lib` builds the default kind, a static library.
   const { values, positionals } = (() => {
@@ -913,3 +916,5 @@ else if (import.meta.main) {
     process.exit(1);
   }
 }
+
+if (import.meta.main) main();
