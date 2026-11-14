@@ -27,8 +27,16 @@ import type {
   TypeParam,
 } from "./parser.ts";
 import {
+  cloneClassMember,
+  cloneDeclarator,
   cloneExpr,
+  cloneObjectProp,
+  cloneParam,
+  clonePattern,
+  clonePatternProp,
   cloneStmt,
+  cloneTypeMember,
+  cloneTypeNode,
   idOfClassMember,
   idOfClassNode,
   idOfDeclarator,
@@ -638,6 +646,19 @@ export class NodeSet<K extends Id> {
 // takes, so every table keyed by node reads the same entry for either. A tree reads a replacement
 // through `current` until a rebuild puts it in place: after a body's check, or at the end of a
 // pass that lowers the tree before checking.
+// A replacement as a rebuilt body holds it, copied out for its table.
+type Refreshed =
+  | { of: "stmt"; node: Stmt }
+  | { of: "expr"; node: Expr }
+  | { of: "declarator"; node: Declarator }
+  | { of: "param"; node: Param }
+  | { of: "pattern"; node: Pattern }
+  | { of: "typeNode"; node: TypeNode }
+  | { of: "objectProp"; node: ObjectProp }
+  | { of: "classMember"; node: ClassMember }
+  | { of: "typeMember"; node: TypeMember }
+  | { of: "patternProp"; node: PatternProp };
+
 export class Rewrites implements Replacements {
   private exprs: Map<usize, Expr> = new Map<usize, Expr>();
   private stmts = new Map<usize, Stmt>();
@@ -705,23 +726,47 @@ export class Rewrites implements Replacements {
   // through this table, and the body holds rebuilt copies of them, not the table's own.
   refresh(this: Mut<this>, body: Ref<Stmt[]>): void {
     if (!this.hasChanges) return;
-    let stmts: Stmt[] = [];
-    let exprs: Expr[] = [];
-    const knownStmts: Ref<Map<usize, Stmt>> = this.stmts;
-    const knownExprs: Ref<Map<usize, Expr>> = this.exprs;
+    let wanted = new Set<string>();
+    for (const id of this.stmts.keys()) wanted.add(`stmt ${id}`);
+    for (const id of this.exprs.keys()) wanted.add(`expr ${id}`);
+    for (const id of this.declarators.keys()) wanted.add(`declarator ${id}`);
+    for (const id of this.params.keys()) wanted.add(`param ${id}`);
+    for (const id of this.patterns.keys()) wanted.add(`pattern ${id}`);
+    for (const id of this.typeNodes.keys()) wanted.add(`typeNode ${id}`);
+    for (const id of this.objectProps.keys()) wanted.add(`objectProp ${id}`);
+    for (const id of this.classMembers.keys()) wanted.add(`classMember ${id}`);
+    for (const id of this.typeMembers.keys()) wanted.add(`typeMember ${id}`);
+    for (const id of this.patternProps.keys()) wanted.add(`patternProp ${id}`);
+    let found: Refreshed[] = [];
     for (const s of body) {
       walk({ of: "stmt", node: s }, (n) => {
-        if (n.of === "stmt" && knownStmts.has(n.node.id)) stmts.push(cloneStmt(n.node));
-        else if (n.of === "expr" && knownExprs.has(idOfExpr(n.node))) exprs.push(cloneExpr(n.node));
+        if (!wanted.has(`${n.of} ${nodeIdOf(n)}`)) return;
+        if (n.of === "stmt") found.push({ of: "stmt", node: cloneStmt(n.node) });
+        else if (n.of === "expr") found.push({ of: "expr", node: cloneExpr(n.node) });
+        else if (n.of === "declarator") found.push({ of: "declarator", node: cloneDeclarator(n.node) });
+        else if (n.of === "param") found.push({ of: "param", node: cloneParam(n.node) });
+        else if (n.of === "pattern") found.push({ of: "pattern", node: clonePattern(n.node) });
+        else if (n.of === "typeNode") found.push({ of: "typeNode", node: cloneTypeNode(n.node) });
+        else if (n.of === "objectProp") found.push({ of: "objectProp", node: cloneObjectProp(n.node) });
+        else if (n.of === "classMember") found.push({ of: "classMember", node: cloneClassMember(n.node) });
+        else if (n.of === "typeMember") found.push({ of: "typeMember", node: cloneTypeMember(n.node) });
+        else if (n.of === "patternProp") found.push({ of: "patternProp", node: clonePatternProp(n.node) });
       });
     }
-    while (stmts.length > 0) {
-      const s = stmts.pop()!;
-      this.stmts.set(s.id, s);
-    }
-    while (exprs.length > 0) {
-      const e = exprs.pop()!;
-      this.exprs.set(idOfExpr(e), e);
+    while (found.length > 0) {
+      const n = found.pop()!;
+      switch (n.of) {
+        case "stmt": this.stmts.set(idOfStmt(n.node), n.node); break;
+        case "expr": this.exprs.set(idOfExpr(n.node), n.node); break;
+        case "declarator": this.declarators.set(idOfDeclarator(n.node), n.node); break;
+        case "param": this.params.set(idOfParam(n.node), n.node); break;
+        case "pattern": this.patterns.set(idOfPattern(n.node), n.node); break;
+        case "typeNode": this.typeNodes.set(idOfTypeNode(n.node), n.node); break;
+        case "objectProp": this.objectProps.set(idOfObjectProp(n.node), n.node); break;
+        case "classMember": this.classMembers.set(idOfClassMember(n.node), n.node); break;
+        case "typeMember": this.typeMembers.set(idOfTypeMember(n.node), n.node); break;
+        case "patternProp": this.patternProps.set(idOfPatternProp(n.node), n.node); break;
+      }
     }
   }
 
