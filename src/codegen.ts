@@ -1364,37 +1364,39 @@ class Codegen implements PrintHost, ComptimeHost {
   /** @throws {CompileError} */
   fillConstants(this: Mut<this>): string[] {
     if (this.constantGlobals.size === 0) return [];
-    const made = (cg: Mut<Codegen>, name: string, fill: (cg: Mut<Codegen>) => void) => {
-      const saved = cg.setAside();
-      fill(cg);
-      cg.emit("ret void");
-      const lines = [`define internal void ${name}() {`, "entry:", ...cg.allocas, ...cg.body, "}", ""];
-      cg.takeUp(saved);
-      return lines;
-    };
     // Each constant's value, computed while compiling, before the filler that stores it.
     const constants = [...this.constantGlobals.keys()];
     let computed: Value[] = [];
     for (const c of constants) computed.push(comptimeBody(this, c));
-    const filler = made(this, '@"fsh.constants"', (cg) => {
-      let at: usize = 0;
-      for (const [c, name] of [...cg.constantGlobals]) {
-        const gives = cg.inst(c).returns;
-        const line = `store ${cg.llvm(gives)} ${cg.bake(computed[at]!, gives)}, ptr ${name}`;
-        at++;
-        cg.emit(line);
-      }
-      cg.emit('call void @fsh_rt_constants(ptr @"fsh.constants.drop")');
-    });
-    const dropper = made(this, '@"fsh.constants.drop"', (cg) => {
-      for (const [c, name] of [...cg.constantGlobals]) {
-        const v = cg.temp();
-        const gives = cg.inst(c).returns;
-        cg.emit(`${v} = load ${cg.llvm(gives)}, ptr ${name}`);
-        cg.dispose(v, gives);
-      }
-    });
+    const globals = [...this.constantGlobals];
+    // The helpers are written out in turn, as each closes the function before it.
+    let saved = this.setAside();
+    for (let at: usize = 0; at < globals.length; at++) {
+      const [c, name] = globals[at]!;
+      const gives = this.inst(c).returns;
+      const line = `store ${this.llvm(gives)} ${this.bake(computed[at]!, gives)}, ptr ${name}`;
+      this.emit(line);
+    }
+    this.emit('call void @fsh_rt_constants(ptr @"fsh.constants.drop")');
+    const filler = this.helperLines('@"fsh.constants"', saved);
+    saved = this.setAside();
+    for (const [c, name] of globals) {
+      const v = this.temp();
+      const gives = this.inst(c).returns;
+      this.emit(`${v} = load ${this.llvm(gives)}, ptr ${name}`);
+      this.dispose(v, gives);
+    }
+    const dropper = this.helperLines('@"fsh.constants.drop"', saved);
     return [...filler, ...dropper, '@llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 65535, ptr @"fsh.constants", ptr null }]'];
+  }
+
+  // The helper emitted since `saved` was set aside, as the lines defining `name`, with the function
+  // set aside taken up again.
+  helperLines(this: Mut<this>, name: string, saved: Emission): string[] {
+    this.emit("ret void");
+    const lines = [`define internal void ${name}() {`, "entry:", ...this.allocas, ...this.body, "}", ""];
+    this.takeUp(saved);
+    return lines;
   }
 
 
