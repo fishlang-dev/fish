@@ -935,8 +935,9 @@ async function main(): Promise<void> {
       } catch (e) {
         fail(`fishc survey: the plan '${values.plan ?? ""}' can't be read: ${(e as { message: string }).message}`);
       }
+      const planned = plan !== undefined;
       const ranking = rank(dirs, values.self, plan);
-      console.log(values.json === true ? indented(JSON.stringify(ranking)) : formatRanking(ranking, plan !== undefined));
+      console.log(values.json === true ? indented(JSON.stringify(ranking)) : formatRanking(ranking, planned));
     } else if (values.compare !== undefined) {
       let then: SurveyReport | undefined = undefined;
       try {
