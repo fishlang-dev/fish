@@ -27,6 +27,8 @@ import type {
   TypeParam,
 } from "./parser.ts";
 import {
+  cloneExpr,
+  cloneStmt,
   idOfClassMember,
   idOfClassNode,
   idOfDeclarator,
@@ -697,6 +699,30 @@ export class Rewrites implements Replacements {
     this.rebuilding = body;
     this.from = this.rebuilt.has(body) && this.checks.length > 0 ? this.checks[this.checks.length - 1]! + 1 : 0;
     this.rebuilt.add(body);
+  }
+
+  // Each replacement as it stands in a rebuilt body: a later check of the body reads replacements
+  // through this table, and the body holds rebuilt copies of them, not the table's own.
+  refresh(this: Mut<this>, body: Ref<Stmt[]>): void {
+    if (!this.hasChanges) return;
+    let stmts: Stmt[] = [];
+    let exprs: Expr[] = [];
+    const knownStmts: Ref<Map<usize, Stmt>> = this.stmts;
+    const knownExprs: Ref<Map<usize, Expr>> = this.exprs;
+    for (const s of body) {
+      walk({ of: "stmt", node: s }, (n) => {
+        if (n.of === "stmt" && knownStmts.has(n.node.id)) stmts.push(cloneStmt(n.node));
+        else if (n.of === "expr" && knownExprs.has(idOfExpr(n.node))) exprs.push(cloneExpr(n.node));
+      });
+    }
+    while (stmts.length > 0) {
+      const s = stmts.pop()!;
+      this.stmts.set(s.id, s);
+    }
+    while (exprs.length > 0) {
+      const e = exprs.pop()!;
+      this.exprs.set(idOfExpr(e), e);
+    }
   }
 
   endRebuild(this: Mut<this>): void {

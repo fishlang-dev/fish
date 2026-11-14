@@ -3792,6 +3792,7 @@ class BodyChecker implements Context, GuardHost {
     while (written.length > 0) body.params.push(rebuiltParam(written.shift()!, this.cx.tables.rewrites));
     this.cx.tables.rewrites.startRebuild(bodyId);
     rebuiltStmts(body.body, this.cx.tables.rewrites);
+    this.cx.tables.rewrites.refresh(body.body);
     this.cx.tables.rewrites.endRebuild();
     // A method this body calls on an object holding references is checked first, so the move
     // check knows whether it keeps what it is lent.
