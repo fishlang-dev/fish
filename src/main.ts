@@ -1195,11 +1195,11 @@ async function main(): Promise<void> {
       const image = values.dockerfile === true ? dockerfilePath(binary) : undefined;
       try {
         let warnings: CompileError[] = [];
-        if (lib !== undefined) warnings = buildLibrary(sessionFor(), target!, binary, lib, release, panic, [...links], platform, debug);
+        if (lib !== undefined) warnings = buildLibrary(sessionFor(), target!, binary, lib, release, panic, [...links], copyTarget(platform), debug);
         else {
           const start = performance.now();
           let looked: string[] = [];
-          const made = built(sessionFor(), target!, binary, release, panic, [...links], platform, leaks, debug, looked);
+          const made = built(sessionFor(), target!, binary, release, panic, [...links], copyTarget(platform), leaks, debug, looked);
           reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
           warnings = made.warnings;
         }
