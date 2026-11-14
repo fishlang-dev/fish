@@ -703,6 +703,16 @@ export function indented(json: string): string {
   return out;
 }
 
+// A file's text to show an error against, or none when it can't be read, as when it was removed
+// while being watched.
+function textOf(path: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (_e) {
+    return "";
+  }
+}
+
 // `path` from the working directory, or as it is when that is where it is.
 function fromHere(path: string): string {
   const here = relative(process.cwd(), path);
@@ -1120,10 +1130,10 @@ async function main(): Promise<void> {
           const start = performance.now();
           const made = built(sessionFor(), entry, binary, release, panic, [...links], hostTarget(), leaks, values.debug === true, loaded);
           reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
-          for (const w of made.warnings) console.error(painted(w, entry, readFileSync(entry, "utf8"), "warning"));
+          for (const w of made.warnings) console.error(painted(w, entry, textOf(entry), "warning"));
           return { built: true, loaded };
         } catch (e) {
-          if (e instanceof CompileError) console.error(painted(e, entry, readFileSync(entry, "utf8")));
+          if (e instanceof CompileError) console.error(painted(e, entry, textOf(entry)));
           else console.error(`fishc: ${(e as { message: string }).message}`);
           return { built: false, loaded };
         }
