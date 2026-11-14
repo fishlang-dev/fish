@@ -172,7 +172,8 @@ function bundled(ir: string, loaded: Ref<Loaded>): string {
   const calls = /^\s+(?:%\S+ = )?(?:call|invoke) ptr @fsh_rt_js_export\(ptr @fsh\.js\.bundle, i64 (\d+)/gm;
   let seen = new Set<usize>();
   for (const m of ir.matchAll(calls)) seen.add((Number(m[1]!) ?? 0) as usize);
-  const used = [...seen].sort((a, b) => (a as i64) - (b as i64));
+  let used = [...seen];
+  used.sort((a, b) => (a as i64) - (b as i64));
   if (used.length === 0) return ir;
   const bytes = new TextEncoder().encode(bundle(loaded.packages, used));
   let text = "";
@@ -214,7 +215,8 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   const fish = join(dir, "fish.o");
   const optimize = release ? "-O2" : "-O0";
-  const g = debug ? ["-g"] : [];
+  const none: string[] = [];
+  const g = debug ? ["-g"] : none;
   // A library is never timed, so its objects are built within a session holding only the caches.
   let building = together(newSession(), caches);
   try {
@@ -224,7 +226,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
       const extension = darwin ? "dylib" : "so";
-      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", join(dirname(out), `lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : [])], ir);
+      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", join(dirname(out), `lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)], ir);
     } else {
       run(["clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize, ...g], ir);
       const archive = shim !== undefined ? join(dir, "fish.a") : join(dirname(out), `lib${name}.a`);
@@ -349,7 +351,7 @@ function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ std: Unit[
   const g = debug ? ["-g"] : [];
   const tls = runtimeLinks(ir, target);
   if (session.timings === undefined) {
-    clang([...clangArgs(out, release, links, objects, shim, target), ...tls, ...g], halves.program);
+    clang([...clangArgs(out, release, links, objects, shim, copyTarget(target)), ...tls, ...g], halves.program);
     return;
   }
   // Timed, the program is compiled and linked by two clang calls, so each is measured on its own.
@@ -361,7 +363,7 @@ function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ std: Unit[
     clang(["clang", ...target.compile, "-c", "-x", "ir", "-", "-o", object, "-funwind-tables", optimization(release, target), ...g], halves.program);
     stageEnd(session, "compile", compiling);
     const linking = stageStart(session);
-    clang([...clangArgs(out, release, links, objects, shim, target, [object]), ...tls, ...g]);
+    clang([...clangArgs(out, release, links, objects, shim, copyTarget(target), [object]), ...tls, ...g]);
     // On macOS the debug info stays in the object, deleted below; clang gathers it into a .dSYM
     // only when it compiles and links in one call, so it is gathered here.
     const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
@@ -398,7 +400,8 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
     const object = await objectAsync(u, objectPath(building, u));
     objects.push(object);
   }
-  for (const o of await mathObjectsAsync(building)) objects.push(o);
+  const math = await mathObjectsAsync(building);
+  for (const o of math) objects.push(o);
   const compiler = Bun.spawn([...clangArgs(out, release, links, objects, shim, host), ...runtimeLinks(made.ir, host)], { stdin: new TextEncoder().encode(halves.program), stderr: "pipe" });
   const [code, stderr] = await Promise.all([compiler.exited, new Response(compiler.stderr).text()]);
   if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
@@ -454,12 +457,12 @@ async function testPackage(session: BuildSession, dir: string, filter: string | 
   // Interrupted, the tests running and what they started end, and the build is removed.
   process.on("SIGINT", () => {
     stopTests(running);
-    rmSync(dirname(out), { recursive: true, force: true });
+    removeQuietly(dirname(out));
     process.exit(130);
   });
   process.on("SIGTERM", () => {
     stopTests(running);
-    rmSync(dirname(out), { recursive: true, force: true });
+    removeQuietly(dirname(out));
     process.exit(143);
   });
   try {
@@ -479,6 +482,15 @@ async function testPackage(session: BuildSession, dir: string, filter: string | 
     return 1;
   } finally {
     rmSync(dirname(out), { recursive: true, force: true });
+  }
+}
+
+// Removes a directory, as an interrupted run leaves it, ignoring what can't be removed.
+function removeQuietly(dir: string) {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch (_e) {
+    // Gone already, or not this process's to remove.
   }
 }
 
@@ -502,7 +514,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
       let problems: string[] = [];
       const found = fishFiles(path, problems);
       for (const message of problems) problem(message);
-      files.push(...found.map((f) => ({ path: f, named: false })));
+      for (const f of found) files.push({ path: f, named: false });
     }
     else files.push({ path, named: true });
   }
@@ -652,6 +664,7 @@ export function runtimeLinks(ir: string, target: Ref<Target>): string[] {
 // program's IR calls the engine, and the TLS and zlib halves when it calls those. They are built with unwind tables so a panic can unwind through
 // them, and position-independent when `pic`, for a library. A `--leaks` build's runtime records
 // each block's site, so it is an object of its own.
+/** @throws {IoError} */
 export function runtimeUnits(ir: string, release: boolean, pic = false, target: Target = hostTarget(), leaks = false): Unit[] {
   const js = callsEngine(ir);
   const openssl = callsTls(ir) ? findOpenSsl(target) : undefined;

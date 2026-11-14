@@ -230,7 +230,7 @@ class Server {
       // A hint asked for before the change was checked shouldn't wait for the next edit.
       if (this.results.get(uri)?.text !== this.documents.get(uri)) this.check(uri);
       const result = this.results.get(uri);
-      const range = params.range;
+      const range: Ref<Range | undefined> = params.range;
       if (result === undefined || result.checked === undefined || range === undefined) return { result: "[]" };
       return { result: JSON.stringify(hints(result.checked, result.text, range)) };
     }
