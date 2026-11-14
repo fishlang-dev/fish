@@ -42,13 +42,6 @@ export function newLineSuffixBoundary(): Doc {
   return { kind: "lineSuffixBoundary" };
 }
 
-export const line: Doc = newLine();
-export const softline: Doc = newSoftline();
-export const breakParent: Doc = newBreakParent();
-export const hardline: Doc = newHardline();
-export const literalline: Doc = newLiteralline();
-export const lineSuffixBoundary: Doc = newLineSuffixBoundary();
-export const trim: Doc = { kind: "trim" };
 
 export function group(contents: Doc, options: { shouldBreak?: boolean; id?: string; expandedStates?: Doc[] } = {}): Doc {
   return { kind: "group", contents, break: options.shouldBreak === true, id: options.id, expandedStates: options.expandedStates, propagated: false };
@@ -109,7 +102,6 @@ type Mode = "break" | "flat";
 // parts of a fill already laid out. The comments waiting for the line's end are held alike.
 
 const INFINITY: f64 = 1.0 / 0.0;
-const HARD_LINE: Doc = { kind: "line", soft: false, hard: true, literal: false };
 
 // ponytail: width counts code points, not East Asian wide characters as two; Prettier's
 // getStringWidth does, so a line of wide characters may break later than Prettier's.
@@ -319,6 +311,9 @@ export function print(doc: Doc, printWidth: f64 = 80): string {
   let breaks: Breaks = { found: false };
   const laid = propagateBreaks(doc, breaks);
   let modes = new Map<string, Mode>();
+  // The line breaks the layout adds itself, borrowed as the commands borrow the document's own.
+  const hardLine: Doc = { kind: "line", soft: false, hard: true, literal: false };
+  const hardlineDoc: Doc = newHardline();
   let cDocs: Ref<Doc>[] = [];
   let cModes: Mode[] = [];
   let cIndents: string[] = [];
@@ -468,7 +463,7 @@ export function print(doc: Doc, printWidth: f64 = 80): string {
       sOwnLine.push(afterEnding && !startsWithHardLine(doc.contents));
       sEndsLine.push(doc.endsLine);
     } else if (doc.kind === "lineSuffixBoundary") {
-      if (sDocs.length > 0) { cDocs.push(HARD_LINE); cModes.push(mode); cIndents.push(ind); cWidths.push(indWidth); cAts.push(0); }
+      if (sDocs.length > 0) { cDocs.push(hardLine); cModes.push(mode); cIndents.push(ind); cWidths.push(indWidth); cAts.push(0); }
     } else if (doc.kind === "line") {
       if (mode === "flat" && !doc.hard) {
         if (!doc.soft) {
@@ -493,7 +488,7 @@ export function print(doc: Doc, printWidth: f64 = 80): string {
             cIndents.push(suffixIndent);
             cWidths.push(suffixWidth);
             cAts.push(0);
-            if (sOwnLine.pop()!) { cDocs.push(hardline); cModes.push(suffixMode); cIndents.push(suffixIndent); cWidths.push(suffixWidth); cAts.push(0); }
+            if (sOwnLine.pop()!) { cDocs.push(hardlineDoc); cModes.push(suffixMode); cIndents.push(suffixIndent); cWidths.push(suffixWidth); cAts.push(0); }
           }
           sEndsLine = [];
         } else if (doc.literal) {
@@ -523,7 +518,7 @@ export function print(doc: Doc, printWidth: f64 = 80): string {
         cIndents.push(suffixIndent);
         cWidths.push(suffixWidth);
         cAts.push(0);
-        if (sOwnLine.pop()!) { cDocs.push(hardline); cModes.push(suffixMode); cIndents.push(suffixIndent); cWidths.push(suffixWidth); cAts.push(0); }
+        if (sOwnLine.pop()!) { cDocs.push(hardlineDoc); cModes.push(suffixMode); cIndents.push(suffixIndent); cWidths.push(suffixWidth); cAts.push(0); }
       }
       sEndsLine = [];
     }

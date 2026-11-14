@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import { builders as b, printer } from "prettier/doc";
-import { breakParent, conditionalGroup, fill, group, hardline, ifBreak, indent, indentIfBreak, join, line, print, softline, type Doc } from "../src/doc.ts";
+import { conditionalGroup, fill, group, ifBreak, indent, indentIfBreak, join, newBreakParent, newHardline, newLine, newSoftline, print, type Doc } from "../src/doc.ts";
+
+const line = newLine();
+const softline = newSoftline();
+const hardline = newHardline();
+const breakParent = newBreakParent();
 
 // The same document in Prettier's own model, so its printer is the oracle for ours.
 function theirs(d: Doc, ids: Map<string, symbol>): unknown {
