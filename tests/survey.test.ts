@@ -100,6 +100,7 @@ test("forms that look alike are told apart", () => {
   expect(counts("function f() {\n  console.error(1);\n  console.warn(2);\n  console.info(3);\n  const t = Date.now() + performance.now();\n}\n")).toEqual({ console: 1 });
   expect(counts("function f() {\n  const a = process.argv[2];\n  const h = process.env.HOME;\n  process.exit(1);\n}\n")).toEqual({});
   expect(counts("function f() {\n  process.env.X = \"y\";\n  delete process.env.Y;\n  const p = process.ppid;\n}\n")).toEqual({ process: 3, R3: 1 });
+  expect(counts("function f() {\n  process.stdout.write(\"a\");\n  process.stderr.write(\"b\");\n  const t = process.stdout.isTTY;\n  const o = process.stdout;\n}\n")).toEqual({ process: 2 });
   expect(counts("function f() {\n  const { HOME } = process.env;\n  const k = Object.keys(process.env);\n  const e = process.env;\n  const h = process.env?.HOME;\n  process.env.N++;\n}\n")).toEqual({ process: 4 });
   expect(counts("async function f() {\n  const t = await Bun.file(\"a\").text();\n  Bun.spawnSync([\"ls\"], { cwd: Bun.env.HOME });\n  await Bun.sleep(1);\n  return Bun.which(\"sh\") + Bun.version;\n}\n")).toEqual({});
   expect(counts("function f() {\n  const c = Bun.gc(true);\n  return Bun.build({ entrypoints: [] });\n}\n")).toEqual({ bunGlobals: 2 });

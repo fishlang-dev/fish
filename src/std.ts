@@ -6743,6 +6743,35 @@ export function pid(): i64 {
   return unsafe { getpid() } as i64;
 }
 
+declare function fsh_rt_stream_write(stream: i32, bytes: Ptr<u8>, length: i64): void;
+
+// process.stdout and process.stderr, of which Fish has write alone: the chunk as it is, with no
+// newline added, giving true as Node's does.
+export class WriteStream {
+  fd: i32;
+  constructor(fd: i32) {
+    this.fd = fd;
+  }
+
+  write(chunk: string | u8[]): boolean {
+    if (typeof chunk === "string") streamWrite(this.fd, new TextEncoder().encode(chunk));
+    else streamWrite(this.fd, chunk);
+    return true;
+  }
+}
+
+function streamWrite(fd: i32, bytes: Ref<u8[]>): void {
+  if (bytes.length > 0) unsafe { fsh_rt_stream_write(fd, ptrOf(bytes[0]), bytes.length as i64) };
+}
+
+export function stdout(): WriteStream {
+  return new WriteStream(1);
+}
+
+export function stderr(): WriteStream {
+  return new WriteStream(2);
+}
+
 // Node's process.kill: sends the signal, SIGTERM unless named, refusing in Bun's words.
 export function kill(pid: i64, signal: string | i64 = "SIGTERM"): boolean throws IoError {
   const failed = unsafe { fsh_rt_kill(pid, signalNumberOf(signal)) };
@@ -7174,7 +7203,7 @@ export { sleeping as sleep, serving as serve, spawning as spawn };
 // `process.argv`, called with nothing, and `env` as a table, `process.env.HOME` and
 // `process.env[name]` calling it with the key.
 export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
-  process: { argv: "value", env: "table", shutdown: "value", platform: "value", arch: "value", execPath: "value", pid: "value" },
+  process: { argv: "value", env: "table", shutdown: "value", platform: "value", arch: "value", execPath: "value", pid: "value", stdout: "value", stderr: "value" },
   Bun: { argv: "value", env: "table", stdin: "value", version: "value" },
 };
 

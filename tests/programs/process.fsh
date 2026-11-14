@@ -137,3 +137,52 @@ function main(): void throws IoError {
   process.chdir(start);
   rmSync(dir, { recursive: true });
 }
+// case: process_stdout_write
+// expect: ab c
+// expect: true
+function main() {
+  process.stdout.write("a");
+  process.stdout.write("b ");
+  console.log("c");
+  console.log(process.stdout.write(""));
+}
+// case: process_stderr_write
+// stderr: one two
+// stderr: three
+function main() {
+  process.stderr.write("one ");
+  console.error("two");
+  process.stderr.write("three\n");
+}
+// case: process_stdout_write_bytes
+// expect: héllo
+import { stdout } from "node:process";
+function main() {
+  const bytes: u8[] = new TextEncoder().encode("hé");
+  stdout.write(bytes);
+  process.stdout.write(Buffer.from("llo\n"));
+}
+// case: process_stdout_write_panic
+// expect: kept
+// panic: stop
+function main() {
+  process.stdout.write("kept\n");
+  assert(false, "stop");
+}
+// case: process_stdout_write_task
+// expect: from task
+// expect: done
+async function task(): Promise<void> {
+  process.stdout.write("from ");
+  process.stdout.write("task\n");
+}
+async function main(): Promise<void> {
+  const t = spawn(task());
+  await t;
+  process.stdout.write("done\n");
+}
+// case: process_stdout_unsupported
+// error: 'process.stdout.isTTY' isn't supported yet; write to the stream with 'process.stdout.write(chunk)'
+function main() {
+  const tty = process.stdout.isTTY;
+}

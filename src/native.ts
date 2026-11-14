@@ -4872,6 +4872,14 @@ void fsh_rt_print_end(int32_t stream) {
   funlockfile(stdout);
 }
 
+// process.stdout.write and process.stderr.write go through console.log's buffers and locks, so
+// what they write keeps its place among printed lines.
+void fsh_rt_stream_write(int32_t stream, const char *bytes, int64_t length) {
+  fsh_rt_print_begin(stream);
+  fwrite(bytes, 1, length, stream == 2 ? stderr : stdout);
+  fsh_rt_print_end(stream);
+}
+
 // A Lock's word: 0 unlocked, or the token of the thread holding it. A lock is held only for a
 // synchronous callback, so a waiter spins briefly, then gives its thread up between tries.
 // Taking a lock this thread already holds would wait forever, so it is refused: 1, and the

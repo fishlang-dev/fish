@@ -83,7 +83,7 @@ const RULES: Rule[] = [
   { id: "genericFunctionsHeld", action: "unsupported", title: "generic function types held in class fields, arrays or unions, which would box a family of functions" },
   { id: "classForms", action: "unsupported", title: "abstract fields, and '#x in obj' checks" },
   { id: "tagged", action: "guided", title: "tagged templates: a Fish tag takes its strings as 'comptime strings: TemplateStringsArray', so its code over them runs while compiling" },
-  { id: "process", action: "unsupported", title: "process members besides argv, env, exit, platform, arch, execPath, cwd, chdir, on, once, kill and pid, and writes to process.env" },
+  { id: "process", action: "unsupported", title: "process members besides argv, env, exit, platform, arch, execPath, cwd, chdir, on, once, kill, pid, stdout.write and stderr.write, and writes to process.env" },
   { id: "bunGlobals", action: "unsupported", title: "Bun members besides file, stdin, write, env, argv, sleep, sleepSync, which, spawn, spawnSync, serve and version" },
   { id: "importMeta", action: "unsupported", title: "import.meta besides its path, file, dir, url, main, dirname and filename members" },
   { id: "timerForms", action: "unsupported", title: "setImmediate, unref on a timer, and more than two arguments passed on to a timer's function" },
@@ -254,7 +254,7 @@ const BUILTINS = new Map<string, Equivalent>([
   // `buffer` is the Buffer global; its methods std lacks, such as `writeUInt32BE`, are found by name.
   // `crypto` is more than std's random functions and one-shot hashes: an import of only those is portable.
   ["readline", STD("the readLine global and the stdin module, for lines, text and bytes")], ["dgram", STD("UdpSocket")],
-  ["process", STD("process, for argv, env, exit, platform, arch, execPath, cwd, chdir, pid, on, once, kill and signals")], ["perf_hooks", STD("the global performance, for now()")],
+  ["process", STD("process, for argv, env, exit, platform, arch, execPath, cwd, chdir, pid, on, once, kill, signals, stdout.write and stderr.write")], ["perf_hooks", STD("the global performance, for now()")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
 ]);
 const FEATURES = features();
@@ -402,10 +402,11 @@ type Loop = { at: usize; array: boolean; name: string | undefined };
 // `envKeys` holds the `process.env` nodes read by key or whole through Object.entries and
 // Object.keys, which Fish takes (any other use of it, it doesn't), `statements` the destructuring
 // assignments written as statements of their own, `metaRead` the `import.meta` nodes whose
-// member is read, and `heads` the declarations heading a loop.
+// member is read, `heads` the declarations heading a loop, and `writes` the `process.stdout` and
+// `process.stderr` nodes whose `write` is read.
 type Scan = {
   path: string; hits: Hit[]; ownBun: boolean; wholes: Map<string, Whole>; exports: Map<string, Set<string>>;
-  envKeys: Set<usize>; statements: Set<usize>; metaRead: Set<usize>; heads: Set<usize>;
+  envKeys: Set<usize>; statements: Set<usize>; metaRead: Set<usize>; heads: Set<usize>; writes: Set<usize>;
   spreads: Spread[]; loops: Loop[]; tuples: Set<string>; arrays: Set<string>;
 };
 
@@ -417,7 +418,7 @@ function note(s: Mut<Scan>, id: string, at: usize) {
 function scan(path: string, program: Ref<Stmt[]>): Hit[] {
   let s: Scan = {
     path, hits: [], ownBun: false, wholes: new Map<string, Whole>(), exports: new Map<string, Set<string>>(),
-    envKeys: new Set<usize>(), statements: new Set<usize>(), metaRead: new Set<usize>(), heads: new Set<usize>(),
+    envKeys: new Set<usize>(), statements: new Set<usize>(), metaRead: new Set<usize>(), heads: new Set<usize>(), writes: new Set<usize>(),
     spreads: [], loops: [], tuples: new Set<string>(), arrays: new Set<string>(),
   };
   for (const st of program) {
@@ -524,6 +525,8 @@ const literalString = (e: Ref<Expr>): boolean => e.kind === "string" || (e.kind 
 // The members of Bun's global that std's Bun module has.
 const BUN_MEMBERS = ["file", "stdin", "write", "env", "argv", "sleep", "sleepSync", "which", "spawn", "spawnSync", "serve", "version"];
 const PROCESS_MEMBERS = ["argv", "env", "exit", "platform", "arch", "execPath", "cwd", "chdir", "on", "once", "kill", "pid"];
+// The process members Fish takes only for their write, as in `process.stdout.write(text)`.
+const STREAMS = ["stdout", "stderr"];
 // The array methods that give a new array, as in `for await (const r of urls.map(fetch))`.
 const ARRAY_MAKERS = new Set(["map", "filter", "slice", "concat", "flat", "flatMap", "toSorted", "toReversed", "toSpliced", "with"]);
 
@@ -605,14 +608,15 @@ function callRules(e: Ref<Extract<Expr, { kind: "call" }>>, s: Mut<Scan>) {
 
 function memberRules(e: Ref<Extract<Expr, { kind: "member" }>>, s: Mut<Scan>) {
   const object: Ref<Expr> = e.object;
-  if (named(object, "process") && !PROCESS_MEMBERS.includes(e.name)) note(s, "process", e.start);
+  if (e.name === "write" && object.kind === "member" && named(object.object, "process") && STREAMS.includes(object.name)) s.writes.add(object.id);
+  if (named(object, "process") && !PROCESS_MEMBERS.includes(e.name) && !(STREAMS.includes(e.name) && s.writes.has(e.id))) note(s, "process", e.start);
   if (named(object, "process") && e.name === "env" && !s.envKeys.has(e.id)) note(s, "process", e.start);
   if (!s.ownBun && named(object, "Bun") && !BUN_MEMBERS.includes(e.name)) note(s, "bunGlobals", e.start);
   if (envEntry(e) && !e.optional) s.envKeys.add(object.id);
   if (object.kind === "meta" && IMPORT_META_MEMBERS.includes(e.name)) s.metaRead.add(object.id);
   if (e.name === "lastIndex") note(s, "regexState", e.start);
   // A Buffer member std lacks: a static on the global, or a method only Buffer has.
-  if (BUFFER_REFUSED.has(e.name) || (named(object, "Buffer") && !BUFFER_STATICS.includes(e.name) && e.name !== "BYTES_PER_ELEMENT")) s.hits.push({ id: "nodeBuiltins", at: e.start, module: "buffer" });
+  if ((BUFFER_REFUSED.has(e.name) && !s.writes.has(object.id)) || (named(object, "Buffer") && !BUFFER_STATICS.includes(e.name) && e.name !== "BYTES_PER_ELEMENT")) s.hits.push({ id: "nodeBuiltins", at: e.start, module: "buffer" });
   if (object.kind !== "ident") return;
   const whole = s.wholes.get(object.name);
   if (whole === undefined || whole.has.has(e.name)) return;
