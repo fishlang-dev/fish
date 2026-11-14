@@ -1152,7 +1152,11 @@ async function main(): Promise<void> {
       manifest: findManifest(dirname(resolve(entry))),
       build: () => rebuilt(rebuild),
       done: () => {
-        if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
+        try {
+          if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
+        } catch (_e) {
+          // The scratch directory is the system's temporary one, which it clears in time.
+        }
       },
     });
   }
