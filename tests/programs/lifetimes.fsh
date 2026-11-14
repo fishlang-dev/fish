@@ -1,4 +1,5 @@
 // A returned reference borrows what its lifetime, written or elided, ties it to.
+// case: lifetimes_returned
 class Inner {
   v = 0
 }
