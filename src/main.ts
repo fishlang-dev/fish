@@ -565,13 +565,9 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
       const typescript = named && path.endsWith(".ts");
       // A relative `.ts` import is renamed when its `.fsh` file will be there, or is and the `.ts`
       // file isn't; with both there, which is meant is for a person to say.
-      let pointed = new Set<string>();
       const fsh: Imported = (specifier): "rename" | "ambiguous" | undefined => {
         const target = resolve(dirname(path), specifier);
-        if (settled.has(target)) {
-          pointed.add(target);
-          return "rename";
-        }
+        if (settled.has(target)) return "rename";
         if (!existsSync(`${target.slice(0, -3)}.fsh`)) return undefined;
         return existsSync(target) ? "ambiguous" : "rename";
       };
@@ -604,7 +600,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
             continue;
           }
         }
-        for (const target of pointed) importers.set(target, [...(importers.get(target) ?? noFiles), to !== undefined ? fromHere(to) : shown]);
+        for (const target of settledImports(path, src, settled)) importers.set(target, [...(importers.get(target) ?? noFiles), to !== undefined ? fromHere(to) : shown]);
         if (fixed > 0) console.log(`fixed ${fixed} in ${shown}`);
         if (to !== undefined) {
           at = to;
@@ -626,6 +622,22 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
   }
   console.log(`${hits} to change in ${changed} file${changed === 1 ? "" : "s"}`);
   return hits > 0 ? 1 : code;
+}
+
+// The files of `settled` that the file at `path`, with text `src`, imports by a relative path,
+// whose imports its fixes rename.
+/** @throws {CompileError} */
+function settledImports(path: string, src: string, settled: Ref<Set<string>>): string[] {
+  let found: string[] = [];
+  for (const s of parse(src, { last: 0 })) {
+    let module: string | undefined = undefined;
+    if (s.kind === "import" || s.kind === "exportAll") module = s.module;
+    else if (s.kind === "exportNamed") module = s.module;
+    if (module === undefined || !module.startsWith(".")) continue;
+    const target = resolve(dirname(path), module);
+    if (settled.has(target) && !found.includes(target)) found.push(target);
+  }
+  return found;
 }
 
 // `path` from the working directory, or as it is when that is where it is.
@@ -818,7 +830,7 @@ async function main(): Promise<void> {
     // A directory given twice, or inside another given, would count its files twice.
     const real = dirs.map((d) => realpathSync(d));
     const nested = real.findIndex((d, k) => real.some((e, l) => l !== k && (d === e ? l < k : d.startsWith(e + sep))));
-    if (nested >= 0) fail(`fishc survey: '${dirs[nested]}' is already surveyed as part of another directory given`);
+    if (nested >= 0) fail(`fishc survey: '${dirs[nested as usize]}' is already surveyed as part of another directory given`);
     if (values.rank === true) {
       let plan: Plan | undefined = undefined;
       try {
