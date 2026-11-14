@@ -553,6 +553,8 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
   const noFiles: string[] = [];
   let hits = 0;
   let changed = 0;
+  // A file a fix left unparsable, which fixedText has reported.
+  let unfixable = false;
   for (const { path, named } of files) {
     let at = path;
     let shown = fromHere(path);
@@ -595,7 +597,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
         }
         const { text, fixed } = fixedText(src, shown, fsh);
         if (text === undefined) {
-          code = 1;
+          unfixable = true;
           continue;
         }
         if (text !== src || to !== undefined) {
@@ -632,7 +634,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
     }
   }
   console.log(`${hits} to change in ${changed} file${changed === 1 ? "" : "s"}`);
-  return hits > 0 ? 1 : code;
+  return hits > 0 || unfixable ? 1 : code;
 }
 
 // The files of `settled` that the file at `path`, with text `src`, imports by a relative path,
@@ -918,7 +920,7 @@ async function main(): Promise<void> {
     if (paths.length === 0) {
       const found = findManifest(process.cwd());
       if (found === undefined) fail(`fishc fmt: no ${MANIFEST} here or in any directory above; name the files to format, or run it inside a package`);
-      paths.push(dirname(found));
+      paths.push(dirname(found!));
     }
     process.exit(formatPaths(paths, check));
   }
@@ -928,7 +930,7 @@ async function main(): Promise<void> {
     if (paths.length === 0) {
       const found = findManifest(process.cwd());
       if (found === undefined) fail(`fishc lint: no ${MANIFEST} here or in any directory above; name the files to lint, or run it inside a package`);
-      paths.push(dirname(found));
+      paths.push(dirname(found!));
     }
     process.exit(lintPaths(paths, values.fix === true));
   }
