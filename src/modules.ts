@@ -143,6 +143,7 @@ class Loader {
     const made: Module = { path: key, file, base, src: text, statements: [], targets: noTargets(), globals: new Map<string, Module>(), pkg };
     let [kept, rest] = dup(made);
     let [shared, module] = dup(rest);
+    const index = this.modules.length;
     this.modules.push(kept);
     this.byPath.set(key, shared);
     let targets = noTargets();
@@ -161,7 +162,11 @@ class Loader {
     module.statements = statements;
     module.targets = targets;
     module.globals = globals;
-    return module;
+    // In Fish the list's copy was made before the statements were known, so it is replaced by the
+    // whole module; an import found the module by its path, which it already had.
+    let [stored, given] = dup(module);
+    this.modules[index] = stored;
+    return given;
   }
 
   // The module an import or re-export in the file at `path`, known as `key`, names.
