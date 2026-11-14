@@ -568,9 +568,12 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
       const typescript = named && path.endsWith(".ts");
       // A relative `.ts` import is renamed when its `.fsh` file will be there, or is and the `.ts`
       // file isn't; with both there, which is meant is for a person to say.
+      // The callback keeps its own copy, as the files settled change as files are written.
+      let known = new Set<string>();
+      for (const t of settled) known.add(t);
       const fsh: Imported = (specifier): "rename" | "ambiguous" | undefined => {
         const target = resolve(dirname(path), specifier);
-        if (settled.has(target)) return "rename";
+        if (known.has(target)) return "rename";
         if (!existsSync(`${target.slice(0, -3)}.fsh`)) return undefined;
         return existsSync(target) ? "ambiguous" : "rename";
       };
@@ -939,7 +942,8 @@ async function main(): Promise<void> {
     if (positionals.length > 2 || flags.some((k) => k !== "panic") || values.panic !== "unwind") fail("usage: fishc test [<filter>]");
     const found = findManifest(process.cwd());
     if (found === undefined) fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
-    process.exit(await testPackage(sessionFor(), dirname(found!), file));
+    const code = await testPackage(sessionFor(), dirname(found!), file);
+    process.exit(code);
   }
   if (command === "publish") {
     const usage = "usage: fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]";
