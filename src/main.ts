@@ -1187,9 +1187,10 @@ async function main(): Promise<void> {
       const sysroot = values.sysroot ?? (values.target !== undefined && values.target !== hostTriple() && fromEnv !== "" ? fromEnv : undefined);
       const resolved = resolveTarget(values.target, sysroot);
       const base = values.static === true ? staticTarget(resolved) : resolved;
+      const sanitized = sanitize !== undefined;
       const platform = sanitize !== undefined ? sanitizedTarget(base, sanitize) : base;
       // A sanitizer's report names .fsh lines only when the program carries line tables.
-      const debug = values.debug === true || sanitize !== undefined;
+      const debug = values.debug === true || sanitized;
       const binary = out ?? basename(target!, ".fsh");
       const image = values.dockerfile === true ? dockerfilePath(binary) : undefined;
       try {
