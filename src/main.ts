@@ -443,7 +443,8 @@ export function buildTests(session: BuildSession, dir: string, out: string): Tes
     throw e;
   }
   const checked = checkedProgram(compilation, program, false, loaded.sources);
-  const made = generated(checked, loaded, { src, file: entry, release: false, panic: "unwind", sources: [...loaded.sources], harness: true });
+  const sources = [...loaded.sources];
+  const made = generated(checked, loaded, { src, file: entry, release: false, panic: "unwind", sources, harness: true });
   const shim = rustShim(made.rust, made.checked);
   const host = hostTarget();
   const halves = parts(made.ir, made.checked, false, host);
@@ -545,12 +546,16 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
   // The `.ts` files named that move to their `.fsh` names under `--fix`, settled before any file is
   // written: each parses, its fixes apply, and no file has its `.fsh` name. Imports are renamed
   // against these and the `.fsh` files already there, and only then.
-  const settled = new Set(files.filter((f) => f.named && f.path.endsWith(".ts") && !f.path.endsWith(".d.ts") && !existsSync(`${f.path.slice(0, -3)}.fsh`) && fixes(f.path)).map((f) => resolve(f.path)));
+  let settled = new Set(files.filter((f) => f.named && f.path.endsWith(".ts") && !f.path.endsWith(".d.ts") && !existsSync(`${f.path.slice(0, -3)}.fsh`) && fixes(f.path)).map((f) => resolve(f.path)));
   // The files written with an import of each settled file's `.fsh` name.
-  const importers = new Map<string, string[]>();
-  let [hits, changed] = [0, 0];
+  let importers = new Map<string, string[]>();
+  const noFiles: string[] = [];
+  let hits = 0;
+  let changed = 0;
   for (const { path, named } of files) {
-    let [at, shown, src] = [path, relative(process.cwd(), path) || path, ""];
+    let at = path;
+    let shown = fromHere(path);
+    let src = "";
     try {
       if (named && path.endsWith(".d.ts")) {
         console.log(`fishc lint: '${shown}' is a declaration file, which describes JavaScript rather than holding code to port, so it isn't linted`);
@@ -560,7 +565,7 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
       const typescript = named && path.endsWith(".ts");
       // A relative `.ts` import is renamed when its `.fsh` file will be there, or is and the `.ts`
       // file isn't; with both there, which is meant is for a person to say.
-      const pointed = new Set<string>();
+      let pointed = new Set<string>();
       const fsh: Imported = (specifier) => {
         const target = resolve(dirname(path), specifier);
         if (settled.has(target)) {
@@ -579,8 +584,8 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
       parse(src, { last: 0 });
       if (fixing) {
         const to = typescript ? `${path.slice(0, -3)}.fsh` : undefined;
-        if (to && existsSync(to)) {
-          problem(`fishc lint: '${shown}' isn't fixed, since '${relative(process.cwd(), to) || to}', its Fish name, already exists`);
+        if (to !== undefined && existsSync(to)) {
+          problem(`fishc lint: '${shown}' isn't fixed, since '${fromHere(to)}', its Fish name, already exists`);
           continue;
         }
         const { text, fixed } = fixedText(src, shown, fsh);
@@ -588,22 +593,23 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
           code = 1;
           continue;
         }
-        if (text !== src || to) {
+        if (text !== src || to !== undefined) {
           const failed = rewrite(path, text, Buffer.from(src), to);
-          if (failed) {
+          if (failed !== undefined) {
             const target = resolve(path);
             settled.delete(target);
-            const pointing = importers.get(target) ?? [];
+            const pointing = importers.get(target) ?? noFiles;
             const stranded = pointing.length > 0 ? `; ${pointing.map((p) => `'${p}'`).join(", ")} already import${pointing.length === 1 ? "s" : ""} its '.fsh' name, which isn't there` : "";
             problem(`fishc lint: can't write '${shown}': ${failed}${stranded}`);
             continue;
           }
         }
-        for (const target of pointed) importers.set(target, [...(importers.get(target) ?? []), to ? relative(process.cwd(), to) || to : shown]);
+        for (const target of pointed) importers.set(target, [...(importers.get(target) ?? noFiles), to !== undefined ? fromHere(to) : shown]);
         if (fixed > 0) console.log(`fixed ${fixed} in ${shown}`);
-        if (to) {
-          [at, shown] = [to, relative(process.cwd(), to) || to];
-          console.log(`renamed ${relative(process.cwd(), path) || path} to ${shown}`);
+        if (to !== undefined) {
+          at = to;
+          shown = fromHere(to);
+          console.log(`renamed ${fromHere(path)} to ${shown}`);
         }
         src = text;
       }
@@ -620,6 +626,12 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
   }
   console.log(`${hits} to change in ${changed} file${changed === 1 ? "" : "s"}`);
   return hits > 0 ? 1 : code;
+}
+
+// `path` from the working directory, or as it is when that is where it is.
+function fromHere(path: string): string {
+  const here = relative(process.cwd(), path);
+  return here === "" ? path : here;
 }
 
 // Whether the TS-compat file at `path` reads, parses and takes its fixes, as a `.ts` file must
@@ -800,7 +812,8 @@ async function main(): Promise<void> {
     const extra = values.self !== undefined || values.plan !== undefined;
     if (dirs.length === 0 || (values.rank !== true && (dirs.length > 1 || extra))) fail(usage);
     if (values.rank === true && values.compare !== undefined) fail("fishc survey: --compare compares one project's survey; rankings can't be compared yet");
-    for (const dir of [...dirs, ...(values.self !== undefined ? [values.self] : [])]) checkProject(dir);
+    for (const dir of dirs) checkProject(dir);
+    if (values.self !== undefined) checkProject(values.self);
     // A directory given twice, or inside another given, would count its files twice.
     const real = dirs.map((d) => realpathSync(d));
     const nested = real.findIndex((d, k) => real.some((e, l) => l !== k && (d === e ? l < k : d.startsWith(e + sep))));
@@ -928,7 +941,7 @@ async function main(): Promise<void> {
         let updating = cachedSession();
         updating.locking.update = file !== undefined ? new Set([file]) : "all";
         resolvePackages(join(manifest.dir, manifest.entry), updating.locking);
-        console.log(`updated ${relative(process.cwd(), join(manifest.dir, "fish.lock")) || "fish.lock"}`);
+        console.log(`updated ${fromHere(join(manifest.dir, "fish.lock"))}`);
       }
     } catch (e) {
       if (e instanceof CompileError) {
