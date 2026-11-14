@@ -6036,8 +6036,9 @@ class Codegen implements PrintHost, ComptimeHost {
   // An object's fields as JSON writes them, typed and marked optional as the object was written.
   objectJsonFields(object: ObjectType, as: Ref<Field[]>): JsonField[] {
     let out: JsonField[] = [];
-    const count = this.tables.typing.rec(object).fields.length;
-    for (let i: usize = 0; i < count; i++) out.push({ name: this.tables.typing.rec(object).fields[i]!.name, type: as[i]!.type, path: [i], omit: as[i]!.optional !== undefined });
+    // Any record with fields may be printed this way, not only an object's.
+    const fields = this.recOf<Type>(object)!.fields;
+    for (let i: usize = 0; i < fields.length; i++) out.push({ name: fields[i]!.name, type: as[i]!.type, path: [i], omit: as[i]!.optional !== undefined });
     return out;
   }
 
