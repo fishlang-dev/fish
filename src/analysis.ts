@@ -9,9 +9,9 @@ import { liftTests, stripTests } from "./tests.ts";
 
 // Checks the program whose entry is `file`, with text `src`, without building it, its package's
 // tests included. The file may be one another imports, so it needs no `main`. `read` reads the
-// files it imports. It compiles within `session`, whose caches it uses.
+// files it imports before the disk. It compiles within `session`, whose caches it uses.
 /** @throws {CompileError | Error | IoError} */
-export function analyze(session: Session, src: string, file: string, read?: (path: string) => string): { checked: Checked; sources: Source[] } {
+export function analyze(session: Session, src: string, file: string, read?: (path: string) => string | undefined): { checked: Checked; sources: Source[] } {
   let compilation = newCompilation(session);
   let loaded = load(compilation, file, src, read);
   let program: Stmt[] = [];

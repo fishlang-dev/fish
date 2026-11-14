@@ -39,8 +39,9 @@ export type Package = { specifier: string; dir: string; at: Span };
 export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[] };
 export type RustCrate = { dependency: RustDependency; dir: string };
 
-// What reads a file the program imports, when not the disk.
-type Reader = ((path: string) => string) | undefined;
+// What reads a file the program imports before the disk does: an editor's unsaved text, or
+// undefined for a file it doesn't hold.
+type Reader = ((path: string) => string | undefined) | undefined;
 type Namespace = Extract<Stmt, { kind: "namespace" }>;
 // What an import from a package is gathering: the declarations of the names it imports, each by
 // the name it is declared under here, and the names those refer to, still to declare.
@@ -48,14 +49,15 @@ type Gathering = { reader: DeclarationReader; specifier: string; index: usize; s
 
 /** @throws {IoError} */
 function readWith(read: Ref<Reader>, path: string): string {
-  return read !== undefined ? read(path) : readFileSync(path, "utf8");
+  const given = read !== undefined ? read(path) : undefined;
+  return given !== undefined ? given : readFileSync(path, "utf8");
 }
 
 // Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
-// `read`: an editor's unsaved text is newer than the disk's. The program's files are noted in the
+// `read`, before the disk: an editor's unsaved text is newer than the disk's. The program's files are noted in the
 // compilation's `files`.
 /** @throws {CompileError | Error | IoError} */
-export function load(compilation: Mut<Compilation>, entry: string, src: string = readFileSync(entry, "utf8"), read?: (path: string) => string, fish?: FishPackage[]): Loaded {
+export function load(compilation: Mut<Compilation>, entry: string, src: string = readFileSync(entry, "utf8"), read?: (path: string) => string | undefined, fish?: FishPackage[]): Loaded {
   let loader = new Loader(entry, fish !== undefined ? fish : resolvePackages(entry, compilation.session.locking));
   try {
     loader.visit(compilation, read, entry, src, entry);

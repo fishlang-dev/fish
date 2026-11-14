@@ -688,7 +688,7 @@ function checkProject(dir: string) {
 
 async function main(): Promise<void> {
   if (Bun.argv.length === 3 && Bun.argv[2] === "lsp") {
-    serveLsp();
+    await serveLsp();
     return;
   }
   // A bare `--lib` builds the default kind, a static library.
