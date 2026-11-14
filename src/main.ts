@@ -1205,9 +1205,7 @@ async function main(): Promise<void> {
         for (const w of warnings) console.error(painted(w, target!, readFileSync(target!, "utf8"), "warning"));
       } catch (e) {
         // A missing header or library for another target is most often a missing or partial sysroot.
-        if (e instanceof Error) {
-          if (platform.compile.includes("-target") && e.message.startsWith("clang failed")) e.message += `\nfishc build: building for ${platform.triple} needs its headers and libraries; check that --sysroot or FISH_SYSROOT names a complete sysroot for it`;
-        }
+        if (e instanceof Error && platform.compile.includes("-target") && e.message.startsWith("clang failed")) throw new Error(`${e.message}\nfishc build: building for ${platform.triple} needs its headers and libraries; check that --sysroot or FISH_SYSROOT names a complete sysroot for it`);
         throw e;
       }
     }
