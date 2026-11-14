@@ -67,6 +67,7 @@ import {
   markTypeMember,
   markTypeNode,
   markTypeParam,
+  rebuiltClassMember,
   rebuiltExpr,
   rebuiltFunc,
   rebuiltParam,
@@ -461,6 +462,11 @@ export function respanExpr(tree: Expr, at: Ref<Span>): Expr {
 export function respanFunc(tree: Func, at: Ref<Span>): Func {
   const a = makeRespan({ of: "func", node: tree }, at);
   return rebuiltFunc(tree, a);
+}
+
+export function respanClassMember(tree: ClassMember, at: Ref<Span>): ClassMember {
+  const a = makeRespan({ of: "classMember", node: tree }, at);
+  return rebuiltClassMember(tree, a);
 }
 
 // A node's id, which every table keys it by: a node and the replacement lowering made for it share
