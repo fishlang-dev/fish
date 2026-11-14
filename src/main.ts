@@ -302,7 +302,7 @@ function cType(typing: Ref<Typing>, t: Type): string {
 /** @throws {CompileError | Error | IoError | JsonError} */
 export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), leaks = false, debug = false): CompileError[] {
   let looked: string[] = [];
-  return built(session, file, out, release, panic, links, target, leaks, debug, looked).warnings;
+  return built(session, file, out, release, panic, [...links], target, leaks, debug, looked).warnings;
 }
 
 // `build`, giving the session back, with its caches and the build's timings. `looked` is given the
@@ -1124,7 +1124,7 @@ async function main(): Promise<void> {
     try {
       const start = performance.now();
       let looked: string[] = [];
-      const made = built(sessionFor(), target, binary, release, panic, links, hostTarget(), leaks, values.debug === true, looked);
+      const made = built(sessionFor(), target, binary, release, panic, [...links], hostTarget(), leaks, values.debug === true, looked);
       reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
       for (const w of made.warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
       const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
@@ -1194,11 +1194,11 @@ async function main(): Promise<void> {
       const image = values.dockerfile === true ? dockerfilePath(binary) : undefined;
       try {
         let warnings: CompileError[] = [];
-        if (lib !== undefined) warnings = buildLibrary(sessionFor(), target!, binary, lib, release, panic, links, platform, debug);
+        if (lib !== undefined) warnings = buildLibrary(sessionFor(), target!, binary, lib, release, panic, [...links], platform, debug);
         else {
           const start = performance.now();
           let looked: string[] = [];
-          const made = built(sessionFor(), target!, binary, release, panic, links, platform, leaks, debug, looked);
+          const made = built(sessionFor(), target!, binary, release, panic, [...links], platform, leaks, debug, looked);
           reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
           warnings = made.warnings;
         }
