@@ -563,7 +563,11 @@ export class NodeMap<K extends Id, V> {
   }
 
   copy(): NodeMap<K, V> {
-    return new NodeMap<K, V>([...this.entries()]);
+    // The pairs are gathered by hand: spreading this class's own generator here isn't compiled
+    // natively yet.
+    let pairs: [K, V][] = [];
+    for (const k of this.nodes.keys()) pairs.push([this.nodes.get(k)!, this.nodeValues.get(k)!]);
+    return new NodeMap<K, V>(pairs);
   }
 }
 
