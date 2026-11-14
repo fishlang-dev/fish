@@ -17,6 +17,7 @@ import { openIndex, registryUrl } from "./registry_index.ts";
 import { formatVersion, parseRange, maxSatisfying } from "./semver.ts";
 import { createPackage, type Edition, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.ts";
 import { parse, parseWithComments, type Stmt } from "./parser.ts";
+import type { Ids } from "./nodes.ts";
 import { bundle } from "./bundle.ts";
 import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.ts";
@@ -584,7 +585,8 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
         if (named) console.log(`fishc lint: '${shown}' is in the native edition, so there's nothing to lint`);
         continue;
       }
-      parse(src, { last: 0 });
+      let parsing: Ids = { last: 0 };
+      parse(src, parsing);
       if (fixing) {
         const to = typescript ? `${path.slice(0, -3)}.fsh` : undefined;
         if (to !== undefined && existsSync(to)) {
@@ -616,7 +618,9 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
         }
         src = text;
       }
-      const found = migrations(parseWithComments(src, { last: 0 }), src, fsh).sort((a, b) => a.start - b.start || a.end - b.end);
+      let numbering: Ids = { last: 0 };
+      let found = migrations(parseWithComments(src, numbering), src, fsh);
+      found.sort((a, b) => (a.start !== b.start ? (a.start as i64) - (b.start as i64) : (a.end as i64) - (b.end as i64)));
       if (at.endsWith(".ts")) found.unshift({ rule: "A10", action: "auto", start: 0, end: 0, message: `the file becomes '${basename(at, ".ts")}.fsh', its Fish name; 'fishc lint --fix' renames it` });
       for (const hit of found) console.log(formatError(new CompileError("E0802", hit.message ?? REJECTS[hit.rule]!, hit.start, hit.end), shown, src, `${hit.action} ${hit.rule}`));
       hits += found.length;
@@ -636,7 +640,8 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
 /** @throws {CompileError} */
 function settledImports(path: string, src: string, settled: Ref<Set<string>>): string[] {
   let found: string[] = [];
-  for (const s of parse(src, { last: 0 })) {
+  let ids: Ids = { last: 0 };
+  for (const s of parse(src, ids)) {
     let module: string | undefined = undefined;
     if (s.kind === "import" || s.kind === "exportAll") module = s.module;
     else if (s.kind === "exportNamed") module = s.module;
@@ -906,7 +911,7 @@ async function main(): Promise<void> {
   }
   if (command === "fmt") {
     const usage = "usage: fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]";
-    const paths = positionals.slice(1);
+    let paths = positionals.slice(1);
     if (flags.some((k) => k !== "check" && k !== "panic") || (paths.includes("-") && paths.length > 1)) fail(usage);
     const check = values.check === true;
     if (paths[0] === "-") process.exit(formatStdin(check));
@@ -918,7 +923,7 @@ async function main(): Promise<void> {
     process.exit(formatPaths(paths, check));
   }
   if (command === "lint") {
-    const paths = positionals.slice(1);
+    let paths = positionals.slice(1);
     if (flags.some((k) => k !== "panic" && k !== "fix") || values.panic !== "unwind") fail("usage: fishc lint [<path>...] [--fix]");
     if (paths.length === 0) {
       const found = findManifest(process.cwd());
