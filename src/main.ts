@@ -1004,7 +1004,7 @@ async function main(): Promise<void> {
         writeFileSync(found, edited);
         console.log(`added ${name} ${written}`);
         const chosen = released.find((e) => formatVersion(e.version) === formatVersion(latest!));
-        if (chosen?.unsafe) console.error(`note: '${name}' ${chosen.text} uses unsafe`);
+        if (chosen !== undefined && chosen.unsafe === true) console.error(`note: '${name}' ${chosen.text} uses unsafe`);
       } else {
         if (file !== undefined && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
         let updating = cachedSession();
