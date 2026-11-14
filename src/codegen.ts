@@ -13855,7 +13855,9 @@ class Codegen implements PrintHost, ComptimeHost {
     // A call used as a statement has no type of its own; what it makes, from this instance's
     // regex, is dropped at its end.
     const any = this.tables.typing.rec(regexT).any === true;
-    const type = this.cur().types.get(e) ?? regexStringType(this.tables.typing, name, regexT, any);
+    // In an optional chain the call's type is the chain's Option, which what it makes becomes.
+    const type = regexStringType(this.tables.typing, name, regexT, any);
+    const recorded = this.cur().types.get(e);
     const call = (cg: Mut<Codegen>, line: string) => {
       const v = cg.temp();
       cg.emit(`${v} = call ${line}`);
@@ -13885,8 +13887,11 @@ class Codegen implements PrintHost, ComptimeHost {
       result = this.temp();
       this.emit(`${result} = load ${ARRAY}, ptr ${out}`);
     } else result = this.regexLoop(e, name, regexT, re, s, type);
-    if (!this.cur().types.has(e) && this.needsDrop(type)) this.pending.push({ v: result, type });
-    return result;
+    if (recorded === undefined) {
+      if (this.needsDrop(type)) this.pending.push({ v: result, type });
+      return result;
+    }
+    return recorded !== type ? this.convert(result, type, recorded) : result;
   }
 
 

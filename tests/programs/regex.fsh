@@ -412,3 +412,11 @@ function main() {
 function main() {
   console.log("ab".replace(/(?<x>a)/, "$$<y>"), "ab".replace(/(?<x>a)/, "$$$<x>"));
 }
+// case: regex_replace_in_optional_chain
+// expect: bad none
+function first(text: string): string {
+  return text.split("\n").find((l) => l !== "")?.trim().replace(/^fatal: /, "") ?? "none";
+}
+function main() {
+  console.log(first("\nfatal: bad\nx"), first(""));
+}
