@@ -2697,6 +2697,11 @@ export class Typing {
         const sends = r.sends;
         if (sends !== undefined) r.sends = this.lower(sends);
         this.arena.set(id, r);
+      } else if (r.kind === "class") {
+        // A class's fields too, so a field holding a union of brands of one base is laid out as
+        // that base, as the values written to it are.
+        r.fields = r.fields.map((f): Field => ({ ...f, type: this.lower(f.type) }));
+        this.arena.set(id, r);
       } else if (r.kind === "closure" && r.generic === undefined) {
         // So do a closure's parameters and result, which its body was compiled with lowered.
         r.params = r.params.map((t) => this.lower(t));
