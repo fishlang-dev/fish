@@ -32,3 +32,30 @@ function main() {
   print(f.x, e.x, inner(b).v, count(a).inner.v, either(true, a, b).inner.v)
 }
 // expect: 1 2 20 10 10
+// case: lifetimes_narrowed_reference_returned
+// mode: release
+// expect: [hello] [inner] true
+type Wrapped = { kind: "member"; value: V };
+type V = bigint | f64 | boolean | string | null | undefined | Wrapped;
+function isWrapped(v: Ref<V>): v is Wrapped {
+  return v !== null && typeof v === "object" && v.kind === "member";
+}
+function plain<A extends Lifetime>(v: Ref<V, A>): Ref<V, A> {
+  return isWrapped(v) ? plain(v.value) : v;
+}
+function show(s: string): string {
+  return `[${s}]`;
+}
+function bake(tagged: Ref<V>): string {
+  const v = plain(tagged);
+  if (v === null) return "null";
+  if (typeof v === "string") return show(v);
+  if (typeof v === "boolean") return String(v);
+  return "other";
+}
+function main() {
+  const a: V = "hello";
+  const b: V = { kind: "member", value: "inner" };
+  const c: V = true;
+  console.log(bake(a), bake(b), bake(c));
+}

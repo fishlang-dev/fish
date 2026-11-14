@@ -12563,8 +12563,10 @@ class Codegen implements PrintHost, ComptimeHost {
     if (ref?.kind === "ref" && given?.kind === "ref" && e.kind === "ident" && !this.known.has(e)) {
       const local = this.localAt(e);
       const declared = local !== undefined ? this.loc(local).type : undefined;
-      const lowered = declared !== undefined ? this.tables.typing.lower(declared) : undefined;
-      if (local !== undefined && declared !== type && lowered === this.tables.typing.lower(to!)) {
+      // Compared by what each points at, as a lifetime the declaration names is no part of it.
+      const declaredRec = declared !== undefined ? this.recOf(declared) : undefined;
+      const pointsAt = declaredRec !== undefined && declaredRec.kind === "ref" ? this.tables.typing.lower(declaredRec.to) : undefined;
+      if (local !== undefined && declared !== type && pointsAt !== undefined && pointsAt === this.tables.typing.lower(ref.to)) {
         const held = this.temp();
         const line = `${held} = load ptr, ptr ${this.slot(local)}`;
         this.emit(line);
