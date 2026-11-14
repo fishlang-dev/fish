@@ -43,7 +43,7 @@ export type Panic = "unwind" | "abort";
 // `formatError` for stderr, painted on a terminal unless NO_COLOR is set, or whenever FORCE_COLOR is.
 function painted(e: CompileError, path: string, program: string, kind = "error"): string {
   const forced = process.env.FORCE_COLOR;
-  const colour = forced !== undefined && forced !== "0" ? true : process.stderr.isTTY === true && !process.env.NO_COLOR;
+  const colour = forced !== undefined && forced !== "0" ? true : process.stderr.isTTY === true && (process.env.NO_COLOR ?? "") === "";
   return formatError(e, path, program, kind, colour);
 }
 // A library C can call: an archive to link, or a shared library to load.
@@ -836,7 +836,9 @@ else if (import.meta.main) {
       for (const w of timing([...FRONT_END, "codegen", ...NATIVE_STAGES], () => build(session, target, binary, values.release, panic, values.link ?? [], HOST_TARGET, values.leaks, values.debug))) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
       const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
       // A signal ends it with 128 plus the signal's number, as a shell reports it.
-      code = ran.exitCode ?? 128 + (ran.signalCode ? constants.signals[ran.signalCode as NodeJS.Signals] : 0);
+      const signal = ran.signalCode;
+      const found = signal === null ? undefined : Object.entries(constants.signals).find(([name]) => name === signal);
+      code = ran.exitCode ?? 128 + (found === undefined ? 0 : found[1]);
     } catch (e) {
       if (e instanceof CompileError) console.error(painted(e, target, readFileSync(target, "utf8")));
       else console.error(e instanceof Error ? e.message : e);

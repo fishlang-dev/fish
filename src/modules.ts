@@ -1207,11 +1207,11 @@ class Spaces implements Scoping {
     if (n.kind === "member") {
       const object: Ref<Expr> = n.object;
       if (object.kind === "ident" && !hidden.has(object.name) && this.spaces.has(object.name)) return this.rewrite(n, object.name, true);
-      if (object.kind === "member" && (object.name === "stdout" || object.name === "stderr") && n.name !== "write") {
+      if (object.kind === "member" && (object.name === "stdout" || object.name === "stderr") && n.name !== "write" && n.name !== "isTTY") {
         const owner: Ref<Expr> = object.object;
         const name = owner.kind === "ident" && !hidden.has(owner.name) ? owner.name : "";
         const space = this.spaces.get(name);
-        if (space !== undefined && space.path === "std:process") return this.fail(new CompileError("E0801", `'${name}.${object.name}.${n.name}' isn't supported yet; write to the stream with '${name}.${object.name}.write(chunk)'`, n.start, n.end));
+        if (space !== undefined && space.path === "std:process") return this.fail(new CompileError("E0801", `'${name}.${object.name}.${n.name}' isn't supported yet; Fish's streams have 'write(chunk)' and 'isTTY'`, n.start, n.end));
       }
     }
     return false;

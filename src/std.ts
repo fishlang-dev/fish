@@ -4578,6 +4578,7 @@ export { Buffer };
 `,
   os: String.raw`
 declare function fsh_rt_os_hostname(): Ptr<u8>;
+declare function fsh_rt_signal_name(number: i64): Ptr<u8>;
 declare function fsh_rt_os_tmpdir(): Ptr<u8>;
 declare function fsh_rt_os_homedir(): Ptr<u8>;
 declare function fsh_rt_os_platform(): Ptr<u8>;
@@ -4590,6 +4591,26 @@ export function hostname(): string {
 export function tmpdir(): string {
   return unsafe { fromCString(fsh_rt_os_tmpdir()) };
 }
+
+// os.constants, of which Fish has signals: each signal's number by name, as this platform numbers
+// them.
+class OsConstants {
+  signals: Record<string, i64>;
+  constructor(signals: Record<string, i64>) {
+    this.signals = signals;
+  }
+}
+
+function osConstants(): OsConstants {
+  let signals: Record<string, i64> = {};
+  for (let n: i64 = 1; n < 65; n++) {
+    const name = unsafe { fsh_rt_signal_name(n).isNull() ? "" : fromCString(fsh_rt_signal_name(n)) };
+    if (name !== "") signals[name] = n;
+  }
+  return new OsConstants(signals);
+}
+
+export { osConstants as constants };
 
 export function homedir(): string {
   return unsafe { fromCString(fsh_rt_os_homedir()) };
@@ -6744,13 +6765,22 @@ export function pid(): i64 {
 }
 
 declare function fsh_rt_stream_write(stream: i32, bytes: Ptr<u8>, length: i64): void;
+declare function isatty(fd: i32): i32;
 
-// process.stdout and process.stderr, of which Fish has write alone: the chunk as it is, with no
+// process.stdout and process.stderr, of which Fish has isTTY and write: the chunk as it is, with no
 // newline added, giving true as Node's does.
 export class WriteStream {
   fd: i32;
   constructor(fd: i32) {
     this.fd = fd;
+  }
+
+  get isTTY(): boolean {
+    let tty: i32 = 0;
+    unsafe {
+      tty = isatty(this.fd);
+    }
+    return tty === 1;
   }
 
   write(chunk: string | u8[]): boolean {
@@ -7205,6 +7235,7 @@ export { sleeping as sleep, serving as serve, spawning as spawn };
 export const STD_VALUES: Record<string, Record<string, "value" | "table">> = {
   process: { argv: "value", env: "table", shutdown: "value", platform: "value", arch: "value", execPath: "value", pid: "value", stdout: "value", stderr: "value" },
   Bun: { argv: "value", env: "table", stdin: "value", version: "value" },
+  os: { constants: "value" },
 };
 
 // The compiler's own tests run JS through this module, which no program may import: Fish has no

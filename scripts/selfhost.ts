@@ -3,7 +3,7 @@
 // imports. `--update` writes the baseline tests/selfhost.test.ts holds the source to. Naming files,
 // as in `bun scripts/selfhost.ts match.ts keys.ts`, checks only those, each printed as it finishes,
 // so a file that hangs shows which it is, with every error it has rendered in full.
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { type Session } from "../src/compilation.ts";
@@ -36,10 +36,13 @@ export function survey(src = join(import.meta.dir, "..", "src"), only: string[] 
 }
 
 // Copies the TypeScript file `file` into `dir` as Fish source, with its relative imports renamed
-// to match; gives the copy's path.
+// to match; gives the copy's path. A .fsh file beside it, written for Fish where the TypeScript
+// relies on Bun alone, is copied in its place, as Fish's loader prefers it.
 export function mirrored(file: string, dir: string): string {
   const to = join(dir, basename(file).replace(/\.ts$/, ".fsh"));
-  writeFileSync(to, readFileSync(file, "utf8").replace(/(["'])(\.{1,2}\/[^"']+)\.ts\1/g, "$1$2.fsh$1"));
+  const fish = file.replace(/\.ts$/, ".fsh");
+  const from = existsSync(fish) ? fish : file;
+  writeFileSync(to, readFileSync(from, "utf8").replace(/(["'])(\.{1,2}\/[^"']+)\.ts\1/g, "$1$2.fsh$1"));
   return to;
 }
 

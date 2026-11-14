@@ -182,7 +182,14 @@ async function main(): Promise<void> {
   process.stdout.write("done\n");
 }
 // case: process_stdout_unsupported
-// error: 'process.stdout.isTTY' isn't supported yet; write to the stream with 'process.stdout.write(chunk)'
+// error: 'process.stdout.columns' isn't supported yet; Fish's streams have 'write(chunk)' and 'isTTY'
 function main() {
-  const tty = process.stdout.isTTY;
+  const width = process.stdout.columns;
+}
+// case: process_stream_is_tty
+// expect: false
+// expect: false
+function main() {
+  console.log(process.stdout.isTTY);
+  console.log(process.stderr.isTTY);
 }
