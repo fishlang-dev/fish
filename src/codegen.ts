@@ -14100,7 +14100,7 @@ function breadcrumbs(text: string): usize[] {
     const c = text.charCodeAt(unit);
     const second = c >= 0xdc00 && c < 0xe000 && unit > 0 && text.charCodeAt(unit - 1) >= 0xd800 && text.charCodeAt(unit - 1) < 0xdc00;
     if (unit % STRIDE === 0) crumbs.push((at * 2 + (second ? 1 : 0)) as usize);
-    const paired = c >= 0xd800 && c < 0xdc00 && text.charCodeAt(unit + 1) >= 0xdc00 && text.charCodeAt(unit + 1) < 0xe000;
+    const paired = c >= 0xd800 && c < 0xdc00 && unit + 1 < text.length && text.charCodeAt(unit + 1) >= 0xdc00 && text.charCodeAt(unit + 1) < 0xe000;
     if (!paired) at += second ? 4 : c < 0x80 ? 1 : c < 0x800 ? 2 : 3;
   }
   return crumbs;
@@ -14111,7 +14111,8 @@ function wtf8(text: string): u8[] {
   let out: u8[] = [];
   for (let i = 0; i < text.length; i++) {
     let c = text.charCodeAt(i) as u32;
-    const next = text.charCodeAt(i + 1);
+    // Past the end there is no unit, as JavaScript's NaN compares as none.
+    const next = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
     if (c >= 0xd800 && c < 0xdc00 && next >= 0xdc00 && next < 0xe000) {
       c = 0x10000 + ((c - 0xd800) << 10) + ((next as u32) - 0xdc00);
       i++;
