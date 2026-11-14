@@ -69,7 +69,8 @@ function together(core: Session, caches: Caches): BuildSession {
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
 /** @throws {CompileError | Error | IoError | JsonError} */
 export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false, debug = false): string {
-  return compiledIn(newCompilation(session), src, file, release, panic, library, leaks, debug).ir;
+  let looked: string[] = [];
+  return compiledIn(newCompilation(session), src, file, release, panic, library, leaks, debug, looked).ir;
 }
 
 // Checks the program whose entry is `file` as `compile` would, generating nothing; throws its
@@ -82,16 +83,17 @@ export function checkProgram(session: Session, file: string): CompileError[] {
 // `checkProgram`, giving the session back with the check's timings.
 /** @throws {CompileError | Error | IoError} */
 function checkedFile(session: Session, file: string): { warnings: CompileError[]; session: Session } {
-  const { checked } = checkedSource(newCompilation(session), file, readFileSync(file, "utf8"), false);
+  let looked: string[] = [];
+  const { checked } = checkedSource(newCompilation(session), file, readFileSync(file, "utf8"), false, looked);
   return { warnings: checked.warnings, session: checked.tables.session };
 }
 
 // The program whose entry is `file`, with text `src`, loaded and checked, with each warning given
-// its files. `loaded` is given the files it read or looked for, whether or not they load.
+// its files. `looked` is given the files it read or looked for, whether or not they load.
 /** @throws {CompileError | Error | IoError} */
-function checkedSource(compilation: Compilation, file: string, src: string, library: boolean, loaded?: (files: string[]) => void): { checked: Checked; loaded: Loaded } {
+function checkedSource(compilation: Compilation, file: string, src: string, library: boolean, looked: Mut<string[]>): { checked: Checked; loaded: Loaded } {
   let program = compilation;
-  let modules = loadedFrom(program, file, src, loaded);
+  let modules = loadedFrom(program, file, src, looked);
   let statements: Stmt[] = [];
   try {
     statements = expanded(program, modules, library);
@@ -106,13 +108,13 @@ function checkedSource(compilation: Compilation, file: string, src: string, libr
 
 // The program's files loaded, timed as the parse stage.
 /** @throws {CompileError | Error | IoError} */
-function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, loaded?: (files: string[]) => void): Loaded {
+function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, looked: Mut<string[]>): Loaded {
   const started = stageStart(compilation.session);
   try {
     return load(compilation, file, src);
   } finally {
     stageEnd(compilation.session, "parse", started);
-    if (loaded !== undefined) loaded([...compilation.looked]);
+    for (const f of compilation.looked) looked.push(f);
   }
 }
 
@@ -135,12 +137,12 @@ function checkedProgram(compilation: Compilation, program: Stmt[], library: bool
 // The program checked and turned into IR, timed as the codegen stage, its packages bundled in and,
 // in a debug build, its debug info added.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function compiledIn(compilation: Compilation, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks: boolean, debug: boolean, loaded?: (files: string[]) => void): Compiled {
+function compiledIn(compilation: Compilation, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks: boolean, debug: boolean, looked: Mut<string[]>): Compiled {
   let program = compilation;
   // What a build's codegen fails on is collected in the session's list, when it has one.
   const failed = program.session.failed;
   program.session.failed = undefined;
-  let made = checkedSource(program, file, src, library, loaded);
+  let made = checkedSource(program, file, src, library, looked);
   const sources = [...made.loaded.sources];
   return generated(made.checked, made.loaded, { src, file, release, panic, library, sources, leaks, debug, failed });
 }
@@ -207,7 +209,8 @@ export function runtimeNames(): Set<string> {
 export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), debug = false): CompileError[] {
   const src = readFileSync(file, "utf8");
   let { core, caches } = apart(session);
-  const made = compiledIn(newCompilation(core), src, file, release, panic, true, false, debug);
+  let looked: string[] = [];
+  const made = compiledIn(newCompilation(core), src, file, release, panic, true, false, debug, looked);
   const ir = made.ir;
   const checked: Ref<Checked> = made.checked;
   const shim = rustShim(made.rust, checked);
@@ -295,18 +298,19 @@ function cType(typing: Ref<Typing>, t: Type): string {
 // Compiles `file` to a native executable at `out`, piping the IR through clang and linking the
 // cached runtime objects.
 // `links` names the C libraries the program's declared functions come from. With `leaks`, the
-// program reports at exit what it never freed, by where it was allocated. `loaded` is given the
-// files the program was read from, or looked for, even when it doesn't build. Gives the warnings.
+// program reports at exit what it never freed, by where it was allocated. Gives the warnings.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), leaks = false, debug = false, loaded?: (files: string[]) => void): CompileError[] {
-  return built(session, file, out, release, panic, links, target, leaks, debug, loaded).warnings;
+export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), leaks = false, debug = false): CompileError[] {
+  let looked: string[] = [];
+  return built(session, file, out, release, panic, links, target, leaks, debug, looked).warnings;
 }
 
-// `build`, giving the session back, with its caches and the build's timings.
+// `build`, giving the session back, with its caches and the build's timings. `looked` is given the
+// files the program was read from, or looked for, even when it doesn't build.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, loaded?: (files: string[]) => void): { warnings: CompileError[]; session: BuildSession } {
+function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>): { warnings: CompileError[]; session: BuildSession } {
   let { core, caches } = apart(session);
-  let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, loaded);
+  let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, looked);
   const ir = instrumented(made.ir, target);
   const shim = rustShim(made.rust, made.checked);
   if (shim !== undefined) refuseForeignRust(target);
@@ -389,7 +393,8 @@ function clang(args: string[], stdin?: string): void {
 /** @throws {CompileError | Error | IoError | JsonError} */
 export async function buildAsync(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []): Promise<CompileError[]> {
   let { core, caches } = apart(session);
-  let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, false, false);
+  let looked: string[] = [];
+  let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, false, false, looked);
   const host = hostTarget();
   const halves = parts(made.ir, made.checked, release, host);
   const shim = rustShim(made.rust, made.checked);
@@ -1083,7 +1088,8 @@ async function main(): Promise<void> {
     let code = 1;
     try {
       const start = performance.now();
-      const made = built(sessionFor(), target, binary, release, panic, links, hostTarget(), leaks, values.debug === true);
+      let looked: string[] = [];
+      const made = built(sessionFor(), target, binary, release, panic, links, hostTarget(), leaks, values.debug === true, looked);
       reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
       for (const w of made.warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
       const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
@@ -1112,9 +1118,7 @@ async function main(): Promise<void> {
         let loaded: string[] = [];
         try {
           const start = performance.now();
-          const made = built(sessionFor(), entry, binary, release, panic, [...links], hostTarget(), leaks, values.debug === true, (files) => {
-            loaded = files;
-          });
+          const made = built(sessionFor(), entry, binary, release, panic, [...links], hostTarget(), leaks, values.debug === true, loaded);
           reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
           for (const w of made.warnings) console.error(painted(w, entry, readFileSync(entry, "utf8"), "warning"));
           return { built: true, loaded };
@@ -1145,7 +1149,8 @@ async function main(): Promise<void> {
   try {
     if (llvm) {
       const start = performance.now();
-      const made = compiledIn(newCompilation(sessionFor()), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true);
+      let looked: string[] = [];
+      const made = compiledIn(newCompilation(sessionFor()), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked);
       reportTimings(made.checked.tables.session, [...FRONT_END, "codegen"], start);
       process.stdout.write(made.ir);
     } else {
@@ -1164,7 +1169,8 @@ async function main(): Promise<void> {
         if (lib !== undefined) warnings = buildLibrary(sessionFor(), target!, binary, lib, release, panic, links, platform, debug);
         else {
           const start = performance.now();
-          const made = built(sessionFor(), target!, binary, release, panic, links, platform, leaks, debug);
+          let looked: string[] = [];
+          const made = built(sessionFor(), target!, binary, release, panic, links, platform, leaks, debug, looked);
           reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
           warnings = made.warnings;
         }
