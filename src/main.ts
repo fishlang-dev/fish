@@ -1036,7 +1036,7 @@ async function main(): Promise<void> {
     console.log(`created the package '${name}'${command === "new" ? ` in ${file ?? ""}/` : ""}`);
     process.exit(0);
   }
-  const panicName = values.panic ?? "unwind";
+  const panicName = values.panic;
   const panic: Panic = panicName === "abort" ? "abort" : "unwind";
   const libName = values.lib;
   const lib: Library | undefined = libName === undefined ? undefined : libName === "shared" ? "shared" : "static";
