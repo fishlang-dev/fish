@@ -269,9 +269,14 @@ const MATH_INTRINSICS = new Set(["floor", "ceil", "trunc", "sqrt"]);
 // The C functions the runtime prelude already declares, which a `declare function` reuses.
 function declared(): Set<string> {
   let out = new Set<string>();
+  // Read without a regex, since this runs while a compiler built by Fish is compiled.
   for (const line of RUNTIME) {
-    const found = /^declare [^@]*@([\w.]+)\(/.exec(line);
-    if (found !== null) out.add(found[1]!);
+    if (!line.startsWith("declare ")) continue;
+    const at = line.indexOf("@");
+    const open = line.indexOf("(", at);
+    if (at < 0 || open < 0) continue;
+    const name = line.slice(at + 1, open);
+    if (name.length > 0 && !name.includes(" ") && !name.includes("\"")) out.add(name);
   }
   return out;
 }
