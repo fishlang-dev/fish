@@ -22,7 +22,7 @@ import { JS_NATIVE } from "./js_native.ts";
 import { NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.ts";
 import { cachedObject, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, type BuildSession, type Unit } from "./mathlib.ts";
 import { RUNTIME } from "./runtime.ts";
-import { dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.ts";
+import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.ts";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.ts";
@@ -31,7 +31,7 @@ import { formatRanking, rank, readPlan, type Plan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey, type Report as SurveyReport } from "./survey.ts";
 import { explain } from "./codes.ts";
 import type { Checked, Instance } from "./check.ts";
-import { INTEGERS, type Type, type Typing } from "./typing.ts";
+import type { Type, Typing } from "./typing.ts";
 import { rustShim, type Shim } from "./rustshim.ts";
 import { split } from "./split.ts";
 import { withDebugInfo } from "./debuginfo.ts";
@@ -140,7 +140,8 @@ function compiledIn(compilation: Compilation, src: string, file: string, release
   const failed = program.session.failed;
   program.session.failed = undefined;
   let made = checkedSource(program, file, src, library, loaded);
-  return generated(made.checked, made.loaded, { src, file, release, panic, library, sources: [...made.loaded.sources], leaks, debug, failed });
+  const sources = [...made.loaded.sources];
+  return generated(made.checked, made.loaded, { src, file, release, panic, library, sources, leaks, debug, failed });
 }
 
 // The IR of a checked program, timed as the codegen stage, with its packages bundled in and, in a
@@ -148,6 +149,8 @@ function compiledIn(compilation: Compilation, src: string, file: string, release
 /** @throws {CompileError | Error | IoError} */
 function generated(checked: Checked, loaded: Loaded, options: Options): Compiled {
   const names = copyNames(checked.tables.names);
+  const { src, file, release } = options;
+  const debug = options.debug === true;
   const started = stageStart(checked.tables.session);
   let made: { ir: string; checked: Checked } | undefined = undefined;
   try {
@@ -158,7 +161,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   }
   let done = made!;
   let ir = bundled(done.ir, loaded);
-  if (options.debug === true) ir = withDebugInfo(ir, options.src, options.file, loaded.sources, options.release);
+  if (debug) ir = withDebugInfo(ir, src, file, loaded.sources, release);
   stageEnd(done.checked.tables.session, "codegen", started);
   return { ir, checked: done.checked, rust: loaded.rust };
 }
@@ -168,7 +171,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
 function bundled(ir: string, loaded: Ref<Loaded>): string {
   const calls = /^\s+(?:%\S+ = )?(?:call|invoke) ptr @fsh_rt_js_export\(ptr @fsh\.js\.bundle, i64 (\d+)/gm;
   let seen = new Set<usize>();
-  for (const m of ir.matchAll(calls)) seen.add(Number(m[1]) as usize);
+  for (const m of ir.matchAll(calls)) seen.add(Number(m[1]!) as usize);
   const used = [...seen].sort((a, b) => (a as i64) - (b as i64));
   if (used.length === 0) return ir;
   const bytes = new TextEncoder().encode(bundle(loaded.packages, used));
@@ -197,7 +200,7 @@ export function runtimeNames(): Set<string> {
 
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
 // `<name>.h` declaring its exports beside it. Gives the warnings.
-/** @throws {CompileError | Error | IoError} */
+/** @throws {CompileError | Error | IoError | JsonError} */
 export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), debug = false): CompileError[] {
   const src = readFileSync(file, "utf8");
   let { core, caches } = apart(session);
@@ -243,8 +246,9 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
 // Runs a command to its end with `stdin` as its input when given, throwing its stderr if it fails.
 /** @throws {Error | IoError} */
 function run(args: string[], stdin?: string): void {
+  const command = args[0]!;
   const done = stdin === undefined ? Bun.spawnSync(args) : Bun.spawnSync(args, { stdin: new TextEncoder().encode(stdin) });
-  if (done.exitCode !== 0) throw new Error(`${args[0]} failed:\n${new TextDecoder().decode(done.stderr)}`);
+  if (done.exitCode !== 0) throw new Error(`${command} failed:\n${new TextDecoder().decode(done.stderr)}`);
 }
 
 // A C header declaring a library's exports, usable from C and C++. A parameter named like a C
@@ -280,7 +284,7 @@ function cType(typing: Ref<Typing>, t: Type): string {
   const names = new Map<string, string>([["boolean", "bool"], ["f32", "float"], ["f64", "double"], ["usize", "size_t"], ["isize", "ptrdiff_t"]]);
   const known = names.get(t);
   if (known !== undefined) return known;
-  if (t in INTEGERS) return t.startsWith("u") ? `uint${t.slice(1)}_t` : `int${t.slice(1)}_t`;
+  if (/^[iu](8|16|32|64|128)$/.test(t)) return t.startsWith("u") ? `uint${t.slice(1)}_t` : `int${t.slice(1)}_t`;
   return "void";
 }
 
@@ -289,13 +293,13 @@ function cType(typing: Ref<Typing>, t: Type): string {
 // `links` names the C libraries the program's declared functions come from. With `leaks`, the
 // program reports at exit what it never freed, by where it was allocated. `loaded` is given the
 // files the program was read from, or looked for, even when it doesn't build. Gives the warnings.
-/** @throws {CompileError | Error | IoError} */
+/** @throws {CompileError | Error | IoError | JsonError} */
 export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), leaks = false, debug = false, loaded?: (files: string[]) => void): CompileError[] {
   return built(session, file, out, release, panic, links, target, leaks, debug, loaded).warnings;
 }
 
 // `build`, giving the session back, with its caches and the build's timings.
-/** @throws {CompileError | Error | IoError} */
+/** @throws {CompileError | Error | IoError | JsonError} */
 function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, loaded?: (files: string[]) => void): { warnings: CompileError[]; session: BuildSession } {
   let { core, caches } = apart(session);
   let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, loaded);
@@ -325,7 +329,7 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
   let own: string[] = [];
   for (const i of compiledOf(checked)) {
     const body = bodyOf(arenas, i);
-    if (body.foreign || body.rust) continue;
+    if (body.foreign === true || body.rust !== undefined) continue;
     if (body.start >= STD_BASE) std.push(symbolIn(arenas, i, names));
     else own.push(symbolIn(arenas, i, names));
   }
@@ -338,7 +342,7 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
 function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ std: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean) {
   const started = stageStart(session);
   let objects: string[] = [];
-  for (const u of runtimeUnits(ir, release, false, target, leaks)) objects.push(cachedObject(session, u));
+  for (const u of runtimeUnits(ir, release, false, copyTarget(target), leaks)) objects.push(cachedObject(session, u));
   for (const u of halves.std) objects.push(cachedObject(session, u));
   for (const o of mathObjects(session, target.compile)) objects.push(o);
   stageEnd(session, "runtime", started);
@@ -376,7 +380,7 @@ function clang(args: string[], stdin?: string): void {
 }
 
 // `build`, with clang run without blocking, so several builds can go at once.
-/** @throws {CompileError | Error | IoError} */
+/** @throws {CompileError | Error | IoError | JsonError} */
 export async function buildAsync(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = []): Promise<CompileError[]> {
   let { core, caches } = apart(session);
   let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, false, false);
@@ -398,7 +402,7 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
 // Builds the tests of the package at `dir` into one program at `out`, unless it has none, and gives
 // them in declaration order. Every `.fsh` file of the package is loaded through a generated entry,
 // the harness, whose `main` runs one test by its index.
-/** @throws {CompileError | Error | IoError} */
+/** @throws {CompileError | Error | IoError | JsonError} */
 export function buildTests(session: BuildSession, dir: string, out: string): Test[] {
   let problems: string[] = [];
   const files = fishFiles(dir, problems);
@@ -418,8 +422,8 @@ export function buildTests(session: BuildSession, dir: string, out: string): Tes
     tests = liftTests(compilation, loaded.modules, paths);
     if (tests.length === 0) return tests;
     hideMains(compilation, loaded.modules);
-    const main = harnessMain(compilation.ids, tests, loaded.modules);
-    for (const s of main) loaded.modules[0]!.statements.push(s);
+    let main = harnessMain(compilation.ids, tests, loaded.modules);
+    while (main.length > 0) loaded.modules[0]!.statements.push(main.shift()!);
     program = expanded(compilation, loaded, false);
   } catch (e) {
     if (e instanceof CompileError) throw sourced(e, copyNames(compilation.names), loaded.sources);
@@ -437,6 +441,7 @@ export function buildTests(session: BuildSession, dir: string, out: string): Tes
 
 // Runs the tests of the package at `dir` whose name holds `filter`, each in a process of its own.
 // Gives the exit code.
+/** @throws {Error | IoError} */
 async function testPackage(session: BuildSession, dir: string, filter: string | undefined): Promise<i64> {
   const out = join(mkdtempSync(join(tmpdir(), "fishc-test-")), "tests");
   const running = new Set<i32>();
@@ -474,6 +479,7 @@ async function testPackage(session: BuildSession, dir: string, filter: string | 
 // With `fixing`, each file's auto fixes are written first, a `.ts` file moving to its `.fsh` name,
 // and what is left is reported. Gives the exit code: 1 when anything is to change or couldn't be
 // read or written, else 0.
+/** @throws {IoError} */
 function lintPaths(paths: string[], fixing: boolean): i64 {
   let code = 0;
   const problem = (message: string) => {
@@ -603,8 +609,7 @@ function fixedText(src: string, shown: string, fsh: Imported): { text?: string; 
   try {
     return fix(src, (specifier) => fsh(specifier));
   } catch (e) {
-    if (!(e instanceof CompileError)) throw e;
-    console.error(`fishc lint: '${shown}' was left as it was, because a fix gave text that doesn't parse (${e.message}); please report it`);
+    console.error(`fishc lint: '${shown}' was left as it was, because a fix gave text that doesn't parse (${(e as { message: string }).message}); please report it`);
     return { fixed: 0 };
   }
 }
@@ -630,7 +635,8 @@ export function runtimeLinks(ir: string, target: Ref<Target>): string[] {
   const zlib: string[] = callsZlib(ir) ? ["-lz"] : [];
   if (!callsTls(ir)) return zlib;
   const openssl = findOpenSsl(target);
-  return [...("link" in openssl ? openssl.link : []), ...zlib];
+  const none: string[] = [];
+  return [...("link" in openssl ? openssl.link : none), ...zlib];
 }
 
 // The C half of the runtime as cached objects, with the engine's glue and sources when the
@@ -640,12 +646,13 @@ export function runtimeLinks(ir: string, target: Ref<Target>): string[] {
 export function runtimeUnits(ir: string, release: boolean, pic = false, target: Target = hostTarget(), leaks = false): Unit[] {
   const js = callsEngine(ir);
   const openssl = callsTls(ir) ? findOpenSsl(target) : undefined;
-  const flags = [...target.compile, "-funwind-tables", "-pthread", optimization(release, target), ...(pic ? ["-fPIC"] : []), ...(js ? ["-I", ENGINE] : [])];
+  const none: string[] = [];
+  const flags = [...target.compile, "-funwind-tables", "-pthread", optimization(release, target), ...(pic ? ["-fPIC"] : none), ...(js ? ["-I", ENGINE] : none)];
   const tls = openssl === undefined ? "" : "missing" in openssl ? "-tls-missing" : "-tls";
   const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}`;
-  const source = [NATIVE, ...(js ? [JS_NATIVE] : []), ...(openssl === undefined ? [] : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
+  const source = [NATIVE, ...(js ? [JS_NATIVE] : none), ...(openssl === undefined ? none : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
   const tlsFlags = openssl !== undefined && "compile" in openssl ? openssl.compile : [];
-  const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : [])], stdin: source, inputs: js ? files(ENGINE) : [] };
+  const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none)], stdin: source, inputs: js ? files(ENGINE) : none };
   const engine = js ? ENGINE_SOURCES.map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(ENGINE) })) : [];
   const zlib: Unit[] = callsZlib(ir) ? [{ name: "zlib", args: ["-x", "c", "-", ...flags], stdin: ZLIB_NATIVE, inputs: [] }] : [];
   return [runtime, ...engine, ...zlib];
@@ -654,14 +661,15 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
 // A build's optimization level. A sanitized dev build is optimized a little, as clang advises for
 // its sanitizers: at -O0, clang for AArch64 misreads large aggregates passed by value to an
 // address-sanitized function, so the program would quietly do something else.
-function optimization(release: boolean, target: Target): string {
+function optimization(release: boolean, target: Ref<Target>): string {
   return release ? "-O2" : target.sanitize !== undefined ? "-O1" : "-O0";
 }
 
 // Clang's command line for a program, its IR read from stdin unless `program` names it compiled
 // already, linked with `objects`.
 function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = hostTarget(), program: string[] = ["-x", "ir", "-"]): string[] {
-  return ["clang", ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim ? [shim.lib, ...shim.links] : [])];
+  const none: string[] = [];
+  return ["clang", ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)];
 }
 
 function fail(message: string): never {
@@ -675,6 +683,7 @@ function reportTimings(session: Ref<Session>, stages: string[], start: f64) {
 }
 
 // A directory `fishc survey` can read, holding TypeScript.
+/** @throws {IoError} */
 function checkProject(dir: string) {
   if (!existsSync(dir)) fail(`fishc survey: '${dir}' doesn't exist`);
   if (!statSync(dir).isDirectory()) fail(`fishc survey: '${dir}' is a file; give the directory of a TypeScript project`);

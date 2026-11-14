@@ -78,7 +78,11 @@ export function macroCompilation(c: Ref<Compilation>): Compilation {
   let fileNames: Map<usize, Map<string, string>> | undefined = undefined;
   if (c.fileNames !== undefined) {
     let copied = new Map<usize, Map<string, string>>();
-    for (const [base, names] of c.fileNames) copied.set(base, new Map<string, string>(names));
+    for (const [base, names] of c.fileNames) {
+      let copy = new Map<string, string>();
+      for (const [k, v] of names) copy.set(k, v);
+      copied.set(base, copy);
+    }
     fileNames = copied;
   }
   return {
@@ -567,7 +571,7 @@ export function timed<T>(timings: Timings | undefined, name: string, run: Timed<
 }
 
 // One line per stage of `stages`, in that order, a stage that never ran as 0.0, then the total.
-export function formatTimings(timings: Timings, stages: string[], total: f64): string {
+export function formatTimings(timings: Ref<Timings>, stages: string[], total: f64): string {
   const line = (name: string, ms: f64, note?: string) => `${name.padEnd(9)}${ms.toFixed(1).padStart(9)} ms${note !== undefined ? ` (${note})` : ""}\n`;
   return stages.map((s) => line(s, timings.ms.get(s) ?? 0, timings.notes.get(s))).join("") + line("total", total);
 }

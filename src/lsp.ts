@@ -31,7 +31,7 @@ export function frames(buffer: Buffer): { bodies: string[]; rest: Buffer } {
     const end = headersEnd(buffer, at);
     if (end < 0) break;
     const start = (end as usize) + 4;
-    const length = /^content-length: *(\d+)/im.exec(new TextDecoder().decode(buffer.slice(at, end as usize)));
+    const length = /^content-length: *(\d+)/im.exec(new TextDecoder().decode(buffer.slice(at as i64, end)));
     // Headers without a length can't say where the body ends; skip them.
     if (length === null) {
       at = start;
@@ -39,10 +39,10 @@ export function frames(buffer: Buffer): { bodies: string[]; rest: Buffer } {
     }
     const size = Number(length[1]!) as usize;
     if (buffer.length < start + size) break;
-    bodies.push(new TextDecoder().decode(buffer.slice(start, start + size)));
+    bodies.push(new TextDecoder().decode(buffer.slice(start as i64, (start + size) as i64)));
     at = start + size;
   }
-  return { bodies, rest: buffer.slice(at) };
+  return { bodies, rest: buffer.slice(at as i64) };
 }
 
 // Where the blank line ending the headers from `from` starts, or -1 when it hasn't arrived.
@@ -72,7 +72,7 @@ function located(path: string, text: string, sources: Ref<Source[]>, start: usiz
 /** @throws {Error | IoError} */
 function diagnose(session: Session, path: string, text: string, read: (path: string) => string | undefined): { diagnostics: Diagnostic[]; checked?: Checked } {
   try {
-    const { checked, sources } = analyze(session, text, path, read);
+    const { checked, sources } = analyze(session, text, path, (p) => read(p));
     const uri = pathToFileURL(path).href;
     let warnings: Diagnostic[] = [];
     for (const w of checked.warnings) {
@@ -94,10 +94,9 @@ function diagnostic(e: Ref<CompileError>, path: string, text: string): Diagnosti
   const uri = pathToFileURL(path).href;
   const at = located(path, text, e.sources, e.start, e.end);
   let related: Related[] = [];
-  const note = e.note;
-  if (note !== undefined) {
-    const there = located(path, text, e.sources, note.start, note.end);
-    if (there !== undefined) related.push({ location: there, message: shown(note.message, e.names) });
+  if (e.note !== undefined) {
+    const there = located(path, text, e.sources, e.note.start, e.note.end);
+    if (there !== undefined) related.push({ location: there, message: shown(e.note.message, e.names) });
   }
   if (at !== undefined && at.uri === uri) return withRelated({ range: at.range, severity: 1, code: e.code, source: "fish", message: shown(e.message, e.names) }, related);
   const elsewhere = sourceOf(text, path, e.start, e.sources);
@@ -127,7 +126,7 @@ function named(checked: Ref<Checked>, t: Type): string {
 export function hints(checked: Ref<Checked>, text: string, range: Ref<Range>): Hint[] {
   let found = new Map<usize, Hint>();
   for (const instance of compiledOf(checked)) {
-    for (const [at, raised] of instance.raises) {
+    for (const [at, raised] of instance.raises.entries()) {
       // Past the document's text is another file's.
       if (at.kind === "throw" || at.end > text.length || found.has(at.end)) continue;
       const place = position(text, at.end);
@@ -180,11 +179,11 @@ class Server {
   check(this: Mut<this>, uri: string) {
     const text = this.documents.get(uri);
     if (text === undefined || !uri.startsWith("file:")) return;
-    // An open file's unsaved text, and any other's on disk.
-    let open = new Map<string, string>();
-    for (const [u, t] of this.documents) if (u.startsWith("file:")) open.set(resolve(fileURLToPath(u)), t);
     this.results.set(uri, { text });
     try {
+      // An open file's unsaved text, and any other's on disk.
+      let open = new Map<string, string>();
+      for (const [u, t] of this.documents) if (u.startsWith("file:")) open.set(resolve(fileURLToPath(u)), t);
       const found = diagnose(cachedSession(), fileURLToPath(uri), text, (path) => open.get(resolve(path)));
       notify("textDocument/publishDiagnostics", JSON.stringify({ uri, diagnostics: found.diagnostics }));
       this.results.set(uri, { text, checked: found.checked });
@@ -209,7 +208,7 @@ class Server {
       this.documents.set(uri, params.textDocument?.text ?? "");
       this.changed = true;
     } else if (method === "textDocument/didChange") {
-      const changes = params.contentChanges;
+      const changes: Ref<{ text: string }[] | undefined> = params.contentChanges;
       if (changes === undefined || changes.length === 0) throw new Error("a change gave no contentChanges");
       this.documents.set(uri, changes[changes.length - 1]!.text);
       this.changed = true;
@@ -247,7 +246,7 @@ class Server {
     try {
       message = JSON.parse<Message>(body);
     } catch (e) {
-      send(`{"jsonrpc":"2.0","id":null,"error":${JSON.stringify({ code: -32700, message: e instanceof Error ? e.message : String(e) })}}`);
+      send(`{"jsonrpc":"2.0","id":null,"error":${JSON.stringify({ code: -32700, message: (e as { message: string }).message })}}`);
       return;
     }
     const got = message!;

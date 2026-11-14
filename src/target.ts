@@ -19,6 +19,11 @@ export function hostTarget(): Target {
   return { triple: "", compile: [], link: [], ar: "ar" };
 }
 
+// A copy of `target` for a caller to own.
+export function copyTarget(target: Ref<Target>): Target {
+  return { triple: target.triple, compile: [...target.compile], link: [...target.link], ar: target.ar, sanitize: target.sanitize };
+}
+
 const osOf = (triple: string) => (triple.includes("-apple-") ? "macOS" : "Linux");
 const musl = (triple: string) => triple.endsWith("-musl");
 
@@ -154,7 +159,7 @@ export function sanitizedTarget(target: Target, kinds: string[], given?: string,
 // such marks, so each definition in `ir` is given one for `target`'s sanitizer. Each is kept out of
 // line too: a function inlined into one with no debug info, such as a task's poll, loses its
 // lines, and a report would name no .fsh line for it.
-export function instrumented(ir: string, target: Target): string {
+export function instrumented(ir: string, target: Ref<Target>): string {
   if (target.sanitize === undefined) return ir;
   const attribute = `${target.sanitize === "address" ? "sanitize_address" : "sanitize_thread"} noinline`;
   return ir.replace(/^(define [^\n]*\))( uwtable| \{$)/gm, `$1 ${attribute}$2`);
@@ -181,7 +186,7 @@ function pkgConfigFlags(): string[] | undefined {
   }
 }
 
-export function findOpenSsl(target: Target): OpenSsl {
+export function findOpenSsl(target: Ref<Target>): OpenSsl {
   const at = target.compile.indexOf("--sysroot");
   const sysroot = at >= 0 ? target.compile[(at + 1) as usize] : undefined;
   if (sysroot !== undefined || target.compile.includes("-target")) {
