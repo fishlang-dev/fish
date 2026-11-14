@@ -423,7 +423,7 @@ export function buildTests(session: BuildSession, dir: string, out: string): Tes
   // The harness is read as the manifest's path, which every package has and no `.fsh` file is, so
   // the files' names are written from the package's directory.
   const entry = join(dir, MANIFEST);
-  const src = harnessImports(dir, files);
+  const src = harnessImports(dir, [...files]);
   let { core, caches } = apart(session);
   let compilation = newCompilation(core);
   let loaded = load(compilation, entry, src);
@@ -533,7 +533,8 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
     if (manifest === undefined) return undefined;
     if (!editions.has(manifest)) {
       try {
-        editions.set(manifest, loadManifest(manifest).edition);
+        const edition = loadManifest(manifest).edition;
+        editions.set(manifest, edition);
       } catch (e) {
         editions.set(manifest, "broken");
         throw e;
@@ -789,7 +790,7 @@ async function main(): Promise<void> {
   if (command === "explain") {
     if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail("usage: fishc explain <code>");
     const text = explain(named!);
-    if (text === undefined) fail(`fishc explain: '${named}' isn't an error code; a code looks like E0201 or W0001, as an error shows it`);
+    if (text === undefined) fail(`fishc explain: '${named ?? ""}' isn't an error code; a code looks like E0201 or W0001, as an error shows it`);
     console.log(text);
     process.exit(0);
   }
@@ -809,7 +810,7 @@ async function main(): Promise<void> {
       try {
         plan = values.plan !== undefined ? readPlan(values.plan) : undefined;
       } catch (e) {
-        fail(`fishc survey: the plan '${values.plan}' can't be read: ${(e as { message: string }).message}`);
+        fail(`fishc survey: the plan '${values.plan ?? ""}' can't be read: ${(e as { message: string }).message}`);
       }
       const ranking = rank(dirs, values.self, plan);
       console.log(values.json === true ? JSON.stringify(ranking, null, 2) : formatRanking(ranking, plan !== undefined));
@@ -947,10 +948,10 @@ async function main(): Promise<void> {
     if (!validName(name)) {
       fail(command === "init" && file === undefined ? `fishc init: this directory's name '${name}' isn't a package name: ${NAME_RULE}; give one, as in 'fishc init my-app'` : `fishc ${command}: '${name}' isn't a package name: ${NAME_RULE}`);
     }
-    if (command === "new" && !vacant(dir)) fail(`fishc new: '${file}' already exists and isn't empty; choose another name, or run 'fishc init' inside it`);
+    if (command === "new" && !vacant(dir)) fail(`fishc new: '${file ?? ""}' already exists and isn't empty; choose another name, or run 'fishc init' inside it`);
     if (command === "init" && existsSync(join(dir, MANIFEST))) fail(`fishc init: there is already a ${MANIFEST} here`);
     createPackage(dir, name);
-    console.log(`created the package '${name}'${command === "new" ? ` in ${file}/` : ""}`);
+    console.log(`created the package '${name}'${command === "new" ? ` in ${file ?? ""}/` : ""}`);
     process.exit(0);
   }
   const panicName = values.panic ?? "unwind";
