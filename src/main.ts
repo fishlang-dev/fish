@@ -172,9 +172,11 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
 // The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
 /** @throws {CompileError | Error | IoError | JsonError} */
 function bundled(ir: string, loaded: Ref<Loaded>): string {
-  const calls = /^\s+(?:%\S+ = )?(?:call|invoke) ptr @fsh_rt_js_export\(ptr @fsh\.js\.bundle, i64 (\d+)/gm;
   let seen = new Set<usize>();
-  for (const m of ir.matchAll(calls)) seen.add((Number(m[1]!) ?? 0) as usize);
+  for (const line of linesWith(ir, "@fsh_rt_js_export(ptr @fsh.js.bundle")) {
+    const m = /^\s+(?:%\S+ = )?(?:call|invoke) ptr @fsh_rt_js_export\(ptr @fsh\.js\.bundle, i64 (\d+)/.exec(line);
+    if (m !== null) seen.add((Number(m[1]!) ?? 0) as usize);
+  }
   let used = [...seen];
   used.sort((a, b) => (a as i64) - (b as i64));
   if (used.length === 0) return ir;
@@ -782,15 +784,29 @@ export function engineSources(): string[] {
 }
 
 // Whether the IR calls into the JS engine: an instruction, not a declaration or a string's bytes.
-export const callsEngine = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/m.test(ir);
+// The lines of the IR holding `name`. A program's IR runs to hundreds of megabytes and these names
+// are rare, so a regex is run over each line found rather than over the whole text.
+function linesWith(ir: string, name: string): string[] {
+  let out: string[] = [];
+  let at = ir.indexOf(name);
+  while (at >= 0) {
+    let end = ir.indexOf("\n", at);
+    if (end < 0) end = ir.length as i64;
+    out.push(ir.slice(ir.lastIndexOf("\n", at) + 1, end));
+    at = ir.indexOf(name, end);
+  }
+  return out;
+}
+
+export const callsEngine = (ir: string) => linesWith(ir, "@fsh_rt_js_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/.test(l));
 
 // Whether the IR calls into the OpenSSL half of the runtime, as fetch, serve and the tls module do
 // for TLS, and the postgres module and WebSocket handshakes for hashes. A function std declares
 // itself is called by its quoted name.
-export const callsTls = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_(?:tls|crypto)_/m.test(ir);
+export const callsTls = (ir: string) => [...linesWith(ir, "fsh_rt_tls_"), ...linesWith(ir, "fsh_rt_crypto_")].some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_(?:tls|crypto)_/.test(l));
 
 // Whether the IR calls into the zlib half of the runtime, as the zlib module does.
-export const callsZlib = (ir: string) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_zlib_/m.test(ir);
+export const callsZlib = (ir: string) => linesWith(ir, "fsh_rt_zlib_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_zlib_/.test(l));
 
 // What links OpenSSL into a program calling the TLS runtime, when it was found, without which the
 // runtime's TLS calls say how to install it, and zlib into one calling the zlib runtime.
