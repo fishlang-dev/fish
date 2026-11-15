@@ -17,6 +17,7 @@ import { STD_BASE } from "./std.ts";
 import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.ts";
 import type { Tables } from "./compilation.ts";
+import { allWords } from "./sizes.ts";
 import type { Kind, Verdict } from "./narrow.ts";
 
 // Every instance to compile, as records.
@@ -14091,7 +14092,9 @@ export function codegen(checked: Checked, options: Options): string {
 // `codegen`, giving back the checked program, which what is built from the IR reads after it.
 /** @throws {CompileError} */
 export function codegenChecked(checked: Checked, options: Options): { ir: string; checked: Checked } {
-  const { instances, tables, warnings } = checked;
+  let { instances, tables, warnings } = checked;
+  const measured = allWords(tables.typing);
+  tables.typing.unionWords = measured;
   let generator = new Codegen({ instances, tables, warnings: [] }, options);
   const ir = generator.module();
   return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings } };

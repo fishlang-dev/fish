@@ -2026,6 +2026,17 @@ export class Typing {
   private interned = new Map<string, ObjectType>();
   private literals = new Map<string, LiteralType>();
   private unions = new Map<string, UnionType>();
+
+  // Each union's payload words, filled in once before codegen; a union made after that is measured
+  // when it is asked for.
+  unionWords = new TypeMap<UnionType, usize>();
+
+  // Every union type made so far.
+  unionTypes(): UnionType[] {
+    let out: UnionType[] = [];
+    for (const t of this.unions.values()) out.push(t);
+    return out;
+  }
   private keys = new TypeMap<Exclude<Type, string>, string>();
   private declared = 0;
 
