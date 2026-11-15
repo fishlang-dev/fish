@@ -48,8 +48,8 @@ function firstDifference(a: string, b: string): string | null {
 let gen1 = values.from;
 if (gen1 === undefined) {
   gen1 = join(out, "gen1");
-  const errors = timed("generation 1 built by Bun", () => build(cachedSession(), join(src, "main.fsh"), gen1!, true));
-  if (errors.length > 0) throw new Error(errors.map((e) => e.message).join("\n"));
+  // build throws on an error; what it gives back is the warnings, which don't matter here.
+  timed("generation 1 built by Bun", () => build(cachedSession(), join(src, "main.fsh"), gen1!, true));
 }
 const ir: string[] = [];
 let fishc = gen1;
