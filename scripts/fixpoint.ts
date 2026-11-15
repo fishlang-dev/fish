@@ -16,9 +16,13 @@ const root = join(import.meta.dir, "..");
 const out = values.out ?? mkdtempSync(join(tmpdir(), "fish-fixpoint-"));
 const src = join(out, "src");
 mkdirSync(src, { recursive: true });
-try {
-  symlinkSync(join(root, "vendor"), join(out, "vendor"));
-} catch {}
+// The mirror is read where the native compiler was built from: vendor beside it, and the math
+// runtime's C++ source inside it.
+for (const [from, to] of [[join(root, "vendor"), join(out, "vendor")], [join(root, "src", "runtime"), join(src, "runtime")]] as const) {
+  try {
+    symlinkSync(from, to);
+  } catch {}
+}
 for (const f of readdirSync(join(root, "src"))) if (f.endsWith(".ts") && !f.endsWith(".d.ts")) mirrored(join(root, "src", f), src);
 
 function timed<T>(label: string, f: () => T): T {
