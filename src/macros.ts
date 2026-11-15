@@ -56,6 +56,8 @@ export function expandMacros(compilation: Mut<Compilation>, loaded: Mut<Loaded>,
     let { loaded: copy, of } = copied(compilation.ids, loaded);
     const program = flatten(compilation, copy, library, true);
     const macros = macroFunctions(program);
+    let linkedAt = new Map<usize, usize>();
+    for (let i: usize = 0; i < program.length; i++) linkedAt.set(program[i]!.id, i);
     // Every decorator of this round, by where it is written: the one linked, and its arguments,
     // each one a macro takes as a value computed while compiling, as a constant checked with
     // the macros.
@@ -64,8 +66,11 @@ export function expandMacros(compilation: Mut<Compilation>, loaded: Mut<Loaded>,
     let linked = new Set<usize>();
     for (const site of sites) {
       const written: Ref<Stmt> = loaded.modules[site.module]!.statements[site.index]!;
-      const twin = of.get(written.id);
-      if (twin === undefined) throw new Error("internal error: a decorated declaration has no linked copy");
+      const fromCopy = of.get(written.id);
+      if (fromCopy === undefined) throw new Error("internal error: a decorated declaration has no linked copy");
+      // As linked: linking renames the program's statements, not the copies they were made from.
+      const at = linkedAt.get(fromCopy.id);
+      const twin: Ref<Stmt> = at !== undefined ? program[at]! : fromCopy;
       let own = placed(declOf(written));
       let twins = placed(declOf(twin));
       while (own.length > 0) {
