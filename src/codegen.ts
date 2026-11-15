@@ -4272,7 +4272,8 @@ class Codegen implements PrintHost, ComptimeHost {
     const at = this.temp();
     this.emit(`${at} = getelementptr ${this.llvm(type)}, ptr ${base}, i64 0, i64 ${i}`);
     const part2 = this.loc(local).type;
-    if (this.isRef(part2)) {
+    // An element that is a reference is what the loop's reference holds; any other is lent where it lives.
+    if (this.isRef(part2) && !this.isRef(this.tables.typing.rec(type).element)) {
       const line3 = `store ptr ${at}, ptr ${this.slot(local)}`;
       this.emit(line3);
     }
