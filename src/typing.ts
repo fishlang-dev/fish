@@ -2398,6 +2398,12 @@ export class Typing {
   private fixeds = new Map<string, FixedType>();
 
   arrayType(this: Mut<this>, element: Type, typed?: TypedName): ArrayType {
+    // An element's key nests the keys of everything inside it, so building and hashing it on every
+    // call is what made this slow natively; a plain array is found by its element's id instead.
+    if (typed === undefined) {
+      const known = this.plainArrays.get(element);
+      if (known !== undefined) return known;
+    }
     const key = `[${this.keyOf(element)}]${typed !== undefined ? typed : ""}`;
     let t = this.arrays.get(key);
     if (t === undefined) {
@@ -2405,10 +2411,12 @@ export class Typing {
       t = this.made<ArrayType>(rec, key);
       this.arrays.set(key, t);
     }
+    if (typed === undefined) this.plainArrays.set(element, t);
     return t;
   }
 
   private arrays = new Map<string, ArrayType>();
+  private plainArrays = new TypeMap<Type, ArrayType>();
 
   typedArray(this: Mut<this>, name: TypedName): ArrayType {
     return this.arrayType(typedElement(name), name);
