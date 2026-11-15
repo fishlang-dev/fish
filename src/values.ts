@@ -2405,9 +2405,12 @@ export class Expressions<C extends Context> implements Union<C> {
       const arg2317_1 = `a splice where ${category === "AstExpr" ? "an expression" : category === "AstStmt" ? "a statement" : "a type"} goes takes an '${category}', not '${this.ctx.typing().show(t)}'`;
       this.coerce(q.holes[i]!, t, wanted, arg2317_1);
     }
+    const given = q.category === "AstExpr" ? astExpr : q.category === "AstStmt" ? astStmt : astType;
     const tables = this.ctx.tables();
+    // What this check found of its splices is kept with the quote, which the rest read from there.
+    tables.parsedQuotes.set(cloneExpr(e), q);
     tables.quotes.set(cloneExpr(e), { AstExpr: astExpr, AstStmt: astStmt, AstType: astType });
-    return q.category === "AstExpr" ? astExpr : q.category === "AstStmt" ? astStmt : astType;
+    return given;
   }
 
   // One of the Ast types a quote's splices take, as std declares it.
