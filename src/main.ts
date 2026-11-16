@@ -1021,7 +1021,7 @@ async function main(): Promise<void> {
     let paths = positionals.slice(1);
     if (flags.some((k) => k !== "check" && k !== "panic") || (paths.includes("-") && paths.length > 1)) fail(usage);
     const check = values.check === true;
-    if (paths[0] === "-") process.exit(formatStdin(check));
+    if (paths.length > 0 && paths[0] === "-") process.exit(formatStdin(check));
     if (paths.length === 0) {
       const found = findManifest(process.cwd()) ?? fail(`fishc fmt: no ${MANIFEST} here or in any directory above; name the files to format, or run it inside a package`);
       paths.push(dirname(found!));
