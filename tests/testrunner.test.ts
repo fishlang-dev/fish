@@ -233,3 +233,9 @@ test("a test that can't be started fails rather than stalling the report", async
   }
   expect(written.join("")).toStartWith("FAIL a.fsh > missing\nthe test couldn't be run:");
 });
+
+test("a test whose name has a dot in it runs, beside a helper that can throw", () => {
+  const helper = 'function read(): string throws Error {\n  return "x";\n}\n';
+  const body = 'test("reads a.txt", () => {\n  let got = "";\n  try {\n    got = read();\n  } catch (e) {\n    assert(false, e.message);\n  }\n  assert(got === "x");\n});\n';
+  expect(fishc(pkg("dotted", { "src/main.fsh": `function main() {}\n${helper}${body}` }))).toEqual({ code: 0, out: "ok src/main.fsh > reads a.txt\n1 passed, 0 failed\n", err: "" });
+});

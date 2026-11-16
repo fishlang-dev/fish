@@ -61,6 +61,12 @@ export function stripTests(loaded: Mut<Loaded>) {
   }
 }
 
+// The function a test is lifted into. Linking renames a qualified name only up to its first dot, so
+// the symbol holds none.
+function testSymbol(name: string): string {
+  return `test ${JSON.stringify(name).replaceAll(".", "\\u002e")}`;
+}
+
 // Turns each test of the files at `paths`, in that order, into a function of its own file,
 // `test "name"`, which no program can write. A test's function throws Error, so a body may throw,
 // and is async when the body is. Names are unique across the files; a second use of one is refused.
@@ -83,7 +89,7 @@ export function liftTests(compilation: Mut<Compilation>, modules: Mut<Module[]>,
       const twin = tests.find((t) => t.name === name);
       if (twin !== undefined) throw new CompileError("E1106", `there is already a test named '${name}' in '${twin.module.file}'; give each test a name of its own`, found.start, found.end);
       tests.push({ name, module: { file: module.file, path: module.path }, index: tests.length, async: found.async });
-      const symbol = `test ${JSON.stringify(name)}`;
+      const symbol = testSymbol(name);
       compilation.names.madeUp.set(symbol, `the test '${name}'`);
       symbols.push(symbol);
     }
@@ -155,7 +161,7 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
 `;
   let made = parse(text, ids);
   let named = new Map<string, string>();
-  for (const t of tests) named.set(call(t), `test ${JSON.stringify(t.name)}-fsh${modules.findIndex((m) => m.path === t.module.path)}`);
+  for (const t of tests) named.set(call(t), `${testSymbol(t.name)}-fsh${modules.findIndex((m) => m.path === t.module.path)}`);
   renameIn(ids, made, (name) => named.get(name));
   return made;
 }
