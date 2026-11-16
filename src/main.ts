@@ -444,7 +444,7 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
 // them in declaration order. Every `.fsh` file of the package is loaded through a generated entry,
 // the harness, whose `main` runs one test by its index.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function buildTests(session: BuildSession, dir: string, out: string): Test[] {
+export function buildTests(session: BuildSession, dir: string, out: string, release = false): Test[] {
   let problems: string[] = [];
   const files = fishFiles(dir, problems);
   for (const message of problems) console.error(message.replace(/^fishc fmt/, "fishc test"));
@@ -472,23 +472,23 @@ export function buildTests(session: BuildSession, dir: string, out: string): Tes
   }
   const checked = checkedProgram(compilation, program, false, loaded.sources);
   const sources = [...loaded.sources];
-  const made = generated(checked, loaded, { src, file: entry, release: false, panic: "unwind", sources, harness: true });
+  const made = generated(checked, loaded, { src, file: entry, release, panic: "unwind", sources, harness: true });
   const shim = rustShim(made.rust, made.checked);
   const host = hostTarget();
-  const halves = parts(made.ir, made.checked, false, host);
+  const halves = parts(made.ir, made.checked, release, host);
   let building = together(made.checked.tables.session, caches);
-  linked(building, made.ir, halves, out, false, [], shim, host, false, false);
+  linked(building, made.ir, halves, out, release, [], shim, host, false, false);
   return tests;
 }
 
 // Runs the tests of the package at `dir` whose name holds `filter`, each in a process of its own.
 // Gives the exit code.
 /** @throws {Error | IoError | JsonError} */
-async function testPackage(session: BuildSession, dir: string, filter: string | undefined): Promise<i64> {
+async function testPackage(session: BuildSession, dir: string, filter: string | undefined, release: boolean): Promise<i64> {
   const out = join(mkdtempSync(join(tmpdir(), "fishc-test-")), "tests");
   let code: i64 = 1;
   try {
-    code = await testsIn(session, dir, out, filter);
+    code = await testsIn(session, dir, out, filter, release);
   } catch (e) {
     rmSync(dirname(out), { recursive: true, force: true });
     throw e;
@@ -499,10 +499,10 @@ async function testPackage(session: BuildSession, dir: string, filter: string | 
 
 // `testPackage`'s build and run, the build at `out`.
 /** @throws {Error | IoError | JsonError} */
-async function testsIn(session: BuildSession, dir: string, out: string, filter: string | undefined): Promise<i64> {
+async function testsIn(session: BuildSession, dir: string, out: string, filter: string | undefined, release: boolean): Promise<i64> {
   let running = new Set<i32>();
   try {
-    const tests = buildTests(session, dir, out);
+    const tests = buildTests(session, dir, out, release);
     if (tests.length === 0) {
       console.log("no tests found");
       return 0;
@@ -1039,9 +1039,9 @@ async function main(): Promise<void> {
   }
   if (command === "test") {
     // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
-    if (positionals.length > 2 || flags.some((k) => k !== "panic") || values.panic !== "unwind") fail("usage: fishc test [<filter>]");
+    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "release") || values.panic !== "unwind") fail("usage: fishc test [<filter>] [--release]");
     const found = findManifest(process.cwd()) ?? fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
-    const code = await testPackage(sessionFor(), dirname(found!), file);
+    const code = await testPackage(sessionFor(), dirname(found!), file, values.release === true);
     process.exit(code);
   }
   if (command === "publish") {
@@ -1221,7 +1221,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
