@@ -145,6 +145,12 @@ function propagateBreaks(doc: Doc, breaks: Mut<Breaks>): Doc {
       if (d.expandedStates !== undefined) {
         const states = propagateAll(d.expandedStates, breaks);
         d.expandedStates = states;
+        // The contents are the first state: the same document in JS, already marked, but a copy
+        // in Fish, which has to be marked too.
+        const found = breaks.found;
+        const contents = propagateBreaks(d.contents, breaks);
+        d.contents = contents;
+        breaks.found = found;
       } else {
         const contents = propagateBreaks(d.contents, breaks);
         d.contents = contents;
