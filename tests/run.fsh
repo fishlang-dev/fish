@@ -206,8 +206,9 @@ async function outcome(fishc: string, tmp: string, p: Program): Promise<Outcome>
     let joined = "";
     for (const i of input) joined += JSON.parse<string>(i);
     const stdin = input.length > 0 ? new TextEncoder().encode(joined) : null;
-    // Every program is checked for leaks: the runtime reports what is still allocated at exit.
-    const run = await ran([join(tmp, binaryName(p.name))], dirname(p.file), environment("FISH_LEAKS"), stdin, limit(p.label));
+    // Every program is checked for leaks: the runtime reports what is still allocated at exit. It
+    // runs where the runner does, so its paths to fixtures are relative to the repository.
+    const run = await ran([join(tmp, binaryName(p.name))], process.cwd(), environment("FISH_LEAKS"), stdin, limit(p.label));
     return { ...run, warnings: warningsOf(built.stderr) };
   } catch (e) {
     return { ...empty, failed: true, printed: `the runner failed: ${e.message}` };
