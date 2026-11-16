@@ -1,5 +1,5 @@
-// What the ported tests share: reading files, which fails the test rather than throwing, and
-// asking Prettier, the formatter's reference, how it formats.
+// What the ported tests share: reading files, which fails the test rather than throwing, running
+// the native fishc, and asking Prettier, the formatter's reference, how it formats.
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +17,28 @@ export function read(path: string): string {
     assert(false, `can't read ${path}: ${e.message}`);
     return "";
   }
+}
+
+// The fishc the CLI tests run: FISHC, else `fishc` on PATH, as tests/run.fsh picks its compiler.
+export function fishcPath(): string {
+  return process.env.FISHC ?? "fishc";
+}
+
+// What a fishc run gave: its exit code, -1 when a signal ended it, and its output.
+export type Ran = { code: i64; out: string; err: string };
+
+// Runs fishc with `args` in `cwd`, with `stdin` piped in when given.
+export function fishc(cwd: string, args: string[], stdin?: string): Ran {
+  const run = stdin === undefined ? spawnSync(fishcPath(), args, { cwd }) : spawnSync(fishcPath(), args, { cwd, input: stdin });
+  const failed = run.error;
+  if (failed !== null) assert(false, `can't run ${fishcPath()}: ${failed.message}`);
+  const decoder = new TextDecoder();
+  return { code: run.status ?? -1, out: decoder.decode(run.stdout), err: decoder.decode(run.stderr) };
+}
+
+// Fails the test with both runs shown when `got` isn't the exit code and output wanted.
+export function ran(got: Ref<Ran>, code: i64, out: string, err: string, what: string): void {
+  assert(got.code === code && got.out === out && got.err === err, `${what}:\n--- expected\ncode ${code}\nstdout:\n${out}\nstderr:\n${err}\n--- got\ncode ${got.code}\nstdout:\n${got.out}\nstderr:\n${got.err}`);
 }
 
 // Fails the test with both values shown when they differ.
