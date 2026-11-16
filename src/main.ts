@@ -954,6 +954,20 @@ async function main(): Promise<void> {
   const named = positionals.length > 1 ? positionals[1] : undefined;
   const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
+  // Parses a file without checking it, for test programs that only have to parse.
+  if (command === "parse") {
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail("usage: fishc parse <file.fsh>");
+    let src = "";
+    try {
+      src = readFileSync(named!, "utf8");
+      parse(src, { last: 0 });
+    } catch (err) {
+      if (!(err instanceof CompileError)) fail(`fishc parse: can't read '${named!}': ${(err as { message: string }).message}`);
+      else console.error(formatError(err, named!, src));
+      process.exit(1);
+    }
+    process.exit(0);
+  }
   if (command === "explain") {
     if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail("usage: fishc explain <code>");
     const text = explain(named!);
@@ -1207,7 +1221,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.

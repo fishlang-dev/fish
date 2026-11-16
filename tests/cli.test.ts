@@ -234,3 +234,11 @@ test("indented lays compact JSON out as JSON.stringify does with an indent of 2"
   const values: unknown[] = [{ a: 1, b: [1, 2, { c: 'x,y:"z' }], d: {}, e: [], f: null, g: "\\" }, [], {}, [[]], "s", 3, { n: { m: {} } }];
   for (const v of values) expect(indented(JSON.stringify(v))).toBe(JSON.stringify(v, null, 2));
 });
+
+test("fishc parse parses a file without checking it, and reports a syntax error", () => {
+  const at = dir("parse-only", { "ok.fsh": "function f(): i64 { return undefinedName; }\n", "bad.fsh": "function f( {\n" });
+  expect(fishc(at, "parse", "ok.fsh")).toEqual({ code: 0, out: "", err: "" });
+  const bad = fishc(at, "parse", "bad.fsh");
+  expect(bad.code).toBe(1);
+  expect(bad.err).toContain("bad.fsh:2:1: error[E0001]");
+});
