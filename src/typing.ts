@@ -624,36 +624,45 @@ export function familyHeld(where: string): string {
 
 // One program's types: the tables its types are interned in, so `===` is identity within it, and
 // the operations over them. Each compilation makes its own, so no type of one meets another's.
+// The first type id a record has; 1 to 20 are the primitives'.
+const FIRST_ID: usize = 21;
+
 export class Typing {
-  // Every record of this program, keyed by its type id from 21 up: the module constants' first,
-  // then those this program makes.
-  private arena: Map<usize, TypeRecord> = new Map<usize, TypeRecord>([
-    [21, { kind: "future", name: "sleep", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }, { name: "deadline", type: "i64" }], concrete: true }],
-    [22, { kind: "future", name: "yieldNow", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }], concrete: true }],
-    [23, { kind: "regex", source: "", pattern: "", flags: "", captures: [], fields: [], any: true }],
-  ]);
+  // Every record of this program, the one for type id N at N - FIRST_ID: the module constants'
+  // first, then those this program makes. An array rather than a map, so a record can be lent.
+  private arena: TypeRecord[] = [
+    { kind: "future", name: "sleep", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }, { name: "deadline", type: "i64" }], concrete: true },
+    { kind: "future", name: "yieldNow", gives: "void", fields: [], params: [], frame: [{ name: "state", type: "i32" }], concrete: true },
+    { kind: "regex", source: "", pattern: "", flags: "", captures: [], fields: [], any: true },
+  ];
 
   // The record a type that isn't a primitive stands for, which its changes are made through.
   rec<T extends Exclude<Type, string>>(t: T): RecordOf<T> {
-    return this.arena.get(t as usize)! as RecordOf<T>;
+    return copyRecord(this.arena[(t as usize) - FIRST_ID]!) as RecordOf<T>;
+  }
+
+  // `rec` without the copy, which natively is a deep copy of the record on every call; for reads
+  // that don't outlive a change to the typing.
+  recRef(this: Ref<this>, t: Exclude<Type, string>): Ref<TypeRecord> {
+    return this.arena[(t as usize) - FIRST_ID]!;
   }
 
   // Gives a generator's or a future's type the fields its frame holds, once its body is checked.
   setFrame(this: Mut<this>, t: GeneratorType | FutureType, frame: Field[]): void {
     const r = this.rec(t);
-    if (r.kind === "generator") this.arena.set(t as usize, { ...r, frame });
-    else if (r.kind === "future") this.arena.set(t as usize, { ...r, frame });
+    if (r.kind === "generator") this.arena[(t as usize) - FIRST_ID] = { ...r, frame };
+    else if (r.kind === "future") this.arena[(t as usize) - FIRST_ID] = { ...r, frame };
   }
 
   // Marks a class as standing for a Rust type.
   setRust(this: Mut<this>, t: ClassType, rust: RustClass): void {
     const r = this.rec(t);
-    this.arena.set(t as usize, { ...r, rust });
+    this.arena[(t as usize) - FIRST_ID] = { ...r, rust };
   }
 
   // Updates the record of a type that isn't a primitive.
   setRec<T extends Exclude<Type, string>>(this: Mut<this>, t: T, record: RecordOf<T>): void {
-    this.arena.set(t as usize, record);
+    this.arena[(t as usize) - FIRST_ID] = record;
     this.settled.clear();
   }
 
@@ -959,7 +968,7 @@ export class Typing {
   private holdsMutIn(t: Type, seen: Mut<TypeSet<Type>>): boolean {
     if (typeof t === "string" || seen.has(t)) return false;
     seen.add(t);
-    const r = this.rec(t);
+    const r = this.recRef(t);
     if (r.kind === "ref") return r.mutable;
     if (r.kind === "recursive") return this.holdsPart(r.of, (u) => { const v = this.recOf(u); return v?.kind === "ref" && v.mutable; });
     if (r.kind === "param") return r.concrete !== undefined ? this.holdsMutIn(r.concrete, seen) : r.bound !== undefined && this.holdsMutIn(r.bound, seen);
@@ -2042,15 +2051,15 @@ export class Typing {
 
   // A new type: its record kept in the arena, and interned under `key` when it has one.
   private made<T extends Exclude<Type, string>>(this: Mut<this>, record: RecordOf<T>, key?: string): T {
-    const t = (this.arena.size + 21) as T;
-    this.arena.set(t as usize, record);
+    const t = (this.arena.length + FIRST_ID) as T;
+    this.arena.push(record);
     if (key !== undefined) this.keys.set(t, key);
     return t;
   }
 
   // The record of the type with id `id`, if this program has one.
   typeOf(id: usize): TypeRecord | undefined {
-    return this.arena.get(id);
+    return id >= FIRST_ID && id - FIRST_ID < this.arena.length ? copyRecord(this.arena[id - FIRST_ID]!) : undefined;
   }
 
   // A class's key is unique to its declaration, since two programs may reuse a class name.
@@ -2364,7 +2373,7 @@ export class Typing {
     const id = this.unknownId as usize;
     const all = this.unionType([...this.intoUnknown, "null"]);
     const members = this.recOf(all)?.kind === "union" ? this.rec(all as UnionType).members : [all];
-    this.arena.set(id, { kind: "union", members, fields: [], name: "unknown", unknown: true });
+    this.arena[id - FIRST_ID] = { kind: "union", members, fields: [], name: "unknown", unknown: true };
   }
 
   // Whether an `unknown` holding a `member` gives it where a `to` is read, after narrowing: as
@@ -2539,7 +2548,7 @@ export class Typing {
   private holdsRefIn(t: Type, seen: Mut<TypeSet<Type>>): boolean {
     if (typeof t === "string" || seen.has(t)) return false;
     seen.add(t);
-    const r = this.rec(t);
+    const r = this.recRef(t);
     if (r.kind === "ref" || (r.kind === "dyn" && this.borrowing.has(r.of))) return true;
     // A type parameter holds references when what it stands for, or its bound, does.
     if (r.kind === "param") return r.concrete !== undefined ? this.holdsRefIn(r.concrete, seen) : r.bound !== undefined && this.holdsRefIn(r.bound, seen);
@@ -2706,29 +2715,29 @@ export class Typing {
   // and give are laid out as codegen holds values, a brand as its base; the checker kept the
   // brands to check them.
   layOutForCodegen(this: Mut<this>): void {
-    for (const id of [...this.arena.keys()]) {
-      let r = this.arena.get(id)!;
+    for (let at: usize = 0; at < this.arena.length; at++) {
+      let r = copyRecord(this.arena[at]!);
       if (r.kind === "future") {
         r.gives = this.lower(r.gives);
-        this.arena.set(id, r);
+        this.arena[at] = r;
       } else if (r.kind === "generator") {
         r.yields = this.lower(r.yields);
         const sends = r.sends;
         if (sends !== undefined) r.sends = this.lower(sends);
-        this.arena.set(id, r);
+        this.arena[at] = r;
       } else if (r.kind === "class") {
         // A class's fields holding brands too, so a union of brands of one base is laid out as
         // that base, as the values written to it are. The others keep their optional markers,
         // which printing reads.
         r.fields = r.fields.map((f): Field => ({ ...f, type: this.holdsBrand(f.type) ? this.lower(f.type) : f.type }));
-        this.arena.set(id, r);
+        this.arena[at] = r;
       } else if (r.kind === "closure" && r.generic === undefined) {
         // So do a closure's parameters and result, which its body was compiled with lowered.
         r.params = r.params.map((t) => this.lower(t));
         r.returns = this.lower(r.returns);
         const throws = r.throws;
         if (throws !== undefined) r.throws = this.lower(throws);
-        this.arena.set(id, r);
+        this.arena[at] = r;
       }
     }
     // A type holding itself keeps its records, since `lower` gives it back as it is: its objects'
@@ -2737,8 +2746,8 @@ export class Typing {
     let group = new TypeSet<Exclude<Type, string>>();
     for (const [m] of this.members) group.add(m);
     for (const [u] of this.ties) group.add(u);
-    for (const id of [...this.arena.keys()]) {
-      const r = this.arena.get(id)!;
+    for (let at: usize = 0; at < this.arena.length; at++) {
+      const r: Ref<TypeRecord> = this.arena[at]!;
       if (r.kind !== "recursive" || typeof r.of === "string") continue;
       group.add(r.of);
       const of = this.rec(r.of);
@@ -3291,7 +3300,7 @@ export class Typing {
     // A type holding itself is shown by its name.
     const tied = this.ties.get(t);
     if (tied !== undefined) return this.describing ? `part of ${this.rec(tied).name}` : this.rec(tied).name;
-    const r = this.rec(t);
+    const r = this.recRef(t);
     if (r.kind === "literal" && r.owner !== undefined) return `${r.owner.enum}.${r.owner.member}`;
     if (r.kind === "literal") return typeof r.value === "string" ? JSON.stringify(r.value) : literalText(r.value);
     if (r.kind === "pattern") {
@@ -3375,4 +3384,35 @@ function plainName(n: string): boolean {
     if (!letter && !(i > 0 && c >= "0" && c <= "9")) return false;
   }
   return true;
+}
+
+// An owned copy of a record lent from the arena. A record can only be spread once its kind is
+// known, so each kind is spread on its own; the last left is `unknown`'s.
+function copyRecord(r: Ref<TypeRecord>): TypeRecord {
+  if (r.kind === "object") return { ...r };
+  if (r.kind === "class") return { ...r };
+  if (r.kind === "interface") return { ...r };
+  if (r.kind === "param") return { ...r };
+  if (r.kind === "literal") return { ...r };
+  if (r.kind === "pattern") return { ...r };
+  if (r.kind === "brand") return { ...r };
+  if (r.kind === "union") return { ...r };
+  if (r.kind === "ref") return { ...r };
+  if (r.kind === "closure") return { ...r };
+  if (r.kind === "function") return { ...r };
+  if (r.kind === "array") return { ...r };
+  if (r.kind === "fixed") return { ...r };
+  if (r.kind === "map") return { ...r };
+  if (r.kind === "variant") return { ...r };
+  if (r.kind === "generator") return { ...r };
+  if (r.kind === "pointer") return { ...r };
+  if (r.kind === "future") return { ...r };
+  if (r.kind === "handle") return { ...r };
+  if (r.kind === "interior") return { ...r };
+  if (r.kind === "shared") return { ...r };
+  if (r.kind === "block") return { ...r };
+  if (r.kind === "dyn") return { ...r };
+  if (r.kind === "regex") return { ...r };
+  if (r.kind === "recursive") return { ...r };
+  return { ...r };
 }
