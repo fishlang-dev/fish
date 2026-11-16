@@ -879,19 +879,22 @@ function rejectsIn(f: Ref<File>, dictionary: Ref<Dictionaries> | undefined): Hit
 }
 
 function byName(f: Mut<File>) {
-  let idents = new Map<string, usize[]>();
-  let lets = new Map<string, usize[]>();
-  let calls = new Map<string, usize[]>();
+  let identPairs: Pairs = { names: [], at: [] };
+  let letPairs: Pairs = { names: [], at: [] };
+  let callPairs: Pairs = { names: [], at: [] };
   for (const n of f.order) {
     const x: Ref<Item> = f.items[n]!;
     const name = x.name;
-    if (x.kind === "ident" && name !== undefined) addTo(idents, name, n);
+    if (x.kind === "ident" && name !== undefined) addTo(identPairs, name, n);
     const callee = x.callee;
-    if (x.kind === "call" && callee !== undefined && f.items[callee]!.kind === "ident") addTo(calls, nameAt(f, callee)!, n);
-    if (x.kind === "let") for (const d of x.declarations) for (const target of identNames(f, f.items[d]!.target, false)) addTo(lets, target, n);
+    if (x.kind === "call" && callee !== undefined && f.items[callee]!.kind === "ident") addTo(callPairs, nameAt(f, callee)!, n);
+    if (x.kind === "let") for (const d of x.declarations) for (const target of identNames(f, f.items[d]!.target, false)) addTo(letPairs, target, n);
     // A function or class declared by name is a declaration of that name too.
-    if (((x.kind === "function" && x.macro) || x.kind === "class") && name !== undefined) addTo(lets, name, n);
+    if (((x.kind === "function" && x.macro) || x.kind === "class") && name !== undefined) addTo(letPairs, name, n);
   }
+  let idents = grouped(identPairs);
+  let lets = grouped(letPairs);
+  let calls = grouped(callPairs);
   sortLists(f, idents);
   sortLists(f, lets);
   sortLists(f, calls);
@@ -900,11 +903,32 @@ function byName(f: Mut<File>) {
   f.calls = calls;
 }
 
-function addTo(map: Mut<Map<string, usize[]>>, name: string, n: usize) {
-  let list = map.get(name);
-  if (list === undefined) list = [];
-  list.push(n);
-  map.set(name, list);
+// Positions collected by name, grouped once they are all in: a Map's array is copied as it is read
+// in Fish, so adding to it one position at a time would copy the whole list each time.
+type Pairs = { names: string[]; at: usize[] };
+
+function addTo(pairs: Mut<Pairs>, name: string, n: usize) {
+  pairs.names.push(name);
+  pairs.at.push(n);
+}
+
+// Each name's positions, in the order they were added.
+function grouped(pairs: Ref<Pairs>): Map<string, usize[]> {
+  let order: usize[] = [];
+  for (let i: usize = 0; i < pairs.names.length; i++) order.push(i);
+  order.sort((a, b) => (pairs.names[a]! < pairs.names[b]! ? -1 : pairs.names[a]! > pairs.names[b]! ? 1 : (a as i64) - (b as i64)));
+  let out = new Map<string, usize[]>();
+  let i: usize = 0;
+  while (i < order.length) {
+    const name = pairs.names[order[i]!]!;
+    let list: usize[] = [];
+    while (i < order.length && pairs.names[order[i]!]! === name) {
+      list.push(pairs.at[order[i]!]!);
+      i++;
+    }
+    out.set(name, list);
+  }
+  return out;
 }
 
 function sortLists(f: Ref<File>, map: Mut<Map<string, usize[]>>) {
@@ -1636,7 +1660,7 @@ function counters(f: Ref<File>): Hit[] {
   let statements = new Set<usize>();
   let exported = new Set<string>();
   let updated = new Set<string>();
-  let uses = new Map<string, usize[]>();
+  let usePairs: Pairs = { names: [], at: [] };
   for (const n of f.order) {
     const x: Ref<Item> = f.items[n]!;
     const expr = x.expr;
@@ -1646,8 +1670,9 @@ function counters(f: Ref<File>): Hit[] {
     if (x.kind === "update" && kindAt(f, x.operand) === "ident") updated.add(nameAt(f, x.operand)!);
     if (x.kind === "assign" && kindAt(f, x.target) === "ident") updated.add(nameAt(f, x.target)!);
     const name = x.name;
-    if ((x.kind === "ident" || x.kind === "shorthand") && name !== undefined) addTo(uses, name, n);
+    if ((x.kind === "ident" || x.kind === "shorthand") && name !== undefined) addTo(usePairs, name, n);
   }
+  const uses = grouped(usePairs);
   for (const s of f.top) {
     const x: Ref<Item> = f.items[s]!;
     if (x.kind !== "let" || x.keyword !== "let" || x.declarations.length !== 1) continue;
