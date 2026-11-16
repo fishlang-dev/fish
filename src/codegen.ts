@@ -12644,9 +12644,17 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     const slot = this.alloca(this.llvm(to));
     const made = this.evaluate(e);
-    if (this.fresh(e)) this.pending.push({ v: made, type: this.cur().types.get(e)! });
     const get2 = this.cur().types.get(e)!;
-    const line = `store ${this.llvm(to)} ${this.convert(made, get2, to)}, ptr ${slot}`;
+    const converted = this.convert(made, get2, to);
+    // A temporary lent as it is lives on in its slot, where a `Mut` borrower may change it, as
+    // by taking its elements out, so it is released from there rather than as it was made.
+    if (this.fresh(e)) {
+      if (converted === made && this.needsDrop(get2)) {
+        this.allocas.push(`  store ${this.llvm(to)} zeroinitializer, ptr ${slot}`);
+        this.pending.push({ v: made, type: get2, slot, home: true });
+      } else this.pending.push({ v: made, type: get2 });
+    }
+    const line = `store ${this.llvm(to)} ${converted}, ptr ${slot}`;
     this.emit(line);
     return slot;
   }

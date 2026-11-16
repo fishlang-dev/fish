@@ -392,3 +392,28 @@ function main() {
   let v = c.view();
   console.log(v.go());
 }
+// case: mut_temporary_array_changed_by_its_borrower
+// expect: 7 xxxyy
+// expect: 3
+// A temporary array lent as Mut is dropped as its borrower left it: emptied, or grown.
+function drain(xs: Mut<string[]>): i64 {
+  let n = 0;
+  while (xs.length > 0) {
+    const s = xs.shift()!;
+    n += s.length as i64;
+  }
+  return n;
+}
+
+function grow(xs: Mut<string[]>): string {
+  xs.push("y".repeat(2));
+  return xs.join("");
+}
+
+function main() {
+  const name = "x".repeat(3);
+  const drained = drain([`a ${name} b`]);
+  const grown = grow([name]);
+  console.log(drained, grown);
+  console.log(drain([name]));
+}
