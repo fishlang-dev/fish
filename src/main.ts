@@ -37,6 +37,7 @@ import { rustShim, type Shim } from "./rustshim.ts";
 import { split } from "./split.ts";
 import { withDebugInfo } from "./debuginfo.ts";
 import { watchProgram } from "./watch.ts";
+import { fileAt } from "./program.ts";
 import { STD_BASE } from "./std.ts";
 
 export type Panic = "unwind" | "abort";
@@ -316,7 +317,7 @@ function built(session: BuildSession, file: string, out: string, release: boolea
   const ir = instrumented(made.ir, target);
   const shim = rustShim(made.rust, made.checked);
   if (shim !== undefined) refuseForeignRust(target);
-  const split = parts(ir, made.checked, release, target);
+  const split = parts(ir, made.checked, release, target, debug);
   let building = together(made.checked.tables.session, caches);
   linked(building, ir, split, out, release, links, shim, target, leaks, debug);
   return { warnings: made.checked.warnings, session: building };
@@ -329,31 +330,50 @@ function refuseForeignRust(target: Ref<Target>) {
 }
 
 // A build's IR as clang is given it: a release build's as one module, so `-O2` inlines across std
-// and the program, and a dev build's as the program's part, with std's part a unit of its own that
-// the cache keeps between builds.
-function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<Target>): { std: Unit[]; program: string } {
-  if (release) return { std: [], program: ir };
+// and the program, and a dev build's as the program's part, with std's part and each of the
+// program's files a unit of its own that the cache keeps by its text, so a rebuild compiles only
+// the files whose code changed. A `-g` build keeps its files in the program's part, which holds
+// the debug metadata their functions refer to.
+function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<Target>, debug = false): { cached: Unit[]; program: string } {
+  if (release) return { cached: [], program: ir };
   const arenas: Ref<Arenas> = checked.tables.arenas;
   const names = symbolNames(arenas);
   let std: string[] = [];
   let own: string[] = [];
+  let byFile = new Map<string, string[]>();
   for (const i of compiledOf(checked)) {
     const body = bodyOf(arenas, i);
     if (body.foreign === true || body.rust !== undefined) continue;
-    if (body.start >= STD_BASE) std.push(symbolIn(arenas, i, names));
-    else own.push(symbolIn(arenas, i, names));
+    const symbol = symbolIn(arenas, i, names);
+    if (body.start >= STD_BASE) {
+      std.push(symbol);
+      continue;
+    }
+    own.push(symbol);
+    if (debug) continue;
+    const file = fileAt(checked.tables.files, body.start);
+    const had = byFile.get(file);
+    if (had === undefined) byFile.set(file, [symbol]);
+    else {
+      let list: string[] = had;
+      list.push(symbol);
+      byFile.set(file, list);
+    }
   }
-  const halves = split(ir, std, own);
-  return { std: [{ name: "std", args: [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"], stdin: halves.std, inputs: [] }], program: halves.program };
+  const halves = split(ir, std, own, byFile);
+  const args = [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"];
+  let cached: Unit[] = [{ name: "std", args: [...args], stdin: halves.std, inputs: [] }];
+  for (const [file, text] of halves.groups) cached.push({ name: `file-${file.replace(/[^\w.-]/g, "_")}`, args: [...args], stdin: text, inputs: [] });
+  return { cached, program: halves.program };
 }
 
 // Builds the program's IR, split into `halves`, into the executable `out`.
 /** @throws {Error | IoError} */
-function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ std: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean) {
+function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ cached: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean) {
   const started = stageStart(session);
   let objects: string[] = [];
   for (const u of runtimeUnits(ir, release, false, copyTarget(target), leaks)) objects.push(cachedObject(session, u));
-  for (const u of halves.std) objects.push(cachedObject(session, u));
+  for (const u of halves.cached) objects.push(cachedObject(session, u));
   for (const o of mathObjects(session, [...target.compile])) objects.push(o);
   stageEnd(session, "runtime", started);
   const none: string[] = [];
@@ -407,7 +427,7 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
     const object = await objectAsync(u, objectPath(building, u));
     objects.push(object);
   }
-  for (const u of halves.std) {
+  for (const u of halves.cached) {
     const object = await objectAsync(u, objectPath(building, u));
     objects.push(object);
   }

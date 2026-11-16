@@ -302,6 +302,28 @@ test("a dev build keeps std's object across edits to the program's own code", ()
   expect(stdObjects(cache)).toHaveLength(2);
 });
 
+test("a dev build compiles again only the objects of the files whose code changed", () => {
+  const cache = join(root, "per-file");
+  const dir = join(root, "per-file-src");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "a.fsh"), `export function twice(n: i64): i64 { return n * 2; }\n`);
+  writeFileSync(join(dir, "main.fsh"), `import { twice } from "./a.fsh";\nimport { greet } from "./b.fsh";\nfunction main() { console.log(greet("fish"), twice(21)); }\n`);
+  const out = join(root, "per-file-out");
+  const built = (b: string) => {
+    writeFileSync(join(dir, "b.fsh"), b);
+    fishc(cache, "build", join(dir, "main.fsh"), "-o", out);
+    return Bun.spawnSync([out]).stdout.toString();
+  };
+  const files = (name: string) => readdirSync(join(cache, "objects")).filter((f) => f.startsWith(`file-${name}.fsh-`)).sort();
+  expect(built(`export function greet(s: string): string { return "hi " + s; }\n`)).toBe("hi fish 42\n");
+  const [a, b] = [files("a"), files("b")];
+  expect(a).toHaveLength(1);
+  expect(b).toHaveLength(1);
+  expect(built(`export function greet(s: string): string { return "hello " + s; }\n`)).toBe("hello fish 42\n");
+  expect(files("a")).toEqual(a);
+  expect(files("b")).toHaveLength(2);
+});
+
 // Every 10th case of the test programs that builds and runs as a dev executable, with no C
 // library to link and no server to start.
 function sampled(): { file: string; src: string }[] {

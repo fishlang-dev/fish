@@ -1,6 +1,8 @@
 import assert from "node:assert";
-// A dev build's IR split into two modules: std's part, whose text is the same whatever the
-// program's own code says, so its object can be cached, and the program's part, compiled fresh.
+// A dev build's IR split into modules: std's part, whose text is the same whatever the program's
+// own code says, a part per group of the program's functions (one per source file), and the
+// program's part holding the rest. Each part's text changes only when what it holds does, so its
+// object can be cached by that text.
 //
 // Std's part is every definition its functions reach, stopping at the program's: its own functions,
 // and the generated glue that reaches them, such as a Dyn's thunk calling one of its closures,
@@ -52,8 +54,10 @@ const copied = (item: Ref<Item>) => item.kind === "global" && / = private unname
 // A definition as the other part declares it.
 function declaration(item: Ref<Item>): string {
   if (item.kind === "global") {
-    const found = / = (?:\w+ )*?(global|constant) (.*)$/.exec(item.text)!;
-    return `@${item.name} = external ${found[1]!} ${typeAt(found[2]!)}`;
+    if (item.text.includes(" = external ")) return item.text;
+    // A thread-local global stays one in every part, or another part reaches it as an ordinary one.
+    const found = / = (?:\w+ )*?(thread_local )?(global|constant) (.*)$/.exec(item.text)!;
+    return `@${item.name} = external ${found[1] ?? ""}${found[2]!} ${typeAt(found[3]!)}`;
   }
   const header = item.text.slice(0, item.text.indexOf("\n"));
   const at = header.indexOf(`@${item.name}(`);
@@ -78,9 +82,10 @@ const typeAt = (text: string) => ("{[<".includes(text[0]!) ? text.slice(0, (clos
 
 const exposed = (item: Ref<Item>) => (item.kind === "define" ? item.text.replace(/^define internal /, "define ") : item.text.replace(/ = (internal|private) /, " = "));
 
-// The IR split into std's part and the program's. `stdSymbols` names std's functions and
-// `ownSymbols` the program's, as the IR spells them.
-export function split(ir: string, stdSymbols: string[], ownSymbols: string[]): { std: string; program: string } {
+// The IR split into std's part, a part for each of `groups`, and the program's. `stdSymbols` names
+// std's functions and `ownSymbols` the program's, as the IR spells them; `groups` names parts of
+// the program's functions, which leave the program's part for one of their own.
+export function split(ir: string, stdSymbols: string[], ownSymbols: string[], groups: Ref<Map<string, string[]>>): { std: string; groups: Map<string, string>; program: string } {
   const std = keysOf(stdSymbols);
   const own = keysOf(ownSymbols);
   const all = items(ir);
@@ -132,10 +137,21 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[]): {
     reached.add(name);
     for (const r of references(item)) work.push(r);
   }
+  // Which part defines each name: STD for std's, a group's name for its functions, and none for the
+  // program's.
+  let where = new Map<string, string>();
+  for (const name of reached) where.set(name, STD);
+  for (const [group, symbols] of groups) for (const k of keysOf(symbols)) if (!reached.has(k)) where.set(k, group);
   let metadata = "";
   for (const line of ir.split("\n")) if (line.startsWith("!")) metadata += `${line}\n`;
-  return { std: part(all, byName, reached, true), program: part(all, byName, reached, false) + metadata };
+  let out = new Map<string, string>();
+  for (const group of groups.keys()) out.set(group, part(all, byName, where, group));
+  return { std: part(all, byName, where, STD), groups: out, program: part(all, byName, where, "") + metadata };
 }
+
+// Std's part's name in `where`, which no group of the program's can have, since groups are named
+// by files.
+const STD = "\u0000std";
 
 function keysOf(symbols: Ref<string[]>): Set<string> {
   let out = new Set<string>();
@@ -143,17 +159,18 @@ function keysOf(symbols: Ref<string[]>): Set<string> {
   return out;
 }
 
-// Whether an item belongs to std's part, or else to the program's: std's is what its functions
-// reach, and the program's every other definition.
-function owns(item: Ref<Item>, reached: Ref<Set<string>>, std: boolean): boolean {
-  return std ? reached.has(item.key) : item.kind !== "declare" && !copied(item) && !reached.has(item.key);
+// Whether an item belongs to the part named `at`: std's is what its functions reach, a group's
+// its functions, and the program's every other definition.
+function owns(item: Ref<Item>, where: Ref<Map<string, string>>, at: string): boolean {
+  if (item.kind === "declare" || copied(item)) return false;
+  return (where.get(item.key) ?? "") === at;
 }
 
 // One part's text: what it owns and what that refers to, the rest declared.
-function part(all: Ref<Item[]>, byName: Ref<Map<string, usize>>, reached: Ref<Set<string>>, std: boolean): string {
+function part(all: Ref<Item[]>, byName: Ref<Map<string, usize>>, where: Ref<Map<string, string>>, label: string): string {
   let used = new Set<string>();
   let pending: string[] = [];
-  for (const item of all) if (owns(item, reached, std)) pending.push(item.key);
+  for (const item of all) if (owns(item, where, label)) pending.push(item.key);
   while (pending.length > 0) {
     const name = pending.pop()!;
     if (used.has(name)) continue;
@@ -161,12 +178,12 @@ function part(all: Ref<Item[]>, byName: Ref<Map<string, usize>>, reached: Ref<Se
     const at = byName.get(name);
     if (at === undefined) continue;
     const item: Ref<Item> = all[at]!;
-    if (owns(item, reached, std) || copied(item)) for (const r of references(item)) pending.push(r);
+    if (owns(item, where, label) || copied(item)) for (const r of references(item)) pending.push(r);
   }
   let lines: string[] = [];
   for (const item of all) {
     if (!used.has(item.key)) continue;
-    lines.push(copied(item) || item.kind === "declare" ? item.text : owns(item, reached, std) ? exposed(item) : declaration(item));
+    lines.push(copied(item) || item.kind === "declare" ? item.text : owns(item, where, label) ? exposed(item) : declaration(item));
   }
   return `${lines.join("\n")}\n`;
 }
