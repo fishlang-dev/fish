@@ -7187,9 +7187,11 @@ export class Subprocess {
   }
 }
 
-// The exit code, put back for the next reader once taken.
+// The exit code, put back for the next reader once taken. The first reader starts the wait as a
+// task of its own, so a reader dropped while waiting, as the loser of a race is, leaves it running
+// for the readers after it.
 async function childExited(state: shared<ChildState>): Promise<i64> {
-  if (!state.claimed.exchange(true)) await childWaited(state.clone());
+  if (!state.claimed.exchange(true)) spawn(childWaited(state.clone()));
   while (true) {
     const code = await state.exit.receive();
     if (code !== null) {
@@ -7200,7 +7202,7 @@ async function childExited(state: shared<ChildState>): Promise<i64> {
 }
 
 async function* childText(state: shared<ChildState>, err: boolean): AsyncGenerator<string> {
-  if (!state.claimed.exchange(true)) await childWaited(state.clone());
+  if (!state.claimed.exchange(true)) spawn(childWaited(state.clone()));
   let text: string | null = null;
   if (err) text = await state.err.receive();
   else text = await state.out.receive();

@@ -36,3 +36,21 @@ function main() {
 function main() {
   Bun.env.X = "y";
 }
+// case: bun_spawn_exited_after_a_lost_race
+// expect: first 0
+// expect: second 1 0
+// A child's exit awaited by the loser of a race is still seen by the next reader.
+async function exitOf(exited: Promise<i64>, at: i64): Promise<i64> {
+  const _code = await exited;
+  return at;
+}
+
+async function main(): Promise<void> throws IoError {
+  const a = Bun.spawn(["sleep", "0.1"], { stdout: "ignore", stderr: "ignore" });
+  const b = Bun.spawn(["sleep", "0.4"], { stdout: "ignore", stderr: "ignore" });
+  const first = await Promise.race([exitOf(a.exited, 0), exitOf(b.exited, 1)]);
+  console.log("first", first);
+  const second = await Promise.race([exitOf(b.exited, 1)]);
+  const code = await b.exited;
+  console.log("second", second, code);
+}
