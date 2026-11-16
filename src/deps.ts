@@ -72,11 +72,14 @@ const NATIVE_HELPERS = new Set(["node-gyp-build", "bindings", "node-addon-api", 
 // `@esbuild/darwin-arm64`, `sharp-linux-x64` or `turbo-darwin-64`.
 const PLATFORMS = /(^|[-/@])(darwin|linux|win32|freebsd|android)-(x64|arm64|ia32|arm|64|universal|x86|ppc64|s390x|riscv64|loong64|mips64el)([-.]|$)/;
 
+// A dependency list's versions as written: one that isn't a string, as in `"odd": 1`, is passed
+// over where the list is read, rather than failing the whole parse.
+type Versions = { [name: string]: string | f64 | boolean | null };
+
 // The fields of a package.json read here. Fish checks them as it parses; TypeScript doesn't, so
 // each is still checked where it is read.
 type PackageFields = {
-  dependencies?: { [name: string]: string }; devDependencies?: { [name: string]: string };
-  optionalDependencies?: { [name: string]: string }; gypfile?: boolean;
+  dependencies?: Versions; devDependencies?: Versions; optionalDependencies?: Versions; gypfile?: boolean;
 };
 
 const isObject = (v: Ref<unknown>): boolean => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -146,11 +149,11 @@ export function dependencies(dir: string): Dependencies | undefined {
 
 type Named = { name: string; version: string; dev: boolean };
 
-function named(deps: Ref<{ [name: string]: string } | undefined>, dev: boolean): Named[] {
+function named(deps: Ref<Versions | undefined>, dev: boolean): Named[] {
   let out: Named[] = [];
   if (deps === undefined || !isObject(deps)) return out;
   for (const [name, version] of Object.entries(deps)) {
-    if (typeof (version as unknown) === "string") out.push({ name, version, dev });
+    if (typeof version === "string") out.push({ name, version, dev });
   }
   return out;
 }
@@ -182,7 +185,7 @@ function installed(dir: string, name: string): string {
   }
 }
 
-function keysOf(deps: Ref<{ [name: string]: string } | undefined>): string[] {
+function keysOf(deps: Ref<Versions | undefined>): string[] {
   if (deps === undefined || !isObject(deps)) return [];
   return Object.keys(deps);
 }
