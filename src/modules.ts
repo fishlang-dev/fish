@@ -1336,13 +1336,14 @@ class Encodings implements Scoping {
     const given: Ref<Expr> = n.args[at]!;
     const options = typeof role === "number";
     if (options && (given.kind !== "object" || !given.props.some((p) => isEncoding(p)))) return false;
-    let encoding: string | null | undefined = undefined;
-    if (given.kind === "string" && !options) encoding = given.value;
-    else if (given.kind === "object") encoding = encodingOf(given, options);
-    if (encoding === undefined) {
+    let found: { name: string | null } | undefined = undefined;
+    if (given.kind === "string" && !options) found = { name: given.value };
+    else if (given.kind === "object") found = encodingOf(given, options);
+    if (found === undefined) {
       if (this.failure === undefined) this.failure = new CompileError("E0908", `'${target.name}' takes its encoding as a literal, like ${options ? "" : `"utf8" or `}{ encoding: "utf8" }, so its type is known while compiling`, given.start, given.end);
       return false;
     }
+    let encoding = found.name;
     // Node's "buffer" asks for bytes, what no encoding gives.
     if (options && encoding === "buffer") encoding = null;
     if (encoding !== null && !/^utf-?8$/i.test(encoding)) {
@@ -1445,8 +1446,9 @@ function isEncoding(p: Ref<ObjectProp>): boolean {
 }
 
 // The encoding an options object names: its text, null for `encoding: null`, or undefined when
-// it isn't a literal, or the object holds anything else and `others` doesn't allow it.
-function encodingOf(o: Ref<Extract<Expr, { kind: "object" }>>, others: boolean): string | null | undefined {
+// it isn't a literal, or the object holds anything else and `others` doesn't allow it. The name is
+// held in an object, since Fish has one absent value where JS has two.
+function encodingOf(o: Ref<Extract<Expr, { kind: "object" }>>, others: boolean): { name: string | null } | undefined {
   let named: usize = 0;
   for (const p of o.props) if (isEncoding(p)) named++;
   if (named !== 1 || (!others && o.props.length > 1)) return undefined;
@@ -1454,8 +1456,8 @@ function encodingOf(o: Ref<Extract<Expr, { kind: "object" }>>, others: boolean):
     if (!isEncoding(p)) continue;
     if (p.kind !== "property") return undefined;
     const value: Ref<Expr> = p.value;
-    if (value.kind === "null") return null;
-    return value.kind === "string" ? value.value : undefined;
+    if (value.kind === "null") return { name: null };
+    return value.kind === "string" ? { name: value.value } : undefined;
   }
   return undefined;
 }
