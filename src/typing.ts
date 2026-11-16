@@ -671,6 +671,13 @@ export class Typing {
     return t === undefined || typeof t === "string" ? undefined : this.rec(t as Exclude<T, string>);
   }
 
+  // A record's kind, read without copying the record out.
+  kindOf(t: Exclude<Type, string>): TypeRecord["kind"];
+  kindOf(t: Type | undefined): TypeRecord["kind"] | undefined;
+  kindOf(t: Type | undefined): TypeRecord["kind"] | undefined {
+    return t === undefined || typeof t === "string" ? undefined : this.recRef(t).kind;
+  }
+
   // Whether a hole of type `t` takes `text`: any text for a string, the text a number of that type
   // prints as for a number type, a literal's own text, or for a union, what any member takes.
   textFits(text: string, t: Type): boolean {
@@ -713,14 +720,14 @@ export class Typing {
   optionRef(t: Type | undefined): RefType | undefined {
     if (t === undefined || !this.isOption(t) || this.rec(t).members.length !== 2) return undefined;
     const ref = this.rec(t).members.find((m) => m !== "null")!;
-    return this.recOf(ref)?.kind === "ref" ? (ref as RefType) : undefined;
+    return this.kindOf(ref) === "ref" ? (ref as RefType) : undefined;
   }
 
   // The shape a JS handle's declaration gives it, when it has one.
   jsShape(t: Type): InterfaceType | ObjectType | undefined {
     const r = this.recOf(t);
     if (r?.kind !== "block" || r.which !== "JsValue" || typeof r.of === "string") return undefined;
-    const kind = this.rec(r.of).kind;
+    const kind = this.kindOf(r.of);
     return kind === "interface" || kind === "object" ? (r.of as InterfaceType | ObjectType) : undefined;
   }
 
@@ -929,7 +936,7 @@ export class Typing {
   // lent again rather than moved, so it copies too.
   // Whether a type is the class `c`, or a class extending it: what `instanceof c` tests.
   isSubclass(t: Type, c: Type): boolean {
-    let x: ClassType | undefined = this.recOf(t)?.kind === "class" ? (t as ClassType) : undefined;
+    let x: ClassType | undefined = this.kindOf(t) === "class" ? (t as ClassType) : undefined;
     while (x !== undefined) {
       if (x === c) return true;
       x = this.rec(x).base;
@@ -1046,7 +1053,7 @@ export class Typing {
   // Whether a value owns a JoinHandle, or with `throughRefs` borrows one: only one place may
   // await a task's result.
   holdsHandle(t: Type, throughRefs = false) {
-    return this.holdsPart(t, (u) => this.recOf(u)?.kind === "handle", throughRefs);
+    return this.holdsPart(t, (u) => this.kindOf(u) === "handle", throughRefs);
   }
 
   // Whether a value changes in place behind a shared reference: it holds an Atomic, a Lock, a
@@ -1064,7 +1071,7 @@ export class Typing {
   holdsInterior(t: Type): InteriorType | undefined {
     let found: InteriorType | undefined = undefined;
     this.holdsPart(t, (u) => {
-      if (this.recOf(u)?.kind !== "interior") return false;
+      if (this.kindOf(u) !== "interior") return false;
       found = u as InteriorType;
       return true;
     });
@@ -1346,7 +1353,7 @@ export class Typing {
 
   private crossing(t: Exclude<Type, string>, within: Mut<TypeSet<Type>>): string | undefined {
     // A callback or a stored Promise crosses on its own, as JS keeps it, not inside another value.
-    const kept = (u: Type) => this.recOf(u)?.kind === "dyn" && this.keptByJs(u as DynType);
+    const kept = (u: Type) => this.kindOf(u) === "dyn" && this.keptByJs(u as DynType);
     const r = this.rec(t);
     switch (r.kind) {
       case "brand":
@@ -1354,7 +1361,7 @@ export class Typing {
       case "literal":
         return undefined;
       case "param":
-        if (r.bound !== undefined && this.rec(r.bound).kind === "function") return "functions crossing between Fish and JS aren't supported yet";
+        if (r.bound !== undefined && this.kindOf(r.bound) === "function") return "functions crossing between Fish and JS aren't supported yet";
         return r.concrete === undefined ? "a type parameter's value isn't known here" : this.uncrossableIn(r.concrete, within);
       case "union": {
         if (r.members.some((m) => kept(m))) return "a callback or a Promise in a union, as an optional parameter holds one, isn't supported yet";
@@ -1848,7 +1855,7 @@ export class Typing {
 
   // What a `Promise<T>` gives, when the interface is one.
   promiseElement(t: Type): Type | undefined {
-    return this.recOf(t)?.kind === "interface" ? this.promised.get(t as InterfaceType) : undefined;
+    return this.kindOf(t) === "interface" ? this.promised.get(t as InterfaceType) : undefined;
   }
 
   private regexes = new Map<string, RegexType>();
@@ -1910,10 +1917,10 @@ export class Typing {
   // remade by the checker.
   private remade(this: Mut<this>, t: RecursiveType, makeOf: (self: Mut<this>) => Type, args: Type[]): RecursiveType {
     const stands = this.rec(t).of;
-    const kind = this.recOf(stands)?.kind;
+    const kind = this.kindOf(stands);
     if (kind === "class" || (kind === "union" && this.heldBlocks.get(stands as UnionType) === t)) {
       const made = makeOf(this);
-      const madeKind = this.recOf(made)?.kind;
+      const madeKind = this.kindOf(made);
       return madeKind === "class" || madeKind === "union" ? this.blockFor(made as ClassType | UnionType, args) : t;
     }
     return this.instanceRecursive(t, args);
@@ -2016,7 +2023,7 @@ export class Typing {
   // types they stand for, held in a value of their own rather than in a block.
   unfolded(this: Mut<this>, t: Type): Type {
     const r = this.recOf(t);
-    if (r?.kind === "union" && r.members.some((m) => this.recOf(m)?.kind === "recursive")) return this.unionType(r.members.map((t) => this.unfold(t)), r.name);
+    if (r?.kind === "union" && r.members.some((m) => this.kindOf(m) === "recursive")) return this.unionType(r.members.map((t) => this.unfold(t)), r.name);
     return this.unfold(t);
   }
 
@@ -2212,7 +2219,7 @@ export class Typing {
 
   // What a `Generator<T>`, or with `async` an `AsyncGenerator<T>`, yields, when the interface is one.
   generatorElement(t: Type, async = false): Type | undefined {
-    return this.recOf(t)?.kind === "interface" ? (async ? this.asyncElements : this.elements).get(t as InterfaceType) : undefined;
+    return this.kindOf(t) === "interface" ? (async ? this.asyncElements : this.elements).get(t as InterfaceType) : undefined;
   }
 
   functionType(this: Mut<this>, names: string[], params: Type[], returns: Type, throws?: Type): FunctionType {
@@ -2286,7 +2293,7 @@ export class Typing {
     const allNever = flattened.every((q) => q === "never");
     let flat: Type[] = flattened.filter((p) => p !== "never" || allNever);
     // Regexes of different patterns are one `RegExp`, as every regex is a pointer to a program.
-    const isRegex = (p: Type) => this.recOf(p)?.kind === "regex";
+    const isRegex = (p: Type) => this.kindOf(p) === "regex";
     if (new TypeSet<Type>(flat.filter((p) => isRegex(p))).size > 1) flat = flat.map((p): Type => (isRegex(p) ? ANY_REGEX : p));
     // Members of one value shape, like `{ a?: T }` and `{ a: T | null }`, are one member, spelled
     // as whichever sorts first.
@@ -2351,7 +2358,7 @@ export class Typing {
     if (from === "void" || r?.kind === "interface" || r?.kind === "function" || r?.kind === "closure" || r?.kind === "generator" || r?.kind === "future" || r?.kind === "handle") return false;
     if (this.holdsRef(from) || this.holdsUnknownInPlace(from) || this.uninspectable(from) !== undefined) return false;
     const held = this.lower(r?.kind === "literal" ? (r.owner?.of ?? this.baseOf(from as LiteralType)) : r?.kind === "variant" && r.of !== undefined ? r.of : from);
-    const heldMembers: Type[] = this.isUnknown(held) ? [] : (this.recOf(held)?.kind === "union" ? this.rec(held as UnionType).members : [held]);
+    const heldMembers: Type[] = this.isUnknown(held) ? [] : (this.kindOf(held) === "union" ? this.rec(held as UnionType).members : [held]);
     for (const m of heldMembers) this.intoUnknown.add(m);
     return true;
   }
@@ -2372,7 +2379,7 @@ export class Typing {
     if (this.unknownId === undefined) return;
     const id = this.unknownId as usize;
     const all = this.unionType([...this.intoUnknown, "null"]);
-    const members = this.recOf(all)?.kind === "union" ? this.rec(all as UnionType).members : [all];
+    const members = this.kindOf(all) === "union" ? this.rec(all as UnionType).members : [all];
     this.arena[id - FIRST_ID] = { kind: "union", members, fields: [], name: "unknown", unknown: true };
   }
 
@@ -2493,7 +2500,7 @@ export class Typing {
     this.arrays.set(`[${this.keyOf(of)}]`, array);
     this.ties.set(of, back);
     // Its members stay as they are too, so one narrowed to is still a member of it.
-    if (r?.kind === "union") for (const m of r.members) if (typeof m !== "string" && this.rec(m).kind === "object") this.members.set(m, back);
+    if (r?.kind === "union") for (const m of r.members) if (typeof m !== "string" && this.kindOf(m) === "object") this.members.set(m, back);
   }
 
   // The type holding itself that each member of its union belongs to.
@@ -2870,7 +2877,7 @@ export class Typing {
   // function or closure type never is unchanged, since `heldArgument` boxes it.
   private allUnswappable(this: Mut<this>, ts: Type[], held: boolean): boolean {
     for (const u of ts) {
-      const kind = this.recOf(u)?.kind;
+      const kind = this.kindOf(u);
       if (held && (kind === "function" || kind === "closure")) return false;
       if (!this.unswappable(u)) return false;
     }
@@ -2882,7 +2889,7 @@ export class Typing {
     const found = swap.get(t);
     if (found !== undefined) return found;
     if (typeof t === "string") return t;
-    if (this.unswappable(t) && [...swap.keys()].every((k) => this.recOf(k)?.kind === "param")) return t;
+    if (this.unswappable(t) && [...swap.keys()].every((k) => this.kindOf(k) === "param")) return t;
     const r = this.rec(t);
     if (r.kind === "class") {
       if (r.generic === undefined) return t;
@@ -3166,7 +3173,7 @@ export class Typing {
     const fr = this.recOf(from);
     const tr = this.recOf(to);
     const target = tr?.kind === "param" && tr.concrete !== undefined ? tr.concrete : to;
-    if (from !== target && this.recOf(target)?.kind === "pattern") {
+    if (from !== target && this.kindOf(target) === "pattern") {
       if (fr?.kind === "union") return fr.members.every((m) => this.fits(m, target));
       return fr?.kind === "literal" && typeof fr.value === "string" && fr.owner === undefined && this.textFits(fr.value, target);
     }
@@ -3184,7 +3191,7 @@ export class Typing {
       return fr?.kind === "ref" && (fr.mutable || !tr.mutable) && this.lower(this.unfold(fr.to)) === this.lower(tr.to);
     }
     // Any regex is a `RegExp`; all of them are the same pointer to a program.
-    if (to === ANY_REGEX) return fr !== undefined && (fr.kind === "regex" || (fr.kind === "param" && this.recOf(fr.bound)?.kind === "regex"));
+    if (to === ANY_REGEX) return fr !== undefined && (fr.kind === "regex" || (fr.kind === "param" && this.kindOf(fr.bound) === "regex"));
     // A `MutPtr<T>` may be used as a `Ptr<T>`, as Rust's `*mut T` coerces to `*const T`.
     if (tr?.kind === "pointer") {
       return fr?.kind === "pointer" && (fr.mutable || !tr.mutable) && this.lower(fr.to) === this.lower(tr.to);
@@ -3222,7 +3229,7 @@ export class Typing {
     // returning what it returns, or anything when it returns nothing.
     // A parameter of a function type fits through its signature.
     if (tr?.kind === "function") {
-      const given = fr?.kind === "param" && fr.bound !== undefined && this.rec(fr.bound).kind === "function" ? fr.concrete ?? fr.bound : from;
+      const given = fr?.kind === "param" && fr.bound !== undefined && this.kindOf(fr.bound) === "function" ? fr.concrete ?? fr.bound : from;
       // A stored callable fits by the function type it was written as.
       const g = this.recOf(given);
       const fn = g?.kind === "dyn" ? this.callableOf.get(g.of) : undefined;

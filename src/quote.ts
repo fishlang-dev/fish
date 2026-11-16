@@ -284,7 +284,7 @@ function memberFor(typing: Ref<Typing>, v: Ref<QuoteValue>, all: Ref<Type[]>): T
   const kind = kindOf(v);
   for (const m of all) {
     const o = typing.unfold(m);
-    if (typeof o === "string" || typing.rec(o).kind !== "object") continue;
+    if (typeof o === "string" || typing.kindOf(o) !== "object") continue;
     const k = typing.field(o, "kind");
     const kr = k === undefined || typeof k.type === "string" ? undefined : typing.rec(k.type);
     if (kind !== undefined && (kr === undefined || kr.kind !== "literal" || kr.value !== kind)) continue;

@@ -179,7 +179,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     for (const [e, to] of instance.coercions) {
       const ref = cx.tables.typing.optionRef(to);
       const from = instance.types.get(e);
-      const fromRef = from !== undefined && typeof from !== "string" && cx.tables.typing.rec(from).kind === "ref";
+      const fromRef = from !== undefined && typeof from !== "string" && cx.tables.typing.kindOf(from) === "ref";
       let given: Type = to;
       if (ref !== undefined && from !== undefined && from !== "null" && cx.tables.typing.optionRef(from) === undefined && !fromRef) given = ref;
       coercions.set(e.id, given);
@@ -291,10 +291,10 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     return cx.instance.locals.getById(n.id);
   }
   isRef(cx: Ref<MoveCx<T, B, I>>, t: Type): t is RefType {
-    return typeof t !== "string" && cx.tables.typing.rec(t).kind === "ref";
+    return typeof t !== "string" && cx.tables.typing.kindOf(t) === "ref";
   }
   isUnion(cx: Ref<MoveCx<T, B, I>>, t: Type): t is UnionType {
-    return typeof t !== "string" && cx.tables.typing.rec(t).kind === "union";
+    return typeof t !== "string" && cx.tables.typing.kindOf(t) === "union";
   }
   // What a reference refers to, or the type itself.
   deref(cx: Ref<MoveCx<T, B, I>>, t: Type): Type {
@@ -1969,7 +1969,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     if (typeof held === "string") return cx.instance.types.get(e);
     const concrete = cx.tables.typing.lower(held);
     if (typeof concrete === "string") return cx.instance.types.get(e);
-    const kind = cx.tables.typing.rec(concrete).kind;
+    const kind = cx.tables.typing.kindOf(concrete);
     if (kind === "union" || kind === "param") return cx.instance.types.get(e);
     return cx.tables.typing.field(concrete, e.name)?.type ?? cx.instance.types.get(e);
   }
@@ -2707,7 +2707,7 @@ function narrowsUnion(typing: Mut<Typing>, instance: Ref<Instance>, coercions: R
   const to = instance.types.get(e);
   if (from === undefined || to === undefined) return false;
   const lowered = typing.lower(from);
-  if (typeof lowered === "string" || typing.rec(lowered).kind !== "union") return false;
+  if (typeof lowered === "string" || typing.kindOf(lowered) !== "union") return false;
   const target = typing.lower(to);
   return lowered !== target && !typing.fits(lowered, target);
 }

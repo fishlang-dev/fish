@@ -139,11 +139,11 @@ function cases(typing: Mut<Typing>, t: Type): Case[] {
       out.push({ kind: "variant", variant: m as VariantType });
       continue;
     }
-    if (r.kind === "object" || r.kind === "class" || (r.kind === "param" && (typing.recOf(r.bound)?.kind === "object" || typing.recOf(r.bound)?.kind === "interface"))) {
+    if (r.kind === "object" || r.kind === "class" || (r.kind === "param" && (typing.kindOf(r.bound) === "object" || typing.kindOf(r.bound) === "interface"))) {
       out.push({ kind: "object", type: m as Shape });
       continue;
     }
-    const boxed = r.kind === "recursive" ? typing.recOf(r.of)?.kind : undefined;
+    const boxed = r.kind === "recursive" ? typing.kindOf(r.of) : undefined;
     if (boxed === "object" || boxed === "class") {
       out.push({ kind: "object", type: m as Shape });
       continue;
@@ -173,7 +173,7 @@ export function uncovered(typing: Mut<Typing>, ids: Mut<Ids>, rows: Row[], types
   const all = cases(typing, type);
   // A member holding the union again splits into fields of the union, without end; where no row
   // takes the column apart, every value of it is covered alike, so it needs no split.
-  if (expanded.every((row) => info(recorded, row[0]!).kind === "any") && all.some((c) => c.kind === "object" && typing.rec(c.type).kind === "recursive")) {
+  if (expanded.every((row) => info(recorded, row[0]!).kind === "any") && all.some((c) => c.kind === "object" && typing.kindOf(c.type) === "recursive")) {
     const missing = uncovered(typing, ids, expanded.map((row) => row.slice(1)), rest, recorded);
     return missing !== undefined ? ["_", ...missing] : undefined;
   }
@@ -250,7 +250,7 @@ function specialize(typing: Ref<Typing>, ids: Mut<Ids>, p: Pattern, c: Ref<Case>
 // included.
 export function objectFields(typing: Ref<Typing>, t: Shape): Field[] {
   const r = typing.rec(t);
-  if (r.kind === "recursive") return typing.recOf(r.of)?.kind === "object" || typing.recOf(r.of)?.kind === "class" ? objectFields(typing, r.of as Shape) : [];
+  if (r.kind === "recursive") return typing.kindOf(r.of) === "object" || typing.kindOf(r.of) === "class" ? objectFields(typing, r.of as Shape) : [];
   if (r.kind === "param" || r.kind === "object") return typing.fieldsOf(t);
   const baseFields: Field[] = r.base !== undefined ? objectFields(typing, r.base) : [];
   return [...baseFields, ...r.fields].filter((f) => (f.access ?? "public") === "public");

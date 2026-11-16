@@ -41,7 +41,7 @@ export function placeholders<R extends BoundResolver>(r: Mut<R>, params: Ref<Typ
       if (around !== undefined) for (const [n, t] of around) seen.set(n, t);
       for (const [n, t] of scope) seen.set(n, t);
       const t = r.resolveIn(seen, p.constraint);
-      const kind = typeof t === "string" ? undefined : r.tables.typing.rec(t).kind;
+      const kind = typeof t === "string" ? undefined : r.tables.typing.kindOf(t);
       if (kind === "interface" || kind === "object") bound = t as ObjectType | InterfaceType;
       else if (valueBound(r.tables.typing, t)) within = t;
       else throw new CompileError("E0107", `a type parameter's bound must be an interface, an object type, or a union, primitive, literal or brand type, not '${r.tables.typing.show(t)}'`, p.constraint.start, p.constraint.end);
@@ -976,7 +976,7 @@ export class Instancing<H extends InstancingHost> {
       // A generic method's own parameters are open here too, offering their bounds.
       for (const [name, t] of this.explicitPlaceholders(f.bodyId)) if (!scope.has(name)) scope.set(name, bindings.get(name) ?? t);
       for (const [i, bound] of this.implicitOf(f.bodyId)) {
-        if (this.host.tables.typing.rec(bound).kind !== "function" || !bindings.has(`#${i}`)) continue;
+        if (this.host.tables.typing.kindOf(bound) !== "function" || !bindings.has(`#${i}`)) continue;
         const shown = this.host.tables.typing.show(bound);
         const same = this.sameParams(f.bodyId, i, bound, merged(scope, undefined));
         scope.set(`#${i}`, this.host.tables.typing.wrapped(shown, same, bindings.get(`#${i}`)!));
@@ -1018,7 +1018,7 @@ export class Instancing<H extends InstancingHost> {
     const t = this.host.resolveIn(scope, f.params[i]!.type!);
     const r = typeof t === "string" ? undefined : this.host.tables.typing.rec(t);
     const own = r?.kind === "ref" ? r.to : t;
-    return typeof own !== "string" && this.host.tables.typing.rec(own).kind === this.host.tables.typing.rec(bound).kind ? (own as Bound) : bound;
+    return typeof own !== "string" && this.host.tables.typing.kindOf(own) === this.host.tables.typing.kindOf(bound) ? (own as Bound) : bound;
   }
 
   /** @throws {CompileError} */
@@ -1063,7 +1063,7 @@ export class Instancing<H extends InstancingHost> {
     if (written.kind !== "ref" || written.name !== "Iterable") return t;
     const r = typeof t === "string" ? undefined : this.host.tables.typing.rec(t);
     const held = r?.kind === "ref" ? r.to : t;
-    if (this.host.tables.typing.recOf(held)?.kind !== "class") return t;
+    if (this.host.tables.typing.kindOf(held) !== "class") return t;
     let members = this.host.members();
     const classId = members.classIdOf(held as ClassType);
     const method = inherited(members.arenas(), members.arenas().classOf(classId), "methods", ITERATOR);
@@ -1106,7 +1106,7 @@ export class Instancing<H extends InstancingHost> {
       // default's type when left out, which differs from an argument's, so it stays refused. A
       // function-typed parameter property takes a closure as a declared field assigned from a
       // parameter does.
-      const optional = p.optional && (written !== type || this.host.tables.typing.recOf(type)?.kind !== "interface" || this.host.tables.defaulted.has(p));
+      const optional = p.optional && (written !== type || this.host.tables.typing.kindOf(type) !== "interface" || this.host.tables.defaulted.has(p));
       if (type === undefined || typeof type === "string" || optional) continue;
       const t = this.host.tables.typing.rec(type);
       if (p.modifiers.length > 0 && t.kind !== "function") continue;
@@ -1444,7 +1444,7 @@ export class GenericClasses<H extends GenericClassesHost> {
     const shape = shapes.join(",");
     const seen = this.host.genericClassesState.shapesOf.get(template.id)!;
     if (!seen.has(shape) && seen.size > 64) throw new CompileError("E0113", `instantiating '${template.name}' never ends: each instance needs another with larger type arguments`, at.start, at.end);
-    for (const a of args) if (typeof a !== "string" && this.host.tables.typing.rec(a).kind === "interface") throw new CompileError("E0115", "an interface can't be a type argument, since it describes values without being one", at.start, at.end);
+    for (const a of args) if (typeof a !== "string" && this.host.tables.typing.kindOf(a) === "interface") throw new CompileError("E0115", "an interface can't be a type argument, since it describes values without being one", at.start, at.end);
     let scope = new Map<string, Type>();
     for (let i: usize = 0; i < count; i++) scope.set(template.typeParams[i]!.name, args[i]!);
     let shown: string[] = [];

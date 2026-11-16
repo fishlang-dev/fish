@@ -246,6 +246,9 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   private recOf<T extends Type>(t: T | undefined) {
     return t === undefined || typeof t === "string" ? undefined : this.host.tables.typing.rec(t as Exclude<T, string>);
   }
+  private kindOf(t: Type | undefined) {
+    return this.host.tables.typing.kindOf(t);
+  }
   // A class laid out for a type-level function, with no names in sight.
   /** @throws {CompileError} */
   fieldsKnown(this: Mut<this>, c: ClassType): boolean {
@@ -608,7 +611,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (lowered !== undefined) {
       const declared = this.resolveType(p.type!);
       const low = this.host.tables.typing.lower(declared);
-      const kind = this.recOf(low)?.kind;
+      const kind = this.kindOf(low);
       if (kind !== undefined && ["function", "closure", "dyn", "interface", "param", "ref", "future", "generator", "handle"].includes(kind)) {
         throw new CompileError("E0801", `defaults on parameters of type '${this.host.tables.typing.show(declared)}' are not supported yet`, p.start, p.end);
       }
@@ -1094,7 +1097,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (typeof base !== "string" || base === "void" || base === "null" || base === "never") {
       throw new CompileError("E0116", `a brand's base is a number, boolean, string or bigint type, not '${this.host.tables.typing.show(base)}'`, baseNode.start, baseNode.end);
     }
-    for (const u of this.host.tables.typing.partsOf(tag)) if (this.recOf(u)?.kind === "param") throw unsupported("brand tags holding type parameters", tagNode);
+    for (const u of this.host.tables.typing.partsOf(tag)) if (this.kindOf(u) === "param") throw unsupported("brand tags holding type parameters", tagNode);
     return this.host.tables.typing.brandType(base, tag, how);
   }
 
@@ -1107,10 +1110,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     }
     const to = this.resolveType(t.args[0]!);
     if (to === "void") throw new CompileError("E0118", "there is no 'void' value to borrow", t.start, t.end);
-    if (this.recOf(to)?.kind === "function") throw unsupported("references to functions", t);
+    if (this.kindOf(to) === "function") throw unsupported("references to functions", t);
     // A type parameter standing for a reference makes one too.
     const lowered = this.host.tables.typing.lower(to);
-    if (this.recOf(lowered)?.kind === "ref") throw unsupported("references to references", t);
+    if (this.kindOf(lowered) === "ref") throw unsupported("references to references", t);
     if (t.args.length < 2) return this.host.tables.typing.refType(to, t.name === "Mut", undefined);
     const life: Ref<TypeNode> = t.args[1]!;
     if (life.kind !== "ref" || life.args.length > 0) throw new CompileError("E0209", "a lifetime is a name declared as '<A extends Lifetime>'", life.start, life.end);
@@ -1177,7 +1180,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     let sides: Type[] = [];
     for (let i: usize = 0; i < nodes.length; i++) {
       const s = resolved[i]!;
-      const kind = this.recOf(s)?.kind;
+      const kind = this.kindOf(s);
       if (kind === "object" || kind === "interface") {
         sides.push(s);
         continue;
@@ -1192,10 +1195,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     const from = spanOf(nodes[0]!);
     const to = spanOf(nodes[nodes.length - 1]!);
     let distributes = false;
-    for (const s of sides) if (this.host.tables.typing.rec(s as Exclude<Type, string>).kind === "union") distributes = true;
+    for (const s of sides) if (this.host.tables.typing.kindOf(s as Exclude<Type, string>) === "union") distributes = true;
     if (distributes) {
       for (let i: usize = 0; i < sides.length; i++) {
-        if (this.host.tables.typing.rec(sides[i]! as Exclude<Type, string>).kind === "interface") throw unsupported("intersections of interfaces with unions", nodes[i]!);
+        if (this.host.tables.typing.kindOf(sides[i]! as Exclude<Type, string>) === "interface") throw unsupported("intersections of interfaces with unions", nodes[i]!);
       }
       let combos: ObjectType[][] = [[]];
       for (const s of sides) {
@@ -1234,7 +1237,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     let fields = objects[0]!;
     for (let k: usize = 1; k < objects.length; k++) fields = merged(this.host.tables.typing, fields, objects[k]!, from, to);
     let allObjects = true;
-    for (const s of sides) if (this.host.tables.typing.rec(s as Exclude<Type, string>).kind !== "object") allObjects = false;
+    for (const s of sides) if (this.host.tables.typing.kindOf(s as Exclude<Type, string>) !== "object") allObjects = false;
     if (allObjects) return fields;
     let keys: string[] = [];
     for (const s of sides) keys.push(this.host.tables.typing.keyOf(s));
@@ -1290,10 +1293,10 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // Whether every member of a union, unfolded, is an object type.
   private objectMembers(this: Mut<this>, u: Type): boolean {
     if (typeof u === "string") return false;
-    const count = this.host.tables.typing.rec(u).kind === "union" ? (this.host.tables.typing.rec(u as UnionType)).members.length : 0;
+    const count = this.host.tables.typing.kindOf(u) === "union" ? (this.host.tables.typing.rec(u as UnionType)).members.length : 0;
     for (let k: usize = 0; k < count; k++) {
       const m = this.host.tables.typing.rec(u as UnionType).members[k]!;
-      if (this.recOf(this.host.tables.typing.unfold(m))?.kind !== "object") return false;
+      if (this.kindOf(this.host.tables.typing.unfold(m)) !== "object") return false;
     }
     return true;
   }
@@ -1831,7 +1834,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       const against = this.comparable(resolved, spanOf(p));
       return this.conforms(t, against, spanOf(p));
     }
-    const kind = this.recOf(t)?.kind;
+    const kind = this.kindOf(t);
     if (kind === "param") {
       const concrete = this.host.tables.typing.rec(t as ParamType).concrete;
       if (concrete !== undefined) return this.matches(p, concrete, found);
@@ -2030,7 +2033,7 @@ function keyed(typing: Ref<Typing>, t: Type): boolean {
 }
 
 function kindOf(typing: Ref<Typing>, t: Type | undefined): string | undefined {
-  return t === undefined || typeof t === "string" ? undefined : typing.rec(t).kind;
+  return t === undefined || typeof t === "string" ? undefined : typing.kindOf(t);
 }
 
 // Whether a parameter is written `...args: any[]` or `...args: unknown[]`.
@@ -2206,7 +2209,7 @@ function merged(typing: Mut<Typing>, a: ObjectType, b: ObjectType, from: Ref<Spa
 // A type, when it is an object type.
 function objectTypeOf(typing: Ref<Typing>, t: Type): ObjectType | undefined {
   if (typeof t === "string") return undefined;
-  return typing.rec(t).kind === "object" ? (t as ObjectType) : undefined;
+  return typing.kindOf(t) === "object" ? (t as ObjectType) : undefined;
 }
 
 // Whether every recursive type `t` is, or holds as a union member, knows the type it stands for.
@@ -2245,7 +2248,7 @@ export function interior(typing: Mut<Typing>, which: InteriorRecord["which"], gi
   if (which === "Atomic" && (held === "i128" || held === "u128")) {
     throw new CompileError("E0116", `'Atomic' holds integers of up to 64 bits, not '${typing.show(of)}', which not every processor changes in one step; use a 'Lock'`, at.start, at.end);
   }
-  if (which === "Atomic" && held !== "boolean" && !isInteger(held) && !(typeof held !== "string" && typing.rec(held).kind === "param")) {
+  if (which === "Atomic" && held !== "boolean" && !isInteger(held) && !(typeof held !== "string" && typing.kindOf(held) === "param")) {
     throw new CompileError("E0116", `'Atomic' holds an integer or a boolean, not '${typing.show(of)}'; use a 'Lock' for other values`, at.start, at.end);
   }
   if (typing.holdsRef(of)) throw new CompileError("E0801", `'${which}' can't hold a reference yet ('${typing.show(of)}')`, at.start, at.end);
@@ -2262,7 +2265,7 @@ export function interior(typing: Mut<Typing>, which: InteriorRecord["which"], gi
 function abstractless(typing: Mut<Typing>, of: Type, holder: string, at: Ref<Span>) {
   const lowered = typing.lower(of);
   let found: Type | undefined = undefined;
-  for (const u of typing.partsOf(lowered)) if (found === undefined && typeof u !== "string" && ["interface", "function"].includes(typing.rec(u).kind)) found = u;
+  for (const u of typing.partsOf(lowered)) if (found === undefined && typeof u !== "string" && ["interface", "function"].includes(typing.kindOf(u))) found = u;
   if (found !== undefined) throw new CompileError("E0801", `${holder} can't hold a '${typing.show(found)}' yet: name a concrete type`, at.start, at.end);
 }
 

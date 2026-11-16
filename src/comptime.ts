@@ -598,7 +598,7 @@ class Interpreter<H extends ComptimeHost> {
   // An instance's comparison through its class's `equals`, or nothing for other records.
   /** @throws {CompileError | Jump | Stop | Thrown} */
   private equals<S extends Span>(this: Mut<this>, a: Ref<Record>, b: Ref<Record>, at: Ref<S>): boolean | undefined {
-    if (this.host.tables.typing.rec(a.type).kind !== "class") return undefined;
+    if (this.host.tables.typing.kindOf(a.type) !== "class") return undefined;
     const method = this.host.tables.equalities.get(a.type as ClassType);
     if (method === undefined) return undefined;
     const self = this.temp(this.frames.length - 1, copyValue(a));
@@ -616,7 +616,7 @@ class Interpreter<H extends ComptimeHost> {
     if (isMember(v)) return this.memberType(v.value, v.type);
     const own = deref(this.host.tables.typing, t);
     if (own === undefined || typeof own === "string") return own;
-    const kind = this.host.tables.typing.rec(own).kind;
+    const kind = this.host.tables.typing.kindOf(own);
     if (kind === "union") return memberOf(this.host.tables.typing, v, own as UnionType);
     if (kind === "literal") return this.host.tables.typing.baseOf(own as LiteralType);
     return own;
@@ -867,7 +867,7 @@ class Interpreter<H extends ComptimeHost> {
     const [own, target] = [this.inst(f).types.get(e), this.inst(f).coercions.get(e) ?? this.inst(f).types.get(e)];
     // A fixed array copies where an array shares, which comptime values don't follow yet.
     const held = deref(this.host.tables.typing, own);
-    if (held !== undefined && typeof held !== "string" && this.host.tables.typing.rec(held).kind === "fixed") this.unsupported("a FixedArray", e);
+    if (held !== undefined && typeof held !== "string" && this.host.tables.typing.kindOf(held) === "fixed") this.unsupported("a FixedArray", e);
     if (mutable(this.host.tables.typing, target) && !mutable(this.host.tables.typing, own) && (e.kind === "ident" || e.kind === "member" || e.kind === "index" || e.kind === "this")) return this.place(f, e);
     const v = this.raw(f, e);
     return isShort(v) || (keep && isPlace(v)) ? v : this.typed(f, e, v);
@@ -1001,7 +1001,7 @@ class Interpreter<H extends ComptimeHost> {
       }
       case "as": {
         const from = this.host.tables.typing.lower(this.inst(f).coercions.get(e.expr) ?? this.typeOf(f, e.expr));
-        if (typeof from !== "string" && this.host.tables.typing.rec(from).kind === "union" && from !== type && !this.host.tables.typing.fits(from, type)) {
+        if (typeof from !== "string" && this.host.tables.typing.kindOf(from) === "union" && from !== type && !this.host.tables.typing.fits(from, type)) {
           const held = this.expr(f, e.expr);
           const kept = kindOf(this.host.tables.typing, type) === "union" ? membersOf(this.host.tables.typing, type) : [type];
           const actual = this.memberType(held, from);
@@ -1654,7 +1654,7 @@ class Interpreter<H extends ComptimeHost> {
   // it first. A FixedArray's isn't, so reading it refuses it.
   private placeable(f: usize, e: Ref<Expr>): boolean {
     const held = deref(this.host.tables.typing, this.inst(f).types.get(e));
-    if (held !== undefined && typeof held !== "string" && this.host.tables.typing.rec(held).kind === "fixed") return false;
+    if (held !== undefined && typeof held !== "string" && this.host.tables.typing.kindOf(held) === "fixed") return false;
     switch (e.kind) {
       case "nonNull":
         return redundantBang(e) && this.placeable(f, e.expr);
@@ -1724,7 +1724,7 @@ class Interpreter<H extends ComptimeHost> {
     const v = this.unwrap(value);
     const info = this.inst(f).patterns.get(p)!;
     const t = info.type;
-    const union = typeof t !== "string" && this.host.tables.typing.rec(t).kind === "union";
+    const union = typeof t !== "string" && this.host.tables.typing.kindOf(t) === "union";
     switch (info.kind) {
       case "literal": {
         const member = info.member;
@@ -2267,7 +2267,7 @@ function mutable(typing: Ref<Typing>, t: Type | undefined): boolean {
 // The kind of a type's record, for a type that has one.
 function kindOf(typing: Ref<Typing>, t: Type | undefined): string | undefined {
   if (t === undefined || typeof t === "string") return undefined;
-  return typing.rec(t).kind;
+  return typing.kindOf(t);
 }
 
 // A union's members, a copy the caller may hold while the typing changes.
@@ -2340,7 +2340,7 @@ function elementOf(typing: Ref<Typing>, t: Type | undefined): Type | undefined {
 
 // A literal type as its base type, which `===` compares by.
 function plainType(typing: Ref<Typing>, t: Type): Type {
-  if (typeof t === "string" || typing.rec(t).kind !== "literal") return t;
+  if (typeof t === "string" || typing.kindOf(t) !== "literal") return t;
   return typing.baseOf(t as LiteralType);
 }
 

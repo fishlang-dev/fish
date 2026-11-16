@@ -376,7 +376,7 @@ export class Printer<H extends PrintHost> {
   }
 
   piece(this: Mut<this>, v: string, type: Type): void {
-    const kind = typeof type === "string" ? "" : this.host.tables.typing.rec(type).kind;
+    const kind = typeof type === "string" ? "" : this.host.tables.typing.kindOf(type);
     // Objects, arrays, Maps, Sets and unions holding them print as Node's util.inspect would.
     if (!plain(this.host.tables.typing, type)) {
       this.flush();

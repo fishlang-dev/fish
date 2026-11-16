@@ -77,7 +77,7 @@ export interface Slots extends Builder {
 }
 
 // Whether values of a type compare part by part rather than as one word.
-export const compound = (typing: Ref<Typing>, t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(typing.rec(t).kind);
+export const compound = (typing: Ref<Typing>, t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(typing.kindOf(t));
 
 // Which members of a union a test asks for: those of a kind (`instanceof Map`), of a `typeof`
 // category, having the key a narrowing test named, holding a value, or giving a type.
@@ -134,7 +134,7 @@ export class Conversions<H extends Slots> {
   }
 
   isUnion(t: Type): boolean {
-    return typeof t !== "string" && this.host.tables.typing.rec(t).kind === "union";
+    return typeof t !== "string" && this.host.tables.typing.kindOf(t) === "union";
   }
 
   // What a reference points to or a recursive type's block holds, or undefined.
@@ -549,7 +549,7 @@ export class Conversions<H extends Slots> {
   }
 
   kindOf(t: Type): string {
-    return typeof t === "string" ? "" : this.host.tables.typing.rec(t).kind;
+    return typeof t === "string" ? "" : this.host.tables.typing.kindOf(t);
   }
 
   // A member of another kind than the narrowed type, an empty one or a scalar where an

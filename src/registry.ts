@@ -272,7 +272,7 @@ export class Registry<H extends RegistryHost> {
   private related(x: Type, y: Type): boolean {
     const a = this.held(x);
     const b = this.held(y);
-    if (typeof a === "string" || typeof b === "string" || this.host.tables.typing.rec(a).kind !== "class" || this.host.tables.typing.rec(b).kind !== "class") return false;
+    if (typeof a === "string" || typeof b === "string" || this.host.tables.typing.kindOf(a) !== "class" || this.host.tables.typing.kindOf(b) !== "class") return false;
     return this.host.tables.typing.derives(a as ClassType, b as ClassType) || this.host.tables.typing.derives(b as ClassType, a as ClassType);
   }
 

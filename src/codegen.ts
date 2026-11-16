@@ -1001,25 +1001,28 @@ class Codegen implements PrintHost, ComptimeHost {
   recOf<T extends Type>(t: T | undefined): RecordOf<Exclude<T, string>> | undefined {
     return (t === undefined || typeof t === "string" ? undefined : this.tables.typing.rec(t as Exclude<T, string>));
   }
+  kindOf(t: Type | undefined) {
+    return this.tables.typing.kindOf(t);
+  }
 
   isRef(t: Type): boolean {
-    return this.recOf(t)?.kind === "ref";
+    return this.kindOf(t) === "ref";
   }
 
   isArray(t: Type): t is ArrayType {
-    return this.recOf(t)?.kind === "array";
+    return this.kindOf(t) === "array";
   }
 
   // Whether indexing a value reads an element: an array's, or a fixed array's, through a
   // reference too.
   indexes(t: Type): boolean {
   const held = this.referent(t);
-  const kind = this.recOf(held)?.kind;
+  const kind = this.kindOf(held);
   return kind === "array" || kind === "fixed";
 }
 
   isDyn(t: Type): t is DynType {
-    return this.recOf(t)?.kind === "dyn";
+    return this.kindOf(t) === "dyn";
   }
 
   relays(this: Mut<this>, from: Type, to: DynType): boolean {
@@ -1250,7 +1253,7 @@ class Codegen implements PrintHost, ComptimeHost {
       if (p.pattern.kind !== "ident" || p.optional || p.default !== undefined) continue;
       const get2 = this.inst(i).locals.get(p)!;
       const part = this.loc(get2).type;
-      if (this.recOf(part)?.kind !== "closure") continue;
+      if (this.kindOf(part) !== "closure") continue;
       const name = p.pattern.name;
       let uses = 0;
       let calls = 0;
@@ -1535,8 +1538,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // checking a union's tag.
   widens(this: Mut<this>, e: Ref<Extract<Expr, { kind: "as" | "satisfies" }>>): boolean {
     const [from, to] = [this.valueType(e.expr), this.cur().types.get(e)!];
-    if (this.recOf(from)?.kind === "union" && from !== to && !this.tables.typing.fits(from, to)) return false;
-    return !isNumeric(to) && to !== "bigint" && this.recOf(to)?.kind !== "pointer";
+    if (this.kindOf(from) === "union" && from !== to && !this.tables.typing.fits(from, to)) return false;
+    return !isNumeric(to) && to !== "bigint" && this.kindOf(to) !== "pointer";
   }
 
 
@@ -2119,7 +2122,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${bits} = ${integerInfo(k).signed ? "sext" : "zext"} ${this.llvm(k)} ${v} to i64`);
       return bits;
     }
-    if (this.recOf(k)?.kind === "union") {
+    if (this.kindOf(k) === "union") {
       const [tag, bits] = [this.temp(), this.temp()];
       this.emit(`${tag} = extractvalue ${this.llvm(k)} ${v}, 0`);
       this.emit(`${bits} = zext i32 ${tag} to i64`);
@@ -2390,7 +2393,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.scopes.push({ transient: false, held: [] });
     const [held, counter] = [this.loopSlot(s, 0, "ptr"), this.loopSlot(s, 1, "i64")];
     const kept = (this.resuming !== undefined ? this.tables.typing.rec(this.resuming.type).frame[this.cur().frame!.loops.get(s)!]!.type : undefined);
-    if (kept !== undefined ? this.recOf(kept)?.kind === "map" : this.fresh(s.right)) {
+    if (kept !== undefined ? this.kindOf(kept) === "map" : this.fresh(s.right)) {
       this.own(held, t);
       const line = `store ptr ${this.owned(s.right)}, ptr ${held}`;
       this.emit(line);
@@ -3136,7 +3139,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // A JS value read as the first member of a union it is: literals tried first, then the rest,
   // a plain JsValue last as it takes anything.
   jsUnion(this: Mut<this>, box: string, type: UnionType, what: string, at: Ref<Span>): string {
-    const rank = (cg: Mut<Codegen>, m: Type) => (cg.recOf(m)?.kind === "literal" ? 0 : cg.tables.typing.isPlainJs(m) ? 2 : 1);
+    const rank = (cg: Mut<Codegen>, m: Type) => (cg.kindOf(m) === "literal" ? 0 : cg.tables.typing.isPlainJs(m) ? 2 : 1);
     let order = [...this.tables.typing.rec(type).members];
     order.sort((a, b) => rank(this, a) - rank(this, b));
     const [slot, done] = [this.alloca(this.llvm(type)), this.label()];
@@ -3634,7 +3637,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (this.isDyn(type)) return [this.relayThunk(`@"fsh.dyn.${n}.call"`, type, this.tables.typing.rec(this.tables.typing.rec(to).of).methods[0]!)];
     const r = this.recOf(type);
     if (r?.kind === "generator") return [this.generatorNext(type as GeneratorType, n)];
-    const abstract = (cg: Mut<Codegen>, t: Type) => cg.recOf(t)?.kind === "interface" && cg.tables.typing.promiseElement(t) === undefined;
+    const abstract = (cg: Mut<Codegen>, t: Type) => cg.kindOf(t) === "interface" && cg.tables.typing.promiseElement(t) === undefined;
     const declared = this.tables.typing.rec(this.tables.typing.rec(to).of).methods.map((m) => copyMethod(m));
     let made: string[] = [];
     for (let i: usize = 0; i < declared.length; i++) {
@@ -4029,7 +4032,7 @@ class Codegen implements PrintHost, ComptimeHost {
   presence(this: Mut<this>, e: Ref<Expr>): string {
     const { object, name, when } = this.tables.presenceTests.get(e)!;
     const t = this.referent(this.valueType(object));
-    if (this.recOf(t)?.kind !== "dyn") {
+    if (this.kindOf(t) !== "dyn") {
       this.ranFor(object);
       return String(this.cur().absent?.has(e) === true ? !when : when);
     }
@@ -4411,7 +4414,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const [held, at] = [`%loop${base}`, `%loop${base + 2}`];
     const kept = this.tables.typing.rec(this.resuming!.type).frame[base]!.type;
     const awaited = this.tables.typing.rec(this.resuming!.type).frame[base + 2]!.type as FutureType | DynType;
-    const boxed = this.tables.typing.rec(awaited).kind === "dyn" ? awaited : undefined;
+    const boxed = this.tables.typing.kindOf(awaited) === "dyn" ? awaited : undefined;
     const future = awaited as FutureType;
     const keptRec = this.recOf(kept);
     const channel = keptRec?.kind === "block" ? (kept as BlockType) : undefined;
@@ -4725,7 +4728,7 @@ class Codegen implements PrintHost, ComptimeHost {
           return;
         }
         const yielding = this.referent(iterated);
-        if (this.recOf(yielding)?.kind === "generator") {
+        if (this.kindOf(yielding) === "generator") {
           this.generatorLoop(s, iterated, s.right);
           return;
         }
@@ -4752,7 +4755,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const [held, counter] = [this.loopSlot(s, 0, ARRAY), this.loopSlot(s, 1, "i64")];
         // In a generator, the frame says whether the loop owns its array.
         const kept = (this.resuming !== undefined ? this.tables.typing.rec(this.resuming.type).frame[this.cur().frame!.loops.get(s)!]!.type : undefined);
-        if (kept !== undefined ? this.recOf(kept)?.kind === "array" : this.fresh(s.right)) {
+        if (kept !== undefined ? this.kindOf(kept) === "array" : this.fresh(s.right)) {
           this.own(held, type);
           const line = `store ${ARRAY} ${this.owned(s.right)}, ptr ${held}`;
           this.emit(line);
@@ -5817,7 +5820,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // spelled: an empty `x?: T` is left out, as JavaScript leaves out an undefined field.
   jsonWrite(this: Mut<this>, w: string, v: string, type: Type): void {
     const t = this.tables.typing.lower(type);
-    if (typeof t === "string" || this.tables.typing.rec(t).kind === "literal") {
+    if (typeof t === "string" || this.tables.typing.kindOf(t) === "literal") {
       this.jsonScalar(w, v, t);
       return;
     }
@@ -5909,7 +5912,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // A part of `written` where `lowered` has the same shape, so its spelling can be read.
   writtenPart(this: Mut<this>, written: Type, lowered: Exclude<Type, string>, part: (cg: Mut<Codegen>, t: Exclude<Type, string>) => Type | undefined): Type | undefined {
-    return typeof written !== "string" && this.tables.typing.rec(written).kind === this.tables.typing.rec(lowered).kind ? part(this, written) : undefined;
+    return typeof written !== "string" && this.tables.typing.kindOf(written) === this.tables.typing.kindOf(lowered) ? part(this, written) : undefined;
   }
 
 
@@ -5922,7 +5925,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // The record of `written` where it has the same shape as `lowered`.
   writtenShape(written: Type, lowered: Exclude<Type, string>) {
     const r = this.recOf(written);
-    return r?.kind === this.tables.typing.rec(lowered).kind ? (written as Exclude<Type, string>) : undefined;
+    return r?.kind === this.tables.typing.kindOf(lowered) ? (written as Exclude<Type, string>) : undefined;
   }
 
 
@@ -6126,7 +6129,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const lower2 = this.tables.typing.lower(this.tables.typing.rec(t).element);
     const element = this.llvm(lower2);
     const [length, data] = [this.temp(), this.temp()];
-    if (this.tables.typing.rec(t).kind === "array") {
+    if (this.tables.typing.kindOf(t) === "array") {
       this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
       this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
     } else {
@@ -6480,7 +6483,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const lower2 = this.tables.typing.lower(this.tables.typing.rec(t).element);
     const element = this.llvm(lower2);
     const [length, data] = [this.temp(), this.temp()];
-    if (this.tables.typing.rec(t).kind === "array") {
+    if (this.tables.typing.kindOf(t) === "array") {
       this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
       this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
     } else {
@@ -6523,7 +6526,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // `depth` is how deep in the printed value this one sits, as Node counts it.
   inspectTree(this: Mut<this>, v: string, type: Type, depth = "0"): string {
     const t = this.tables.typing.lower(type);
-    if (typeof t === "string" || this.tables.typing.rec(t).kind === "literal") return this.inspectScalar(v, t);
+    if (typeof t === "string" || this.tables.typing.kindOf(t) === "literal") return this.inspectScalar(v, t);
     const written = this.asWritten(type);
     let name = this.inspectors.get(written);
     if ((name === undefined || name === "")) {
@@ -6673,7 +6676,7 @@ class Codegen implements PrintHost, ComptimeHost {
         this.startBlock(cases[i as usize]!);
         const member = this.tables.typing.lower(m);
         let x = "zeroinitializer";
-        if (this.recOf(member)?.kind !== "literal" && member !== "null") {
+        if (this.kindOf(member) !== "literal" && member !== "null") {
           const slot = this.alloca(this.llvm(t));
           this.emit(`store ${this.llvm(t)} ${v}, ptr ${slot}`);
           const at = this.temp();
@@ -6931,7 +6934,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const lower2 = this.tables.typing.lower(this.tables.typing.rec(t).element);
     const element = this.llvm(lower2);
     const [length, data] = [this.temp(), this.temp()];
-    if (this.tables.typing.rec(t).kind === "array") {
+    if (this.tables.typing.kindOf(t) === "array") {
       this.emit(`${length} = extractvalue ${ARRAY} ${v}, 1`);
       this.emit(`${data} = extractvalue ${ARRAY} ${v}, 0`);
     } else {
@@ -7204,7 +7207,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     if (c.kind === "array") return this.readElements(r, t as Exclude<Type, string> as ArrayType, false, 0, noUndo);
     if (c.kind === "map") return this.readEntries(r, t as Exclude<Type, string> as MapType);
-    if (c.kind === "union") return c.members.every((m) => this.recOf(m)?.kind === "variant") ? this.readVariant(r, t as Exclude<Type, string> as UnionType) : this.readMember(r, t as Exclude<Type, string> as UnionType);
+    if (c.kind === "union") return c.members.every((m) => this.kindOf(m) === "variant") ? this.readVariant(r, t as Exclude<Type, string> as UnionType) : this.readMember(r, t as Exclude<Type, string> as UnionType);
     if (c.kind === "variant") return this.readVariant(r, t as Exclude<Type, string> as VariantType);
     if (c.kind === "object" && this.tables.typing.isTuple(t)) return this.readTuple(r, t as Exclude<Type, string> as ObjectType);
     let fields: JsonField[] = [];
@@ -7580,7 +7583,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // A data enum's member, tagged as serde writes it: a bare name, or an object of one key, the
   // name, holding its value or an array of its values.
   readVariant(this: Mut<this>, r: string, t: UnionType | VariantType): string {
-    const variants = this.tables.typing.rec(t).kind === "union" ? this.tables.typing.rec(t as UnionType).members.map((m) => m as VariantType) : [t as VariantType];
+    const variants = this.tables.typing.kindOf(t) === "union" ? this.tables.typing.rec(t as UnionType).members.map((m) => m as VariantType) : [t as VariantType];
     const result = this.alloca(this.llvm(t));
     const [named, keyed, done] = [this.label(), this.label(), this.label()];
     const names = variants.map((v) => this.tables.typing.rec(v).member).join(", ");
@@ -7787,7 +7790,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.startBlock(cases[i as usize]!);
       const member = this.tables.typing.lower(m);
       if (typeof member === "string" && (member === "null" || member === "never")) this.jsonRaw(w, "null");
-      else if (this.recOf(member)?.kind === "literal") this.jsonScalar(w, "", member);
+      else if (this.kindOf(member) === "literal") this.jsonScalar(w, "", member);
       else {
         const slot = this.alloca(this.llvm(t));
         this.emit(`store ${this.llvm(t)} ${v}, ptr ${slot}`);
@@ -9010,7 +9013,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if ((whole || rust) && this.fresh(e)) return this.value(e, true);
     if (!rust && !this.needsDrop(this.cur().types.get(e)!) && this.holdsRust(this.valueType(e))) return this.value(e);
     // A value owning nothing meets a recursive type's blocks only as the blocks just made for it.
-    if (to !== undefined && !this.needsDrop(this.referent(this.cur().types.get(e)!)) && this.tables.typing.holdsPart(to, (t) => this.recOf(t)?.kind === "recursive")) return this.value(e, true);
+    if (to !== undefined && !this.needsDrop(this.referent(this.cur().types.get(e)!)) && this.tables.typing.holdsPart(to, (t) => this.kindOf(t) === "recursive")) return this.value(e, true);
     const v = this.value(e);
     if ((whole || rust) && this.cur().consumes.has(e.id) && this.lendable(e)) {
       this.take(e);
@@ -9036,7 +9039,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Where a place's value lives: in the place, or in the block a recursive type's place holds.
   blockOf(this: Mut<this>, at: string, place: Type): string {
-    if (this.recOf(place)?.kind !== "recursive") return at;
+    if (this.kindOf(place) !== "recursive") return at;
     const block = this.temp();
     this.emit(`${block} = load ptr, ptr ${at}`);
     return block;
@@ -9062,7 +9065,7 @@ class Codegen implements PrintHost, ComptimeHost {
       return;
     }
     if (r?.kind !== "union") return;
-    const blocks = r.members.filter((m) => this.recOf(m)?.kind === "recursive");
+    const blocks = r.members.filter((m) => this.kindOf(m) === "recursive");
     if (blocks.length === 0) return;
     const tag = this.temp();
     this.emit(`${tag} = extractvalue ${this.llvm(type)} ${v}, 0`);
@@ -9088,9 +9091,9 @@ class Codegen implements PrintHost, ComptimeHost {
     const fromAll = membersOf(this.tables.typing, from);
     // A recursive type's block holds its unfolded members as they are, so a value boxed into one
     // keeps the blocks its members own.
-    const held = this.recOf(to)?.kind === "recursive" ? this.tables.typing.unfolded(to) : to;
+    const held = this.kindOf(to) === "recursive" ? this.tables.typing.unfolded(to) : to;
     const toAll = membersOf(this.tables.typing, held);
-    return fromAll.some((m) => this.recOf(m)?.kind === "recursive" && !toAll.includes(m));
+    return fromAll.some((m) => this.kindOf(m) === "recursive" && !toAll.includes(m));
   }
 
 
@@ -9099,7 +9102,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (from === to) return false;
     const fromAll = membersOf(this.tables.typing, this.referent(from));
     const toAll = membersOf(this.tables.typing, to);
-    return toAll.some((m) => this.recOf(m)?.kind === "recursive") && fromAll.some((m) => !toAll.includes(m));
+    return toAll.some((m) => this.kindOf(m) === "recursive") && fromAll.some((m) => !toAll.includes(m));
   }
 
 
@@ -9865,12 +9868,12 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`${result} = icmp eq ptr ${a}, ${b}`);
         return result;
       }
-      if (e.callee.kind === "member" && this.recOf(this.valueType(e.callee.object))?.kind === "pointer") return this.pointerCall(e, e.callee);
-      if (e.callee.kind === "member" && this.recOf(this.referent(this.valueType(e.callee.object)))?.kind === "interior") return this.atomicCall(e, e.callee);
-      if (e.callee.kind === "member" && e.callee.name !== "clone" && this.recOf(this.referent(this.valueType(e.callee.object)))?.kind === "block") return this.blockCall(e, e.callee);
+      if (e.callee.kind === "member" && this.kindOf(this.valueType(e.callee.object)) === "pointer") return this.pointerCall(e, e.callee);
+      if (e.callee.kind === "member" && this.kindOf(this.referent(this.valueType(e.callee.object))) === "interior") return this.atomicCall(e, e.callee);
+      if (e.callee.kind === "member" && e.callee.name !== "clone" && this.kindOf(this.referent(this.valueType(e.callee.object))) === "block") return this.blockCall(e, e.callee);
       if (this.tables.dynCalls.has(e)) return this.dynCall(e, e.callee);
-      if (e.callee.kind === "member" && (e.callee.name === "downgrade" || e.callee.name === "upgrade") && this.recOf(this.referent(this.valueType(e.callee.object)))?.kind === "shared") return this.countedCall(e, e.callee);
-      if (e.callee.kind === "member" && (e.callee.name === "update" || e.callee.name === "read") && this.recOf(this.referent(this.valueType(e.callee.object)))?.kind === "shared") {
+      if (e.callee.kind === "member" && (e.callee.name === "downgrade" || e.callee.name === "upgrade") && this.kindOf(this.referent(this.valueType(e.callee.object))) === "shared") return this.countedCall(e, e.callee);
+      if (e.callee.kind === "member" && (e.callee.name === "update" || e.callee.name === "read") && this.kindOf(this.referent(this.valueType(e.callee.object))) === "shared") {
         const t = this.referent(this.valueType(e.callee.object)) as SharedType;
         const block = this.temp();
         const line19 = `${block} = load ptr, ptr ${this.receiver(e.callee.object)}`;
@@ -9923,7 +9926,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       if (e.callee.kind === "member" && e.callee.name !== "clone" && this.valueType(e.callee.object) === "string") return this.stringCall(e, e.callee);
       if (e.callee.kind === "member" && e.callee.name !== "clone" && this.isArray(this.valueType(e.callee.object))) return this.arrayCall(e, e.callee);
-      if (e.callee.kind === "member" && e.callee.name !== "clone" && this.recOf(this.valueType(e.callee.object))?.kind === "map") return this.mapCall(e, e.callee);
+      if (e.callee.kind === "member" && e.callee.name !== "clone" && this.kindOf(this.valueType(e.callee.object)) === "map") return this.mapCall(e, e.callee);
       const receiver = e.callee.kind === "member" ? this.recOf(this.valueType(e.callee.object)) : undefined;
       if (e.callee.kind === "member" && receiver !== undefined && receiver.kind === "generator" && receiver.async === true) {
         const made = this.temp();
@@ -10241,7 +10244,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const line = `${v} = load ${this.llvm(whole)}, ptr ${this.slot(local)}`;
       this.emit(line);
     }
-    while (this.recOf(whole)?.kind === "ref" || this.recOf(whole)?.kind === "recursive") {
+    while (this.kindOf(whole) === "ref" || this.kindOf(whole) === "recursive") {
       const held = this.recOf(whole)!;
       const inner = this.temp();
       const next = held.kind === "ref" ? held.to : held.kind === "recursive" ? held.of : whole;
@@ -10344,7 +10347,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const v = kept ? this.owned(e.value) : this.jsOperand(e.value);
       const chosen2 = kept ? held : this.cur().types.get(e.value)!;
       const box = this.toJs(v, chosen2, empty);
-      const handle = this.recOf(type)?.kind === "block";
+      const handle = this.kindOf(type) === "block";
       if (handle) {
         this.emit(`call void @fsh_rt_block_retain(ptr ${box})`);
         this.pending.push({ v: box, type });
@@ -10620,7 +10623,7 @@ class Codegen implements PrintHost, ComptimeHost {
       walk = partOf(walk);
       const get2 = this.cur().types.get(e.object)!;
       const holder = this.referent(get2);
-      const kind = this.recOf(holder)?.kind;
+      const kind = this.kindOf(holder);
       if (kind === "shared") return !this.cur().copiesOut.has(e);
       if (kind !== "object" && kind !== "class") return false;
     }
@@ -11259,7 +11262,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // error is raised at `e`.
   suspend(this: Mut<this>, inner: FutureType | HandleType | DynType, at: string, field: usize, e: Ref<Expr>): string | undefined {
     // A boxed future polls as a future giving what its Promise does, and throws nothing.
-    const shape = this.tables.typing.rec(inner).kind === "dyn" ? this.tables.typing.handleType(this.tables.typing.promiseElement(this.tables.typing.rec(inner as DynType).of)!, undefined) : (inner as FutureType | HandleType);
+    const shape = this.tables.typing.kindOf(inner) === "dyn" ? this.tables.typing.handleType(this.tables.typing.promiseElement(this.tables.typing.rec(inner as DynType).of)!, undefined) : (inner as FutureType | HandleType);
     const poll = this.label();
     if (this.resuming !== undefined) this.resuming.resumes.push(poll);
     const resumed = this.resuming!.resumes.length;
@@ -11883,9 +11886,9 @@ class Codegen implements PrintHost, ComptimeHost {
   // One poll of the future in slot `at`: the blocks it goes on to, waiting, ready or failed,
   // and, called in those blocks, the value it gave and the error it threw. `e` places a panic.
   pollStep(this: Mut<this>, inner: FutureType | HandleType | DynType, at: string, e: Ref<Span>): { waiting: string; ready: string; failed: string; value: (cg: Mut<Codegen>) => string | undefined; error: (cg: Mut<Codegen>) => string } {
-    const shape = this.tables.typing.rec(inner).kind === "dyn" ? this.tables.typing.handleType(this.tables.typing.promiseElement(this.tables.typing.rec(inner as DynType).of)!, undefined) : (inner as FutureType | HandleType);
+    const shape = this.tables.typing.kindOf(inner) === "dyn" ? this.tables.typing.handleType(this.tables.typing.promiseElement(this.tables.typing.rec(inner as DynType).of)!, undefined) : (inner as FutureType | HandleType);
     const [result, tag, waiting, ready, failed] = [this.temp(), this.temp(), this.label(), this.label(), this.label()];
-    const leaf = this.tables.typing.rec(inner).kind === "future" ? this.tables.typing.leafOf.get(inner as FutureType) : undefined;
+    const leaf = this.tables.typing.kindOf(inner) === "future" ? this.tables.typing.leafOf.get(inner as FutureType) : undefined;
     let given: string | undefined = undefined;
     // What is read only once it is ready, as reading it before would read nothing.
     let readied: string | undefined = undefined;
@@ -11894,7 +11897,7 @@ class Codegen implements PrintHost, ComptimeHost {
     // A joined task's panic reason, when it panicked.
     let why: string | undefined = undefined;
     // The poll result as the runtime gives it: a joined task's is its own, throwing no TaskPanic.
-    const handle = this.tables.typing.rec(inner).kind === "handle" ? this.tables.typing.rec(inner as HandleType) : undefined;
+    const handle = this.tables.typing.kindOf(inner) === "handle" ? this.tables.typing.rec(inner as HandleType) : undefined;
     const polledAs = handle !== undefined && handle.joined !== undefined ? handle.joined.base : shape;
     if (leaf?.method === "next") {
       // An async generator's `next()`: its resume, run where the generator lives.
@@ -12084,7 +12087,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${done} = call i32 @fsh_rt_sleep(ptr ${at}, ptr %cx)`);
       this.emit(`${tag} = trunc i32 ${done} to i8`);
       this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
-    } else if (this.tables.typing.rec(inner).kind === "handle") {
+    } else if (this.tables.typing.kindOf(inner) === "handle") {
       // A spawned task: the runtime copies its result out once it is done.
       // Awaited plainly, a task that panicked panics its awaiter; joined, it fails with its reason.
       const base = handle!.joined?.base ?? (inner as HandleType);
@@ -12100,7 +12103,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${result} = load ${this.pollType(base)}, ptr ${buffer}`);
       this.emit(`${tag} = trunc i32 ${outcome} to i8`);
       this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} i8 3, label %${failed} ]`);
-    } else if (this.tables.typing.rec(inner).kind === "dyn") {
+    } else if (this.tables.typing.kindOf(inner) === "dyn") {
       // Through its vtable: the slot after drop, copy and clone is the future's own poll.
       const [dyn, data, table, slot, fn] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp()];
       this.emit(`${dyn} = load ${DYN}, ptr ${at}`);
@@ -12682,7 +12685,7 @@ class Codegen implements PrintHost, ComptimeHost {
         const [from, to] = [this.cur().coercions.get(e.expr) ?? this.cur().types.get(e.expr)!, this.cur().types.get(e)!];
         // A widening 'as' is its operand, converted by the coercion the checker gave it.
         if (this.widens(e)) return this.value(e.expr, true);
-        if (this.recOf(from)?.kind === "union") {
+        if (this.kindOf(from) === "union") {
           const v = this.value(e.expr);
           const declared = this.recOf(to);
           const kept = declared?.kind === "union" ? declared.members : [to];
@@ -12696,7 +12699,7 @@ class Codegen implements PrintHost, ComptimeHost {
           const operand2 = this.value(e.expr);
           return this.bigTo(operand2, to);
         }
-        const pointer = (cg: Mut<Codegen>, t: Type) => cg.recOf(t)?.kind === "pointer";
+        const pointer = (cg: Mut<Codegen>, t: Type) => cg.kindOf(t) === "pointer";
         if (!pointer(this, from) && !pointer(this, to)) {
           const operand3 = this.value(e.expr);
           return this.cast(operand3, from, to as Numeric);
@@ -13166,7 +13169,7 @@ class Codegen implements PrintHost, ComptimeHost {
         // A literal, as a literal type argument is, compares by value, and two types of different
         // bases, as an instance's argument and a value of its bound may have, are never equal.
         const [lt, rt] = [this.tables.typing.lower(this.valueType(e.left)), this.tables.typing.lower(this.valueType(e.right))];
-        if ((e.op === "===" || e.op === "!==") && (lt !== rt || this.recOf(lt)?.kind === "literal")) {
+        if ((e.op === "===" || e.op === "!==") && (lt !== rt || this.kindOf(lt) === "literal")) {
           const same = this.mixedNumbers(a, lt, b, rt) ?? this.conversions().equals(a, lt, b, rt);
           if (e.op === "===") return same;
           const differ = this.temp();
@@ -13179,7 +13182,7 @@ class Codegen implements PrintHost, ComptimeHost {
         // Empty values are always equal.
         if (type === "null") return String(e.op === "===");
         // Raw pointers compare by address.
-        if (this.recOf(type)?.kind === "pointer") {
+        if (this.kindOf(type) === "pointer") {
           const same = this.temp();
           this.emit(`${same} = icmp ${condition} ptr ${a}, ${b}`);
           return same;
@@ -13280,11 +13283,11 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`${read} = load ${this.llvm(source)}, ptr ${whole}`);
         whole = read;
       }
-      const fields = this.tables.typing.rec(source).kind === "class" ? this.tables.typing.allFields(source as ClassType) : this.tables.typing.rec(source).fields;
+      const fields = this.tables.typing.kindOf(source) === "class" ? this.tables.typing.allFields(source as ClassType) : this.tables.typing.rec(source).fields;
       for (const f of fields) {
         const v = this.temp();
         this.emit(`${v} = extractvalue ${this.llvm(source)} ${whole}, ${this.tables.typing.fieldPath(source, f.name).join(", ")}`);
-        const shown = this.tables.typing.rec(source).kind !== "class" || (f.access ?? "public") === "public";
+        const shown = this.tables.typing.kindOf(source) !== "class" || (f.access ?? "public") === "public";
         if (shown) {
           const chosen = taken ? v : this.copied(v, f.type);
           put(this, f.name, chosen, f.type);
@@ -13443,14 +13446,14 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     const get4 = this.cur().types.get(target.object)!;
     const referent2 = this.referent(get4);
-    if (this.recOf(referent2)?.kind === "shared") return this.sharedField(target)[2];
+    if (this.kindOf(referent2) === "shared") return this.sharedField(target)[2];
     const holder = this.stored(target.object);
     const object = this.tables.typing.unfold(this.referent(holder)) as ObjectType | ClassType;
     // Through a reference, the field is inside what it points to, and in a recursive type's
     // block, inside the block. A reference to a recursive member, as a narrowed `Mut` gives,
     // points at the place holding the block, not at the block.
     let base = this.isRef(holder) ? this.evaluate(target.object) : this.address(target.object);
-    if (this.recOf(this.referent(holder))?.kind === "recursive") {
+    if (this.kindOf(this.referent(holder)) === "recursive") {
       const block = this.temp();
       this.emit(`${block} = load ptr, ptr ${base}`);
       base = block;
@@ -13470,7 +13473,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // where it is stored as it is read.
   inPayload(this: Mut<this>, e: Ref<Expr>): boolean {
     const declared = this.cur().narrowedFields?.get(e);
-    if (declared === undefined || e.kind !== "member" || this.recOf(this.cur().types.get(e))?.kind === "union") return false;
+    if (declared === undefined || e.kind !== "member" || this.kindOf(this.cur().types.get(e)) === "union") return false;
     const stored2 = this.stored(e.object);
     const referent2 = this.referent(stored2);
     const holder = this.tables.typing.unfold(referent2) as ObjectType | ClassType;
@@ -13500,7 +13503,7 @@ class Codegen implements PrintHost, ComptimeHost {
         object = undefined;
       }
       // A shared value's interior-mutable field lives in its block, wherever the handle is.
-      const kind = this.recOf(object)?.kind;
+      const kind = this.kindOf(object);
       if (kind === "shared") return !this.cur().copiesOut.has(at);
       if (kind !== "object" && kind !== "class") return false;
     }
@@ -13513,7 +13516,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (this.cur().copiesOut.has(e)) return false;
     const local = e.kind === "ident" ? this.localAt(e) : undefined;
     const type = this.cur().types.get(e);
-    return local !== undefined && (type === this.loc(local).type || this.recOf(type)?.kind !== "union");
+    return local !== undefined && (type === this.loc(local).type || this.kindOf(type) !== "union");
   }
 
 

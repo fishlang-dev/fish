@@ -107,6 +107,9 @@ export class TypeFunctions<H extends TypeFunctionsHost> {
   private recOf(this: Mut<this>, t: Type) {
     return typeof t === "string" ? undefined : this.typing().rec(t);
   }
+  private kindOf(this: Mut<this>, t: Type | undefined) {
+    return this.typing().kindOf(t);
+  }
 
   // What a type parameter that has been given a type stands for.
   private concreteOf(this: Mut<this>, t: Type): Type | undefined {

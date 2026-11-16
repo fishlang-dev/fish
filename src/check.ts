@@ -425,7 +425,7 @@ function iterated(typing: Mut<Typing>, instance: Ref<Instance>, e: Ref<Expr>): T
 // `this`, a reference, or a field of an object or instance, or an element, of one. A field read
 // through a shared value or a Dyn, or out of an Option, is a copy of its own.
 function plainPlace(typing: Ref<Typing>, instance: Ref<Instance>, e: Ref<Expr>): boolean {
-  if (typing.recOf(instance.types.get(e))?.kind === "ref") return true;
+  if (typing.kindOf(instance.types.get(e)) === "ref") return true;
   if (e.kind === "ident" || e.kind === "this") return true;
   if (e.kind !== "member" && e.kind !== "index") return false;
   if (e.kind === "member" && instance.calls.has(e)) return false;
@@ -454,7 +454,7 @@ function receiverField(typing: Mut<Typing>, self: Ref<NonNullable<Body["self"]>>
 
 // A closure, future or generator type, marked as made for `instance`.
 function madeBy<T extends ClosureType | FutureType | GeneratorType>(typing: Mut<Typing>, t: T, symbol: string): T {
-  const kind = typing.rec(t).kind;
+  const kind = typing.kindOf(t);
   typing.madeFor.set(t, `${kind} of ${symbol}`);
   return t;
 }
@@ -1724,7 +1724,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           const callee = this.tables.arenas.instanceOf(target);
           const gives: Type = callee.generator !== undefined ? callee.generator : callee.returns;
           if (had === undefined || had === gives || swap.has(had)) continue;
-          if (this.recOf(had)?.kind === "generator" && this.recOf(gives)?.kind === "generator") swap.set(had, gives);
+          if (this.kindOf(had) === "generator" && this.kindOf(gives) === "generator") swap.set(had, gives);
         }
         if (swap.size === 0) continue;
         changed = true;
@@ -1805,7 +1805,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     let part: Type | undefined = undefined;
     for (;;) {
       part = this.tables.typing.unjson(unknown, (c) => known.get(c) === true);
-      const kind = this.recOf(part)?.kind;
+      const kind = this.kindOf(part);
       if (part === undefined || (kind !== "class" && kind !== "variant") || known.has(part as ClassType)) break;
       known.set(part as ClassType, this.derivesJson(part as ClassType));
     }
@@ -1844,8 +1844,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   recOf<T extends Type>(t: T | undefined) {
     return t === undefined || typeof t === "string" ? undefined : this.tables.typing.rec(t as Exclude<T, string>);
   }
+  kindOf(t: Type | undefined) {
+    return this.tables.typing.kindOf(t);
+  }
   isInterface(t: Type) {
-    return this.recOf(t)?.kind === "interface";
+    return this.kindOf(t) === "interface";
   }
   // A return type describing the value returned, which keeps its own type: an interface, or a
   // generic function type.
@@ -1854,7 +1857,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     return r?.kind === "interface" || (r?.kind === "function" && r.generic !== undefined);
   }
   isRef(t: Type): t is RefType {
-    return this.recOf(t)?.kind === "ref";
+    return this.kindOf(t) === "ref";
   }
   addBody(this: Mut<this>, f: Func): BodyId {
     return this.tables.arenas.addBody(f).bodyId;
@@ -2017,7 +2020,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const plain = rebuiltExpr(cloneExpr(arg), this.tables.rewrites);
     const tagged = comptimeArgument(this, site, plain);
     const tag = tagged !== null && typeof tagged === "object" && tagged.kind === "member" ? tagged.type : undefined;
-    if (this.recOf(tag)?.kind === "literal") return tag!;
+    if (this.kindOf(tag) === "literal") return tag!;
     const v = untagged(tagged);
     if (typeof v === "bigint" || typeof v === "string" || typeof v === "boolean") return this.tables.typing.literalType(v);
     if (v !== null && typeof v === "object" && v.kind === "array") {
@@ -2295,7 +2298,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       const instance = this.tables.arenas.instanceOf(id);
       const held = this.recOf(instance.types.get(e.object));
       const objectType = held?.kind === "ref" ? held.to : instance.types.get(e.object);
-      if (this.recOf(objectType)?.kind === "class" && this.tables.typing.field(objectType as ClassType, e.name) === undefined) throw unsupported("pipes over a field a getter provides", e);
+      if (this.kindOf(objectType) === "class" && this.tables.typing.field(objectType as ClassType, e.name) === undefined) throw unsupported("pipes over a field a getter provides", e);
     }
     {
       let instance = this.tables.arenas.instanceMut(id);
@@ -2450,7 +2453,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   private crossesToLibrary(t: Type): boolean {
-    return isNumeric(t) || t === "boolean" || this.recOf(t)?.kind === "pointer";
+    return isNumeric(t) || t === "boolean" || this.kindOf(t) === "pointer";
   }
 
   // A C function's signature, which must cross to C as it is: numbers, booleans and raw
@@ -2493,7 +2496,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // hands its counted descriptor to the runtime, which is a pointer to C; only std may, as a
   // program could otherwise make one that closes a descriptor it doesn't own.
   private crossesToC(t: Type, at: usize): boolean {
-    if (isNumeric(t) || t === "boolean" || this.recOf(t)?.kind === "pointer") return true;
+    if (isNumeric(t) || t === "boolean" || this.kindOf(t) === "pointer") return true;
     if (stdModuleAt(this.tables.files, at) === undefined) return false;
     const r = this.recOf(t);
     const held = r?.kind === "ref" ? this.recOf(r.to) : r;
@@ -2612,7 +2615,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       // An object type taken as a JS object's shape is still checked for what it holds.
       const given = params[i]!;
       const written = declared[i]!;
-      const shaped = given !== written && typeof written !== "string" && this.tables.typing.rec(written).kind !== "function" && this.tables.typing.rec(written).kind !== "interface";
+      const shaped = given !== written && typeof written !== "string" && this.tables.typing.kindOf(written) !== "function" && this.tables.typing.kindOf(written) !== "interface";
       const why = this.tables.typing.uncrossable(given) ?? (shaped ? this.tables.typing.uncrossable(written) : undefined);
       if (why !== undefined) throw refusedJs(`${named} takes a '${this.tables.typing.show(given)}', which can't cross between Fish and JS yet: ${why}`, p.type !== undefined ? { start: p.type.start, end: p.type.end } : { start: p.start, end: p.end }, f.js!.name, at);
     }
@@ -3966,7 +3969,7 @@ class BodyChecker implements Context, GuardHost {
     const hr = this.cx.recOf(h);
     // Through a parameter typed by an object type, a field is read with the type its bound gives.
     const bound = hr?.kind === "param" ? hr.bound : h;
-    const kind = this.cx.recOf(bound)?.kind;
+    const kind = this.cx.kindOf(bound);
     if (kind !== "object" && kind !== "class") return undefined;
     const field = this.cx.tables.typing.field(bound as Exclude<Type, string>, e.name);
     if ((field === undefined)) return undefined;
@@ -4014,7 +4017,7 @@ class BodyChecker implements Context, GuardHost {
     const prefix = `${rootId === "this" ? rootId : String(rootId)}${cut < 0 ? path : path.slice(0, cut)}`;
     if (!this.loopChange(prefix, action, `${rootName}${path}`, at)) return;
     const kept = action !== "assign to" || this.exprsState.updating === at.id ? this.factOf(prefix) : undefined;
-    const keeps = kept !== undefined && kept === this.types().get(at) && this.cx.recOf(kept)?.kind !== "union";
+    const keeps = kept !== undefined && kept === this.types().get(at) && this.cx.kindOf(kept) !== "union";
     if (!keeps) {
       this.forgetPaths(prefix, { start: at.start, end: at.end });
       return;
@@ -4359,7 +4362,7 @@ class BodyChecker implements Context, GuardHost {
       const read = renumberExpr(cloneExpr(target), () => nextId(this.cx.tables.ids));
       this.exprsState.asDeclared.add(cloneExpr(read));
       const t = this.exprs().value(read);
-      return this.cx.recOf(t)?.kind === "ref" ? undefined : t;
+      return this.cx.kindOf(t) === "ref" ? undefined : t;
     } catch (err) {
       if (err instanceof CompileError) return undefined;
       throw err;
@@ -4519,7 +4522,7 @@ class BodyChecker implements Context, GuardHost {
     // An object-typed or interface-typed parameter stands for any type with its fields, which its
     // bound names.
     const bound = l?.kind === "param" ? l.bound : undefined;
-    const whole = bound !== undefined && ["object", "interface"].includes(this.cx.tables.typing.rec(bound).kind) ? bound : lowered;
+    const whole = bound !== undefined && ["object", "interface"].includes(this.cx.tables.typing.kindOf(bound)) ? bound : lowered;
     const w = this.cx.recOf(whole);
     let parts: [Pattern, Expr, Type][] = [];
     const source: Ref<Expr> | undefined = inPlace ? init : undefined;
@@ -4527,7 +4530,7 @@ class BodyChecker implements Context, GuardHost {
       // A union of objects, as `as const` rows give, is read field by field, each field the union
       // of its members', as a member read of it is.
       const members = w?.kind === "union" ? w.members.slice() : [whole];
-      if (!members.every((m) => this.cx.recOf(m)?.kind === "object" || this.cx.recOf(m)?.kind === "class" || (m === whole && this.cx.recOf(m)?.kind === "interface"))) {
+      if (!members.every((m) => this.cx.kindOf(m) === "object" || this.cx.kindOf(m) === "class" || (m === whole && this.cx.kindOf(m) === "interface"))) {
         throw new CompileError("E0003", `'{ ... }' destructures an object or an instance, not '${this.cx.tables.typing.show(destructuring)}'`, pattern.start, pattern.end);
       }
       let taken = new Set<string>();
@@ -5100,7 +5103,7 @@ class BodyChecker implements Context, GuardHost {
     const w = this.cx.recOf(written);
     const type = w?.kind === "function" && w.generic === undefined ? this.cx.tables.typing.stored(written) : written;
     const to = this.cx.isRef(type) ? this.cx.tables.typing.rec(type).to : type;
-    if (this.cx.recOf(to)?.kind === "interface") throw unsupported("closure parameters of interface types", p);
+    if (this.cx.kindOf(to) === "interface") throw unsupported("closure parameters of interface types", p);
     return type;
   }
 
@@ -5630,7 +5633,7 @@ class BodyChecker implements Context, GuardHost {
         // A closure returned is boxed into the callable the function declares.
         // A generic function value is returned as it is, capturing nothing.
         const r = this.cx.recOf(type);
-        if (r?.kind === "closure" && r.generic === undefined && this.cx.recOf(this.state.declared)?.kind !== "dyn") {
+        if (r?.kind === "closure" && r.generic === undefined && this.cx.kindOf(this.state.declared) !== "dyn") {
           if (this.f().comptime === "const") throw new CompileError("E0801", "a top-level const holding a function is supported when its value is an arrow written in place, as in 'const f = (x: i64) => ...'; declare the function with 'function', or call it by its own name", s.value!.start, s.value!.end);
           throw unsupported("functions returned without a function return type", s.value!);
         }
@@ -5638,7 +5641,7 @@ class BodyChecker implements Context, GuardHost {
         // to follow what it borrows through.
         if (this.f().comptime === "const" && s.value !== undefined && r?.kind !== "ref" && this.cx.tables.typing.holdsRef(type)) throw unsupported("top-level consts holding references", s.value);
         // Returns of different regexes give any regex, as TypeScript infers 'RegExp'.
-        if (this.state.declared === undefined && this.cx.recOf(this.state.inferred)?.kind === "regex" && r?.kind === "regex" && this.state.inferred !== type) this.state.inferred = ANY_REGEX;
+        if (this.state.declared === undefined && this.cx.kindOf(this.state.inferred) === "regex" && r?.kind === "regex" && this.state.inferred !== type) this.state.inferred = ANY_REGEX;
         const expected = this.state.declared ?? this.state.inferred;
         // A subclass's copy of a member returning `this` must give back the subclass.
         const inherits = this.f().copyOf !== undefined && selfTyped(this.f()) ? `: '${this.cx.tables.typing.show(this.f().self!.type)}' inherits this method, and its 'this' return type is the receiver's own class, so return 'this'` : "";
@@ -6015,7 +6018,7 @@ class BodyChecker implements Context, GuardHost {
     if (union !== undefined && union.kind === "union") for (const m of union.members) candidates.push(m);
     else candidates.push(errorType);
     let classes: ClassType[] = [];
-    for (const m of candidates) if (typeof m !== "string" && this.cx.tables.typing.rec(m).kind === "class") classes.push(m as ClassType);
+    for (const m of candidates) if (typeof m !== "string" && this.cx.tables.typing.kindOf(m) === "class") classes.push(m as ClassType);
     let wrappers: { wrapper: ClassType; param: Type; via: InstanceId }[] = [];
     for (const c of classes) {
       const id = this.cx.registry().classIdOf(c);
@@ -6285,7 +6288,7 @@ function earliestOf(spans: Ref<Expr[]>): { start: usize; end: usize } | undefine
 // The type an argument crosses into JS as: the stored callable a callback meets, or its own.
 function crossingType(typing: Ref<Typing>, i: Ref<Instance>, a: Ref<Expr>): Type {
   const to = i.coercions.get(a);
-  return to !== undefined && typing.holdsPart(to, (u) => typeof u !== "string" && typing.rec(u).kind === "dyn") ? to : i.types.get(a)!;
+  return to !== undefined && typing.holdsPart(to, (u) => typeof u !== "string" && typing.kindOf(u) === "dyn") ? to : i.types.get(a)!;
 }
 
 function calledName(callee: Ref<Expr>): string | undefined {

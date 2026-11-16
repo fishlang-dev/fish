@@ -113,7 +113,7 @@ export function unsatisfied(type: Type, trait: InterfaceType, members: Mut<Membe
 // function type written, which is what it is compared as.
 function implicitBound(typing: Ref<Typing>, t: Type): Type {
   const r = typeof t === "string" ? undefined : typing.rec(t);
-  return r?.kind === "param" && typing.recOf(r.bound)?.kind === "function" ? r.bound! : t;
+  return r?.kind === "param" && typing.kindOf(r.bound) === "function" ? r.bound! : t;
 }
 
 function same(typing: Mut<Typing>, a: Type, b: Type): boolean {

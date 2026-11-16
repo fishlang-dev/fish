@@ -260,7 +260,7 @@ function verdict(typing: Mut<Typing>, test: Ref<Test>, m: Type): Verdict {
       if (kind !== undefined && is(typing, kind, test.value)) return "yes";
       const r = kind === undefined || typeof kind === "string" ? undefined : typing.rec(kind);
       // A `kind` that is one of several literals is that literal only when it is among them.
-      if (r !== undefined && r.kind === "union" && r.members.every((k) => typeof k !== "string" && typing.rec(k).kind === "literal")) {
+      if (r !== undefined && r.kind === "union" && r.members.every((k) => typeof k !== "string" && typing.kindOf(k) === "literal")) {
         return r.members.some((k) => is(typing, k, test.value)) ? "both" : "no";
       }
       return r !== undefined && r.kind === "literal" ? "no" : "both";

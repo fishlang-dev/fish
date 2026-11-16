@@ -161,7 +161,7 @@ export function unionField(typing: Mut<Typing>, union: UnionType, name: string, 
   for (const m of r.members) {
     const held = typing.unfold(m);
     if (typeof held === "string") return undefined;
-    if (held !== m && typing.rec(held).kind === "union") {
+    if (held !== m && typing.kindOf(held) === "union") {
       const inner = unionField(typing, held as UnionType, name, at);
       if (inner === undefined) return undefined;
       found.push(inner);
@@ -308,7 +308,7 @@ export function holdsArgument(typing: Ref<Typing>, t: UnionType): boolean {
 // A `?:` whose sides have different types makes the union of both, as in TypeScript.
 /** @throws {CompileError} */
 export function bothSides<B extends UnionContext, H extends Union<B>>(host: Mut<H>, e: Ref<Extract<Expr, { kind: "conditional" }>>, then: Type, otherwise: Type): Type {
-  const kinds = [then, otherwise].map((t) => (typeof t === "string" ? t : host.ctx.tables().typing.rec(t).kind));
+  const kinds = [then, otherwise].map((t) => (typeof t === "string" ? t : host.ctx.tables().typing.kindOf(t)));
   // `c ? undefined : () => ...` holds the function as a stored callable of its own signature, or nothing.
   if (kinds.includes("closure") && kinds.includes("null")) return optionalClosure<B, H>(host, e, then, otherwise);
   if (kinds.includes("closure")) throw unsupported("unions holding functions", { start: e.start, end: e.end });
@@ -403,7 +403,7 @@ export function intoUnion<B extends UnionContext, H extends Union<B>>(e: Ref<Exp
 }
 
 function kindOf(typing: Ref<Typing>, t: Type): string | undefined {
-  return typeof t === "string" ? undefined : typing.rec(t).kind;
+  return typeof t === "string" ? undefined : typing.kindOf(t);
 }
 
 function unionMembers(typing: Ref<Typing>, t: Type): Type[] {
@@ -492,7 +492,7 @@ function flat(typing: Mut<Typing>, t: Type): Type {
 }
 
 function isParam(typing: Ref<Typing>, t: Type): boolean {
-  return typeof t !== "string" && typing.rec(t).kind === "param";
+  return typeof t !== "string" && typing.kindOf(t) === "param";
 }
 
 // Whether a side, as read, is a type parameter.
@@ -511,7 +511,7 @@ export function objectsMeet(typing: Ref<Typing>, a: Type, b: Type): boolean {
 
 function isObject(typing: Ref<Typing>, t: Type): boolean {
   if (typeof t === "string") return false;
-  const kind = typing.rec(t).kind;
+  const kind = typing.kindOf(t);
   return kind !== "literal" && kind !== "pattern" && kind !== "brand";
 }
 
@@ -544,8 +544,8 @@ function memberComparable(typing: Mut<Typing>, x: Type, y: Type): boolean {
   const lx = literalOf(typing, x);
   const ly = literalOf(typing, y);
   if (lx !== undefined && ly !== undefined) return lx.value === ly.value;
-  const bx = typeof x !== "string" && typing.rec(x).kind === "brand";
-  const by = typeof y !== "string" && typing.rec(y).kind === "brand";
+  const bx = typeof x !== "string" && typing.kindOf(x) === "brand";
+  const by = typeof y !== "string" && typing.kindOf(y) === "brand";
   if (x === y && bx) return true;
   const ux = bx !== by ? typing.unbranded(x) : x;
   const uy = bx !== by ? typing.unbranded(y) : y;
@@ -560,5 +560,5 @@ function literalOf(typing: Ref<Typing>, t: Type): { value: string | bigint | boo
 
 function baseOf(typing: Ref<Typing>, t: Type): Type {
   if (literalOf(typing, t) !== undefined) return typing.baseOf(t as LiteralType);
-  return typeof t !== "string" && typing.rec(t).kind === "pattern" ? "string" : t;
+  return typeof t !== "string" && typing.kindOf(t) === "pattern" ? "string" : t;
 }

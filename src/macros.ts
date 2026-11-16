@@ -805,7 +805,7 @@ function run(decl: Ref<Stmt>, exported: boolean, pending: Ref<Pending>, ready: R
   if (id === undefined) throw new CompileError("E1103", "a macro's parameters can't be object types or interfaces yet, which make it generic; use a class", macro.start, macro.end);
   const param: Ref<Param> = macro.params[0]!;
   const returns = host.tables.arenas.instanceOf(id).returns;
-  if (typeof returns === "string" || host.tables.typing.rec(returns).kind === "literal") throw new CompileError("E1103", `a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${host.tables.typing.show(returns)}'`, macro.start, macro.end);
+  if (typeof returns === "string" || host.tables.typing.kindOf(returns) === "literal") throw new CompileError("E1103", `a macro gives the declarations it makes, as an 'Ast' or an 'Ast[]', not '${host.tables.typing.show(returns)}'`, macro.start, macro.end);
   const input = localType(host, id, param);
   const [bare, strip] = stripped(compilation.ids, decl, pending);
   const value = inputValue(host.tables, bare, input, param);

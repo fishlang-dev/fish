@@ -31,7 +31,7 @@ export function binaryType(typing: Mut<Typing>, op: BinaryOp, left: Type, right:
   const branded = brandedType(typing, op, left, right, { start: at.start, end: at.end });
   if (branded !== undefined) return branded;
   // Value equality comes through Eq, which objects don't have yet. A literal's value is known.
-  const comparable = (t: Type) => typeof t === "string" || ["literal", "pattern", "pointer"].includes(typing.rec(t).kind);
+  const comparable = (t: Type) => typeof t === "string" || ["literal", "pattern", "pointer"].includes(typing.kindOf(t));
   if ((op === "===" || op === "!==") && (!comparable(left) || !comparable(right))) {
     throw unsupported("comparisons of objects", at);
   }

@@ -287,7 +287,7 @@ function cType(typing: Ref<Typing>, t: Type): string {
     const r = typing.rec(t);
     if (r.kind !== "pointer") return "void";
     const to = cType(typing, r.to);
-    const pointer = typeof r.to !== "string" && typing.rec(r.to).kind === "pointer";
+    const pointer = typeof r.to !== "string" && typing.kindOf(r.to) === "pointer";
     const target = r.mutable ? to : pointer ? `${to}const` : `const ${to}`;
     return `${target}${target.endsWith("*") ? "" : " "}*`;
   }
