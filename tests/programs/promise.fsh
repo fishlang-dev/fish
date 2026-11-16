@@ -655,3 +655,27 @@ async function main() {
   console.log(r);
 }
 // expect: [ 'a1!', 'b1!', 's1L' ]
+// case: promise_uncopyable_moved_through_shorthand_and_unwrap
+// expect: hi
+// expect: ho
+// A promise reading a child's output can't be copied, so a shorthand property and an unwrapped
+// shift both have to move it.
+async function outputOf(stdout: Response): Promise<string> {
+  return await stdout.text();
+}
+
+type Held = { at: i64; output: Promise<string> };
+
+async function main(): Promise<void> throws IoError {
+  const one = Bun.spawn(["echo", "hi"], { stdout: "pipe", stderr: "pipe" });
+  const output: Promise<string> = outputOf(new Response(one.stdout));
+  const r: Held = { at: 0, output };
+  const a = await r.output;
+  process.stdout.write(a);
+  const two = Bun.spawn(["echo", "ho"], { stdout: "pipe", stderr: "pipe" });
+  const second: Promise<string> = outputOf(new Response(two.stdout));
+  let xs: Held[] = [{ at: 1, output: second }];
+  const h = xs.shift()!;
+  const b = await h.output;
+  process.stdout.write(b);
+}

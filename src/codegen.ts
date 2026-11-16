@@ -8926,6 +8926,9 @@ class Codegen implements PrintHost, ComptimeHost {
       // A string's index makes a string; an array's reads an element.
       case "index":
         return !this.indexes(this.valueType(e.object));
+      // Unwrapping an Option made here takes what it holds.
+      case "nonNull":
+        return e.narrows === undefined && !redundantBang(e) && this.valueType(e.expr) !== "null" && this.fresh(e.expr);
       default:
         return false;
     }
@@ -12851,7 +12854,8 @@ class Codegen implements PrintHost, ComptimeHost {
         }
         // Through a reference, the Option it points to.
         const option = this.valueType(e.expr) as UnionType;
-        const v = this.value(e.expr);
+        const taken = this.fresh(e.expr);
+        const v = this.value(e.expr, taken);
         // The checker's own unwraps, as of an iterator helper's count, say why they panic.
         const none: Type[] = ["null"];
         const holds4 = this.conversions().holds(v, option, none);
@@ -13321,7 +13325,7 @@ class Codegen implements PrintHost, ComptimeHost {
     // A shorthand lent to a reference field points at its variable.
     if (this.isRef(to) && !this.isRef(this.loc(local).type)) return [p.name, this.slot(local)];
     const part3 = this.loc(local).type;
-    if (this.holdsRust(part3)) {
+    if (this.holdsRust(part3) || (this.cur().consumes.has(p.id) && this.keepsAll(part3, to))) {
       const shorthand2 = this.shorthand(p, local);
       const part = this.loc(local).type;
       return [p.name, this.convert(shorthand2, part, to)];
@@ -13336,19 +13340,18 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  // A shorthand property's value: its variable's, copied, or for a Rust value, moved out of it, as
-  // the property written out moves it.
+  // A shorthand property's value: its variable's, moved out of it where the property written out
+  // would move it, which a value that can't be copied needs, and otherwise copied.
   shorthand(this: Mut<this>, p: Ref<Extract<ObjectProp, { kind: "shorthand" }>>, local: LocalId): string {
     const read = this.temp();
     const part2 = this.loc(local).type;
     const line = `${read} = load ${this.llvm(part2)}, ptr ${this.slot(local)}`;
     this.emit(line);
     const part3 = this.loc(local).type;
-    if (!this.holdsRust(part3)) {
-      const part = this.loc(local).type;
-      return this.copied(read, part);
+    if (!this.cur().consumes.has(p.id)) {
+      if (this.holdsRust(part3)) assert(false, "internal error: a Rust value in a shorthand property isn't moved");
+      return this.copied(read, part3);
     }
-    if (!this.cur().consumes.has(p.id)) assert(false, "internal error: a Rust value in a shorthand property isn't moved");
     const part4 = this.loc(local).type;
     const line2 = `store ${this.llvm(part4)} zeroinitializer, ptr ${this.slot(local)}`;
     this.emit(line2);
