@@ -13132,12 +13132,12 @@ class Codegen implements PrintHost, ComptimeHost {
         const get22 = this.cur().types.get(e)!;
         const line10 = `${result} = phi ${this.llvm(get22)} [ ${a}, %${thenEnd} ], [ ${b}, %${otherwiseEnd} ]`;
         this.emit(line10);
-        // Only the side that ran filled its slot; the other's reads as nothing to drop.
+        // Only the side that ran filled its slot; the other's reads as nothing to drop. Each is
+        // dropped from its slot when the statement ends, as the result may lend the slot itself.
         for (const { slot, type } of kept) {
           const v = this.temp();
           this.emit(`${v} = load ${this.llvm(type)}, ptr ${slot}`);
-          this.emit(`store ${this.llvm(type)} zeroinitializer, ptr ${slot}`);
-          this.pending.push({ v, type });
+          this.pending.push({ v, type, slot, home: true });
         }
         return result;
       }
