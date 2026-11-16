@@ -1,7 +1,7 @@
 // What the ported tests share: reading files, which fails the test rather than throwing, running
 // the native fishc, and asking Prettier, the formatter's reference, how it formats.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -44,6 +44,44 @@ export function ran(got: Ref<Ran>, code: i64, out: string, err: string, what: st
 // Fails the test with both values shown when they differ.
 export function same(got: string, want: string, what: string): void {
   assert(got === want, `${what}:\n--- expected\n${want}\n--- got\n${got}`);
+}
+
+// Bytes as UTF-8 text.
+export function text(bytes: Ref<u8[]>): string {
+  return new TextDecoder().decode(bytes);
+}
+
+// A fresh directory under the system's temporary one, by its real path.
+export function scratch(prefix: string): string {
+  try {
+    return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  } catch (e) {
+    assert(false, `can't make a directory: ${e.message}`);
+    return "";
+  }
+}
+
+// Removes a directory `scratch` made.
+export function removed(dir: string): void {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch (_e) {}
+}
+
+// Builds `source` as the program `name` in `dir` with the native fishc, giving the executable's
+// path and failing the test when the build prints anything.
+export function built(dir: string, name: string, source: string): string {
+  const program = join(dir, `${name}.fsh`);
+  try {
+    writeFileSync(program, source);
+  } catch (e) {
+    assert(false, `can't write ${program}: ${e.message}`);
+  }
+  const out = join(dir, name);
+  const run = fishc(dir, ["build", program, "-o", out]);
+  same(run.err, "", `building ${name}`);
+  assert(run.code === 0, `building ${name} exited with ${run.code}`);
+  return out;
 }
 
 // Bun's script printing, as a JSON array, how Prettier formats each input of the JSON array in a
