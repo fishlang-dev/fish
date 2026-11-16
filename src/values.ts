@@ -37,6 +37,8 @@ type Call = Extract<Expr, { kind: "call" }>;
 type Elements = Extract<Expr, { kind: "array" }>["elements"];
 
 const I64_MAX = (1n << 63n) - 1n;
+// Stands in for an argument's mismatch message until an error needs the real one.
+const ARGUMENT_MISMATCH = "\u0000argument mismatch\u0000";
 
 // `String.raw`'s text: the parts as written, each value between two, as a template; a literal
 // value is folded into the text, so a template of literals is a constant.
@@ -2889,8 +2891,7 @@ export class Expressions<C extends Context> implements Union<C> {
         const defaulted = param !== undefined ? this.defaultedArg(a, t, param) : undefined;
         if (defaulted !== undefined) shown = defaulted;
       }
-      const arg2770_1 = `argument of type '${this.ctx.typing().show(t)}' is not assignable to parameter of type '${this.ctx.typing().show(shown)}'`;
-      this.coerce(a, t, params[i]!, arg2770_1);
+      this.coerceArg(a, t, params[i]!, shown);
       i++;
     }
     const given = this.ctx.tables().typing.lower(held);
@@ -7862,8 +7863,20 @@ export class Expressions<C extends Context> implements Union<C> {
       if (this.isRefType(expected) && this.ctx.typing().rec(expected).mutable) this.readOnlySubarray(list[i]!);
       const declared = cloneParam(written[i]!);
       const shown = this.defaultedArg(list[i]!, type, declared) ?? expected;
-      const arg7536_1 = `argument of type '${this.ctx.typing().show(type)}' is not assignable to parameter of type '${this.ctx.typing().show(shown)}'`;
-      this.coerce(list[i]!, type, expected, arg7536_1);
+      this.coerceArg(list[i]!, type, expected, shown);
+    }
+  }
+
+  // The message names both types, and rendering them on every argument was a large share of
+  // checking natively, so it is made only when the argument doesn't fit.
+  /** @throws {CompileError} */
+  private coerceArg(this: Mut<this>, a: Ref<Expr>, type: Type, to: Type, shown: Type): void {
+    try {
+      this.coerce(a, type, to, ARGUMENT_MISMATCH);
+    } catch (err) {
+      if (!(err instanceof CompileError) || !err.message.includes(ARGUMENT_MISMATCH)) throw err;
+      const said = `argument of type '${this.ctx.typing().show(type)}' is not assignable to parameter of type '${this.ctx.typing().show(shown)}'`;
+      throw new CompileError(err.code, err.message.replace(ARGUMENT_MISMATCH, said), err.start, err.end, err.note === undefined ? undefined : { ...err.note! });
     }
   }
 

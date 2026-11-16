@@ -3330,7 +3330,7 @@ export class Typing {
       return `${this.readonlyTuple(t as ObjectType) ? "readonly " : ""}[${[...elems, ...restPart].join(", ")}]`;
     }
     if (r.fields.length === 0) return "{}";
-    const name = (n: string) => (/^[A-Za-z_$][\w$]*$/.test(n) ? n : JSON.stringify(n));
+    const name = (n: string) => (plainName(n) ? n : JSON.stringify(n));
     return `{ ${r.fields.map((f) => {
       const shown = f.optional === "added" ? this.showWithoutNull(f.type) : this.show(f.type);
       return `${f.readonly === true ? "readonly " : ""}${name(f.name)}${f.optional !== undefined && f.optional !== "undefined" ? "?" : ""}: ${shown}`;
@@ -3364,3 +3364,15 @@ export type NeededInstance =
   | { kind: "interface"; t: InterfaceType; args: Type[] }
   | { kind: "variant"; v: VariantType; args: Type[] }
   | { kind: "recursive"; t: RecursiveType; args: Type[] };
+
+// What `/^[A-Za-z_$][\w$]*$/` tests, by hand: it runs for every field of every object type shown,
+// and natively the regex cost more than the rest of showing the type.
+function plainName(n: string): boolean {
+  if (n.length === 0) return false;
+  for (let i: usize = 0; i < n.length; i++) {
+    const c = n[i]!;
+    const letter = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c === "_" || c === "$";
+    if (!letter && !(i > 0 && c >= "0" && c <= "9")) return false;
+  }
+  return true;
+}
