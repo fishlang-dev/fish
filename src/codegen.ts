@@ -808,7 +808,9 @@ class Codegen implements PrintHost, ComptimeHost {
       let params = written.flatMap((p, k) => {
         const local = p.local;
         if (shared !== undefined && shared.at.has(k as usize)) {
-          const at = `%"${this.loc(local).name}.pair.${this.loc(local).id}"`;
+          // Named by the parameter's place, not the program's count of locals, so it reads the
+          // same however many locals the rest of the program declares.
+          const at = `%"${this.loc(local).name}.pair.${k}"`;
           this.allocas.push(`  ${at} = alloca ${PAIR}`);
           const line9 = `store ${PAIR} %"${this.loc(local).name}.arg", ptr ${at}`;
           this.emit(line9);
@@ -1323,6 +1325,15 @@ class Codegen implements PrintHost, ComptimeHost {
       });
     }
     return found;
+  }
+
+
+  // Where `at` is, as a generated name may say it: the function it is in, without a generic
+  // instance's hash, and its offset from that function's start, so the name doesn't move when
+  // code before the function does or another instance of it asks first.
+  siteName(this: Mut<this>, at: Ref<Span>): string {
+    const family = shortened(this.inst(this.current).symbol).replace(/(?<![.\s])#\w+$/, "");
+    return `${family}+${(at.start as i64) - (this.bodyAt(this.current).start as i64)}`;
   }
 
 
@@ -2767,7 +2778,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const key = `${this.tables.typing.keyOf(type)} ${at.start}`;
     const made = this.settlers.get(key);
     if (made !== undefined) return made;
-    const line = `${this.tables.typing.described(type)} ${at.start}`;
+    const line = `${this.tables.typing.described(type)} ${this.siteName(at)}`;
     const n = this.stableId("js.settle", line, key);
     const names: [string, string] = [`@fsh.js.settle.${n}`, `@fsh.js.settle.drop.${n}`];
     this.settlers.set(key, names);
@@ -2837,7 +2848,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const key = `${this.tables.typing.keyOf(type)} ${at.start}`;
     const made = this.callbacks.get(key);
     if ((made !== undefined && made !== "")) return made;
-    const line = `${this.tables.typing.described(type)} ${at.start}`;
+    const line = `${this.tables.typing.described(type)} ${this.siteName(at)}`;
     const name = `@fsh.js.callback.${this.stableId("js.callback", line, key)}`;
     this.callbacks.set(key, name);
     const saved = this.setAside();
@@ -8186,7 +8197,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const line = `store ${this.llvm(closure)} ${this.owned(compare)}, ptr ${env}`;
       this.emit(line);
       // Its own owner, since code emitted twice, as a `finally` is, makes two.
-      const line3 = `${this.cur().symbol} ${compare.start}`;
+      const line3 = this.siteName(compare);
       through = `@fsh.sort.compare.${this.stableId("sort.compare", line3, `unique ${this.taken.size}`)}`;
       this.thunk(through, "i32", (cg) => {
         const arg = (cg: Mut<Codegen>, p: string, given: Type | undefined): string[] => {
