@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildTests } from "../src/main.ts";
-import { runTests, type Test } from "../src/tests.ts";
+import { runDefaults, runTests, type Test } from "../src/tests.ts";
 import { cachedSession } from "../src/stdcache.ts";
 
 const session = cachedSession();
@@ -217,17 +217,17 @@ test("a diagnostic names a test as the test, and --panic=abort is refused", () =
   expect(fishc(dir).err).toContain("which isn't the 'Error' that the test 'throws its own' throws");
   const aborting = fishc(dir, "--panic=abort");
   expect(aborting.code).toBe(2);
-  expect(aborting.err).toBe("usage: fishc test [<filter>] [--release]\n");
+  expect(aborting.err).toBe("usage: fishc test [<filter>] [--release] [--timeout <ms>] [--jobs <n>]\n");
 });
 
 test("a test that can't be started fails rather than stalling the report", async () => {
-  const tests = [{ name: "missing", index: 0, async: false, module: { file: "a.fsh" } }] as unknown as Test[];
+  const tests = [{ name: "missing", index: 0, async: false, module: { file: "a.fsh" }, timeout: undefined }] as unknown as Test[];
   const written: string[] = [];
   const [write, log] = [process.stdout.write, console.log];
   process.stdout.write = ((s: string) => written.push(s) > 0) as typeof process.stdout.write;
   console.log = (s: string) => void written.push(`${s}\n`);
   try {
-    expect(await runTests(new Set(), join(root, "no-such-binary"), tests, root)).toBe(1);
+    expect(await runTests(new Set(), join(root, "no-such-binary"), tests, root, runDefaults())).toBe(1);
   } finally {
     [process.stdout.write, console.log] = [write, log];
   }
@@ -245,4 +245,32 @@ test("fishc test --release builds the tests optimized and runs them", () => {
   const plain = fishc(at);
   expect(fishc(at, "--release")).toEqual(plain);
   expect(plain.code).toBe(0);
+});
+
+test("a test's own timeout and --timeout set how long it may run", () => {
+  const src = 'function main() {}\ntest("quick under its own", async () => {\n  await sleep(1500);\n}, { timeout: 5000 });\ntest("slow under the run\'s", async () => {\n  await sleep(1500);\n});\ntest("past its own", async () => {\n  await sleep(1500);\n}, { timeout: 300 });\n';
+  const dir = pkg("timeouts", { "src/main.fsh": src });
+  expect(fishc(dir, "--timeout", "800")).toEqual({
+    code: 1,
+    out: "ok src/main.fsh > quick under its own\nFAIL src/main.fsh > slow under the run's\ntimed out after 800ms\nFAIL src/main.fsh > past its own\ntimed out after 300ms\n1 passed, 2 failed\n",
+    err: "",
+  });
+  for (const bad of ["0", "1.5", "soon"]) expect(fishc(dir, "--timeout", bad)).toEqual({ code: 2, out: "", err: `fishc test: --timeout takes a whole number of milliseconds above 0, not '${bad}'\n` });
+});
+
+test("a test's options are refused unless they are a literal timeout", () => {
+  for (const options of ['{ timeout: "1s" }', "{ timeout: 0 }", "{ limit: 100 }", "{ timeout: 100, retry: 1 }", "100"]) {
+    const run = fishc(pkg("options", { "src/main.fsh": `function main() {}\ntest("t", () => {}, ${options});\n` }));
+    expect([options, run.code, run.err.split("\n")[0]]).toEqual([options, 1, expect.stringContaining("error[E1106]: a test's options are '{ timeout: <ms> }'")]);
+  }
+});
+
+test("--jobs caps how many tests run at once", () => {
+  // Each test marks itself running, waits, then looks for another's mark before removing its own.
+  const one = (name: string) => `test("${name}", async () => {\n  try {\n    writeFileSync("running-${name}", "");\n    await sleep(300);\n    const others = readdirSync(".").filter((f) => f.startsWith("running-") && f !== "running-${name}");\n    rmSync("running-${name}");\n    assert(others.length === 0, "another test is running");\n  } catch (e) {\n    assert(false, e.message);\n  }\n});\n`;
+  const src = `import { readdirSync, rmSync, writeFileSync } from "node:fs";\nfunction main() {}\n${["a", "b", "c"].map(one).join("")}`;
+  const dir = pkg("jobs", { "src/main.fsh": src });
+  expect(fishc(dir, "--jobs", "1")).toEqual({ code: 0, out: "ok src/main.fsh > a\nok src/main.fsh > b\nok src/main.fsh > c\n3 passed, 0 failed\n", err: "" });
+  expect(fishc(dir, "--jobs", "3").out).toContain("another test is running");
+  for (const bad of ["0", "two"]) expect(fishc(dir, "--jobs", bad)).toEqual({ code: 2, out: "", err: `fishc test: --jobs takes a whole number of tests above 0, not '${bad}'\n` });
 });

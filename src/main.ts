@@ -27,7 +27,7 @@ import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTr
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.ts";
 import { serveLsp } from "./lsp.ts";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.ts";
-import { hideMains, harnessImports, harnessMain, liftTests, runTests, stopTests, type Test } from "./tests.ts";
+import { hideMains, harnessImports, harnessMain, liftTests, runDefaults, runTests, stopTests, type RunOptions, type Test } from "./tests.ts";
 import { formatRanking, rank, readPlan, type Plan } from "./rank.ts";
 import { compare, formatComparison, formatReport, readReport, sources, survey, type Report as SurveyReport } from "./survey.ts";
 import { explain } from "./codes.ts";
@@ -484,11 +484,11 @@ export function buildTests(session: BuildSession, dir: string, out: string, rele
 // Runs the tests of the package at `dir` whose name holds `filter`, each in a process of its own.
 // Gives the exit code.
 /** @throws {Error | IoError | JsonError} */
-async function testPackage(session: BuildSession, dir: string, filter: string | undefined, release: boolean): Promise<i64> {
+async function testPackage(session: BuildSession, dir: string, filter: string | undefined, release: boolean, options: Ref<RunOptions>): Promise<i64> {
   const out = join(mkdtempSync(join(tmpdir(), "fishc-test-")), "tests");
   let code: i64 = 1;
   try {
-    code = await testsIn(session, dir, out, filter, release);
+    code = await testsIn(session, dir, out, filter, release, options);
   } catch (e) {
     rmSync(dirname(out), { recursive: true, force: true });
     throw e;
@@ -497,9 +497,15 @@ async function testPackage(session: BuildSession, dir: string, filter: string | 
   return code;
 }
 
+// A whole number above 0 written in decimal, as `--timeout` and `--jobs` take, or undefined.
+function wholeNumber(text: string): usize | undefined {
+  if (!/^[1-9][0-9]{0,8}$/.test(text)) return undefined;
+  return (Number(text) ?? 0) as usize;
+}
+
 // `testPackage`'s build and run, the build at `out`.
 /** @throws {Error | IoError | JsonError} */
-async function testsIn(session: BuildSession, dir: string, out: string, filter: string | undefined, release: boolean): Promise<i64> {
+async function testsIn(session: BuildSession, dir: string, out: string, filter: string | undefined, release: boolean, options: Ref<RunOptions>): Promise<i64> {
   let running = new Set<i32>();
   try {
     const tests = buildTests(session, dir, out, release);
@@ -509,7 +515,7 @@ async function testsIn(session: BuildSession, dir: string, out: string, filter: 
     }
     const chosen = filter === undefined ? tests : tests.filter((t) => t.name.includes(filter));
     if (chosen.length > 0) {
-      const code = await Promise.race([runTests(running, out, chosen, dir), signalled("SIGINT", 130), signalled("SIGTERM", 143)]);
+      const code = await Promise.race([runTests(running, out, chosen, dir, options), signalled("SIGINT", 130), signalled("SIGTERM", 143)]);
       // Interrupted, the tests still running and what they started end.
       stopTests(running);
       return code;
@@ -935,6 +941,8 @@ async function main(): Promise<void> {
           debug: { type: "boolean", short: "g" },
           timings: { type: "boolean" },
           sanitize: { type: "string", multiple: true },
+          timeout: { type: "string" },
+          jobs: { type: "string" },
         },
       });
     } catch (e) {
@@ -1039,9 +1047,13 @@ async function main(): Promise<void> {
   }
   if (command === "test") {
     // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
-    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "release") || values.panic !== "unwind") fail("usage: fishc test [<filter>] [--release]");
+    const usage = "usage: fishc test [<filter>] [--release] [--timeout <ms>] [--jobs <n>]";
+    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "timeout" && k !== "jobs") || values.panic !== "unwind") fail(usage);
+    let options = runDefaults();
+    if (values.timeout !== undefined) options.timeout = wholeNumber(values.timeout) ?? fail(`fishc test: --timeout takes a whole number of milliseconds above 0, not '${values.timeout}'`);
+    if (values.jobs !== undefined) options.jobs = wholeNumber(values.jobs) ?? fail(`fishc test: --jobs takes a whole number of tests above 0, not '${values.jobs}'`);
     const found = findManifest(process.cwd()) ?? fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
-    const code = await testPackage(sessionFor(), dirname(found!), file, values.release === true);
+    const code = await testPackage(sessionFor(), dirname(found!), file, values.release === true, options);
     process.exit(code);
   }
   if (command === "publish") {

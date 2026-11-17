@@ -5,7 +5,7 @@ import type { Compilation } from "./compilation.ts";
 import { CompileError } from "./diag.ts";
 import { renameIn, type Loaded, type Module } from "./modules.ts";
 import { nextId, respanFunc, type Ids } from "./nodes.ts";
-import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
+import { parse, type Expr, type Func, type ObjectProp, type Span, type Stmt } from "./parser.ts";
 
 // Top-level `test("name", () => { ... })` blocks: left out of a build, lifted into functions of
 // their own file for `fishc test` and the language server, and run by a generated harness.
@@ -13,26 +13,43 @@ import { parse, type Expr, type Func, type Span, type Stmt } from "./parser.ts";
 type Body = Extract<Expr, { kind: "arrow" | "function" }>;
 // `index` is the test's place in the harness's numbering; `module` is the file declaring it, by
 // its name and its path.
-export type Test = { name: string; module: { file: string; path: string }; index: usize; async: boolean };
+// A test's `timeout` is the limit its options gave it, in milliseconds, or undefined for the run's.
+export type Test = { name: string; module: { file: string; path: string }; index: usize; async: boolean; timeout: usize | undefined };
 
-const SHAPE = `a test is written as 'test("name", () => { ... })' at the top level of a file, its name a string literal`;
+const SHAPE = `a test is written as 'test("name", () => { ... })' at the top level of a file, its name a string literal, with '{ timeout: <ms> }' after the body for a limit of its own`;
 
-// A top-level statement's test: its name, where the name is, and whether its body is async.
-type Found = { name: string; start: usize; end: usize; async: boolean };
+// A top-level statement's test: its name, where the name is, whether its body is async, and the
+// limit its options give it.
+type Found = { name: string; start: usize; end: usize; async: boolean; timeout: usize | undefined };
 
 // The test a top-level statement is, or undefined when it isn't a `test(...)` call.
 /** @throws {CompileError} */
 function testOf(s: Ref<Stmt>): Found | undefined {
   if (s.kind !== "expr" || s.expr.kind !== "call" || s.expr.callee.kind !== "ident" || s.expr.callee.name !== "test") return undefined;
   const args: Ref<Expr[]> = s.expr.args;
-  const shaped = args.length === 2 && s.expr.typeArgs.length === 0 && !s.expr.optional && args[0]!.kind === "string" && bare(args[1]!);
+  const shaped = (args.length === 2 || args.length === 3) && s.expr.typeArgs.length === 0 && !s.expr.optional && args[0]!.kind === "string" && bare(args[1]!);
   if (!shaped) throw new CompileError("E1106", SHAPE, s.expr.start, s.expr.end);
+  let timeout: usize | undefined = undefined;
+  if (args.length === 3) timeout = timeoutOf(args[2]!);
   const name: Ref<Expr> = args[0]!;
   const body: Ref<Expr> = args[1]!;
   if (name.kind !== "string") return undefined;
   // `--list` and the report give each test one line.
   if (/[\n\r]/.test(name.value)) throw new CompileError("E1106", "a test's name is one line, so it can't hold a line break", name.start, name.end);
-  return { name: name.value, start: name.start, end: name.end, async: body.kind === "arrow" ? body.async : body.kind === "function" ? body.async : false };
+  return { name: name.value, start: name.start, end: name.end, async: body.kind === "arrow" ? body.async : body.kind === "function" ? body.async : false, timeout };
+}
+
+// The limit a test's options give it: `{ timeout: <ms> }`, an integer literal, read while
+// compiling so the harness knows every test's limit before running any.
+/** @throws {CompileError} */
+function timeoutOf(options: Ref<Expr>): usize {
+  const refused = new CompileError("E1106", "a test's options are '{ timeout: <ms> }', its limit in milliseconds as a whole number above 0", options.start, options.end);
+  if (options.kind !== "object" || options.props.length !== 1) throw refused;
+  const p: Ref<ObjectProp> = options.props[0]!;
+  if (p.kind !== "property" || p.key !== "timeout") throw refused;
+  const value: Ref<Expr> = p.value;
+  if (value.kind !== "int" || value.value <= 0n || value.value > 86_400_000n) throw refused;
+  return (Number(String(value.value)) ?? 0) as usize;
 }
 
 // Whether `e` is an arrow or a function that isn't a generator, taking no parameters.
@@ -88,7 +105,7 @@ export function liftTests(compilation: Mut<Compilation>, modules: Mut<Module[]>,
       const name = found.name;
       const twin = tests.find((t) => t.name === name);
       if (twin !== undefined) throw new CompileError("E1106", `there is already a test named '${name}' in '${twin.module.file}'; give each test a name of its own`, found.start, found.end);
-      tests.push({ name, module: { file: module.file, path: module.path }, index: tests.length, async: found.async });
+      tests.push({ name, module: { file: module.file, path: module.path }, index: tests.length, async: found.async, timeout: found.timeout });
       const symbol = testSymbol(name);
       compilation.names.madeUp.set(symbol, `the test '${name}'`);
       symbols.push(symbol);
@@ -113,6 +130,8 @@ function liftedTest(ids: Mut<Ids>, name: string, s: Stmt): Func {
   const at: Span = { start: s.start, end: s.end };
   let call = s;
   if (call.kind === "expr" && call.expr.kind === "call") {
+    // The body is the second argument, with the options, when there are any, after it.
+    if (call.expr.args.length === 3) call.expr.args.pop();
     const body = call.expr.args.pop();
     if (body !== undefined && (body.kind === "arrow" || body.kind === "function")) return lifted(ids, name, body, at);
   }
@@ -177,7 +196,11 @@ export function hideMains(compilation: Mut<Compilation>, modules: Mut<Module[]>)
   }
 }
 
-const LIMIT = 10_000;
+// How long a test may run when neither it nor the run names a limit, in milliseconds.
+export const LIMIT: usize = 10_000;
+
+// How a run goes: the limit for a test that names none, and how many tests run at once.
+export type RunOptions = { timeout: usize; jobs: usize };
 
 type Outcome = { passed: boolean; output: string };
 
@@ -197,20 +220,21 @@ function ended(running: Mut<Set<i32>>, group: i32) {
 }
 
 // A test running now: its place in the run, its child and the child's process group, its output
-// as it is read, when it runs past the limit, and whether it has.
-type Running = { at: usize; child: Subprocess; group: i32; output: Promise<string>; deadline: f64; late: boolean };
+// as it is read, its limit, when it runs past it, and whether it has.
+type Running = { at: usize; child: Subprocess; group: i32; output: Promise<string>; limit: usize; deadline: f64; late: boolean };
 
 // What a round of waiting saw first: the test at `at` exiting, or running past the limit.
 type Event = { kind: "exit"; at: usize; code: i64 } | { kind: "timeout"; at: usize };
 
 // Starts `test` in a process group of its own, noted in `running`, its output read as it runs.
 /** @throws {IoError} */
-function started(running: Mut<Set<i32>>, binary: string, test: Ref<Test>, cwd: string, at: usize): Running {
+function started(running: Mut<Set<i32>>, binary: string, test: Ref<Test>, cwd: string, at: usize, timeout: usize): Running {
   const child = Bun.spawn([binary, String(test.index)], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
   const group = child.pid as i32;
   running.add(group);
   const output: Promise<string> = outputOf(new Response(child.stdout), new Response(child.stderr));
-  return { at, child, group, output, deadline: performance.now() + (LIMIT as f64), late: false };
+  const limit = test.timeout ?? timeout;
+  return { at, child, group, output, limit, deadline: performance.now() + (limit as f64), late: false };
 }
 
 async function outputOf(stdout: Response, stderr: Response): Promise<string> {
@@ -248,22 +272,32 @@ async function pastLimit(ms: i64, at: usize): Promise<Event> {
   return { kind: "timeout", at };
 }
 
+// A limit as the report shows it: whole seconds as `10s`, anything else in milliseconds.
+function shownLimit(ms: usize): string {
+  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms}ms`;
+}
+
+// The run's defaults: the standard limit, and a test per core.
+export function runDefaults(): RunOptions {
+  return { timeout: LIMIT, jobs: availableParallelism() as usize };
+}
+
 // A test fails when it exits with anything but 0 or runs past the limit.
-function outcome(text: string, code: i64, late: boolean, signal: string | null): Outcome {
+function outcome(text: string, code: i64, late: boolean, signal: string | null, limit: usize): Outcome {
   const passed = code === 0 && !late;
-  if (late) return { passed, output: `${text}timed out after ${LIMIT / 1000}s\n` };
+  if (late) return { passed, output: `${text}timed out after ${shownLimit(limit)}\n` };
   if (passed || text !== "") return { passed, output: text };
   return { passed, output: signal !== null ? `killed by ${signal}\n` : `exited with ${code}\n` };
 }
 
-// Runs each of `tests` in the program `binary`, as many at once as the machine has cores, and
-// reports them in order: `ok` or `FAIL`, the file and the name, a failed test's output, then the
-// counts, noting each test's process group in `running` while it runs. A test past the limit has
+// Runs each of `tests` in the program `binary`, as many at once as `options.jobs`, and reports them
+// in order: `ok` or `FAIL`, the file and the name, a failed test's output, then the counts, noting
+// each test's process group in `running` while it runs. A test past its own limit, or the run's, has
 // its group killed; once a test exits, the rest of its group is killed, as a child it left behind
 // would otherwise hold its output open, and the verdict is the test's own. Gives the exit code, 1
 // when any failed.
-export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Ref<Test[]>, cwd: string): Promise<i64> {
-  const width = Math.min(availableParallelism(), tests.length as i64);
+export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Ref<Test[]>, cwd: string, options: Ref<RunOptions>): Promise<i64> {
+  const width = Math.min(options.jobs as i64, tests.length as i64);
   let flight: Running[] = [];
   let done: (Outcome | undefined)[] = [];
   for (let at: usize = 0; at < tests.length; at++) done.push(undefined);
@@ -276,7 +310,7 @@ export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Re
       next++;
       try {
         // Started before the push, so `flight` is lent to it only once nothing can throw.
-        const r = started(running, binary, tests[at]!, cwd, at);
+        const r = started(running, binary, tests[at]!, cwd, at, options.timeout);
         flight.push(r);
       } catch (e) {
         done[at] = { passed: false, output: `the test couldn't be run: ${e instanceof Error ? e.message : (e as IoError).message}\n` };
@@ -312,7 +346,7 @@ export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Re
     ended(running, exited.group);
     const text = await exited.output;
     const signal = exited.child.signalCode;
-    done[event.at] = outcome(text, event.code, exited.late, signal === null ? null : `${signal}`);
+    done[event.at] = outcome(text, event.code, exited.late, signal === null ? null : `${signal}`, exited.limit);
   }
   console.log(`${tests.length - failed} passed, ${failed} failed`);
   return failed > 0 ? 1 : 0;
