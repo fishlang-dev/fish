@@ -4902,10 +4902,14 @@ void fsh_rt_print_end(int32_t stream) {
 }
 
 // process.stdout.write and process.stderr.write go through console.log's buffers and locks, so
-// what they write keeps its place among printed lines.
+// what they write keeps its place among printed lines. What they write is flushed at once, as
+// Node's is: a pipe is fully buffered, and a program answering a reader through one, as a language
+// server does, would otherwise say nothing until it exits.
 void fsh_rt_stream_write(int32_t stream, const char *bytes, int64_t length) {
   fsh_rt_print_begin(stream);
-  fwrite(bytes, 1, length, stream == 2 ? stderr : stdout);
+  FILE *to = stream == 2 ? stderr : stdout;
+  fwrite(bytes, 1, length, to);
+  fflush(to);
   fsh_rt_print_end(stream);
 }
 

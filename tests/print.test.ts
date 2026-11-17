@@ -69,3 +69,23 @@ test("console.log prints values as node prints them", () => {
   expect(fish.stdout.toString()).toBe(node.stdout.toString());
   expect(fish.stderr.toString()).toBe("");
 });
+
+test("process.stdout.write reaches a pipe at once, not only when the program exits", async () => {
+  const program = join(tmp, "stream.fsh");
+  const out = join(tmp, "stream");
+  writeFileSync(program, 'async function main() {\n  process.stdout.write("ready\\n");\n  for await (const chunk of process.stdin) process.stdout.write(`got ${chunk.length}\\n`);\n}\n');
+  const built = Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "build", program, "-o", out]);
+  expect(built.exitCode).toBe(0);
+  const child = Bun.spawn([out], { stdin: "pipe", stdout: "pipe" });
+  const reader = child.stdout.getReader();
+  const decoder = new TextDecoder();
+  // Each line is read while stdin is still open, which a buffered pipe would hold back.
+  const first = await reader.read();
+  expect(decoder.decode(first.value)).toBe("ready\n");
+  child.stdin.write("hello\n");
+  child.stdin.flush();
+  const second = await reader.read();
+  expect(decoder.decode(second.value)).toBe("got 6\n");
+  child.stdin.end();
+  expect(await child.exited).toBe(0);
+});
