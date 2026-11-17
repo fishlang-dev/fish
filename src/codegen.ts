@@ -8657,15 +8657,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`br label %${joined}`);
       this.startBlock(joined);
       const mark = this.pending.length;
-      const base = this.tables.typing.lower(element);
-      const plain = isInteger(base) || isFloat(base) || base === "boolean";
-      let piece: string;
-      if (plain) {
-        piece = this.written(v, base);
-      } else {
-        const convert2 = this.convert(v, element, "string");
-        piece = this.written(convert2, "string");
-      }
+      const piece = this.joinPiece(v, element);
       const made = this.pending.splice(mark as i64);
       this.emit(`call void @fsh_rt_join_push(ptr ${joining}, ptr ${piece})`);
       for (const p of made) {
@@ -8694,6 +8686,54 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     if (!this.cur().types.has(e) && this.needsDrop(result)) this.pending.push({ v: r, type: result });
     return r;
+  }
+
+
+  // The text `join` writes for one element, as `String(x)` gives it: a number's, a boolean's, a
+  // string's or a literal's, or for a union whichever of those it holds. A union's text is its own,
+  // pending like a written number's.
+  joinPiece(this: Mut<this>, v: string, type: Type): string {
+    const r = this.recOf(type);
+    if (r?.kind !== "union") {
+      const base = this.tables.typing.lower(type);
+      if (isInteger(base) || isFloat(base) || base === "boolean") return this.written(v, base);
+      const convert2 = this.convert(v, type, "string");
+      return this.written(convert2, "string");
+    }
+    const union = type as UnionType;
+    const members = r.members.slice();
+    const slot = this.alloca("ptr");
+    const done = this.label();
+    for (let i: usize = 0; i < members.length; i++) {
+      const m = members[i]!;
+      const [yes, no] = [this.label(), this.label()];
+      const last = i === members.length - 1;
+      if (!last) {
+        const held = this.conversions().holds(v, union, [m]);
+        this.emit(`br i1 ${held}, label %${yes}, label %${no}`);
+      } else this.emit(`br label %${yes}`);
+      this.startBlock(yes);
+      const mark = this.pending.length;
+      const member = this.convert(v, union, m);
+      const inner = this.joinPiece(member, m);
+      const made = this.pending.splice(mark as i64);
+      // Each side's text is owned, so the one the union held is released once after the join.
+      const owned = made.some((p) => p.v === inner) ? inner : this.copied(inner, "string");
+      for (const p of made) {
+        if (p.v === inner) continue;
+        const left = this.released(p);
+        this.dispose(left, p.type);
+      }
+      this.emit(`store ptr ${owned}, ptr ${slot}`);
+      this.emit(`br label %${done}`);
+      this.startBlock(no);
+      if (last) this.emit("unreachable");
+    }
+    this.startBlock(done);
+    const result = this.temp();
+    this.emit(`${result} = load ptr, ptr ${slot}`);
+    this.pending.push({ v: result, type: "string" });
+    return result;
   }
 
 
