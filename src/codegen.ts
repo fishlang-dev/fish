@@ -956,7 +956,8 @@ class Codegen implements PrintHost, ComptimeHost {
     }
   }
 
-  this.main = this.instances.find((i) => this.inst(i).symbol === "main")!;
+  // A library has no main, and keeps the instance it was given, which only a program's entry reads.
+  this.main = this.instances.find((i) => this.inst(i).symbol === "main") ?? this.main;
 
   // Built before the module is put together, since its message adds a global.
   this.start = this.library ? this.instances.filter((i) => this.bodyAt(i).exported === true).flatMap(((i) => this.exported(i))) : this.entry();
