@@ -8,8 +8,9 @@ import type { Package } from "./modules.ts";
 
 type Request = { specifier: string; dir: string; index: usize }[];
 // The bundled JS, or a refusal with its code: a missing package, or one needing a module Fish's
-// JS lacks.
-type Result = { js?: string; index: usize; message: string; code: string };
+// JS lacks. Only one half is printed, so each field is optional, as a native build checks the
+// fields it parses.
+type Result = { js?: string; index?: usize; message?: string; code?: string };
 type BundleInput = { request: Request; shims: [string, string][] };
 
 // Bundles the packages at `used`, the indexes of those the program's code reaches. Bun's bundler
@@ -30,8 +31,8 @@ export function bundle(packages: Ref<Package[]>, used: Ref<usize[]>): string {
   if (run.exitCode !== 0) throw new Error(`bundling the program's packages failed:\n${new TextDecoder().decode(run.stderr)}`);
   const result = JSON.parse<Result>(new TextDecoder().decode(run.stdout));
   if (result.js !== undefined) return result.js;
-  const at: Ref<Package> = packages[result.index]!;
-  throw new CompileError(result.code, result.message, at.at.start, at.at.end);
+  const at: Ref<Package> = packages[result.index ?? 0]!;
+  throw new CompileError(result.code ?? "E0901", result.message ?? "the bundler gave neither a bundle nor an error", at.at.start, at.at.end);
 }
 
 // The Node modules Fish's std has, as bundled JS sees them: `path` as Node's POSIX path written
