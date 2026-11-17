@@ -1,7 +1,8 @@
 // What the ported tests share: reading files, which fails the test rather than throwing, running
-// the native fishc, and asking Prettier, the formatter's reference, how it formats.
+// the native fishc, asking Prettier, the formatter's reference, how it formats, and reading the
+// flags the native fishc compiles the runtime with.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -165,4 +166,33 @@ export function freePort(): i64 {
   const port = parseInt(text(run.stdout).trim());
   assert(port !== null, `no free port: ${text(run.stderr)}`);
   return port;
+}
+
+// The arguments the native fishc gives clang to compile the runtime, before its output, for a build
+// of `file` with `flags` and a cache of its own under `root`, and the name of the object it was to
+// write, its hash left out. A clang on PATH logs each runtime compile and fails it, so nothing is
+// compiled and the build stops there.
+export function runtimeArgs(root: string, file: string, flags: string[]): [string, string] {
+  const bin = join(root, "shim");
+  const log = join(root, "clang.log");
+  try {
+    writeFileSync(log, "");
+    mkdirSync(bin, { recursive: true });
+    const clang = Bun.which("clang");
+    assert(clang !== null, "no clang on PATH");
+    writeFileSync(join(bin, "clang"), `#!/bin/sh\ncase " $* " in\n  *" -x c - "*" -c -o "*) echo "$*" >> ${JSON.stringify(log)}; exit 1 ;;\nesac\nexec ${JSON.stringify(clang!)} "$@"\n`);
+    chmodSync(join(bin, "clang"), 0o755);
+  } catch (e) {
+    assert(false, `can't make the clang shim: ${e.message}`);
+  }
+  const cache = join(root, `cache-${flags.join("")}`);
+  spawnSync("env", [`FISH_CACHE_DIR=${cache}`, `PATH=${bin}:${process.env.PATH ?? ""}`, fishcPath(), "build", file, "-o", join(root, "main"), ...flags]);
+  const lines = read(log).split("\n").filter((l) => l !== "");
+  assert(lines.length === 1, `the runtime compiles logged:\n${lines.join("\n")}`);
+  const at = lines[0].indexOf(" -c -o ");
+  const object = lines[0].slice((at + 7) as i64).split("/").at(-1)!;
+  const m = /^(.*)-[0-9a-f]{16}\.o/.exec(object);
+  assert(m !== null, `the runtime's object: ${object}`);
+  const name = m![1];
+  return [lines[0].slice(0, at as i64), name];
 }
