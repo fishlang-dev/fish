@@ -58,13 +58,13 @@ export function rustShim(crates: Ref<RustCrate[]>, checked: Ref<Checked>): Shim 
     }
   }
   const record = join(dir, "links.json");
-  let built = cargoBuild(cargo, dir);
+  let built = settledBuild(cargo, dir);
   // rustc names the system libraries only when it compiles the shim, which a build before this
   // one did; without that build's record, the shim is compiled again to learn them.
   if (built.links === undefined && !existsSync(record)) {
     const now = Date.now();
     utimesSync(join(dir, "src", "lib.rs"), new Date(now), new Date(now));
-    built = cargoBuild(cargo, dir);
+    built = settledBuild(cargo, dir);
   }
   if (built.links !== undefined) {
     const temp = `${record}.${process.pid}`;
@@ -74,6 +74,18 @@ export function rustShim(crates: Ref<RustCrate[]>, checked: Ref<Checked>): Shim 
   const links = built.links !== undefined ? built.links : existsSync(record) ? JSON.parse<string[]>(readFileSync(record, "utf8")) : undefined;
   if (links === undefined) throw new Error(`cargo didn't say which system libraries the Rust shim in ${dir} needs; build again`);
   return { lib: built.lib, links };
+}
+
+// cargoBuild, again when the static library it named is gone: another build of the same shim,
+// compiling it again to learn its system libraries, replaces the library while this one looks,
+// and cargo's lock makes the next run wait for that build and name the library it left.
+/** @throws {Error | IoError | JsonError} */
+function settledBuild(cargo: string, dir: string): { lib: string; links?: string[] } {
+  for (let tries = 0; tries < 3; tries++) {
+    const built = cargoBuild(cargo, dir);
+    if (existsSync(built.lib)) return built;
+  }
+  throw new Error(`cargo built the Rust shim in ${dir} but didn't give its static library`);
 }
 
 // Runs cargo on the shim, its own lock keeping two builds from writing `target/` at once. Gives the
@@ -94,7 +106,7 @@ function cargoBuild(cargo: string, dir: string): { lib: string; links?: string[]
     if (lib !== undefined || m.reason !== "compiler-artifact" || target === undefined || target.name !== LIBRARY || m.filenames === undefined) continue;
     lib = m.filenames.find((f) => f.endsWith(".a"));
   }
-  if (lib === undefined || !existsSync(lib)) throw new Error(`cargo built the Rust shim in ${dir} but didn't give its static library`);
+  if (lib === undefined) throw new Error(`cargo built the Rust shim in ${dir} but didn't give its static library`);
   const found = /native-static-libs:(.*)/.exec(stderr);
   const links = found === null ? undefined : found[1];
   if (links === undefined) return { lib };
