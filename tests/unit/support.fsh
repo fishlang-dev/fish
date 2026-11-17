@@ -156,3 +156,13 @@ export function prettier(parser: string, inputs: Ref<string[]>): string[] {
     return [];
   }
 }
+
+// A TCP port on 127.0.0.1 that was free a moment ago, asked of a Node child process, for a server
+// that can't report the port it bound.
+export function freePort(): i64 {
+  const script = `const s = require("node:net").createServer().listen(0, "127.0.0.1", () => { console.log(s.address().port); s.close(); });`;
+  const run = spawnSync("node", ["-e", script]);
+  const port = parseInt(text(run.stdout).trim());
+  assert(port !== null, `no free port: ${text(run.stderr)}`);
+  return port;
+}
