@@ -8197,7 +8197,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const line = `store ${this.llvm(closure)} ${this.owned(compare)}, ptr ${env}`;
       this.emit(line);
       // Its own owner, since code emitted twice, as a `finally` is, makes two.
-      const line3 = this.siteName(compare);
+      const line3 = this.siteName({ start: compare.start, end: compare.end });
       through = `@fsh.sort.compare.${this.stableId("sort.compare", line3, `unique ${this.taken.size}`)}`;
       this.thunk(through, "i32", (cg) => {
         const arg = (cg: Mut<Codegen>, p: string, given: Type | undefined): string[] => {
