@@ -185,7 +185,14 @@ class Loader {
       const text = readWith(read, lib);
       let target = this.visit(cx, read, lib, text, relative(dirname(this.entry), lib));
       const holder = this.fish !== undefined ? packageOf(this.fish, lib) : undefined;
-      if (holder !== undefined) target.owner = { name: holder.manifest.name, dir: holder.dir, lib: holder.manifest.lib };
+      if (holder !== undefined) {
+        target.owner = { name: holder.manifest.name, dir: holder.dir, lib: holder.manifest.lib };
+        // The module the program is linked from is the stored one, which in Fish `visit` gave a
+        // copy of, so it learns its package too.
+        for (let i: usize = 0; i < this.modules.length; i++) {
+          if (this.modules[i]!.path === target.path) this.modules[i]!.owner = { name: holder.manifest.name, dir: holder.dir, lib: holder.manifest.lib };
+        }
+      }
       return target;
     }
     const named = stdModule(specifier);
