@@ -54,3 +54,16 @@ async function main(): Promise<void> throws IoError {
   const code = await b.exited;
   console.log("second", second, code);
 }
+// case: bun_spawn_exited_with_a_background_grandchild
+// expect: 0 promptly "out\n"
+// A child's exit is seen when the child ends, though a process it left in the background still
+// holds its pipes, and what it wrote before then is kept.
+async function main(): Promise<void> throws IoError {
+  const start = Date.now();
+  const child = Bun.spawn(["sh", "-c", "echo out; sleep 5 &"], { stdout: "pipe", stderr: "pipe" });
+  const code = await child.exited;
+  const took = Date.now() - start;
+  const o = new Response(child.stdout);
+  const out = await o.text();
+  console.log(code, took < 3000 ? "promptly" : "late", JSON.stringify(out));
+}
