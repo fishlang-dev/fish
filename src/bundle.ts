@@ -32,7 +32,7 @@ export function bundle(packages: Ref<Package[]>, used: Ref<usize[]>): string {
   const result = JSON.parse<Result>(new TextDecoder().decode(run.stdout));
   if (result.js !== undefined) return result.js;
   const at: Ref<Package> = packages[result.index ?? 0]!;
-  throw new CompileError(result.code ?? "E0901", result.message ?? "the bundler gave neither a bundle nor an error", at.at.start, at.at.end);
+  throw new CompileError(result.code !== undefined ? result.code : "E0901", result.message ?? "the bundler gave neither a bundle nor an error", at.at.start, at.at.end);
 }
 
 // The Node modules Fish's std has, as bundled JS sees them: `path` as Node's POSIX path written
