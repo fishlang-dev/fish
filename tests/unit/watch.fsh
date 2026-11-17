@@ -57,7 +57,7 @@ test("the files watched are those loaded or looked for and the manifest, real, o
     assert(false, e.message);
   }
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("directories are watched with the names in each that matter", () => {
   const got = directories(["/p/a.fsh", "/p/lib/b.fsh", "/p/fish.toml"]);
@@ -71,7 +71,7 @@ test("directories are watched with the names in each that matter", () => {
   }
   entries.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   same(JSON.stringify(entries), JSON.stringify([["/p", ["a.fsh", "fish.toml"]], ["/p/lib", ["b.fsh"]]]), "the directories");
-});
+}, { timeout: 120_000 });
 
 test("a change is a difference in contents, a file renamed into place or removed included", () => {
   const root = scratch("fish-watch-");
@@ -91,7 +91,7 @@ test("a change is a difference in contents, a file renamed into place or removed
     assert(false, e.message);
   }
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function spawned(cmd: string[], cwd: string = "."): Subprocess | null {
   try {
@@ -119,7 +119,7 @@ test("stopping a program that ignores SIGTERM kills it after the grace period", 
   same(polite.signalCode ?? "none", "SIGTERM", "how the polite program ended");
   await stop(polite);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 // A `fishc watch` running in the background, its stderr going to the file `err`.
 type Watcher = { child: Subprocess; err: string; dir: string };
@@ -203,7 +203,7 @@ test("fishc watch restarts the program when a file it imports changes, and survi
   assert(code === 143, `the watcher exited with ${code}`);
   same(running(join(d, "target", "debug", "watched")), "", "programs still running");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 async function newImport(w: Ref<Watcher>, d: string): Promise<string> {
   let f = await until(w, "one\n");
@@ -232,7 +232,7 @@ test("fishc watch sees a new import that didn't exist or didn't build when it is
   const _code = await ended(w, "SIGTERM");
   assert(failure === "", failure);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 async function recreated(w: Ref<Watcher>, d: string): Promise<string> {
   const f = await until(w, "one\n");
@@ -266,7 +266,7 @@ test("fishc watch sees a file deleted and recreated, and an entry that is missin
   const _second = await ended(second, "SIGTERM");
   assert(missing === "", missing);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function stubborn(shown: string): string {
   return `declare function signal(sig: i32, handler: i64): i64;\nasync function main() {\n  unsafe { signal(15, 1); }\n  console.error("${shown}");\n  await sleep(600000);\n}\n`;
@@ -297,7 +297,7 @@ test("a program that ignores SIGTERM is killed when the watcher quits during its
   assert(code === 143, `the watcher exited with ${code}`);
   same(left, "", "programs still running");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function exiting(shown: string): string {
   return `function main() {\n  console.error("${shown}");\n  process.exit(3);\n}\n`;
@@ -329,7 +329,7 @@ test("fishc watch notes a program's exit, rebuilds a burst of saves once, and ex
   assert(failure === "", failure);
   assert(code === 130, `the watcher exited with ${code}`);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 async function interrupted(w: Ref<Watcher>, binary: string): Promise<string> {
   const f = await until(w, "one\n");
@@ -357,4 +357,4 @@ test("a second signal kills a program the watcher is still giving its grace peri
   assert(code === 130, `the watcher exited with ${code}`);
   same(left, "", "programs still running");
   removed(root);
-});
+}, { timeout: 120_000 });

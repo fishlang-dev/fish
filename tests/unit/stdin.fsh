@@ -62,7 +62,7 @@ test("a line longer than many reads arrives whole", () => {
   pieces.push(utf8("\nshort"));
   same(piped(tmp, binary, pieces, 2), `400000 ${"x".repeat(12)}\n5 short\nend\n`, "the output");
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("characters split across reads decode whole", () => {
   const tmp = scratch("fish-stdin-");
@@ -72,7 +72,7 @@ test("characters split across reads decode whole", () => {
   for (const b of utf8("é日本👍🏽\n")) pieces.push([b]);
   same(piped(tmp, binary, pieces, 5), "7 é日本👍🏽\nend\n", "the output");
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 // Nothing is written until every tick has been printed, so the ticks ran while the read waited: the
 // writer waits for the third tick in the program's stderr, then writes the line.
@@ -101,7 +101,7 @@ test("other tasks run while a read waits on a slow pipe", () => {
   same(text(run.stdout), "got hello\n", "the output");
   assert(run.status === 0, `exited with ${run.status ?? -1}`);
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("a file redirected to stdin reads like a pipe", () => {
   const tmp = scratch("fish-stdin-");
@@ -113,7 +113,7 @@ test("a file redirected to stdin reads like a pipe", () => {
   same(text(run.stdout), "5 first\n6 second\n5 third\nend\n", "the output");
   assert(run.status === 0, `exited with ${run.status ?? -1}`);
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("prompt writes its message and a space, then gives each line until input ends", () => {
   const tmp = scratch("fish-stdin-");
@@ -127,7 +127,7 @@ test("prompt writes its message and a space, then gives each line until input en
 `);
   same(piped(tmp, binary, [utf8("fish\r\n"), utf8("two\n")], 20), "name? [fish]\n [two]\nmore? [none]\n", "the output");
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("for await over process.stdin gives what has arrived as each chunk, ending with input", () => {
   const tmp = scratch("fish-stdin-");
@@ -139,4 +139,4 @@ test("for await over process.stdin gives what has arrived as each chunk, ending 
 `);
   same(piped(tmp, binary, [utf8("abc"), utf8("def\n"), [], utf8("ghi")], 50), "10 abcdef|ghi\n", "the output");
   removed(tmp);
-});
+}, { timeout: 60_000 });

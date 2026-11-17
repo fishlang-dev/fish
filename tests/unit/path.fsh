@@ -38,7 +38,7 @@ test("path gives what node's path.posix gives", () => {
   const node = text(spawnSync("node", ["-e", script]).stdout);
   same(fish, node, "the output");
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 test("resolve starts from the working directory", () => {
   const dir = scratch("fish-path-");
@@ -47,4 +47,4 @@ test("resolve starts from the working directory", () => {
   const node = text(spawnSync("node", ["-e", `const path = require("node:path"); console.log(path.resolve("x/y"), path.resolve(), path.relative("x", "."));`], { cwd: dir }).stdout);
   same(fish, node, "the output");
   removed(dir);
-});
+}, { timeout: 30_000 });

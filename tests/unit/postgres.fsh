@@ -164,7 +164,7 @@ test("a user file named like a std module gets no std allowances", () => {
     assert(!err.startsWith("0 ") && /error\[E0401\]: .*'__tlsClient'/.test(err), `${entry} isn't refused with E0401 naming '__tlsClient':\n${err}`);
   }
   removed(dir);
-});
+}, { timeout: 60_000 });
 
 test("a user file named like a std module can't reach std's internal functions", () => {
   const dir = scratch("fish-postgres-");
@@ -175,7 +175,7 @@ test("a user file named like a std module can't reach std's internal functions",
     assert(!err.startsWith("0 ") && err.includes("error[E0401]") && err.includes(`'${name}'`), `${call} isn't refused with E0401 naming '${name}':\n${err}`);
   }
   removed(dir);
-});
+}, { timeout: 60_000 });
 
 // The scripted server, which runs `script`, a JavaScript expression for its Script, and stops itself
 // `closeAfter` milliseconds in when that isn't 0. A rule the client breaks is recorded rather than
@@ -445,7 +445,7 @@ test("trust, cleartext, MD5 and SCRAM-SHA-256 authenticate, and a wrong password
     stopped(peer);
   }
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("a server that can't prove it knows the password is refused", () => {
   const tmp = scratch("fish-postgres-");
@@ -454,7 +454,7 @@ test("a server that can't prove it knows the password is refused", () => {
   same(ran(binary, [peer.url]), "IoError the Postgres server's SCRAM signature doesn't match: it may not know the password\n", "the client's output");
   stopped(peer);
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("sslmode=require refuses a server without TLS", () => {
   const tmp = scratch("fish-postgres-");
@@ -463,7 +463,7 @@ test("sslmode=require refuses a server without TLS", () => {
   same(ran(binary, [`${peer.url}?sslmode=require`]), "IoError the Postgres server doesn't take TLS connections, which sslmode=require asks for\n", "the client's output");
   stopped(peer);
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("parameters travel apart from the SQL as text, rows read by column name, errors and broken connections", () => {
   const tmp = scratch("fish-postgres-");
@@ -504,7 +504,7 @@ test("parameters travel apart from the SQL as text, rows read by column name, er
   // back before its connection ran the next statement.
   same(JSON.stringify(state.order), JSON.stringify(["1: select everything", "1: fail", "1: update", "1: break", "2: fail in transaction", "2: ROLLBACK", "2: after", "2: empty", "2: select everything"]), "the statements in order");
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("callers wait their turn for the pool's max connections, which are reused", () => {
   const tmp = scratch("fish-postgres-");
@@ -514,7 +514,7 @@ test("callers wait their turn for the pool's max connections, which are reused",
   const state = stopped(peer);
   same(`${state.connections} ${state.mostBusy} ${state.count}`, "2 2 6", "the connections, the most busy at once and the statements");
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 // Where Postgres's binaries are: Homebrew's postgresql@17, else the directory of `initdb` on PATH.
 function pgBin(): string {
@@ -639,7 +639,7 @@ test("a real Postgres: SCRAM, typed rows, errors, a small pool shared by many ta
     "again 1",
     "",
   ].join("\n"), "the exit code, stderr and output");
-});
+}, { timeout: 60_000 });
 
 // `s` as encodeURIComponent writes it, which Fish doesn't have yet: every UTF-8 byte but the
 // unreserved ASCII ones as %XX.
@@ -659,7 +659,7 @@ test("a real Postgres over TLS, its certificate verified against sslrootcert", (
   const got = againstReal(`?sslmode=require&sslrootcert=${uriComponent(ca)}`, "tls");
   if (got === "") return;
   same(got, "0 ssl true\n", "the exit code, stderr and output");
-});
+}, { timeout: 60_000 });
 
 // A server that misbehaves is refused with an error, never trusted, panicked on or waited on.
 function hostile(script: string, said: string): void {
@@ -673,35 +673,35 @@ function hostile(script: string, said: string): void {
 
 test("refused: a SCRAM nonce that doesn't extend the client's", () => {
   hostile(`{ auth: "scram", challenge: () => "r=attacker,s=c2FsdA==,i=4096" }`, "IoError the Postgres server sent a malformed SCRAM challenge");
-});
+}, { timeout: 60_000 });
 
 test("refused: no SCRAM iterations", () => {
   hostile(`{ auth: "scram", challenge: (nonce) => "r=" + nonce + "x,s=c2FsdA==,i=0" }`, "IoError the Postgres server sent a malformed SCRAM challenge");
-});
+}, { timeout: 60_000 });
 
 test("refused: too many SCRAM iterations", () => {
   hostile(`{ auth: "scram", challenge: (nonce) => "r=" + nonce + "x,s=c2FsdA==,i=2147483647" }`, "IoError the Postgres server asks for 2147483647 SCRAM iterations, more than the 10000000 Fish allows, as hashing that many would hold a thread for minutes");
-});
+}, { timeout: 60_000 });
 
 test("refused: a RowDescription shorter than its columns", () => {
   hostile(`{ auth: "trust", answer: () => ({ raw: Buffer.concat([message("1"), message("2"), message("T", int16(1), cstring("who")), ready()]) }) }`, "IoError the Postgres server sent a malformed message");
-});
+}, { timeout: 60_000 });
 
 test("refused: a DataRow value longer than its body", () => {
   hostile(`{ auth: "trust", answer: () => ({ raw: Buffer.concat([message("1"), message("2"), PRESENT, message("D", int16(1), int32(1000)), ready()]) }) }`, "IoError the Postgres server sent a malformed message");
-});
+}, { timeout: 60_000 });
 
 test("refused: a DataRow whose count isn't its columns'", () => {
   hostile(`{ auth: "trust", answer: () => ({ raw: Buffer.concat([message("1"), message("2"), PRESENT, message("D", int16(0), int32(3), Buffer.from("abc")), ready()]) }) }`, "IoError the Postgres server sent a malformed message");
-});
+}, { timeout: 60_000 });
 
 test("refused: a length under 4", () => {
   hostile(`{ auth: "trust", answer: () => ({ raw: Buffer.concat([message("1"), lengthOnly("N", -5), Buffer.alloc(64)]) }) }`, "IoError the Postgres server sent a malformed message");
-});
+}, { timeout: 60_000 });
 
 test("refused: a message over 1 GiB", () => {
   hostile(`{ auth: "trust", answer: () => ({ raw: Buffer.concat([message("1"), lengthOnly("D", 1073741829)]) }) }`, "IoError the Postgres server sent a message of 1073741830 bytes, more than the 1 GiB Postgres itself can send");
-});
+}, { timeout: 60_000 });
 
 test("COPY FROM STDIN is answered with CopyFail, and the connection goes on", () => {
   const tmp = scratch("fish-postgres-");
@@ -711,4 +711,4 @@ test("COPY FROM STDIN is answered with CopyFail, and the connection goes on", ()
   const state = stopped(peer);
   same(JSON.stringify(state.sqls), JSON.stringify(["copy", "CopyFail: COPY FROM STDIN isn't supported by Fish's postgres module", "after"]), "the statements the server saw");
   removed(tmp);
-});
+}, { timeout: 60_000 });

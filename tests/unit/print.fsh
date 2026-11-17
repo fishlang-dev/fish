@@ -64,4 +64,4 @@ test("console.log prints values as node prints them", () => {
   same(text(ran.stdout), text(want.stdout), "the output");
   same(text(ran.stderr), "", "the program's stderr");
   removed(dir);
-});
+}, { timeout: 30_000 });

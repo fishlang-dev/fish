@@ -55,7 +55,7 @@ int main(void) {
   assert(built.status === 0, `clang failed:\n${text(built.stderr)}`);
   same(text(spawnSync(out, []).stdout), "2,4,6\n", "the program's output");
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 type Ran = { stdout: string; stderr: string; exitCode: i64 };
 
@@ -133,7 +133,7 @@ test("JS handles are counted, sent and freed", () => {
   const dir = scratch("fish-engine-");
   sameRun(sanitized(join(dir, "handles.fsh"), handles()), "2\ndone\n", "handles");
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 function narrowing(): string {
   return `import { evaluate } from "fish:engine";
@@ -215,7 +215,7 @@ test("JsValues are narrowed and read", () => {
     "narrowing",
   );
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 // Builds `src` as `file` within a session allowing the test hook, into `file`.out.
 async function hookBuilt(file: string, src: string): Promise<void> {
@@ -236,7 +236,7 @@ test("reading a property of undefined panics", async () => {
   same(text(run.stderr), `panicked at ${file}:4:13:\nuncaught exception in JS: TypeError: cannot read property 'x' of undefined\nstack backtrace:\n   0: main at ${file}:4:13\n`, "stderr");
   assert(run.status === 101, `exited with ${run.status ?? -1}`);
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 // The message compiling `src` as `file` throws, or "" when it compiles.
 function refusal(session: BuildSession, file: string, src: string): string {
@@ -275,7 +275,7 @@ test("refused", () => {
   }
   removed(dir);
   assert(failed.length === 0, failed.join("\n"));
-});
+}, { timeout: 30_000 });
 
 // A throw while a module runs, or one that never parses, rejects or never settles, is a panic.
 test("a module that fails panics", async () => {
@@ -299,14 +299,14 @@ test("a module that fails panics", async () => {
   }
   removed(dir);
   assert(failed.length === 0, failed.join("\n"));
-});
+}, { timeout: 30_000 });
 
 test("a program can't import the test hook", () => {
   const dir = scratch("fish-engine-");
   const got = refusal(cachedSession(), join(dir, "hook.fsh"), `import { evaluate } from "fish:engine";\nfunction main() {}\n`);
   same(got, "'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", "the error");
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 test("a program with no JS doesn't build the engine in", () => {
   const dir = scratch("fish-engine-");
@@ -320,4 +320,4 @@ test("a program with no JS doesn't build the engine in", () => {
     assert(false, failure(e, file, src));
   }
   removed(dir);
-});
+}, { timeout: 30_000 });

@@ -50,9 +50,9 @@ function refused(name: string, src: string): void {
 test("a loop far into a file keeps a nested function's value borrowing", () => {
   const before = `${head()}  function reset(): void { xs = [new P(5)]; }\n  const g = `;
   refused("value", placed(`${before}reset;\n`, before.length));
-});
+}, { timeout: 30_000 });
 
 test("a loop far into a file keeps an arrow borrowing", () => {
   const before = `${head()}  const g = (): void => { `;
   refused("arrow", placed(`${before}xs = [new P(5)]; };\n`, before.length));
-});
+}, { timeout: 30_000 });

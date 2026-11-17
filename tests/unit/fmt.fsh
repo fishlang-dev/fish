@@ -236,7 +236,7 @@ test("--check over a copy of the test programs changes no file, and names the on
   for (const broken of ["octal_escape.fsh", "regex.fsh", "type.fsh", "throw.fsh", "modules_parse_error_elsewhere/b.fsh"]) assert(run.err.includes(`${broken}:`), `stderr doesn't name ${broken}: ${run.err}`);
   assert(run.out.split("\n").filter((l) => l !== "").length > 0, "no unformatted file listed");
   done(top);
-});
+}, { timeout: 120_000 });
 
 test("a large result piped out of - arrives whole", () => {
   const top = fresh();

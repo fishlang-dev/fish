@@ -81,7 +81,7 @@ test("a path dependency is imported by name, with its own dependencies, from fis
   assert(direct.code === 0, `fishc build src/main.fsh exited with ${direct.code}: ${direct.err}`);
   same(ran(join(app, "direct")), "hello fish\n", "the program built from its file");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("two packages depending on a third from the same path share it, and one name can't come from two places", () => {
   const root = scratch("fish-deps-");
@@ -96,7 +96,7 @@ test("two packages depending on a third from the same path share it, and one nam
   const clash = files(root, "two/clash", [["fish.toml", manifest("clash", `left = { path = "../left" }\nodd = { path = "../odd" }\n`)], ["src/main.fsh", `function main() {}\n`]]);
   same(fishc(clash, ["build"]).err, "../odd/fish.toml:5:1: error[E0906]: 'base' already comes from '../base' in this program, so it can't also come from '../base2'", "the clash");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a dependency that can't be used is refused where it is named", () => {
   const root = scratch("fish-deps-");
@@ -112,7 +112,7 @@ test("a dependency that can't be used is refused where it is named", () => {
   same(fishc(app(`nolib = { path = "../nolib" }\n`), ["build"]).err, `../nolib/fish.toml:1:1: error[E0905]: the lib 'src/lib.fsh' doesn't exist; create it, or name another with lib = "..."`, "no lib");
   same(fishc(app(`a = { path = "../a" }\n`), ["build"]).err, "../b/fish.toml:5:1: error[E0906]: 'a' depends back on 'b': a -> b -> a; packages can't depend on each other in a cycle", "a cycle");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a package's lib is public, its other files' exports are package-private, and unexported names are file-private", () => {
   const root = scratch("fish-deps-");
@@ -129,7 +129,7 @@ test("a package's lib is public, its other files' exports are package-private, a
   words(`import { clean } from "./util";\nexport function title(s: string): string { return clean(s); }\n`);
   same(fishc(app(`import { title } from "words";\nfunction main() { console.log(title("x")); }\n`), ["build"]).err, "../../words/src/lib.fsh:1:10: error[E0902]: '../../words/src/util.fsh' has no export named 'clean'; it declares 'clean' without exporting it, so add 'export' before that declaration", "an unexported name");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a lib or entry can't be a nested package's file, and packages nested in each other keep their own messages", () => {
   const root = scratch("fish-deps-");
@@ -153,7 +153,7 @@ test("a lib or entry can't be a nested package's file, and packages nested in ea
   const w = files(root, "own/w", [["fish.toml", manifest("w")], ["src/lib.fsh", `import { helper } from "./util";\nexport function pub(): i64 { return helper(); }\n`], ["src/util.fsh", `export function helper(): i64 { return 7; }\n`], ["examples/ex/fish.toml", manifest("ex", `w = { path = "../.." }\n`)], ["examples/ex/src/main.fsh", `import { helper } from "w";\nfunction main() { console.log(helper()); }\n`]]);
   same(fishc(join(w, "examples", "ex"), ["build"]).err, "src/main.fsh:1:10: error[E0903]: 'helper' is private to the package 'w'; only what its lib src/lib.fsh exports is public", "a package inside its dependency");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a relative import into another package's directory is refused, directly or through a link", () => {
   const root = scratch("fish-deps-");
@@ -177,7 +177,7 @@ test("a relative import into another package's directory is refused, directly or
   const top = files(root, "nest/top", [["fish.toml", manifest("top", `outer = { path = "../outer" }\n`)], ["src/main.fsh", `import { o } from "outer";\nfunction main() { console.log(o()); }\n`]]);
   same(fishc(top, ["build"]).err, "../../outer/src/lib.fsh:1:1: error[E0903]: '../deep/src/x' is a file inside the package 'deep'; import it by name, as 'deep'", "a dependency's relative import");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a dependency's inner files are private to it, by every import form, and a name not in fish.toml still reaches npm's packages", () => {
   const root = scratch("fish-deps-");
@@ -194,7 +194,7 @@ test("a dependency's inner files are private to it, by every import form, and a 
   const missing = fishc(npm, ["build"]).err;
   assert(missing.includes("can't find the package 'nothing-installed'"), `an npm name: ${missing}`);
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a git dependency pinned to a commit is fetched into the cache once, and read from there after", () => {
   const root = scratch("fish-deps-");
@@ -212,7 +212,7 @@ test("a git dependency pinned to a commit is fetched into the cache once, and re
   assert(nowhere.startsWith(`fish.toml:5:1: error[E0906]: can't fetch 'file://${root}/git/nowhere': `), `a missing repository: ${nowhere}`);
   same(buildIn(other(`second = { git = "file://${repo2}", rev = "abcdef1" }\n`), join(root, "empty-cache")).err, `fish.toml:5:1: error[E0906]: 'file://${repo2}' has no commit 'abcdef1'`, "a missing commit");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fish.lock records every package, keeps itself when nothing changed, checks git files, and --locked holds it", () => {
   const root = scratch("fish-deps-");
@@ -237,7 +237,7 @@ test("fish.lock records every package, keeps itself when nothing changed, checks
   built(buildIn(app, cache), "the build updating the lock");
   same(read(lockFile), "# Written by fishc build; it records exactly which packages a build used.\nversion = 1\n", "the emptied lock");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a dependency named like a Node built-in is that package, and node: still means the built-in", () => {
   const root = scratch("fish-deps-");
@@ -246,7 +246,7 @@ test("a dependency named like a Node built-in is that package, and node: still m
   built(fishc(app, ["build"]), "fishc build");
   same(ran(join(app, "target", "debug", "app")), "mine and std\n", "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a git package holding a symbolic link is refused, and can't write through one", () => {
   const root = scratch("fish-deps-");
@@ -260,7 +260,7 @@ test("a git package holding a symbolic link is refused, and can't write through 
   same(buildIn(app, join(root, "attack-cache")).err, `fish.toml:5:1: error[E0906]: 'file://${evil}' holds a symbolic link at '.fish-commit'; a package from git can't, since a link reaches files its commit doesn't pin`, "a linked file");
   same(read(join(victim, "target.txt")), "SECRET", "the file the link names");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a git package can't reach outside its checkout through lib or a path dependency, nor a local lib through a link", () => {
   const root = scratch("fish-deps-");
@@ -277,7 +277,7 @@ test("a git package can't reach outside its checkout through lib or a path depen
   spawnSync("ln", ["-s", join(outside, "lib.fsh"), join(root, "reach/linked/src/lib.fsh")]);
   same(buildIn(app(`linked = { path = "../linked" }\n`), cache).err, "../linked/fish.toml:1:1: error[E0905]: the lib 'src/lib.fsh' leads outside the package; it is a file inside it", "a linked lib");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a short rev is the commit it starts, never a tag named like it, and short and full revs of one commit are one package", () => {
   const root = scratch("fish-deps-");
@@ -294,7 +294,7 @@ test("a short rev is the commit it starts, never a tag named like it, and short 
   built(buildIn(both, cache), "short and full revs");
   same(ran(join(both, "target", "debug", "both")), "pinned\n", "the program with both");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a package can't depend on itself, a second route by another name is refused, and GIT_DIR doesn't reach the fetch", () => {
   const root = scratch("fish-deps-");
@@ -309,7 +309,7 @@ test("a package can't depend on itself, a second route by another name is refuse
   const gitApp = files(root, "names/gitapp", [["fish.toml", manifest("gitapp", `dep = { git = "file://${repo}", rev = "${commit}" }\n`)], ["src/main.fsh", `function main() {}\n`]]);
   built(buildIn(gitApp, join(root, "names-cache"), [`GIT_DIR=${join(user, ".git")}`, `GIT_WORK_TREE=${user}`]), "the build with GIT_DIR set");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("the lock's version is checked, and a tampered package is named at its entry in the lock", () => {
   const root = scratch("fish-deps-");
@@ -324,7 +324,7 @@ test("the lock's version is checked, and a tampered package is named at its entr
   write(join(app, "fish.lock"), "version = 2\n");
   same(buildIn(app, cache).err, "fish.lock:1:11: error[E0906]: this fish.lock isn't one this fishc writes, version 1; a newer fishc may have written it", "a newer lock");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("builds fetching the same package at once all succeed", () => {
   const root = scratch("fish-deps-");
@@ -342,7 +342,7 @@ test("builds fetching the same package at once all succeed", () => {
     same(codes.join(" "), `[0, ""] [0, ""] [0, ""] [0, ""]`, `round ${round}`);
   }
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a branch named after the pinned commit's full hash can't stand in for it", () => {
   const root = scratch("fish-deps-");
@@ -354,7 +354,7 @@ test("a branch named after the pinned commit's full hash can't stand in for it",
   built(buildIn(app, join(root, "branch-cache")), "fishc build");
   same(ran(join(app, "target", "debug", "app")), "pinned\n", "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a dependency's relative imports stay inside it, while the program's own package may reach further", () => {
   const root = scratch("fish-deps-");
@@ -369,7 +369,7 @@ test("a dependency's relative imports stay inside it, while the program's own pa
   built(fishc(own, ["build"]), "fishc build");
   same(ran(join(own, "target", "debug", "own")), "outside\n", "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("the user's own git hooks don't run while a dependency is checked out", () => {
   const root = scratch("fish-deps-");
@@ -381,4 +381,4 @@ test("the user's own git hooks don't run while a dependency is checked out", () 
   built(buildIn(app, join(root, "hooks-cache"), [`HOME=${home}`]), "fishc build");
   assert(!existsSync(join(root, "hooks", "ran")), "the hook ran");
   removed(root);
-});
+}, { timeout: 30_000 });

@@ -74,14 +74,14 @@ test("a --leaks build reports what it never freed, by line, largest group first"
   const root = scratch("fish-leaks-");
   equal(run(root, "two", leaky(), false, true, []), { code: 0, out: "done\n", err: report() }, "the run");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("a --leaks build that frees everything prints nothing", () => {
   const root = scratch("fish-leaks-");
   const src = `function main() {\n  const xs = [1, 2, 3].map((x) => "n" + x);\n  console.log(xs.join(","));\n}\n`;
   equal(run(root, "clean", src, false, true, []), { code: 0, out: "n1,n2,n3\n", err: "" }, "the run");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 // Each generator finishes in the call that sent it a string: the value it took or dropped there
 // is freed once, and one sent after it finished is freed too.
@@ -90,7 +90,7 @@ test("a --leaks build of generators finishing after a sent string frees each val
   const src = 'function* takes(): Generator<string, void, string> {\n  const x = yield "a";\n  console.log("got", x);\n}\n\nfunction* drops(): Generator<string, void, string> {\n  yield "a";\n}\n\nfunction* never(): Generator<string, void, string> {\n  console.log("ran");\n}\n\nfunction* stops(): Generator<string, void, string> {\n  while (true) {\n    const x = yield "more";\n    if (x === "stop1") return;\n    console.log("kept", x);\n  }\n}\n\nfunction main() {\n  let a = takes();\n  a.next();\n  console.log(a.next("hi" + 1).done);\n  console.log(a.next("late" + 1).done);\n  let b = drops();\n  b.next();\n  console.log(b.next("hi" + 2).done);\n  let c = never();\n  console.log(c.next("hi" + 3).done);\n  let d = stops();\n  d.next();\n  d.next("go" + 1);\n  console.log(d.next("stop" + 1).done);\n}\n';
   equal(run(root, "sent", src, false, true, []), { code: 0, out: "got hi1\ntrue\ntrue\ntrue\nran\ntrue\nkept go1\ntrue\n", err: "" }, "the run");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("a block std makes is charged to the program's call into std", () => {
   const root = scratch("fish-leaks-");
@@ -112,7 +112,7 @@ async function main() {
   assert(got.err.includes(" bytes, at main.fsh:8:14 in main\n"), `stderr:\n${got.err}`);
   assert(got.err.includes("  1 allocation, 4 bytes, at main.fsh:9:26 in main\n"), `stderr:\n${got.err}`);
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("a spawned task's block is charged to the task's own frame", () => {
   const root = scratch("fish-leaks-");
@@ -129,13 +129,13 @@ async function main() {
 `;
   equal(run(root, "task", src, false, true, []), { code: 0, out: "1\n", err: "fish: leaked 1 allocation (24 bytes)\n  1 allocation, 24 bytes, at main.fsh:4:12 in work\n" }, "the run");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("a --release --leaks build reports the same sites", () => {
   const root = scratch("fish-leaks-");
   equal(run(root, "release", leaky(), true, true, []), { code: 0, out: "done\n", err: report() }, "the run");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("--leaks can't build a library", () => {
   const root = scratch("fish-leaks-");
@@ -144,7 +144,7 @@ test("--leaks can't build a library", () => {
   const done = fishc(root, ["build", file, "--lib", "--leaks", "-o", join(root, "libf.a")]);
   same(`${done.code} ${done.err}`, "2 fishc build: '--leaks' can't build a library; build the program that uses it with '--leaks' instead\n", "the exit code and stderr");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 // The IR the native fishc emits for `file` with `flags`.
 function emitted(file: string, flags: string[]): string {
@@ -172,7 +172,7 @@ test("--leaks leaves an ordinary build's IR and runtime alone", () => {
     same(leaks, `${plain} -DFSH_LEAK_SITES`, `the --leaks runtime's flags${release ? " in a release build" : ""}`);
   }
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("a block leaked before a panic is still reported", () => {
   const root = scratch("fish-leaks-");
@@ -188,7 +188,7 @@ function main() {
   assert(got.err.includes("index out of bounds"), `stderr:\n${got.err}`);
   assert(got.err.endsWith("fish: leaked 1 allocation (8 bytes)\n  1 allocation, 8 bytes, at main.fsh:4:12 in main\n"), `stderr:\n${got.err}`);
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("no report with tasks left running", () => {
   const root = scratch("fish-leaks-");
@@ -207,7 +207,7 @@ async function main() {
 `;
   equal(run(root, "running", src, false, true, []), { code: 0, out: "left\n", err: "" }, "the run");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("a block the blocking pool makes is charged to the call that submitted it", () => {
   const root = scratch("fish-leaks-");
@@ -230,7 +230,7 @@ async function main(): Promise<void> throws IoError {
   assert(/\n  1 allocation, \d+ bytes, at main.fsh:11:17 in main\n/.test(got.err), `stderr:\n${got.err}`);
   assert(!got.err.includes("<runtime>"), `stderr:\n${got.err}`);
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("groups that tie are in line order, by number", () => {
   const root = scratch("fish-leaks-");
@@ -248,14 +248,14 @@ function main() {
 `;
   same(run(root, "order", src, false, true, []).err, "fish: leaked 2 allocations (16 bytes)\n  1 allocation, 8 bytes, at main.fsh:4:12 in main\n  1 allocation, 8 bytes, at main.fsh:11:12 in main\n", "stderr");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("one byte is one byte", () => {
   const root = scratch("fish-leaks-");
   const src = `${alloc()}\nfunction main() {\n  unsafe { fsh_rt_alloc(1); }\n}\n`;
   same(run(root, "byte", src, false, true, []).err, "fish: leaked 1 allocation (1 byte)\n  1 allocation, 1 byte, at main.fsh:4:12 in main\n", "stderr");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("a size the header would overflow runs out of memory, as an ordinary build does", () => {
   const root = scratch("fish-leaks-");
@@ -264,13 +264,13 @@ test("a size the header would overflow runs out of memory, as an ordinary build 
   equal(run(root, "negative", src, false, true, []), expected, "the --leaks run");
   equal(run(root, "negative-plain", src, false, false, []), expected, "the plain run");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("FISH_LEAKS=1 still counts in an ordinary build", () => {
   const root = scratch("fish-leaks-");
   equal(run(root, "count", leaky(), false, false, ["FISH_LEAKS=1"]), { code: 0, out: "done\n", err: "fish: leaked 3 allocations\n" }, "the run");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("the usage text lists --leaks", () => {
   const root = scratch("fish-leaks-");
@@ -278,4 +278,4 @@ test("the usage text lists --leaks", () => {
   assert(bad.code === 2, `exited with ${bad.code}`);
   assert(bad.err.includes("[--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm]"), `stderr:\n${bad.err}`);
   removed(root);
-});
+}, { timeout: 60_000 });

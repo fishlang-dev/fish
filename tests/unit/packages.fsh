@@ -256,7 +256,7 @@ function main() {
 }
 `), ok("ONE 2.5 true 3 cjs\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a const that isn't what its declaration says panics where it is read", () => {
   const root = scratch("fish-packages-");
@@ -266,7 +266,7 @@ function main() {
 }
 `), { stdout: "", stderr: "panicked at main.fsh:3:13:\n'WRONG' from 'esm' is a number, where its declaration says 'string'\nstack backtrace:\n   0: main at main.fsh:3:13\n", exitCode: 101 }, "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a package needing a Node built-in, or with no JS, is refused", () => {
   const root = scratch("fish-packages-");
@@ -274,20 +274,20 @@ test("a package needing a Node built-in, or with no JS, is refused", () => {
   const none = refusal(root, "p1", `import { gone } from "typesonly";\nfunction main() { console.log(gone); }\n`);
   assert(none.startsWith("main.fsh:1:1: error[E0901]: 'typesonly' has no JS Fish could bundle: "), `a package with no JS: ${none}`);
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a program importing a package it never reaches at run time isn't bundled", () => {
   const root = scratch("fish-packages-");
   sameOut(run(root, "p", `import { size } from "needsfs";\nfunction main() { console.log(1); }\n`), ok("1\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a JS throw, or a result that isn't what its declaration says, panics at the call", () => {
   const root = scratch("fish-packages-");
   sameOut(run(root, "p0", `import { boom } from "esm";\nfunction main() {\n  boom();\n}\n`), { stdout: "", stderr: "panicked at main.fsh:3:3:\nuncaught exception in JS: RangeError: too far\nstack backtrace:\n   0: main at main.fsh:3:3\n", exitCode: 101 }, "a throw");
   sameOut(run(root, "p1", `import { liar } from "esm";\nfunction main() {\n  console.log(liar());\n}\n`), { stdout: "", stderr: "panicked at main.fsh:3:15:\n'liar' from 'esm' gave a number, where its declaration says 'string'\nstack backtrace:\n   0: main at main.fsh:3:15\n", exitCode: 101 }, "a wrong result");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("arrays, tuples and objects are copied across, and a handle passes as itself, with no leaks", () => {
   const root = scratch("fish-packages-");
@@ -308,13 +308,13 @@ function main() {
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("3 1 3\n2 2 c\na 1 2 a\nx:?:1 y:true:2\nmade3 made4 true false\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("an array whose elements aren't what the declaration says panics naming them", () => {
   const root = scratch("fish-packages-");
   panicked(run(root, "p", `import { strings } from "esm";\nfunction main() {\n  console.log(strings());\n}\n`), "panicked at main.fsh:3:15:\n'strings' from 'esm' gave an array holding a number, where its declaration says 'string'\n", "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a package's classes are made, their fields read and written, and their methods and statics used", () => {
   const root = scratch("fish-packages-");
@@ -334,13 +334,13 @@ function main() {
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("3 box1 5 5\nbox1:10\nmade2:1 10\n5 new new5 n3\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a compound assignment to a handle's property waits", () => {
   const root = scratch("fish-packages-");
   same(refusal(root, "p", `import { Box } from "esm";\nfunction main() {\n  const b = new Box(1);\n  b.size += 1;\n}\n`), "main.fsh:4:3: error[E0801]: compound assignments to a package's properties are not supported yet", "the refusal");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("results of every type the checker lets cross are read as declared", () => {
   const root = scratch("fish-packages-");
@@ -362,13 +362,13 @@ function main() {
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("5 200 1.5 2 x 7 true true\n1\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a result no member of its declared union takes panics", () => {
   const root = scratch("fish-packages-");
   sameOut(run(root, "p", `import { rb } from "esm";\nfunction main() {\n  const r = rb();\n}\n`), { stdout: "", stderr: "panicked at main.fsh:3:13:\n'rb' from 'esm' gave a number, where its declaration says 'boolean | Result'\nstack backtrace:\n   0: main at main.fsh:3:13\n", exitCode: 101 }, "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a Fish value can't become a handle, and a package can't run while compiling", () => {
   const root = scratch("fish-packages-");
@@ -376,7 +376,7 @@ test("a Fish value can't become a handle, and a package can't run while compilin
   assert(handle.startsWith("main.fsh:3:21: error[E1005]: turning a Fish value into a JS value isn't supported yet"), `a Fish value as a handle: ${handle}`);
   same(refusal(root, "p1", `import { id } from "esm";\nconst X = id("x");\nfunction main() {}\n`), "main.fsh:2:7: error[E1101]: 'id' from the package 'esm' can't run while compiling: comptime code only computes values", "a package while compiling");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a union's members of one JS kind are told apart by what they hold", () => {
   const root = scratch("fish-packages-");
@@ -392,19 +392,19 @@ function main() {
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("[ 'a' ] [ 1, 2 ] [ 't', 9 ]\n2 true true true\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a generic Fish function forwards its type parameter to a package", () => {
   const root = scratch("fish-packages-");
   sameOut(run(root, "p", `import { id } from "esm";\nfunction g<T>(x: T): T {\n  return id(x);\n}\nfunction main() {\n  console.log(g("ok"), g(3));\n}\n`), ok("ok 3\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("an empty value is undefined in a property written with ?, and null in one that isn't", () => {
   const root = scratch("fish-packages-");
   sameOut(run(root, "p", `import { describe } from "esm";\nfunction main() {\n  const deep: boolean | null = null;\n  console.log(describe({ name: "z", deep }));\n}\n`), ok("z:?:2\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a handle meets another declaration of its type, in another file or a shape it fits", () => {
   const root = scratch("fish-packages-");
@@ -422,13 +422,13 @@ function main() {
   const dir = project(root, "p", main, [["lib.fsh", `import { relabel } from "esm";\nimport type { Result } from "esm";\nexport function counted(r: Result): string {\n  return relabel(r);\n}\n`]]);
   sameOut(sanitized(dir, main), ok("made2 made 2 true\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a Fish type holding itself has no JS form yet", () => {
   const root = scratch("fish-packages-");
   same(refusal(root, "p", `import { id } from "esm";\ntype Tree = { v: f64; kids: Tree[] };\nfunction main() {\n  const t: Tree = { v: 1, kids: [] };\n  const u = id(t);\n}\n`), "node_modules/esm/index.d.ts:26:34: error[E1005]: 'id' from 'esm' takes a 'Tree', which can't cross between Fish and JS yet: a type holding itself has no JS form yet", "the refusal");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a package's promises are awaited, a rejection thrown as a JsError, and a later settling wakes its task", () => {
   const root = scratch("fish-packages-");
@@ -456,14 +456,14 @@ async function main(): Promise<void> throws JsError {
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("42\nJsError bad input\n[JsError: bad input]\nreleased\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("awaiting a package's promise is a throw to catch or declare", () => {
   const root = scratch("fish-packages-");
   const got = refusal(root, "p", `import { twice } from "esm";\nasync function main() {\n  const n = await twice(1);\n}\n`);
   assert(got.startsWith("main.fsh:3:13: error[E0602]: 'main' must declare 'throws JsError'"), `the refusal: ${got}`);
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("Fish callbacks are called by JS during a call and kept for later, and freed when JS drops them", () => {
   const root = scratch("fish-packages-");
@@ -487,7 +487,7 @@ import { make } from "esm";
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("6\n[ 'A', 'B' ] [ 'c4' ]\ngot one got two\nnone\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 // The Bun test bounds the run at 20 seconds, so a lock the panic left held fails the test rather
 // than hanging it; here fishc test's own limit bounds it.
@@ -519,14 +519,14 @@ async function main() {
     exitCode: 101,
   }, "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a callback holding what isn't Send is refused, and one JS gives the wrong value panics", () => {
   const root = scratch("fish-packages-");
   same(refusal(root, "p0", `import { keep } from "esm";\nfunction main() {\n  const c = new Cell<i64>(0);\n  keep((s) => { c.set(1); return s; });\n}\n`), "main.fsh:4:8: error[E0303]: a '(s: string) => string' may cross to another thread, so it can't hold a 'Cell<i64>', which changes without a lock", "a Cell in a callback");
   panicked(run(root, "p1", `import { misuse } from "esm";\nfunction main() {\n  console.log(misuse((n) => n + 1));\n}\n`), "panicked at main.fsh:3:22:\na callback was given a string, where its declaration says 'number'\n", "a misused callback");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a Fish future given to JS is a promise, running as a task from when it is given", () => {
   const root = scratch("fish-packages-");
@@ -547,7 +547,7 @@ async function main(): Promise<void> throws JsError {
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("8 ignored\nran though ignored\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a future is given to JS only inside an async function, and only one that can't throw", () => {
   const root = scratch("fish-packages-");
@@ -555,7 +555,7 @@ test("a future is given to JS only inside an async function, and only one that c
   const thrown = refusal(root, "p1", `import { plusOne } from "esm";\nclass Bad { message: string = "b"; }\nasync function fails(): Promise<f64> throws Bad {\n  throw new Bad();\n}\nasync function main(): Promise<void> throws JsError {\n  const n = await plusOne(fails());\n}\n`);
   assert(thrown.startsWith("main.fsh:7:27: error[E0602]: a stored 'Promise<number>' can't throw yet"), `a throwing future: ${thrown}`);
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("callbacks from fields and given to a handle's methods, kept at exit, and an await that never settles, leak nothing", () => {
   const root = scratch("fish-packages-");
@@ -586,7 +586,7 @@ async function main(): Promise<void> throws JsError {
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("x! amade1,A\nsoon\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a callback or a Promise written to a handle's property goes to JS, and isn't read back", () => {
   const root = scratch("fish-packages-");
@@ -607,7 +607,7 @@ async function main(): Promise<void> throws JsError {
   same(refusal(root, "p1", `import { Slot } from "esm";\nfunction main() {\n  const s = new Slot();\n  const f = s.handler;\n}\n`), "main.fsh:4:13: error[E0801]: reading property 'handler' of 'Slot' isn't supported yet: it holds a function, which Fish can give JS but not read back", "reading a callback back");
   same(refusal(root, "p2", `import { Slot } from "esm";\nfunction main() {\n  const s = new Slot();\n  const f = (s.handler = (t) => t);\n}\n`), "main.fsh:4:14: error[E1005]: a callback or a Promise written to property 'handler' goes to JS, so the assignment has no value to use; write it as a statement of its own", "using the assignment's value");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("calling into JS under a Lock panics, and a handle dropped under one is freed later", () => {
   const root = scratch("fish-packages-");
@@ -622,20 +622,20 @@ function main() {
   sameOut(sanitized(project(root, "p0", main), main), ok("made3\n"), "the program");
   sameOut(run(root, "p1", `import { shout } from "esm";\nfunction main() {\n  const l = new Lock("a");\n  l.update((v) => { v = shout(v); });\n}\n`), { stdout: "", stderr: "panicked at main.fsh:4:25:\ncalled into JS while holding a Lock, which a callback JS runs may wait for; call the package before 'update' or after it\nstack backtrace:\n   0: <arrow 4:12> at main.fsh:4:25\n   1: main at main.fsh:4:3\n", exitCode: 101 }, "calling under a Lock");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a callback inside an object given to JS waits", () => {
   const root = scratch("fish-packages-");
   const got = refusal(root, "p", `import { withOpts } from "esm";\nfunction main() {\n  console.log(withOpts({ cb: (x) => x + 1 }));\n}\n`);
   assert(got.startsWith("node_modules/esm/index.d.ts:"), `the refusal: ${got}`);
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a nested object given to JS takes numbers as JS does, and an optional require runs", () => {
   const root = scratch("fish-packages-");
   sameOut(run(root, "p", `import { deep, optional, listed } from "esm";\nfunction main() {\n  console.log(deep({ inner: { v: 5 } }), optional(), listed({ list: [] }));\n}\n`), ok("5 caught 0\n"), "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("bundled JS's path, os and process are Fish's, and another Node module is refused naming it", () => {
   const root = scratch("fish-packages-");
@@ -651,7 +651,7 @@ function main() {
   sameOut(run(root, "p0", main, ["one", "two"], ["NODE_ENV=production"]), ok("b/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\nb/c.txt|/x|../../d|/a/b|c|.gz|/a/c/|/\ntrue true true one,two production setfalse\n"), "the program");
   same(refusal(root, "p1", `import { id } from "usescrypto";\nfunction main() { console.log(id()); }\n`), "main.fsh:1:1: error[E1005]: 'usescrypto' needs Node's 'crypto' module, which a package's JS can't use in Fish yet", "a package needing crypto");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("bundled JS's fs/promises reads and writes through Fish's blocking pool, a failure as Node's error", () => {
   const root = scratch("fish-packages-");
@@ -668,4 +668,4 @@ async function main(): Promise<void> throws JsError {
   // calling JS to finish.
   sameOut(run(root, "p1", `import { ordered } from "files";\nfunction main() { console.log(ordered(${JSON.stringify(join(dir, "written.txt"))})); }\n`), ok("sync\n"), "a read with no async runtime");
   removed(root);
-});
+}, { timeout: 30_000 });

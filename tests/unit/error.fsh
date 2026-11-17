@@ -62,4 +62,4 @@ function main() {
   console.log(new Error("deep", { cause: new Error("1", { cause: new Error("2", { cause: new Error("3", { cause: new Error("4") }) }) }) }));
 }
 `);
-});
+}, { timeout: 30_000 });

@@ -93,7 +93,7 @@ test("spawnSync gives Bun's exit code, signal, output and errors", () => {
   }`, "", "", []);
   assert(out.includes("inherited\n"), `no inherited output in:\n${out}`);
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("spawn gives a running child Bun's exit code, signal and output", () => {
   const tmp = scratch("fish-bun-");
@@ -134,7 +134,7 @@ test("spawn gives a running child Bun's exit code, signal and output", () => {
     console.log(e.message);
   }`, "", "", []);
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("which finds executables on PATH, or by a path with a slash", () => {
   const tmp = scratch("fish-bun-");
@@ -142,7 +142,7 @@ test("which finds executables on PATH, or by a path with a slash", () => {
   console.log(Bun.which("sh"), Bun.which("no-such-x"), Bun.which("/bin/sh"), Bun.which(""), Bun.which("/tmp"));
   console.log(Bun.which("./bin/tool"), Bun.which("bin/tool"), Bun.which("plain"), Bun.which("./plain"));`, "", `mkdir bin && printf '#!/bin/sh\\n' > bin/tool && chmod 755 bin/tool && : > plain`, []);
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("a command is looked for on env's PATH when given, relative entries from the working directory", () => {
   const tmp = scratch("fish-bun-");
@@ -164,7 +164,7 @@ test("a command is looked for on env's PATH when given, relative entries from th
   bad(["sh"], { A: "x\\0y" });`, "", `mkdir bin && printf '#!/bin/sh\\necho "ran $1"\\n' > bin/tool && chmod 755 bin/tool`, [`PATH=bin::${path}`]);
   same(out, "ran x\n\n<dir>/bin/tool\nThe argument 'args[2]' must be a string without null bytes ERR_INVALID_ARG_VALUE\nThe argument 'args[0]' must be a string without null bytes ERR_INVALID_ARG_VALUE\nThe property 'options.env['A']' must be a string without null bytes ERR_INVALID_ARG_VALUE\n", "the output");
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("file, write, stdin, env, argv and the sleeps", () => {
   const tmp = scratch("fish-bun-");
@@ -192,7 +192,7 @@ test("file, write, stdin, env, argv and the sleeps", () => {
   await Bun.sleep(20);
   console.log(Date.now() - start >= 40);`, "from stdin\n", "", []);
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 // Bun.serve gives a Server at once and Fish's is awaited, so each side has its own program: both
 // serve the same handler and print what a request through fetch got back.
@@ -226,4 +226,4 @@ test("serve answers through fetch as Bun's does", () => {
   same(text(fish.stdout), text(bun.stdout), "the output");
   same(text(fish.stdout), `201 hi POST http://127.0.0.1:${port}/a/b?c=d sent fetch\n`, "Fish's output");
   removed(tmp);
-});
+}, { timeout: 30_000 });

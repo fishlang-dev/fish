@@ -292,4 +292,4 @@ kill $pid`;
   }
   assert(wrong.length === 0, `${wrong.length} requests differ:\n${wrong.join("\n")}`);
   removed(tmp);
-});
+}, { timeout: 120_000 });

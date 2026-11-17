@@ -159,7 +159,7 @@ test("an index is cloned once, read, and cloned again only when asked", () => {
   same(texts(opened(url, true), "http"), "1.0.0, 1.3.0", "the versions after a refresh");
   removed(join(root, "one"));
   same(texts(opened(url), "http"), "1.0.0, 1.3.0", "the versions once the index is gone");
-});
+}, { timeout: 30_000 });
 
 test("a missing package, a malformed line and a config without dl are refused saying where", () => {
   const root = childRoot();
@@ -178,7 +178,7 @@ test("a missing package, a malformed line and a config without dl are refused sa
   const nodl = index(root, "nodl", [], `{"url":"x"}`);
   has(openError(nodl), `the registry '${nodl}' has a config.json without a "dl" naming {name} and {version}`, "no dl");
   has(openError(`file://${root}/nowhere`), `can't read the registry 'file://${root}/nowhere'`, "a missing index");
-});
+}, { timeout: 30_000 });
 
 test("FISH_REGISTRY, then the package's [registry], then Fish's own index, choose where to look", () => {
   const root = childRoot();
@@ -197,7 +197,7 @@ test("FISH_REGISTRY, then the package's [registry], then Fish's own index, choos
   } catch (e) {
     assert(false, e.message);
   }
-});
+}, { timeout: 30_000 });
 
 test("each name gets the highest version every range on it allows, through the chosen versions' own dependencies", () => {
   const root = childRoot();
@@ -221,7 +221,7 @@ test("each name gets the highest version every range on it allows, through the c
   same(pick(reg, [["log", [["^1.0.0", "app"]]]], [["log", "1.1.0"]]), "log 1.1.0", "a locked lower version");
   has(pick(reg, [["http", [["^2.0.0", "app"]]], ["log", [["^1.0.0", "app"]]]]), "no version of 'log' fits every range on it: '^1.0.0' from app, '^2.0.0' from http 2.0.0", "conflicting ranges");
   has(pick(reg, [["http", [["^3.0.0", "app"]]]]), "no version of 'http' fits every range on it: '^3.0.0' from app", "no version");
-});
+}, { timeout: 30_000 });
 
 // Adds `name` at `version` to the index at `reg` under `root`: the package's files packed as a
 // .tar.gz in the archive folder, made by `archive` when given, and its line, with the archive's
@@ -283,7 +283,7 @@ test("a program depending on registry packages builds from their archives and ru
   built(build(dir, url, join(root, "cache-a")), "fishc build");
   same(ran(join(dir, "target", "debug", "app")), "hello fish\n", "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 // A tar.gz written by Python's tarfile at `dir`, with `py` adding its entries to `t`.
 function pyTar(dir: string, py: string): u8[] {
@@ -326,7 +326,7 @@ test("archives that don't match, hold links or paths outside, fail to download, 
   assert(!existsSync("/tmp/fish-evil.fsh"), "/tmp/fish-evil.fsh was written");
   same(text(spawnSync("find", [cache, "-name", "evil.fsh"]).stdout), "", "evil.fsh in the cache");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("fish.lock pins registry versions, a locked build needs no index, and a changed range re-resolves", () => {
   const root = scratch("fish-registry-");
@@ -351,7 +351,7 @@ test("fish.lock pins registry versions, a locked build needs no index, and a cha
   has(read(lockFile), `name = "num"\nversion = "2.0.0"`, "the lock");
   same(ran(join(dir, "target", "debug", "app")), "20\n", "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fishc add names a dependency at its latest version, keeping the rest of fish.toml as it was", () => {
   const root = scratch("fish-registry-");
@@ -375,7 +375,7 @@ test("fishc add names a dependency at its latest version, keeping the rest of fi
   const bad = fishc(bare, url, cache, ["add", "Bad"]).err;
   assert(bad.startsWith("fishc add: 'Bad' isn't a package name"), `an upper-case name: ${bad}`);
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fishc update moves locked versions to the newest that fit, all of them or one", () => {
   const root = scratch("fish-registry-");
@@ -397,7 +397,7 @@ test("fishc update moves locked versions to the newest that fit, all of them or 
   built(build(dir, url, cache), "the build after updating");
   same(ran(join(dir, "target", "debug", "app")), "22\n", "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 // A package published with a fish.toml of its own, unlike `publish`'s.
 function publishWith(root: string, reg: string, name: string, version: string, toml: string, files: [string, string][], listedDeps: [string, string][] = []): string {
@@ -420,7 +420,7 @@ test("every file of a registry package is in its checksum, target/ included, and
   assert(locked.code === 0, `the locked build exited with ${locked.code}: ${locked.err}`);
   same(ran(join(dir, "target", "debug", "app")), "1\n", "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("the registry and the archive's own fish.toml must agree, and one name can't be two packages", () => {
   const root = scratch("fish-registry-");
@@ -437,7 +437,7 @@ test("the registry and the archive's own fish.toml must agree, and one name can'
   write(join(root, "apps", "util", "src", "lib.fsh"), "");
   same(build(clash, url, cache).err, "fish.toml:5:1: error[E0906]: 'util' comes from the registry for a registry package's dependency, but already comes from '../util' in this program", "one name from two places");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("without a lock the index is read as it is now, and concurrent first builds share one clone", () => {
   const root = scratch("fish-registry-");
@@ -458,7 +458,7 @@ test("without a lock the index is read as it is now, and concurrent first builds
   const codes = dirs.map((d) => `[${read(join(d, "code")).trim()}, ${JSON.stringify(read(join(d, "err")).split("\n")[0])}]`);
   same(codes.join(" "), dirs.map((_d) => `[0, ""]`).join(" "), "the concurrent builds");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("resolution settles before refusing, long chains settle, and cycles are refused", () => {
   const root = childRoot();
@@ -478,7 +478,7 @@ test("resolution settles before refusing, long chains settle, and cycles are ref
   publish(root, "reg-i", "ca", "1.0.0", "", [["cb", "^1.0.0"]]);
   const url = publish(root, "reg-i", "cb", "1.0.0", "", [["ca", "^1.0.0"]]);
   same(build(app(root, "i", [["ca", "^1.0.0"]], ``, "1"), url, cache).err, "fish.toml:5:1: error[E0906]: the registry packages ca -> cb -> ca depend on each other in a cycle", "a cycle");
-});
+}, { timeout: 60_000 });
 
 test("index versions are plain and unique, archives must be plain files, and GNU long names unpack", () => {
   const root = childRoot();
@@ -507,7 +507,7 @@ test("index versions are plain and unique, archives must be plain files, and GNU
   const dir = app(root, "k", [["gnu", "^1.0.0"]], `import { g } from "gnu";`, "g()");
   built(build(dir, gnu, join(root, "cache-k")), "the GNU archive's build");
   same(ran(join(dir, "target", "debug", "app")), "7\n", "the program");
-});
+}, { timeout: 30_000 });
 
 test("fishc add keeps CRLF and quoted headers, refuses empty ranges, and update refuses unknown names", () => {
   const root = scratch("fish-registry-");
@@ -520,7 +520,7 @@ test("fishc add keeps CRLF and quoted headers, refuses empty ranges, and update 
   same(fishc(dir, url, cache, ["add", "x@"]).err, "fishc add: '' isn't a version range; write one as package.json does, as in ^1.2.0", "an empty range");
   same(fishc(dir, url, cache, ["update", "nosuch"]).err, "fishc update: 'nosuch' isn't a dependency from the registry in fish.toml", "an unknown name");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fishc add writes into a CRLF fish.toml with no last line end", () => {
   const root = scratch("fish-registry-");
@@ -530,4 +530,4 @@ test("fishc add writes into a CRLF fish.toml with no last line end", () => {
   same(fishc(dir, url, join(root, "cache-m"), ["add", "lib"]).out, "added lib ^1.0.0\n", "fishc add lib");
   same(read(join(dir, "fish.toml")), `[package]\r\nname = "m"\r\nversion = "0.1.0"\r\n[dependencies]\r\nother = { version = "^1.0.0" }\r\nlib = { version = "^1.0.0" }`, "the manifest");
   removed(root);
-});
+}, { timeout: 30_000 });

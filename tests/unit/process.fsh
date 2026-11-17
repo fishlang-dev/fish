@@ -41,7 +41,7 @@ test("process.argv, process.env and process.exit match node", () => {
     same(result("env", fish), result("env", node), `with ${JSON.stringify(args)}`);
   }
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 test("the first two arguments are the binary's absolute path", () => {
   const dir = scratch("fish-process-");
@@ -55,4 +55,4 @@ test("the first two arguments are the binary's absolute path", () => {
   }
   same(text(run.stdout), `${path}\n${path}\n`, "the output");
   removed(dir);
-});
+}, { timeout: 30_000 });

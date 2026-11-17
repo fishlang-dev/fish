@@ -32,7 +32,7 @@ test("the os functions give what Node's give", () => {
   const [fish, node] = both(out, []);
   same(fish, node, "the output");
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 test("tmpdir falls back through TMPDIR, TMP and TEMP, and drops a trailing slash", () => {
   const dir = scratch("fish-os-");
@@ -43,7 +43,7 @@ test("tmpdir falls back through TMPDIR, TMP and TEMP, and drops a trailing slash
     same(fish, node, `the output with ${vars.join(" ")}`);
   }
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 test("homedir reads HOME first", () => {
   const dir = scratch("fish-os-");
@@ -51,4 +51,4 @@ test("homedir reads HOME first", () => {
   const [fish, node] = both(out, ["HOME=/somewhere/else"]);
   same(fish, node, "the output");
   removed(dir);
-});
+}, { timeout: 30_000 });

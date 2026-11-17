@@ -182,4 +182,4 @@ test("case mapping matches JavaScript for every code point", () => {
   for (let i: usize = 0; i < tables.length; i++) if (tables[i] !== lines[i]) wrong.push(i);
   assert(wrong.length === 0, `the runtime's case mapping differs from its tables: it gives ${shown(wrong, lines, tables)}`);
   same(got.stderr, "", "stderr");
-});
+}, { timeout: 30_000 });

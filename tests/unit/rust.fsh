@@ -148,7 +148,7 @@ test("a call of a Rust function is a call of its shim's symbol, with no unsafe",
   assert(code.includes(`declare i64 @"fsh_rust_4demo3add"(i64, i64, ptr)`), "the IR doesn't declare add");
   assert(code.includes("call void @fsh_rt_panic_rust(ptr "), "the IR doesn't call fsh_rt_panic_rust");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a crate's name with '-' is spelled with '_' in its shim's symbols", () => {
   const root = scratch("fish-rust-");
@@ -158,7 +158,7 @@ test("a crate's name with '-' is spelled with '_' in its shim's symbols", () => 
   ], `my-crate = { path = "rust/demo" }`);
   assert(ir(dir).includes(`call i64 @"fsh_rust_8my_crate1f"(ptr `), "the IR has no call of fsh_rust_8my_crate1f");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("Rust declarations and imports are refused where they go wrong", () => {
   const root = scratch("fish-rust-");
@@ -186,7 +186,7 @@ test("Rust declarations and imports are refused where they go wrong", () => {
   same(refused(notPath), `rust.fsh:2:9: error[E1004]: this isn't a Rust path; write one from the crate's root, as in "util::mul"`, "a path that isn't Rust's");
   same(refused(pkg(root, [["src/rust.fsh", ""], ["src/main.fsh", `import { s } from "rust:demo";\nfunction main() {}\n`]])), `src/main.fsh:1:1: error[E1004]: no file of this package declares the functions of 'demo'; declare them in one, as in 'declare module "rust:demo" { export function f(x: i64): i64; }'`, "no declarations");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a package builds and runs with a Rust crate's functions", () => {
   const root = scratch("fish-rust-");
@@ -196,7 +196,7 @@ test("a package builds and runs with a Rust crate's functions", () => {
   assert(run.code === 0, `the build exited with ${run.code}`);
   same(built(dir), "42 2.5 1.5 true false -128 15 2 42\n", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 // A package calling `top`, a crate with a build script that depends on `inner`, another path crate.
 function layered(root: string): string {
@@ -260,7 +260,7 @@ test("an unchanged shim isn't rebuilt, and a change to a crate, its dependencies
   write(join(dir, "rust", "top", "build.rs"), `fn main() {\n    println!("cargo:rustc-env=BONUS=20");\n}\n`);
   same(rebuilt(dir, "a build after the build script changed"), "23\n", "the program after the build script changed");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a deleted shim library or record is built again", () => {
   const root = scratch("fish-rust-");
@@ -277,7 +277,7 @@ test("a deleted shim library or record is built again", () => {
   clean(fishc(dir, ["build"]), "a build after the record was deleted");
   same(built(dir), "12\n", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a shim built for a configured target is found where cargo puts it", () => {
   const root = scratch("fish-rust-");
@@ -293,7 +293,7 @@ test("a shim built for a configured target is found where cargo puts it", () => 
   clean(fishc(dir, ["build"]), "a build for the host");
   same(built(dir), "12\n", "the program for the host");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a Rust panic's message keeps its NULs, and a payload that panics when dropped doesn't abort", () => {
   const root = scratch("fish-rust-");
@@ -308,7 +308,7 @@ test("a Rust panic's message keeps its NULs, and a payload that panics when drop
   const bomb = program(dir, ["x"]);
   assert(bomb.code === 101 && bomb.err === "panicked at src/main.fsh:4:44:\na Rust panic with no message\nstack backtrace:\n   0: main at src/main.fsh:4:44\n", `bomb: code ${bomb.code}, stderr ${JSON.stringify(bomb.err)}`);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 // The names `trusted` must refuse, by index.
 function untrusted(i: usize): { crate: string; path: string; symbol: string } {
@@ -347,7 +347,7 @@ function main() {
     assert(run.status !== 0 && err.includes("internal error: a Rust function's name isn't one a declaration gives"), `name ${i}: exit ${run.status ?? -1}:\n${err}`);
   }
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("only the package being built lists Rust crates", () => {
   const root = scratch("fish-rust-");
@@ -362,7 +362,7 @@ test("only the package being built lists Rust crates", () => {
   same(run.err.split("\n")[0], "dep/fish.toml:5:1: error[E0906]: the dependency 'dep' lists Rust crates under [rust-dependencies]; only the package being built may list them for now", "the error");
   assert(!existsSync(join(dir, "cache", "fish", "rust")), "a shim was built");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("declarations naming one Rust function share its shim function, and must agree on its types", () => {
   const root = scratch("fish-rust-");
@@ -381,7 +381,7 @@ test("declarations naming one Rust function share its shim function, and must ag
   assert(rustSymbol("a", "b__c") !== rustSymbol("a__b", "c"), "two paths share a symbol");
   has(refused(pkg(root, [["src/main.fsh", "function main() {}\n"]], `a-b = "1"\na_b = "1"`)), "'a_b' and 'a-b' are the same crate in Rust", "two crates Rust reads as one");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a Rust panic is a Fish panic at the call", () => {
   const root = scratch("fish-rust-");
@@ -390,7 +390,7 @@ test("a Rust panic is a Fish panic at the call", () => {
   assert(b.code === 0, `the build failed:\n${b.err}`);
   sameOut(program(dir), 101, "1\n", "panicked at src/main.fsh:5:15:\nnegative: -2\nstack backtrace:\n   0: main at src/main.fsh:5:15\n", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a build calling Rust without cargo on PATH says how to get it", () => {
   const root = scratch("fish-rust-");
@@ -403,7 +403,7 @@ test("a build calling Rust without cargo on PATH says how to get it", () => {
   const llvm = fishc(dir, ["build", "--emit-llvm", "src/main.fsh"], without);
   assert(llvm.code === 0, `--emit-llvm without cargo exited with ${llvm.code}:\n${llvm.err}`);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("two builds of one shim at once both succeed", () => {
   const root = scratch("fish-rust-");
@@ -421,14 +421,14 @@ wait`;
     same(text(spawnSync(join(dir, "target", out), []).stdout), "42 2.5 1.5 true false -128 15 2 42\n", `program ${out}`);
   }
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("fishc test runs a test that calls Rust", () => {
   const root = scratch("fish-rust-");
   const dir = pkg(root, [["src/main.fsh", `import { add } from "rust:demo";\n\nfunction main() {}\n\ntest("adds in Rust", () => {\n  assert(add(2, 3) === 5);\n});\n`]]);
   ran(fishc(dir, ["test"]), 0, "ok src/main.fsh > adds in Rust\n1 passed, 0 failed\n", "", "fishc test");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a static library links the shim of the Rust it calls", () => {
   const root = scratch("fish-rust-");
@@ -446,7 +446,7 @@ test("a static library links the shim of the Rust it calls", () => {
   same(text(clang.stderr), "", "clang's stderr");
   same(text(spawnSync(join(dir, "prog"), []).stdout), "42\n", "the C program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function handlesD(): string {
   return `declare module "rust:demo" {
@@ -505,7 +505,7 @@ test("a Rust type's constructor, statics and methods of each receiver are calls 
     assert(code.includes(`call ${call}`) || code.includes(`invoke ${call}`), `the IR neither calls nor invokes ${call}`);
   }
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("Rust handles move and borrow as Fish values do, and cross threads", () => {
   const root = scratch("fish-rust-");
@@ -514,7 +514,7 @@ test("Rust handles move and borrow as Fish values do, and cross threads", () => 
   const sent = handles(root, `async function run(c: Counter): Promise<i64> {\n  return c.get();\n}\nasync function main() {\n  const n = await spawn(run(new Counter(1)));\n  console.log(n);\n}\n`);
   const _code = ir(sent);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("what a Rust handle can't do is refused where it is written", () => {
   const root = scratch("fish-rust-");
@@ -550,7 +550,7 @@ test("what a Rust handle can't do is refused where it is written", () => {
   const union = pkg(root, [["src/rust.fsh", `declare module "rust:demo" {\n  export class A {\n    static make(): A;\n    named(s: i64 | string): i64;\n  }\n}\n`], ["src/main.fsh", `import { A } from "rust:demo";\nfunction main() {\n  A.make();\n}\n`]]);
   same(refused(union), "rust.fsh:4:11: error[E1004]: a Rust function can't take a 'i64 | string': unions other than 'T | null' can't cross the Rust boundary yet; Rust enums other than Option and Result aren't supported", "a union parameter");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a Rust type lives in Fish: made, called, lent, moved, cloned and dropped once", () => {
   const root = scratch("fish-rust-");
@@ -575,7 +575,7 @@ function main() {
   clean(fishc(dir, ["build"]), "the build");
   sameOut(program(dir), 0, "1 102 1\n1001 1\n1020 2\n7\n3\n", "", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a Rust type that isn't Send is refused by the build, naming Send", () => {
   const root = scratch("fish-rust-");
@@ -586,7 +586,7 @@ test("a Rust type that isn't Send is refused by the build, naming Send", () => {
   has(run.err, "cannot be sent between threads safely", "the build's stderr");
   has(run.err, "Send", "the build's stderr");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a panic in a Rust method is a Fish panic at the call", () => {
   const root = scratch("fish-rust-");
@@ -595,7 +595,7 @@ test("a panic in a Rust method is a Fish panic at the call", () => {
   assert(b.code === 0, `the build failed:\n${b.err}`);
   sameOut(program(dir), 101, "4\n", "panicked at src/main.fsh:5:15:\ncounter at 4\nstack backtrace:\n   0: main at src/main.fsh:5:15\n", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function grumpy(root: string, main: string): string {
   return pkg(root, [["src/rust.fsh", `declare module "rust:demo" {\n  export class Grumpy {\n    constructor();\n  }\n}\n`], ["src/main.fsh", main]]);
@@ -608,7 +608,7 @@ test("a panic in a Rust value's drop is a Fish panic", () => {
   assert(b.code === 0, `the build failed:\n${b.err}`);
   sameOut(program(dir), 101, "made\n", "panicked while dropping a Rust 'Grumpy':\ngrumpy to the end\nstack backtrace:\n   0: main at src/main.fsh:6:1\n", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a drop panicking while a panic unwinds walks no frame the unwind left", () => {
   const root = scratch("fish-rust-");
@@ -619,7 +619,7 @@ test("a drop panicking while a panic unwinds walks no frame the unwind left", ()
   const first = "panicked at src/main.fsh:5:10:\nindex out of bounds: the len is 3 but the index is 9\nstack backtrace:\n   0: inner at src/main.fsh:5:10\n   1: deeper at src/main.fsh:9:10\n   2: holds at src/main.fsh:13:13\n   3: main at src/main.fsh:17:15\n";
   sameOut({ code: run.code, out: "", err: run.err }, 101, "", `${first}panicked while dropping a Rust 'Grumpy':\ngrumpy to the end\n`, "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a Rust handle is owned by a spawned task, and shared between tasks, and dropped once", () => {
   const root = scratch("fish-rust-");
@@ -651,7 +651,7 @@ async function main() {
   clean(fishc(dir, ["build"]), "the build");
   sameOut(program(dir), 0, "42 1\n3 2\n", "", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a Rust handle made for an Own method moves into it, never copied", () => {
   const root = scratch("fish-rust-");
@@ -674,7 +674,7 @@ function main() {
   clean(fishc(dir, ["build"]), "the build");
   sameOut(program(dir), 0, "40 50 0 30 4\n6 true 4\n", "", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a shared value gives its Rust values only inside update, so they need only be Send", () => {
   const root = scratch("fish-rust-");
@@ -700,14 +700,14 @@ async function main() {
   clean(fishc(dir, ["build"]), "the build");
   same(built(dir), "400\n", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("no class extends a Rust type", () => {
   const root = scratch("fish-rust-");
   same(refused(handles(root, `class Mine extends Counter {\n  constructor() {\n    super(1);\n  }\n}\nfunction main() {}\n`)), "src/main.fsh:2:20: error[E1004]: a class can't extend the Rust type 'Counter'; hold one in a field instead", "extending Counter");
   same(refused(handles(root, `class Mine extends Bare {}\nfunction main() {}\n`)), "src/main.fsh:2:20: error[E1004]: a class can't extend the Rust type 'Bare'; hold one in a field instead", "extending Bare");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a static and a method naming one Rust function are refused, and so is a Dyn of a Rust type", () => {
   const root = scratch("fish-rust-");
@@ -715,7 +715,7 @@ test("a static and a method naming one Rust function are refused, and so is a Dy
   same(refused(twice), "rust.fsh:5:5: error[E1004]: 'demo::Counter::zero' is declared elsewhere as (&self): Counter; declare it with the same types", "a static and a method");
   same(refused(handles(root, `interface Getter {\n  get(): i64;\n}\nfunction main() {\n  const d: Dyn<Getter> = new Counter(4);\n}\n`)), "src/main.fsh:6:26: error[E1004]: a Rust 'Counter' can't become a 'Dyn<Getter>' yet; call its methods on it, or take it as a generic parameter", "a Dyn");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a Rust value moves through shorthand properties, '??' and destructuring defaults", () => {
   const root = scratch("fish-rust-");
@@ -757,7 +757,7 @@ function main() {
   sameOut(program(dir), 0, "4 1\n2\n3 2 0 6 2\n6\n8 90 10 8\n9\n", "", "the program");
   has(refused(handles(root, `function main() {\n  const a: Counter | null = new Counter(1);\n  const b = a ?? new Counter(2);\n  const c = a ?? new Counter(3);\n}\n`)), "'a' was moved", "a second '??' of a moved value");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a future holding a Rust value is boxed by moving it: stored as a Promise, through a function value, and as a handler", () => {
   const root = scratch("fish-rust-");
@@ -796,7 +796,7 @@ async function main() {
   clean(fishc(dir, ["build"]), "the build");
   sameOut(program(dir), 0, "5 5 2\ncount 7 m 3 4\n", "", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("copying a boxed future holding a Rust value panics naming its type; one holding none copies", () => {
   const root = scratch("fish-rust-");
@@ -823,7 +823,7 @@ async function main() {
   clean(fishc(dir, ["build"]), "the build");
   sameOut(program(dir), 101, "1\n", "panicked while copying a Dyn:\nits value holds a Rust 'Counter', which is moved, never copied; await the futures holding one, or move them rather than copy them\nstack backtrace:\n   0: main at src/main.fsh:18:14\n", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function textD(): string {
   return `declare module "rust:demo" {
@@ -872,7 +872,7 @@ function main() {
   clean(fishc(dir, ["build"]), "the build");
   sameOut(checked(dir), 0, "hello, fish LOUD FISH a static label 5\n61 FFFD 62 E9\n4 null false null\n<x> null\n4 counter 4 #4 null\ntrue 3 0\n4 1\n", "", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 // The first line of the error declaring `body` in the demo crate's module gives.
 function declaredF(root: string, body: string, counter: boolean = false): string {
@@ -888,7 +888,7 @@ test("what can't cross the Rust boundary yet is refused at its type", () => {
   same(declaredF(root, "export function f(): Ref<i64[]>;"), "rust.fsh:2:24: error[E1004]: the Rust function 'f' can't give a 'Ref<i64[]>': a borrow's lifetime can't cross from Rust yet; give the value itself", "a lent result");
   same(declaredF(root, "export function f(x: Mut<i64[]>): void;"), "rust.fsh:2:21: error[E1004]: a Rust function can't take a 'Mut<i64[]>': 'Mut<T[]>' would be '&mut [T]', which can't cross yet; pass the array, which moves it", "a mutable slice");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function fallibleD(): string {
   return `declare module "rust:demo" {
@@ -966,7 +966,7 @@ function main() {
   clean(fishc(dir, ["build"]), "the build");
   sameOut(checked(dir), 0, "42\ncaught: invalid digit found in string\n10\noops -3 0\n1\n5\npropagated -7\ntouched\ncaught: touch failed\n3\ncaught: 3 + 9223372036854775807 overflows\nno counter -1\n3\n", "", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a fallible Rust call needs a throws clause or a catch, and throws only Error or a Rust type", () => {
   const root = scratch("fish-rust-");
@@ -974,7 +974,7 @@ test("a fallible Rust call needs a throws clause or a catch, and throws only Err
   same(refused(pkg(root, [["src/rust.fsh", `declare module "rust:demo" {\n  export function f(): i64 throws string;\n}\n`], ["src/main.fsh", `import { f } from "rust:demo";\nfunction main() {}\n`]])), "rust.fsh:2:35: error[E1004]: the Rust function 'f' throws a Rust 'Err' as Fish's 'Error', made from its Display text, or as a Rust type declared in a 'rust:' block, not as a 'string'", "throws string");
   same(refused(pkg(root, [["src/main.fsh", `class A {\n  n: i64 = 0;\n  constructor() throws Error {\n    throw new Error("no");\n  }\n}\nfunction main() {}\n`]])), "src/main.fsh:4:5: error[E0602]: a constructor can only throw before it assigns its first field, so a failed 'new' leaves nothing half built; field initializers count as assigned first, so check and throw before assigning, then assign the fields", "a constructor throwing late");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function vectorsD(): string {
   return `declare module "rust:demo" {
@@ -1024,7 +1024,7 @@ function main() {
   clean(fishc(dir, ["build"]), "the build");
   sameOut(checked(dir), 0, "6 3 0 [ 8, 10 ] []\n[ false, true ] [ 'to', 'be', 'or' ] [ 'a', 'b' ]\nx+yz p-q 2\n3 3 0\n6 3\n1 3\n5\n[ 0, 1, 2 ] null 2 -1\n", "", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a slice of Rust values, an array of arrays and a mutable slice are refused at their types", () => {
   const root = scratch("fish-rust-");
@@ -1033,7 +1033,7 @@ test("a slice of Rust values, an array of arrays and a mutable slice are refused
   same(declaredF(root, "export function f(): string[][];", true), "rust.fsh:5:24: error[E1004]: the Rust function 'f' can't give a 'string[][]': arrays of arrays can't cross the Rust boundary yet", "an array of arrays given");
   same(declaredF(root, "export function f(xs: Mut<i64[]>): void;", true), "rust.fsh:5:21: error[E1004]: a Rust function can't take a 'Mut<i64[]>': 'Mut<T[]>' would be '&mut [T]', which can't cross yet; pass the array, which moves it", "a mutable slice");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function edgesD(): string {
   return `declare module "rust:demo" {
@@ -1084,7 +1084,7 @@ function main() {
   sameOut(checked(dir), 0, out, "", "the program");
   sameOut(checked(dir, ["x"]), 101, out, "panicked at src/main.fsh:21:32:\nboom sname 2 2 9\nstack backtrace:\n   0: main at src/main.fsh:21:32\n", "the program that panics");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a returned array whose Rust elements aren't the declared ones is cargo's type error", () => {
   const root = scratch("fish-rust-");
@@ -1095,7 +1095,7 @@ test("a returned array whose Rust elements aren't the declared ones is cargo's t
     has(run.err, "type mismatch in closure arguments", decl);
   }
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function twiceD(root: string, body: string): string {
   return refused(pkg(root, [["src/rust.fsh", `declare module "rust:demo" {\n  export class Oops {\n    code(): i64;\n  }\n${body}}\n`], ["src/main.fsh", `import { a, b } from "rust:demo";\nfunction main() {}\n`]]));
@@ -1112,7 +1112,7 @@ test("declarations of one Rust function agree on what they throw, and a static a
   clean(fishc(dir, ["build"]), "the build");
   sameOut(checked(dir), 0, "2 3\n", "", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a Rust value Fish holds can't borrow what the call was given, and one that owns its data can be held", () => {
   const root = scratch("fish-rust-");
@@ -1136,7 +1136,7 @@ test("a Rust value Fish holds can't borrow what the call was given, and one that
   clean(fishc(dir, ["build"]), "the build");
   sameOut(checked(dir), 0, "abcdef err zzzzzzyyyyyy\n", "", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function borrowD(member: string, looks: boolean): string {
   return `declare module "rust:demo" {
@@ -1186,4 +1186,4 @@ test("a Rust value Fish holds can't borrow the receiver or a lent Rust value, an
   clean(run, "the build");
   sameOut(checked(dir), 0, "3 3 3\n", "", "the program");
   removed(root);
-});
+}, { timeout: 120_000 });

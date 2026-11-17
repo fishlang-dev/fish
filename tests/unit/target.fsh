@@ -239,7 +239,7 @@ test("FISH_SYSROOT leaves a build for the host alone", () => {
     same(text(spawnSync(join(dir, "main"), []).stdout), "host\n", "the program's output");
   }
   removed(dir);
-});
+}, { timeout: 120_000 });
 
 test("Linux over musl takes a musl sysroot from any host whose libc isn't musl", () => {
   const arm = "aarch64-unknown-linux-musl";

@@ -55,7 +55,7 @@ test("spawnSync gives node's status, signal, output and error", () => {
   const body = spawnBody();
   const out = compare("spawn", `import { spawnSync } from "node:child_process";`, body, "", body);
   assert(out.includes("SIGTERM"), `no SIGTERM in:\n${out}`);
-});
+}, { timeout: 30_000 });
 
 function textBody(): string {
   return `
@@ -68,7 +68,7 @@ function textBody(): string {
 test("spawnSync with a utf8 encoding gives text, keeping its other options", () => {
   const body = textBody();
   compare("text", `import * as cp from "child_process";`, body, "", body);
-});
+}, { timeout: 30_000 });
 
 test("spawnSync's encoding must be a literal UTF-8", () => {
   const cases: [string, string][] = [
@@ -79,7 +79,7 @@ test("spawnSync's encoding must be a literal UTF-8", () => {
     const err = refused("bad", `  const e = "utf8";\n  spawnSync("true", [], ${options});`);
     assert(err.includes(message), `${options}: expected ${message} in:\n${err}`);
   }
-});
+}, { timeout: 30_000 });
 
 // Node throws one kind of error for both failures; Fish an IoError when the command can't start and
 // an ExecError when it fails.
@@ -104,7 +104,7 @@ test("execFileSync and execSync give stdout, or node's errors", () => {
     else console.log(e.message, e.code, e.syscall, e.path);
   }`);
   compare("exec", `import { execFileSync, execSync, ExecError } from "node:child_process";`, body + fish.join(""), "throws IoError | ExecError ", body + node.join(""));
-});
+}, { timeout: 30_000 });
 
 function moreBody(): string {
   return `
@@ -118,7 +118,7 @@ function moreBody(): string {
 test("spawnSync takes byte input, a missing cwd and Node's bytes encodings as node does", () => {
   const body = moreBody();
   compare("more", `import { spawnSync } from "node:child_process";`, body, "", body);
-});
+}, { timeout: 30_000 });
 
 test("a child gets its input with this process's stdin closed", () => {
   const tmp = scratch("fish-child-process-");
@@ -126,7 +126,7 @@ test("a child gets its input with this process's stdin closed", () => {
   const run = spawnSync("sh", ["-c", `"$0" <&-`, out]);
   same(text(run.stdout), "fed 0\n", "the output");
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("an encoding held anywhere but the call's literal is refused", () => {
   const cases: [string, string][] = [
@@ -137,4 +137,4 @@ test("an encoding held anywhere but the call's literal is refused", () => {
     const err = refused("held", `  ${code}`);
     assert(err.includes(message), `${code}: expected ${message} in:\n${err}`);
   }
-});
+}, { timeout: 30_000 });

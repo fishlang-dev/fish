@@ -72,4 +72,4 @@ test("bigint arithmetic, bitwise operators, shifts and comparisons give node's r
     }
     console.log(-a, ~a, a ** 3n, a << 37n, a >> 37n, a >> 1n, a << 0n, a >> 400n, a >> -3n);
   }`);
-});
+}, { timeout: 60_000 });

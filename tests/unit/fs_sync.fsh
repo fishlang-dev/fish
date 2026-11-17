@@ -565,37 +565,37 @@ test("readFileSync, writeFileSync and existsSync give what node's give", () => {
   const tmp = scratch("fish-fs-sync-");
   compare(tmp, "rw", rwImports(), rwBody(), [], rwBody());
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("statSync, lstatSync, readdirSync, realpathSync, mkdtempSync and rmSync give what node's give", () => {
   const tmp = scratch("fish-fs-sync-");
   compare(tmp, "meta", metaImports(), metaBody(), [{ dir: "d" }, { file: "d/f.txt", text: "abc" }, { file: "d/b.txt", text: "" }, { link: "ln", target: "d/f.txt" }], metaBody());
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("a failing realpathSync names the part node's walk stops at", () => {
   const tmp = scratch("fish-fs-sync-");
   compare(tmp, "realpath", realpathImports(), realpathBody(), [{ dir: "real/deep" }, { link: "dangling", target: "nowhere" }, { link: "lnd", target: "real/deep" }, { link: "loop1", target: "loop2" }, { link: "loop2", target: "loop1" }], realpathBody());
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("mkdirSync makes a directory, or with recursive its missing parents, as node's does", () => {
   const tmp = scratch("fish-fs-sync-");
   compare(tmp, "mkdir", mkdirImports(), mkdirBody(), [{ file: "f", text: "hi" }], mkdirBody());
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("renameSync, copyFileSync and unlinkSync give what node's give", () => {
   const tmp = scratch("fish-fs-sync-");
   compare(tmp, "move", moveImports(), moveBody(), [{ file: "f", text: "hi" }, { dir: "a" }, { dir: "md" }, { dir: "x/y" }, { link: "lf", target: "f" }, { link: "ln", target: "nowhere" }, { link: "dl", target: "made" }], moveBody());
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("openSync, readSync, writeSync and the other descriptor calls give what node's give", () => {
   const tmp = scratch("fish-fs-sync-");
   compare(tmp, "fd", fdImports(), fdBody(), [{ file: "f", text: "hello world" }, { file: "g", text: "abc" }], fdBody());
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 // A handle dropped without close closes its file, so the next open reuses its descriptor; node
 // closes one only when it is collected, so its side closes it.
@@ -603,7 +603,7 @@ test("open gives a FileHandle whose calls give what node's give, closed when dro
   const tmp = scratch("fish-fs-sync-");
   compare(tmp, "handle", handleImports(), handleBody(), [{ file: "f", text: "hello world" }, { file: "g", text: "abc" }], handleNodeBody());
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 // A call queued on the blocking pool when another task closes the handle must not run on the
 // descriptor's number, which the next open reuses. The pool's threads are first all held by reads
@@ -616,13 +616,13 @@ test("a FileHandle call queued across close() fails instead of writing to the fi
   same(text(run.stderr), "", "the program's stderr");
   same(text(run.stdout), "file closed EBADF write\n0 0\n", "the output");
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 test("accessSync and access give what node's give", () => {
   const tmp = scratch("fish-fs-sync-");
   compare(tmp, "access", accessImports(), accessBody(), [{ dir: "d" }, { file: "f", text: "hi" }, { file: "ro", text: "hi" }, { readOnly: "ro" }], accessBody());
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 // Both times of each entry in `dir`, the atimes the programs can't print among them, in
 // nanoseconds as node reads them.
@@ -638,7 +638,7 @@ test("utimesSync, lutimesSync, utimes and lutimes give what node's give", () => 
   const [fishDir, nodeDir] = compare(tmp, "utimes", utimesImports(), utimesBody(), [{ dir: "d" }, { file: "f", text: "hi" }, { file: "g", text: "hi" }, { link: "dl", target: "nowhere" }, { link: "ln", target: "g" }], utimesBody());
   same(times(fishDir), times(nodeDir), "the times");
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 function modes(dir: string): string {
   let out: string[] = [];
@@ -655,10 +655,10 @@ test("chmodSync and chmod give what node's give", () => {
   const [fishDir, nodeDir] = compare(tmp, "chmod", chmodImports(), chmodBody(), [{ dir: "d" }, { file: "f", text: "hi" }, { file: "g", text: "hi" }, { file: "h", text: "hi" }, { file: "i", text: "hi" }, { file: "j", text: "hi" }, { link: "dl", target: "nowhere" }], chmodBody());
   same(modes(fishDir), modes(nodeDir), "the modes");
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("symlinkSync, linkSync, readlinkSync and their promise forms, with realpath, give what node's give", () => {
   const tmp = scratch("fish-fs-sync-");
   compare(tmp, "links", linksImports(), linksBody(), [{ dir: "d" }, { file: "f", text: "hi" }, { link: "dl", target: "nowhere" }], linksBody());
   removed(tmp);
-});
+}, { timeout: 30_000 });

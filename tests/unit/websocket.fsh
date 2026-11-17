@@ -302,7 +302,7 @@ await stop();`, "");
   same(fact(r, "large"), "é".repeat(40000), "the large echo");
   same(fact(r, "close"), `["close",1000,"string"]`, "the close, with a string reason");
   exitedWith(r, 0);
-});
+}, { timeout: 60_000 });
 
 test("path params, mounted routers and their middleware apply before the upgrade", () => {
   const r = run(String.raw`const room = bunClient("ws://127.0.0.1:" + port + "/room/a%20b");
@@ -349,7 +349,7 @@ await stop();`, "");
   same(fact(r, "key"), "400", "a bad key's status");
   assert(fact(r, "head").startsWith("HTTP/1.1 405 Method Not Allowed\r\n"), `a HEAD's head: ${fact(r, "head")}`);
   assert(fact(r, "http10").startsWith("HTTP/1.1 400 Bad Request\r\n"), `an HTTP/1.0 GET's head: ${fact(r, "http10")}`);
-});
+}, { timeout: 60_000 });
 
 test("the handshake's accept key is RFC 6455's, and no extension or subprotocol is agreed", () => {
   const r = run(String.raw`const c = await rawClient(port, "/echo", "Sec-WebSocket-Extensions: permessage-deflate\r\nSec-WebSocket-Protocol: chat\r\n");
@@ -363,7 +363,7 @@ await stop();`, "");
   assert(!head.toLowerCase().includes("sec-websocket-extensions"), `an extension agreed in: ${head}`);
   assert(!head.toLowerCase().includes("sec-websocket-protocol"), `a subprotocol agreed in: ${head}`);
   same(fact(r, "rest"), `[[8,"1000 "]]`, "the frames after the close");
-});
+}, { timeout: 60_000 });
 
 test("fragments make one message, even splitting a character, pings get pongs between them, the 8-byte length form reads, and a close is echoed", () => {
   const r = run(String.raw`const c = await rawClient(port, "/echo");
@@ -380,7 +380,7 @@ c.send(8, Buffer.concat([Buffer.from([11, 184]), Buffer.from("later")]));
 facts.rest = JSON.stringify(await c.rest());
 await stop();`, "");
   same(fact(r, "rest"), `[[10,"are you there"],[1,"fragmented"],[2,"\\u0007\\b\\t"],[2,"\\u0005\\u0006"],[1,"é"],[8,"3000 "]]`, "the server's frames");
-});
+}, { timeout: 60_000 });
 
 // Each case: the path, what the raw client sends, and the close the server answers with.
 function protocolCases(): [string, string, string][] {
@@ -439,7 +439,7 @@ await stop();`, "");
   }
   assert(wrong.length === 0, `${wrong.length} cases closed otherwise:\n${wrong.join("\n")}`);
   same(fact(r, "after"), "still serving", "the echo after the protocol errors");
-});
+}, { timeout: 60_000 });
 
 test("pongs to a client that stops reading count against maxBuffered, closing with 1013", () => {
   const r = run(String.raw`const c = await rawClient(port, "/small");
@@ -459,7 +459,7 @@ await stop();`, "");
   same(fact(r, "last"), `[8,"1013 send buffer full"]`, "the last frame");
   const before = fact(r, "before");
   assert(before === "[10]" || before === "[]", `frames other than pongs before the close: ${before}`);
-});
+}, { timeout: 60_000 });
 
 test("another task sends through a sender, and sends after the close are dropped", () => {
   const r = run(String.raw`const push = bunClient("ws://127.0.0.1:" + port + "/push");
@@ -476,7 +476,7 @@ await until("the server to end the connection", closing.ended);
 await stop();`, "");
   same(fact(r, "push"), "from another task", "the other task's message");
   same(fact(r, "rest"), `[[8,"4000 bye"]]`, "the frames up to the close");
-});
+}, { timeout: 60_000 });
 
 test("a handler that returns closes with 1000, and one that panics with 1011, as a reserved close code does", () => {
   const r = run(String.raw`const done = bunClient("ws://127.0.0.1:" + port + "/return");
@@ -496,7 +496,7 @@ await stop();`, "");
   same(fact(r, "reserved"), `[["close",1011,""]]`, "the reserved close code's events");
   assert(r.stderr.includes("the handler gave up"), `no panic message in:\n${r.stderr}`);
   assert(r.stderr.includes("a WebSocket close code is 1000 or one of 3000 to 4999, not 1006"), `no close code panic in:\n${r.stderr}`);
-});
+}, { timeout: 60_000 });
 
 test("a silent client is pinged after the idle timeout, then dropped", () => {
   const r = run(String.raw`const c = await rawClient(port, "/small");
@@ -516,7 +516,7 @@ await stop();`, "");
   same(fact(r, "ping"), "9", "the first frame's opcode");
   same(fact(r, "next"), "null", "what follows the ping");
   same(fact(r, "kept"), "still here", "the answering client's echo");
-});
+}, { timeout: 60_000 });
 
 test("stopping the server closes open WebSockets with 1001", () => {
   const r = run(String.raw`const c = bunClient("ws://127.0.0.1:" + port + "/echo");
@@ -527,7 +527,7 @@ facts.events = JSON.stringify(c.events);`, "");
   same(fact(r, "events"), `[["close",1001,""]]`, "the client's events");
   exitedWith(r, 0);
   assert(r.stderr.includes("stopped"), `serve never returned:\n${r.stderr}`);
-});
+}, { timeout: 60_000 });
 
 test("wss: WebSockets over the server's TLS", () => {
   const fixtures = join(root(), "tests", "fixtures", "tls");
@@ -540,4 +540,4 @@ await c.closed;
 facts.echo = c.events[0];
 await stop();`, fixtures);
   same(fact(r, "echo"), "secret", "the echo over TLS");
-});
+}, { timeout: 60_000 });

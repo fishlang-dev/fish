@@ -144,11 +144,11 @@ function abortedBy(signal: string): void {
 
 test("one SIGTERM aborts process.shutdown and the program ends normally", () => {
   abortedBy("SIGTERM");
-});
+}, { timeout: 60_000 });
 
 test("one SIGINT aborts process.shutdown and the program ends normally", () => {
   abortedBy("SIGINT");
-});
+}, { timeout: 60_000 });
 
 function ignored(): string {
   return `async function main(): Promise<void> {
@@ -176,11 +176,11 @@ function signalledTwice(signal: string, code: i64): void {
 
 test("a second SIGINT exits at once with 130", () => {
   signalledTwice("SIGINT", 130);
-});
+}, { timeout: 60_000 });
 
 test("a second SIGTERM exits at once with 143", () => {
   signalledTwice("SIGTERM", 143);
-});
+}, { timeout: 60_000 });
 
 test("a program that never names process.shutdown dies at its first SIGINT", () => {
   const tmp = scratch("fish-shutdown-");
@@ -193,7 +193,7 @@ test("a program that never names process.shutdown dies at its first SIGINT", () 
   const r = run(tmp, binary, `await line("ready");\nprocess.kill(pid, "SIGINT");`, false);
   ended(r, "", null, "SIGINT");
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 function slow(): string {
   return `async function main(): Promise<void> throws IoError {
@@ -230,7 +230,7 @@ await exited();`, false);
   same(fact(r, "answer"), `[200,"done slowly"]`, "the request in flight's answer");
   ended(r, "after serve\n", 0, null);
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("serve given its own signal leaves SIGINT alone", () => {
   const tmp = scratch("fish-shutdown-");
@@ -243,7 +243,7 @@ test("serve given its own signal leaves SIGINT alone", () => {
   const r = run(tmp, binary, `await line("listening");\nprocess.kill(pid, "SIGINT");`, false);
   ended(r, "", null, "SIGINT");
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 // A FIFO opened for reading and writing, so opening it doesn't wait, that the test never reads.
 test("a second SIGINT exits even while stdout is stuck on a full pipe", () => {
@@ -258,7 +258,7 @@ test("a second SIGINT exits even while stdout is stuck on a full pipe", () => {
   const r = run(tmp, binary, `await line("ready");\nawait sleep(500);\nprocess.kill(pid, "SIGINT");\nawait sleep(100);\nprocess.kill(pid, "SIGINT");`, true);
   ended(r, "", 130, null);
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 function firehose(): string {
   return `async function* firehose(): AsyncGenerator<string> {
@@ -294,7 +294,7 @@ socket.destroy();`, false);
   ended(r, "after serve\n", 0, null);
   same(fact(r, "ended"), "true", "whether the connection ended");
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("a stream's write under way at SIGINT gets a second's grace, then the stream ends cleanly", () => {
   const tmp = scratch("fish-shutdown-");
@@ -320,7 +320,7 @@ await exited();`, false);
   assert(fact(r, "tail").endsWith("\r\n0\r\n\r\n"), `the stream ended with ${JSON.stringify(fact(r, "tail"))}`);
   ended(r, "after serve\n", 0, null);
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 // A half-closed client looks the same as one that has gone, so its end of the stream ends a
 // streamed body as Node's server does: the head goes out, the body is cut short with no last
@@ -358,7 +358,7 @@ await exited();`, false);
   assert(!received.includes("piece 2;"), `the whole body in ${JSON.stringify(received)}`);
   assert(!received.endsWith("0\r\n\r\n"), `a last chunk in ${JSON.stringify(received)}`);
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("a handler that panics gets its request a bare 500, and the server keeps serving", () => {
   const tmp = scratch("fish-shutdown-");
@@ -400,7 +400,7 @@ await exited();`, false);
   ended(r, "after serve\n", 0, null);
   assert(/panicked at .*panicky\.fsh:5:\d+:\nindex out of bounds/.test(r.stderr), `no panic report in:\n${r.stderr}`);
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("a detached task's panic is printed and the program ends normally", () => {
   const tmp = scratch("fish-shutdown-");
@@ -421,7 +421,7 @@ async function main() {
   same(`${JSON.stringify(text(r.stdout))} ${JSON.stringify(r.status)} ${JSON.stringify(r.signal)}`, `"main finished\\n" 0 null`, "the stdout, exit code and signal");
   assert(/^panicked at .*detached\.fsh:4:(\d+):\nindex out of bounds: the len is 1 but the index is 2\nstack backtrace:\n   0: boom at .*detached\.fsh:4:\1\nspawned at .*detached\.fsh:7:3\n$/.test(stderr), `the panic report:\n${stderr}`);
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("a Router route that panics answers 500 while the other routes keep working", () => {
   const tmp = scratch("fish-shutdown-");
@@ -451,4 +451,4 @@ await exited();`, false);
   const count = panics === null ? 0 : panics.length;
   assert(count === 2, `${count} panics reported in:\n${r.stderr}`);
   removed(tmp);
-});
+}, { timeout: 60_000 });

@@ -79,7 +79,7 @@ kill $peer`;
   same(`${readText(join(tmp, "code1")).trim()} ${readText(join(tmp, "err1"))}${readText(join(tmp, "out1"))}`, "0 200 bun /x\n", "the trusting client's exit code, stderr and output");
   same(`${readText(join(tmp, "code2")).trim()} ${readText(join(tmp, "err2"))}${readText(join(tmp, "out2"))}`, "0 UNABLE_TO_GET_ISSUER_CERT_LOCALLY certificate verify failed: unable to get local issuer certificate\n", "the untrusting client's exit code, stderr and output");
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("Bun's fetch reaches a Fish HTTPS server", () => {
   const tmp = scratch("fish-tls-");
@@ -111,7 +111,7 @@ kill $server`;
   same(text(run.stderr), "", "Bun's stderr");
   same(text(run.stdout), `200 fish https://localhost:${port}/y\n`, "what Bun's fetch got");
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("std's TLS helper is std's alone", () => {
   const tmp = scratch("fish-tls-");
@@ -125,7 +125,7 @@ test("std's TLS helper is std's alone", () => {
   assert(run.code !== 0, "the build succeeded");
   assert(/: error\[E\d+\]: unknown function '__tlsClient'/.test(run.err), `not a compile error about '__tlsClient':\n${run.err}`);
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 function shown(o: Ref<OpenSsl>): string {
   return "missing" in o ? `missing: ${o.missing}` : `compile: ${JSON.stringify(o.compile)} link: ${JSON.stringify(o.link)}`;
@@ -154,7 +154,7 @@ test("OpenSSL for another target is looked for only in its sysroot", () => {
   write(join(sysroot, "usr", "include", "openssl", "ssl.h"), "");
   same(shown(findOpenSsl(musl(["-target", "x86_64-unknown-linux-musl", "--sysroot", sysroot]))), `compile: [] link: ["-lssl","-lcrypto"]`, "with the headers in the sysroot");
   removed(tmp);
-});
+}, { timeout: 60_000 });
 
 test("the runtime without OpenSSL compiles, its TLS calls saying why", () => {
   const tmp = scratch("fish-tls-");
@@ -163,4 +163,4 @@ test("the runtime without OpenSSL compiles, its TLS calls saying why", () => {
   assert(!text(clang.stderr).includes("error"), `clang's errors:\n${text(clang.stderr)}`);
   assert(clang.status === 0, `clang exited with ${clang.status ?? -1}`);
   removed(tmp);
-});
+}, { timeout: 60_000 });

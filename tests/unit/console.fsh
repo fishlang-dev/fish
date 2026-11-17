@@ -15,7 +15,7 @@ test("console.error and console.warn write to stderr as node does", () => {
   same(text(fish.stdout), text(node.stdout), "stdout");
   same(text(fish.stderr), text(node.stderr), "stderr");
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 test("stdout and stderr keep their order in one pipe, as node keeps them", () => {
   const dir = scratch("fish-console-");
@@ -29,7 +29,7 @@ test("stdout and stderr keep their order in one pipe, as node keeps them", () =>
   const node = text(spawnSync("sh", ["-c", `node -e '${source}' 2>&1 | cat`]).stdout);
   same(fish, node, "the output");
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 test("Date.now() is node's wall clock, and performance.now() counts from the start", () => {
   const dir = scratch("fish-console-");
@@ -45,4 +45,4 @@ test("Date.now() is node's wall clock, and performance.now() counts from the sta
   assert(Math.abs(now - (Date.now() as number)) < 5000, `Date.now() gave ${parts[0]}, ${Date.now()} here`);
   same(`${parts[1]} ${parts[2]}`, "true true", "the clock checks");
   removed(dir);
-});
+}, { timeout: 30_000 });

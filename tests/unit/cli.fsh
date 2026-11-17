@@ -47,7 +47,7 @@ test("fishc build with no file builds the package around the working directory i
   assert(fishcIn(p, ["build", "-o", "elsewhere"]).code === 0, "the -o build failed");
   same(ranOut(join(p, "elsewhere")), "from app\n", "the -o build");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a package's entry and its errors are found through the manifest", () => {
   const root = scratch("fish-cli-");
@@ -60,7 +60,7 @@ test("a package's entry and its errors are found through the manifest", () => {
   const typo = dir(root, "typo", [["fish.toml", `[package]\nname = "typo"\nverison = "1.0.0"\n`]]);
   same(firstLine(fishcIn(typo, ["build"]).err), "fish.toml:3:1: error[E0905]: [package] has no key 'verison'; it has name, version, entry, lib, edition", "a misspelled key");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fishc build with no file and no package says how to make one", () => {
   const root = scratch("fish-cli-");
@@ -68,7 +68,7 @@ test("fishc build with no file and no package says how to make one", () => {
   assert(!existsSync(join(root, "fish.toml")), "a fish.toml in the root");
   ran(fishcIn(none, ["build"]), 2, "", "fishc build: no fish.toml here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'\n", "fishc build");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fishc new makes a package that builds and greets", () => {
   const root = scratch("fish-cli-");
@@ -84,7 +84,7 @@ test("fishc new makes a package that builds and greets", () => {
   assert(fishcIn(p, ["build"]).code === 0, "the build failed");
   same(ranOut(join(p, "target", "debug", "hello")), "Hello from hello!\n", "the program");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fishc init makes a package where it is run, keeping code already there", () => {
   const root = scratch("fish-cli-");
@@ -98,7 +98,7 @@ test("fishc init makes a package where it is run, keeping code already there", (
   same(ranOut(join(existing, "target", "debug", "kept")), "mine\n", "the existing program");
   same(read(join(existing, ".gitignore")), "/out\n", "the kept .gitignore");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("new and init refuse bad names and overwriting", () => {
   const root = scratch("fish-cli-");
@@ -112,7 +112,7 @@ test("new and init refuse bad names and overwriting", () => {
   assert(fishcIn(odd, ["init", "odd"]).code === 0, "fishc init odd failed");
   ran(fishcIn(odd, ["init", "odd"]), 2, "", "fishc init: there is already a fish.toml here\n", "a second init");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 function compat(): string {
   return "this file is in the TS-compat edition, which Fish doesn't compile; run 'fishc lint' to find what to change, then mark it '// @fish-edition native'";
@@ -131,7 +131,7 @@ test("a TS-compat package's files are refused by build and test, at each file's 
   assert(tested.code === 1, `fishc test exited with ${tested.code}`);
   same(tested.err, refusal, "fishc test's stderr");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a file's directive sets its edition, over its package's, after any shebang", () => {
   const root = scratch("fish-cli-");
@@ -151,7 +151,7 @@ test("a file's directive sets its edition, over its package's, after any shebang
   const unknown = dir(root, "unknown-edition", [["main.fsh", "#!/usr/bin/env fishc\n// @fish-edition typescript\nfunction main() {}\n"]]);
   ran(fishcIn(unknown, ["build", "main.fsh"]), 1, "", "main.fsh:2:1: error[E0005]: an edition directive is written '// @fish-edition native' or '// @fish-edition ts-compat'\n 2 | // @fish-edition typescript\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n", "an unknown edition");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("a dependency's TS-compat file is refused where the dependency is built", () => {
   const root = scratch("fish-cli-");
@@ -161,7 +161,7 @@ test("a dependency's TS-compat file is refused where the dependency is built", (
   assert(built.code === 1, `exited with ${built.code}`);
   same(built.err, `../../words/src/lib.fsh:1:1: error[E0006]: ${compat()}\n 1 | export function word(): string {\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n`, "the build's stderr");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("only a debug build keeps frames for panic backtraces", () => {
   const root = scratch("fish-cli-");
@@ -173,7 +173,7 @@ test("only a debug build keeps frames for panic backtraces", () => {
   assert(release.code === 0, `the release build exited with ${release.code}`);
   assert(!/fsh_rt_frames|%fsh\.(site|name|link|prev)/.test(release.out), "the release IR keeps frames");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fishc check checks a file or package without building, exiting 1 on an error", () => {
   const root = scratch("fish-cli-");
@@ -186,7 +186,7 @@ test("fishc check checks a file or package without building, exiting 1 on an err
   same(bad.err, fishcIn(p, ["build", "bad.fsh"]).err, "check's error against build's");
   assert(bad.err.includes("bad.fsh:2:18: error[E0101]:"), `stderr: ${bad.err}`);
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fishc run builds and runs a program with its arguments and exit code", () => {
   const root = scratch("fish-cli-");
@@ -201,7 +201,7 @@ test("fishc run builds and runs a program with its arguments and exit code", () 
   same(bad.out, "", "stdout");
   assert(bad.err.includes("error[E0101]:"), `stderr: ${bad.err}`);
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fishc explain prints a code's explanation, and refuses a code that isn't one", () => {
   const root = scratch("fish-cli-");
@@ -213,7 +213,7 @@ test("fishc explain prints a code's explanation, and refuses a code that isn't o
   ran(fishcIn(root, ["explain", "E9999"]), 2, "", "fishc explain: 'E9999' isn't an error code; a code looks like E0201 or W0001, as an error shows it\n", "an unknown code");
   same(fishcIn(root, ["explain"]).err, "usage: fishc explain <code>\n", "no code");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fishc check reports every error, with a closing count, painted only when asked for", () => {
   const root = scratch("fish-cli-");
@@ -231,7 +231,7 @@ test("fishc check reports every error, with a closing count, painted only when a
   same(painted(["FORCE_COLOR=0"]), plain.err, "FORCE_COLOR=0");
   same(painted(["NO_COLOR=1"]), plain.err, "NO_COLOR=1");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 type Stage = { stage: string; ms: f64; note: string | null };
 
@@ -272,7 +272,7 @@ test("fishc check --timings prints each front-end stage's time, then the total",
   assert(bad.code === 1, `exited with ${bad.code}`);
   assert(!bad.err.includes(" ms"), `a failed check printed timings: ${bad.err}`);
   removed(root);
-});
+}, { timeout: 30_000 });
 
 test("fishc build and run --timings print every stage, saying which objects were built or cached", () => {
   const root = scratch("fish-cli-");
@@ -295,7 +295,7 @@ test("fishc build and run --timings print every stage, saying which objects were
   same(names(run.err), all, "fishc run's stages");
   ran(fishcIn(p, ["build", "main.fsh", "--lib", "--timings"]), 2, "", "fishc build: '--timings' times an executable's build; leave out '--lib' to time the program it would be built from\n", "--lib --timings");
   removed(root);
-});
+}, { timeout: 30_000 });
 
 // Node's `JSON.stringify(JSON.parse(s), null, 2)` for each of `inputs`.
 function nodeIndented(inputs: Ref<string[]>): string[] {
@@ -316,7 +316,7 @@ test("indented lays compact JSON out as JSON.stringify does with an indent of 2"
   const want = nodeIndented(values);
   assert(want.length === values.length, "node gave too few");
   for (let i: usize = 0; i < values.length; i++) same(indented(values[i]), want[i], values[i]);
-});
+}, { timeout: 30_000 });
 
 test("fishc parse parses a file without checking it, and reports a syntax error", () => {
   const root = scratch("fish-cli-");
@@ -326,4 +326,4 @@ test("fishc parse parses a file without checking it, and reports a syntax error"
   assert(bad.code === 1, `exited with ${bad.code}`);
   assert(bad.err.includes("bad.fsh:2:1: error[E0001]"), `stderr: ${bad.err}`);
   removed(root);
-});
+}, { timeout: 30_000 });

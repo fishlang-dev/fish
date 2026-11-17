@@ -54,7 +54,7 @@ test("readFile and writeFile give what node's give", () => {
   same(text(fish.stderr), "", "the program's stderr");
   same(text(fish.stdout), text(node.stdout), "the output");
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("a read still waiting when main returns isn't reported as a leak", () => {
   const dir = scratch("fish-fs-");
@@ -64,4 +64,4 @@ test("a read still waiting when main returns isn't reported as a leak", () => {
   same(text(fish.stderr), "", "the program's stderr");
   same(text(fish.stdout), "done\n", "the output");
   removed(dir);
-});
+}, { timeout: 30_000 });

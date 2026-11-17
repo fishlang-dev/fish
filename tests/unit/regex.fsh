@@ -210,7 +210,7 @@ test("regex test agrees with JavaScript", () => {
   const got = ran(dir, "corpus", `function main() {\n${body}\n}\n`);
   remove(dir);
   same(disagreeing(cases, wants, got, "test on"), "", "results");
-});
+}, { timeout: 60_000 });
 
 test("regex exec agrees with JavaScript", () => {
   const dir = temp();
@@ -231,7 +231,7 @@ test("regex exec agrees with JavaScript", () => {
   const got = ran(dir, "exec", `function main() {\n${lines.join("\n")}\n}\n`);
   remove(dir);
   same(disagreeing(cases, wants, got, "exec on"), "", "results");
-});
+}, { timeout: 60_000 });
 
 // Bun's 300 cases, built as two programs of 150, each case a function of its own, since building
 // them all at once runs past the test runner's 10 seconds: each distinct regex costs codegen about

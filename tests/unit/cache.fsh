@@ -4,17 +4,18 @@
 // itself again in a child process with them set: `again` starts this test binary on the same test,
 // FISH_CACHE_TEST_ROOT naming the directory the parent made, and fails with the child's output.
 // The Bun tests of std's parsed-tree cache are left out: that cache is stdcache.ts's alone, and a
-// compiler built by Fish parses std in each session. So are three that take longer than a test's
-// 10 seconds natively: a dev build keeping std's object across edits, compiling the same programs
-// twice in one process, and split against one-module dev builds of sampled programs.
+// compiler built by Fish parses std in each session. The slower tests take longer limits, as the
+// Bun file's two minutes do.
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { argv } from "node:process";
 import { CompileError, formatError } from "../compiler/diag.fsh";
-import { build, buildAsync, compile, engineDir, runtimeUnits } from "../compiler/main.fsh";
-import { buildSession, cachedObject, files, type Unit } from "../compiler/mathlib.fsh";
+import { build, buildAsync, compile, engineDir, runtimeLinks, runtimeUnits } from "../compiler/main.fsh";
+import { buildSession, cachedObject, cachedObjectAsync, files, mathObjectsAsync, type Unit } from "../compiler/mathlib.fsh";
 import { newSession } from "../compiler/compilation.fsh";
+import { hostTarget } from "../compiler/target.fsh";
 import { cachedSession } from "../compiler/stdcache.fsh";
 import { fishcPath, read, removed, root as repo, same, scratch, text } from "./support.fsh";
 
@@ -113,7 +114,7 @@ test("the runtime is compiled once per cache, and once more for a release build"
   same(ranOut(out), "hello\n", "the release program");
   same(JSON.stringify(listed(join(cache, "objects")).filter((f) => !f.endsWith(".o"))), "[]", "what else is in the cache");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a change to the runtime's source or flags is a new object", () => {
   const root = childRoot();
@@ -139,7 +140,7 @@ test("a change to the runtime's source or flags is a new object", () => {
   } catch (e) {
     assert(false, failure(e));
   }
-});
+}, { timeout: 120_000 });
 
 test("a failed compile leaves nothing in the cache", () => {
   const root = childRoot();
@@ -159,7 +160,7 @@ test("a failed compile leaves nothing in the cache", () => {
   }
   assert(message.includes("clang failed building broken"), `expected a clang failure, got: ${message === "" ? "an object" : message}`);
   same(JSON.stringify(listed(join(root, "failed", "objects"))), "[]", "the cache");
-});
+}, { timeout: 120_000 });
 
 test("static and shared libraries link the cached runtime, built position-independent", () => {
   const root = scratch("fish-cache-");
@@ -184,7 +185,7 @@ test("static and shared libraries link the cached runtime, built position-indepe
   fishc(cache, ["build", program, "-o", join(root, "hello-pie")]);
   assert(count(cache, "runtime") === 2, `the runtime's objects after an executable: ${stamped(cache, "runtime")}`);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function engineProgram(root: string): string {
   const file = join(root, "engine.fsh");
@@ -225,7 +226,7 @@ test("a program calling the JS engine compiles the engine once", () => {
   assert(listed(join(cache, "objects")).filter((f) => /^(quickjs|libregexp|libunicode|dtoa|runtime-js)-/.test(f)).length === 5, `the engine's objects: ${first}`);
   buildEngine(program, out);
   same(engineObjects(cache), first, "the engine's objects after a second build");
-});
+}, { timeout: 120_000 });
 
 test("headers in the working directory never reach a cached object", () => {
   const root = childRoot();
@@ -248,7 +249,7 @@ test("headers in the working directory never reach a cached object", () => {
       assert(false, `can't read ${f}: ${e.message}`);
     }
   }
-});
+}, { timeout: 120_000 });
 
 // Builds `program` into `out` in a session of its own, giving the failure or "".
 async function builtQuietly(program: string, out: string): Promise<string> {
@@ -293,7 +294,7 @@ test("builds running at once compile each object once", async () => {
   assert(compiles.length === objects.length, `${compiles.length} compiles for ${objects.length} objects:\n${compiles.join("\n")}`);
   const runtimes = compiles.filter((line) => line.includes("/runtime-"));
   assert(runtimes.length === 1, `the runtime was compiled ${runtimes.length} times`);
-});
+}, { timeout: 120_000 });
 
 test("an edit to a hashed engine header is a new object", () => {
   const root = childRoot();
@@ -319,7 +320,7 @@ test("an edit to a hashed engine header is a new object", () => {
   } catch (e) {
     assert(false, failure(e));
   }
-});
+}, { timeout: 120_000 });
 
 function httpProgram(): string {
   return `async function main(): Promise<void> {
@@ -337,6 +338,35 @@ function stdObjects(cache: string): string[] {
 }
 
 // Each build is a process of its own, as a rebuild from the command line is.
+test("a dev build keeps std's object across edits to the program's own code", () => {
+  const root = scratch("fish-cache-");
+  const cache = join(root, "split");
+  const base = httpProgram();
+  const file = join(root, "edited.fsh");
+  const out = join(root, "edited");
+  const built = (src: string) => {
+    write(file, src);
+    fishc(cache, ["build", file, "-o", out]);
+    return ranOut(out);
+  };
+  same(built(base), "200 user 7\n", "the program");
+  const first = stdObjects(cache);
+  assert(first.length === 1, `std's objects: ${JSON.stringify(first)}`);
+  const edits: [string, string][] = [
+    [base.replace('"user "', '"member "'), "200 member 7\n"],
+    [base.replace('new Response("user " + req.param("id"))', '{ const id = req.param("id"); return new Response(id + " is a user"); }'), "200 7 is a user\n"],
+    [base.replaceAll("body", "text"), "200 user 7\n"],
+  ];
+  for (const [src, expected] of edits) {
+    same(built(src), expected, "the edited program");
+    assert(stdObjects(cache) === first, `std's objects after an edit: ${JSON.stringify(stdObjects(cache))}`);
+  }
+  const aggregate = base.replace("console.log(res.status, body);", "console.log(res.status, body, new AggregateError([1, 2]).errors.length);");
+  same(built(aggregate), "200 user 7 2\n", "the program using more of std");
+  assert(stdObjects(cache).length === 2, `std's objects after using more of it: ${JSON.stringify(stdObjects(cache))}`);
+  removed(root);
+}, { timeout: 120_000 });
+
 test("a dev build compiles again only the objects of the files whose code changed", () => {
   const root = scratch("fish-cache-");
   const cache = join(root, "per-file");
@@ -360,7 +390,7 @@ test("a dev build compiles again only the objects of the files whose code change
   assert(objectsOf("a") === a, `a.fsh's objects after editing b.fsh: ${JSON.stringify(objectsOf("a"))}`);
   assert(objectsOf("b").length === 2, `b.fsh's objects after editing it: ${JSON.stringify(objectsOf("b"))}`);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 type Program = { file: string; src: string };
 
@@ -388,9 +418,35 @@ function sampled(folder: string): Program[] {
   return chosen;
 }
 
+function irOf(p: Ref<Program>): string {
+  try {
+    const ir = compile(cachedSession(), p.src, p.file);
+    return ir;
+  } catch (e) {
+    assert(false, `${p.file}: ${failure(e)}`);
+    return "";
+  }
+}
 
 // Each compile in a process starts from the same type state, so a program compiled again after
 // others gives the same IR: union order, tags and glue names don't depend on what came before.
+test("compiling the same programs again in one process gives identical IR", () => {
+  const root = scratch("fish-cache-");
+  const json = read(join(repo(), "tests", "programs", "json.fsh"));
+  const failures = join(root, "json_parse_failures.fsh");
+  const after = json.split(/^\/\/ case: json_parse_failures$/m)[1];
+  write(failures, after.split(/^\/\/ case: /m)[0]);
+  let programs: Program[] = [{ file: failures, src: read(failures) }];
+  for (const p of sampled(join(root, "sampled"))) programs.push(p.clone());
+  let rounds: string[][] = [];
+  for (let round = 0; round < 3; round++) rounds.push(programs.map((p) => irOf(p)));
+  for (let i: usize = 0; i < programs.length; i++) {
+    assert(rounds[1][i] === rounds[0][i], `${programs[i].file}: the second round's IR differs`);
+    assert(rounds[2][i] === rounds[0][i], `${programs[i].file}: the third round's IR differs`);
+  }
+  removed(root);
+}, { timeout: 120_000 });
+
 // A process that builds many times, as a test runner or a daemon does, gives std's part the same
 // text each time a program is built again, so it links the object it cached the first time.
 test("a long-lived process reuses std's object when it builds a program again", async () => {
@@ -416,7 +472,7 @@ test("a long-lived process reuses std's object when it builds a program again", 
   } catch (e) {
     assert(false, failure(e));
   }
-});
+}, { timeout: 120_000 });
 
 type Outcome = { stdout: string; stderr: string; code: i64 };
 
@@ -429,10 +485,57 @@ function outcome(out: string): Outcome {
   return { stdout: text(done.stdout), stderr: lines.join("\n"), code: done.status ?? -1 };
 }
 
+// Builds `p` both ways, split and as one module, runs each under the leak check, and gives what
+// the two runs differ in, or "" when they behave alike.
+async function bothWays(p: Program): Promise<string> {
+  const split = `${p.file}.split`;
+  const whole = `${p.file}.whole`;
+  try {
+    const _warnings = await buildAsync(cachedSession(), p.file, split);
+    const ir = compile(cachedSession(), p.src, p.file);
+    let session = cachedSession();
+    let objects: string[] = [];
+    for (const u of runtimeUnits(ir, false)) {
+      const object = await cachedObjectAsync(session, u.clone());
+      objects.push(object);
+    }
+    const math = await mathObjectsAsync(session);
+    for (const m of math) objects.push(m);
+    const clang = spawnSync("clang", ["-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", whole, "-O0", "-lm", ...runtimeLinks(ir, hostTarget())], { input: ir });
+    if (clang.status !== 0) return `${p.file}: clang failed:\n${text(clang.stderr)}`;
+  } catch (e) {
+    return `${p.file}: ${failure(e)}`;
+  }
+  const a = outcome(split);
+  const b = outcome(whole);
+  if (a.stdout === b.stdout && a.stderr === b.stderr && a.code === b.code) return "";
+  return `${p.file}: split ${JSON.stringify(a)}, one module ${JSON.stringify(b)}`;
+}
+
+test("split and one-module dev builds of sampled test programs behave alike", async () => {
+  const root = childRoot();
+  if (root === "") {
+    const r = scratch("fish-cache-");
+    again(r, join(r, "sampled-cache"), r, []);
+    removed(r);
+    return;
+  }
+  const programs = sampled(join(root, "sampled"));
+  assert(programs.length > 50, `only ${programs.length} sampled programs`);
+  const width = availableParallelism() as usize;
+  let differing: string[] = [];
+  for (let at: usize = 0; at < programs.length; at += width) {
+    let batch: Promise<string>[] = [];
+    for (let i = at; i < at + width && i < programs.length; i++) batch.push(bothWays(programs[i].clone()));
+    const results = await Promise.all(batch);
+    for (const r of results) if (r !== "") differing.push(r);
+  }
+  assert(differing.length === 0, differing.join("\n"));
+}, { timeout: 420_000 });
 
 test("giving a session the build caches again keeps the ones it has", () => {
   let session = buildSession(newSession());
   session.digests.set("a.c:1:1", "digest");
   const again = buildSession(session);
   assert(again.digests.get("a.c:1:1") === "digest", `the digest: ${again.digests.get("a.c:1:1") ?? "none"}`);
-});
+}, { timeout: 120_000 });

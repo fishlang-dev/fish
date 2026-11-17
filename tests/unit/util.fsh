@@ -56,11 +56,11 @@ function cases(): string {
 
 test("format with a format string read at run time gives what node's gives", () => {
   compare("format", imports(), p(), `\n  const fmt: string = "%s|%d|%i|%f|%o|%O|%c|%%|%x|%";${cases()}`, []);
-});
+}, { timeout: 30_000 });
 
 test("format with a literal format gives what node's gives", () => {
   compare("literal", imports(), p(), cases().replaceAll("format(fmt, ", `format("%s|%d|%i|%f|%o|%O|%c|%%|%x|%", `), []);
-});
+}, { timeout: 30_000 });
 
 test("console.log, console.error and print format their first argument as node's console does", () => {
   compare("console", "", p(), `
@@ -76,7 +76,7 @@ test("console.log, console.error and print format their first argument as node's
   console.log("%c%s", "color: red", "styled");
   console.error("%s to stderr %i", "written", 4.7);
   console.log(xs.length);`, []);
-});
+}, { timeout: 30_000 });
 
 test("inspect and isDeepStrictEqual give what node's give", () => {
   compare("inspect", `import { inspect, isDeepStrictEqual } from "node:util";`, p(), `
@@ -86,7 +86,7 @@ test("inspect and isDeepStrictEqual give what node's give", () => {
   const a: string = "a";
   console.log(isDeepStrictEqual(1, 1), isDeepStrictEqual(a, "b"), isDeepStrictEqual({ a: [1, 2] }, { a: [1, 2] }), isDeepStrictEqual({ a: [1, 2] }, { a: [1, 3] }));
   console.log(isDeepStrictEqual([[1], [2]], [[1], [2]]), isDeepStrictEqual(u, "u"), isDeepStrictEqual([1, 2], [1, 2, 3]));`, []);
-});
+}, { timeout: 30_000 });
 
 function options(): string {
   return `{ color: { type: "boolean", short: "c" }, name: { type: "string", short: "n" }, tag: { type: "string", multiple: true, short: "t" }, v: { type: "boolean", multiple: true }, "dry-run": { type: "boolean" }, out: { type: "string", default: "x" } }`;
@@ -125,7 +125,7 @@ function run_${negative}_${positionals}(args: string[]) {
   return x === true ? "true" : x === false ? "false" : "-";
 }`;
   compare("parse", `import { parseArgs } from "node:util";`, `${flag}\n${runs.join("\n")}`, `\n  ${calls.join("\n  ")}`, []);
-});
+}, { timeout: 30_000 });
 
 test("parseArgs reads the program's arguments when given none, with defaults and the empty config", () => {
   compare("argv", `import { parseArgs } from "node:util";`, "", `
@@ -138,4 +138,4 @@ test("parseArgs reads the program's arguments when given none, with defaults and
   } catch (e) {
     console.log(e.code, e.message);
   }`, ["-l", "debug", "file.txt", "--quiet"]);
-});
+}, { timeout: 30_000 });

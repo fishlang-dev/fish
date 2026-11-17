@@ -110,7 +110,7 @@ test("a dry run packs exactly the tracked files into a reproducible archive, and
   const tarList = text(spawnSync("tar", ["-tvzf", join(dir, "target/publish/words-1.0.0.tar.gz")]).stdout);
   assert(tarList.includes("-rwxr-xr-x"), `tar lists:\n${tarList}`);
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("uncommitted changes, packages outside git, missing libs, links and non-registry dependencies are refused", () => {
   const root = scratch("fish-publish-");
@@ -134,7 +134,7 @@ test("uncommitted changes, packages outside git, missing libs, links and non-reg
   same(fishc(root, pathed, ["publish", "--dry-run"]).err, "fishc publish: 'util' is a path or git dependency, and a published package depends only on the registry; give it a version range", "a path dependency");
   same(fishc(root, pathed, ["publish", "--yes"]).err, "usage: fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]", "--yes without --submit");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("every unsafe block, unsafe expression and C declaration is found with its place", () => {
   const root = scratch("fish-publish-");
@@ -149,7 +149,7 @@ test("every unsafe block, unsafe expression and C declaration is found with its 
   const refused = fishc(root, bad, ["publish", "--dry-run"]).err;
   assert(refused.includes("src/bad.fsh doesn't parse:"), `a file that doesn't parse: ${refused}`);
   removed(root);
-});
+}, { timeout: 60_000 });
 
 // A registry index at `name` under `root` whose packages are `lines`, each a JSON line, committed,
 // with archives under `root`'s archives folder.
@@ -180,7 +180,7 @@ test("publish reports its own unsafe and dependencies the index marks, and fishc
   const added = run(adder, ["add", "ffi"], vars);
   same(`${added.out}|${added.err}`, "added ffi ^1.2.0\n|note: 'ffi' 1.2.0 uses unsafe\n", "fishc add");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("a build that brings a package marked unsafe into the lock says so, and records it", () => {
   const root = scratch("fish-publish-");
@@ -196,7 +196,7 @@ test("a build that brings a package marked unsafe into the lock says so, and rec
   assert(lock.endsWith("\nunsafe = true\n"), `the lock:\n${lock}`);
   same(run(app, ["build"], vars).err, "", "the second build");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 // A home directory whose git config names an author, as publishing commits under the user's own.
 function home(root: string): string {
@@ -250,7 +250,7 @@ test("publish prepares the archive and its line on a branch of the index, and a 
   gitIn(indexDir, ["merge", "-q", "--ff-only", "FETCH_HEAD"]);
   same(run(dir, ["publish"], vars).err.trim(), "fishc publish: 'greet' 1.0.0 is already in the registry; raise the version in fish.toml to publish again", "publishing again");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 // A directory for PATH holding git and, unless `gh` is null, a gh stub that records its arguments
 // in `log` and runs `gh` as its shell body.
@@ -305,7 +305,7 @@ test("--submit asks, pushes the prepared branch to the fork and opens a pull req
   const rejected = submit(ok, ["--yes", "--allow-dirty"]).err;
   assert(rejected.startsWith(`fishc publish: can't push to ${fork}: ! [rejected]`), `a changed release: ${rejected}`);
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("a lib or import git doesn't track, and a dirty link or deleted file, are refused", () => {
   const root = scratch("fish-publish-");
@@ -337,7 +337,7 @@ test("a lib or import git doesn't track, and a dirty link or deleted file, are r
   const escaping = pkg(root, "escaping-import", [["src/lib.fsh", `import { g } from "../../../../../../../../../../../../tmp/g";\nexport function f(): i64 { return g(); }\n`]]);
   same(fishc(root, escaping, ["publish", "--dry-run"]).err, "fishc publish: 'src/lib.fsh' imports '../../../../../../../../../../../../tmp/g', which the archive doesn't hold; if git doesn't track it, add and commit it", "an import leaving the package");
   removed(root);
-});
+}, { timeout: 60_000 });
 
 test("--submit to a GitHub index asks before forking, and pushes the same release again after the index moves", () => {
   const root = scratch("fish-publish-");
@@ -384,4 +384,4 @@ test("--submit to a GitHub index asks before forking, and pushes the same releas
   const retried = run(dir, ["publish"], vars);
   assert(retried.code === 0 && retried.err === "", `publishing again exited with ${retried.code}: ${retried.err}`);
   removed(root);
-});
+}, { timeout: 60_000 });

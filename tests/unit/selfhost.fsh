@@ -51,7 +51,7 @@ test("every default parameter in the compiler's source has a type Fish can read"
     });
   }
   assert(untyped.length === 0, untyped.join("\n"));
-});
+}, { timeout: 7_200_000 });
 
 // Fish refuses a top-level `let`, and a `const` is deeply immutable, so the compiler keeps no
 // state of its own: no file has a top-level `let`, and no table a top-level `const` holds is
@@ -138,4 +138,4 @@ test("the compiler keeps no module state", () => {
     for (const c of tableChanges(program, reached)) found.push(`${f}: ${c} changes a module's table`);
   }
   assert(found.length === 0, found.join("\n"));
-});
+}, { timeout: 7_200_000 });

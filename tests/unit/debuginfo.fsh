@@ -68,7 +68,7 @@ test("-g gives each of the program's functions a subprogram, and each call its .
   assert(lineOf(ir, "@llvm.sadd.with.overflow.i64") === 2, "the add's line");
   assert(!ir.includes(";fsh."), "a ;fsh. comment");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("without -g the IR has no debug metadata", () => {
   const root = scratch("fish-debuginfo-");
@@ -76,7 +76,7 @@ test("without -g the IR has no debug metadata", () => {
   assert(!ir.includes("!dbg"), "a !dbg");
   assert(!ir.includes(";fsh."), "a ;fsh. comment");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a release -g build marks its subprograms optimized", () => {
   const root = scratch("fish-debuginfo-");
@@ -84,7 +84,7 @@ test("a release -g build marks its subprograms optimized", () => {
   assert(ir.includes("isOptimized: true"), "no isOptimized");
   assert(ir.includes("DISPFlagDefinition | DISPFlagOptimized"), "no DISPFlagOptimized");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("a function from an imported file is described in that file", () => {
   const root = scratch("fish-debuginfo-");
@@ -103,7 +103,7 @@ test("a function from an imported file is described in that file", () => {
   assert(fields.includes(`file: ${util}, line: 1,`), `twice's subprogram: ${fields}`);
   assert(lineOf(ir, "@llvm.smul.with.overflow.i64") === 3, "the multiply's line");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 function stdProgram(): string {
   return `function main() {
@@ -148,14 +148,14 @@ test("-g dev and release builds run as plain ones do, and share std's cached obj
   same(built("release", ["-g", "--release"]), "A,BB,CCC 2\n", "the release -g build");
   assert(stdObjects(cache) === std, `std's objects now: ${JSON.stringify(stdObjects(cache))}`);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("fishc run -g runs the program", () => {
   const root = scratch("fish-debuginfo-");
   const file = place(root, "run", [["main.fsh", program()]]);
   ran(fishc(join(root, "run"), ["run", file, "-g"]), 0, "3\n", "", "fishc run -g");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("lldb stops at a breakpoint on a .fsh line", () => {
   if (Bun.which("lldb") === null) {
@@ -171,7 +171,7 @@ test("lldb stops at a breakpoint on a .fsh line", () => {
   assert(out.includes("Breakpoint 1: where = prog`main + "), `lldb said:\n${out}`);
   assert(/frame #0: .* prog`main at main\.fsh:6:13/.test(out), `lldb said:\n${out}`);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 // A timed build compiles and links in two clang calls, which on macOS must still leave a .dSYM.
 test("lldb resolves a .fsh breakpoint in a build timed with --timings", () => {

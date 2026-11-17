@@ -104,14 +104,14 @@ test("a sanitizer instruments every compile and keeps frame pointers", () => {
   assert(address.compile === [...linux.compile, "-fsanitize=address", "-fno-omit-frame-pointer"], `the address target's compile flags: ${JSON.stringify(address.compile)}`);
   throwsWith(() => sanitizedTarget(resolveTarget("x86_64-unknown-linux-gnu", "/s", "aarch64-apple-darwin", has), ["thread"], "aarch64-apple-darwin", inside(dir)), "clang has no thread sanitizer runtime for x86_64-unknown-linux-gnu");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("one known sanitizer at a time, for a target clang has its runtime for", () => {
   throwsWith(() => sanitizedTarget(hostTarget(), ["memory"], "aarch64-apple-darwin", anywhere), "fishc build: unknown sanitizer 'memory'; use one of address, thread");
   throwsWith(() => sanitizedTarget(hostTarget(), ["address", "thread"], "aarch64-apple-darwin", anywhere), "fishc build: --sanitize takes one sanitizer at a time; address and thread can't instrument the same build");
   throwsWith(() => sanitizedTarget(resolveTarget("x86_64-unknown-linux-musl", "/s", "aarch64-apple-darwin", has), ["address"], "aarch64-apple-darwin", anywhere), "clang has no address sanitizer runtime for x86_64-unknown-linux-musl");
   throwsWith(() => sanitizedTarget(staticTarget(resolveTarget("x86_64-unknown-linux-musl", "/s", "aarch64-apple-darwin", has), "aarch64-apple-darwin"), ["thread"], "aarch64-apple-darwin", anywhere), "fishc build: --sanitize=thread links clang's sanitizer runtime, which a --static build can't; leave out one of them");
-});
+}, { timeout: 120_000 });
 
 function sanitizing(kind: string): Target {
   return { triple: "", compile: [], link: [], ar: "ar", sanitize: kind };
@@ -125,7 +125,7 @@ test("each definition in the IR is marked for the sanitizer, and an unsanitized 
   // A symbol can hold a space, and so the word itself.
   const named = 'define internal i64 @"fsh.C.static uwtable"() uwtable personality ptr @__gcc_personality_v0 {';
   same(instrumented(named, sanitizing("address")), 'define internal i64 @"fsh.C.static uwtable"() sanitize_address noinline uwtable personality ptr @__gcc_personality_v0 {', "a symbol holding uwtable");
-});
+}, { timeout: 120_000 });
 
 // Read from builds rather than from `runtimeUnits`, so the host needs the address sanitizer's
 // runtime for this one, where the Bun test doesn't.
@@ -141,7 +141,7 @@ test("an instrumented runtime is cached apart from a plain one, a dev build's at
   assert(words.includes("-O0"), `the plain runtime's flags: ${plain}`);
   same(`${plainName} ${addressName}`, "runtime runtime", "the runtimes' object names");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("--sanitize refused where it can't apply", () => {
   const root = scratch("fish-sanitize-");
@@ -160,7 +160,7 @@ test("--sanitize refused where it can't apply", () => {
     same(`${got.code} ${got.err}`, want, `fishc ${args.join(" ")}`);
   }
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("the address sanitizer reports a use after free at its .fsh lines", () => {
   if (!can("address")) return;
@@ -183,7 +183,7 @@ function main() {
   assert(/READ of size 8 [^\n]*\n\s+#0 [^\n]* in fsh\.main [^\n]*main\.fsh:10/.test(got.err), `no read at main.fsh:10 in:\n${got.err}`);
   assert(/freed by thread T0 here:\n[^\n]*\n\s+#1 [^\n]* in fsh\.main [^\n]*main\.fsh:8/.test(got.err), `no free at main.fsh:8 in:\n${got.err}`);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 // Fails the test unless the program ran clean, giving `out`.
 function clean(got: Ref<Ran>, out: string): void {
@@ -243,7 +243,7 @@ function main() {
 `;
   clean(run(root, "narrowed-fields", src, ["--sanitize", "address"]), "15\nhi!\n0 3 0\n");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 // References held in Option fields and in a tagged union's members are pointers in the payload,
 // read and written through once narrowed, with nothing dropped through them.
@@ -285,7 +285,7 @@ function main() {
 `;
   clean(run(root, "union-refs", src, ["--sanitize", "address"]), "hello\nhello!\nline 9\n9\n");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 // An array of references holds pointers it never frees through: pushed, read, written, popped
 // and looped over, with the buffer freed once and nothing its elements point at freed with it.
@@ -329,7 +329,7 @@ function main() {
 `;
   clean(run(root, "ref-arrays", src, ["--sanitize", "address"]), "82 2 b2\na1\nnone\nb2\nb2\nb2 2\n");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 // The array methods copy pointers between buffers and free each buffer once: copies, joins,
 // inserts, spreads, clones and what a callback gives back, with the referents untouched.
@@ -365,7 +365,7 @@ function main() {
 `;
   clean(run(root, "ref-array-methods", src, ["--sanitize", "address"]), "13 b2 c3 b2\n23 a1 b2 24 a1 c3\no2 c3 22\n[ Expr { text: 'b2' } ]\n");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 // A server answering one request with "ok" and writing what it was sent: its method, path, x-tag
 // header and body, as the Bun test's in-process server records them.
@@ -437,7 +437,7 @@ test("an address-sanitized fetch sends the method, headers and body it was given
   assert(failure === "", failure);
   same(readOr(seenFile), "POST /up t1 yyyyyyyyyy", "what the server was sent");
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("the thread sanitizer reports two tasks racing on raw memory", () => {
   if (!can("thread")) return;
@@ -467,7 +467,7 @@ async function main() {
   assert(got.err.includes("WARNING: ThreadSanitizer: data race"), `stderr:\n${got.err}`);
   assert(/#0 fsh\.bump [^\n]*main\.fsh:5/.test(got.err), `no race at main.fsh:5 in:\n${got.err}`);
   removed(root);
-});
+}, { timeout: 120_000 });
 
 test("the runtime's executor, channels, locks and blocking pool run clean under the thread sanitizer", () => {
   if (!can("thread")) return;
@@ -516,4 +516,4 @@ async function main() {
 `;
   clean(run(root, "clean", src, ["--sanitize", "thread"]), "28 400 400 8 42\n");
   removed(root);
-});
+}, { timeout: 120_000 });

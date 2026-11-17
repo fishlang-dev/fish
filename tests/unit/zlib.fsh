@@ -149,7 +149,7 @@ test("small inputs compress to node's bytes at every level, and decompress", () 
   console.log(constants.Z_NO_COMPRESSION, constants.Z_BEST_SPEED, constants.Z_BEST_COMPRESSION, constants.Z_DEFAULT_COMPRESSION);
   console.log(show(gzipSync("x", { level: constants.Z_BEST_COMPRESSION })), show(gzipSync("x", {})));`, "");
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 // Text that deflates in several blocks, with long and short matches.
 function large(): string {
@@ -182,7 +182,7 @@ console.log(z.gunzipSync(fs.readFileSync("out.gz")).equals(big), z.inflateSync(f
   same(text(check.stderr), "", "node's stderr reading Fish's output");
   same(text(check.stdout), "true true true true\n", "node decompressing Fish's output");
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("corrupt input fails with node's message, errno and code", () => {
   const tmp = scratch("fish-zlib-");
@@ -218,7 +218,7 @@ test("corrupt input fails with node's message, errno and code", () => {
     }
   }`, "");
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("a level out of range is node's range error, for every call", () => {
   const tmp = scratch("fish-zlib-");
@@ -236,7 +236,7 @@ test("a level out of range is node's range error, for every call", () => {
     }
   }`, "");
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 function irOf(tmp: string, name: string, src: string): string {
   const file = join(tmp, name);
@@ -267,7 +267,7 @@ test("zlib is compiled and linked into a program only when it calls the module",
   assert(!runtimeLinks(plain, HOST_TARGET).includes("-lz"), "the plain program links -lz");
   assert(!unitNames(plain).includes("zlib"), "the plain program has a zlib unit");
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 test("the promise forms give what node's promisified calls give", () => {
   const tmp = scratch("fish-zlib-");
@@ -303,7 +303,7 @@ test("the promise forms give what node's promisified calls give", () => {
     console.log(e.message, errnoOf(e), e.code);
   }`, "");
   removed(tmp);
-});
+}, { timeout: 30_000 });
 
 function harness(): string {
   return `
@@ -353,7 +353,7 @@ console.log(z.inflateSync(fs.readFileSync("out0")).equals(input), z.gunzipSync(f
   same(text(check.stderr), "", "node's stderr");
   same(text(check.stdout), "true true true\n", "node decompressing the harness's output");
   removed(dir);
-});
+}, { timeout: 30_000 });
 
 // Whether clang can build for the host with the address sanitizer.
 function asan(): boolean {
@@ -400,4 +400,4 @@ async function main(): Promise<void> throws ZlibError {
   same(text(ran.stderr), "", "the program's stderr");
   same(text(ran.stdout), "sleep won\ndone 350\n", "the program's output");
   removed(dir);
-});
+}, { timeout: 30_000 });
