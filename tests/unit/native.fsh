@@ -174,7 +174,7 @@ test("case mapping matches JavaScript for every code point", () => {
   let older = differing.length > 0;
   for (const i of differing) if (engine[i] !== String.fromCodePoint(cps[i] as u32)) older = false;
   const shown = (indices: Ref<usize[]>, gotten: Ref<string[]>, want: Ref<string[]>) => indices.slice(0, 5).map((i) => `${point(i)}: ${JSON.stringify(gotten[i])} for ${JSON.stringify(want[i])}`).join("; ");
-  assert(differing.length === 0 || older, `the case tables differ from this Bun's case mapping (Unicode ${unicode}, tables ${CASEMAP_UNICODE}); regenerate them with \`bun scripts/casemap.ts\`. Bun gives ${shown(differing, engine, tables)}`);
+  assert(differing.length === 0 || older, `the case tables differ from this Bun's case mapping (Unicode ${unicode}, tables ${CASEMAP_UNICODE}); regenerate them with \`fishc run scripts/casemap.fsh\`. Bun gives ${shown(differing, engine, tables)}`);
   let lines = got.stdout.split("\n");
   lines.pop();
   assert(lines.length === tables.length, `the runtime gave ${lines.length} mappings for ${tables.length}`);

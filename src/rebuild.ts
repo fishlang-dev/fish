@@ -1,4 +1,4 @@
-// Generated from the parser's AST types by `bun scripts/walkgen.ts`; a test fails when it is stale.
+// Generated from the parser's AST types by `fishc run scripts/walkgen.fsh`; a test fails when it is stale.
 // Each `rebuilt` function gives a node as the rewrite table has it, each node under it put in
 // place the same way, writing the slots that held replaced nodes.
 import type { TypeNode, Expr, Stmt, TupleElement, PropertyName, TypeMember, ObjectProp, ClassNode, ClassMember, Param, Pattern, MatchArm, PatternProp, Specifier, EnumMember, SwitchCase, Declarator, TypeParam, TypeAlias, Interface, JsName, Func } from "./parser.ts";

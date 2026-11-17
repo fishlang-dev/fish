@@ -1,9 +1,13 @@
-// Ports tests/walk.test.ts. The tests comparing the generated walkers, rebuild and Ast reader with
-// their generators wait on scripts/walkgen.ts and scripts/unquotegen.ts becoming Fish, and the one
-// finding every node by reading every field needs reflection Fish doesn't have.
+// Ports tests/walk.test.ts, and the generator comparisons that left it once the generators were
+// Fish. The test finding every node by reading every field needs reflection Fish doesn't have.
+import { join } from "node:path";
+import { parserSource } from "../../scripts/gen/dumpgen.fsh";
+import { unquoteSource } from "../../scripts/gen/unquotegen.fsh";
+import { walkSources } from "../../scripts/gen/walkgen.fsh";
 import { forEachChild, Rewrites, walkWhile, type AnyNode } from "../compiler/nodes.fsh";
 import { parseExpression, type Expr } from "../compiler/parser.fsh";
 import { rebuiltExpr } from "../compiler/rebuild.fsh";
+import { read, root, same } from "./support.fsh";
 
 function kindOf(n: Ref<AnyNode>): string {
   if (n.of === "expr") return n.node.kind;
@@ -85,4 +89,22 @@ test("a rebuild puts each replacement where its node was, under that node's id, 
   assert(placed.id === inner.id, `the replacement in place has id ${placed.id}, not ${inner.id}`);
   assert(placed.args.length === 1 && placed.args[0] === c, "the replacement within the replacement isn't in place");
   assert(placed.callee === by.callee && placed.typeArgs === by.typeArgs, "the replacement in place isn't the one made");
+});
+
+test("the walkers and the rebuild are generated from the parser's current AST types; run 'fishc run scripts/walkgen.fsh' when they aren't", () => {
+  try {
+    const both = walkSources(parserSource());
+    same(read(join(root(), "src", "walk.ts")), both[0]!, "src/walk.ts");
+    same(read(join(root(), "src", "rebuild.ts")), both[1]!, "src/rebuild.ts");
+  } catch (e) {
+    assert(false, e.message);
+  }
+});
+
+test("the Ast reader macros' results go through is generated from the parser's current AST types; run 'fishc run scripts/unquotegen.fsh' when it isn't", () => {
+  try {
+    same(read(join(root(), "src", "unquote.ts")), unquoteSource(parserSource()), "src/unquote.ts");
+  } catch (e) {
+    assert(false, e.message);
+  }
 });

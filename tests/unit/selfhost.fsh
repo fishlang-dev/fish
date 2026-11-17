@@ -1,5 +1,4 @@
-// Ports tests/selfhost.test.ts. The baseline survey waits on scripts/selfhost.ts, and the two
-// native comparisons on scripts/nativediff.ts, becoming Fish. Where the Bun tests find nodes by
+// Ports tests/selfhost.test.ts. The baseline survey waits on scripts/selfhost.ts becoming Fish. Where the Bun tests find nodes by
 // reading every field, these walk the tree with the generated walker.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";

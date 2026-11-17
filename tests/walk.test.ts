@@ -1,8 +1,6 @@
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { unquoteSource, UNQUOTE } from "../scripts/unquotegen.ts";
-import { rebuildSource, REBUILD, walkerSource, WALK } from "../scripts/walkgen.ts";
 import { forEachChild, Rewrites, walk, walkWhile, type AnyNode } from "../src/nodes.ts";
 import { parse, parseExpression, type Expr } from "../src/parser.ts";
 import { rebuiltExpr } from "../src/rebuild.ts";
@@ -14,15 +12,6 @@ function childrenOf(n: AnyNode): AnyNode[] {
 }
 
 const ROOT = join(import.meta.dir, "..");
-
-test("the walkers and the rebuild are generated from the parser's current AST types; run 'bun scripts/walkgen.ts' when they aren't", () => {
-  expect(readFileSync(WALK, "utf8")).toBe(walkerSource(readFileSync(join(ROOT, "src", "parser.ts"), "utf8")));
-  expect(readFileSync(REBUILD, "utf8")).toBe(rebuildSource(readFileSync(join(ROOT, "src", "parser.ts"), "utf8")));
-});
-
-test("the Ast reader macros' results go through is generated from the parser's current AST types; run 'bun scripts/unquotegen.ts' when it isn't", () => {
-  expect(readFileSync(UNQUOTE, "utf8")).toBe(unquoteSource(readFileSync(join(ROOT, "src", "parser.ts"), "utf8")));
-});
 
 // Every object with an id under `roots`, found by reading every field, as a walk once did.
 function everyNode(roots: unknown[]): Set<object> {

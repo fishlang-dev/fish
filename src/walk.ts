@@ -1,4 +1,4 @@
-// Generated from the parser's AST types by `bun scripts/walkgen.ts`; a test fails when it is stale.
+// Generated from the parser's AST types by `fishc run scripts/walkgen.fsh`; a test fails when it is stale.
 // Visits each node a node holds, tagged, in the order its type lists the fields.
 import assert from "node:assert";
 import type { TypeNode, Expr, Stmt, TupleElement, PropertyName, TypeMember, ObjectProp, ClassNode, ClassMember, Param, Pattern, MatchArm, PatternProp, Specifier, EnumMember, SwitchCase, Declarator, TypeParam, TypeAlias, Interface, JsName, Func } from "./parser.ts";

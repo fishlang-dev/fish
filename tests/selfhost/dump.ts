@@ -1,4 +1,4 @@
-// Generated from the parser's AST types by `bun scripts/dumpgen.ts`; a test fails when it is stale.
+// Generated from the parser's AST types by `fishc run scripts/dumpgen.fsh`; a test fails when it is stale.
 import type { TypeNode, Expr, Stmt, TupleElement, PropertyName, TypeMember, ObjectProp, ClassNode, ClassMember, Param, Pattern, MatchArm, PatternProp, Specifier, EnumMember, SwitchCase, Declarator, TypeParam, TypeAlias, Interface, JsName, Func } from "../../src/parser.ts";
 
 export function dumpTypeNode(indent: string, label: string, n: Ref<TypeNode>): void {

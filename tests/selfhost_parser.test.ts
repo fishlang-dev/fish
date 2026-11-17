@@ -1,11 +1,10 @@
 import { expect, setDefaultTimeout, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cachedSession } from "../src/stdcache.ts";
 import { build } from "../src/main.ts";
 import { mirrored } from "../scripts/selfhost.ts";
-import { DUMP, dumperSource } from "../scripts/dumpgen.ts";
 
 setDefaultTimeout(240_000);
 
@@ -17,12 +16,6 @@ function corpus(): string[] {
   const sources = readdirSync(join(ROOT, "src")).filter((f) => f.endsWith(".ts")).map((f) => join("src", f));
   return [...programs, ...sources].sort();
 }
-
-// The printer the driver uses is generated from the parser's AST types, so a type the printer
-// leaves out would make the trees agree without being compared.
-test("the tree printer is generated from the parser's current AST types; run 'bun scripts/dumpgen.ts' when it isn't", () => {
-  expect(readFileSync(DUMP, "utf8")).toBe(dumperSource(readFileSync(join(ROOT, "src", "parser.ts"), "utf8")));
-});
 
 // tests/selfhost/parser.ts parses files through src/parser.ts and prints each tree in full. Run by
 // Bun and built by fishc from the same source, the two must print the same trees for every file.

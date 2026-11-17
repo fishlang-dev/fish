@@ -1,4 +1,4 @@
-// Generated from the parser's AST types by `bun scripts/unquotegen.ts`; a test fails when it is stale.
+// Generated from the parser's AST types by `fishc run scripts/unquotegen.fsh`; a test fails when it is stale.
 // A value a macro made while compiling, of an `Ast` type, as the syntax tree it stands for: each
 // record a node of its kind, its fields read by name, an absent part `undefined`, and a node made
 // from one given a fresh id once its parts have theirs.

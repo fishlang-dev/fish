@@ -99,7 +99,7 @@ test("case mapping matches JavaScript for every code point", () => {
   const older = differing.length > 0 && differing.every((i) => engine[i] === String.fromCodePoint(cps[i]!));
   const shown = (indices: number[], got: string[], want: string[]) => indices.slice(0, 5).map((i) => `${point(i)}: ${JSON.stringify(got[i])} for ${JSON.stringify(want[i])}`).join("; ");
   if (differing.length > 0 && !older) {
-    throw new Error(`the case tables differ from this Bun's case mapping (Unicode ${process.versions.unicode}, tables ${CASEMAP_UNICODE}); regenerate them with \`bun scripts/casemap.ts\`. Bun gives ${shown(differing, engine, tables)}`);
+    throw new Error(`the case tables differ from this Bun's case mapping (Unicode ${process.versions.unicode}, tables ${CASEMAP_UNICODE}); regenerate them with \`fishc run scripts/casemap.fsh\`. Bun gives ${shown(differing, engine, tables)}`);
   }
   const lines = stdout.split("\n").slice(0, -1);
   const wrong = tables.flatMap((mapped, i) => (mapped === lines[i] ? [] : [i]));
