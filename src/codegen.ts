@@ -14165,7 +14165,9 @@ class Codegen implements PrintHost, ComptimeHost {
 // The LLVM IR of a checked program.
 /** @throws {CompileError} */
 export function codegen(checked: Checked, options: Options): string {
-  checked.tables.typing.structNames = structNames(checked.tables.typing);
+  const named = structNames(checked.tables.typing);
+  checked.tables.typing.structNames = named.names;
+  checked.tables.typing.structColors = named.colors;
   return new Codegen(checked, options).module();
 }
 
@@ -14175,7 +14177,9 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
   let { instances, tables, warnings } = checked;
   const measured = allWords(tables.typing);
   tables.typing.unionWords = measured;
-  tables.typing.structNames = structNames(tables.typing);
+  const named = structNames(tables.typing);
+  tables.typing.structNames = named.names;
+  tables.typing.structColors = named.colors;
   let generator = new Codegen({ instances, tables, warnings: [] }, options);
   const ir = generator.module();
   return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings } };

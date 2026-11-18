@@ -59,7 +59,7 @@ function shapeOf(typing: Ref<Typing>, t: Type): Shape {
 // types' colors from the round before, until a round splits them no further, which tells apart
 // any two of them that differ. A color is two hashes, each scrambled and combined modulo a prime
 // below 2^31, so the arithmetic stays exact in an i64 and in a double.
-function colored(typing: Ref<Typing>, roots: Ref<Type[]>): TypeMap<Type, string> {
+function colored(typing: Ref<Typing>, roots: Ref<Type[]>, known: Ref<TypeMap<Type, [i64, i64]>>): TypeMap<Type, [i64, i64]> {
   let index = new TypeMap<Type, usize>();
   let types: Type[] = [];
   let shapes: Shape[] = [];
@@ -70,6 +70,12 @@ function colored(typing: Ref<Typing>, roots: Ref<Type[]>): TypeMap<Type, string>
     if (typeof t === "string" || index.has(t)) continue;
     index.set(t, types.length);
     types.push(t);
+    // A type colored already keeps its color, and nothing it reaches needs coloring again: it
+    // can't reach a type made after it.
+    if (known.has(t)) {
+      shapes.push({ text: "", inner: [] });
+      continue;
+    }
     let shape = shapeOf(typing, t);
     // A brand is laid out as its base and held as one, so it is colored as its base.
     shape.inner = shape.inner.map((c) => unbranded(typing, c));
@@ -88,7 +94,15 @@ function colored(typing: Ref<Typing>, roots: Ref<Type[]>): TypeMap<Type, string>
   }
   let colorA: i64[] = [...shapeA];
   let colorB: i64[] = [...shapeB];
+  for (let i: usize = 0; i < types.length; i++) {
+    const was = known.get(types[i]!);
+    if (was !== undefined) {
+      colorA[i] = was![0];
+      colorB[i] = was![1];
+    }
+  }
   for (const group of cyclesOf(inner)) {
+    if (group.length === 1 && known.has(types[group[0]!]!)) continue;
     let member = new Set<i64>();
     for (const i of group) member.add(i as i64);
     const cyclic = group.length > 1 || inner[group[0]!]!.includes(group[0]! as i64);
@@ -126,11 +140,20 @@ function colored(typing: Ref<Typing>, roots: Ref<Type[]>): TypeMap<Type, string>
       }
     }
   }
-  let out = new TypeMap<Type, string>();
-  for (let i: usize = 0; i < types.length; i++) out.set(types[i]!, `${base36(colorA[i]!)}${base36(colorB[i]!)}`);
+  let out = new TypeMap<Type, [i64, i64]>();
+  for (let i: usize = 0; i < types.length; i++) {
+    const pair: [i64, i64] = [colorA[i]!, colorB[i]!];
+    out.set(types[i]!, pair);
+  }
   for (const t of roots) {
     const base = unbranded(typing, t);
-    if (typeof t !== "string" && base !== t && typeof base !== "string") out.set(t, out.get(base) ?? "");
+    if (typeof t !== "string" && base !== t && typeof base !== "string") {
+      const c = out.get(base);
+      if (c !== undefined) {
+        const pair: [i64, i64] = [c![0], c![1]];
+        out.set(t, pair);
+      }
+    }
   }
   return out;
 }
@@ -243,40 +266,47 @@ function hashed(text: string, base: i64, prime: i64): i64 {
 // The name of the named struct a value of `t` is held as, for a class, object or union, from the
 // colors of the types it reaches; undefined for a type written out where it is used. A class is
 // named by its name and type arguments, an object or union by its color.
-function nameFrom(typing: Ref<Typing>, t: Type, colors: Ref<TypeMap<Type, string>>): string | undefined {
+function nameFrom(typing: Ref<Typing>, t: Type, colors: Ref<TypeMap<Type, [i64, i64]>>): string | undefined {
   if (typeof t === "string") return undefined;
   const r = typing.rec(t);
   const nameable = (r.kind === "class" && (r.base !== undefined || r.fields.length > 0) && rustClassOf(typing, t) === undefined) || (r.kind === "object" && r.fields.length > 0) || r.kind === "union";
   if (!nameable) return undefined;
-  const color = colors.get(t) ?? "";
+  const color = colorText(colors, t);
   if (r.kind !== "class") return `%"<${r.kind === "union" ? "u" : "o"}.${color}>"`;
   // A type argument is shown by its name when it has one a reader knows, else by its color.
   const shown = (a: Type): string => {
     if (typeof a === "string") return a;
     const x = typing.rec(a);
-    return x.kind === "class" && x.generic === undefined ? x.name : `#${colors.get(a) ?? ""}`;
+    return x.kind === "class" && x.generic === undefined ? x.name : `#${colorText(colors, a)}`;
   };
   const text = r.generic !== undefined ? `${r.generic.name}<${r.generic.args.map((a) => shown(a)).join(",")}>` : r.name;
   // A class name holding a quote or a backslash would need escaping in the IR, so it takes its color.
   return /^[\w$.<>,:|\[\]{}=+#-]+$/.test(text) ? `%"<${text}>"` : `%"<c.${color}>"`;
 }
 
-// The name of the named struct a value of `t` is held as, for a type made after `structNames`.
+// A color as a name writes it.
+function colorText(colors: Ref<TypeMap<Type, [i64, i64]>>, t: Type): string {
+  const c = colors.get(t);
+  return c !== undefined ? `${base36(c![0])}${base36(c![1])}` : "";
+}
+
+// The name of the named struct a value of `t` is held as, for a type made after `structNames`,
+// colored from the colors it kept.
 export function typeName(typing: Ref<Typing>, t: Type): string | undefined {
-  const colors = colored(typing, [t]);
+  const colors = colored(typing, [t], typing.structColors);
   return nameFrom(typing, t, colors);
 }
 
-// Every type's named struct, made once for codegen to read.
-export function structNames(typing: Ref<Typing>): TypeMap<Type, string> {
+// Every type's named struct, and the colors the names come from, made once for codegen to read.
+export function structNames(typing: Ref<Typing>): { names: TypeMap<Type, string>; colors: TypeMap<Type, [i64, i64]> } {
   const ids = typing.typeIds();
-  const colors = colored(typing, ids);
+  const colors = colored(typing, ids, new TypeMap<Type, [i64, i64]>());
   let names = new TypeMap<Type, string>();
   for (const t of ids) {
     const n = nameFrom(typing, t, colors);
     if (n !== undefined) names.set(t, n);
   }
-  return names;
+  return { names, colors };
 }
 
 // The definitions of the named structs `text` uses, each once and in name order, with those their

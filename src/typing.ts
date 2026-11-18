@@ -2048,6 +2048,8 @@ export class Typing {
   unionWords = new TypeMap<UnionType, usize>();
   // The named struct each class, object and union is held as in the IR, set before codegen.
   structNames = new TypeMap<Type, string>();
+  // The colors those names come from, which a type made after them is colored from.
+  structColors = new TypeMap<Type, [i64, i64]>();
 
   // Every union type made so far.
   unionTypes(): UnionType[] {
