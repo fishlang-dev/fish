@@ -1007,7 +1007,9 @@ function rebuilt(r: Ref<Rebuild>, kept: Kept | undefined): Rebuilt {
     let made = builtKept(sessionWith(r.locked, r.timed), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded, kept, r.manifest);
     reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
     for (const w of made.warnings) console.error(painted(w, r.entry, textOf(r.entry), "warning"));
-    verified(r, { ir: made.ir, warnings: made.warnings });
+    // Only a build from what an earlier one kept can differ from a clean one.
+    saved(made.kept.carried, made.ir, made.warnings);
+    if (made.kept.carried > 0) verified(r, { ir: made.ir, warnings: [...made.warnings] });
     return { built: true, loaded, kept: made.kept };
   } catch (e) {
     if (e instanceof CompileError) {
@@ -1015,6 +1017,21 @@ function rebuilt(r: Ref<Rebuild>, kept: Kept | undefined): Rebuilt {
       verified(r, e);
     } else console.error(`fishc: ${(e as { message: string }).message}`);
     return { built: false, loaded, kept: undefined };
+  }
+}
+
+// With FISH_WATCH_IR set to a directory, each build's IR and warnings are written there, named by
+// how many builds in a row it follows from what one kept, to compare with a clean build later
+// when there's no memory for both at once.
+function saved(carried: usize, ir: string, warnings: Ref<CompileError[]>): void {
+  const dir = process.env.FISH_WATCH_IR;
+  if (dir === undefined) return;
+  try {
+    mkdirSync(dir!, { recursive: true });
+    writeFileSync(join(dir!, `build-${carried}.ll`), ir);
+    writeFileSync(join(dir!, `build-${carried}.warnings`), warnings.map((w) => `${w.code} ${w.message}`).join("\n"));
+  } catch (e) {
+    console.error(`[fishc] can't save the build's IR in ${dir!}: ${(e as { message: string }).message}`);
   }
 }
 
