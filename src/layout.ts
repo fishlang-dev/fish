@@ -56,9 +56,9 @@ function shapeOf(typing: Ref<Typing>, t: Type): Shape {
 // wherever a self-referring type was first met isn't. A type that reaches no cycle is hashed from
 // its shape and its inner types' colors, however deep they go. The types of one cycle, each of
 // which reaches every other, are refined together: first their shapes, then each round their inner
-// types' colors from the round before, for twice their number of rounds and one, which tells apart
-// any two of them that differ. A color is two hashes, each a polynomial modulo a prime below
-// 2^31, so the arithmetic stays exact in an i64 and in a double.
+// types' colors from the round before, until a round splits them no further, which tells apart
+// any two of them that differ. A color is two hashes, each scrambled and combined modulo a prime
+// below 2^31, so the arithmetic stays exact in an i64 and in a double.
 function colored(typing: Ref<Typing>, roots: Ref<Type[]>): TypeMap<Type, string> {
   let index = new TypeMap<Type, usize>();
   let types: Type[] = [];
@@ -91,27 +91,38 @@ function colored(typing: Ref<Typing>, roots: Ref<Type[]>): TypeMap<Type, string>
   for (const group of cyclesOf(inner)) {
     let member = new Set<i64>();
     for (const i of group) member.add(i as i64);
-    const rounds = group.length === 1 && !inner[group[0]!]!.includes(group[0]! as i64) ? 1 : 2 * group.length + 1;
-    for (let round: usize = 0; round < rounds; round++) {
+    const cyclic = group.length > 1 || inner[group[0]!]!.includes(group[0]! as i64);
+    // Refinement stops a round after it splits the cycle's members no further, which its own
+    // structure decides, whatever else the program holds.
+    let classes: usize = 0;
+    let settled = false;
+    const rounds = cyclic ? group.length + 1 : 1;
+    for (let round: usize = 0; round < rounds && !settled; round++) {
       let nextA: i64[] = [];
       let nextB: i64[] = [];
       for (const i of group) {
         let x = shapeA[i]!;
         let y = shapeB[i]!;
         for (const c of inner[i]!) {
-          const ca = c < 0 ? -1 - c : colorA[c as usize]!;
-          const cb = c < 0 ? -1 - c : colorB[c as usize]!;
+          const ca = c < 0 ? hashed(`${-1 - c}`, 131, PRIME_A) : colorA[c as usize]!;
+          const cb = c < 0 ? hashed(`${-1 - c}`, 137, PRIME_B) : colorB[c as usize]!;
           // An inner type of the same cycle is told from one outside it.
           const mark: i64 = c >= 0 && member.has(c) ? 3 : 7;
-          x = (x * 131 + ca + mark) % PRIME_A;
-          y = (y * 137 + cb + mark) % PRIME_B;
+          x = (mixed(x, PRIME_A) * 131 + ca + mark) % PRIME_A;
+          y = (mixed(y, PRIME_B) * 137 + cb + mark) % PRIME_B;
         }
-        nextA.push((x * 131 + (rounds as i64)) % PRIME_A);
-        nextB.push((y * 137 + (rounds as i64)) % PRIME_B);
+        nextA.push(mixed((x * 131 + (cyclic ? 5 : 1)) % PRIME_A, PRIME_A));
+        nextB.push(mixed((y * 137 + (cyclic ? 5 : 1)) % PRIME_B, PRIME_B));
       }
       for (let k: usize = 0; k < group.length; k++) {
         colorA[group[k]!] = nextA[k]!;
         colorB[group[k]!] = nextB[k]!;
+      }
+      if (cyclic) {
+        let seen = new Set<string>();
+        for (let k: usize = 0; k < group.length; k++) seen.add(`${nextA[k]!}.${nextB[k]!}`);
+        if (seen.size === classes) settled = true;
+        classes = seen.size;
       }
     }
   }
@@ -202,6 +213,14 @@ function cyclesOf(edges: Ref<i64[][]>): usize[][] {
 const PRIME_A: i64 = 2147483647;
 const PRIME_B: i64 = 2147483629;
 
+// `x` below 2^31 scrambled, so that hashes combined from it don't cancel the way sums of powers
+// do: two inner types swapped across levels would otherwise give the same color. Every step stays
+// below 2^53, exact in a double, and the xors below 2^31, exact in JavaScript's 32-bit ones.
+function mixed(x: i64, prime: i64): i64 {
+  const y = ((x ^ (x >> 15)) * 1000003) % prime;
+  return ((y ^ (y >> 13)) * 999983) % prime;
+}
+
 // A number below 2^31 in base 36, six digits wide.
 function base36(n: i64): string {
   const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
@@ -283,7 +302,7 @@ export function typeDefinitions(typing: Ref<Typing>, text: string): string[] {
     const first = byName.get(n);
     assert(first !== undefined, `internal error: no type is named ${n}`);
     const body = layoutOf(typing, first!);
-    for (const [m, t] of again) assert(m !== n || layoutOf(typing, t) === body, `internal error: types laid out differently share the name ${n}`);
+    for (const [m, t] of again) assert(m !== n || layoutOf(typing, t) === body, `internal error: types laid out differently share the name ${n}: '${typing.show(first!)}' as ${body} and '${typing.show(t)}' as ${layoutOf(typing, t)}`);
     defs.set(n, `${n} = type ${body}`);
     for (const m of used(body)) wanted.push(m);
   }
