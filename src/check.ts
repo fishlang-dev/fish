@@ -1407,7 +1407,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         const x = this.tables.arenas.instanceOf(i as InstanceId);
         if (x.retired === true || again.includes(i as InstanceId)) continue;
         const b = this.tables.arenas.bodyOf(x.body);
-        if (holdsNode({ of: "stmts", node: b.body }, (n) => n.of === "expr" && n.node.kind === "ident" && named.has(n.node.name))) again.push(i as InstanceId);
+        if (!holdsNode({ of: "stmts", node: b.body }, (n) => n.of === "expr" && n.node.kind === "ident" && named.has(n.node.name))) continue;
+        // A closure is checked within the body it is written in, which sees what it captures.
+        const root = this.outermost(i as InstanceId);
+        if (!again.includes(root)) again.push(root);
       }
     }
     // An instance whose results changed is checked again in every caller that read them, and so on
@@ -1438,12 +1441,25 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         for (let c: usize = 1; c <= this.tables.arenas.instanceCount(); c++) {
           const caller = c as InstanceId;
           if (done.has(caller)) continue;
-          if (this.readsAny(caller, changed)) next.push(caller);
+          if (!this.readsAny(caller, changed)) continue;
+          const root = this.outermost(caller);
+          if (!done.has(root) && !next.includes(root)) next.push(root);
         }
       }
       round = next;
     }
     return undefined;
+  }
+
+  // The instance a closure is written in, through every closure around it; an instance that isn't
+  // a closure's is its own.
+  private outermost(id: InstanceId): InstanceId {
+    let at = id;
+    for (;;) {
+      const closure = bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(at)).closure;
+      if (closure === undefined) return at;
+      at = closure.parent;
+    }
   }
 
   // Whether a live instance calls, or sets through, any of `callees`.

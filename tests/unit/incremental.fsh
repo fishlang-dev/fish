@@ -236,3 +236,24 @@ test("a function's signature edit is checked again with every body naming it", (
   ]);
   assert(said.join("; ") === "kept same; kept same", said.join("; "));
 }, { timeout: 120_000 });
+
+test("a closure naming an edited signature is checked again with the body it is written in", () => {
+  const uses = `import { place } from "./lib.fsh";
+
+function main() {
+  console.log(place(3));
+}
+`;
+  const lib = `export function moved(offset: i64): i64 {
+  return offset + 1;
+}
+
+export function place(n: i64): i64 {
+  const regions = [1, 2, 3];
+  const at = (k: i64) => moved(k) + (regions.length as i64);
+  return at(n);
+}
+`;
+  const said = editedIn(uses, lib, [["export function moved(offset: i64): i64 {\n  return offset + 1;", "export function moved(at: i64): i64 {\n  return at + 1;"]]);
+  assert(said.join("; ") === "kept same", said.join("; "));
+}, { timeout: 120_000 });
