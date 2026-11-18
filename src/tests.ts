@@ -24,7 +24,7 @@ type Found = { name: string; start: usize; end: usize; async: boolean; timeout: 
 
 // The test a top-level statement is, or undefined when it isn't a `test(...)` call.
 /** @throws {CompileError} */
-function testOf(s: Ref<Stmt>): Found | undefined {
+export function testOf(s: Ref<Stmt>): Found | undefined {
   if (s.kind !== "expr" || s.expr.kind !== "call" || s.expr.callee.kind !== "ident" || s.expr.callee.name !== "test") return undefined;
   const args: Ref<Expr[]> = s.expr.args;
   const shaped = (args.length === 2 || args.length === 3) && s.expr.typeArgs.length === 0 && !s.expr.optional && args[0]!.kind === "string" && bare(args[1]!);

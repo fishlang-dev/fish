@@ -107,3 +107,69 @@ test("a build from what watch kept is compared with a clean build's IR, warnings
   assert(said === undefined, `the error differs from a clean build's: ${said ?? ""}`);
   removed(dir);
 }, { timeout: 120_000 });
+
+const USES = `import { twice, pick, apply, Box } from "./lib.fsh";
+
+function main() {
+  console.log(twice(21), pick<string>("a"), apply(3), new Box().get());
+}
+`;
+
+const LIB = `export class Box {
+  v: i64 = 4;
+  get(): i64 {
+    return this.v;
+  }
+}
+
+export function twice(n: i64): i64 { return n * 2; }
+
+export function pick<T>(x: T): T {
+  return x;
+}
+
+export function apply(n: i64): i64 {
+  const f = (x: i64) => x + n;
+  return f(1);
+}
+`;
+
+// Edits `lib.fsh` in turn from a first build, each build from what the last one kept, and says
+// for each whether it was rechecked from what was kept and how it compares with a clean build.
+function edited(edits: Ref<[string, string][]>): string[] throws Error {
+  const dir = scratch("fish-incremental-");
+  const entry = join(dir, "main.fsh");
+  write(entry, USES);
+  let lib = LIB;
+  write(join(dir, "lib.fsh"), lib);
+  let last = compiledFrom(entry, undefined);
+  let said: string[] = [];
+  for (const [from, to] of edits) {
+    lib = lib.replace(from, to);
+    write(join(dir, "lib.fsh"), lib);
+    let next = compiledFrom(entry, last.kept);
+    const how = next.kept === undefined ? "error" : next.kept!.carried > 0 ? "kept" : "afresh";
+    said.push(`${how} ${compared(entry, next.made) ?? "same"}`);
+    last = next;
+  }
+  removed(dir);
+  return said;
+}
+
+test("an edit to a function's body is checked again from what watch kept, and matches a clean build", () => {
+  const said = edited([
+    ["return n * 2;", "const k = 2;\n  return n * k;"],
+    ["  return x;", "  const y = x;\n  return y;"],
+    ["x + n;", "x + n * 2;"],
+  ]);
+  assert(said.join("; ") === "kept same; kept same; kept same", said.join("; "));
+}, { timeout: 120_000 });
+
+test("an edit to a method's body is checked afresh, and an error leaves nothing kept", () => {
+  const said = edited([
+    ["return this.v;", "return this.v + 1;"],
+    ["return n * 2;", "return m * 2;"],
+    ["return m * 2;", "return n * 2;"],
+  ]);
+  assert(said.join("; ") === "afresh same; error same; afresh same", said.join("; "));
+}, { timeout: 120_000 });

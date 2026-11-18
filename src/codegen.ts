@@ -133,13 +133,16 @@ function brief(shown: string): string {
 export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
   let alike = new Map<string, usize>();
   for (let id: usize = 1; id <= arenas.instanceCount(); id++) {
-    const name = shortened(arenas.instanceOf(id as InstanceId).symbol);
+    const x = arenas.instanceOf(id as InstanceId);
+    if (x.retired === true) continue;
+    const name = shortened(x.symbol);
     alike.set(name, (alike.get(name) ?? 0) + 1);
   }
   let known = new Map<InstanceId, string>();
   let taken = new Set<string>();
   for (let id: usize = 1; id <= arenas.instanceCount(); id++) {
     const x = arenas.instanceOf(id as InstanceId);
+    if (x.retired === true) continue;
     const name = shortened(x.symbol);
     let chosen = (alike.get(name) ?? 0) > 1 ? `${name}~${digest(x.symbol)}` : name;
     for (let n: usize = 2; taken.has(chosen); n++) chosen = `${name}~${digest(x.symbol)}.${n}`;

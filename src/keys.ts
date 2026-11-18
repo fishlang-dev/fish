@@ -182,6 +182,12 @@ function readLeaf(e: Ref<Expr>, consts: Ref<Map<string, Expr>>, enums: Ref<Map<s
 /** @throws {CompileError} */
 export function lowerKeys(program: Mut<Stmt[]>) {
   const leaf = topKeys(program);
+  lowerKeysWith(program, leaf);
+}
+
+// `lowerKeys` over part of a program, with the whole program's `topKeys`.
+/** @throws {CompileError} */
+export function lowerKeysWith(program: Mut<Stmt[]>, leaf: Ref<TopKeys>) {
   let rewrites = new Rewrites();
   let failure: CompileError | undefined = undefined;
   walk({ of: "stmts", node: program }, (n) => {

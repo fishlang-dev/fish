@@ -36,7 +36,8 @@ export type Module = { path: string; file: string; base: usize; src: string; sta
 // from, its index naming it in the bundle.
 export type Package = { specifier: string; dir: string; at: Span };
 // `rust`: each Rust crate the program imports, with the directory of the Fish package listing it.
-export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[] };
+// `links` is what linking made of each file, kept once the program is linked.
+export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[]; links?: Linked[] };
 export type RustCrate = { dependency: RustDependency; dir: string };
 
 // What reads a file the program imports before the disk does: an editor's unsaved text, or
@@ -673,7 +674,7 @@ export function resolveSpecifier(from: string, specifier: string, at: Ref<Span>,
 type Decl = { name: string; unique: string; fixed: boolean; file: usize };
 // What an import binds: the module's index among the program's, and the name it exports.
 type Import = { from: usize; name: string; at: Span };
-type Linked = {
+export type Linked = {
   path: string;
   file: string;
   base: usize;
@@ -725,21 +726,7 @@ export function flatten(compilation: Mut<Compilation>, loaded: Mut<Loaded>, libr
       throw new CompileError("E0902", name === "default" ? `'${from.file}' has no default export; add 'export default' before what it should give${hidden}` : `'${from.file}' has no export named '${name}'${hidden}`, at.start, at.end);
     }
   }
-  let taken = new Set<string>();
-  for (let li: usize = 0; li < all.length; li++) {
-    let names: string[] = [];
-    for (const name of all[li]!.own.keys()) names.push(name);
-    for (const name of names) {
-      const d = all[li]!.own.get(name);
-      if (d === undefined) continue;
-      // Another file using the name for something else, its own local or a std name, would
-      // otherwise reach this declaration.
-      const elsewhere = all.some((o) => o.index !== li && o.used.has(d.name) && !sameDecl(local(all, o.index, d.name, new Set<string>()), d));
-      const unique = d.fixed || (!elsewhere && !taken.has(d.name)) ? d.name : apart(d.name, li);
-      taken.add(unique);
-      all[li]!.own.set(name, { name: d.name, unique, fixed: d.fixed, file: d.file });
-    }
-  }
+  const taken = settledUniques(all);
   let names = new Map<usize, Map<string, string>>();
   for (const l of all) {
     let written = new Map<string, string>();
@@ -753,23 +740,7 @@ export function flatten(compilation: Mut<Compilation>, loaded: Mut<Loaded>, libr
   let foreign = new Map<string, { signature: string; file: string }>();
   let program: Stmt[] = [];
   for (let li: usize = 0; li < all.length; li++) {
-    let to = new Map<string, string>();
-    for (const name of all[li]!.used) {
-      // `name-fsh<n>`, a name a macro's quote written in file n pins, is what `name` means there.
-      const pinned = /^(.*)-fsh(\d+)$/.exec(name);
-      if (pinned !== null) {
-        const meant = String(pinned[1]);
-        const there = Number(String(pinned[2]));
-        const d = there !== null && there < (all.length as f64) ? local(all, there as usize, meant, new Set<string>()) : undefined;
-        if (d !== undefined) to.set(name, d.unique);
-        continue;
-      }
-      const d = local(all, li, name, new Set<string>());
-      // A name another file declares, and this one neither declares nor imports, is this file's
-      // own local or nothing at all here.
-      const unique = d !== undefined ? d.unique : taken.has(name) ? apart(name, li) : name;
-      if (unique !== name) to.set(name, unique);
-    }
+    const to = renamesIn(all, li, taken);
     let body = all[li]!.body.splice(0);
     renameIn(compilation.ids, body, (name) => to.get(name));
     const file = all[li]!.file;
@@ -779,7 +750,147 @@ export function flatten(compilation: Mut<Compilation>, loaded: Mut<Loaded>, libr
     }
   }
   if (!lenient) compilation.fileNames = names;
+  // Kept for a file read again into the same program, as `fishc watch` does; their bodies are
+  // the program's now.
+  if (!lenient) loaded.links = all;
   return program;
+}
+
+// The file at `index` parsed again from `text`, as loading parsed it: its spans in its own place
+// in the program and its `import.meta` lowered. Each import keeps the id its statement had, so it
+// still reaches the file it did; the caller has found the file's imports unchanged. Gives why it
+// can't be parsed in place instead, when it holds a Rust block or reaches another global.
+/** @throws {CompileError} */
+export function reparsedFile(ids: Mut<Ids>, loaded: Ref<Loaded>, index: usize, text: string): { statements: Stmt[]; fallback: string | undefined } {
+  const m: Ref<Module> = loaded.modules[index]!;
+  let parsed = parse(text, ids);
+  if (m.base > 0) shiftSpansStmts(parsed, m.base);
+  lowerImportMeta(ids, parsed, m.path, index === 0);
+  if (parsed.some((s) => isRustBlock(s))) return { statements: [], fallback: "the file declares Rust" };
+  // What a macro made of the file is in the program, which the file as written isn't.
+  if (parsed.some((s) => decorated(s))) return { statements: [], fallback: "the file has decorators or macros" };
+  const known = m.targets.ids();
+  let at: usize = 0;
+  for (let i: usize = 0; i < parsed.length; i++) {
+    if (specifierOf(parsed[i]!) === undefined) continue;
+    if (at >= known.length) return { statements: [], fallback: "the file's imports changed" };
+    renumbered(parsed[i]!, known[at]!);
+    at++;
+  }
+  if (at !== known.length) return { statements: [], fallback: "the file's imports changed" };
+  const globals = globalsIn(parsed);
+  if (globals.length !== m.globals.size || globals.some((g) => !m.globals.has(g))) return { statements: [], fallback: "the file reaches other std modules through their names" };
+  return { statements: parsed, fallback: undefined };
+}
+
+// Whether a top-level statement is a macro, or has a decorator a macro expands.
+function decorated(s: Ref<Stmt>): boolean {
+  const d: Ref<Stmt> = s.kind === "export" ? s.body : s.kind === "exportDefault" && s.declaration !== undefined ? s.declaration : s;
+  if (d.kind === "function") return d.macro || (d.decorators !== undefined && d.decorators.length > 0);
+  if (d.kind === "class") return d.decorators.length > 0 || d.members.some((m) => m.kind !== "index" && m.kind !== "staticBlock" && m.decorators.length > 0);
+  if (d.kind === "typeAlias") return d.decorators !== undefined && d.decorators.length > 0;
+  if (d.kind === "interface") return d.decorators !== undefined && d.decorators.length > 0;
+  if (d.kind === "enum") return d.decorators !== undefined && d.decorators.length > 0;
+  return false;
+}
+
+// Gives an import or re-export statement the id `id`.
+function renumbered(s: Mut<Stmt>, id: usize): void {
+  switch (s.kind) {
+    case "import":
+      s.id = id;
+      break;
+    case "exportAll":
+      s.id = id;
+      break;
+    case "exportNamed":
+      s.id = id;
+      break;
+  }
+}
+
+// The file at `index`, given as `statements` read again from `text`, linked into the program
+// `loaded` holds as its first link linked it: its statements renamed as they are in the program,
+// or why that can't be, when its declarations, imports or exports, or the unique names any file's
+// declarations take, come out otherwise. Its module and link are replaced either way.
+/** @throws {CompileError} */
+export function relinkedFile(ids: Mut<Ids>, loaded: Mut<Loaded>, index: usize, text: string, statements: Stmt[], library: boolean): { statements: Stmt[]; fallback: string | undefined } {
+  if (loaded.links === undefined) return { statements: [], fallback: "the program wasn't linked" };
+  if (statements.some((s) => s.kind === "declare")) return { statements: [], fallback: "the file declares C or JS names" };
+  let m: Mut<Module> = loaded.modules[index]!;
+  m.src = text;
+  m.statements = statements;
+  let indexOf = new Map<string, usize>();
+  for (let i: usize = 0; i < loaded.modules.length; i++) indexOf.set(loaded.modules[i]!.path, i);
+  let l = linkOf(ids, loaded.modules, index, indexOf, library);
+  let links: Mut<Linked[]> = loaded.links!;
+  const before = uniquesOf(links);
+  const same = sameLink(links[index]!, l);
+  links[index] = l;
+  const taken = settledUniques(links);
+  if (!same) return { statements: [], fallback: "the file's declarations, imports or exports changed" };
+  if (uniquesOf(links) !== before) return { statements: [], fallback: "a file's declaration takes another name in the program" };
+  const to = renamesIn(links, index, taken);
+  let body = links[index]!.body.splice(0);
+  renameIn(ids, body, (name) => to.get(name));
+  return { statements: body, fallback: undefined };
+}
+
+// Every declaration's unique name, file by file, as one text to compare.
+function uniquesOf(links: Ref<Linked[]>): string {
+  let out: string[] = [];
+  for (const l of links) for (const [name, d] of l.own) out.push(`${l.index}:${name}=${d.unique}`);
+  return out.join(",");
+}
+
+// Whether two links of a file declare, import and export the same names.
+function sameLink(a: Ref<Linked>, b: Ref<Linked>): boolean {
+  const own = (l: Ref<Linked>) => [...l.own].map(([n, d]) => `${n}=${d.name}:${d.fixed}`).join(",");
+  const imports = (l: Ref<Linked>) => [...l.imports].map(([n, i]) => `${n}=${i.from}.${i.name}`).join(",");
+  const exports = (l: Ref<Linked>) => [...l.exports].map(([n, e]) => ("local" in e ? `${n}=${e.local}` : `${n}=${e.from}.${e.name}`)).join(",");
+  return own(a) === own(b) && imports(a) === imports(b) && exports(a) === exports(b) && a.stars.join(",") === b.stars.join(",");
+}
+
+// Settles each top-level declaration's unique name, giving every unique name taken. A name keeps
+// its spelling unless another file uses it for something else, its own local or a std name, which
+// would otherwise reach this declaration.
+function settledUniques(all: Mut<Linked[]>): Set<string> {
+  let taken = new Set<string>();
+  for (let li: usize = 0; li < all.length; li++) {
+    let names: string[] = [];
+    for (const name of all[li]!.own.keys()) names.push(name);
+    for (const name of names) {
+      const d = all[li]!.own.get(name);
+      if (d === undefined) continue;
+      const elsewhere = all.some((o) => o.index !== li && o.used.has(d.name) && !sameDecl(local(all, o.index, d.name, new Set<string>()), d));
+      const unique = d.fixed || (!elsewhere && !taken.has(d.name)) ? d.name : apart(d.name, li);
+      taken.add(unique);
+      all[li]!.own.set(name, { name: d.name, unique, fixed: d.fixed, file: d.file });
+    }
+  }
+  return taken;
+}
+
+// What each name file `li` uses is renamed to in the program.
+function renamesIn(all: Ref<Linked[]>, li: usize, taken: Ref<Set<string>>): Map<string, string> {
+  let to = new Map<string, string>();
+  for (const name of all[li]!.used) {
+    // `name-fsh<n>`, a name a macro's quote written in file n pins, is what `name` means there.
+    const pinned = /^(.*)-fsh(\d+)$/.exec(name);
+    if (pinned !== null) {
+      const meant = String(pinned[1]);
+      const there = Number(String(pinned[2]));
+      const d = there !== null && there < (all.length as f64) ? local(all, there as usize, meant, new Set<string>()) : undefined;
+      if (d !== undefined) to.set(name, d.unique);
+      continue;
+    }
+    const d = local(all, li, name, new Set<string>());
+    // A name another file declares, and this one neither declares nor imports, is this file's
+    // own local or nothing at all here.
+    const unique = d !== undefined ? d.unique : taken.has(name) ? apart(name, li) : name;
+    if (unique !== name) to.set(name, unique);
+  }
+  return to;
 }
 
 // Whether a statement stays in the program: a C function declared again with the same types is

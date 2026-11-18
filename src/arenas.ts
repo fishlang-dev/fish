@@ -1,5 +1,6 @@
 import type { Instance, Local } from "./check.ts";
 import type { Body, ClassInfo } from "./classes.ts";
+import type { Func } from "./parser.ts";
 
 // What names one of a compilation's instances, bodies, locals or classes: its place in that
 // compilation's arena, from 1, so no id is falsy. Each kind of id is branded so one can't pass for
@@ -62,6 +63,20 @@ export class Arenas {
 
   bodyMut(this: Mut<this>, id: BodyId): Mut<Body> {
     return this.bodies[id - 1]!;
+  }
+
+  // A function read again, with the same signature, put in place of the body it was: its nodes,
+  // spans and statements, keeping what declaring and checking added to it.
+  replaceBody(this: Mut<this>, id: BodyId, f: Func): void {
+    let b = this.bodyMut(id);
+    b.id = f.id;
+    b.start = f.start;
+    b.end = f.end;
+    b.params = f.params;
+    b.returnType = f.returnType;
+    if (f.throws !== undefined) b.throws = f.throws;
+    if (b.typeParams !== undefined) b.typeParams = f.typeParams;
+    if (f.body !== undefined) b.body = f.body;
   }
 
   classMut(this: Mut<this>, id: ClassId): Mut<ClassInfo> {

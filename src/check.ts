@@ -6,7 +6,7 @@ import { warnings } from "./warnings.ts";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.ts";
 import { FILE_SPAN, stdModuleAt } from "./program.ts";
 import { comptimeArgument, comptimeBody, stringsType, untagged, type Value } from "./comptime.ts";
-import type { ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, PropertyName, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
+import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, PropertyName, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
 import { cloneDeclarator, cloneExpr, cloneInterface, cloneObjectProp, cloneParam, clonePattern, clonePatternProp, cloneStmt, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts, withIdExpr } from "./rebuild.ts";
@@ -25,7 +25,7 @@ import { lowerDefaults, writtenName } from "./defaults.ts";
 import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
-import { localKeys, lowerKeys, numberKey, topKeys } from "./keys.ts";
+import { localKeys, lowerKeys, lowerKeysWith, numberKey, topKeys } from "./keys.ts";
 import { lowerOverloads } from "./overloads.ts";
 import { checkMoves } from "./moves.ts";
 import { ContextState, Expressions, ExpressionsState, stringLike, type Context, type DynTable } from "./values.ts";
@@ -130,6 +130,8 @@ export type Instance = {
   // Calls of an interface's optional method, and tests for one, whose method this instance's
   // concrete type leaves out.
   absent?: NodeSet<Expr>;
+  // A closure's instance from a check thrown away, which nothing compiles or names any more.
+  retired?: true;
   // For a closure: the binding standing in its body for each variable it captures, and that
   // variable, or `this`, in the body it is written in, in the order its environment holds them;
   // and where it, or a closure inside it, first uses each.
@@ -726,6 +728,35 @@ export function checkKeeping(compilation: Compilation, written: Stmt[], exportsT
   return { checked, parts };
 }
 
+// Whether a class member has a private name.
+function privateMember(m: Ref<ClassMember>): boolean {
+  if (m.kind !== "field" && m.kind !== "method" && m.kind !== "get" && m.kind !== "set") return false;
+  const name: Ref<PropertyName> = m.name;
+  return typeof name === "string" && name.startsWith("#");
+}
+
+// One file's linked statements lowered as `lowered` lowers the whole program's, for a file read
+// again into a kept check, or why a pass that reads the whole program means it can't be: a local
+// type the file's bodies hoist, a private name, whose separation reads every class, or a timer,
+// which can make `main` async.
+/** @throws {CompileError} */
+export function loweredFile(tables: Mut<Tables>, given: Stmt[], library: boolean): { statements: Stmt[]; fallback: string | undefined } {
+  let written = lowerOverloads(tables.ids, given);
+  if (holdsNode({ of: "stmts", node: written }, (n) => (n.of === "expr" && n.node.kind === "ident" && TIMER_GLOBALS.has(n.node.name)) || (n.of === "classMember" && privateMember(n.node)) || (n.of === "expr" && n.node.kind === "member" && typeof n.node.name === "string" && n.node.name.startsWith("#")))) return { statements: [], fallback: "the file uses a timer or a private name" };
+  if (tables.timerMains.size > 0 && !library) return { statements: [], fallback: "the program's main runs timers" };
+  localKeys(written);
+  if (hoistLocals(tables, written).hoisted.length > 0) return { statements: [], fallback: "the file declares local types" };
+  if (tables.topKeys === undefined) return { statements: [], fallback: "the program's keys weren't kept" };
+  lowerKeysWith(written, tables.topKeys!);
+  holdsNode({ of: "stmts", node: written }, (n) => {
+    if (n.of === "classMember" && n.node.kind === "get" && typeof n.node.name === "string") tables.getterNames.add(n.node.name);
+    if (n.of === "objectProp" && n.node.kind === "get" && typeof n.node.key === "string") tables.getterNames.add(n.node.key);
+    return false;
+  });
+  lowerDefaults(tables, written);
+  return { statements: written, fallback: undefined };
+}
+
 // The program as checking reads it: the written statements lowered, after std's.
 /** @throws {CompileError} */
 function lowered(tables: Mut<Tables>, given: Stmt[], library: boolean): Stmt[] {
@@ -1075,12 +1106,39 @@ function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<str
   return { checked: { instances, tables: taken.tables, warnings }, parts: taken.parts };
 }
 
+// A kept check given files read again, each as its linked and lowered statements: every function
+// in them put in place of the body it was and checked again, every instance of it too, then what
+// they ask for, and the program's results gathered again. Gives why it can't be instead, when a
+// file's other declarations moved or a function is new, lifts a generic one, or is a signature;
+// the kept check is spent then, and the build starts afresh.
+/** @throws {CompileError} */
+export function recheckKept(checked: Checked, parts: CheckerParts, files: Stmt[][]): { checked: Checked; parts: CheckerParts; fallback: string | undefined } {
+  let checker = Checker.resumed(checked.tables, parts);
+  const fallback = checker.recheck(files);
+  if (fallback !== undefined) {
+    let spent = checkerApart(checker);
+    return { checked: { instances: [], tables: spent.tables, warnings: [] }, parts: spent.parts, fallback };
+  }
+  let outcome: { instances: InstanceId[]; warnings: CompileError[] } | undefined = undefined;
+  try {
+    outcome = checker.finish();
+  } catch (e) {
+    throw e instanceof CompileError ? named(e, copyNames(checker.tables.names)) : e;
+  }
+  const { instances, warnings } = outcome!;
+  let taken = checkerApart(checker);
+  let renamed: CompileError[] = [];
+  let found = warnings;
+  while (found.length > 0) renamed.push(named(found.shift()!, copyNames(taken.tables.names)));
+  return { checked: { instances, tables: taken.tables, warnings: renamed }, parts: taken.parts, fallback: undefined };
+}
+
 // What a checker holds besides its tables: what the next check of the same program starts from.
-export type CheckerParts = { library: boolean; takenInC: Set<string>; macros: boolean; module: boolean; program: Stmt[]; funcs: BodyId[]; macroBodies: Set<BodyId>; typedArrows: { body: BodyId; type: TypeNode; arrow: Span & { throws?: TypeNode }; name: string }[]; classes: Map<string, ClassId>; templates: Map<string, ClassNode & { name: string }>; decls: Declarations; enums: Map<string, EnumInfo>; byName: Map<string, BodyId>; main: BodyId | undefined; assuming: Set<string>; registryState: RegistryState; genericClassesState: GenericClassesState; resolverState: ResolverState; beingChecked: InstanceId | undefined; done: Set<InstanceId>; rustTypes: Map<string, string>; views: Map<InstanceId, Type>; demands: NodeMap<Stmt, Integer>; candidates: Map<LocalId, Stmt>; demanded: usize; instancingState: InstancingState; querying: Set<string>; placeholders: NodeMap<Expr, Type>; broken: NodeSet<Stmt>; continued: NodeSet<Stmt>; inProgress: Set<InstanceId>; nextLocal: usize; closures: InstanceId[]; closureBodies: TypeMap<ClosureType, InstanceId>; errors: CompileError[]; unending: boolean; claimErrors: CompileError[]; refused: Refused[]; tryCallees: [CompileError, BodyId[]][]; failed: Map<BodyId, CompileError> };
+export type CheckerParts = { library: boolean; takenInC: Set<string>; macros: boolean; module: boolean; program: Stmt[]; funcs: BodyId[]; macroBodies: Set<BodyId>; typedArrows: { body: BodyId; type: TypeNode; arrow: Span & { throws?: TypeNode }; name: string }[]; classes: Map<string, ClassId>; templates: Map<string, ClassNode & { name: string }>; decls: Declarations; enums: Map<string, EnumInfo>; byName: Map<string, BodyId>; main: BodyId | undefined; assuming: Set<string>; registryState: RegistryState; genericClassesState: GenericClassesState; resolverState: ResolverState; beingChecked: InstanceId | undefined; done: Set<InstanceId>; rustTypes: Map<string, string>; views: Map<InstanceId, Type>; demands: NodeMap<Stmt, Integer>; candidates: Map<LocalId, Stmt>; demanded: usize; instancingState: InstancingState; querying: Set<string>; placeholders: NodeMap<Expr, Type>; broken: NodeSet<Stmt>; continued: NodeSet<Stmt>; inProgress: Set<InstanceId>; nextLocal: usize; closures: InstanceId[]; closureBodies: TypeMap<ClosureType, InstanceId>; errors: CompileError[]; unending: boolean; claimErrors: CompileError[]; refused: Refused[]; tryCallees: [CompileError, BodyId[]][]; failed: Map<BodyId, CompileError>; declaredClasses: Set<ClassId> };
 
 // A finished checker taken apart into its tables, which codegen takes, and the rest.
 function checkerApart(c: Checker): { tables: Tables; parts: CheckerParts } {
-  return { tables: c.tables, parts: { library: c.library, takenInC: c.takenInC, macros: c.macros, module: c.module, program: c.program, funcs: c.funcs, macroBodies: c.macroBodies, typedArrows: c.typedArrows, classes: c.classes, templates: c.templates, decls: c.decls, enums: c.enums, byName: c.byName, main: c.main, assuming: c.assuming, registryState: c.registryState, genericClassesState: c.genericClassesState, resolverState: c.resolverState, beingChecked: c.beingChecked, done: c.done, rustTypes: c.rustTypes, views: c.views, demands: c.demands, candidates: c.candidates, demanded: c.demanded, instancingState: c.instancingState, querying: c.querying, placeholders: c.placeholders, broken: c.broken, continued: c.continued, inProgress: c.inProgress, nextLocal: c.nextLocal, closures: c.closures, closureBodies: c.closureBodies, errors: c.errors, unending: c.unending, claimErrors: c.claimErrors, refused: c.refused, tryCallees: c.tryCallees, failed: c.failed } };
+  return { tables: c.tables, parts: { library: c.library, takenInC: c.takenInC, macros: c.macros, module: c.module, program: c.program, funcs: c.funcs, macroBodies: c.macroBodies, typedArrows: c.typedArrows, classes: c.classes, templates: c.templates, decls: c.decls, enums: c.enums, byName: c.byName, main: c.main, assuming: c.assuming, registryState: c.registryState, genericClassesState: c.genericClassesState, resolverState: c.resolverState, beingChecked: c.beingChecked, done: c.done, rustTypes: c.rustTypes, views: c.views, demands: c.demands, candidates: c.candidates, demanded: c.demanded, instancingState: c.instancingState, querying: c.querying, placeholders: c.placeholders, broken: c.broken, continued: c.continued, inProgress: c.inProgress, nextLocal: c.nextLocal, closures: c.closures, closureBodies: c.closureBodies, errors: c.errors, unending: c.unending, claimErrors: c.claimErrors, refused: c.refused, tryCallees: c.tryCallees, failed: c.failed, declaredClasses: c.declaredClasses } };
 }
 
 class Checker implements RegistryHost, GenericClassesHost, InstancingHost, ResolverHost, EnumHost {
@@ -1149,6 +1207,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   tryCallees: [CompileError, BodyId[]][] = [];
   // The error each failed body's check gave, which a call of it gives again rather than another.
   failed = new Map<BodyId, CompileError>();
+  // The classes as declared, and generic classes' definitions, before any body is checked.
+  declaredClasses = new Set<ClassId>();
 
   constructor(tables: Tables, program: Stmt[], top: TopLevel, decls: Declarations, exportsToC: Set<string> | false, macros: boolean, module: boolean) {
     this.tables = tables;
@@ -1188,6 +1248,106 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.nextLocal = 0;
     this.closures = [];
     this.closureBodies = new TypeMap<ClosureType, InstanceId>();
+  }
+
+  // A checker put back together from a finished one's tables and parts, to check again.
+  static resumed(tables: Tables, p: CheckerParts): Checker {
+    const top: TopLevel = { classes: p.classes, templates: p.templates, enums: p.enums, funcs: p.funcs, macroBodies: p.macroBodies, typedArrows: p.typedArrows, errors: p.errors, unending: p.unending };
+    let c = new Checker(tables, p.program, top, p.decls, false, p.macros, p.module);
+    c.library = p.library;
+    c.takenInC = p.takenInC;
+    c.byName = p.byName;
+    c.main = p.main;
+    c.assuming = p.assuming;
+    c.registryState = p.registryState;
+    c.genericClassesState = p.genericClassesState;
+    c.resolverState = p.resolverState;
+    c.beingChecked = p.beingChecked;
+    c.done = p.done;
+    c.rustTypes = p.rustTypes;
+    c.views = p.views;
+    c.demands = p.demands;
+    c.candidates = p.candidates;
+    c.demanded = p.demanded;
+    c.instancingState = p.instancingState;
+    c.querying = p.querying;
+    c.placeholders = p.placeholders;
+    c.broken = p.broken;
+    c.continued = p.continued;
+    c.inProgress = p.inProgress;
+    c.nextLocal = p.nextLocal;
+    c.closures = p.closures;
+    c.closureBodies = p.closureBodies;
+    c.claimErrors = p.claimErrors;
+    c.refused = p.refused;
+    c.tryCallees = p.tryCallees;
+    c.failed = p.failed;
+    c.declaredClasses = p.declaredClasses;
+    return c;
+  }
+
+  // Puts each function of `files` in place of the body it was and checks it again, with every
+  // instance of it and what they ask for; gives why it can't, before changing anything.
+  /** @throws {CompileError} */
+  recheck(this: Mut<this>, given: Stmt[][]): string | undefined {
+    let files = given;
+    let swaps: [BodyId, usize, usize][] = [];
+    for (let fi: usize = 0; fi < files.length; fi++) {
+      const file: Ref<Stmt[]> = files[fi]!;
+      for (let si: usize = 0; si < file.length; si++) {
+        const s: Ref<Stmt> = file[si]!;
+        const d: Ref<Stmt> = s.kind === "export" ? s.body : s;
+        if (d.kind !== "function") {
+          // Anything else is kept as declared, so it must say the same at the same place.
+          if (!this.program.some((p) => p.kind === s.kind && p.start === s.start && p.end === s.end)) return "a declaration other than a function moved";
+          continue;
+        }
+        const id = this.byName.get(d.name);
+        if (id === undefined || d.body === undefined) return "a function is new or has no body";
+        const was = this.tables.arenas.bodyOf(id);
+        if (was.signature === true || was.overloads !== undefined || was.closure !== undefined || was.js !== undefined || was.foreign === true) return "a function is overloaded or not Fish";
+        let lifts = false;
+        for (const k of this.tables.liftedFunctions.keys()) if (k.start >= was.start && k.end <= was.end) lifts = true;
+        if (lifts) return "a function lifted a generic function";
+        swaps.push([id, fi, si]);
+      }
+    }
+    let again: InstanceId[] = [];
+    let at: usize = 0;
+    let fi: usize = 0;
+    while (files.length > 0) {
+      let file = files.shift()!;
+      let si: usize = 0;
+      while (file.length > 0) {
+        let s = file.shift()!;
+        if (at < swaps.length && swaps[at]![1] === fi && swaps[at]![2] === si) {
+          const id = swaps[at]![0];
+          at++;
+          let d = s.kind === "export" ? s.body : s;
+          if (d.kind === "function") this.tables.arenas.replaceBody(id, d);
+        }
+        si++;
+      }
+      fi++;
+    }
+    for (const [id, _fi, _si] of swaps) {
+      this.failed.delete(id);
+      for (let i: usize = 1; i <= this.tables.arenas.instanceCount(); i++) {
+        const instance = this.tables.arenas.instanceOf(i as InstanceId);
+        if (instance.body === id) again.push(i as InstanceId);
+      }
+    }
+    for (const i of again) this.forget(i);
+    for (const i of again) {
+      try {
+        this.checkBody(i);
+      } catch (e) {
+        if (!(e instanceof CompileError)) throw e;
+        this.recover(e);
+      }
+    }
+    this.drain();
+    return undefined;
   }
 
   // Names the program's functions and finds `main`, before any body is checked.
@@ -1554,7 +1714,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // a bad initializer.
     for (const name of [...this.enums.keys()]) settleEnum(this, name);
     // The classes as declared, and generic classes' definitions; any other is an instance a call made.
-    const declaredClasses = new Set<ClassId>([...this.registryState.unsettled]);
+    this.declaredClasses = new Set<ClassId>([...this.registryState.unsettled]);
+    const declaredClasses = new Set<ClassId>([...this.declaredClasses]);
     // A class's `implements` claims are checked before any body uses the class, so a refused one is
     // reported at the class rather than at each use.
     for (const c of declaredClasses) {
@@ -1601,6 +1762,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.recover(e);
       }
     }
+    this.drain();
+    // What follows reads every body's results.
+    return this.finish();
+  }
+
+  // Checks what checking bodies asked for: classes to settle and instances made, until none is left.
+  /** @throws {CompileError} */
+  drain(this: Mut<this>): void {
+    const declaredClasses = new Set<ClassId>([...this.declaredClasses]);
     // Once a body has failed, a generic body's or class's instances aren't checked: their
     // definitions were, and an instance's error then is most often one a refused call already
     // reported.
@@ -1633,7 +1803,12 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.recover(e);
       }
     }
-    // What follows reads every body's results.
+  }
+
+  // Reads every body's results once every body is checked, giving the instances to compile and
+  // the warnings.
+  /** @throws {CompileError} */
+  finish(this: Mut<this>): { instances: InstanceId[]; warnings: CompileError[] } {
     this.stopOnErrors();
     const mainId = this.main;
     if (mainId !== undefined) {
@@ -2912,8 +3087,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     for (const c of this.inProgress) if (this.within(c, id)) inside.push(c);
     for (const c of inside) this.inProgress.delete(c);
     let kept: InstanceId[] = [];
-    for (const c of this.closures) if (!this.within(c, id)) kept.push(c);
+    let retired: InstanceId[] = [];
+    for (const c of this.closures) {
+      if (!this.within(c, id)) kept.push(c);
+      else if (c !== id) retired.push(c);
+    }
     this.closures = kept;
+    for (const c of retired) this.tables.arenas.instanceMut(c).retired = true;
     this.views.delete(id);
     this.done.delete(id);
     this.inProgress.delete(id);

@@ -18,7 +18,7 @@ function g(): void {}
 `;
 
 function shown(e: Ref<Edit>): string {
-  return e.fallback !== undefined ? `fallback: ${e.fallback}` : `bodies ${e.bodies.join(",")} signatures ${e.signatures.join(",")}`;
+  return e.fallback !== undefined ? `fallback: ${e.fallback}` : `bodies ${e.bodies.join(",")} signatures ${e.signatures.join(",")}${e.methods ? " in a class" : ""}`;
 }
 
 function sees(after: string, want: string): void {
@@ -32,7 +32,7 @@ test("an unchanged file changes nothing", () => {
 
 test("a function's, a method's and an empty body's edits are body edits", () => {
   sees(FILE.replace("return n + 1;", "const k = 2;\n  return n + k;"), "bodies 0 signatures ");
-  sees(FILE.replace("return this.a;", "return this.a * 2;"), "bodies 1 signatures ");
+  sees(FILE.replace("return this.a;", "return this.a * 2;"), "bodies 1 signatures  in a class");
   sees(FILE.replace("function g(): void {}", "function g(): void { console.log(1); }"), "bodies 2 signatures ");
 });
 
