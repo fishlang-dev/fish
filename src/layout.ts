@@ -5,7 +5,7 @@ import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
 import { byteSize, words } from "./sizes.ts";
 import type { Tables } from "./compilation.ts";
-import { digest, idOf, integerInfo, isInteger, isLock, isNumeric, literalText, TypeMap, type ArrayType, type ClassType, type Field, type LiteralType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
+import { idOf, integerInfo, isInteger, isLock, isNumeric, literalText, TypeMap, type ArrayType, type ClassType, type Field, type LiteralType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -33,69 +33,231 @@ function settled(typing: Ref<Typing>, t: Type): Type {
   return t;
 }
 
-// The names `typeName` gives, kept across one naming pass, so each type is spelled once.
-export type Spelling = { names: TypeMap<Type, string>; within: Type[] };
+// A type's own part of its color, apart from the types inside it, and those types in order.
+type Shape = { text: string; inner: Type[] };
 
-// A type as a named struct's name spells it: what the type is, never how it is laid out, so a
-// function using a class reads the same when the class's layout changes. A type inside it that
-// has a name of its own is spelled by that name, so a spelling stays short however deep the types
-// go. A type met again inside itself is `^`.
-// ponytail: a self-referring type's name depends on which of its cycle was named first, which is
-// fixed within one compilation; spell cycles canonically if names must match across programs.
-function spelled(typing: Ref<Typing>, t: Type, sp: Mut<Spelling>): string {
-  if (typeof t === "string") return t;
+function shapeOf(typing: Ref<Typing>, t: Type): Shape {
+  if (typeof t === "string") return { text: t, inner: [] };
   const r = typing.rec(t);
-  if (r.kind === "class") return r.generic !== undefined ? `${r.generic.name}<${r.generic.args.map((a) => part(typing, a, sp)).join(",")}>` : r.name;
-  if (r.kind === "object") return `{${r.fields.map((f) => `${f.name}:${part(typing, f.type, sp)}`).join(",")}}${r.tuple === true ? "t" : ""}`;
-  if (r.kind === "union") return r.members.map((m) => part(typing, m, sp)).join("|");
-  if (r.kind === "array") return `${part(typing, r.element, sp)}[]`;
-  if (r.kind === "fixed") return `${part(typing, r.element, sp)}[${r.size}]`;
-  if (r.kind === "brand") return part(typing, r.base, sp);
-  if (r.kind === "literal") return typeof r.value === "string" ? JSON.stringify(r.value) : typeof r.value === "boolean" ? `${r.value}` : `${literalText(r.value)}n`;
-  if (r.kind === "interior") return `${r.which}<${part(typing, r.of, sp)}>`;
-  // Any other type is laid out as what it holds, as `layoutOf` reads it, so it is spelled by that.
+  if (r.kind === "class") return r.generic !== undefined ? { text: `class ${r.generic.name}<>`, inner: [...r.generic.args] } : { text: `class ${r.name}`, inner: [] };
+  if (r.kind === "object") return { text: `{${r.fields.map((f) => f.name).join(",")}}${r.tuple === true ? "t" : ""}`, inner: r.fields.map((f) => f.type) };
+  if (r.kind === "union") return { text: "|", inner: [...r.members] };
+  if (r.kind === "array") return { text: "[]", inner: [r.element] };
+  if (r.kind === "fixed") return { text: `[${r.size}]`, inner: [r.element] };
+  if (r.kind === "literal") return { text: typeof r.value === "string" ? JSON.stringify(r.value) : typeof r.value === "boolean" ? `${r.value}` : `${literalText(r.value)}n`, inner: [] };
+  if (r.kind === "interior") return { text: `${r.which}<>`, inner: [r.of] };
+  // Any other type is laid out as what it holds, as `layoutOf` reads it, so it is colored by that.
   const held: Ref<Field[]> = r.kind === "generator" || r.kind === "future" ? r.frame : r.fields;
-  return `${r.kind}(${held.map((f) => `${f.name}:${part(typing, f.type, sp)}`).join(",")})`;
+  return { text: `${r.kind}(${held.map((f) => f.name).join(",")})`, inner: held.map((f) => f.type) };
 }
 
-// A type inside another's spelling: its own name when it has one, else its spelling.
-function part(typing: Ref<Typing>, t: Type, sp: Mut<Spelling>): string {
-  if (typeof t === "string") return t;
-  if (sp.within.includes(t)) return "^";
-  const named = namedIn(typing, t, sp);
-  return named !== undefined ? named : spelled(typing, t, sp);
+// The color of every type `roots` reach, from only what each holds, so a type is colored the same
+// whatever else the program has or the order its types were made in, which a name spelled from
+// wherever a self-referring type was first met isn't. A type that reaches no cycle is hashed from
+// its shape and its inner types' colors, however deep they go. The types of one cycle, each of
+// which reaches every other, are refined together: first their shapes, then each round their inner
+// types' colors from the round before, for twice their number of rounds and one, which tells apart
+// any two of them that differ. A color is two hashes, each a polynomial modulo a prime below
+// 2^31, so the arithmetic stays exact in an i64 and in a double.
+function colored(typing: Ref<Typing>, roots: Ref<Type[]>): TypeMap<Type, string> {
+  let index = new TypeMap<Type, usize>();
+  let types: Type[] = [];
+  let shapes: Shape[] = [];
+  let queue: Type[] = [];
+  for (const t of roots) queue.push(unbranded(typing, t));
+  while (queue.length > 0) {
+    const t = queue.pop()!;
+    if (typeof t === "string" || index.has(t)) continue;
+    index.set(t, types.length);
+    types.push(t);
+    let shape = shapeOf(typing, t);
+    // A brand is laid out as its base and held as one, so it is colored as its base.
+    shape.inner = shape.inner.map((c) => unbranded(typing, c));
+    for (const c of shape.inner) if (typeof c !== "string" && !index.has(c)) queue.push(c);
+    shapes.push(shape);
+  }
+  // Each type's shape hashed once, and each inner type as its index, or a primitive's own hash
+  // below 0.
+  let shapeA: i64[] = [];
+  let shapeB: i64[] = [];
+  let inner: i64[][] = [];
+  for (const x of shapes) {
+    shapeA.push(hashed(x.text, 131, PRIME_A));
+    shapeB.push(hashed(x.text, 137, PRIME_B));
+    inner.push(x.inner.map((c) => (typeof c === "string" ? -1 - hashed(c, 131, PRIME_A) : (index.get(c)! as i64))));
+  }
+  let colorA: i64[] = [...shapeA];
+  let colorB: i64[] = [...shapeB];
+  for (const group of cyclesOf(inner)) {
+    let member = new Set<i64>();
+    for (const i of group) member.add(i as i64);
+    const rounds = group.length === 1 && !inner[group[0]!]!.includes(group[0]! as i64) ? 1 : 2 * group.length + 1;
+    for (let round: usize = 0; round < rounds; round++) {
+      let nextA: i64[] = [];
+      let nextB: i64[] = [];
+      for (const i of group) {
+        let x = shapeA[i]!;
+        let y = shapeB[i]!;
+        for (const c of inner[i]!) {
+          const ca = c < 0 ? -1 - c : colorA[c as usize]!;
+          const cb = c < 0 ? -1 - c : colorB[c as usize]!;
+          // An inner type of the same cycle is told from one outside it.
+          const mark: i64 = c >= 0 && member.has(c) ? 3 : 7;
+          x = (x * 131 + ca + mark) % PRIME_A;
+          y = (y * 137 + cb + mark) % PRIME_B;
+        }
+        nextA.push((x * 131 + (rounds as i64)) % PRIME_A);
+        nextB.push((y * 137 + (rounds as i64)) % PRIME_B);
+      }
+      for (let k: usize = 0; k < group.length; k++) {
+        colorA[group[k]!] = nextA[k]!;
+        colorB[group[k]!] = nextB[k]!;
+      }
+    }
+  }
+  let out = new TypeMap<Type, string>();
+  for (let i: usize = 0; i < types.length; i++) out.set(types[i]!, `${base36(colorA[i]!)}${base36(colorB[i]!)}`);
+  for (const t of roots) {
+    const base = unbranded(typing, t);
+    if (typeof t !== "string" && base !== t && typeof base !== "string") out.set(t, out.get(base) ?? "");
+  }
+  return out;
 }
 
-// The name of the named struct a value of `t` is held as, for a class, object or union; undefined
-// for a type written out where it is used. A class is named by its name and type arguments, an
-// object or union by a digest of what it holds.
-export function typeName(typing: Ref<Typing>, t: Type): string | undefined {
-  let sp: Spelling = { names: new TypeMap<Type, string>(), within: [] };
-  return namedIn(typing, t, sp);
+// A type with its brands taken off.
+function unbranded(typing: Ref<Typing>, given: Type): Type {
+  let t = given;
+  for (;;) {
+    if (typeof t === "string") return t;
+    const r = typing.rec(t);
+    if (r.kind !== "brand") return t;
+    t = r.base;
+  }
 }
 
-function namedIn(typing: Ref<Typing>, t: Type, sp: Mut<Spelling>): string | undefined {
+// The groups of nodes that reach one another, each a cycle or a node alone, those a group reaches
+// first: Tarjan's algorithm, with its stack kept by hand rather than by recursion. A node's edges
+// are its entries in `edges` at or above 0.
+function cyclesOf(edges: Ref<i64[][]>): usize[][] {
+  const n = edges.length;
+  let order: i64[] = [];
+  let low: usize[] = [];
+  for (let i: usize = 0; i < n; i++) {
+    order.push(-1);
+    low.push(0);
+  }
+  let onStack: boolean[] = [];
+  for (let i: usize = 0; i < n; i++) onStack.push(false);
+  let stack: usize[] = [];
+  let groups: usize[][] = [];
+  let counter: usize = 0;
+  for (let root: usize = 0; root < n; root++) {
+    if (order[root]! >= 0) continue;
+    // Each frame is a node and the next of its edges to follow.
+    let frames: [usize, usize][] = [[root, 0]];
+    order[root] = counter as i64;
+    low[root] = counter;
+    counter++;
+    stack.push(root);
+    onStack[root] = true;
+    while (frames.length > 0) {
+      const [v, next] = frames[frames.length - 1]!;
+      const out: Ref<i64[]> = edges[v]!;
+      if (next < out.length) {
+        frames[frames.length - 1] = [v, next + 1];
+        const e = out[next]!;
+        if (e < 0) continue;
+        const w = e as usize;
+        if (order[w]! < 0) {
+          order[w] = counter as i64;
+          low[w] = counter;
+          counter++;
+          stack.push(w);
+          onStack[w] = true;
+          frames.push([w, 0]);
+        } else if (onStack[w]! && (order[w]! as usize) < low[v]!) low[v] = order[w]! as usize;
+        continue;
+      }
+      frames.pop();
+      if (frames.length > 0) {
+        const [u, _n] = frames[frames.length - 1]!;
+        if (low[v]! < low[u]!) low[u] = low[v]!;
+      }
+      if (low[v]! === (order[v]! as usize)) {
+        let group: usize[] = [];
+        for (;;) {
+          const w = stack.pop()!;
+          onStack[w] = false;
+          group.push(w);
+          if (w === v) break;
+        }
+        group.sort((a, b) => (a as i64) - (b as i64));
+        groups.push(group);
+      }
+    }
+  }
+  return groups;
+}
+
+const PRIME_A: i64 = 2147483647;
+const PRIME_B: i64 = 2147483629;
+
+// A number below 2^31 in base 36, six digits wide.
+function base36(n: i64): string {
+  const digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+  let out = "";
+  let rest = n;
+  for (let i: usize = 0; i < 6; i++) {
+    out = digits.charAt(rest % 36) + out;
+    rest = (rest - (rest % 36)) / 36;
+  }
+  return out;
+}
+
+// A text's polynomial hash modulo `prime`, by its UTF-16 units.
+function hashed(text: string, base: i64, prime: i64): i64 {
+  let h: i64 = 0;
+  for (let i: usize = 0; i < text.length; i++) h = (h * base + (text.charCodeAt(i) as i64) + 1) % prime;
+  return h;
+}
+
+// The name of the named struct a value of `t` is held as, for a class, object or union, from the
+// colors of the types it reaches; undefined for a type written out where it is used. A class is
+// named by its name and type arguments, an object or union by its color.
+function nameFrom(typing: Ref<Typing>, t: Type, colors: Ref<TypeMap<Type, string>>): string | undefined {
   if (typeof t === "string") return undefined;
-  const known = sp.names.get(t);
-  if (known !== undefined) return known;
   const r = typing.rec(t);
   const nameable = (r.kind === "class" && (r.base !== undefined || r.fields.length > 0) && rustClassOf(typing, t) === undefined) || (r.kind === "object" && r.fields.length > 0) || r.kind === "union";
   if (!nameable) return undefined;
-  sp.within.push(t);
-  const text = spelled(typing, t, sp);
-  sp.within.pop();
-  // A class name holding a quote or a backslash, as a string literal type argument does, would
-  // need escaping in the IR, so it takes the digest objects and unions do.
-  const name = r.kind === "class" ? (/^[\w$.<>,:|\[\]{}=+^-]+$/.test(text) ? `%"<${text}>"` : `%"<c.${digest(text)}>"`) : `%"<${r.kind === "union" ? "u" : "o"}.${digest(text)}>"`;
-  sp.names.set(t, name);
-  return name;
+  const color = colors.get(t) ?? "";
+  if (r.kind !== "class") return `%"<${r.kind === "union" ? "u" : "o"}.${color}>"`;
+  // A type argument is shown by its name when it has one a reader knows, else by its color.
+  const shown = (a: Type): string => {
+    if (typeof a === "string") return a;
+    const x = typing.rec(a);
+    return x.kind === "class" && x.generic === undefined ? x.name : `#${colors.get(a) ?? ""}`;
+  };
+  const text = r.generic !== undefined ? `${r.generic.name}<${r.generic.args.map((a) => shown(a)).join(",")}>` : r.name;
+  // A class name holding a quote or a backslash would need escaping in the IR, so it takes its color.
+  return /^[\w$.<>,:|\[\]{}=+#-]+$/.test(text) ? `%"<${text}>"` : `%"<c.${color}>"`;
+}
+
+// The name of the named struct a value of `t` is held as, for a type made after `structNames`.
+export function typeName(typing: Ref<Typing>, t: Type): string | undefined {
+  const colors = colored(typing, [t]);
+  return nameFrom(typing, t, colors);
 }
 
 // Every type's named struct, made once for codegen to read.
 export function structNames(typing: Ref<Typing>): TypeMap<Type, string> {
-  let sp: Spelling = { names: new TypeMap<Type, string>(), within: [] };
-  for (const t of typing.typeIds()) namedIn(typing, t, sp);
-  return sp.names;
+  const ids = typing.typeIds();
+  const colors = colored(typing, ids);
+  let names = new TypeMap<Type, string>();
+  for (const t of ids) {
+    const n = nameFrom(typing, t, colors);
+    if (n !== undefined) names.set(t, n);
+  }
+  return names;
 }
 
 // The definitions of the named structs `text` uses, each once and in name order, with those their
