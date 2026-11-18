@@ -4,7 +4,7 @@ import { constants, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { bodyOf, type Arenas } from "./arenas.ts";
-import { C_KEYWORDS, check } from "./check.ts";
+import { C_KEYWORDS, checkKeeping, type CheckerParts } from "./check.ts";
 import { codegenChecked, compiledOf, symbolIn, symbolNames, type Options } from "./codegen.ts";
 import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, stageEnd, stageStart, type Compilation, type Session, type Tables } from "./compilation.ts";
 import { expanded, sourced } from "./analysis.ts";
@@ -36,7 +36,8 @@ import type { Type, Typing } from "./typing.ts";
 import { rustShim, type Shim } from "./rustshim.ts";
 import { split } from "./split.ts";
 import { withDebugInfo } from "./debuginfo.ts";
-import { watchProgram } from "./watch.ts";
+import { watchProgram, type Rebuilt } from "./watch.ts";
+import { loadedContents, textOf as fileText, unchanged, type Kept } from "./incremental.ts";
 import { fileAt } from "./program.ts";
 import { STD_BASE } from "./std.ts";
 
@@ -54,7 +55,8 @@ export type Library = "static" | "shared";
 export { analyze } from "./analysis.ts";
 
 // What compiling a program gives: its IR, the checked program, and the Rust crates its calls go to.
-type Compiled = { ir: string; checked: Checked; rust: RustCrate[] };
+// The program as loaded comes back too, which `fishc watch` keeps.
+type Compiled = { ir: string; checked: Checked; loaded: Loaded };
 
 // A build session apart: what a compilation takes, and the caches only building objects reads.
 type Caches = { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
@@ -93,6 +95,13 @@ function checkedFile(session: Session, file: string): { warnings: CompileError[]
 // its files. `looked` is given the files it read or looked for, whether or not they load.
 /** @throws {CompileError | Error | IoError} */
 function checkedSource(compilation: Compilation, file: string, src: string, library: boolean, looked: Mut<string[]>): { checked: Checked; loaded: Loaded } {
+  let made = checkedSourceKeeping(compilation, file, src, library, looked);
+  return { checked: made.checked, loaded: made.loaded };
+}
+
+// `checkedSource`, giving back what the checker kept besides its tables as well.
+/** @throws {CompileError | Error | IoError} */
+function checkedSourceKeeping(compilation: Compilation, file: string, src: string, library: boolean, looked: Mut<string[]>): { checked: Checked; loaded: Loaded; parts: CheckerParts } {
   let program = compilation;
   let modules = loadedFrom(program, file, src, looked);
   let statements: Stmt[] = [];
@@ -102,9 +111,9 @@ function checkedSource(compilation: Compilation, file: string, src: string, libr
     if (e instanceof CompileError) throw sourced(e, copyNames(program.names), modules.sources);
     throw e;
   }
-  let checked = checkedProgram(program, statements, library, modules.sources);
+  let { checked, parts } = checkedProgram(program, statements, library, modules.sources);
   for (let i: usize = 0; i < checked.warnings.length; i++) checked.warnings[i]!.sources = [...modules.sources];
-  return { checked, loaded: modules };
+  return { checked, loaded: modules, parts };
 }
 
 // The program's files loaded, timed as the parse stage.
@@ -121,17 +130,17 @@ function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, lo
 
 // `check` of a whole program, timed as the check stage, its errors given the program's files.
 /** @throws {CompileError} */
-function checkedProgram(compilation: Compilation, program: Stmt[], library: boolean, sources: Ref<Source[]>): Checked {
+function checkedProgram(compilation: Compilation, program: Stmt[], library: boolean, sources: Ref<Source[]>): { checked: Checked; parts: CheckerParts } {
   const started = stageStart(compilation.session);
-  let checked: Checked | undefined = undefined;
+  let made: { checked: Checked; parts: CheckerParts } | undefined = undefined;
   try {
-    checked = check(compilation, program, library ? runtimeNames() : false);
+    made = checkKeeping(compilation, program, library ? runtimeNames() : false, false, false);
   } catch (e) {
     if (e instanceof CompileError) throw sourced(e, undefined, sources);
     throw e;
   }
-  let done: Checked = checked!;
-  stageEnd(done.tables.session, "check", started);
+  let done = made!;
+  stageEnd(done.checked.tables.session, "check", started);
   return done;
 }
 
@@ -165,9 +174,9 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   }
   let done = made!;
   let ir = bundled(done.ir, loaded);
-  if (debug) ir = withDebugInfo(ir, src, file, loaded.sources, release);
+  if (debug) ir = withDebugInfo(ir, src, file, [...loaded.sources], release);
   stageEnd(done.checked.tables.session, "codegen", started);
-  return { ir, checked: done.checked, rust: loaded.rust };
+  return { ir, checked: done.checked, loaded };
 }
 
 // The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
@@ -216,7 +225,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
   const made = compiledIn(newCompilation(core), src, file, release, panic, true, false, debug, looked);
   const ir = made.ir;
   const checked: Ref<Checked> = made.checked;
-  const shim = rustShim(made.rust, checked);
+  const shim = rustShim(made.loaded.rust, checked);
   if (shim !== undefined) refuseForeignRust(target);
   if (!existsSync(dirname(out))) throw new Error(`can't write the library: the directory '${dirname(out)}' doesn't exist`);
   const name = basename(out).replace(/^lib/, "").replace(/\.(a|so|dylib)$/, "");
@@ -315,12 +324,51 @@ function built(session: BuildSession, file: string, out: string, release: boolea
   let { core, caches } = apart(session);
   let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, looked);
   const ir = instrumented(made.ir, target);
-  const shim = rustShim(made.rust, made.checked);
+  const shim = rustShim(made.loaded.rust, made.checked);
   if (shim !== undefined) refuseForeignRust(target);
   const split = parts(ir, made.checked, release, target, debug);
   let building = together(made.checked.tables.session, caches);
   linked(building, ir, split, out, release, links, shim, target, leaks, debug);
   return { warnings: made.checked.warnings, session: building };
+}
+
+// `built` for `fishc watch`, from what its last build kept: a program whose files all read as they
+// did is not loaded or checked again. Gives what to keep for the next build. `manifest` is the
+// package's, which a build may read.
+/** @throws {CompileError | Error | IoError | JsonError} */
+export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): { warnings: CompileError[]; session: BuildSession; kept: Kept } {
+  let { core, caches } = apart(session);
+  let start = checkedFrom(core, file, looked, kept, manifest);
+  const failed = start.checked.tables.session.failed;
+  start.checked.tables.session.failed = undefined;
+  const sources = [...start.loaded.sources];
+  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed });
+  const ir = instrumented(made.ir, target);
+  const shim = rustShim(made.loaded.rust, made.checked);
+  if (shim !== undefined) refuseForeignRust(target);
+  const split = parts(ir, made.checked, release, target, debug);
+  let { instances, tables, warnings } = made.checked;
+  let building = together(tables.session, caches);
+  // The next build gives the kept tables its own session.
+  tables.session = newSession();
+  linked(building, ir, split, out, release, links, shim, target, leaks, debug);
+  return { warnings: [...warnings], session: building, kept: { checked: { instances, tables, warnings }, parts: start.parts, loaded: made.loaded, contents: start.contents } };
+}
+
+// The program checked: `kept`'s, given `session`, when every file it read reads as it did, or else
+// loaded and checked afresh.
+/** @throws {CompileError | Error | IoError} */
+function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): Kept {
+  if (kept !== undefined && unchanged(kept.contents)) {
+    let reused = kept!;
+    reused.checked.tables.session = session;
+    for (const f of reused.contents.keys()) looked.push(f);
+    return reused;
+  }
+  const manifestText = manifest !== undefined ? fileText(manifest) : undefined;
+  let made = checkedSourceKeeping(newCompilation(session), file, readFileSync(file, "utf8"), false, looked);
+  const contents = loadedContents(made.loaded, looked, manifest, manifestText);
+  return { checked: made.checked, parts: made.parts, loaded: made.loaded, contents };
 }
 
 // Cargo isn't told the target yet, so a crate would be built for the host.
@@ -419,7 +467,7 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
   let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, false, false, looked);
   const host = hostTarget();
   const halves = parts(made.ir, made.checked, release, host);
-  const shim = rustShim(made.rust, made.checked);
+  const shim = rustShim(made.loaded.rust, made.checked);
   let building = together(made.checked.tables.session, caches);
   // ponytail: each object in turn, as Fish can't map to promises yet; Promise.all over them once it can.
   let objects: string[] = [];
@@ -470,10 +518,10 @@ export function buildTests(session: BuildSession, dir: string, out: string, rele
     if (e instanceof CompileError) throw sourced(e, copyNames(compilation.names), loaded.sources);
     throw e;
   }
-  const checked = checkedProgram(compilation, program, false, loaded.sources);
+  const checked = checkedProgram(compilation, program, false, loaded.sources).checked;
   const sources = [...loaded.sources];
   const made = generated(checked, loaded, { src, file: entry, release, panic: "unwind", sources, harness: true });
-  const shim = rustShim(made.rust, made.checked);
+  const shim = rustShim(made.loaded.rust, made.checked);
   const host = hostTarget();
   const halves = parts(made.ir, made.checked, release, host);
   let building = together(made.checked.tables.session, caches);
@@ -740,21 +788,21 @@ function sessionWith(locked: boolean, timed: boolean): BuildSession {
 }
 
 // What one of `fishc watch`'s builds takes.
-type Rebuild = { entry: string; binary: string; links: string[]; release: boolean; panic: Panic; leaks: boolean; debug: boolean; locked: boolean; timed: boolean };
+type Rebuild = { entry: string; binary: string; links: string[]; release: boolean; panic: Panic; leaks: boolean; debug: boolean; locked: boolean; timed: boolean; manifest: string | undefined };
 
 // One of `fishc watch`'s builds: whether it built, and the files it read or looked for.
-function rebuilt(r: Ref<Rebuild>): { built: boolean; loaded: string[] } {
+function rebuilt(r: Ref<Rebuild>, kept: Kept | undefined): Rebuilt {
   let loaded: string[] = [];
   try {
     const start = performance.now();
-    const made = built(sessionWith(r.locked, r.timed), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded);
+    let made = builtKept(sessionWith(r.locked, r.timed), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded, kept, r.manifest);
     reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
     for (const w of made.warnings) console.error(painted(w, r.entry, textOf(r.entry), "warning"));
-    return { built: true, loaded };
+    return { built: true, loaded, kept: made.kept };
   } catch (e) {
     if (e instanceof CompileError) console.error(painted(e, r.entry, textOf(r.entry)));
     else console.error(`fishc: ${(e as { message: string }).message}`);
-    return { built: false, loaded };
+    return { built: false, loaded, kept: undefined };
   }
 }
 
@@ -1216,13 +1264,14 @@ async function main(): Promise<void> {
     const scratch = out === undefined ? mkdtempSync(join(tmpdir(), "fishc-watch-")) : undefined;
     const binary = out ?? join(scratch!, basename(entry, ".fsh"));
     // What each build takes, the callback's own, since it may run on another thread.
-    const rebuild: Rebuild = { entry: `${entry}`, binary: `${binary}`, links: [...links], release, panic, leaks, debug: values.debug === true, locked, timed };
+    const manifest = findManifest(dirname(resolve(entry)));
+    const rebuild: Rebuild = { entry: `${entry}`, binary: `${binary}`, links: [...links], release, panic, leaks, debug: values.debug === true, locked, timed, manifest };
     await watchProgram({
       entry,
       binary,
       args: programArgs,
-      manifest: findManifest(dirname(resolve(entry))),
-      build: () => rebuilt(rebuild),
+      manifest,
+      build: (kept) => rebuilt(rebuild, kept),
       done: () => {
         try {
           if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });

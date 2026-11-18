@@ -2,6 +2,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { watch } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import type { Subprocess } from "bun";
+import type { Kept } from "./incremental.ts";
 
 // How long a burst of saves is let settle before rebuilding, and how long a program is given to
 // exit on SIGTERM before it is killed.
@@ -77,7 +78,9 @@ export async function stop(child: Ref<Subprocess>, grace: i64 = GRACE_MS): Promi
 
 // `build` builds the program into `binary`, printing its warnings or error as `fishc run` does,
 // and gives whether it built and the files it read. `done` runs once before exiting.
-export type Watching = { entry: string; binary: string; args: string[]; manifest?: string; build: () => { built: boolean; loaded: string[] }; done: () => void };
+// One build: whether it built, the files it read or looked for, and what it keeps for the next.
+export type Rebuilt = { built: boolean; loaded: string[]; kept: Kept | undefined };
+export type Watching = { entry: string; binary: string; args: string[]; manifest?: string; build: (kept: Kept | undefined) => Rebuilt; done: () => void };
 
 // Each signal the watcher was sent, a second of the same kind apart from the first. Controllers
 // rather than counters, since a listener owns what it captures and can't change it.
@@ -148,14 +151,14 @@ async function changes(files: Ref<string[]>, s: Ref<Signals>, round: Ref<AbortCo
   return await Promise.race(waits);
 }
 
-type Started = { files: string[]; contents: Map<string, string | undefined>; child: Subprocess | undefined };
+type Started = { files: string[]; contents: Map<string, string | undefined>; child: Subprocess | undefined; kept: Kept | undefined };
 
 // Builds and starts the program, giving the files to watch from now on and their contents.
 /** @throws {IoError} */
-async function start(w: Ref<Watching>, files: string[], note: (text: string) => void): Promise<Started> {
+async function start(w: Ref<Watching>, files: string[], note: (text: string) => void, kept: Kept | undefined): Promise<Started> {
   // Read before building, so a save during the build still differs afterwards.
   const before = snapshot(files);
-  const result = w.build();
+  let result = w.build(kept);
   // A build that failed may not have reached every import, so the files watched only grow then.
   let wanted: string[] = result.built ? [] : files;
   for (const f of result.loaded) wanted.push(f);
@@ -165,10 +168,10 @@ async function start(w: Ref<Watching>, files: string[], note: (text: string) => 
   for (const f of watched) contents.set(f, before.has(f) ? before.get(f) : contentsOf(f));
   if (!result.built) {
     note("waiting for changes");
-    return { files: watched, contents, child: undefined };
+    return { files: watched, contents, child: undefined, kept: result.kept };
   }
   const child = Bun.spawn([w.binary, ...w.args], { stdio: ["inherit", "inherit", "inherit"] });
-  return { files: watched, contents, child };
+  return { files: watched, contents, child, kept: result.kept };
 }
 
 // A program already sent SIGTERM is killed, as is every program on a second signal, so none
@@ -208,10 +211,12 @@ export async function watchProgram(w: Watching): Promise<never> {
     terminate.abort();
   });
   const note = (text: string) => console.error(`[fishc] ${text}`);
-  const first = await start(w, watchedFiles([w.entry], w.manifest), note);
+  let first = await start(w, watchedFiles([w.entry], w.manifest), note, undefined);
   let files = first.files;
   let contents = first.contents;
   let child = first.child;
+  // What the last build kept, which the next starts from.
+  let kept = first.kept;
   let due: i64 | undefined = undefined;
   while (true) {
     // Fish drops the waits that lose a race, so each round watches afresh, and nothing is watched
@@ -241,9 +246,10 @@ export async function watchProgram(w: Watching): Promise<never> {
       interrupted = ended.kind === "signal";
     }
     if (interrupted) await quit(w, s, child, true);
-    const next = await start(w, files, note);
+    let next = await start(w, files, note, kept);
     files = next.files;
     contents = next.contents;
     child = next.child;
+    kept = next.kept;
   }
 }

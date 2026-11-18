@@ -712,11 +712,18 @@ function macroShape(f: Ref<Declared>) {
 // An error it throws names local declarations as they were written.
 /** @throws {CompileError} */
 export function check(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false = false, macros = false, module = false): Checked {
-  let checked = checkAll(compilation, written, exportsToC, macros, module);
+  return checkKeeping(compilation, written, exportsToC, macros, module).checked;
+}
+
+// `check`, giving back what the checker kept besides its tables as well, which `fishc watch`
+// holds for its next build of the same program.
+/** @throws {CompileError} */
+export function checkKeeping(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean): { checked: Checked; parts: CheckerParts } {
+  let { checked, parts } = checkAll(compilation, written, exportsToC, macros, module);
   let renamed: CompileError[] = [];
   while (checked.warnings.length > 0) renamed.push(named(checked.warnings.shift()!, copyNames(checked.tables.names)));
   while (renamed.length > 0) checked.warnings.push(renamed.shift()!);
-  return checked;
+  return { checked, parts };
 }
 
 // The program as checking reads it: the written statements lowered, after std's.
@@ -1044,7 +1051,7 @@ function signatureFrom(typeParams: Ref<TypeParam[]>, params: Ref<Param[]>, retur
 }
 
 /** @throws {CompileError} */
-function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean): Checked {
+function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean): { checked: Checked; parts: CheckerParts } {
   let tables = newTables(compilation);
   let decls = newDeclarations();
   let program: Stmt[] = [];
@@ -1063,7 +1070,17 @@ function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<str
   } catch (e) {
     throw e instanceof CompileError ? named(e, copyNames(checker.tables.names)) : e;
   }
-  return { instances: outcome!.instances, tables: checker.tables, warnings: outcome!.warnings };
+  const { instances, warnings } = outcome!;
+  let taken = checkerApart(checker);
+  return { checked: { instances, tables: taken.tables, warnings }, parts: taken.parts };
+}
+
+// What a checker holds besides its tables: what the next check of the same program starts from.
+export type CheckerParts = { library: boolean; takenInC: Set<string>; macros: boolean; module: boolean; program: Stmt[]; funcs: BodyId[]; macroBodies: Set<BodyId>; typedArrows: { body: BodyId; type: TypeNode; arrow: Span & { throws?: TypeNode }; name: string }[]; classes: Map<string, ClassId>; templates: Map<string, ClassNode & { name: string }>; decls: Declarations; enums: Map<string, EnumInfo>; byName: Map<string, BodyId>; main: BodyId | undefined; assuming: Set<string>; registryState: RegistryState; genericClassesState: GenericClassesState; resolverState: ResolverState; beingChecked: InstanceId | undefined; done: Set<InstanceId>; rustTypes: Map<string, string>; views: Map<InstanceId, Type>; demands: NodeMap<Stmt, Integer>; candidates: Map<LocalId, Stmt>; demanded: usize; instancingState: InstancingState; querying: Set<string>; placeholders: NodeMap<Expr, Type>; broken: NodeSet<Stmt>; continued: NodeSet<Stmt>; inProgress: Set<InstanceId>; nextLocal: usize; closures: InstanceId[]; closureBodies: TypeMap<ClosureType, InstanceId>; errors: CompileError[]; unending: boolean; claimErrors: CompileError[]; refused: Refused[]; tryCallees: [CompileError, BodyId[]][]; failed: Map<BodyId, CompileError> };
+
+// A finished checker taken apart into its tables, which codegen takes, and the rest.
+function checkerApart(c: Checker): { tables: Tables; parts: CheckerParts } {
+  return { tables: c.tables, parts: { library: c.library, takenInC: c.takenInC, macros: c.macros, module: c.module, program: c.program, funcs: c.funcs, macroBodies: c.macroBodies, typedArrows: c.typedArrows, classes: c.classes, templates: c.templates, decls: c.decls, enums: c.enums, byName: c.byName, main: c.main, assuming: c.assuming, registryState: c.registryState, genericClassesState: c.genericClassesState, resolverState: c.resolverState, beingChecked: c.beingChecked, done: c.done, rustTypes: c.rustTypes, views: c.views, demands: c.demands, candidates: c.candidates, demanded: c.demanded, instancingState: c.instancingState, querying: c.querying, placeholders: c.placeholders, broken: c.broken, continued: c.continued, inProgress: c.inProgress, nextLocal: c.nextLocal, closures: c.closures, closureBodies: c.closureBodies, errors: c.errors, unending: c.unending, claimErrors: c.claimErrors, refused: c.refused, tryCallees: c.tryCallees, failed: c.failed } };
 }
 
 class Checker implements RegistryHost, GenericClassesHost, InstancingHost, ResolverHost, EnumHost {
@@ -2911,6 +2928,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   /** @throws {CompileError} */
   checkInstance(this: Mut<this>, id: InstanceId, outer: Mut<BodyState> | undefined, outerSt: Mut<ContextState> | undefined, outerExprs: Mut<ExpressionsState> | undefined): void {
+    this.tables.counts.checks++;
     const f = bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(id));
     // A comptime parameter's value is the instance's own; one called from C, or kept in an async
     // function's or a generator's state, or given to an accessor, has no instance per value.
