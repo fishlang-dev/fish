@@ -336,23 +336,73 @@ function built(session: BuildSession, file: string, out: string, release: boolea
 // did is not loaded or checked again. Gives what to keep for the next build. `manifest` is the
 // package's, which a build may read.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): { warnings: CompileError[]; session: BuildSession; kept: Kept } {
+export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): { ir: string; warnings: CompileError[]; session: BuildSession; kept: Kept } {
   let { core, caches } = apart(session);
-  let start = checkedFrom(core, file, looked, kept, manifest);
-  const failed = start.checked.tables.session.failed;
-  start.checked.tables.session.failed = undefined;
-  const sources = [...start.loaded.sources];
-  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed });
+  let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest);
   const ir = instrumented(made.ir, target);
-  const shim = rustShim(made.loaded.rust, made.checked);
+  const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
   if (shim !== undefined) refuseForeignRust(target);
-  const split = parts(ir, made.checked, release, target, debug);
-  let { instances, tables, warnings } = made.checked;
+  const split = parts(ir, made.kept.checked, release, target, debug);
+  let { checked, parts: checkerParts, loaded, contents } = made.kept;
+  let { instances, tables, warnings } = checked;
   let building = together(tables.session, caches);
   // The next build gives the kept tables its own session.
   tables.session = newSession();
   linked(building, ir, split, out, release, links, shim, target, leaks, debug);
-  return { warnings: [...warnings], session: building, kept: { checked: { instances, tables, warnings }, parts: start.parts, loaded: made.loaded, contents: start.contents } };
+  return { ir: made.ir, warnings: made.warnings, session: building, kept: { checked: { instances, tables, warnings }, parts: checkerParts, loaded, contents } };
+}
+
+// `compile` for `fishc watch`, from what its last build kept, giving the IR, the warnings and what
+// to keep.
+/** @throws {CompileError | Error | IoError | JsonError} */
+export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): { ir: string; warnings: CompileError[]; kept: Kept } {
+  let start = checkedFrom(session, file, looked, kept, manifest);
+  const failed = start.checked.tables.session.failed;
+  start.checked.tables.session.failed = undefined;
+  const sources = [...start.loaded.sources];
+  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed });
+  const warnings = [...made.checked.warnings];
+  return { ir: made.ir, warnings, kept: { checked: made.checked, parts: start.parts, loaded: made.loaded, contents: start.contents } };
+}
+
+// How a build from what `fishc watch` kept differs from a clean build of `file`: its IR, its
+// warnings, or the error it stopped at, or undefined when they match.
+/** @throws {IoError} */
+export function cleanDifference(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, got: Ref<{ ir: string; warnings: CompileError[] } | CompileError>): string | undefined {
+  let clean: { ir: string; warnings: CompileError[] } | CompileError | undefined = undefined;
+  try {
+    let looked: string[] = [];
+    const made = compiledIn(newCompilation(session), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, looked);
+    clean = { ir: made.ir, warnings: [...made.checked.warnings] };
+  } catch (e) {
+    if (!(e instanceof CompileError)) return `the clean build failed: ${(e as { message: string }).message}`;
+    clean = e;
+  }
+  const want = clean!;
+  if (want instanceof CompileError || got instanceof CompileError) {
+    const wanted = want instanceof CompileError ? `error ${shownError(want)}` : "a build";
+    const gave = got instanceof CompileError ? `error ${shownError(got)}` : "a build";
+    return wanted === gave ? undefined : `a clean build gives ${wanted}, the kept one ${gave}`;
+  }
+  const wantWarnings = want.warnings.map((w) => shownError(w)).join("\n");
+  const gotWarnings = got.warnings.map((w) => shownError(w)).join("\n");
+  if (wantWarnings !== gotWarnings) return `the warnings differ:\n--- clean\n${wantWarnings}\n--- kept\n${gotWarnings}`;
+  if (want.ir === got.ir) return undefined;
+  return `the IR differs from a clean build's, first at line ${firstDifference(want.ir, got.ir)}`;
+}
+
+// An error's code, place and message, as compared between builds.
+function shownError(e: Ref<CompileError>): string {
+  return `${e.code} ${e.start}-${e.end} ${e.message}`;
+}
+
+// The first line, from 1, where two texts differ.
+function firstDifference(a: string, b: string): usize {
+  const x = a.split("\n");
+  const y = b.split("\n");
+  let i: usize = 0;
+  while (i < x.length && i < y.length && x[i] === y[i]) i++;
+  return i + 1;
 }
 
 // The program checked: `kept`'s, given `session`, when every file it read reads as it did, or else
@@ -798,11 +848,25 @@ function rebuilt(r: Ref<Rebuild>, kept: Kept | undefined): Rebuilt {
     let made = builtKept(sessionWith(r.locked, r.timed), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded, kept, r.manifest);
     reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
     for (const w of made.warnings) console.error(painted(w, r.entry, textOf(r.entry), "warning"));
+    verified(r, { ir: made.ir, warnings: made.warnings });
     return { built: true, loaded, kept: made.kept };
   } catch (e) {
-    if (e instanceof CompileError) console.error(painted(e, r.entry, textOf(r.entry)));
-    else console.error(`fishc: ${(e as { message: string }).message}`);
+    if (e instanceof CompileError) {
+      console.error(painted(e, r.entry, textOf(r.entry)));
+      verified(r, e);
+    } else console.error(`fishc: ${(e as { message: string }).message}`);
     return { built: false, loaded, kept: undefined };
+  }
+}
+
+// With FISH_WATCH_VERIFY set, says when a build from what watch kept differs from a clean one.
+function verified(r: Ref<Rebuild>, got: Ref<{ ir: string; warnings: CompileError[] } | CompileError>): void {
+  if (process.env.FISH_WATCH_VERIFY === undefined) return;
+  try {
+    const wrong = cleanDifference(sessionWith(r.locked, false), r.entry, r.release, r.panic, r.leaks, r.debug, got);
+    console.error(wrong === undefined ? "[fishc] verified: the build matches a clean one" : `[fishc] verify failed: ${wrong}`);
+  } catch (e) {
+    console.error(`[fishc] verify failed: ${(e as { message: string }).message}`);
   }
 }
 
