@@ -39,10 +39,9 @@ export type Compilation = {
 };
 
 // What a compilation numbers as it goes, from 0, so the same program is numbered the same way
-// whatever was compiled before it: its enums, which tells enums of one name apart, the generic
-// functions lifted out of bodies, destructuring assignments, macro expansions, and the constants
-// macros give values. `checks` counts the instances checked, which a kept check repeats for few.
-export type Counts = { enums: usize; lifts: usize; destructures: usize; expansions: usize; constants: usize; checks: usize };
+// whatever was compiled before it: its enums, which tells enums of one name apart, macro
+// expansions, and the constants macros give values. `checks` counts the instances checked, which a kept check repeats for few.
+export type Counts = { enums: usize; expansions: usize; constants: usize; checks: usize };
 
 // What lasts as long as whoever compiles: a CLI run, a language server, a test. Its options, and
 // the caches that spare later compilations the work earlier ones did. The caches only building
@@ -68,7 +67,7 @@ export function newSession(): Session {
 }
 
 export function newCompilation(session: Session): Compilation {
-  return { session, ids: { last: 0 }, rewrites: new Rewrites(), names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: new Typing(), arenas: new Arenas(), counts: { enums: 0, lifts: 0, destructures: 0, expansions: 0, constants: 0, checks: 0 }, upcasts: new Set(), files: [], rust: { names: new NodeMap<Declared | ClassMember, RustName>(), classNodes: new NodeMap<ClassNode, RustClass>() }, enumInits: [], generated: new NodeSet<Id>(), looked: [] };
+  return { session, ids: { last: 0 }, rewrites: new Rewrites(), names: { local: new Set(), madeUp: new Map() }, regex: { properties: new Map(), folds: new Map() }, typing: new Typing(), arenas: new Arenas(), counts: { enums: 0, expansions: 0, constants: 0, checks: 0 }, upcasts: new Set(), files: [], rust: { names: new NodeMap<Declared | ClassMember, RustName>(), classNodes: new NodeMap<ClassNode, RustClass>() }, enumInits: [], generated: new NodeSet<Id>(), looked: [] };
 }
 
 // A compilation to check one round's macros with, so the check doesn't use up the compilation
@@ -95,7 +94,7 @@ export function macroCompilation(c: Ref<Compilation>): Compilation {
     regex: { properties: new Map(), folds: new Map() },
     typing: new Typing(),
     arenas: new Arenas(),
-    counts: { enums: c.counts.enums, lifts: c.counts.lifts, destructures: c.counts.destructures, expansions: c.counts.expansions, constants: c.counts.constants, checks: c.counts.checks },
+    counts: { enums: c.counts.enums, expansions: c.counts.expansions, constants: c.counts.constants, checks: c.counts.checks },
     upcasts: copied,
     files: c.files.map((f) => ({ base: f.base, file: f.file, src: f.src, std: f.std })),
     rust: { names: c.rust.names.copy(), classNodes: c.rust.classNodes.copy() },

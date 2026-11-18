@@ -176,3 +176,30 @@ test("a function passing an instance on keeps its IR when the class gains a fiel
   removed(dir);
   assert(wrong === "", wrong);
 });
+
+const LIFTED = `function first(): i64 {
+  const id = <T>(x: T): T => x;
+  return id(1);
+}
+
+function second(): string {
+  const same = <T>(x: T): T => x;
+  return same("a");
+}
+
+function main() {
+  console.log(first(), second());
+}
+`;
+
+test("a generic arrow lifted out of a body is named by its place in that body", () => {
+  const dir = scratch("fish-irnames-");
+  const before = irOf(dir, LIFTED);
+  // Another generic arrow lifted from the earlier body, on a line already there.
+  const after = irOf(dir, LIFTED.replace("  return id(1);", "  const other = <T>(x: T): T => x; return id(other(1));"));
+  const lifted = named(before, ['@"fsh.second']);
+  assert(lifted.length > 1, `second or what it lifts wasn't found: ${lifted.join(", ")}`);
+  const wrong = differing(before, after, lifted);
+  removed(dir);
+  assert(wrong === "", wrong);
+});

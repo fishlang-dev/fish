@@ -127,17 +127,24 @@ function brief(shown: string): string {
   return short.length <= 2 * LONGEST_ARGUMENTS ? short : `${short.slice(0, (2 * LONGEST_ARGUMENTS) as i64)}...`;
 }
 
-// Each instance's name in the IR: two instances whose types read alike, as two classes made from
-// arguments shown the same way, are told apart by a count after the first.
+// Each instance's name in the IR: instances whose shortened symbols read alike, as two classes made
+// from arguments shown the same way, are each told apart by a digest of the whole symbol, so a
+// name doesn't depend on the order instances were made in. Whole symbols alike are numbered.
 export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
+  let alike = new Map<string, usize>();
+  for (let id: usize = 1; id <= arenas.instanceCount(); id++) {
+    const name = shortened(arenas.instanceOf(id as InstanceId).symbol);
+    alike.set(name, (alike.get(name) ?? 0) + 1);
+  }
   let known = new Map<InstanceId, string>();
-  let seen = new Map<string, usize>();
+  let taken = new Set<string>();
   for (let id: usize = 1; id <= arenas.instanceCount(); id++) {
     const x = arenas.instanceOf(id as InstanceId);
     const name = shortened(x.symbol);
-    const n = (seen.get(name) ?? 0) + 1;
-    seen.set(name, n);
-    known.set(x.id, n === 1 ? name : `${name}~${n}`);
+    let chosen = (alike.get(name) ?? 0) > 1 ? `${name}~${digest(x.symbol)}` : name;
+    for (let n: usize = 2; taken.has(chosen); n++) chosen = `${name}~${digest(x.symbol)}.${n}`;
+    taken.add(chosen);
+    known.set(x.id, chosen);
   }
   return known;
 }

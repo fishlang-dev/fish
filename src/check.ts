@@ -3058,6 +3058,9 @@ class ClassMembers implements Members {
 // in, and that body's expression state, through `outer` and `outerExprs`.
 class BodyState {
   instanceId: InstanceId;
+  // How many destructuring temporaries the body has named, which numbers them within it, so a
+  // body's names don't depend on what was checked before it.
+  parts: usize = 0;
   // The body a closure is written in, which its body reaches back into as it is checked.
   outer: Mut<BodyState> | undefined;
   outerSt: Mut<ContextState> | undefined;
@@ -4194,7 +4197,7 @@ class BodyChecker implements Context, GuardHost {
     return [...out.reads, ...out.writes];
   }
   private freshPart(this: Mut<this>): string {
-    return `destructured ${this.cx.tables.counts.destructures++}`;
+    return `destructured ${this.state.parts++}`;
   }
   private partIdent(this: Mut<this>, name: string, at: Ref<Span>): Expr {
     return { id: nextId(this.cx.tables.ids), kind: "ident", name, start: at.start, end: at.end };
@@ -5926,7 +5929,11 @@ class BodyChecker implements Context, GuardHost {
     const known = this.cx.tables.liftedFunctions.get(key);
     if (known !== undefined) return known.symbol;
     const id = nextId(this.cx.tables.ids);
-    const symbol = `${this.f().name}.${name !== "" ? name : "arrow"}#${this.cx.tables.counts.lifts++}`;
+    // Named by where it sits in the body around it, so it keeps its name whatever was lifted before
+    // it, and by its place in the file when two bodies named alike lift at the same place.
+    const enclosing = this.f();
+    let symbol = `${enclosing.name}.${name !== "" ? name : "arrow"}+${fn.start - enclosing.start}`;
+    if (this.cx.byName.has(symbol)) symbol = `${symbol}@${fn.start}`;
     // Its calls of itself call what it was lifted to.
     walk({ of: "stmts", node: fn.body }, (n) => {
       if (n.of === "expr" && n.node.kind === "call" && n.node.callee.kind === "ident" && n.node.callee.name === name) this.cx.tables.rewrites.replace(n.node.callee, { ...n.node.callee, name: symbol });

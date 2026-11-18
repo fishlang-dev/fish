@@ -92,7 +92,7 @@ export function expandMacros(compilation: Mut<Compilation>, loaded: Mut<Loaded>,
       const made = checkMacros(macroCompilation(compilation), forCheck);
       // The ids and counts the check took stay taken, so what the macros make doesn't reuse them.
       compilation.ids.last = made.tables.ids.last;
-      compilation.counts = { enums: made.tables.counts.enums, lifts: made.tables.counts.lifts, destructures: made.tables.counts.destructures, expansions: made.tables.counts.expansions, constants: made.tables.counts.constants, checks: made.tables.counts.checks };
+      compilation.counts = { enums: made.tables.counts.enums, expansions: made.tables.counts.expansions, constants: made.tables.counts.constants, checks: made.tables.counts.checks };
       checked = new MacroHost(made);
     } catch (e) {
       throw argumentError(e as CompileError, spans);
