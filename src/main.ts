@@ -390,7 +390,7 @@ function rechecked(kept: Kept): { done: Kept | undefined; session: Session | und
   let classes: Edit[] = [];
   for (const [index, now] of edits) {
     const edit = classified(k.loaded.modules[index]!.src, now);
-    if (edit.fallback !== undefined || edit.signatures.length > 0 || edit.changed.some((c) => c.name === "constructor")) fresh = true;
+    if (edit.fallback !== undefined || edit.changed.some((c) => c.name === "constructor")) fresh = true;
     classes.push(edit);
   }
   if (fresh) return spent(k);
@@ -404,8 +404,8 @@ function rechecked(kept: Kept): { done: Kept | undefined; session: Session | und
     const file = k.loaded.modules[index]!.file;
     const before = k.loaded.modules[index]!.src;
     // A changed body is named in the program as its file's link names it.
-    let wanted: { owner: string | undefined; name: string }[] = [];
-    for (const c of edit.changed) wanted.push(c.owner !== undefined ? { owner: uniqueIn(k.loaded, index, c.owner!), name: c.name } : { owner: undefined, name: uniqueIn(k.loaded, index, c.name) });
+    let wanted: { owner: string | undefined; name: string; whole: boolean }[] = [];
+    for (const c of edit.changed) wanted.push(c.owner !== undefined ? { owner: uniqueIn(k.loaded, index, c.owner!), name: c.name, whole: false } : { owner: undefined, name: uniqueIn(k.loaded, index, c.name), whole: c.whole });
     let r = reloaded(k, index, now);
     if (r.fallback !== undefined) return spent(k);
     let taken = takenBodies(r.statements, wanted);
@@ -429,7 +429,10 @@ function rechecked(kept: Kept): { done: Kept | undefined; session: Session | und
       while (body.statements.length > 0) moved.push(movedStmt(body.statements.shift()!, by));
       moves.push([spill, spill + (c.end - c.start), c.start]);
       spill = spill + (c.end - c.start) + 1;
-      bodies.push({ owner: body.owner, name: body.name, statements: moved });
+      if (body.func !== undefined) {
+        const whole = movedStmt(body.func!, by);
+        if (whole.kind === "function") bodies.push({ owner: undefined, name: body.name, statements: [], func: whole });
+      } else bodies.push({ owner: body.owner, name: body.name, statements: moved });
     }
     if (spill >= (FILE_SPAN as usize)) return spent(k);
     k.loaded.sources[s]!.src = now;

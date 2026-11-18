@@ -207,3 +207,32 @@ function main() {
   const said = editedIn(uses, GENERIC, [["    return 1;", "    const w = 2;\n    return w;"]]);
   assert(said.join("; ") === "kept same", said.join("; "));
 }, { timeout: 120_000 });
+
+const CHAIN = `export function label(n: i64) {
+  return n * 2;
+}
+
+export function wrap(n: i64) {
+  return label(n);
+}
+`;
+
+const CALLS = `import { label, wrap } from "./lib.fsh";
+
+function main() {
+  console.log(wrap(2));
+}
+`;
+
+test("a body whose inferred result changes is checked again in every caller that read it", () => {
+  const said = editedIn(CALLS, CHAIN, [["  return n * 2;", "  return `${n}`;"], ["  return `${n}`;", "  return n + 1;"]]);
+  assert(said.join("; ") === "kept same; kept same", said.join("; "));
+}, { timeout: 120_000 });
+
+test("a function's signature edit is checked again with every body naming it", () => {
+  const said = editedIn(CALLS, CHAIN, [
+    ["export function label(n: i64) {", "export function label(n: i64): i64 {"],
+    ["export function label(n: i64): i64 {", "export function label(k: i64, j: i64 = 1): i64 {\n  const n = k * j;"],
+  ]);
+  assert(said.join("; ") === "kept same; kept same", said.join("; "));
+}, { timeout: 120_000 });

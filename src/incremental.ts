@@ -86,7 +86,7 @@ export function spillFrom(was: Ref<[usize, usize, usize][] | undefined>, length:
 // The statements of each body `wanted` names, out of a file read again: a function's by its name,
 // a member's by its class's name and its key. Gives undefined when one isn't found or takes a
 // parameter with a default, whose lowering writes statements at the parameter.
-export function takenBodies(given: Stmt[], wanted: Ref<{ owner: string | undefined; name: string }[]>): Replaced[] | undefined {
+export function takenBodies(given: Stmt[], wanted: Ref<{ owner: string | undefined; name: string; whole: boolean }[]>): Replaced[] | undefined {
   let statements = given;
   let out: Replaced[] = [];
   while (statements.length > 0) {
@@ -94,9 +94,11 @@ export function takenBodies(given: Stmt[], wanted: Ref<{ owner: string | undefin
     let d = s.kind === "export" ? s.body : s;
     if (d.kind === "function") {
       const named = d.name;
-      if (!wanted.some((w) => w.owner === undefined && w.name === named)) continue;
+      const w = wanted.find((w) => w.owner === undefined && w.name === named);
+      if (w === undefined) continue;
       if (d.body === undefined || d.params.some((p) => p.default !== undefined)) return undefined;
-      out.push({ owner: undefined, name: named, statements: d.body! });
+      if (w!.whole) out.push({ owner: undefined, name: named, statements: [], func: d });
+      else out.push({ owner: undefined, name: named, statements: d.body! });
       continue;
     }
     if (d.kind !== "class" || d.name === undefined) continue;

@@ -23,7 +23,7 @@ import { Registry, RegistryState, type RegistryHost } from "./registry.ts";
 import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost } from "./resolve.ts";
 import { openParam } from "./typefns.ts";
 import { lowerDefaults, writtenName } from "./defaults.ts";
-import { TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.ts";
+import { idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.ts";
 import { unsupported, unsupportedDeclaration } from "./unsupported.ts";
 import { hoistLocals } from "./locals.ts";
 import { localKeys, lowerKeys, lowerKeysWith, numberKey, topKeys } from "./keys.ts";
@@ -1328,6 +1328,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         if (id === undefined) return "a function is new";
         const was = this.tables.arenas.bodyOf(id);
         if (was.signature === true || was.overloads !== undefined || was.closure !== undefined || was.js !== undefined || was.foreign === true) return "a function is overloaded or not Fish";
+        // A generic function's instances are told apart by its type parameters' names.
+        const params: Ref<TypeParam[] | undefined> = was.typeParams;
+        const oldNames = params !== undefined ? params!.map((p) => p.name).join(",") : "";
+        if (r.func !== undefined && oldNames !== r.func!.typeParams.map((p) => p.name).join(",")) return "a function's type parameters changed";
         ids.push(id);
       } else {
         for (let c: usize = 1; c <= this.tables.arenas.classCount(); c++) {
@@ -1353,11 +1357,30 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       targets.push(ids);
     }
     let again: InstanceId[] = [];
+    let named = new Set<string>();
     let at: usize = 0;
     while (replaced.length > 0) {
-      const r = replaced.shift()!;
+      let r = replaced.shift()!;
       const ids: Ref<BodyId[]> = targets[at]!;
       at++;
+      if (r.func !== undefined) {
+        // A signature read again: the function is in place of its whole body, and every body that
+        // names it is checked again too.
+        let f = r.func!;
+        const id = ids[0]!;
+        let body = this.tables.arenas.bodyMut(id);
+        body.start = f.start;
+        body.end = f.end;
+        body.params = f.params;
+        body.returnType = f.returnType;
+        body.throws = f.throws;
+        if (body.typeParams !== undefined) body.typeParams = f.typeParams;
+        if (f.body !== undefined) body.body = f.body!;
+        this.failed.delete(id);
+        named.add(r.name);
+        for (let i: usize = 1; i <= this.tables.arenas.instanceCount(); i++) if (this.tables.arenas.instanceOf(i as InstanceId).body === id) again.push(i as InstanceId);
+        continue;
+      }
       for (const id of ids) {
         let body = this.tables.arenas.bodyMut(id);
         body.body = cloneStmts(r.statements);
@@ -1379,18 +1402,69 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         }
       }
     }
-    for (const i of again) this.forget(i);
-    for (const i of again) {
-      try {
-        this.checkBody(i);
-      } catch (e) {
-        if (!(e instanceof CompileError)) throw e;
-        this.recover(e);
+    if (named.size > 0) {
+      for (let i: usize = 1; i <= this.tables.arenas.instanceCount(); i++) {
+        const x = this.tables.arenas.instanceOf(i as InstanceId);
+        if (x.retired === true || again.includes(i as InstanceId)) continue;
+        const b = this.tables.arenas.bodyOf(x.body);
+        if (holdsNode({ of: "stmts", node: b.body }, (n) => n.of === "expr" && n.node.kind === "ident" && named.has(n.node.name))) again.push(i as InstanceId);
       }
     }
-    this.drain();
+    // An instance whose results changed is checked again in every caller that read them, and so on
+    // until none changes.
+    let done = new Set<InstanceId>();
+    let round = again;
+    while (round.length > 0) {
+      let before = new Map<InstanceId, string>();
+      for (let k: usize = 0; k < round.length; k++) before.set(round[k]!, this.resultsOf(round[k]!));
+      for (let k: usize = 0; k < round.length; k++) {
+        this.forget(round[k]!);
+        done.add(round[k]!);
+      }
+      for (let k: usize = 0; k < round.length; k++) {
+        const i = round[k]!;
+        try {
+          this.checkBody(i);
+        } catch (e) {
+          if (!(e instanceof CompileError)) throw e;
+          this.recover(e);
+        }
+      }
+      this.drain();
+      let changed = new Set<InstanceId>();
+      for (const [i, was] of before) if (this.resultsOf(i) !== was) changed.add(i);
+      let next: InstanceId[] = [];
+      if (changed.size > 0) {
+        for (let c: usize = 1; c <= this.tables.arenas.instanceCount(); c++) {
+          const caller = c as InstanceId;
+          if (done.has(caller)) continue;
+          if (this.readsAny(caller, changed)) next.push(caller);
+        }
+      }
+      round = next;
+    }
     return undefined;
   }
+
+  // Whether a live instance calls, or sets through, any of `callees`.
+  private readsAny(caller: InstanceId, callees: Ref<Set<InstanceId>>): boolean {
+    const x = this.tables.arenas.instanceOf(caller);
+    if (x.retired === true) return false;
+    for (const callee of x.calls.values()) if (callees.has(callee)) return true;
+    for (const callee of x.setters.values()) if (callees.has(callee)) return true;
+    return false;
+  }
+
+  // What a caller reads of an instance's check, as one text to compare: what it gives and throws,
+  // the types its parameters keep their brands as, and whether it keeps what it borrows. Locals
+  // and nodes are numbered anew by each check, so none is compared.
+  private resultsOf(id: InstanceId): string {
+    const x = this.tables.arenas.instanceOf(id);
+    const key = (t: Type) => (typeof t === "string" ? t : `${idOf(t)}`);
+    const branded = x.branded !== undefined ? `${key(x.branded!.returns)}:${[...x.branded!.params.values()].map((t) => key(t)).join(",")}` : "";
+    return `${key(x.returns)}|${branded}|${x.throws !== undefined ? key(x.throws!) : ""}|${x.keeps === undefined ? "" : x.keeps ? "keeps" : "lends"}`;
+  }
+
 
   // Names the program's functions and finds `main`, before any body is checked.
   /** @throws {CompileError} */
