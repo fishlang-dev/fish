@@ -11,7 +11,7 @@ import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, isMember, memberOf, toFloat, type ComptimeHost, type Value } from "./comptime.ts";
 import { Printer, RUNTIME, type PrintHost } from "./runtime.ts";
 import type { ArithmeticOp, AssignOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { ARRAY, DYN, compound, Conversions, llvmOf, textOf } from "./layout.ts";
+import { ARRAY, DYN, compound, Conversions, llvmOf, structNames, textOf, typeDefinitions } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
 import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
@@ -972,7 +972,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // The runtime reads which way a panic goes. A library leaves it to the runtime's default, so
   // two libraries in one program don't both define it; its exports abort on a panic anyway.
   const abort: string[] = this.library ? [] : [`@fsh_panic_abort = constant i32 ${this.panic === "abort" ? 1 : 0}`];
-  return [
+  const module = [
     ...this.globals.toSorted(),
     ...abort,
     "",
@@ -985,6 +985,8 @@ class Codegen implements PrintHost, ComptimeHost {
     ...this.filled,
     "",
   ].join("\n");
+  // Each named struct the module uses, defined once ahead of everything.
+  return [...typeDefinitions(this.tables.typing, module), module].join("\n");
   }
 
   loc(id: LocalId): Ref<Local> {
@@ -1708,8 +1710,9 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     if (family !== "overflowing") return v;
     const pair = this.temp();
-    this.emit(`${pair} = insertvalue { ${t}, i1 } undef, ${t} ${v}, 0`);
-    this.emit(`${result} = insertvalue { ${t}, i1 } ${pair}, i1 ${over!}, 1`);
+    const tuple = this.llvm(this.valueType(e));
+    this.emit(`${pair} = insertvalue ${tuple} undef, ${t} ${v}, 0`);
+    this.emit(`${result} = insertvalue ${tuple} ${pair}, i1 ${over!}, 1`);
     return result;
   }
 
@@ -14152,6 +14155,7 @@ class Codegen implements PrintHost, ComptimeHost {
 // The LLVM IR of a checked program.
 /** @throws {CompileError} */
 export function codegen(checked: Checked, options: Options): string {
+  checked.tables.typing.structNames = structNames(checked.tables.typing);
   return new Codegen(checked, options).module();
 }
 
@@ -14161,6 +14165,7 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
   let { instances, tables, warnings } = checked;
   const measured = allWords(tables.typing);
   tables.typing.unionWords = measured;
+  tables.typing.structNames = structNames(tables.typing);
   let generator = new Codegen({ instances, tables, warnings: [] }, options);
   const ir = generator.module();
   return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings } };

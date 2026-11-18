@@ -151,3 +151,28 @@ test("the shims a JS promise and a JS callback go through are named by their fun
   removed(dir);
   assert(wrong === "", wrong);
 }, { timeout: 30_000 });
+
+const BOXED = `class Box {
+  a: i64 = 1;
+}
+
+function pass(b: Box): Box {
+  return b;
+}
+
+function main() {
+  console.log(pass(new Box()).a);
+}
+`;
+
+test("a function passing an instance on keeps its IR when the class gains a field", () => {
+  const dir = scratch("fish-irnames-");
+  const before = irOf(dir, BOXED);
+  // On the same line, so no line moves.
+  const after = irOf(dir, BOXED.replace("  a: i64 = 1;", "  a: i64 = 1; z: i64 = 0;"));
+  const passing = named(before, ['@"fsh.pass"', "@fsh.pass("]);
+  assert(passing.length > 0, `pass wasn't found: ${[...before.keys()].join(", ")}`);
+  const wrong = differing(before, after, passing);
+  removed(dir);
+  assert(wrong === "", wrong);
+});

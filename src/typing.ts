@@ -2046,6 +2046,8 @@ export class Typing {
   // Each union's payload words, filled in once before codegen; a union made after that is measured
   // when it is asked for.
   unionWords = new TypeMap<UnionType, usize>();
+  // The named struct each class, object and union is held as in the IR, set before codegen.
+  structNames = new TypeMap<Type, string>();
 
   // Every union type made so far.
   unionTypes(): UnionType[] {
@@ -2721,6 +2723,15 @@ export class Typing {
   // Once every body is checked, what futures give, generators yield and take, and closures take
   // and give are laid out as codegen holds values, a brand as its base; the checker kept the
   // brands to check them.
+  // Every type this program has a record for, in the order they were made.
+  typeIds(): Type[] {
+    let out: Type[] = [];
+    // An id converts to one kind of type, not to their union; which kind it says doesn't matter
+    // here, since callers read the record.
+    for (let at: usize = 0; at < this.arena.length; at++) out.push((at + FIRST_ID) as ObjectType);
+    return out;
+  }
+
   layOutForCodegen(this: Mut<this>): void {
     for (let at: usize = 0; at < this.arena.length; at++) {
       let r = copyRecord(this.arena[at]!);

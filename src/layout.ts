@@ -5,7 +5,7 @@ import type { Expr } from "./parser.ts";
 import { rustClassOf } from "./rust.ts";
 import { byteSize, words } from "./sizes.ts";
 import type { Tables } from "./compilation.ts";
-import { idOf, integerInfo, isInteger, isLock, isNumeric, literalText, type ArrayType, type ClassType, type Field, type LiteralType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
+import { digest, idOf, integerInfo, isInteger, isLock, isNumeric, literalText, TypeMap, type ArrayType, type ClassType, type Field, type LiteralType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.ts";
 
 // How each type is laid out in LLVM IR, and how a value moves between two types that hold it
 // differently.
@@ -33,11 +33,117 @@ function settled(typing: Ref<Typing>, t: Type): Type {
   return t;
 }
 
-// The LLVM type a value of `t` is held as. An object is a literal struct of its fields, in
-// their sorted order. An instance is a literal struct of the base it embeds, if any, then its
-// own fields in declaration order. A union is its member's index, then enough 64-bit words for
-// its largest member.
+// The names `typeName` gives, kept across one naming pass, so each type is spelled once.
+export type Spelling = { names: TypeMap<Type, string>; within: Type[] };
+
+// A type as a named struct's name spells it: what the type is, never how it is laid out, so a
+// function using a class reads the same when the class's layout changes. A type inside it that
+// has a name of its own is spelled by that name, so a spelling stays short however deep the types
+// go. A type met again inside itself is `^`.
+// ponytail: a self-referring type's name depends on which of its cycle was named first, which is
+// fixed within one compilation; spell cycles canonically if names must match across programs.
+function spelled(typing: Ref<Typing>, t: Type, sp: Mut<Spelling>): string {
+  if (typeof t === "string") return t;
+  const r = typing.rec(t);
+  if (r.kind === "class") return r.generic !== undefined ? `${r.generic.name}<${r.generic.args.map((a) => part(typing, a, sp)).join(",")}>` : r.name;
+  if (r.kind === "object") return `{${r.fields.map((f) => `${f.name}:${part(typing, f.type, sp)}`).join(",")}}${r.tuple === true ? "t" : ""}`;
+  if (r.kind === "union") return r.members.map((m) => part(typing, m, sp)).join("|");
+  if (r.kind === "array") return `${part(typing, r.element, sp)}[]`;
+  if (r.kind === "fixed") return `${part(typing, r.element, sp)}[${r.size}]`;
+  if (r.kind === "brand") return part(typing, r.base, sp);
+  if (r.kind === "literal") return typeof r.value === "string" ? JSON.stringify(r.value) : typeof r.value === "boolean" ? `${r.value}` : `${literalText(r.value)}n`;
+  if (r.kind === "interior") return `${r.which}<${part(typing, r.of, sp)}>`;
+  // Any other type is laid out as what it holds, as `layoutOf` reads it, so it is spelled by that.
+  const held: Ref<Field[]> = r.kind === "generator" || r.kind === "future" ? r.frame : r.fields;
+  return `${r.kind}(${held.map((f) => `${f.name}:${part(typing, f.type, sp)}`).join(",")})`;
+}
+
+// A type inside another's spelling: its own name when it has one, else its spelling.
+function part(typing: Ref<Typing>, t: Type, sp: Mut<Spelling>): string {
+  if (typeof t === "string") return t;
+  if (sp.within.includes(t)) return "^";
+  const named = namedIn(typing, t, sp);
+  return named !== undefined ? named : spelled(typing, t, sp);
+}
+
+// The name of the named struct a value of `t` is held as, for a class, object or union; undefined
+// for a type written out where it is used. A class is named by its name and type arguments, an
+// object or union by a digest of what it holds.
+export function typeName(typing: Ref<Typing>, t: Type): string | undefined {
+  let sp: Spelling = { names: new TypeMap<Type, string>(), within: [] };
+  return namedIn(typing, t, sp);
+}
+
+function namedIn(typing: Ref<Typing>, t: Type, sp: Mut<Spelling>): string | undefined {
+  if (typeof t === "string") return undefined;
+  const known = sp.names.get(t);
+  if (known !== undefined) return known;
+  const r = typing.rec(t);
+  const nameable = (r.kind === "class" && (r.base !== undefined || r.fields.length > 0) && rustClassOf(typing, t) === undefined) || (r.kind === "object" && r.fields.length > 0) || r.kind === "union";
+  if (!nameable) return undefined;
+  sp.within.push(t);
+  const text = spelled(typing, t, sp);
+  sp.within.pop();
+  // A class name holding a quote or a backslash, as a string literal type argument does, would
+  // need escaping in the IR, so it takes the digest objects and unions do.
+  const name = r.kind === "class" ? (/^[\w$.<>,:|\[\]{}=+^-]+$/.test(text) ? `%"<${text}>"` : `%"<c.${digest(text)}>"`) : `%"<${r.kind === "union" ? "u" : "o"}.${digest(text)}>"`;
+  sp.names.set(t, name);
+  return name;
+}
+
+// Every type's named struct, made once for codegen to read.
+export function structNames(typing: Ref<Typing>): TypeMap<Type, string> {
+  let sp: Spelling = { names: new TypeMap<Type, string>(), within: [] };
+  for (const t of typing.typeIds()) namedIn(typing, t, sp);
+  return sp.names;
+}
+
+// The definitions of the named structs `text` uses, each once and in name order, with those their
+// own layouts use. A name two types with different layouts share would hold one of them where the
+// other was meant, so it is an internal error.
+export function typeDefinitions(typing: Ref<Typing>, text: string): string[] {
+  // Angle brackets, which no local's name holds, set these apart from the IR's other names.
+  const used = (s: string): string[] => [...s.matchAll(/%"<[^"]*>"/g)].map((m) => m[0]);
+  // The first type given each name, and every later one, which must be laid out as the first is.
+  let byName = new Map<string, Type>();
+  let again: [string, Type][] = [];
+  for (const t of typing.typeIds()) {
+    const n = typing.structNames.get(t) ?? typeName(typing, t);
+    if (n === undefined) continue;
+    if (byName.has(n)) again.push([n, t]);
+    else byName.set(n, t);
+  }
+  let wanted = used(text);
+  let defs = new Map<string, string>();
+  while (wanted.length > 0) {
+    const n = wanted.pop()!;
+    if (defs.has(n)) continue;
+    const first = byName.get(n);
+    assert(first !== undefined, `internal error: no type is named ${n}`);
+    const body = layoutOf(typing, first!);
+    for (const [m, t] of again) assert(m !== n || layoutOf(typing, t) === body, `internal error: types laid out differently share the name ${n}`);
+    defs.set(n, `${n} = type ${body}`);
+    for (const m of used(body)) wanted.push(m);
+  }
+  return [...defs.keys()].toSorted().map((n) => defs.get(n)!);
+}
+
+// The LLVM type a value of `t` is held as: a class, object or union by the name its definition
+// has, `typeName`, and anything else as it is laid out.
 export function llvmOf(typing: Ref<Typing>, t: Type): string {
+  if (typeof t === "string") return primitive(t);
+  // Spelling a type walks all of it, so the names are made once, before codegen; a type codegen
+  // makes is spelled when it is first asked for.
+  const named = typing.structNames.get(t) ?? typeName(typing, t);
+  if (named !== undefined) return named;
+  return layoutOf(typing, t);
+}
+
+// How a value of `t` is laid out, as a named struct's definition writes it. An object is a struct
+// of its fields, in their sorted order. An instance is a struct of the base it embeds, if any,
+// then its own fields in declaration order. A union is its member's index, then enough 64-bit
+// words for its largest member.
+export function layoutOf(typing: Ref<Typing>, t: Type): string {
   if (typeof t === "string") return primitive(t);
   const r = typing.rec(t);
   if (r.kind === "brand") return llvmOf(typing, r.base);

@@ -34,7 +34,7 @@ function items(ir: string): Item[] {
       found.push({ kind: "define", name, key: key(name), text: lines.slice(i as i64, end + 1).join("\n") });
       i = end as usize;
     } else if (line.startsWith("declare ")) found.push({ kind: "declare", name, key: key(name), text: line });
-    else if (line.startsWith("!")) continue;
+    else if (line.startsWith("!") || line.startsWith('%"<')) continue;
     else if (line.startsWith("@")) found.push({ kind: "global", name, key: key(name), text: line });
     else assert(false, `can't split the IR at '${line}'`);
   }
@@ -62,7 +62,7 @@ function declaration(item: Ref<Item>): string {
   const header = item.text.slice(0, item.text.indexOf("\n"));
   const at = header.indexOf(`@${item.name}(`);
   const open = (at as usize) + item.name.length + 1;
-  const params = header.slice(open as i64, (closing(header, open) + 1) as i64).replace(/ %("[^"]*"|[\w.$-]+)/g, "");
+  const params = header.slice(open as i64, (closing(header, open) + 1) as i64).replace(/ %("[^"<][^"]*"|[\w.$-]+)/g, "");
   return `declare ${header.slice("define ".length as i64, at).replace(/^internal /, "")}@${item.name}${params}`;
 }
 
@@ -89,6 +89,9 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
   const std = keysOf(stdSymbols);
   const own = keysOf(ownSymbols);
   const all = items(ir);
+  // Each named struct's definition, by its name, for the parts that use it.
+  let types = new Map<string, string>();
+  for (const l of ir.split("\n")) if (l.startsWith('%"<')) types.set(l.slice(0, l.indexOf(" = type ")), l);
   // Where each key's item sits in `all`; of two items with one key, the later.
   let byName = new Map<string, usize>();
   for (let i: usize = 0; i < all.length; i++) byName.set(all[i]!.key, i);
@@ -145,8 +148,8 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
   let metadata = "";
   for (const line of ir.split("\n")) if (line.startsWith("!")) metadata += `${line}\n`;
   let out = new Map<string, string>();
-  for (const group of groups.keys()) out.set(group, part(all, byName, where, group));
-  return { std: part(all, byName, where, STD), groups: out, program: part(all, byName, where, "") + metadata };
+  for (const group of groups.keys()) out.set(group, typed(types, part(all, byName, where, group)));
+  return { std: typed(types, part(all, byName, where, STD)), groups: out, program: typed(types, part(all, byName, where, "")) + metadata };
 }
 
 // Std's part's name in `where`, which no group of the program's can have, since groups are named
@@ -164,6 +167,27 @@ function keysOf(symbols: Ref<string[]>): Set<string> {
 function owns(item: Ref<Item>, where: Ref<Map<string, string>>, at: string): boolean {
   if (item.kind === "declare" || copied(item)) return false;
   return (where.get(item.key) ?? "") === at;
+}
+
+// A part's text after the definitions of the named structs it uses, and those theirs use: a type
+// can't be declared across modules, and std's part must read the same whatever the program's
+// types are.
+function typed(types: Ref<Map<string, string>>, text: string): string {
+  let used = new Set<string>();
+  let pending = [...text.matchAll(/%"<[^"]*>"/g)].map((m) => m[0]);
+  while (pending.length > 0) {
+    const n = pending.pop()!;
+    if (used.has(n)) continue;
+    used.add(n);
+    const line = types.get(n);
+    if (line !== undefined) for (const m of line.slice(n.length as i64).matchAll(/%"<[^"]*>"/g)) pending.push(m[0]);
+  }
+  let lines: string[] = [];
+  for (const n of [...used].toSorted()) {
+    const line = types.get(n);
+    if (line !== undefined) lines.push(line);
+  }
+  return lines.length === 0 ? text : `${lines.join("\n")}\n${text}`;
 }
 
 // One part's text: what it owns and what that refers to, the rest declared.
