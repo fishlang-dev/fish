@@ -1,3 +1,4 @@
+import { memberKey, type Replaced } from "./edits.ts";
 import { cloneSignature, declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.ts";
 import { crossingOf, rustClassOf } from "./rust.ts";
 import { newDeclarations, newTables, timingEnd, timingStart, type Compilation, type Declarations, type Tables } from "./compilation.ts";
@@ -9,7 +10,7 @@ import { comptimeArgument, comptimeBody, stringsType, untagged, type Value } fro
 import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, PropertyName, Span, Stmt, TypeNode, TypeParam } from "./parser.ts";
 import { lowerPattern, type PatternInfo } from "./match.ts";
 import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.ts";
-import { cloneDeclarator, cloneExpr, cloneInterface, cloneObjectProp, cloneParam, clonePattern, clonePatternProp, cloneStmt, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts, withIdExpr } from "./rebuild.ts";
+import { cloneDeclarator, cloneExpr, cloneInterface, cloneObjectProp, cloneParam, clonePattern, clonePatternProp, cloneStmt, cloneStmts, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts, withIdExpr } from "./rebuild.ts";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
 import { alwaysReturns, assignedNames, assignsOwn, assignsOwnIn, closureAssigned, fieldRootsIn, patternNames } from "./flow.ts";
@@ -728,6 +729,33 @@ export function checkKeeping(compilation: Compilation, written: Stmt[], exportsT
   return { checked, parts };
 }
 
+// The body a class's member key names: `m`, `static m`, `get x`, `set x`, `static get x`.
+function memberBody(info: Ref<ClassInfo>, key: string): BodyId | undefined {
+  if (key.startsWith("static ")) return info.statics.get(key.slice(7));
+  if (key.startsWith("get ")) return info.getters.get(key.slice(4));
+  if (key.startsWith("set ")) return info.setters.get(key.slice(4));
+  return info.methods.get(key);
+}
+
+// Gives the member of `node` that `key` names the statements `statements`.
+function memberWithBody(node: Mut<ClassNode>, key: string, statements: Ref<Stmt[]>): void {
+  for (let i: usize = 0; i < node.members.length; i++) {
+    if (memberKey(node.members[i]!) !== key) continue;
+    let m: Mut<ClassMember> = node.members[i]!;
+    switch (m.kind) {
+      case "method":
+        m.body = cloneStmts(statements);
+        break;
+      case "get":
+        m.body = cloneStmts(statements);
+        break;
+      case "set":
+        m.body = cloneStmts(statements);
+        break;
+    }
+  }
+}
+
 // Whether a class member has a private name.
 function privateMember(m: Ref<ClassMember>): boolean {
   if (m.kind !== "field" && m.kind !== "method" && m.kind !== "get" && m.kind !== "set") return false;
@@ -1106,15 +1134,15 @@ function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<str
   return { checked: { instances, tables: taken.tables, warnings }, parts: taken.parts };
 }
 
-// A kept check given files read again, each as its linked and lowered statements: every function
-// in them put in place of the body it was and checked again, every instance of it too, then what
-// they ask for, and the program's results gathered again. Gives why it can't be instead, when a
-// file's other declarations moved or a function is new, lifts a generic one, or is a signature;
-// the kept check is spent then, and the build starts afresh.
+// A kept check given bodies read again, each its function's or member's new statements: each put
+// in place of what it held and checked again, every instance of it too, then what they ask for,
+// and the program's results gathered again. Gives why it can't be instead, when a body is new or
+// overloaded or lifts a generic function; the kept check is spent then, and the build starts
+// afresh.
 /** @throws {CompileError} */
-export function recheckKept(checked: Checked, parts: CheckerParts, files: Stmt[][]): { checked: Checked; parts: CheckerParts; fallback: string | undefined } {
+export function recheckKept(checked: Checked, parts: CheckerParts, bodies: Replaced[]): { checked: Checked; parts: CheckerParts; fallback: string | undefined } {
   let checker = Checker.resumed(checked.tables, parts);
-  const fallback = checker.recheck(files);
+  const fallback = checker.recheck(bodies);
   if (fallback !== undefined) {
     let spent = checkerApart(checker);
     return { checked: { instances: [], tables: spent.tables, warnings: [] }, parts: spent.parts, fallback };
@@ -1286,55 +1314,69 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     return c;
   }
 
-  // Puts each function of `files` in place of the body it was and checks it again, with every
-  // instance of it and what they ask for; gives why it can't, before changing anything.
+  // Puts each body read again in place of what it held, in every class and copy that holds it,
+  // and checks again every instance of each, then what they ask for; gives why it can't, before
+  // changing anything.
   /** @throws {CompileError} */
-  recheck(this: Mut<this>, given: Stmt[][]): string | undefined {
-    let files = given;
-    let swaps: [BodyId, usize, usize][] = [];
-    for (let fi: usize = 0; fi < files.length; fi++) {
-      const file: Ref<Stmt[]> = files[fi]!;
-      for (let si: usize = 0; si < file.length; si++) {
-        const s: Ref<Stmt> = file[si]!;
-        const d: Ref<Stmt> = s.kind === "export" ? s.body : s;
-        if (d.kind !== "function") {
-          // Anything else is kept as declared, so it must say the same at the same place.
-          if (!this.program.some((p) => p.kind === s.kind && p.start === s.start && p.end === s.end)) return "a declaration other than a function moved";
-          continue;
-        }
-        const id = this.byName.get(d.name);
-        if (id === undefined || d.body === undefined) return "a function is new or has no body";
+  recheck(this: Mut<this>, given: Replaced[]): string | undefined {
+    let replaced = given;
+    let targets: BodyId[][] = [];
+    for (const r of replaced) {
+      let ids: BodyId[] = [];
+      if (r.owner === undefined) {
+        const id = this.byName.get(r.name);
+        if (id === undefined) return "a function is new";
         const was = this.tables.arenas.bodyOf(id);
         if (was.signature === true || was.overloads !== undefined || was.closure !== undefined || was.js !== undefined || was.foreign === true) return "a function is overloaded or not Fish";
-        let lifts = false;
-        for (const k of this.tables.liftedFunctions.keys()) if (k.start >= was.start && k.end <= was.end) lifts = true;
-        if (lifts) return "a function lifted a generic function";
-        swaps.push([id, fi, si]);
+        ids.push(id);
+      } else {
+        for (let c: usize = 1; c <= this.tables.arenas.classCount(); c++) {
+          const info = this.tables.arenas.classOf(c as ClassId);
+          if (info.node.name !== r.owner) continue;
+          const id = memberBody(info, r.name);
+          if (id !== undefined && !ids.includes(id)) ids.push(id);
+        }
+        if (ids.length === 0) return "a member is new";
       }
+      // A template's copies in concrete classes and a base's in the classes extending it.
+      for (let c: usize = 1; c <= this.tables.arenas.classCount(); c++) {
+        for (const [from, to] of this.tables.arenas.classOf(c as ClassId).copies) if (ids.includes(from) && !ids.includes(to)) ids.push(to);
+      }
+      for (let b: usize = 1; b <= this.tables.arenas.bodyCount(); b++) {
+        const copied = this.tables.arenas.bodyOf(b as BodyId).copyOf;
+        if (copied !== undefined && ids.includes(copied) && !ids.includes(b as BodyId)) ids.push(b as BodyId);
+      }
+      for (const id of ids) {
+        const was = this.tables.arenas.bodyOf(id);
+        for (const k of this.tables.liftedFunctions.keys()) if (k.start >= was.start && k.end <= was.end) return "a body lifted a generic function";
+      }
+      targets.push(ids);
     }
     let again: InstanceId[] = [];
     let at: usize = 0;
-    let fi: usize = 0;
-    while (files.length > 0) {
-      let file = files.shift()!;
-      let si: usize = 0;
-      while (file.length > 0) {
-        let s = file.shift()!;
-        if (at < swaps.length && swaps[at]![1] === fi && swaps[at]![2] === si) {
-          const id = swaps[at]![0];
-          at++;
-          let d = s.kind === "export" ? s.body : s;
-          if (d.kind === "function") this.tables.arenas.replaceBody(id, d);
-        }
-        si++;
+    while (replaced.length > 0) {
+      const r = replaced.shift()!;
+      const ids: Ref<BodyId[]> = targets[at]!;
+      at++;
+      for (const id of ids) {
+        let body = this.tables.arenas.bodyMut(id);
+        body.body = cloneStmts(r.statements);
+        this.failed.delete(id);
+        for (let i: usize = 1; i <= this.tables.arenas.instanceCount(); i++) if (this.tables.arenas.instanceOf(i as InstanceId).body === id) again.push(i as InstanceId);
       }
-      fi++;
-    }
-    for (const [id, _fi, _si] of swaps) {
-      this.failed.delete(id);
-      for (let i: usize = 1; i <= this.tables.arenas.instanceCount(); i++) {
-        const instance = this.tables.arenas.instanceOf(i as InstanceId);
-        if (instance.body === id) again.push(i as InstanceId);
+      // A generic class's later instances are declared from its node, so it reads the new body.
+      if (r.owner !== undefined) {
+        for (let c: usize = 1; c <= this.tables.arenas.classCount(); c++) {
+          if (this.tables.arenas.classOf(c as ClassId).node.name !== r.owner) continue;
+          let info = this.tables.arenas.classMut(c as ClassId);
+          memberWithBody(info.node, r.name, r.statements);
+        }
+        const template = this.templates.get(r.owner!);
+        if (template !== undefined) {
+          let node = { ...template! };
+          memberWithBody(node, r.name, r.statements);
+          this.templates.set(r.owner!, node);
+        }
       }
     }
     for (const i of again) this.forget(i);

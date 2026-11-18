@@ -45,8 +45,20 @@ export function written(text: string, names: Ref<Names>): string {
 // A second location an error refers to, like where a value was moved.
 export type Note = { message: string; start: usize; end: usize };
 
-// A file of a program other than the one an error is rendered against, from `base` on.
-export type Source = { base: usize; src: string; file: string };
+// A file of a program other than the one an error is rendered against, from `base` on. `moves`
+// is set once `fishc watch` checks it again from what it kept: the nodes it kept hold their
+// first positions, and each stretch of those, as its start, its end and its start in `src` now,
+// says where they are now.
+export type Source = { base: usize; src: string; file: string; moves?: [usize, usize, usize][] };
+
+// Where an offset into a source's file is in its text now.
+export function movedOffset(s: Ref<Source>, offset: usize): usize {
+  if (s.moves === undefined) return offset;
+  for (const [a, b, x] of s.moves!) if (offset >= a && offset < b) return offset - a + x;
+  // The end of a span is just past its stretch.
+  for (const [a, b, x] of s.moves!) if (offset === b && b > a) return offset - a + x;
+  return offset;
+}
 
 // A user-facing compile error pointing at a [start, end) source range, with its code from
 // src/codes.ts. `sources` holds the program's other files, when it spans several, and `names` the
@@ -77,7 +89,9 @@ export class CompileError extends Error {
       this.end,
       this.note === undefined ? undefined : { start: this.note!.start, end: this.note!.end, message: this.note!.message },
     );
-    out.sources = this.sources.map((s) => ({ base: s.base, src: s.src, file: s.file }));
+    let sources: Source[] = [];
+    for (const s of this.sources) sources.push(s.moves !== undefined ? { base: s.base, src: s.src, file: s.file, moves: [...s.moves!] } : { base: s.base, src: s.src, file: s.file });
+    out.sources = sources;
     out.names = { local: new Set([...this.names.local]), madeUp: new Map([...this.names.madeUp]) };
     out.errors = this.errors.map((e) => e.clone());
     return out;
@@ -127,7 +141,7 @@ function rename(e: Mut<CompileError>, names: Ref<Names>): void {
 export function sourceOf(src: string, file: string, offset: usize, sources: Ref<Source[]>): { src: string; file: string; offset: usize } {
   for (let i = sources.length; i > 0; i--) {
     const other: Ref<Source> = sources[i - 1]!;
-    if (offset >= other.base) return { src: other.src, file: other.file, offset: offset - other.base };
+    if (offset >= other.base) return { src: other.src, file: other.file, offset: movedOffset(other, offset - other.base) };
   }
   return { src, file, offset };
 }

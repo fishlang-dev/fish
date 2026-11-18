@@ -448,14 +448,14 @@ class Walkgen {
       const all = this.aliasShapes(name);
       if (all.length === 1) {
         append(rebuilt, [
-          `export function withId${name}(n: ${name}, id: usize, by: usize, at?: [usize, usize]): ${name} {`,
+          `export function withId${name}(n: ${name}, id: usize, by: i64, at?: [usize, usize]): ${name} {`,
           `  n.id = id;`,
           `  if (at !== undefined) {`,
           `    n.start = at[0];`,
           `    n.end = at[1];`,
           `  } else if (by !== 0) {`,
-          `    n.start += by;`,
-          `    n.end += by;`,
+          `    n.start = ((n.start as i64) + by) as usize;`,
+          `    n.end = ((n.end as i64) + by) as usize;`,
           `  }`,
           `  return n;`,
           `}`,
@@ -480,8 +480,8 @@ class Walkgen {
           `        n.start = at[0];`,
           `        n.end = at[1];`,
           `      } else if (by !== 0) {`,
-          `        n.start += by;`,
-          `        n.end += by;`,
+          `        n.start = ((n.start as i64) + by) as usize;`,
+          `        n.end = ((n.end as i64) + by) as usize;`,
           `      }`,
           `      return n;`,
         ]);
@@ -490,7 +490,7 @@ class Walkgen {
       const casesGetId = this.byKind(name, "    ", `return n.id;`);
       const casesMark = this.byKind(name, "    ", `return [n.id, n.start * 1048576 + n.end];`);
       append(rebuilt, [
-        `export function withId${name}(n: ${name}, id: usize, by: usize, at?: [usize, usize]): ${name} {`,
+        `export function withId${name}(n: ${name}, id: usize, by: i64, at?: [usize, usize]): ${name} {`,
         `  switch (n.kind) {`,
         ...casesId,
         `  }`,

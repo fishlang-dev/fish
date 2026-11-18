@@ -9,7 +9,7 @@ import { codegenChecked, compiledOf, symbolIn, symbolNames, type Options } from 
 import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, stageEnd, stageStart, type Compilation, type Session, type Tables } from "./compilation.ts";
 import { expanded, sourced } from "./analysis.ts";
 import { cachedSession } from "./stdcache.ts";
-import { CompileError, copyNames, formatError, type Source } from "./diag.ts";
+import { CompileError, copyNames, formatError, movedOffset, type Source } from "./diag.ts";
 import { load, type Loaded, type RustCrate } from "./modules.ts";
 import { resolvePackages } from "./dependencies.ts";
 import { pack, prepare, submit, unsafeDependencies } from "./publish.ts";
@@ -37,8 +37,10 @@ import { rustShim, type Shim } from "./rustshim.ts";
 import { split } from "./split.ts";
 import { withDebugInfo } from "./debuginfo.ts";
 import { watchProgram, type Rebuilt } from "./watch.ts";
-import { loadedContents, reloaded, textOf as fileText, unchanged, type Kept } from "./incremental.ts";
-import { classified } from "./edits.ts";
+import { composedMoves, loadedContents, reloaded, spillFrom, takenBodies, textOf as fileText, unchanged, type Kept } from "./incremental.ts";
+import { classified, type Changed, type Edit, type Replaced } from "./edits.ts";
+import { movedStmt } from "./nodes.ts";
+import { FILE_SPAN } from "./program.ts";
 import { fileAt } from "./program.ts";
 import { STD_BASE } from "./std.ts";
 
@@ -362,7 +364,11 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   start.checked.tables.session.failed = undefined;
   const sources = [...start.loaded.sources];
   let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed });
-  const warnings = [...made.checked.warnings];
+  let warnings = [...made.checked.warnings];
+  // A clean check gives its warnings in the order they are written in, which a kept one's
+  // positions only give through their files' maps.
+  const placed: Ref<Source[]> = made.loaded.sources;
+  warnings.sort((a, b) => (realOffset(a.start, placed) as i64) - (realOffset(b.start, placed) as i64));
   return { ir: made.ir, warnings, kept: { checked: made.checked, parts: start.parts, loaded: made.loaded, contents: start.contents, carried: start.carried } };
 }
 
@@ -381,25 +387,59 @@ function rechecked(kept: Kept): { done: Kept | undefined; session: Session | und
     if (index < 0 || now === undefined) fresh = true;
     else edits.push([index as usize, now!]);
   }
+  let classes: Edit[] = [];
   for (const [index, now] of edits) {
     const edit = classified(k.loaded.modules[index]!.src, now);
-    if (edit.fallback !== undefined || edit.signatures.length > 0 || edit.methods) fresh = true;
+    if (edit.fallback !== undefined || edit.signatures.length > 0 || edit.changed.some((c) => c.name === "constructor")) fresh = true;
+    classes.push(edit);
   }
   if (fresh) return spent(k);
   const started = stageStart(k.checked.tables.session);
-  let files: Stmt[][] = [];
+  let bodies: Replaced[] = [];
+  let at: usize = 0;
   for (const [index, now] of edits) {
+    const edit: Ref<Edit> = classes[at]!;
+    at++;
     const base = k.loaded.modules[index]!.base;
+    const file = k.loaded.modules[index]!.file;
+    const before = k.loaded.modules[index]!.src;
+    // A changed body is named in the program as its file's link names it.
+    let wanted: { owner: string | undefined; name: string }[] = [];
+    for (const c of edit.changed) wanted.push(c.owner !== undefined ? { owner: uniqueIn(k.loaded, index, c.owner!), name: c.name } : { owner: undefined, name: uniqueIn(k.loaded, index, c.name) });
     let r = reloaded(k, index, now);
     if (r.fallback !== undefined) return spent(k);
-    files.push(r.statements);
-    for (let i: usize = 0; i < k.loaded.sources.length; i++) if (k.loaded.sources[i]!.base === base) k.loaded.sources[i]!.src = now;
+    let taken = takenBodies(r.statements, wanted);
+    if (taken === undefined) return spent(k);
+    // The entry has no source of its own until a kept check maps its positions.
+    const known = k.loaded.sources.findIndex((x) => x.base === base);
+    if (known < 0) k.loaded.sources.unshift({ base, src: before, file });
+    const s: usize = known < 0 ? 0 : (known as usize);
+    const mapped: Ref<[usize, usize, usize][] | undefined> = k.loaded.sources[s]!.moves;
+    const was: [usize, usize, usize][] | undefined = mapped !== undefined ? [...mapped!] : undefined;
+    let moves = composedMoves(was, before.length, edit.moves);
+    let spill = spillFrom(was, before.length);
+    // Each body read again is put past every position the kept check holds, mapped to where it is.
+    let found = taken!;
+    while (found.length > 0) {
+      let body = found.shift()!;
+      const ci = wanted.findIndex((w) => w.owner === body.owner && w.name === body.name);
+      const c: Ref<Changed> = edit.changed[ci as usize]!;
+      const by = (spill as i64) - (c.start as i64);
+      let moved: Stmt[] = [];
+      while (body.statements.length > 0) moved.push(movedStmt(body.statements.shift()!, by));
+      moves.push([spill, spill + (c.end - c.start), c.start]);
+      spill = spill + (c.end - c.start) + 1;
+      bodies.push({ owner: body.owner, name: body.name, statements: moved });
+    }
+    if (spill >= (FILE_SPAN as usize)) return spent(k);
+    k.loaded.sources[s]!.src = now;
+    k.loaded.sources[s]!.moves = moves;
     k.contents.set(k.loaded.modules[index]!.path, now);
   }
   let { checked, parts, loaded, contents } = k;
   let made: { checked: Checked; parts: CheckerParts; fallback: string | undefined } | undefined = undefined;
   try {
-    made = recheckKept(checked, parts, files);
+    made = recheckKept(checked, parts, bodies);
   } catch (e) {
     if (e instanceof CompileError) throw sourced(e, undefined, loaded.sources);
     throw e;
@@ -412,6 +452,13 @@ function rechecked(kept: Kept): { done: Kept | undefined; session: Session | und
   for (let i: usize = 0; i < done.checked.warnings.length; i++) done.checked.warnings[i]!.sources = [...loaded.sources];
   stageEnd(done.checked.tables.session, "check", started);
   return { done: { checked: done.checked, parts: done.parts, loaded, contents, carried: k.carried }, session: undefined };
+}
+
+// The name a top-level declaration of the file at `index` has in the program.
+function uniqueIn(loaded: Ref<Loaded>, index: usize, written: string): string {
+  if (loaded.links === undefined) return written;
+  const d = loaded.links![index]!.own.get(written);
+  return d !== undefined ? d.unique : written;
 }
 
 // A kept program given up on: its session, for a build afresh.
@@ -472,9 +519,20 @@ function irPieces(ir: string): string[] {
   return out;
 }
 
-// An error's code, place and message, as compared between builds.
+// An error's code, place in the text now and message, as compared between builds.
 function shownError(e: Ref<CompileError>): string {
-  return `${e.code} ${e.start}-${e.end} ${e.message}`;
+  const start = realOffset(e.start, e.sources);
+  return `${e.code} ${start}-${start + (e.end - e.start)} ${e.message}`;
+}
+
+// Where an offset a check holds is in the program's text now, through the map of the file it is
+// in, when a kept check made one.
+function realOffset(offset: usize, sources: Ref<Source[]>): usize {
+  for (let i = sources.length; i > 0; i--) {
+    const s: Ref<Source> = sources[i - 1]!;
+    if (offset >= s.base) return s.base + movedOffset(s, offset - s.base);
+  }
+  return offset;
 }
 
 // The first line, from 1, where two texts differ.

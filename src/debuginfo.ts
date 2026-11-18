@@ -5,10 +5,9 @@
 // before it, so debuggers step through `.fsh` lines. Nothing else in the module is touched.
 
 import { resolve, basename, dirname } from "node:path";
+import { movedOffset, type Source } from "./diag.ts";
 
-// One of the program's files other than the entry, as `diag.ts` has it, written out so this file
-// checks with Fish while `diag.ts` doesn't yet.
-type Source = { base: usize; src: string; file: string };
+
 
 const FN = /^ {2};fsh\.fn (\d+)$/;
 const AT = /^ {2};fsh\.at (\d+)$/;
@@ -30,12 +29,14 @@ function lineStarts(text: string): usize[] {
 // `ir` with the line tables its marks call for, and the marks gone. `optimized` for a release build.
 export function withDebugInfo(ir: string, src: string, file: string, sources: Source[], optimized: boolean): string {
   // The entry's source, then each other file's in order of where its offsets start.
-  const regions = [{ base: 0, file, starts: lineStarts(src) }, ...sources.map((s) => ({ base: s.base, file: s.file, starts: lineStarts(s.src) }))];
+  type Region = { base: usize; file: string; starts: usize[]; source: Source };
+  let regions: Region[] = [{ base: 0, file, starts: lineStarts(src), source: { base: 0, src: "", file } }];
+  for (const s of sources) regions.push({ base: s.base, file: s.file, starts: lineStarts(s.src), source: s.moves !== undefined ? { base: s.base, src: "", file: s.file, moves: [...s.moves!] } : { base: s.base, src: "", file: s.file } });
   // `file`, `line` and `col` of an offset into the program.
   const place = (offset: usize): { file: string; line: usize; col: usize } => {
     const after = regions.findIndex((r) => r.base > offset);
     const region = after < 0 ? regions.at(-1)! : regions.at(after - 1)!;
-    const at = offset - region.base;
+    const at = movedOffset(region.source, offset - region.base);
     const next = region.starts.findIndex((start) => start > at);
     return { file: region.file, line: next as usize, col: at - region.starts.at(next - 1)! + 1 };
   };

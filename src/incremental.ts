@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { loweredFile, type Checked, type CheckerParts } from "./check.ts";
 import { relinkedFile, reparsedFile, type Loaded } from "./modules.ts";
 import type { Stmt } from "./parser.ts";
+import { memberKey, type Replaced } from "./edits.ts";
 import type { CompileError } from "./diag.ts";
 import { testOf } from "./tests.ts";
 
@@ -53,4 +54,61 @@ export function reloaded(kept: Mut<Kept>, index: usize, text: string): { stateme
   let linked = relinkedFile(kept.checked.tables.ids, kept.loaded, index, text, statements, false);
   if (linked.fallback !== undefined) return linked;
   return loweredFile(kept.checked.tables, linked.statements, false);
+}
+
+// The map from the kept check's positions in a file to its text after an edit, from `was`, the
+// map to its text before, undefined when the kept positions are that text's own, `length` long,
+// and the edit's unchanged stretches `moves`. A kept position the edit changed maps to nothing.
+export function composedMoves(was: Ref<[usize, usize, usize][] | undefined>, length: usize, moves: Ref<[usize, usize, usize][]>): [usize, usize, usize][] {
+  let before: [usize, usize, usize][] = [];
+  if (was === undefined) before.push([0, length, 0]);
+  else for (const [a, b, x] of was!) before.push([a, b, x]);
+  let out: [usize, usize, usize][] = [];
+  for (const [a, b, x] of before) {
+    const y = x + (b - a);
+    for (const [c, d, z] of moves) {
+      const lo = x > c ? x : c;
+      const hi = y < d ? y : d;
+      if (lo < hi || (lo === hi && a === b)) out.push([a + (lo - x), a + (hi - x), z + (lo - c)]);
+    }
+  }
+  return out;
+}
+
+// The first kept position past every one a file's map, or its text `length` long, has used, where
+// a body read again is put.
+export function spillFrom(was: Ref<[usize, usize, usize][] | undefined>, length: usize): usize {
+  let at = length + 1;
+  if (was !== undefined) for (const [_a, b, _x] of was!) if (b + 1 > at) at = b + 1;
+  return at;
+}
+
+// The statements of each body `wanted` names, out of a file read again: a function's by its name,
+// a member's by its class's name and its key. Gives undefined when one isn't found or takes a
+// parameter with a default, whose lowering writes statements at the parameter.
+export function takenBodies(given: Stmt[], wanted: Ref<{ owner: string | undefined; name: string }[]>): Replaced[] | undefined {
+  let statements = given;
+  let out: Replaced[] = [];
+  while (statements.length > 0) {
+    let s = statements.shift()!;
+    let d = s.kind === "export" ? s.body : s;
+    if (d.kind === "function") {
+      const named = d.name;
+      if (!wanted.some((w) => w.owner === undefined && w.name === named)) continue;
+      if (d.body === undefined || d.params.some((p) => p.default !== undefined)) return undefined;
+      out.push({ owner: undefined, name: named, statements: d.body! });
+      continue;
+    }
+    if (d.kind !== "class" || d.name === undefined) continue;
+    const owner = d.name!;
+    while (d.members.length > 0) {
+      let m = d.members.shift()!;
+      const key = memberKey(m);
+      if (!wanted.some((w) => w.owner === owner && w.name === key)) continue;
+      if (m.kind !== "method" && m.kind !== "get" && m.kind !== "set") return undefined;
+      if (m.body === undefined || m.params.some((p) => p.default !== undefined)) return undefined;
+      out.push({ owner, name: key, statements: m.body! });
+    }
+  }
+  return out.length === wanted.length ? out : undefined;
 }

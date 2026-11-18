@@ -84,6 +84,7 @@ import {
   rebuiltStmt,
   rebuiltStmts,
   rebuiltTypeNode,
+  rebuiltTypeParam,
   withIdClassMember,
   withIdClassNode,
   withIdDeclarator,
@@ -203,9 +204,9 @@ class Applier implements Replacements {
   assigned: Map<usize, usize>;
   hasShared: boolean;
   renumber: boolean;
-  by: usize;
+  by: i64;
   at: [usize, usize] | undefined;
-  constructor(seen: Map<usize, usize>, assigned: Map<usize, usize>, hasShared: boolean, renumber: boolean, by: usize, at?: [usize, usize]) {
+  constructor(seen: Map<usize, usize>, assigned: Map<usize, usize>, hasShared: boolean, renumber: boolean, by: i64, at?: [usize, usize]) {
     this.seen = seen;
     this.assigned = assigned;
     this.hasShared = hasShared;
@@ -405,10 +406,10 @@ function makeRenumber(root: AnyNode, next: () => usize, by: usize = 0): Applier 
   const [seen, order, hasShared] = collectIds(root);
   let assigned = new Map<usize, usize>();
   for (const id of order) assigned.set(id, next());
-  return new Applier(seen, assigned, hasShared, true, by);
+  return new Applier(seen, assigned, hasShared, true, by as i64);
 }
 
-function makeShift(root: AnyNode, by: usize): Applier {
+function makeShift(root: AnyNode, by: i64): Applier {
   const [seen, _order, hasShared] = collectIds(root);
   return new Applier(seen, new Map<usize, usize>(), hasShared, false, by);
 }
@@ -449,18 +450,42 @@ export function renumberTypeNode(tree: TypeNode, next: () => usize): TypeNode {
 
 // Moves every span in a parsed tree by `by`, for a source placed past others in one program.
 export function shiftSpansExpr(tree: Expr, by: usize): Expr {
+  return movedExpr(tree, by as i64);
+}
+
+export function shiftSpansStmt(tree: Stmt, by: usize): Stmt {
+  return movedStmt(tree, by as i64);
+}
+
+export function shiftSpansStmts(tree: Mut<Stmt[]>, by: usize): void {
+  const a = makeShift({ of: "stmts", node: tree }, by as i64);
+  rebuiltStmts(tree, a);
+}
+
+// Every node in a tree moved by `by`, earlier when it is below 0.
+export function movedExpr(tree: Expr, by: i64): Expr {
   const a = makeShift({ of: "expr", node: tree }, by);
   return rebuiltExpr(tree, a);
 }
 
-export function shiftSpansStmt(tree: Stmt, by: usize): Stmt {
+export function movedStmt(tree: Stmt, by: i64): Stmt {
   const a = makeShift({ of: "stmt", node: tree }, by);
   return rebuiltStmt(tree, a);
 }
 
-export function shiftSpansStmts(tree: Mut<Stmt[]>, by: usize): void {
-  const a = makeShift({ of: "stmts", node: tree }, by);
-  rebuiltStmts(tree, a);
+export function movedTypeNode(tree: TypeNode, by: i64): TypeNode {
+  const a = makeShift({ of: "typeNode", node: tree }, by);
+  return rebuiltTypeNode(tree, a);
+}
+
+export function movedParam(tree: Param, by: i64): Param {
+  const a = makeShift({ of: "param", node: tree }, by);
+  return rebuiltParam(tree, a);
+}
+
+export function movedTypeParam(tree: TypeParam, by: i64): TypeParam {
+  const a = makeShift({ of: "typeParam", node: tree }, by);
+  return rebuiltTypeParam(tree, a);
 }
 
 // Gives every node in `tree` the span `at`.

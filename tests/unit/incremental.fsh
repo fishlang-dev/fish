@@ -41,7 +41,7 @@ function main() {
 }
 `;
 
-test("a rebuild with every file as it was checks nothing again, and one after an edit checks afresh", () => {
+test("a rebuild with every file as it was checks nothing again, and one after an edit checks the edit", () => {
   const dir = scratch("fish-incremental-");
   write(join(dir, "main.fsh"), MAIN);
   write(join(dir, "lib.fsh"), "export function twice(n: i64): i64 { return n * 2; }\n");
@@ -137,10 +137,14 @@ export function apply(n: i64): i64 {
 // Edits `lib.fsh` in turn from a first build, each build from what the last one kept, and says
 // for each whether it was rechecked from what was kept and how it compares with a clean build.
 function edited(edits: Ref<[string, string][]>): string[] throws Error {
+  return editedIn(USES, LIB, edits);
+}
+
+function editedIn(uses: string, written: string, edits: Ref<[string, string][]>): string[] throws Error {
   const dir = scratch("fish-incremental-");
   const entry = join(dir, "main.fsh");
-  write(entry, USES);
-  let lib = LIB;
+  write(entry, uses);
+  let lib = written;
   write(join(dir, "lib.fsh"), lib);
   let last = compiledFrom(entry, undefined);
   let said: string[] = [];
@@ -165,11 +169,41 @@ test("an edit to a function's body is checked again from what watch kept, and ma
   assert(said.join("; ") === "kept same; kept same; kept same", said.join("; "));
 }, { timeout: 120_000 });
 
-test("an edit to a method's body is checked afresh, and an error leaves nothing kept", () => {
+test("an edit to a method's body, and one moving a class, are checked again from what watch kept", () => {
   const said = edited([
     ["return this.v;", "return this.v + 1;"],
+    ["return n * 2;", "const k = 2;\n  return n * k;"],
+    ["return this.v + 1;", "const w = this.v;\n    return w + 2;"],
+  ]);
+  assert(said.join("; ") === "kept same; kept same; kept same", said.join("; "));
+}, { timeout: 120_000 });
+
+test("an error leaves nothing kept, so the build after it checks afresh", () => {
+  const said = edited([
     ["return n * 2;", "return m * 2;"],
     ["return m * 2;", "return n * 2;"],
   ]);
-  assert(said.join("; ") === "afresh same; error same; afresh same", said.join("; "));
+  assert(said.join("; ") === "error same; afresh same", said.join("; "));
+}, { timeout: 120_000 });
+
+const GENERIC = `export class Holder<T> {
+  v: T;
+  constructor(v: T) {
+    this.v = v;
+  }
+  count(): i64 {
+    return 1;
+  }
+}
+`;
+
+test("an edit to a generic class's method is checked again in every instance of the class", () => {
+  const uses = `import { Holder } from "./lib.fsh";
+
+function main() {
+  console.log(new Holder<i64>(3).count(), new Holder<string>("s").count());
+}
+`;
+  const said = editedIn(uses, GENERIC, [["    return 1;", "    const w = 2;\n    return w;"]]);
+  assert(said.join("; ") === "kept same", said.join("; "));
 }, { timeout: 120_000 });

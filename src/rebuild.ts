@@ -2087,7 +2087,7 @@ export function rebuiltOneOf3(n: Expr | Extract<Stmt, { kind: "block" }>, r: Ref
   return n;
 }
 
-export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, usize]): TypeNode {
+export function withIdTypeNode(n: TypeNode, id: usize, by: i64, at?: [usize, usize]): TypeNode {
   switch (n.kind) {
     case "ref":
       n.id = id;
@@ -2095,8 +2095,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "literal":
@@ -2105,8 +2105,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "array":
@@ -2115,8 +2115,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "tuple":
@@ -2125,8 +2125,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "object":
@@ -2135,8 +2135,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "function":
@@ -2145,8 +2145,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "union":
@@ -2155,8 +2155,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "intersection":
@@ -2165,8 +2165,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "operator":
@@ -2175,8 +2175,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "indexed":
@@ -2185,8 +2185,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "query":
@@ -2195,8 +2195,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "import":
@@ -2205,8 +2205,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "conditional":
@@ -2215,8 +2215,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "infer":
@@ -2225,8 +2225,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "template":
@@ -2235,8 +2235,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "mapped":
@@ -2245,8 +2245,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "predicate":
@@ -2255,8 +2255,8 @@ export function withIdTypeNode(n: TypeNode, id: usize, by: usize, at?: [usize, u
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     default:
@@ -2342,7 +2342,7 @@ export function markTypeNode(n: Ref<TypeNode>): [usize, usize] {
   }
 }
 
-export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): Expr {
+export function withIdExpr(n: Expr, id: usize, by: i64, at?: [usize, usize]): Expr {
   switch (n.kind) {
     case "int":
       n.id = id;
@@ -2350,8 +2350,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "float":
@@ -2360,8 +2360,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "bigint":
@@ -2370,8 +2370,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "null":
@@ -2380,8 +2380,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "this":
@@ -2390,8 +2390,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "super":
@@ -2400,8 +2400,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "regex":
@@ -2410,8 +2410,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "template":
@@ -2420,8 +2420,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "tagged":
@@ -2430,8 +2430,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "bool":
@@ -2440,8 +2440,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "string":
@@ -2450,8 +2450,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "ident":
@@ -2460,8 +2460,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "spread":
@@ -2470,8 +2470,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "array":
@@ -2480,8 +2480,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "object":
@@ -2490,8 +2490,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "function":
@@ -2500,8 +2500,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "arrow":
@@ -2510,8 +2510,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "member":
@@ -2520,8 +2520,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "index":
@@ -2530,8 +2530,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "call":
@@ -2540,8 +2540,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "new":
@@ -2550,8 +2550,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "instantiation":
@@ -2560,8 +2560,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "meta":
@@ -2570,8 +2570,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "import":
@@ -2580,8 +2580,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "nonNull":
@@ -2590,8 +2590,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "throw":
@@ -2600,8 +2600,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "class":
@@ -2610,8 +2610,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "privateName":
@@ -2620,8 +2620,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "unary":
@@ -2630,8 +2630,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "update":
@@ -2640,8 +2640,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "binary":
@@ -2650,8 +2650,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "conditional":
@@ -2660,8 +2660,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "assign":
@@ -2670,8 +2670,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "pipe":
@@ -2680,8 +2680,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "topic":
@@ -2690,8 +2690,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "match":
@@ -2700,8 +2700,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "comptime":
@@ -2710,8 +2710,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "unsafe":
@@ -2720,8 +2720,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "destructure":
@@ -2730,8 +2730,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "sequence":
@@ -2740,8 +2740,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "yield":
@@ -2750,8 +2750,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "as":
@@ -2760,8 +2760,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "satisfies":
@@ -2770,8 +2770,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "assertion":
@@ -2780,8 +2780,8 @@ export function withIdExpr(n: Expr, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     default:
@@ -2975,7 +2975,7 @@ export function markExpr(n: Ref<Expr>): [usize, usize] {
   }
 }
 
-export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): Stmt {
+export function withIdStmt(n: Stmt, id: usize, by: i64, at?: [usize, usize]): Stmt {
   switch (n.kind) {
     case "expr":
       n.id = id;
@@ -2983,8 +2983,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "let":
@@ -2993,8 +2993,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "return":
@@ -3003,8 +3003,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "if":
@@ -3013,8 +3013,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "while":
@@ -3023,8 +3023,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "doWhile":
@@ -3033,8 +3033,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "switch":
@@ -3043,8 +3043,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "labeled":
@@ -3053,8 +3053,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "break":
@@ -3063,8 +3063,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "continue":
@@ -3073,8 +3073,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "throw":
@@ -3083,8 +3083,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "try":
@@ -3093,8 +3093,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "for":
@@ -3103,8 +3103,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "forIn":
@@ -3113,8 +3113,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "forOf":
@@ -3123,8 +3123,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "block":
@@ -3133,8 +3133,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "empty":
@@ -3143,8 +3143,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "debugger":
@@ -3153,8 +3153,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "enum":
@@ -3163,8 +3163,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "namespace":
@@ -3173,8 +3173,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "declare":
@@ -3183,8 +3183,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "comptime":
@@ -3193,8 +3193,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "unsafe":
@@ -3203,8 +3203,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "import":
@@ -3213,8 +3213,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "importEquals":
@@ -3223,8 +3223,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "export":
@@ -3233,8 +3233,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "exportDefault":
@@ -3243,8 +3243,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "exportNamed":
@@ -3253,8 +3253,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "exportAll":
@@ -3263,8 +3263,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "exportAssign":
@@ -3273,8 +3273,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "exportAsNamespace":
@@ -3283,8 +3283,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "typeAlias":
@@ -3293,8 +3293,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "interface":
@@ -3303,8 +3303,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "function":
@@ -3313,8 +3313,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "class":
@@ -3323,8 +3323,8 @@ export function withIdStmt(n: Stmt, id: usize, by: usize, at?: [usize, usize]): 
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     default:
@@ -3482,14 +3482,14 @@ export function markStmt(n: Ref<Stmt>): [usize, usize] {
   }
 }
 
-export function withIdTupleElement(n: TupleElement, id: usize, by: usize, at?: [usize, usize]): TupleElement {
+export function withIdTupleElement(n: TupleElement, id: usize, by: i64, at?: [usize, usize]): TupleElement {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -3502,7 +3502,7 @@ export function markTupleElement(n: Ref<TupleElement>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdTypeMember(n: TypeMember, id: usize, by: usize, at?: [usize, usize]): TypeMember {
+export function withIdTypeMember(n: TypeMember, id: usize, by: i64, at?: [usize, usize]): TypeMember {
   switch (n.kind) {
     case "property":
       n.id = id;
@@ -3510,8 +3510,8 @@ export function withIdTypeMember(n: TypeMember, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "method":
@@ -3520,8 +3520,8 @@ export function withIdTypeMember(n: TypeMember, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "call":
@@ -3530,8 +3530,8 @@ export function withIdTypeMember(n: TypeMember, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "construct":
@@ -3540,8 +3540,8 @@ export function withIdTypeMember(n: TypeMember, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "index":
@@ -3550,8 +3550,8 @@ export function withIdTypeMember(n: TypeMember, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "get":
@@ -3560,8 +3560,8 @@ export function withIdTypeMember(n: TypeMember, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "set":
@@ -3570,8 +3570,8 @@ export function withIdTypeMember(n: TypeMember, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     default:
@@ -3617,7 +3617,7 @@ export function markTypeMember(n: Ref<TypeMember>): [usize, usize] {
   }
 }
 
-export function withIdObjectProp(n: ObjectProp, id: usize, by: usize, at?: [usize, usize]): ObjectProp {
+export function withIdObjectProp(n: ObjectProp, id: usize, by: i64, at?: [usize, usize]): ObjectProp {
   switch (n.kind) {
     case "property":
       n.id = id;
@@ -3625,8 +3625,8 @@ export function withIdObjectProp(n: ObjectProp, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "shorthand":
@@ -3635,8 +3635,8 @@ export function withIdObjectProp(n: ObjectProp, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "spread":
@@ -3645,8 +3645,8 @@ export function withIdObjectProp(n: ObjectProp, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "method":
@@ -3655,8 +3655,8 @@ export function withIdObjectProp(n: ObjectProp, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "get":
@@ -3665,8 +3665,8 @@ export function withIdObjectProp(n: ObjectProp, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "set":
@@ -3675,8 +3675,8 @@ export function withIdObjectProp(n: ObjectProp, id: usize, by: usize, at?: [usiz
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     default:
@@ -3718,14 +3718,14 @@ export function markObjectProp(n: Ref<ObjectProp>): [usize, usize] {
   }
 }
 
-export function withIdClassNode(n: ClassNode, id: usize, by: usize, at?: [usize, usize]): ClassNode {
+export function withIdClassNode(n: ClassNode, id: usize, by: i64, at?: [usize, usize]): ClassNode {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -3738,7 +3738,7 @@ export function markClassNode(n: Ref<ClassNode>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdClassMember(n: ClassMember, id: usize, by: usize, at?: [usize, usize]): ClassMember {
+export function withIdClassMember(n: ClassMember, id: usize, by: i64, at?: [usize, usize]): ClassMember {
   switch (n.kind) {
     case "field":
       n.id = id;
@@ -3746,8 +3746,8 @@ export function withIdClassMember(n: ClassMember, id: usize, by: usize, at?: [us
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "method":
@@ -3756,8 +3756,8 @@ export function withIdClassMember(n: ClassMember, id: usize, by: usize, at?: [us
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "constructor":
@@ -3766,8 +3766,8 @@ export function withIdClassMember(n: ClassMember, id: usize, by: usize, at?: [us
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "get":
@@ -3776,8 +3776,8 @@ export function withIdClassMember(n: ClassMember, id: usize, by: usize, at?: [us
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "set":
@@ -3786,8 +3786,8 @@ export function withIdClassMember(n: ClassMember, id: usize, by: usize, at?: [us
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "index":
@@ -3796,8 +3796,8 @@ export function withIdClassMember(n: ClassMember, id: usize, by: usize, at?: [us
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "staticBlock":
@@ -3806,8 +3806,8 @@ export function withIdClassMember(n: ClassMember, id: usize, by: usize, at?: [us
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     default:
@@ -3853,14 +3853,14 @@ export function markClassMember(n: Ref<ClassMember>): [usize, usize] {
   }
 }
 
-export function withIdParam(n: Param, id: usize, by: usize, at?: [usize, usize]): Param {
+export function withIdParam(n: Param, id: usize, by: i64, at?: [usize, usize]): Param {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -3873,7 +3873,7 @@ export function markParam(n: Ref<Param>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdPattern(n: Pattern, id: usize, by: usize, at?: [usize, usize]): Pattern {
+export function withIdPattern(n: Pattern, id: usize, by: i64, at?: [usize, usize]): Pattern {
   switch (n.kind) {
     case "ident":
       n.id = id;
@@ -3881,8 +3881,8 @@ export function withIdPattern(n: Pattern, id: usize, by: usize, at?: [usize, usi
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "object":
@@ -3891,8 +3891,8 @@ export function withIdPattern(n: Pattern, id: usize, by: usize, at?: [usize, usi
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "array":
@@ -3901,8 +3901,8 @@ export function withIdPattern(n: Pattern, id: usize, by: usize, at?: [usize, usi
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "default":
@@ -3911,8 +3911,8 @@ export function withIdPattern(n: Pattern, id: usize, by: usize, at?: [usize, usi
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "expr":
@@ -3921,8 +3921,8 @@ export function withIdPattern(n: Pattern, id: usize, by: usize, at?: [usize, usi
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "wildcard":
@@ -3931,8 +3931,8 @@ export function withIdPattern(n: Pattern, id: usize, by: usize, at?: [usize, usi
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "literal":
@@ -3941,8 +3941,8 @@ export function withIdPattern(n: Pattern, id: usize, by: usize, at?: [usize, usi
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "variant":
@@ -3951,8 +3951,8 @@ export function withIdPattern(n: Pattern, id: usize, by: usize, at?: [usize, usi
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     case "or":
@@ -3961,8 +3961,8 @@ export function withIdPattern(n: Pattern, id: usize, by: usize, at?: [usize, usi
         n.start = at[0];
         n.end = at[1];
       } else if (by !== 0) {
-        n.start += by;
-        n.end += by;
+        n.start = ((n.start as i64) + by) as usize;
+        n.end = ((n.end as i64) + by) as usize;
       }
       return n;
     default:
@@ -4016,14 +4016,14 @@ export function markPattern(n: Ref<Pattern>): [usize, usize] {
   }
 }
 
-export function withIdMatchArm(n: MatchArm, id: usize, by: usize, at?: [usize, usize]): MatchArm {
+export function withIdMatchArm(n: MatchArm, id: usize, by: i64, at?: [usize, usize]): MatchArm {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -4036,14 +4036,14 @@ export function markMatchArm(n: Ref<MatchArm>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdPatternProp(n: PatternProp, id: usize, by: usize, at?: [usize, usize]): PatternProp {
+export function withIdPatternProp(n: PatternProp, id: usize, by: i64, at?: [usize, usize]): PatternProp {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -4056,14 +4056,14 @@ export function markPatternProp(n: Ref<PatternProp>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdSpecifier(n: Specifier, id: usize, by: usize, at?: [usize, usize]): Specifier {
+export function withIdSpecifier(n: Specifier, id: usize, by: i64, at?: [usize, usize]): Specifier {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -4076,14 +4076,14 @@ export function markSpecifier(n: Ref<Specifier>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdEnumMember(n: EnumMember, id: usize, by: usize, at?: [usize, usize]): EnumMember {
+export function withIdEnumMember(n: EnumMember, id: usize, by: i64, at?: [usize, usize]): EnumMember {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -4096,14 +4096,14 @@ export function markEnumMember(n: Ref<EnumMember>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdSwitchCase(n: SwitchCase, id: usize, by: usize, at?: [usize, usize]): SwitchCase {
+export function withIdSwitchCase(n: SwitchCase, id: usize, by: i64, at?: [usize, usize]): SwitchCase {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -4116,14 +4116,14 @@ export function markSwitchCase(n: Ref<SwitchCase>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdDeclarator(n: Declarator, id: usize, by: usize, at?: [usize, usize]): Declarator {
+export function withIdDeclarator(n: Declarator, id: usize, by: i64, at?: [usize, usize]): Declarator {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -4136,14 +4136,14 @@ export function markDeclarator(n: Ref<Declarator>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdTypeParam(n: TypeParam, id: usize, by: usize, at?: [usize, usize]): TypeParam {
+export function withIdTypeParam(n: TypeParam, id: usize, by: i64, at?: [usize, usize]): TypeParam {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -4156,14 +4156,14 @@ export function markTypeParam(n: Ref<TypeParam>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdTypeAlias(n: TypeAlias, id: usize, by: usize, at?: [usize, usize]): TypeAlias {
+export function withIdTypeAlias(n: TypeAlias, id: usize, by: i64, at?: [usize, usize]): TypeAlias {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -4176,14 +4176,14 @@ export function markTypeAlias(n: Ref<TypeAlias>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdInterface(n: Interface, id: usize, by: usize, at?: [usize, usize]): Interface {
+export function withIdInterface(n: Interface, id: usize, by: i64, at?: [usize, usize]): Interface {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
@@ -4196,14 +4196,14 @@ export function markInterface(n: Ref<Interface>): [usize, usize] {
   return [n.id, n.start * 1048576 + n.end];
 }
 
-export function withIdFunc(n: Func, id: usize, by: usize, at?: [usize, usize]): Func {
+export function withIdFunc(n: Func, id: usize, by: i64, at?: [usize, usize]): Func {
   n.id = id;
   if (at !== undefined) {
     n.start = at[0];
     n.end = at[1];
   } else if (by !== 0) {
-    n.start += by;
-    n.end += by;
+    n.start = ((n.start as i64) + by) as usize;
+    n.end = ((n.end as i64) + by) as usize;
   }
   return n;
 }
