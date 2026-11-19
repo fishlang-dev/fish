@@ -14388,10 +14388,11 @@ export type Emitted = { defines: Map<string, string>; items: Map<string, Item>; 
 // A global or a declaration, and which part of the module it goes in.
 export type Item = { line: string; place: "global" | "intrinsic" | "rust" | "declared" };
 
-// The `@` names IR text uses, leaving out what its string constants hold.
+// The `@` names IR text uses, leaving out what its string constants hold, which are written
+// `[N x i8] c"..."`; a quoted name may end in `c` too.
 function namesIn(text: string): string[] {
   let names: string[] = [];
-  for (const m of text.replace(/c"[^"]*"/g, "").matchAll(/@("(?:[^"\\]|\\.)*"|[\w.$-]+)/g)) names.push(`@${m[1]!}`);
+  for (const m of text.replace(/x i8\] c"[^"]*"/g, "").matchAll(/@("(?:[^"\\]|\\.)*"|[\w.$-]+)/g)) names.push(`@${m[1]!}`);
   return names;
 }
 
