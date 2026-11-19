@@ -97,19 +97,20 @@ export function shortened(name: string): string {
   let depth = 0;
   let from = 0;
   let inText = false;
+  // By code unit, so no one-character string is made for each.
   for (let i = 0; i < name.length; i++) {
-    const c = name[i]!;
+    const c = name.charCodeAt(i);
     // A literal type's text may hold `<` or `>`, as a function type's arrow holds `>`.
-    if (c === "\"") inText = !inText;
-    else if (inText && c === "\\") i++;
-    if (inText || c === "\"") continue;
-    if (c === "<") {
+    if (c === 34) inText = !inText;
+    else if (inText && c === 92) i++;
+    if (inText || c === 34) continue;
+    if (c === 60) {
       if (depth === 0) {
         out += name.slice(from as i64, (i + 1) as i64);
         from = i + 1;
       }
       depth++;
-    } else if (c === ">" && depth > 0 && name[i - 1] !== "=") {
+    } else if (c === 62 && depth > 0 && name.charCodeAt(i - 1) !== 61) {
       depth--;
       if (depth === 0) {
         const inner = name.slice(from as i64, i as i64);
@@ -132,10 +133,16 @@ function brief(shown: string): string {
 // name doesn't depend on the order instances were made in. Whole symbols alike are numbered.
 export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
   let alike = new Map<string, usize>();
+  // Each live instance's shortened symbol, made once.
+  let short: string[] = [""];
   for (let id: usize = 1; id <= arenas.instanceCount(); id++) {
     const x = arenas.instanceOf(id as InstanceId);
-    if (x.retired === true) continue;
+    if (x.retired === true) {
+      short.push("");
+      continue;
+    }
     const name = shortened(x.symbol);
+    short.push(name);
     alike.set(name, (alike.get(name) ?? 0) + 1);
   }
   let known = new Map<InstanceId, string>();
@@ -143,7 +150,7 @@ export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
   for (let id: usize = 1; id <= arenas.instanceCount(); id++) {
     const x = arenas.instanceOf(id as InstanceId);
     if (x.retired === true) continue;
-    const name = shortened(x.symbol);
+    const name = short[id]!;
     let chosen = (alike.get(name) ?? 0) > 1 ? `${name}~${digest(x.symbol)}` : name;
     for (let n: usize = 2; taken.has(chosen); n++) chosen = `${name}~${digest(x.symbol)}.${n}`;
     taken.add(chosen);

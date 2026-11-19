@@ -617,9 +617,36 @@ export function digest(description: string): string {
 // All 64 bits of `digest`'s hash, as up to 13 base-36 digits: for names a big module makes so many
 // of that six digits would collide.
 export function fullDigest(description: string): string {
-  let h = 0xcbf29ce484222325n;
-  for (const b of new TextEncoder().encode(description)) h = ((h ^ BigInt(b)) * 0x100000001b3n) & 0xffffffffffffffffn;
-  return h.toString(36);
+  // The hash in four 16-bit limbs, lowest first, so every step is exact both as a double and as
+  // an i64, with no bigint made per byte. FNV's prime is 2^40 + 0x1b3.
+  let a0: i64 = 0x2325;
+  let a1: i64 = 0x8422;
+  let a2: i64 = 0x9ce4;
+  let a3: i64 = 0xcbf2;
+  for (const b of new TextEncoder().encode(description)) {
+    a0 = a0 ^ (b as i64);
+    const s0 = a0 * 0x1b3;
+    const s1 = a1 * 0x1b3 + (s0 >> 16);
+    const s2 = a2 * 0x1b3 + (s1 >> 16) + ((a0 & 0xff) << 8);
+    const s3 = a3 * 0x1b3 + (s2 >> 16) + (a0 >> 8) + ((a1 & 0xff) << 8);
+    a0 = s0 & 0xffff;
+    a1 = s1 & 0xffff;
+    a2 = s2 & 0xffff;
+    a3 = s3 & 0xffff;
+  }
+  // Base 36 by long division of the limbs, highest first.
+  let limbs: i64[] = [a3, a2, a1, a0];
+  let digits = "";
+  while (limbs.some((l) => l !== 0)) {
+    let rest: i64 = 0;
+    for (let i: usize = 0; i < 4; i++) {
+      const at = rest * 65536 + limbs[i]!;
+      limbs[i] = (at - (at % 36)) / 36;
+      rest = at % 36;
+    }
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz".charAt(rest) + digits;
+  }
+  return digits === "" ? "0" : digits;
 }
 
 // Why a generic function type can't be held where it is: as `where` it would be boxed, and a box
