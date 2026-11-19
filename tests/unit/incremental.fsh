@@ -214,6 +214,9 @@ test("an edit reaching other functions' code emits them again: behind a vtable, 
   for (const each of editedIn(shared, `export function first<T>(xs: Ref<T[]>): i64 {\n  return xs.length as i64;\n}\n`, [["return xs.length as i64;", "return (xs.length as i64) + 1;"]])) said.push(each);
   const boxes = `export class Box<T> {\n  v: T;\n  constructor(v: T) {\n    this.v = v;\n  }\n  get(): i64 {\n    return 1;\n  }\n}\n\nexport function use(): i64 {\n  return new Box<i64>(1).get() + new Box<string>("a").get();\n}\n`;
   for (const each of editedIn(`import { use } from "./lib.fsh";\nfunction main() {\n  console.log(use());\n}\n`, boxes, [[` + new Box<string>("a").get()`, ""]])) said.push(each);
+  // A string holding IR's own words names nothing the module must define.
+  const quoting = `import { shout, twice } from "./lib.fsh";\nfunction main() {\n  shout();\n  console.log(twice(2));\n}\n`;
+  for (const each of editedIn(quoting, `export function shout(): void {\n  console.log("define i32 @main(i32 %argc) calls @fsh_rt_args(");\n}\n\nexport function twice(n: i64): i64 {\n  return n * 2;\n}\n`, [["return n * 2;", "return n * 3;"]])) said.push(each);
   assert(said.every((each) => each === "kept same"), said.join(" | "));
 }, { timeout: 300_000 });
 

@@ -10451,8 +10451,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (queue.length === 0) return stale;
     let users = new Map<string, string[]>();
     for (const [name, text] of prior.defines) {
-      for (const m of text.matchAll(/@("(?:[^"\\]|\\.)*"|[\w.$-]+)/g)) {
-        const used = `@${m[1]!}`;
+      for (const used of namesIn(text)) {
         if (used === name) continue;
         let list: string[] = users.has(used) ? users.get(used)! : [];
         list.push(name);
@@ -10520,7 +10519,7 @@ class Codegen implements PrintHost, ComptimeHost {
   pullKept(this: Mut<this>, prior: Ref<Emitted>): void {
     if (this.takenDefines.length === 0) return;
     let defined = new Set<string>();
-    for (const line of [...this.out, ...this.globals, ...this.intrinsics, ...RUNTIME]) {
+    for (const line of [...this.out, ...this.globals, ...this.intrinsics, ...RUNTIME, ...this.start, ...this.filled]) {
       const name = itemName(line);
       if (name !== undefined) defined.add(name);
     }
@@ -10529,8 +10528,7 @@ class Codegen implements PrintHost, ComptimeHost {
     let queue = [...this.takenDefines];
     while (queue.length > 0) {
       const text = queue.pop()!;
-      for (const m of text.matchAll(/@("(?:[^"\\]|\\.)*"|[\w.$-]+)/g)) {
-        const name = `@${m[1]!}`;
+      for (const name of namesIn(text)) {
         if (defined.has(name) || this.stale.has(name)) continue;
         defined.add(name);
         const define = prior.defines.get(name);
@@ -14389,6 +14387,13 @@ export type Emitted = { defines: Map<string, string>; items: Map<string, Item>; 
 
 // A global or a declaration, and which part of the module it goes in.
 export type Item = { line: string; place: "global" | "intrinsic" | "rust" | "declared" };
+
+// The `@` names IR text uses, leaving out what its string constants hold.
+function namesIn(text: string): string[] {
+  let names: string[] = [];
+  for (const m of text.replace(/c"[^"]*"/g, "").matchAll(/@("(?:[^"\\]|\\.)*"|[\w.$-]+)/g)) names.push(`@${m[1]!}`);
+  return names;
+}
 
 // The name a global, define or declaration line gives, if it gives one.
 function itemName(line: string): string | undefined {
