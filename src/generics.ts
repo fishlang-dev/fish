@@ -507,6 +507,9 @@ class Concreteness {
 // What instantiating needs from the checker.
 export interface InstancingHost {
   tables: Tables;
+  // Who an instance asked for now is asked for by: the instance being checked, the class being
+  // settled as `CLASS_ASKER` plus its id, or 0 for the program itself.
+  asker(): usize;
   decls: Declarations;
   /** @throws {CompileError} */
   resolveType(t: TypeNode): Type;
@@ -545,6 +548,9 @@ export function comptimeName(p: Ref<Param>): string {
 }
 
 // The instances made so far and what making them worked out, kept by the host between uses.
+// Where a class's ids start among those that ask for instances.
+export const CLASS_ASKER: usize = 1 << 40;
+
 export class InstancingState {
   concreteness: Concreteness;
   explicit = new Map<BodyId, Map<string, Type>>();
@@ -560,6 +566,10 @@ export class InstancingState {
   // What a call made inside an instance passed for each type parameter, where that was one of
   // the instance's own.
   sites = new NodeMap<Span & Id, Map<string, Type>>();
+  // Each instance asked for, and the instance being checked when it was, 0 when none was: the
+  // instances a program has are those its roots reach through these.
+  requestFrom: usize[] = [];
+  requestTo: usize[] = [];
 
   constructor() {
     this.concreteness = new Concreteness();
@@ -769,7 +779,12 @@ export class Instancing<H extends InstancingHost> {
     if (!this.host.instancingState.instances.has(f.bodyId)) this.host.instancingState.instances.set(f.bodyId, new Map<string, InstanceId>());
     let byKey = this.host.instancingState.instances.get(f.bodyId)!;
     const known = byKey.get(key);
-    if (known !== undefined) return this.host.tables.arenas.instanceOf(known);
+    const asking = this.host.asker();
+    if (known !== undefined) {
+      this.host.instancingState.requestFrom.push(asking);
+      this.host.instancingState.requestTo.push(known as usize);
+      return this.host.tables.arenas.instanceOf(known);
+    }
     // Every type parameter, implicit ones included, needs a concrete binding to compile.
     const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...this.implicitOf(f.bodyId).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
     const isConcrete = complete && [...bindings].every(([name, t]) => isApart(name) || this.host.instancingState.concreteness.concrete(this.host.tables.typing, t));
@@ -788,6 +803,8 @@ export class Instancing<H extends InstancingHost> {
     byKey.set(key, found.id);
     this.host.instancingState.instances.set(f.bodyId, byKey);
     this.host.instancingState.pending.push(found.id);
+    this.host.instancingState.requestFrom.push(asking);
+    this.host.instancingState.requestTo.push(found.id as usize);
     return found;
   }
 

@@ -8,6 +8,7 @@ import { CompileError } from "./diag.ts";
 import { didYouMean } from "./suggest.ts";
 import { unsatisfied, type Members } from "./interfaces.ts";
 import type { ClassNode, Param, Span, TypeNode } from "./parser.ts";
+import { CLASS_ASKER, type InstancingState } from "./generics.ts";
 import { cloneTypeNode } from "./rebuild.ts";
 import { storable } from "./resolve.ts";
 import { EMBEDDED, type Field, type MapType, type InterfaceType, type ObjectType, TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing, copyField } from "./typing.ts";
@@ -24,6 +25,8 @@ type Table = "methods" | "getters" | "setters" | "statics";
 // other lazily.
 export interface RegistryHost {
   tables: Tables;
+  asker(): usize;
+  instancingState: InstancingState;
   classes: Map<string, ClassId>;
   templates: Map<string, ClassNode & { name: string }>;
   members(this: Mut<this>): Members;
@@ -73,6 +76,9 @@ export class Registry<H extends RegistryHost> {
     const type = this.host.tables.arenas.classOf(c).type;
     this.host.registryState.infoOf.set(type, c);
     this.host.registryState.unsettled.push(c);
+    // A class is asked for by whoever registers it, and asks for its members as it settles.
+    this.host.instancingState.requestFrom.push(this.host.asker());
+    this.host.instancingState.requestTo.push(CLASS_ASKER + (c as usize));
   }
 
   // Lays out a class and checks what it claims; gives its members, each for the host to check at

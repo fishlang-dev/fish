@@ -202,6 +202,21 @@ test("a build after an edit emits again only the functions it changed or moved, 
   assert(said.join(" | ") === "1 same | 1 same | 2 same", said.join(" | "));
 }, { timeout: 120_000 });
 
+test("an edit reaching other functions' code emits them again: behind a vtable, raced and cancelled, shared, and no longer used", () => {
+  let said: string[] = [];
+  const dyn = `import { Circle, Shape, area } from "./lib.fsh";\nfunction main() {\n  const s: Dyn<Shape> = new Circle(2);\n  console.log(area(s));\n}\n`;
+  const shapes = `export interface Shape {\n  area(): i64;\n}\n\nexport class Circle {\n  r: i64;\n  constructor(r: i64) {\n    this.r = r;\n  }\n  area(): i64 {\n    return this.r * 3;\n  }\n}\n\nexport function area(s: Ref<Dyn<Shape>>): i64 {\n  return s.area();\n}\n`;
+  for (const each of editedIn(dyn, shapes, [["return this.r * 3;", "const k = 5;\n    return this.r * k;"]])) said.push(each);
+  const raced = `import { outer } from "./lib.fsh";\nasync function main() {\n  const v = await outer();\n  console.log(v);\n}\n`;
+  const racing = `export async function inner(n: i64): Promise<i64> {\n  await sleep(1);\n  return n * 2;\n}\n\nexport async function outer(): Promise<i64> {\n  const r = await Promise.race([inner(2), inner(3)]);\n  return r;\n}\n`;
+  for (const each of editedIn(raced, racing, [["return n * 2;", "return n * 5;"], ["  await sleep(1);\n  return n * 5;", "  const m = n * 5;\n  await sleep(1);\n  await sleep(1);\n  return m;"]])) said.push(each);
+  const shared = `import { first } from "./lib.fsh";\nfunction main() {\n  console.log(first<i64>([1, 2]), first<u8>([3 as u8]), first<string>(["a"]));\n}\n`;
+  for (const each of editedIn(shared, `export function first<T>(xs: Ref<T[]>): i64 {\n  return xs.length as i64;\n}\n`, [["return xs.length as i64;", "return (xs.length as i64) + 1;"]])) said.push(each);
+  const boxes = `export class Box<T> {\n  v: T;\n  constructor(v: T) {\n    this.v = v;\n  }\n  get(): i64 {\n    return 1;\n  }\n}\n\nexport function use(): i64 {\n  return new Box<i64>(1).get() + new Box<string>("a").get();\n}\n`;
+  for (const each of editedIn(`import { use } from "./lib.fsh";\nfunction main() {\n  console.log(use());\n}\n`, boxes, [[` + new Box<string>("a").get()`, ""]])) said.push(each);
+  assert(said.every((each) => each === "kept same"), said.join(" | "));
+}, { timeout: 300_000 });
+
 test("an edit to a function's body is checked again from what watch kept, and matches a clean build", () => {
   const said = edited([
     ["return n * 2;", "const k = 2;\n  return n * k;"],

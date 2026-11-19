@@ -17,7 +17,7 @@ import { alwaysReturns, assignedNames, assignsOwn, assignsOwnIn, closureAssigned
 import { declareEnum, enumMemberNames, enumMemberOf, enumType, settleEnum, type EnumHost, type EnumInfo, type EnumInstance } from "./enums.ts";
 import { bindingKey, covers, either, guard, isPath, presentKey, type Facts, type Guard, type GuardHost } from "./narrow.ts";
 import { comparable, numberMembers, objectsMeet } from "./unions.ts";
-import { comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.ts";
+import { CLASS_ASKER, comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.ts";
 import { unsatisfied, type Members, type Refused } from "./interfaces.ts";
 import { Registry, RegistryState, type RegistryHost } from "./registry.ts";
 import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost } from "./resolve.ts";
@@ -1239,6 +1239,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   failed = new Map<BodyId, CompileError>();
   // The instances the last `recheck` checked again, which codegen emits again.
   rechecked = new Set<InstanceId>();
+  // Whether this check resumed a kept one, whose instances may include ones nothing asks for now.
+  resumedCheck = false;
+  // The class whose members are being checked at their definitions, outside any instance's check.
+  settling: ClassId | undefined = undefined;
   // The classes as declared, and generic classes' definitions, before any body is checked.
   declaredClasses = new Set<ClassId>();
 
@@ -1426,6 +1430,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       for (let k: usize = 0; k < round.length; k++) before.set(round[k]!, this.resultsOf(round[k]!));
       for (let k: usize = 0; k < round.length; k++) {
         this.forget(round[k]!);
+        this.forgetRequests(round[k]!);
         done.add(round[k]!);
       }
       for (let k: usize = 0; k < round.length; k++) {
@@ -1453,7 +1458,55 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       round = next;
     }
     this.rechecked = done;
+    this.resumedCheck = true;
     return undefined;
+  }
+
+  // Drops what an instance and the closures written in it asked for, before it is checked again.
+  private forgetRequests(this: Mut<this>, id: InstanceId): void {
+    let from: usize[] = [];
+    let to: usize[] = [];
+    const state: Ref<InstancingState> = this.instancingState;
+    for (let k: usize = 0; k < state.requestFrom.length; k++) {
+      const asker = state.requestFrom[k]!;
+      if (asker !== 0 && asker < CLASS_ASKER && this.outermost(asker as InstanceId) === id) continue;
+      from.push(asker);
+      to.push(state.requestTo[k]!);
+    }
+    this.instancingState.requestFrom = from;
+    this.instancingState.requestTo = to;
+  }
+
+  // The instances the program's roots reach through what each asked for, closures through the
+  // instance they are written in.
+  private instancesReached(): Set<InstanceId> {
+    let asked = new Map<usize, usize[]>();
+    const state: Ref<InstancingState> = this.instancingState;
+    for (let k: usize = 0; k < state.requestFrom.length; k++) {
+      const asker = state.requestFrom[k]!;
+      let list: usize[] = asked.has(asker) ? asked.get(asker)! : [];
+      list.push(state.requestTo[k]!);
+      asked.set(asker, list);
+    }
+    for (const c of this.closures) {
+      const parent = bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(c)).closure!.parent as usize;
+      let list: usize[] = asked.has(parent) ? asked.get(parent)! : [];
+      list.push(c as usize);
+      asked.set(parent, list);
+    }
+    let seen = new Set<InstanceId>();
+    let stack: usize[] = [0];
+    while (stack.length > 0) {
+      const at = stack.pop()!;
+      const next = asked.get(at);
+      if (next === undefined) continue;
+      for (const n of next) {
+        if (seen.has(n as InstanceId)) continue;
+        seen.add(n as InstanceId);
+        stack.push(n);
+      }
+    }
+    return seen;
   }
 
   // The instance a closure is written in, through every closure around it; an instance that isn't
@@ -1783,6 +1836,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     return this.replaced(t, swap);
   }
 
+  asker(): usize {
+    if (this.beingChecked !== undefined) return this.beingChecked as usize;
+    return this.settling !== undefined ? CLASS_ASKER + (this.settling as usize) : 0;
+  }
+
   checking(): InstanceId | undefined {
     return this.beingChecked;
   }
@@ -1919,9 +1977,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         for (const c of kept) this.registryState.unsettled.push(c);
         if (this.registryState.unsettled.length === 0 && this.instancingState.pending.length === 0) break;
       }
+      this.settling = undefined;
       try {
         if (this.registryState.unsettled.length > 0) {
           const next = this.registryState.unsettled.shift()!;
+          this.settling = next;
           for (const f of this.registry().settle(next)) {
             try {
               const definition = this.definition(f);
@@ -1931,6 +1991,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
               this.recover(e);
             }
           }
+          this.settling = undefined;
         } else {
           const pending = this.instancingState.pending.shift()!;
           this.checkBody(pending);
@@ -1985,6 +2046,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     for (const c of this.closures) {
       const i = this.tables.arenas.instanceOf(c);
       if (i.concrete && !checkedOnly(this.tables, i)) compiledIds.push(c);
+    }
+    // A resumed check keeps the instances an edit stopped asking for; a fresh one never made them.
+    if (this.resumedCheck) {
+      const live = this.instancesReached();
+      compiledIds = compiledIds.filter((id) => live.has(id));
     }
     const tables: Ref<Tables> = this.tables;
     unreached(this.tables.typing, this.tables.equalities, this.tables.arenas, compiledIds, (i) => bodyOf(tables.arenas, i).abstract === true || checkedOnly(tables, i));

@@ -429,6 +429,9 @@ class Codegen implements PrintHost, ComptimeHost {
   // taken, whose names the module must still define.
   reemitted: usize;
   takenDefines: string[];
+  // The last build's defines that name a function whose face changed, was renamed or is gone, and
+  // so are emitted again rather than taken.
+  stale: Set<string>;
   combinePolls: TypeMap<FutureType, string>;
   cancelled: Set<InstanceId>;
   stringers: TypeMap<Type, string>;
@@ -615,6 +618,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.rechecked = options.rechecked ?? new Set<InstanceId>();
     this.reemitted = 0;
     this.takenDefines = [];
+    this.stale = new Set<string>();
 
     // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
     // cancel function is wanted for.
@@ -727,6 +731,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   this.shares = this.sharing();
+  if (prior !== undefined) this.stale = this.staleNames(prior!);
 
   // The current function's parameters taken as a closure's address and code, by their slots.
   this.pairs = new Map<LocalId, string>();
@@ -993,7 +998,6 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
   // A library has no main, and keeps the instance it was given, which only a program's entry reads.
-  if (prior !== undefined) this.pullKept(prior!);
 
   this.main = this.instances.find((i) => this.inst(i).symbol === "main") ?? this.main;
 
@@ -1001,6 +1005,8 @@ class Codegen implements PrintHost, ComptimeHost {
   this.start = this.library ? this.instances.filter((i) => this.bodyAt(i).exported === true).flatMap(((i) => this.exported(i))) : this.entry();
 
   this.filled = this.fillConstants();
+  // Last, so what the entry and the fillers made is not taken from the last build as well.
+  if (prior !== undefined) this.pullKept(prior!);
 
 
   // Definitions in order of their names, rather than of when they were made, so a function
@@ -10415,6 +10421,59 @@ class Codegen implements PrintHost, ComptimeHost {
     return shown;
   }
 
+  // What a function's callers' code reads of it beyond its symbol: the LLVM types it gives, and
+  // the frame its future or generator keeps.
+  face(i: InstanceId): string {
+    const x = this.inst(i);
+    const machine: Type | undefined = x.generator !== undefined ? x.generator : x.future;
+    return `${this.llvm(x.returns)} ${machine !== undefined ? this.llvm(machine!) : ""}`;
+  }
+
+  // Every name in the last build's module whose define can't be taken: a function's whose face
+  // changed or which no function compiled now has, then every define naming one, and through
+  // helpers, every define naming those.
+  staleNames(this: Mut<this>, prior: Ref<Emitted>): Set<string> {
+    // Each function compiled now by its symbol, with its face.
+    let faces = new Map<string, string>();
+    for (const i of [...this.instances]) {
+      if (this.bodyAt(i).comptime !== undefined || this.bodyAt(i).foreign === true) continue;
+      faces.set(this.symbol(i), this.face(i));
+    }
+    let functions = new Set<string>();
+    for (const made of prior.made.values()) functions.add(made.symbol);
+    let stale = new Set<string>();
+    let queue: string[] = [];
+    for (const made of prior.made.values()) {
+      if (faces.get(made.symbol) === made.face || stale.has(made.symbol)) continue;
+      queue.push(made.symbol);
+      stale.add(made.symbol);
+    }
+    if (queue.length === 0) return stale;
+    let users = new Map<string, string[]>();
+    for (const [name, text] of prior.defines) {
+      for (const m of text.matchAll(/@("(?:[^"\\]|\\.)*"|[\w.$-]+)/g)) {
+        const used = `@${m[1]!}`;
+        if (used === name) continue;
+        let list: string[] = users.has(used) ? users.get(used)! : [];
+        list.push(name);
+        users.set(used, list);
+      }
+    }
+    while (queue.length > 0) {
+      const name = queue.pop()!;
+      const by = users.get(name);
+      if (by === undefined) continue;
+      for (const user of by) {
+        if (stale.has(user)) continue;
+        stale.add(user);
+        // A function's define emitted again keeps its face, so what names it still reads right;
+        // a helper's is only made again when something asks for it, so its users are stale too.
+        if (!functions.has(user)) queue.push(user);
+      }
+    }
+    return stale;
+  }
+
   // How an instance shares its code with others, as one text to compare across builds.
   sharedKey(i: InstanceId): string {
     const share = this.shares.get(i);
@@ -10441,7 +10500,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (made === undefined || (instance as usize) > prior.count || made.comptime) return false;
     if (this.rechecked.has(instance) || this.rechecked.has(this.outermostOf(instance))) return false;
     const symbol = this.symbol(instance);
-    if (symbol !== made.symbol || made.shared !== this.sharedKey(instance)) return false;
+    if (symbol !== made.symbol || made.shared !== this.sharedKey(instance) || this.stale.has(symbol)) return false;
     const define = prior.defines.get(symbol);
     if (define === undefined) return false;
     for (const p of made.places) if (this.placeOf({ start: p.at, end: p.at }) !== p.shown) return false;
@@ -10472,7 +10531,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const text = queue.pop()!;
       for (const m of text.matchAll(/@("(?:[^"\\]|\\.)*"|[\w.$-]+)/g)) {
         const name = `@${m[1]!}`;
-        if (defined.has(name)) continue;
+        if (defined.has(name) || this.stale.has(name)) continue;
         defined.add(name);
         const define = prior.defines.get(name);
         if (define !== undefined) {
@@ -11516,7 +11575,9 @@ class Codegen implements PrintHost, ComptimeHost {
   combinePoll(this: Mut<this>, t: FutureType): string {
     const known = this.combinePolls.get(t);
     if ((known !== undefined && known !== "")) return known;
-    const line = `${this.tables.typing.described(t)} ${this.tables.typing.combinedOf.get(t)!.at.start}`;
+    // Named by where in its function the combining call is, which moves only with that function's body.
+    const site = this.tables.typing.combinedOf.get(t)!.at;
+    const line = `${this.tables.typing.described(t)} ${this.siteName({ start: site.start, end: site.end })}`;
     const name = `@fsh.combine.${this.stableId("combine", line, typeOwner(t))}`;
     this.combinePolls.set(t, name);
     const { kind, futures, at, array } = this.tables.typing.combinedOf.get(t)!;
@@ -14319,7 +14380,7 @@ export type Placed = { at: usize; shown: string };
 
 // What emitting one instance asked of the module, besides its define: what a later build needs to
 // take the define instead of emitting it again.
-export type Made = { symbol: string; places: Placed[]; reads: InstanceId[]; comptime: boolean; shared: string; awaits: { state: usize; field: usize; type: Type }[] };
+export type Made = { symbol: string; face: string; places: Placed[]; reads: InstanceId[]; comptime: boolean; shared: string; awaits: { state: usize; field: usize; type: Type }[] };
 
 // What a build's codegen made, kept for `fishc watch`'s next build: each define by its symbol, the
 // module's globals and declarations by name, what each instance asked for, and how many
@@ -14398,7 +14459,7 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
     const places: Placed[] = generator.wheres.has(id) ? [...generator.wheres.get(id)!] : [];
     const reads: InstanceId[] = generator.reads.has(id) ? [...generator.reads.get(id)!] : [];
     const awaits: { state: usize; field: usize; type: Type }[] = generator.awaitsOf.has(id) ? [...generator.awaitsOf.get(id)!] : [];
-    made.set(id, { symbol: generator.symbol(id), places, reads, comptime: generator.ranComptime.has(id), shared: generator.sharedKey(id), awaits });
+    made.set(id, { symbol: generator.symbol(id), face: generator.face(id), places, reads, comptime: generator.ranComptime.has(id), shared: generator.sharedKey(id), awaits });
   }
   const emitted: Emitted = { defines: definesIn(ir.split("\n")), items: itemsOf(generator), made, count: generator.tables.arenas.instanceCount() as usize, reemitted: generator.reemitted };
   return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings }, emitted };
