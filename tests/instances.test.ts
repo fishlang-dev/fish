@@ -62,13 +62,14 @@ function main() {
 });
 
 // Two instances whose symbols read alike, as classes made from arguments shown the same way, get
-// names of their own in the IR; one alone keeps its symbol.
+// names of their own in the IR, each by a digest of its whole symbol and a count when those are
+// the same too, so a name doesn't depend on which was made first; one alone keeps its symbol.
 test("instances that read alike get symbols of their own", () => {
   const arenas = new Arenas();
   const made = (symbol: string) => arenas.addInstance({ body: arenas.addBody({ name: "m" } as Body).bodyId, symbol, bindings: new Map() } as unknown as Omit<Instance, "id">);
   const [a, b, c] = [made("Box<T>.get"), made("Box<T>.get"), made("Box<U>.get")];
   const names = symbolNames(arenas);
-  expect([symbolIn(arenas, a, names), symbolIn(arenas, b, names), symbolIn(arenas, c, names)]).toEqual(['@"fsh.Box<T>.get"', '@"fsh.Box<T>.get~2"', '@"fsh.Box<U>.get"']);
+  expect([symbolIn(arenas, a, names), symbolIn(arenas, b, names), symbolIn(arenas, c, names)]).toEqual(['@"fsh.Box<T>.get~r07hia"', '@"fsh.Box<T>.get~r07hia.2"', '@"fsh.Box<U>.get"']);
 });
 
 // An abstract member's signature and a template are checked but never compiled, so no compiled

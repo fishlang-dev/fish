@@ -57,6 +57,7 @@ const SOURCES: string[] = [
   "src/dependencies.ts",
   "src/deps.ts",
   "src/diag.ts",
+  "src/edits.ts",
   "src/doc.ts",
   "src/enums.ts",
   "src/expressions.ts",
@@ -66,6 +67,7 @@ const SOURCES: string[] = [
   "src/generics.ts",
   "src/git.ts",
   "src/ids.ts",
+  "src/incremental.ts",
   "src/interfaces.ts",
   "src/js.ts",
   "src/js_native.ts",
@@ -351,6 +353,7 @@ test("src/defaults.ts formats as Prettier formats it", () => likePrettier("src/d
 test("src/dependencies.ts formats as Prettier formats it", () => likePrettier("src/dependencies.ts"));
 test("src/deps.ts formats as Prettier formats it", () => likePrettier("src/deps.ts"));
 test("src/diag.ts formats as Prettier formats it", () => likePrettier("src/diag.ts"));
+test("src/edits.ts formats as Prettier formats it", () => likePrettier("src/edits.ts"));
 test("src/doc.ts formats as Prettier formats it", () => likePrettier("src/doc.ts"));
 test("src/enums.ts formats as Prettier formats it", () => likePrettier("src/enums.ts"));
 test("src/expressions.ts formats as Prettier formats it", () => likePrettier("src/expressions.ts"));
@@ -360,6 +363,7 @@ test("src/fmt.ts formats as Prettier formats it", () => likePrettier("src/fmt.ts
 test("src/generics.ts formats as Prettier formats it", () => likePrettier("src/generics.ts"));
 test("src/git.ts formats as Prettier formats it", () => likePrettier("src/git.ts"));
 test("src/ids.ts formats as Prettier formats it", () => likePrettier("src/ids.ts"));
+test("src/incremental.ts formats as Prettier formats it", () => likePrettier("src/incremental.ts"));
 test("src/interfaces.ts formats as Prettier formats it", () => likePrettier("src/interfaces.ts"));
 test("src/js.ts formats as Prettier formats it", () => likePrettier("src/js.ts"));
 test("src/js_native.ts formats as Prettier formats it", () => likePrettier("src/js_native.ts"));

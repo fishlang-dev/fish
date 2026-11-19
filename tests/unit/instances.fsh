@@ -102,7 +102,8 @@ function made(arenas: Mut<Arenas>, symbol: string): InstanceId {
 }
 
 // Two instances whose symbols read alike, as classes made from arguments shown the same way, get
-// names of their own in the IR; one alone keeps its symbol.
+// names of their own in the IR, each by a digest of its whole symbol and a count when those are
+// the same too, so a name doesn't depend on which was made first; one alone keeps its symbol.
 test("instances that read alike get symbols of their own", () => {
   let arenas = new Arenas();
   const a = made(arenas, "Box<T>.get");
@@ -110,7 +111,7 @@ test("instances that read alike get symbols of their own", () => {
   const c = made(arenas, "Box<U>.get");
   const names = symbolNames(arenas);
   const got = [symbolIn(arenas, arenas.instanceOf(a), names), symbolIn(arenas, arenas.instanceOf(b), names), symbolIn(arenas, arenas.instanceOf(c), names)].join(" ");
-  assert(got === '@"fsh.Box<T>.get" @"fsh.Box<T>.get~2" @"fsh.Box<U>.get"', got);
+  assert(got === '@"fsh.Box<T>.get~r07hia" @"fsh.Box<T>.get~r07hia.2" @"fsh.Box<U>.get"', got);
 });
 
 // An abstract member's signature and a template are checked but never compiled, so no compiled

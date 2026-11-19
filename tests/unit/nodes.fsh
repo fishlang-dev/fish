@@ -305,6 +305,9 @@ function inPlace(): string[] {
     "check.ts: list.splice(", "check.ts: list[i] = block;", "check.ts: while (added.length > 0) list.splice(", "check.ts: while (parts.length > 0) list.splice(", "check.ts: let removed = list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
     "check.ts: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.ts: if (inserted !== undefined && inserted.length > 0",
     "modules.ts: let removed = l.body.splice(at, 1);", "modules.ts: l.body.splice(at, 0, {", "macros.ts: statements.splice(", "modules.ts: if (startsMain(statements[i]!)) statements.splice(",
+    // a kept check's class node given a member's body read again, so a generic class's later
+    // instances read it, which the node owns there;
+    "check.ts: m.body = cloneStmts(statements);",
     // a file's statements lent to linking and put back where they were;
     "modules.ts: let taken = m.statements.splice(0);",
     // a package's function just made, given the overloads it lists before any tree holds it;
