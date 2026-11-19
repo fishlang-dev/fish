@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { constants, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { bodyOf, type Arenas } from "./arenas.ts";
+import { bodyOf, type Arenas, type InstanceId } from "./arenas.ts";
 import { C_KEYWORDS, checkKeeping, recheckKept, type CheckerParts } from "./check.ts";
 import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.ts";
 import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, stageEnd, stageStart, type Compilation, type Session, type Tables } from "./compilation.ts";
@@ -363,7 +363,7 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   const failed = start.checked.tables.session.failed;
   start.checked.tables.session.failed = undefined;
   const sources = [...start.loaded.sources];
-  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed });
+  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed, prior: start.emitted, rechecked: start.rechecked });
   let warnings = [...made.checked.warnings];
   // A clean check gives its warnings in the order they are written in, which a kept one's
   // positions only give through their files' maps.
@@ -440,7 +440,7 @@ function rechecked(kept: Kept): { done: Kept | undefined; session: Session | und
     k.contents.set(k.loaded.modules[index]!.path, now);
   }
   let { checked, parts, loaded, contents } = k;
-  let made: { checked: Checked; parts: CheckerParts; fallback: string | undefined } | undefined = undefined;
+  let made: { checked: Checked; parts: CheckerParts; fallback: string | undefined; rechecked: Set<InstanceId> } | undefined = undefined;
   try {
     made = recheckKept(checked, parts, bodies);
   } catch (e) {
@@ -454,7 +454,7 @@ function rechecked(kept: Kept): { done: Kept | undefined; session: Session | und
   }
   for (let i: usize = 0; i < done.checked.warnings.length; i++) done.checked.warnings[i]!.sources = [...loaded.sources];
   stageEnd(done.checked.tables.session, "check", started);
-  return { done: { checked: done.checked, parts: done.parts, loaded, contents, carried: k.carried }, session: undefined };
+  return { done: { checked: done.checked, parts: done.parts, loaded, contents, carried: k.carried, emitted: k.emitted, rechecked: done.rechecked }, session: undefined };
 }
 
 // The name a top-level declaration of the file at `index` has in the program.
@@ -556,6 +556,7 @@ function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept
     if (unchanged(reused.contents)) {
       for (const f of reused.contents.keys()) looked.push(f);
       reused.carried++;
+      reused.rechecked = new Set<InstanceId>();
       return reused;
     }
     let { done, session: back } = rechecked(reused);

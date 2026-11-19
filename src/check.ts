@@ -1140,12 +1140,12 @@ function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<str
 // overloaded or lifts a generic function; the kept check is spent then, and the build starts
 // afresh.
 /** @throws {CompileError} */
-export function recheckKept(checked: Checked, parts: CheckerParts, bodies: Replaced[]): { checked: Checked; parts: CheckerParts; fallback: string | undefined } {
+export function recheckKept(checked: Checked, parts: CheckerParts, bodies: Replaced[]): { checked: Checked; parts: CheckerParts; fallback: string | undefined; rechecked: Set<InstanceId> } {
   let checker = Checker.resumed(checked.tables, parts);
   const fallback = checker.recheck(bodies);
   if (fallback !== undefined) {
     let spent = checkerApart(checker);
-    return { checked: { instances: [], tables: spent.tables, warnings: [] }, parts: spent.parts, fallback };
+    return { checked: { instances: [], tables: spent.tables, warnings: [] }, parts: spent.parts, fallback, rechecked: new Set<InstanceId>() };
   }
   let outcome: { instances: InstanceId[]; warnings: CompileError[] } | undefined = undefined;
   try {
@@ -1154,11 +1154,13 @@ export function recheckKept(checked: Checked, parts: CheckerParts, bodies: Repla
     throw e instanceof CompileError ? named(e, copyNames(checker.tables.names)) : e;
   }
   const { instances, warnings } = outcome!;
+  const rechecked = checker.rechecked;
+  checker.rechecked = new Set<InstanceId>();
   let taken = checkerApart(checker);
   let renamed: CompileError[] = [];
   let found = warnings;
   while (found.length > 0) renamed.push(named(found.shift()!, copyNames(taken.tables.names)));
-  return { checked: { instances, tables: taken.tables, warnings: renamed }, parts: taken.parts, fallback: undefined };
+  return { checked: { instances, tables: taken.tables, warnings: renamed }, parts: taken.parts, fallback: undefined, rechecked };
 }
 
 // What a checker holds besides its tables: what the next check of the same program starts from.
@@ -1235,6 +1237,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   tryCallees: [CompileError, BodyId[]][] = [];
   // The error each failed body's check gave, which a call of it gives again rather than another.
   failed = new Map<BodyId, CompileError>();
+  // The instances the last `recheck` checked again, which codegen emits again.
+  rechecked = new Set<InstanceId>();
   // The classes as declared, and generic classes' definitions, before any body is checked.
   declaredClasses = new Set<ClassId>();
 
@@ -1448,6 +1452,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       }
       round = next;
     }
+    this.rechecked = done;
     return undefined;
   }
 

@@ -332,7 +332,9 @@ const rustGiven = (typing: Ref<Typing>, arenas: Ref<Arenas>, i: Ref<Instance>): 
 // address and code, and the closure body each of this instance's calls of them runs.
 type Share = { template: InstanceId; at: Set<usize>; code: Map<usize, InstanceId | undefined> };
 const PAIR = "{ ptr, ptr }";
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; debug?: boolean; failed?: string[] };
+// `prior` is what the last build's codegen made, and `rechecked` the instances checked again since,
+// which `fishc watch` gives so a function nothing changed takes its last define.
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; debug?: boolean; failed?: string[]; prior?: Emitted; rechecked?: Set<InstanceId> };
 
 // The owner a generated symbol is made for, when that is a type.
 const typeOwner = (t: Type): string => `type ${idOf(t)}`;
@@ -416,9 +418,17 @@ class Codegen implements PrintHost, ComptimeHost {
   jsonReaders: TypeMap<Type, string>;
   inspectors: TypeMap<Type, string>;
   awaitsOf: Map<InstanceId, { state: usize; field: usize; type: Type; }[]>;
-  // Each place's `file:line:col` a function's code names, by the function and in the order it
-  // named them, which a later build compares to tell a function whose lines moved.
-  wheres: Map<InstanceId, string[]>;
+  // Each place a function's code names as `file:line:col`, by the function, which a later build
+  // compares to tell a function whose lines moved.
+  wheres: Map<InstanceId, Placed[]>;
+  // The top-level consts each function reads, and the functions that ran comptime while emitted.
+  reads: Map<InstanceId, InstanceId[]>;
+  ranComptime: Set<InstanceId>;
+  rechecked: Set<InstanceId>;
+  // How many functions were emitted again rather than taken from the last build, and the defines
+  // taken, whose names the module must still define.
+  reemitted: usize;
+  takenDefines: string[];
   combinePolls: TypeMap<FutureType, string>;
   cancelled: Set<InstanceId>;
   stringers: TypeMap<Type, string>;
@@ -599,7 +609,12 @@ class Codegen implements PrintHost, ComptimeHost {
     // Each async instance's awaits, by the state it is paused in at each: the frame field the
     // awaited future is in, and its type, for cancelling it there.
     this.awaitsOf = new Map<InstanceId, { state: usize; field: usize; type: Type }[]>();
-    this.wheres = new Map<InstanceId, string[]>();
+    this.wheres = new Map<InstanceId, Placed[]>();
+    this.reads = new Map<InstanceId, InstanceId[]>();
+    this.ranComptime = new Set<InstanceId>();
+    this.rechecked = options.rechecked ?? new Set<InstanceId>();
+    this.reemitted = 0;
+    this.takenDefines = [];
 
     // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
     // cancel function is wanted for.
@@ -694,7 +709,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Emits every instance and gives the module's IR.
   /** @throws {CompileError} */
-  module(this: Mut<this>): string {
+  // `prior` is what the last build's codegen made, when a function nothing changed may take its define.
+  module(this: Mut<this>, prior: Emitted | undefined = undefined): string {
     // Top-level consts and comptime blocks run while compiling, every one of them, so one that
     // fails is reported even when nothing reads it; none is compiled.
     for (const instance of [...this.instances]) {
@@ -705,6 +721,7 @@ class Codegen implements PrintHost, ComptimeHost {
         this.bakeable(part, { start: written.start, end: written.end }, true);
         this.raise();
       }
+      this.ranComptime.add(instance);
       comptimeBody(this, instance);
   }
 
@@ -748,6 +765,8 @@ class Codegen implements PrintHost, ComptimeHost {
         }
         continue;
       }
+      if (prior !== undefined && this.reused(prior!, instance)) continue;
+      this.reemitted++;
       this.current = instance;
       this.self = this.bodyAt(instance).self?.type;
       this.allocas = [];
@@ -818,6 +837,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.pairs = new Map();
       const shared = this.shares.get(instance);
       // What each parameter is, read before anything is emitted, which changes the generator.
+      if (this.bodyAt(instance).params.some((p) => p.comptime)) this.ranComptime.add(instance);
       const written = this.bodyAt(instance).params.map((p) => ({ local: this.resolved(p), comptime: p.comptime, value: p.comptime ? comptimeParameter(this.tables, this.inst(instance), p) : null }));
       let params = written.flatMap((p, k) => {
         const local = p.local;
@@ -973,6 +993,8 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
   // A library has no main, and keeps the instance it was given, which only a program's entry reads.
+  if (prior !== undefined) this.pullKept(prior!);
+
   this.main = this.instances.find((i) => this.inst(i).symbol === "main") ?? this.main;
 
   // Built before the module is put together, since its message adds a global.
@@ -1171,6 +1193,11 @@ class Codegen implements PrintHost, ComptimeHost {
   pushFrame(this: Mut<this>, i: InstanceId): string[] {
     if (!this.framingOn) return [];
     this.frames = true;
+    const closure = this.bodyAt(i).closure;
+    if (closure !== undefined && closure.self === undefined) {
+      const written = this.bodyAt(i);
+      this.noted(written.start, this.placeOf({ start: written.start, end: written.end }));
+    }
     return [
       `  %fsh.site = alloca ${FRAME}`,
       `  %fsh.name = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 1`,
@@ -1381,6 +1408,9 @@ class Codegen implements PrintHost, ComptimeHost {
   // A top-level const holding an aggregate lives in a global, filled once before main runs (or
   // as a library loads) and only ever read; its arrays and strings are never freed.
   constantGlobal(this: Mut<this>, c: InstanceId): string {
+    let read: InstanceId[] = this.reads.has(this.current) ? [...this.reads.get(this.current)!] : [];
+    if (!read.includes(c)) read.push(c);
+    this.reads.set(this.current, read);
     const made = this.constantGlobals.get(c);
     if ((made !== undefined && made !== "")) return made;
     const name = `@"fsh.const.${this.bodyAt(c).name.slice("const ".length as i64)}"`;
@@ -4679,6 +4709,7 @@ class Codegen implements PrintHost, ComptimeHost {
       case "comptime":
         const part = this.current;
         try {
+          this.ranComptime.add(this.current);
           comptimeBlock(this, part, s);
         } catch (err) {
           this.deferred(err as CompileError);
@@ -10380,10 +10411,95 @@ class Codegen implements PrintHost, ComptimeHost {
   // Where `at` is in its file, recorded under the instance being emitted, whose define reads it.
   where(this: Mut<this>, at: Ref<Span>): string {
     const shown = this.placeOf(at);
-    let named: string[] = this.wheres.has(this.current) ? [...this.wheres.get(this.current)!] : [];
-    named.push(shown);
-    this.wheres.set(this.current, named);
+    this.noted(at.start, shown);
     return shown;
+  }
+
+  // How an instance shares its code with others, as one text to compare across builds.
+  sharedKey(i: InstanceId): string {
+    const share = this.shares.get(i);
+    if (share === undefined) return "";
+    const code = [...share.code].map(([k, v]) => `${k}=${v === undefined ? "" : `${v}`}`).join(",");
+    return `${share.template} ${[...share.at].toSorted((a, b) => (a as i64) - (b as i64)).join(",")} ${code}`;
+  }
+
+  // The instance a closure is written in, through every closure around it.
+  outermostOf(i: InstanceId): InstanceId {
+    let at = i;
+    for (;;) {
+      const closure = this.bodyAt(at).closure;
+      if (closure === undefined) return at;
+      at = closure.parent;
+    }
+  }
+
+  // Whether the last build's define of `instance` stands for this one's, and if so it is taken, with
+  // the consts, awaits and places it asked for: when nothing it was checked from changed, it ran no
+  // comptime, it shares code as it did, and every place it names reads as it did.
+  reused(this: Mut<this>, prior: Ref<Emitted>, instance: InstanceId): boolean {
+    const made = prior.made.get(instance);
+    if (made === undefined || (instance as usize) > prior.count || made.comptime) return false;
+    if (this.rechecked.has(instance) || this.rechecked.has(this.outermostOf(instance))) return false;
+    const symbol = this.symbol(instance);
+    if (symbol !== made.symbol || made.shared !== this.sharedKey(instance)) return false;
+    const define = prior.defines.get(symbol);
+    if (define === undefined) return false;
+    for (const p of made.places) if (this.placeOf({ start: p.at, end: p.at }) !== p.shown) return false;
+    this.current = instance;
+    this.out.push(define);
+    this.out.push("");
+    this.takenDefines.push(define);
+    this.wheres.set(instance, [...made.places]);
+    for (const c of made.reads) this.constantGlobal(c);
+    if (made.awaits.length > 0) this.awaitsOf.set(instance, [...made.awaits]);
+    if (define.includes("@fsh_rt_frames")) this.frames = true;
+    return true;
+  }
+
+  // What the taken defines name that this build made nothing for, taken from the last build's
+  // module where it was: a helper's define, a global, or a declaration.
+  pullKept(this: Mut<this>, prior: Ref<Emitted>): void {
+    if (this.takenDefines.length === 0) return;
+    let defined = new Set<string>();
+    for (const line of [...this.out, ...this.globals, ...this.intrinsics, ...RUNTIME]) {
+      const name = itemName(line);
+      if (name !== undefined) defined.add(name);
+    }
+    for (const name of this.rustDrops) defined.add(name);
+    if (this.frames) defined.add("@fsh_rt_frames");
+    let queue = [...this.takenDefines];
+    while (queue.length > 0) {
+      const text = queue.pop()!;
+      for (const m of text.matchAll(/@("(?:[^"\\]|\\.)*"|[\w.$-]+)/g)) {
+        const name = `@${m[1]!}`;
+        if (defined.has(name)) continue;
+        defined.add(name);
+        const define = prior.defines.get(name);
+        if (define !== undefined) {
+          this.out.push(define);
+          this.out.push("");
+          queue.push(define);
+          continue;
+        }
+        const item = prior.items.get(name);
+        if (item === undefined) continue;
+        if (item.place === "global") this.globals.push(item.line);
+        else if (item.place === "intrinsic") this.intrinsics.add(item.line);
+        else if (item.place === "rust") this.rustDrops.add(name);
+        else {
+          this.foreign.add(name.slice(1));
+          this.out.push(item.line);
+          this.out.push("");
+        }
+        queue.push(item.line);
+      }
+    }
+  }
+
+  noted(this: Mut<this>, at: usize, shown: string): void {
+    let named: Placed[] = this.wheres.has(this.current) ? [...this.wheres.get(this.current)!] : [];
+    named.push({ at, shown });
+    this.wheres.set(this.current, named);
   }
 
   units(this: Mut<this>, s: string): string {
@@ -12827,6 +12943,7 @@ class Codegen implements PrintHost, ComptimeHost {
         if (this.fault !== undefined) return "undef";
         const part2 = this.current;
         try {
+          this.ranComptime.add(this.current);
           const comptimeValue2 = comptimeValue(this, part2, e);
           const get4 = this.cur().types.get(e)!;
           return this.bake(comptimeValue2, get4);
@@ -12967,6 +13084,7 @@ class Codegen implements PrintHost, ComptimeHost {
           const get17 = this.cur().types.get(e)!;
           if (this.isRef(get17)) return this.constantGlobal(read);
           try {
+            this.ranComptime.add(this.current);
             const baked = comptimeBody(this, read);
             const get7 = this.cur().types.get(e)!;
             return this.bake(baked, get7);
@@ -14196,9 +14314,49 @@ export function codegen(checked: Checked, options: Options): string {
   return new Codegen(checked, options).module();
 }
 
-// What a build's codegen made, kept for `fishc watch`'s next build: each function's define by its
-// symbol, and each instance's places by its symbol.
-export type Emitted = { defines: Map<string, string>; wheres: Map<string, string[]> };
+// A place a function's code names: its offset, and how it read.
+export type Placed = { at: usize; shown: string };
+
+// What emitting one instance asked of the module, besides its define: what a later build needs to
+// take the define instead of emitting it again.
+export type Made = { symbol: string; places: Placed[]; reads: InstanceId[]; comptime: boolean; shared: string; awaits: { state: usize; field: usize; type: Type }[] };
+
+// What a build's codegen made, kept for `fishc watch`'s next build: each define by its symbol, the
+// module's globals and declarations by name, what each instance asked for, and how many
+// instances there were.
+export type Emitted = { defines: Map<string, string>; items: Map<string, Item>; made: Map<InstanceId, Made>; count: usize; reemitted: usize };
+
+// A global or a declaration, and which part of the module it goes in.
+export type Item = { line: string; place: "global" | "intrinsic" | "rust" | "declared" };
+
+// The name a global, define or declaration line gives, if it gives one.
+function itemName(line: string): string | undefined {
+  const global = /^(@(?:"(?:[^"\\]|\\.)*"|[\w.$-]+)) =/.exec(line);
+  if (global !== null) return global[1]!;
+  if (!line.startsWith("define ") && !line.startsWith("declare ")) return undefined;
+  const m = /@("(?:[^"\\]|\\.)*"|[\w.$-]+)\(/.exec(line);
+  return m !== null ? `@${m[1]!}` : undefined;
+}
+
+// The module's globals and declarations by name, and where each goes.
+function itemsOf(generator: Ref<Codegen>): Map<string, Item> {
+  let items = new Map<string, Item>();
+  for (const line of generator.globals) {
+    const name = itemName(line);
+    if (name !== undefined) items.set(name, { line, place: "global" });
+  }
+  for (const line of generator.intrinsics) {
+    const name = itemName(line);
+    if (name !== undefined) items.set(name, { line, place: "intrinsic" });
+  }
+  for (const name of generator.rustDrops) items.set(name, { line: `declare void ${name}(ptr, ptr)`, place: "rust" });
+  for (const line of generator.out) {
+    if (!line.startsWith("declare ")) continue;
+    const name = itemName(line);
+    if (name !== undefined) items.set(name, { line, place: "declared" });
+  }
+  return items;
+}
 
 // Each function's define in `lines`, from its `define` line to its closing brace, by its symbol.
 export function definesIn(lines: Ref<string[]>): Map<string, string> {
@@ -14229,11 +14387,20 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
   tables.typing.structNames = named.names;
   tables.typing.structColors = named.colors;
   tables.typing.structSignatures = named.signatures;
+  const prior = options.prior;
+  options.prior = undefined;
   let generator = new Codegen({ instances, tables, warnings: [] }, options);
-  const ir = generator.module();
-  let wheres = new Map<string, string[]>();
-  for (const [id, places] of generator.wheres) wheres.set(generator.inst(id).symbol, [...places]);
-  const emitted: Emitted = { defines: definesIn(ir.split("\n")), wheres };
+  const ir = generator.module(prior);
+  let made = new Map<InstanceId, Made>();
+  for (const id of [...generator.instances]) {
+    if (generator.bodyAt(id).comptime !== undefined || generator.bodyAt(id).foreign === true) continue;
+    if (generator.inst(id).retired === true) continue;
+    const places: Placed[] = generator.wheres.has(id) ? [...generator.wheres.get(id)!] : [];
+    const reads: InstanceId[] = generator.reads.has(id) ? [...generator.reads.get(id)!] : [];
+    const awaits: { state: usize; field: usize; type: Type }[] = generator.awaitsOf.has(id) ? [...generator.awaitsOf.get(id)!] : [];
+    made.set(id, { symbol: generator.symbol(id), places, reads, comptime: generator.ranComptime.has(id), shared: generator.sharedKey(id), awaits });
+  }
+  const emitted: Emitted = { defines: definesIn(ir.split("\n")), items: itemsOf(generator), made, count: generator.tables.arenas.instanceCount() as usize, reemitted: generator.reemitted };
   return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings }, emitted };
 }
 

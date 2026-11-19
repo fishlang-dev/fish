@@ -181,6 +181,27 @@ test("a build keeps each function's define by its symbol, as its IR has it", () 
   removed(dir);
 }, { timeout: 120_000 });
 
+test("a build after an edit emits again only the functions it changed or moved, and matches a clean build", () => {
+  const dir = scratch("fish-incremental-");
+  const entry = join(dir, "main.fsh");
+  write(entry, USES);
+  let lib = LIB;
+  write(join(dir, "lib.fsh"), lib);
+  let last = compiledFrom(entry, undefined);
+  let said: string[] = [];
+  const edits: [string, string][] = [["return this.v;", "return this.v + 1;"], ["return n * 2;", "return n * 3;"], ["x + n;", "x + n * 2;"]];
+  for (const [from, to] of edits) {
+    lib = lib.replace(from, to);
+    write(join(dir, "lib.fsh"), lib);
+    let next = compiledFrom(entry, last.kept);
+    const emitted = next.kept?.emitted?.reemitted ?? 0;
+    said.push(`${emitted} ${compared(entry, next.made) ?? "same"}`);
+    last = next;
+  }
+  removed(dir);
+  assert(said.join(" | ") === "1 same | 1 same | 2 same", said.join(" | "));
+}, { timeout: 120_000 });
+
 test("an edit to a function's body is checked again from what watch kept, and matches a clean build", () => {
   const said = edited([
     ["return n * 2;", "const k = 2;\n  return n * k;"],
