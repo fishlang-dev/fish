@@ -59,7 +59,10 @@ function shapeOf(typing: Ref<Typing>, t: Type): Shape {
 // types' colors from the round before, until a round splits them no further, which tells apart
 // any two of them that differ. A color is two hashes, each scrambled and combined modulo a prime
 // below 2^31, so the arithmetic stays exact in an i64 and in a double.
-function colored(typing: Ref<Typing>, roots: Ref<Type[]>, known: Ref<TypeMap<Type, [i64, i64]>>): TypeMap<Type, [i64, i64]> {
+// `known` holds the colors of types already colored, and `signatures` the color of each cycle's
+// type by what it holds, which a type made later and holding the same is colored as; the
+// signatures this coloring finds are added to `found`.
+function colored(typing: Ref<Typing>, roots: Ref<Type[]>, known: Ref<TypeMap<Type, [i64, i64]>>, signatures: Ref<Map<string, [i64, i64]>>, found: Mut<Map<string, [i64, i64]>>): TypeMap<Type, [i64, i64]> {
   let index = new TypeMap<Type, usize>();
   let types: Type[] = [];
   let shapes: Shape[] = [];
@@ -82,15 +85,25 @@ function colored(typing: Ref<Typing>, roots: Ref<Type[]>, known: Ref<TypeMap<Typ
     for (const c of shape.inner) if (typeof c !== "string" && !index.has(c)) queue.push(c);
     shapes.push(shape);
   }
-  // Each type's shape hashed once, and each inner type as its index, or a primitive's own hash
-  // below 0.
+  // Each type's shape hashed once, and each inner type as its index, or as a primitive's place
+  // among the primitives, below 0.
   let shapeA: i64[] = [];
   let shapeB: i64[] = [];
   let inner: i64[][] = [];
+  let primitives: string[] = [];
   for (const x of shapes) {
     shapeA.push(hashed(x.text, 131, PRIME_A));
     shapeB.push(hashed(x.text, 137, PRIME_B));
-    inner.push(x.inner.map((c) => (typeof c === "string" ? -1 - hashed(c, 131, PRIME_A) : (index.get(c)! as i64))));
+    let edges: i64[] = [];
+    for (const c of x.inner) edges.push(typeof c === "string" ? -1 - (primitiveAt(primitives, c) as i64) : (index.get(c)! as i64));
+    inner.push(edges);
+  }
+  // A primitive's hash in each lane, worked out once.
+  let primitiveA: i64[] = [];
+  let primitiveB: i64[] = [];
+  for (const p of primitives) {
+    primitiveA.push(hashed(p, 131, PRIME_A));
+    primitiveB.push(hashed(p, 137, PRIME_B));
   }
   let colorA: i64[] = [...shapeA];
   let colorB: i64[] = [...shapeB];
@@ -101,32 +114,93 @@ function colored(typing: Ref<Typing>, roots: Ref<Type[]>, known: Ref<TypeMap<Typ
       colorB[i] = was![1];
     }
   }
-  for (const group of cyclesOf(inner)) {
-    if (group.length === 1 && known.has(types[group[0]!]!)) continue;
+  // Types that are told apart by nothing they hold are one type to color, as codegen holds them
+  // alike: a record with optional fields and its copy with them required, the one inside a cycle
+  // and the other only reaching it, would otherwise be colored by two different methods.
+  let groups = cyclesOf(inner);
+  let kept: boolean[] = [];
+  for (const t of types) kept.push(known.has(t));
+  let reaches: boolean[] = [];
+  for (let i: usize = 0; i < types.length; i++) reaches.push(false);
+  for (const group of groups) {
+    const cyclic = group.length > 1 || inner[group[0]!]!.includes(group[0]! as i64);
+    let r = cyclic;
+    for (const i of group) for (const c of inner[i]!) if (c >= 0 && reaches[c as usize]!) r = true;
+    for (const i of group) reaches[i] = r && !kept[i]!;
+  }
+  // Types reaching no cycle are colored exactly first, from what they hold.
+  for (const group of groups) {
+    const i = group[0]!;
+    if (group.length > 1 || reaches[i]! || kept[i]!) continue;
+    const [x, y] = combined(shapeA[i]!, shapeB[i]!, inner[i]!, colorA, colorB, primitiveA, primitiveB, undefined, 1);
+    const key = signatureOf(shapeA[i]!, shapeB[i]!, inner[i]!, colorA, colorB, primitiveA, primitiveB);
+    const same = signatures.get(key);
+    colorA[i] = same !== undefined ? same![0] : x;
+    colorB[i] = same !== undefined ? same![1] : y;
+  }
+  // The rest are partitioned by what they hold until the partition splits no further.
+  let cls: i64[] = [];
+  let count: usize = 0;
+  {
+    let ids = new Map<string, i64>();
+    for (let i: usize = 0; i < types.length; i++) {
+      if (!reaches[i]!) {
+        cls.push(-1);
+        continue;
+      }
+      const key = `${shapeA[i]!}.${shapeB[i]!}.${inner[i]!.length}`;
+      if (!ids.has(key)) ids.set(key, ids.size as i64);
+      cls.push(ids.get(key)!);
+    }
+    count = ids.size;
+  }
+  for (;;) {
+    let ids = new Map<string, i64>();
+    let next: i64[] = [];
+    for (let i: usize = 0; i < types.length; i++) {
+      if (!reaches[i]!) {
+        next.push(-1);
+        continue;
+      }
+      let key = `${cls[i]!}`;
+      for (const c of inner[i]!) key += c < 0 ? `,p${-1 - c}` : reaches[c as usize]! ? `,c${cls[c as usize]!}` : `,x${colorA[c as usize]!}.${colorB[c as usize]!}`;
+      if (!ids.has(key)) ids.set(key, ids.size as i64);
+      next.push(ids.get(key)!);
+    }
+    cls = next;
+    if (ids.size === count) break;
+    count = ids.size;
+  }
+  // Each class is colored through one of its types, the first met, which every edge then leads to.
+  let first = new Map<i64, usize>();
+  for (let i: usize = 0; i < types.length; i++) if (reaches[i]! && !first.has(cls[i]!)) first.set(cls[i]!, i);
+  let merged: i64[][] = [];
+  for (let i: usize = 0; i < types.length; i++) {
+    let edges: i64[] = [];
+    for (const c of inner[i]!) edges.push(c >= 0 && reaches[c as usize]! ? (first.get(cls[c as usize]!)! as i64) : c);
+    merged.push(edges);
+  }
+  for (const group of cyclesOf(merged)) {
+    const lead = group[0]!;
+    if (!reaches[lead]!) continue;
+    if (group.length === 1 && first.get(cls[lead]!) !== lead) continue;
     let member = new Set<i64>();
     for (const i of group) member.add(i as i64);
-    const cyclic = group.length > 1 || inner[group[0]!]!.includes(group[0]! as i64);
+    const cyclic = group.length > 1 || merged[group[0]!]!.includes(group[0]! as i64);
     // Refinement stops a round after it splits the cycle's members no further, which its own
     // structure decides, whatever else the program holds.
     let classes: usize = 0;
     let settled = false;
-    const rounds = cyclic ? group.length + 1 : 1;
+    // ponytail: at most ROUNDS rounds, so two members of one cycle differing only deeper than that
+    // would share a color, which `typeDefinitions` refuses; raise it if that ever happens.
+    const rounds = cyclic ? (group.length + 1 < ROUNDS ? group.length + 1 : ROUNDS) : 1;
     for (let round: usize = 0; round < rounds && !settled; round++) {
       let nextA: i64[] = [];
       let nextB: i64[] = [];
       for (const i of group) {
-        let x = shapeA[i]!;
-        let y = shapeB[i]!;
-        for (const c of inner[i]!) {
-          const ca = c < 0 ? hashed(`${-1 - c}`, 131, PRIME_A) : colorA[c as usize]!;
-          const cb = c < 0 ? hashed(`${-1 - c}`, 137, PRIME_B) : colorB[c as usize]!;
-          // An inner type of the same cycle is told from one outside it.
-          const mark: i64 = c >= 0 && member.has(c) ? 3 : 7;
-          x = (mixed(x, PRIME_A) * 131 + ca + mark) % PRIME_A;
-          y = (mixed(y, PRIME_B) * 137 + cb + mark) % PRIME_B;
-        }
-        nextA.push(mixed((x * 131 + (cyclic ? 5 : 1)) % PRIME_A, PRIME_A));
-        nextB.push(mixed((y * 137 + (cyclic ? 5 : 1)) % PRIME_B, PRIME_B));
+        const [x, y] = combined(shapeA[i]!, shapeB[i]!, merged[i]!, colorA, colorB, primitiveA, primitiveB, cyclic ? member : undefined, cyclic ? 5 : 1);
+        nextA.push(x);
+        nextB.push(y);
       }
       for (let k: usize = 0; k < group.length; k++) {
         colorA[group[k]!] = nextA[k]!;
@@ -139,6 +213,14 @@ function colored(typing: Ref<Typing>, roots: Ref<Type[]>, known: Ref<TypeMap<Typ
         classes = seen.size;
       }
     }
+  }
+  for (let i: usize = 0; i < types.length; i++) {
+    if (!reaches[i]!) continue;
+    const lead = first.get(cls[i]!)!;
+    colorA[i] = colorA[lead]!;
+    colorB[i] = colorB[lead]!;
+    // A type made later holding what this one holds is this one, colored the same.
+    if (lead === i) found.set(signatureOf(shapeA[i]!, shapeB[i]!, merged[i]!, colorA, colorB, primitiveA, primitiveB), [colorA[i]!, colorB[i]!]);
   }
   let out = new TypeMap<Type, [i64, i64]>();
   for (let i: usize = 0; i < types.length; i++) {
@@ -156,6 +238,28 @@ function colored(typing: Ref<Typing>, roots: Ref<Type[]>, known: Ref<TypeMap<Typ
     }
   }
   return out;
+}
+
+// A type's color from its shape's hashes and its inner types' colors, in each lane; `member`
+// marks the inner types of the same cycle, told from those outside it, and `end` closes the hash.
+function combined(shapeA: i64, shapeB: i64, edges: Ref<i64[]>, colorA: Ref<i64[]>, colorB: Ref<i64[]>, primitiveA: Ref<i64[]>, primitiveB: Ref<i64[]>, member: Ref<Set<i64>> | undefined, end: i64): [i64, i64] {
+  let x = shapeA;
+  let y = shapeB;
+  for (const c of edges) {
+    const ca = c < 0 ? primitiveA[(-1 - c) as usize]! : colorA[c as usize]!;
+    const cb = c < 0 ? primitiveB[(-1 - c) as usize]! : colorB[c as usize]!;
+    const mark: i64 = c >= 0 && member !== undefined && member!.has(c) ? 3 : 7;
+    x = (mixed(x, PRIME_A) * 131 + ca + mark) % PRIME_A;
+    y = (mixed(y, PRIME_B) * 137 + cb + mark) % PRIME_B;
+  }
+  return [mixed((x * 131 + end) % PRIME_A, PRIME_A), mixed((y * 137 + end) % PRIME_B, PRIME_B)];
+}
+
+// What a type holds, by its shape and its inner types' colors, as a key.
+function signatureOf(shapeA: i64, shapeB: i64, edges: Ref<i64[]>, colorA: Ref<i64[]>, colorB: Ref<i64[]>, primitiveA: Ref<i64[]>, primitiveB: Ref<i64[]>): string {
+  let key = `${shapeA}.${shapeB}`;
+  for (const c of edges) key += c < 0 ? `,${primitiveA[(-1 - c) as usize]!}` : `,${colorA[c as usize]!}.${colorB[c as usize]!}`;
+  return key;
 }
 
 // A type with its brands taken off.
@@ -233,6 +337,16 @@ function cyclesOf(edges: Ref<i64[][]>): usize[][] {
   return groups;
 }
 
+const ROUNDS: usize = 64;
+
+// Where `name` is in `primitives`, added at the end when it isn't yet.
+function primitiveAt(primitives: Mut<string[]>, name: string): usize {
+  const at = primitives.indexOf(name);
+  if (at >= 0) return at as usize;
+  primitives.push(name);
+  return primitives.length - 1;
+}
+
 const PRIME_A: i64 = 2147483647;
 const PRIME_B: i64 = 2147483629;
 
@@ -293,20 +407,22 @@ function colorText(colors: Ref<TypeMap<Type, [i64, i64]>>, t: Type): string {
 // The name of the named struct a value of `t` is held as, for a type made after `structNames`,
 // colored from the colors it kept.
 export function typeName(typing: Ref<Typing>, t: Type): string | undefined {
-  const colors = colored(typing, [t], typing.structColors);
+  let found = new Map<string, [i64, i64]>();
+  const colors = colored(typing, [t], typing.structColors, typing.structSignatures, found);
   return nameFrom(typing, t, colors);
 }
 
 // Every type's named struct, and the colors the names come from, made once for codegen to read.
-export function structNames(typing: Ref<Typing>): { names: TypeMap<Type, string>; colors: TypeMap<Type, [i64, i64]> } {
+export function structNames(typing: Ref<Typing>): { names: TypeMap<Type, string>; colors: TypeMap<Type, [i64, i64]>; signatures: Map<string, [i64, i64]> } {
   const ids = typing.typeIds();
-  const colors = colored(typing, ids, new TypeMap<Type, [i64, i64]>());
+  let signatures = new Map<string, [i64, i64]>();
+  const colors = colored(typing, ids, new TypeMap<Type, [i64, i64]>(), new Map<string, [i64, i64]>(), signatures);
   let names = new TypeMap<Type, string>();
   for (const t of ids) {
     const n = nameFrom(typing, t, colors);
     if (n !== undefined) names.set(t, n);
   }
-  return { names, colors };
+  return { names, colors, signatures };
 }
 
 // The definitions of the named structs `text` uses, each once and in name order, with those their
@@ -332,9 +448,15 @@ export function typeDefinitions(typing: Ref<Typing>, text: string): string[] {
     const first = byName.get(n);
     assert(first !== undefined, `internal error: no type is named ${n}`);
     const body = layoutOf(typing, first!);
-    for (const [m, t] of again) assert(m !== n || layoutOf(typing, t) === body, `internal error: types laid out differently share the name ${n}: '${typing.show(first!)}' as ${body} and '${typing.show(t)}' as ${layoutOf(typing, t)}`);
     defs.set(n, `${n} = type ${body}`);
     for (const m of used(body)) wanted.push(m);
+  }
+  // Each later type given a name the IR defines is checked once against the first's layout.
+  for (const [m, t] of again) {
+    if (!defs.has(m)) continue;
+    const first = byName.get(m)!;
+    const body = layoutOf(typing, first);
+    assert(layoutOf(typing, t) === body, `internal error: types laid out differently share the name ${m}: '${typing.show(first)}' as ${body} and '${typing.show(t)}' as ${layoutOf(typing, t)}`);
   }
   return [...defs.keys()].toSorted().map((n) => defs.get(n)!);
 }

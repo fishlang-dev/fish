@@ -14168,6 +14168,7 @@ export function codegen(checked: Checked, options: Options): string {
   const named = structNames(checked.tables.typing);
   checked.tables.typing.structNames = named.names;
   checked.tables.typing.structColors = named.colors;
+  checked.tables.typing.structSignatures = named.signatures;
   return new Codegen(checked, options).module();
 }
 
@@ -14180,6 +14181,7 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
   const named = structNames(tables.typing);
   tables.typing.structNames = named.names;
   tables.typing.structColors = named.colors;
+  tables.typing.structSignatures = named.signatures;
   let generator = new Codegen({ instances, tables, warnings: [] }, options);
   const ir = generator.module();
   return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings } };
