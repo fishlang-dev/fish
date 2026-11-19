@@ -416,6 +416,9 @@ class Codegen implements PrintHost, ComptimeHost {
   jsonReaders: TypeMap<Type, string>;
   inspectors: TypeMap<Type, string>;
   awaitsOf: Map<InstanceId, { state: usize; field: usize; type: Type; }[]>;
+  // Each place's `file:line:col` a function's code names, by the function and in the order it
+  // named them, which a later build compares to tell a function whose lines moved.
+  wheres: Map<InstanceId, string[]>;
   combinePolls: TypeMap<FutureType, string>;
   cancelled: Set<InstanceId>;
   stringers: TypeMap<Type, string>;
@@ -596,6 +599,7 @@ class Codegen implements PrintHost, ComptimeHost {
     // Each async instance's awaits, by the state it is paused in at each: the frame field the
     // awaited future is in, and its type, for cancelling it there.
     this.awaitsOf = new Map<InstanceId, { state: usize; field: usize; type: Type }[]>();
+    this.wheres = new Map<InstanceId, string[]>();
 
     // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
     // cancel function is wanted for.
@@ -987,8 +991,8 @@ class Codegen implements PrintHost, ComptimeHost {
     ...abort,
     "",
     ...RUNTIME,
-    ...[...this.intrinsics].filter((line) => !this.foreign.has(/@([\w.]+)\(/.exec(line)![1]!)),
-    ...[...this.rustDrops].map((name) => `declare void ${name}(ptr, ptr)`),
+    ...[...this.intrinsics].filter((line) => !this.foreign.has(/@([\w.]+)\(/.exec(line)![1]!)).toSorted(),
+    ...[...this.rustDrops].toSorted().map((name) => `declare void ${name}(ptr, ptr)`),
     "",
     ...byName(this.out),
     ...this.start,
@@ -1354,7 +1358,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (closure !== undefined) {
       if (closure.self !== undefined) return closure.self;
       const written = this.bodyAt(i);
-      return `<arrow ${this.where({ start: written.start, end: written.end }).split(":").slice(-2).join(":")}>`;
+      return `<arrow ${this.placeOf({ start: written.start, end: written.end }).split(":").slice(-2).join(":")}>`;
     }
     // A generic instance ends in `#<id>`, which no frame shows; a private name is `#name` after a
     // dot or space, renamed `#name@Class` when a base declares one too.
@@ -1392,10 +1396,10 @@ class Codegen implements PrintHost, ComptimeHost {
   fillConstants(this: Mut<this>): string[] {
     if (this.constantGlobals.size === 0) return [];
     // Each constant's value, computed while compiling, before the filler that stores it.
-    const constants = [...this.constantGlobals.keys()];
+    // In the order of their globals' names, whichever function asked for each first.
+    const globals = [...this.constantGlobals].toSorted((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
     let computed: Value[] = [];
-    for (const c of constants) computed.push(comptimeBody(this, c));
-    const globals = [...this.constantGlobals];
+    for (const [c, _name] of globals) computed.push(comptimeBody(this, c));
     // The helpers are written out in turn, as each closes the function before it.
     let saved = this.setAside();
     for (let at: usize = 0; at < globals.length; at++) {
@@ -1742,7 +1746,8 @@ class Codegen implements PrintHost, ComptimeHost {
       const line = `call void @fsh_rt_panic_assert(ptr ${this.panicAt({ start: e.start, end: e.end })}, ptr ${message})`;
       this.unwinding(line);
     } else {
-      const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\nassertion failed: ${this.tables.asserts.get(e)!}\n`)})`;
+      const panicPlace = this.where({ start: e.start, end: e.end });
+      const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${panicPlace}:\nassertion failed: ${this.tables.asserts.get(e)!}\n`)})`;
       this.unwinding(line2);
     }
     this.emit("unreachable");
@@ -4591,7 +4596,8 @@ class Codegen implements PrintHost, ComptimeHost {
     const [fail, ok] = [this.label(), this.label()];
     this.emit(`br i1 %sent.has, label %${ok}, label %${fail}`);
     this.startBlock(fail);
-    const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\ngenerator resumed without a value\n`)})`;
+    const panicPlace = this.where({ start: e.start, end: e.end });
+    const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${panicPlace}:\ngenerator resumed without a value\n`)})`;
     this.unwinding(line2);
     this.emit("unreachable");
     this.startBlock(ok);
@@ -8029,7 +8035,8 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${empty} = icmp eq i64 ${length}, 0`);
       this.emit(`br i1 ${empty}, label %${fail}, label %${ok}`);
       this.startBlock(fail);
-      const line4 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\nreduce of empty array with no initial value\n`)})`;
+      const panicPlace = this.where({ start: e.start, end: e.end });
+      const line4 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${panicPlace}:\nreduce of empty array with no initial value\n`)})`;
       this.unwinding(line4);
       this.emit("unreachable");
       this.startBlock(ok);
@@ -8209,9 +8216,11 @@ class Codegen implements PrintHost, ComptimeHost {
       env = this.alloca(this.llvm(closure));
       const line = `store ${this.llvm(closure)} ${this.owned(compare)}, ptr ${env}`;
       this.emit(line);
-      // Its own owner, since code emitted twice, as a `finally` is, makes two.
-      const line3 = this.siteName({ start: compare.start, end: compare.end });
-      through = `@fsh.sort.compare.${this.stableId("sort.compare", line3, `unique ${this.taken.size}`)}`;
+      // Its own owner, since code emitted twice, as a `finally` is, makes two: the instance and the
+      // labels made in it so far, which no other function's code changes.
+      const owner = `${this.inst(this.current).symbol} ${this.labels}`;
+      const line3 = `${this.siteName({ start: compare.start, end: compare.end })} ${owner}`;
+      through = `@fsh.sort.compare.${this.stableId("sort.compare", line3, owner)}`;
       this.thunk(through, "i32", (cg) => {
         const arg = (cg: Mut<Codegen>, p: string, given: Type | undefined): string[] => {
           if (given === undefined) return [];
@@ -8330,7 +8339,8 @@ class Codegen implements PrintHost, ComptimeHost {
       cg.emit(`${outside} = icmp uge i64 ${k}, ${length}`);
       cg.emit(`br i1 ${outside}, label %${fail}, label %${ok}`);
       cg.startBlock(fail);
-      const line = `call void @fsh_rt_panic_index(ptr ${cg.cString(`panicked at ${cg.where({ start: e.start, end: e.end })}:\n`)}, i64 ${length}, i64 ${i})`;
+      const panicPlace = cg.where({ start: e.start, end: e.end });
+      const line = `call void @fsh_rt_panic_index(ptr ${cg.cString(`panicked at ${panicPlace}:\n`)}, i64 ${length}, i64 ${i})`;
       cg.unwinding(line);
       cg.emit("unreachable");
       cg.startBlock(ok);
@@ -9812,7 +9822,8 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`${negative} = icmp slt i64 ${n}, 0`);
         this.emit(`br i1 ${negative}, label %${fail}, label %${ok}`);
         this.startBlock(fail);
-        const line8 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\ninvalid array length\n`)})`;
+        const panicPlace = this.where({ start: e.start, end: e.end });
+        const line8 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${panicPlace}:\ninvalid array length\n`)})`;
         this.unwinding(line8);
         this.emit("unreachable");
         this.startBlock(ok);
@@ -10289,7 +10300,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // The "panicked at" line for a panic the runtime raises at an expression.
   panicAt(this: Mut<this>, at: Ref<Span>): string {
-    return this.cString(`panicked at ${this.where(at)}:\n`);
+    const panicPlace = this.where(at);
+    return this.cString(`panicked at ${panicPlace}:\n`);
   }
 
 
@@ -10347,7 +10359,8 @@ class Codegen implements PrintHost, ComptimeHost {
         const i = iAt;
         iAt++;
         this.startBlock(cases[i]!);
-        const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\nthe type predicate '${name}' said '${placeName(arg)}' ${is} '${brief(this.tables.typing.show(type))}', but it holds a '${brief(this.tables.typing.show(m))}'\n`)})`;
+        const panicPlace = this.where({ start: e.start, end: e.end });
+        const line2 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${panicPlace}:\nthe type predicate '${name}' said '${placeName(arg)}' ${is} '${brief(this.tables.typing.show(type))}', but it holds a '${brief(this.tables.typing.show(m))}'\n`)})`;
         this.unwinding(line2);
         this.emit("unreachable");
       }
@@ -10357,12 +10370,21 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   // `file:line:col` of an expression, in the program or the std library.
-  where(at: Ref<Span>): string {
+  // `file:line:col` of `at`.
+  placeOf(at: Ref<Span>): string {
     const place = sourceOf(this.src, this.file, at.start, this.sources);
     const { line, col } = locate(place.src, place.offset);
     return `${place.file}:${line}:${col}`;
   }
 
+  // Where `at` is in its file, recorded under the instance being emitted, whose define reads it.
+  where(this: Mut<this>, at: Ref<Span>): string {
+    const shown = this.placeOf(at);
+    let named: string[] = this.wheres.has(this.current) ? [...this.wheres.get(this.current)!] : [];
+    named.push(shown);
+    this.wheres.set(this.current, named);
+    return shown;
+  }
 
   units(this: Mut<this>, s: string): string {
     const result = this.temp();
@@ -10390,7 +10412,8 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${told} = add i64 ${length}, ${before}`);
       this.emit(`${asked} = add i64 ${index}, ${before}`);
     }
-    const line = `call void @fsh_rt_panic_bounds(ptr ${this.cString(`panicked at ${this.where(at)}:\n`)}, i64 ${told}, i64 ${asked})`;
+    const panicPlace = this.where(at);
+    const line = `call void @fsh_rt_panic_bounds(ptr ${this.cString(`panicked at ${panicPlace}:\n`)}, i64 ${told}, i64 ${asked})`;
     this.unwinding(line);
     this.emit("unreachable");
     this.startBlock(ok);
@@ -13291,7 +13314,8 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       // A quote is made only while compiling; one reached when the program runs panics.
       case "tagged": {
-        const line8 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${this.where({ start: e.start, end: e.end })}:\na quote builds syntax while compiling, so it can't run in the program\n`)})`;
+        const panicPlace = this.where({ start: e.start, end: e.end });
+        const line8 = `call void @fsh_rt_panic(ptr ${this.cString(`panicked at ${panicPlace}:\na quote builds syntax while compiling, so it can't run in the program\n`)})`;
         this.unwinding(line8);
         this.emit("unreachable");
         const label3 = this.label();
@@ -14172,9 +14196,32 @@ export function codegen(checked: Checked, options: Options): string {
   return new Codegen(checked, options).module();
 }
 
+// What a build's codegen made, kept for `fishc watch`'s next build: each function's define by its
+// symbol, and each instance's places by its symbol.
+export type Emitted = { defines: Map<string, string>; wheres: Map<string, string[]> };
+
+// Each function's define in `lines`, from its `define` line to its closing brace, by its symbol.
+export function definesIn(lines: Ref<string[]>): Map<string, string> {
+  let out = new Map<string, string>();
+  let at: usize = 0;
+  while (at < lines.length) {
+    const line = lines[at]!;
+    if (!line.startsWith("define ")) {
+      at++;
+      continue;
+    }
+    const name = /@("(?:[^"\\]|\\.)*"|[\w.$-]+)\(/.exec(line);
+    let end = at;
+    while (end < lines.length && lines[end]! !== "}") end++;
+    if (name !== null) out.set(`@${name[1]!}`, lines.slice(at as i64, (end + 1) as i64).join("\n"));
+    at = end + 1;
+  }
+  return out;
+}
+
 // `codegen`, giving back the checked program, which what is built from the IR reads after it.
 /** @throws {CompileError} */
-export function codegenChecked(checked: Checked, options: Options): { ir: string; checked: Checked } {
+export function codegenChecked(checked: Checked, options: Options): { ir: string; checked: Checked; emitted: Emitted } {
   let { instances, tables, warnings } = checked;
   const measured = allWords(tables.typing);
   tables.typing.unionWords = measured;
@@ -14184,7 +14231,10 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
   tables.typing.structSignatures = named.signatures;
   let generator = new Codegen({ instances, tables, warnings: [] }, options);
   const ir = generator.module();
-  return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings } };
+  let wheres = new Map<string, string[]>();
+  for (const [id, places] of generator.wheres) wheres.set(generator.inst(id).symbol, [...places]);
+  const emitted: Emitted = { defines: definesIn(ir.split("\n")), wheres };
+  return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings }, emitted };
 }
 
 // The runtime's breadcrumb stride, in UTF-16 units.

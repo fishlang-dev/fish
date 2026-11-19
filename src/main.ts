@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { bodyOf, type Arenas } from "./arenas.ts";
 import { C_KEYWORDS, checkKeeping, recheckKept, type CheckerParts } from "./check.ts";
-import { codegenChecked, compiledOf, symbolIn, symbolNames, type Options } from "./codegen.ts";
+import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.ts";
 import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, stageEnd, stageStart, type Compilation, type Session, type Tables } from "./compilation.ts";
 import { expanded, sourced } from "./analysis.ts";
 import { cachedSession } from "./stdcache.ts";
@@ -59,7 +59,7 @@ export { analyze } from "./analysis.ts";
 
 // What compiling a program gives: its IR, the checked program, and the Rust crates its calls go to.
 // The program as loaded comes back too, which `fishc watch` keeps.
-type Compiled = { ir: string; checked: Checked; loaded: Loaded };
+type Compiled = { ir: string; checked: Checked; loaded: Loaded; emitted: Emitted };
 
 // A build session apart: what a compilation takes, and the caches only building objects reads.
 type Caches = { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
@@ -168,7 +168,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   const { src, file, release } = options;
   const debug = options.debug === true;
   const started = stageStart(checked.tables.session);
-  let made: { ir: string; checked: Checked } | undefined = undefined;
+  let made: { ir: string; checked: Checked; emitted: Emitted } | undefined = undefined;
   try {
     made = codegenChecked(checked, options);
   } catch (e) {
@@ -179,7 +179,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   let ir = bundled(done.ir, loaded);
   if (debug) ir = withDebugInfo(ir, src, file, [...loaded.sources], release);
   stageEnd(done.checked.tables.session, "codegen", started);
-  return { ir, checked: done.checked, loaded };
+  return { ir, checked: done.checked, loaded, emitted: done.emitted };
 }
 
 // The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
@@ -346,13 +346,13 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
   if (shim !== undefined) refuseForeignRust(target);
   const split = parts(ir, made.kept.checked, release, target, debug);
-  let { checked, parts: checkerParts, loaded, contents, carried } = made.kept;
+  let { checked, parts: checkerParts, loaded, contents, carried, emitted } = made.kept;
   let { instances, tables, warnings } = checked;
   let building = together(tables.session, caches);
   // The next build gives the kept tables its own session.
   tables.session = newSession();
   linked(building, ir, split, out, release, links, shim, target, leaks, debug);
-  return { ir: made.ir, warnings: made.warnings, session: building, kept: { checked: { instances, tables, warnings }, parts: checkerParts, loaded, contents, carried } };
+  return { ir: made.ir, warnings: made.warnings, session: building, kept: { checked: { instances, tables, warnings }, parts: checkerParts, loaded, contents, carried, emitted } };
 }
 
 // `compile` for `fishc watch`, from what its last build kept, giving the IR, the warnings and what
@@ -369,7 +369,7 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   // positions only give through their files' maps.
   const placed: Ref<Source[]> = made.loaded.sources;
   warnings.sort((a, b) => (realOffset(a.start, placed) as i64) - (realOffset(b.start, placed) as i64));
-  return { ir: made.ir, warnings, kept: { checked: made.checked, parts: start.parts, loaded: made.loaded, contents: start.contents, carried: start.carried } };
+  return { ir: made.ir, warnings, kept: { checked: made.checked, parts: start.parts, loaded: made.loaded, contents: start.contents, carried: start.carried, emitted: made.emitted } };
 }
 
 // The kept program checked again after edits to its own files, rechecking only their bodies when
@@ -494,11 +494,10 @@ export function cleanDifference(session: Session, file: string, release: boolean
   const gotWarnings = got.warnings.map((w) => shownError(w)).join("\n");
   if (wantWarnings !== gotWarnings) return `the warnings differ:\n--- clean\n${wantWarnings}\n--- kept\n${gotWarnings}`;
   if (want.ir === got.ir) return undefined;
-  // A recheck makes new instances after the others, so the IR's functions and globals are
-  // compared as a set: what codegen emits, whatever its order.
+  // Told where the texts part, by the first piece one has that the other lacks.
   const wantSet = irPieces(want.ir);
   const gotSet = irPieces(got.ir);
-  if (wantSet.join("\n") === gotSet.join("\n")) return undefined;
+  if (wantSet.join("\n") === gotSet.join("\n")) return `the IR has the same functions and globals as a clean build's, in another order, first apart at line ${firstDifference(want.ir, got.ir)}`;
   const missing = wantSet.find((p) => !gotSet.includes(p)) ?? gotSet.find((p) => !wantSet.includes(p)) ?? "";
   const lines = missing.split("\n");
   return `the IR differs from a clean build's, first at piece ${firstDifference(wantSet.join("\n"), gotSet.join("\n"))}: ${lines.length > 0 ? lines[0]! : ""}`;

@@ -160,6 +160,27 @@ function editedIn(uses: string, written: string, edits: Ref<[string, string][]>)
   return said;
 }
 
+test("a build keeps each function's define by its symbol, as its IR has it", () => {
+  const dir = scratch("fish-incremental-");
+  const entry = join(dir, "main.fsh");
+  write(entry, USES);
+  write(join(dir, "lib.fsh"), LIB);
+  let looked: string[] = [];
+  let made: { ir: string; warnings: CompileError[]; kept: Kept } | undefined = undefined;
+  try {
+    made = compiledKept(cachedSession(), entry, false, "unwind", false, false, looked, undefined, undefined);
+  } catch (e) {
+    throw new Error(`the build failed: ${(e as { message: string }).message}`);
+  }
+  const built = made!;
+  const emitted = built.kept.emitted!;
+  const defines = built.ir.split("\n").filter((line) => line.startsWith("define ")).length;
+  assert(emitted.defines.size === defines, `${emitted.defines.size} defines kept of ${defines}`);
+  for (const [name, text] of emitted.defines) assert(built.ir.includes(`${text}\n`), `the define of ${name} isn't the IR's`);
+  assert(emitted.defines.has(`@"fsh.main"`), "main's define isn't kept by its symbol");
+  removed(dir);
+}, { timeout: 120_000 });
+
 test("an edit to a function's body is checked again from what watch kept, and matches a clean build", () => {
   const said = edited([
     ["return n * 2;", "const k = 2;\n  return n * k;"],
