@@ -611,9 +611,15 @@ export const INTERIORS = new Set(["Atomic", "Lock", "RwLock", "Cell"]);
 // base-36 digits of its 64-bit FNV-1a hash over UTF-8. The hash is written here rather than taken
 // from Bun so that a compiler built by Fish names instances exactly as this one does.
 export function digest(description: string): string {
+  return fullDigest(description).slice(-6);
+}
+
+// All 64 bits of `digest`'s hash, as up to 13 base-36 digits: for names a big module makes so many
+// of that six digits would collide.
+export function fullDigest(description: string): string {
   let h = 0xcbf29ce484222325n;
   for (const b of new TextEncoder().encode(description)) h = ((h ^ BigInt(b)) * 0x100000001b3n) & 0xffffffffffffffffn;
-  return h.toString(36).slice(-6);
+  return h.toString(36);
 }
 
 // Why a generic function type can't be held where it is: as `where` it would be boxed, and a box

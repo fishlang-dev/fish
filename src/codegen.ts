@@ -14,9 +14,9 @@ import type { ArithmeticOp, AssignOp, BinaryOp, Expr, JsName, ObjectProp, Param,
 import { ARRAY, DYN, compound, Conversions, llvmOf, structNames, textOf, typeDefinitions } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
-import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
+import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.ts";
-import type { Tables } from "./compilation.ts";
+import { partEnd, partStart, type Tables } from "./compilation.ts";
 import { allWords } from "./sizes.ts";
 import type { Kind, Verdict } from "./narrow.ts";
 
@@ -364,6 +364,10 @@ class Codegen implements PrintHost, ComptimeHost {
   panic: "unwind" | "abort";
   library: boolean;
   sources: Source[];
+  // Where each line of each file starts, by the file, so a place is found without rescanning it.
+  newlines: Map<string, usize[]>;
+  // Why a function's last define wasn't taken, with how many times each.
+  refusals: Map<string, usize>;
   harness: boolean;
   leaks: boolean;
   debug: boolean;
@@ -413,6 +417,7 @@ class Codegen implements PrintHost, ComptimeHost {
   cStrings: Map<string, string>;
   emittedTables: Set<string>;
   glue: { drop: TypeMap<Type, string>; copy: TypeMap<Type, string>; };
+  glueByShape: Map<string, string>;
   comparers: TypeMap<Type, string>;
   jsonWriters: TypeMap<Type, string>;
   jsonReaders: TypeMap<Type, string>;
@@ -474,6 +479,8 @@ class Codegen implements PrintHost, ComptimeHost {
     this.panic = options.panic;
     this.library = options.library ?? false;
     this.sources = options.sources !== undefined ? options.sources : [];
+    this.newlines = new Map<string, usize[]>();
+    this.refusals = new Map<string, usize>();
     this.harness = options.harness ?? false;
     this.leaks = options.leaks ?? false;
     this.debug = options.debug ?? false;
@@ -599,6 +606,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
     // The function dropping, or copying, what a value of each type owns, made once.
     this.glue = { drop: new TypeMap<Type, string>(), copy: new TypeMap<Type, string>() };
+    this.glueByShape = new Map<string, string>();
 
     // The function comparing two values of each compound type, made once.
     this.comparers = new TypeMap<Type, string>();
@@ -715,6 +723,9 @@ class Codegen implements PrintHost, ComptimeHost {
   /** @throws {CompileError} */
   // `prior` is what the last build's codegen made, when a function nothing changed may take its define.
   module(this: Mut<this>, prior: Emitted | undefined = undefined): string {
+    let timer = partStart(this.tables.session);
+    this.newlines.set(this.file, newlinesOf(this.src));
+    for (const s of this.sources) this.newlines.set(s.file, newlinesOf(s.src));
     // Top-level consts and comptime blocks run while compiling, every one of them, so one that
     // fails is reported even when nothing reads it; none is compiled.
     for (const instance of [...this.instances]) {
@@ -730,8 +741,12 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  partEnd(this.tables.session, "codegen comptime", timer);
+  timer = partStart(this.tables.session);
   this.shares = this.sharing();
   if (prior !== undefined) this.stale = this.staleNames(prior!);
+  partEnd(this.tables.session, "codegen sharing", timer);
+  timer = partStart(this.tables.session);
 
   // The current function's parameters taken as a closure's address and code, by their slots.
   this.pairs = new Map<LocalId, string>();
@@ -982,6 +997,8 @@ class Codegen implements PrintHost, ComptimeHost {
     }
   }
 
+  partEnd(this.tables.session, "codegen functions", timer);
+  timer = partStart(this.tables.session);
   this.framingOn = false;
 
   this.debuggingOn = false;
@@ -1007,6 +1024,8 @@ class Codegen implements PrintHost, ComptimeHost {
   this.filled = this.fillConstants();
   // Last, so what the entry and the fillers made is not taken from the last build as well.
   if (prior !== undefined) this.pullKept(prior!);
+  partEnd(this.tables.session, "codegen tail", timer);
+  timer = partStart(this.tables.session);
 
 
   // Definitions in order of their names, rather than of when they were made, so a function
@@ -1028,7 +1047,9 @@ class Codegen implements PrintHost, ComptimeHost {
     "",
   ].join("\n");
   // Each named struct the module uses, defined once ahead of everything.
-  return [...typeDefinitions(this.tables.typing, module), module].join("\n");
+  const whole = [...typeDefinitions(this.tables.typing, module), module].join("\n");
+  partEnd(this.tables.session, "codegen assembly", timer);
+  return whole;
   }
 
   loc(id: LocalId): Ref<Local> {
@@ -1399,11 +1420,11 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  // The part of a generated symbol telling `owner` apart in its family: a hash of its description
-  // rather than a count, so it is the same in every program making it. Owners described alike
-  // get numbered suffixes.
+  // The part of a generated symbol telling `owner` apart in its family: all 64 bits of a hash of its
+  // description rather than a count, so it is the same in every program making it, whatever order
+  // its parts are made in. Owners described alike get numbered suffixes, in the order they come.
   stableId(this: Mut<this>, family: string, description: string, owner: string = description): string {
-    const stem = digest(description);
+    const stem = fullDigest(description);
     let id = stem;
     for (let n = 1; this.taken.has(`${family} ${id}`) && this.taken.get(`${family} ${id}`) !== owner; n++) id = `${stem}.${n}`;
     this.taken.set(`${family} ${id}`, owner);
@@ -5618,12 +5639,22 @@ class Codegen implements PrintHost, ComptimeHost {
     const made = kind === "copy" ? this.glue.copy.get(type) : this.glue.drop.get(type);
     if ((made !== undefined && made !== "")) return made;
     const described2 = this.tables.typing.described(type);
-    const name = `@fsh.${kind}.${this.stableId(kind, described2, typeOwner(type))}`;
+    const t = this.llvm(type);
+    // Types described alike and laid out alike are dropped and copied alike, so they share one
+    // helper, named by what they are rather than by which of them came first.
+    const shape = `${kind} ${described2} ${t}`;
+    const shared = this.glueByShape.get(shape);
+    if (shared !== undefined) {
+      if (kind === "copy") this.glue.copy.set(type, shared);
+      else this.glue.drop.set(type, shared);
+      return shared;
+    }
+    const name = `@fsh.${kind}.${this.stableId(kind, described2, shape)}`;
+    this.glueByShape.set(shape, name);
     if (kind === "copy") this.glue.copy.set(type, name);
     else this.glue.drop.set(type, name);
     // A copy keeps the parts it has made pending, so a panic part way drops them.
     const saved = this.setAside();
-    const t = this.llvm(type);
     const each = (cg: Mut<Codegen>, v: string, part: Type, track = true) => {
       if (kind === "drop") {
         cg.dispose(v, part);
@@ -10410,8 +10441,26 @@ class Codegen implements PrintHost, ComptimeHost {
   // `file:line:col` of `at`.
   placeOf(at: Ref<Span>): string {
     const place = sourceOf(this.src, this.file, at.start, this.sources);
-    const { line, col } = locate(place.src, place.offset);
-    return `${place.file}:${line}:${col}`;
+    const newlines = this.newlines.get(place.file);
+    if (newlines === undefined) {
+      const { line, col } = locate(place.src, place.offset);
+      return `${place.file}:${line}:${col}`;
+    }
+    // How many lines end before the place, found by halving.
+    let low: usize = 0;
+    let high: usize = newlines.length;
+    while (low < high) {
+      const mid = low + ((high - low) >> 1);
+      if (newlines[mid]! < place.offset) low = mid + 1;
+      else high = mid;
+    }
+    const lineStart = low === 0 ? 0 : newlines[low - 1]! + 1;
+    return `${place.file}:${low + 1}:${place.offset - lineStart + 1}`;
+  }
+
+  refused(this: Mut<this>, why: string): boolean {
+    this.refusals.set(why, (this.refusals.get(why) ?? 0) + 1);
+    return false;
   }
 
   // Where `at` is in its file, recorded under the instance being emitted, whose define reads it.
@@ -10496,13 +10545,16 @@ class Codegen implements PrintHost, ComptimeHost {
   // comptime, it shares code as it did, and every place it names reads as it did.
   reused(this: Mut<this>, prior: Ref<Emitted>, instance: InstanceId): boolean {
     const made = prior.made.get(instance);
-    if (made === undefined || (instance as usize) > prior.count || made.comptime) return false;
-    if (this.rechecked.has(instance) || this.rechecked.has(this.outermostOf(instance))) return false;
+    if (made === undefined || (instance as usize) > prior.count) return this.refused("new");
+    if (made.comptime) return this.refused("comptime");
+    if (this.rechecked.has(instance) || this.rechecked.has(this.outermostOf(instance))) return this.refused("rechecked");
     const symbol = this.symbol(instance);
-    if (symbol !== made.symbol || made.shared !== this.sharedKey(instance) || this.stale.has(symbol)) return false;
+    if (symbol !== made.symbol) return this.refused("renamed");
+    if (made.shared !== this.sharedKey(instance)) return this.refused("shared");
+    if (this.stale.has(symbol)) return this.refused("stale");
     const define = prior.defines.get(symbol);
-    if (define === undefined) return false;
-    for (const p of made.places) if (this.placeOf({ start: p.at, end: p.at }) !== p.shown) return false;
+    if (define === undefined) return this.refused("no define");
+    for (const p of made.places) if (this.placeOf({ start: p.at, end: p.at }) !== p.shown) return this.refused("moved");
     this.current = instance;
     this.out.push(define);
     this.out.push("");
@@ -14383,10 +14435,17 @@ export type Made = { symbol: string; face: string; places: Placed[]; reads: Inst
 // What a build's codegen made, kept for `fishc watch`'s next build: each define by its symbol, the
 // module's globals and declarations by name, what each instance asked for, and how many
 // instances there were.
-export type Emitted = { defines: Map<string, string>; items: Map<string, Item>; made: Map<InstanceId, Made>; count: usize; reemitted: usize };
+export type Emitted = { defines: Map<string, string>; items: Map<string, Item>; made: Map<InstanceId, Made>; count: usize; reemitted: usize; refusals: Map<string, usize> };
 
 // A global or a declaration, and which part of the module it goes in.
 export type Item = { line: string; place: "global" | "intrinsic" | "rust" | "declared" };
+
+// The offsets of a text's newlines, in order.
+function newlinesOf(text: string): usize[] {
+  let out: usize[] = [];
+  for (let at = text.indexOf("\n"); at >= 0; at = text.indexOf("\n", at + 1)) out.push(at as usize);
+  return out;
+}
 
 // The `@` names IR text uses, leaving out what its string constants hold, which are written
 // `[N x i8] c"..."`; a quoted name may end in `c` too.
@@ -14448,16 +14507,19 @@ export function definesIn(lines: Ref<string[]>): Map<string, string> {
 /** @throws {CompileError} */
 export function codegenChecked(checked: Checked, options: Options): { ir: string; checked: Checked; emitted: Emitted } {
   let { instances, tables, warnings } = checked;
+  const naming = partStart(tables.session);
   const measured = allWords(tables.typing);
   tables.typing.unionWords = measured;
   const named = structNames(tables.typing);
   tables.typing.structNames = named.names;
   tables.typing.structColors = named.colors;
   tables.typing.structSignatures = named.signatures;
+  partEnd(tables.session, "codegen names", naming);
   const prior = options.prior;
   options.prior = undefined;
   let generator = new Codegen({ instances, tables, warnings: [] }, options);
   const ir = generator.module(prior);
+  const keeping = partStart(generator.tables.session);
   let made = new Map<InstanceId, Made>();
   for (const id of [...generator.instances]) {
     if (generator.bodyAt(id).comptime !== undefined || generator.bodyAt(id).foreign === true) continue;
@@ -14467,7 +14529,8 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
     const awaits: { state: usize; field: usize; type: Type }[] = generator.awaitsOf.has(id) ? [...generator.awaitsOf.get(id)!] : [];
     made.set(id, { symbol: generator.symbol(id), face: generator.face(id), places, reads, comptime: generator.ranComptime.has(id), shared: generator.sharedKey(id), awaits });
   }
-  const emitted: Emitted = { defines: definesIn(ir.split("\n")), items: itemsOf(generator), made, count: generator.tables.arenas.instanceCount() as usize, reemitted: generator.reemitted };
+  const emitted: Emitted = { defines: definesIn(ir.split("\n")), items: itemsOf(generator), made, count: generator.tables.arenas.instanceCount() as usize, reemitted: generator.reemitted, refusals: new Map<string, usize>([...generator.refusals]) };
+  partEnd(generator.tables.session, "codegen kept", keeping);
   return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings }, emitted };
 }
 

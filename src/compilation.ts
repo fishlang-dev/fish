@@ -555,6 +555,17 @@ export function stageEnd(session: Mut<Session>, name: string, started: Ref<Start
   session.timings.inner = started.outer + spent;
 }
 
+// A part of a stage, timed apart while the stage keeps all of its own time.
+export function partStart(session: Ref<Session>): Started {
+  if (session.timings === undefined) return { timing: false, outer: 0, start: 0 };
+  return { timing: true, outer: 0, start: now(session.timings) };
+}
+
+export function partEnd(session: Mut<Session>, name: string, started: Ref<Started>) {
+  if (!started.timing || session.timings === undefined) return;
+  session.timings.ms.set(name, (session.timings.ms.get(name) ?? 0) + now(session.timings) - started.start);
+}
+
 // Runs `run`, adding its own time to stage `name` when timing.
 /** @throws {CompileError} */
 export function timed<T>(timings: Timings | undefined, name: string, run: Timed<T>): T {

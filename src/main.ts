@@ -996,6 +996,9 @@ function sessionWith(locked: boolean, timed: boolean): BuildSession {
   return made;
 }
 
+// Codegen's own parts, which watch's timings show apart since a rebuild may skip only some.
+const CODEGEN_PARTS = ["codegen names", "codegen comptime", "codegen sharing", "codegen functions", "codegen tail", "codegen assembly", "codegen kept"];
+
 // What one of `fishc watch`'s builds takes.
 type Rebuild = { entry: string; binary: string; links: string[]; release: boolean; panic: Panic; leaks: boolean; debug: boolean; locked: boolean; timed: boolean; manifest: string | undefined };
 
@@ -1005,7 +1008,11 @@ function rebuilt(r: Ref<Rebuild>, kept: Kept | undefined): Rebuilt {
   try {
     const start = performance.now();
     let made = builtKept(sessionWith(r.locked, r.timed), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded, kept, r.manifest);
-    reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
+    reportTimings(made.session, [...FRONT_END, "codegen", ...CODEGEN_PARTS, ...NATIVE_STAGES], start);
+    if (r.timed && made.kept.emitted !== undefined && made.kept.carried > 0) {
+      const why = [...made.kept.emitted!.refusals].map(([k, n]) => `${n} ${k}`).join(", ");
+      console.error(`codegen emitted ${made.kept.emitted!.reemitted} of ${made.kept.emitted!.made.size} functions again${why === "" ? "" : ` (${why})`}`);
+    }
     for (const w of made.warnings) console.error(painted(w, r.entry, textOf(r.entry), "warning"));
     // Only a build from what an earlier one kept can differ from a clean one.
     saved(made.kept.carried, made.ir, made.warnings);
