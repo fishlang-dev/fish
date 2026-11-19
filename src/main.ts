@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { bodyOf, type Arenas, type InstanceId } from "./arenas.ts";
 import { C_KEYWORDS, checkKeeping, recheckKept, type CheckerParts } from "./check.ts";
 import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.ts";
-import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, stageEnd, stageStart, type Compilation, type Session, type Tables } from "./compilation.ts";
+import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, type Compilation, type Session, type Tables } from "./compilation.ts";
 import { expanded, sourced } from "./analysis.ts";
 import { cachedSession } from "./stdcache.ts";
 import { CompileError, copyNames, formatError, movedOffset, type Source } from "./diag.ts";
@@ -59,7 +59,7 @@ export { analyze } from "./analysis.ts";
 
 // What compiling a program gives: its IR, the checked program, and the Rust crates its calls go to.
 // The program as loaded comes back too, which `fishc watch` keeps.
-type Compiled = { ir: string; checked: Checked; loaded: Loaded; emitted: Emitted };
+type Compiled = { ir: string; checked: Checked; loaded: Loaded; emitted: Emitted | undefined };
 
 // A build session apart: what a compilation takes, and the caches only building objects reads.
 type Caches = { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
@@ -168,7 +168,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   const { src, file, release } = options;
   const debug = options.debug === true;
   const started = stageStart(checked.tables.session);
-  let made: { ir: string; checked: Checked; emitted: Emitted } | undefined = undefined;
+  let made: { ir: string; checked: Checked; emitted: Emitted | undefined } | undefined = undefined;
   try {
     made = codegenChecked(checked, options);
   } catch (e) {
@@ -176,8 +176,10 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
     throw e;
   }
   let done = made!;
+  const bundling = partStart(done.checked.tables.session);
   let ir = bundled(done.ir, loaded);
   if (debug) ir = withDebugInfo(ir, src, file, [...loaded.sources], release);
+  partEnd(done.checked.tables.session, "codegen bundle", bundling);
   stageEnd(done.checked.tables.session, "codegen", started);
   return { ir, checked: done.checked, loaded, emitted: done.emitted };
 }
@@ -363,7 +365,7 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   const failed = start.checked.tables.session.failed;
   start.checked.tables.session.failed = undefined;
   const sources = [...start.loaded.sources];
-  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed, prior: start.emitted, rechecked: start.rechecked });
+  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed, prior: start.emitted, rechecked: start.rechecked, keep: true });
   let warnings = [...made.checked.warnings];
   // A clean check gives its warnings in the order they are written in, which a kept one's
   // positions only give through their files' maps.
@@ -997,7 +999,7 @@ function sessionWith(locked: boolean, timed: boolean): BuildSession {
 }
 
 // Codegen's own parts, which watch's timings show apart since a rebuild may skip only some.
-const CODEGEN_PARTS = ["codegen names", "codegen comptime", "codegen sharing", "codegen functions", "codegen tail", "codegen assembly", "codegen kept"];
+const CODEGEN_PARTS = ["codegen names", "codegen setup", "codegen comptime", "codegen sharing", "codegen functions", "codegen tail", "codegen assembly", "codegen kept", "codegen bundle"];
 
 // What one of `fishc watch`'s builds takes.
 type Rebuild = { entry: string; binary: string; links: string[]; release: boolean; panic: Panic; leaks: boolean; debug: boolean; locked: boolean; timed: boolean; manifest: string | undefined };
