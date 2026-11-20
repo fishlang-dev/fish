@@ -369,9 +369,17 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
 /** @throws {CompileError | Error | IoError | JsonError} */
 export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): { ir: string; warnings: CompileError[]; kept: Kept } {
   // Reading the files again and putting the changed ones back, apart from the check it times itself.
-  const reloading = stageStart(session);
+  // Counted by hand from the front end's stages, since the session it starts on moves into the
+  // check's tables and takes its own copy of the timings with it.
+  const began = performance.now();
+  let before: f64 = 0;
+  if (session.timings !== undefined) for (const name of FRONT_END) before += session.timings!.ms.get(name) ?? 0;
   let start = checkedFrom(session, file, looked, kept, manifest);
-  stageEnd(start.checked.tables.session, "reload", reloading);
+  if (start.checked.tables.session.timings !== undefined) {
+    let after: f64 = 0;
+    for (const name of FRONT_END) after += start.checked.tables.session.timings!.ms.get(name) ?? 0;
+    start.checked.tables.session.timings!.ms.set("reload", performance.now() - began - (after - before));
+  }
   const failed = start.checked.tables.session.failed;
   start.checked.tables.session.failed = undefined;
   const sources = [...start.loaded.sources];
