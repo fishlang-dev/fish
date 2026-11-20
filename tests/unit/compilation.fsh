@@ -1,4 +1,4 @@
-// Ports tests/compilation.test.ts. Each compilation has its own state, so a program compiles the
+// Each compilation has its own state, so a program compiles the
 // same whatever the process compiled before it. These programs use what a compilation numbers or
 // interns as it goes: enums, macro expansions, local generic functions, destructuring assignments,
 // local classes, derived equality over a base, and object, union and closure types.

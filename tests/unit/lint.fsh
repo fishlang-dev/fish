@@ -1,4 +1,4 @@
-// Ports tests/lint.test.ts, running `fishc lint` as the native fishc. Each test makes its own
+// Runs `fishc lint` as the native fishc. Each test makes its own
 // directory and removes it at its end.
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

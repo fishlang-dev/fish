@@ -1,4 +1,4 @@
-// Ports tests/path.test.ts: the std `path` module against node's `path.posix`, over a table of
+// The std `path` module against node's `path.posix`, over a table of
 // inputs edge cases included, each call run through Fish and through node and compared line by line.
 import { spawnSync } from "node:child_process";
 import { built, removed, same, scratch, text } from "./support.fsh";

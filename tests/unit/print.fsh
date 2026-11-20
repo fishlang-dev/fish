@@ -1,4 +1,4 @@
-// Ports tests/print.test.ts: values printed by a Fish program and by the same program in
+// Values printed by a Fish program and by the same program in
 // JavaScript under node, which must print the same text. A data enum has no JavaScript form, so its
 // line is written out.
 import { spawnSync } from "node:child_process";

@@ -1,6 +1,6 @@
-// Ports tests/inspect.test.ts: the runtime's port of Node's util.inspect layout, given trees in C
+// The runtime's port of Node's util.inspect layout, given trees in C
 // and checked against what `node` prints for the same values. The values are JavaScript literals,
-// so a Bun child process turns them into the C that builds each tree, as the Bun test's `tree` does.
+// so a Bun child process turns them into the C that builds each tree.
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";

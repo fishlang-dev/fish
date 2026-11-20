@@ -1,4 +1,4 @@
-// Ports tests/console.test.ts: console.error and console.warn against node's, stdout and stderr
+// Console.error and console.warn against node's, stdout and stderr
 // each as node writes them, and the clocks.
 import { spawnSync } from "node:child_process";
 import { built, removed, same, scratch, text } from "./support.fsh";

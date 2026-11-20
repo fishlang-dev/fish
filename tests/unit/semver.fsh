@@ -1,4 +1,4 @@
-// Ports tests/semver.test.ts: versions and npm's ranges, in process through the compiler's semver
+// Versions and npm's ranges, in process through the compiler's semver
 // module, which imports nothing else.
 import { compare, formatVersion, maxSatisfying, parseRange, parseVersion, satisfies, type Range, type Version } from "../../src/semver.fsh";
 

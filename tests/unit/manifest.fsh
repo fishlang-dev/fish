@@ -1,7 +1,7 @@
-// Ports tests/manifest.test.ts: fish.toml and the TOML subset it is written in, in process through
-// the compiler's manifest module, since the Bun test reads what `parseToml` and `readManifest` give,
-// which no command prints. A parsed value is compared through `shown`, which writes it out with
-// its keys in order, and a dependency without its span, as the Bun test strips `start` and `end`.
+// Fish.toml and the TOML subset it is written in, in process through the compiler's manifest
+// module, since the tests read what `parseToml` and `readManifest` give, which no command prints.
+// A parsed value is compared through `shown`, which writes it out with its keys in order, and a
+// dependency is compared without its span, its `start` and `end` stripped.
 import { CompileError, formatError } from "../../src/diag.fsh";
 import { parseToml, readManifest, type Dependency, type Manifest, type RustDependency, type SpannedValue, type Table, type TomlValue } from "../../src/manifest.fsh";
 

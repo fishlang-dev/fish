@@ -1,4 +1,4 @@
-// Ports tests/native.test.ts: the runtime's own behaviour, checked from C: the leak report, string
+// The runtime's own behaviour, checked from C: the leak report, string
 // blocks and case mapping. JavaScript's case mapping, the reference, is asked of a Bun child process.
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";

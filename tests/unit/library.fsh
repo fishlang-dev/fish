@@ -1,4 +1,4 @@
-// Ports tests/library.test.ts: Fish built into static and shared libraries with the native fishc's
+// Fish built into static and shared libraries with the native fishc's
 // `--lib`, and C programs built against them. What the checker refuses to export is read from
 // `fishc build --lib`'s errors, and an ordinary program's from `fishc check`.
 import { spawnSync } from "node:child_process";

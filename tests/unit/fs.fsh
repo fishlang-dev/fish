@@ -1,4 +1,4 @@
-// Ports tests/fs.test.ts: the std `fs/promises` module against node's: the same calls in a
+// The std `fs/promises` module against node's: the same calls in a
 // directory of their own, output and files compared.
 import { spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";

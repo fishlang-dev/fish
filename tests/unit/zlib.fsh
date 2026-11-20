@@ -1,4 +1,4 @@
-// Ports tests/zlib.test.ts: the std `zlib` module against node's: the same body run by both in a
+// The std `zlib` module against node's: the same body run by both in a
 // directory of its own, output compared. The body is TypeScript, its types stripped by node, which
 // runs it as a `.cts` file.
 import { spawnSync } from "node:child_process";
@@ -67,8 +67,8 @@ function wordChar(c: string): boolean {
   return (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_";
 }
 
-// Whether `body` names `n` as a whole word followed by a call or a member, as the Bun test's
-// `\b${n}[(.]` regex asks.
+// Whether `body` names `n` as a whole word followed by a call or a member, as the regex
+// `\b${n}[(.]` would ask.
 function named(body: string, n: string): boolean {
   const size = n.length as i64;
   let at = body.indexOf(n);

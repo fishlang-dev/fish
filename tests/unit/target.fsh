@@ -1,4 +1,4 @@
-// Ports tests/target.test.ts: resolving a build target's clang flags, and the builds that use them,
+// Resolving a build target's clang flags, and the builds that use them,
 // run through the native fishc. The Docker cases run only with a sysroot named in the environment.
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

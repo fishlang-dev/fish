@@ -1,4 +1,4 @@
-// Ports tests/bigint.test.ts: the same body built by Fish and run by node, output compared.
+// The same body built by Fish and run by node, output compared.
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

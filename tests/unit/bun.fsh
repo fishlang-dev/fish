@@ -1,4 +1,4 @@
-// Ports tests/bun.test.ts: Fish's subset of Bun's global against Bun itself: the same body run by
+// Fish's subset of Bun's global against Bun itself: the same body run by
 // both in directories of their own, output compared, with absolute paths printed as `<dir>`.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";

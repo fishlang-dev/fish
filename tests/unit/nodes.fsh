@@ -1,5 +1,5 @@
-// Ports tests/nodes.test.ts. Regexes are literals, so where the Bun test builds one from a list
-// of names, a literal matching any name captures it and the name is looked up in the list.
+// Regexes are literals, so rather than a regex built from a list of names, a literal matching any
+// name captures it and the name is looked up in the list.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { NodeMap, NodeSet, nodeIdOf, renumberExpr, Rewrites, walk, type AnyNode } from "../../src/nodes.fsh";

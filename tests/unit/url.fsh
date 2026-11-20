@@ -1,4 +1,4 @@
-// Ports tests/url.test.ts: the std URL parser against the web-platform-tests URL data: a vendored
+// The std URL parser against the web-platform-tests URL data: a vendored
 // slice of urltestdata.json, each case parsed by `new URL(input, base)` in one Fish program, which
 // prints the case's parts or the TypeError's message.
 import { spawnSync } from "node:child_process";

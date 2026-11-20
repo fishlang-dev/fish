@@ -182,7 +182,7 @@ export function someNode(root: AnyNode, found: (n: AnyNode) => boolean): boolean
 }
 
 // Gives two owned handles to `x`: a copy in Fish, and the same object reference in JS so node
-// identity checks in `tests/nodes.test.ts` see one object.
+// identity checks in `tests/unit/nodes.fsh` see one object.
 export function dup<T>(x: T): [T, T] {
   let m = new Map<usize, T>();
   m.set(0, x);

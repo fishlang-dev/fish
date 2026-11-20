@@ -1,4 +1,4 @@
-// Ports tests/process.test.ts: the std `process` module against node's: arguments, the environment
+// The std `process` module against node's: arguments, the environment
 // and the exit code. The environment is given through `env`.
 import { spawnSync } from "node:child_process";
 import { realpathSync, writeFileSync } from "node:fs";

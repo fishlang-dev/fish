@@ -1,4 +1,4 @@
-// Ports tests/os.test.ts: the std `os` module against Node's, as Bun gives it on this machine:
+// The std `os` module against Node's, as Bun gives it on this machine:
 // each function, called with the environment varied where the answer reads it. Each variation is
 // given through `env`, `-u NAME` unsetting a variable.
 import { spawnSync } from "node:child_process";

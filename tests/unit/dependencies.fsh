@@ -1,4 +1,4 @@
-// Ports tests/dependencies.test.ts: path and git dependencies, package privacy and fish.lock, each
+// Path and git dependencies, package privacy and fish.lock, each
 // through `fishc build` run as the native fishc in a scratch directory of the test's own. The Bun
 // test's concurrent builds are four background jobs of one shell.
 import { spawnSync } from "node:child_process";

@@ -1,4 +1,4 @@
-// Ports tests/fs_sync.test.ts: the std `fs` module's blocking calls against node's: the same calls
+// The std `fs` module's blocking calls against node's: the same calls
 // in a directory of their own, output compared.
 import { spawnSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";

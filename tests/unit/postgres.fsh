@@ -1,4 +1,4 @@
-// Ports tests/postgres.test.ts: the postgres module against a scripted server speaking Postgres's
+// The postgres module against a scripted server speaking Postgres's
 // wire protocol, run by Bun as a child process in the background, and against a throwaway Postgres
 // when one is installed. Each scripted server takes its script as JavaScript, writes its URL once it
 // listens, and at SIGTERM writes what it saw: the statements, its connection counts, and any
@@ -179,7 +179,7 @@ test("a user file named like a std module can't reach std's internal functions",
 
 // The scripted server, which runs `script`, a JavaScript expression for its Script, and stops itself
 // `closeAfter` milliseconds in when that isn't 0. A rule the client breaks is recorded rather than
-// thrown, as the Bun test's expect calls inside the server would fail it.
+// thrown, so the test fails on it once it reads what the server recorded.
 function fake(script: string, closeAfter: i64): string {
   return String.raw`import { createHash, createHmac, pbkdf2Sync, randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";

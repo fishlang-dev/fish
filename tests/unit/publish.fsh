@@ -1,9 +1,9 @@
-// Ports tests/publish.test.ts: `fishc publish` run as the native fishc on packages in git
+// `fishc publish` run as the native fishc on packages in git
 // repositories of a scratch directory, against registry indexes that are local git repositories
 // and a gh stub, so nothing leaves the machine. The archive is unpacked in process through the
-// compiler's tar module, which imports nothing else. The Bun test's direct calls of `unsafeUses`
-// are made through `fishc publish --dry-run`, which prints every use it finds and refuses a file
-// that doesn't parse.
+// compiler's tar module, which imports nothing else. `unsafeUses` is reached through
+// `fishc publish --dry-run`, which prints every use it finds and refuses a file that doesn't
+// parse.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";

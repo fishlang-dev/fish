@@ -1,10 +1,9 @@
-// Ports tests/registry.test.ts: registry indexes that are local git repositories, read in process
-// through the compiler's registry_index module where the Bun test calls it, and builds, `fishc add`
-// and `fishc update` run as the native fishc. The Bun test sets FISH_CACHE_DIR, and FISH_REGISTRY
-// for one test, in its own process; Fish can't set `process.env`, so an in-process test runs itself
-// again in a child process with them set: `again` starts this test binary on the same test,
-// FISH_REGISTRY_TEST_ROOT naming the directory the parent made. Concurrent builds are background
-// jobs of one shell.
+// Registry indexes that are local git repositories, read in process through the compiler's
+// registry_index module, and builds, `fishc add` and `fishc update` run as the native fishc. The
+// in-process tests need FISH_CACHE_DIR set, and one also FISH_REGISTRY; Fish can't set
+// `process.env`, so such a test runs itself again in a child process with them set: `again` starts
+// this test binary on the same test, FISH_REGISTRY_TEST_ROOT naming the directory the parent made.
+// Concurrent builds are background jobs of one shell.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";

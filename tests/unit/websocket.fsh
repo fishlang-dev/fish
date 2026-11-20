@@ -1,4 +1,4 @@
-// Ports tests/websocket.test.ts: a Fish WebSocket server driven by Bun's WebSocket client, and by a
+// A Fish WebSocket server driven by Bun's WebSocket client, and by a
 // raw socket for the frames a well-behaved client never sends. The server runs under `sh`, which
 // starts a Bun driver in the background and then execs the server, so the test sees the server's
 // own exit code. The driver, given the server's pid and the file its stderr goes to, waits for its

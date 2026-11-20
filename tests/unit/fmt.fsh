@@ -1,4 +1,4 @@
-// Ports tests/fmt.test.ts, running `fishc fmt` as the native fishc. Each test makes its own
+// Runs `fishc fmt` as the native fishc. Each test makes its own
 // directory and removes it at its end, and the copy of the test programs is made with `cp -R`.
 import { spawnSync } from "node:child_process";
 import { chmodSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";

@@ -1,4 +1,4 @@
-// Ports tests/error.test.ts: errors printed by Fish against node's, node's stacks cut to their
+// Errors printed by Fish against node's, node's stacks cut to their
 // first line as Fish has none: the same program, its types stripped for node by Bun's transpiler,
 // asked of a Bun child process.
 import { spawnSync } from "node:child_process";

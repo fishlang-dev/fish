@@ -1,6 +1,6 @@
-// Ports tests/npm.test.ts: programs type-checked against npm packages' declarations, built by the
-// native fishc with `--emit-llvm`, which stops where the Bun test's in-process `compile` does,
-// before clang. A compile error is what fishc prints, as `formatError` gives it.
+// Programs type-checked against npm packages' declarations, built by the
+// native fishc with `--emit-llvm`, which stops before clang. A compile error is what fishc
+// prints, as `formatError` gives it.
 // Four tests are left out until the native fishc stops crashing on what they build, where Bun's
 // run of the compiler gives its answer: importing a function a declaration file declares more than
 // once (two tests), a class passed where an interface names itself through an array, and an

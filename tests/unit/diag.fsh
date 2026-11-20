@@ -1,4 +1,4 @@
-// Ports tests/diag.test.ts. A group is made with `compileErrors`, since a `CompileErrors` isn't taken
+// A group is made with `compileErrors`, since a `CompileErrors` isn't taken
 // where a `CompileError` is.
 import { join } from "node:path";
 import { CompileError, compileErrors, formatError, shown } from "../../src/diag.fsh";

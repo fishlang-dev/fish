@@ -1,11 +1,10 @@
-// Ports tests/cache.test.ts: the object cache, through the native fishc where a build from the
-// command line shows it, and in process where the Bun test calls the compiler. Fish can't set
-// `process.env` yet, so a test that moves FISH_CACHE_DIR or PATH for its in-process builds runs
-// itself again in a child process with them set: `again` starts this test binary on the same test,
-// FISH_CACHE_TEST_ROOT naming the directory the parent made, and fails with the child's output.
-// The Bun tests of std's parsed-tree cache are left out: that cache is stdcache.ts's alone, and a
-// compiler built by Fish parses std in each session. The slower tests take longer limits, as the
-// Bun file's two minutes do.
+// The object cache, through the native fishc where a build from the command line shows it, and in
+// process where a test calls the compiler. Fish can't set `process.env` yet, so a test that moves
+// FISH_CACHE_DIR or PATH for its in-process builds runs itself again in a child process with them
+// set: `again` starts this test binary on the same test, FISH_CACHE_TEST_ROOT naming the directory
+// the parent made, and fails with the child's output. std's parsed-tree cache isn't tested here:
+// that cache is stdcache.ts's alone, and a compiler built by Fish parses std in each session. The
+// slower tests take two-minute limits.
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";

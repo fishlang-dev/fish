@@ -1,8 +1,7 @@
-// Ports tests/packages.test.ts: npm packages a program imports, bundled into the JS engine, built by
-// the native fishc from the command line where the Bun test builds in process. The Bun test's
-// build under AddressSanitizer, tests/sanitized.ts, is `fishc build --sanitize address`, which
-// instruments the program, std, the runtime and the engine, run with FISH_LEAKS=1 as it is; a
-// compile error is the first line fishc prints, as `formatError` gives it.
+// Npm packages a program imports, bundled into the JS engine, built by the native fishc from the
+// command line. The build under AddressSanitizer is `fishc build --sanitize address`, which
+// instruments the program, std, the runtime and the engine, and runs with FISH_LEAKS=1; a compile
+// error is the first line fishc prints, as `formatError` gives it.
 // Two tests are left out until the native fishc stops crashing on a function a declaration file
 // declares more than once, which both call: the values converted both ways under ASan, and an
 // overload's signature being the one called.
@@ -215,8 +214,8 @@ function execute(dir: string, out: string, args: string[], vars: string[]): Out 
   return { stdout: text(run.stdout), stderr: text(run.stderr).replaceAll(`${dir}/`, ""), exitCode: run.status ?? -1 };
 }
 
-// Builds `main.fsh` in `dir` with `flags`, failing the test on any compile error; warnings, which
-// the Bun test's in-process build doesn't print, are let through.
+// Builds `main.fsh` in `dir` with `flags`, failing the test on any compile error; warnings are
+// let through.
 function builtIn(dir: string, flags: string[]): string {
   const b = fishc(dir, ["build", "main.fsh", "-o", "main", ...flags]);
   assert(b.code === 0, `the build failed:\n${b.err}`);
@@ -489,8 +488,8 @@ import { make } from "esm";
   removed(root);
 }, { timeout: 30_000 });
 
-// The Bun test bounds the run at 20 seconds, so a lock the panic left held fails the test rather
-// than hanging it; here fishc test's own limit bounds it.
+// fishc test's own limit bounds the run, so a lock the panic left held fails the test rather than
+// hanging it.
 test("a task panicking in a callback JS runs ends the program, since the panic would cross JS's frames", () => {
   const root = scratch("fish-packages-");
   const main = `import { each } from "esm";

@@ -1,5 +1,4 @@
-// Ports tests/comments.test.ts but its comparison with TypeScript's own scanner, which needs the
-// npm typescript package.
+// Comments kept by the lexer, with their spans, wherever they are written.
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { lexer, type Comment } from "../../src/lexer.fsh";

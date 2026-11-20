@@ -1,4 +1,4 @@
-// Ports tests/tls.test.ts: TLS between Fish and Bun, both ways, with the test-only certificates in
+// TLS between Fish and Bun, both ways, with the test-only certificates in
 // tests/fixtures/tls. Bun's side runs as a child process in the background under `sh`.
 //
 // Left out: "a stream already speaking TLS refuses to start it again, leaking nothing". It stands a

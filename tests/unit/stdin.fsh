@@ -1,4 +1,4 @@
-// Ports tests/stdin.test.ts: standard input that a `// stdin:` directive can't give, written in timed
+// Standard input that a `// stdin:` directive can't give, written in timed
 // pieces by a Node child process feeding the program's stdin through a pipe, or a regular file
 // rather than a pipe.
 import { spawnSync } from "node:child_process";

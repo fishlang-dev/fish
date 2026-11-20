@@ -1,5 +1,5 @@
-// Ports tests/instances.test.ts. Where the Bun test makes instances and bodies with only the fields
-// a function reads, these are made whole, with empty tables.
+// Instances and bodies are made whole, with empty tables, even where a function reads only a few
+// of their fields.
 import { join } from "node:path";
 import { Arenas, type BodyId, type InstanceId } from "../../src/arenas.fsh";
 import { emptyTables, unreached } from "../../src/check.fsh";

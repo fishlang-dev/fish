@@ -1,6 +1,6 @@
-// Ports tests/engine.test.ts: the vendored JS engine, and programs that call it through the
+// The vendored JS engine, and programs that call it through the
 // compiler's own test hook `fish:engine`, which only a session that allows it compiles, so these
-// programs are compiled in process. tests/sanitized.ts's build under AddressSanitizer is `sanitized`.
+// programs are compiled in process. The build under AddressSanitizer is `sanitized`.
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";

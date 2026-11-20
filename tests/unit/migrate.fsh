@@ -1,4 +1,4 @@
-// Ports tests/migrate.test.ts. Each hit is shown as one string, its action or rule and the text it
+// Each hit is shown as one string, its action or rule and the text it
 // spans, so a list of them compares with `===` and prints in full when it differs.
 import { CompileError } from "../../src/diag.fsh";
 import { directive, fix, migrations, rejects, surveyHits, type Hit, type Parsed } from "../../src/migrate.fsh";

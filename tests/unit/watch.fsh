@@ -1,4 +1,4 @@
-// Ports tests/watch.test.ts: the watcher's parts in process, and `fishc watch` itself run as the
+// The watcher's parts in process, and `fishc watch` itself run as the
 // native fishc in the background. A Fish child's output comes whole once it ends, so the watcher's
 // stderr, which its program's output goes to as well, is written to a file and read as it grows.
 // Each test kills what it started before it checks anything.

@@ -1,4 +1,4 @@
-// Ports tests/survey.test.ts. Each project is a fresh directory removed at the test's end, the CLI
+// Each project is a fresh directory removed at the test's end, the CLI
 // is the native fishc, and an object Bun compares with toEqual is shown here as sorted lines or as
 // its JSON, so it prints in full when it differs.
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";

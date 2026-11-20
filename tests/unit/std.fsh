@@ -1,4 +1,4 @@
-// Ports tests/std.test.ts: the classes and functions std gives a program, by name. A program's own
+// The classes and functions std gives a program, by name. A program's own
 // name for one of std's leaves std's under a name no program can write, or leaves out the library
 // it would clash with.
 import { newCompilation } from "../../src/compilation.fsh";

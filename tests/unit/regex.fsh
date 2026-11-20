@@ -1,4 +1,4 @@
-// Ports tests/regex.test.ts. Bun's tests ask the engine running them; these ask Bun, run as a child
+// Bun's tests ask the engine running them; these ask Bun, run as a child
 // with each case in a JSON file, for what JavaScript makes of each case. The corpora are seeded
 // with integer arithmetic and draw a case's text before its pattern is tried, so they hold
 // different cases from Bun's, as many of them.

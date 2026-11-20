@@ -1,4 +1,4 @@
-// Ports tests/cli.test.ts: the `fishc` commands, run as the native fishc. Each test makes its own
+// The `fishc` commands, run as the native fishc. Each test makes its own
 // directory and removes it at its end. `indented` alone is called in process, with Node's
 // `JSON.stringify` as its reference.
 import { spawnSync } from "node:child_process";
@@ -311,7 +311,7 @@ function nodeIndented(inputs: Ref<string[]>): string[] {
 }
 
 test("indented lays compact JSON out as JSON.stringify does with an indent of 2", () => {
-  // JSON.stringify's compact output for each of the Bun test's values.
+  // JSON.stringify's compact output for each value the layout is checked on.
   const values = [`{"a":1,"b":[1,2,{"c":"x,y:\\"z"}],"d":{},"e":[],"f":null,"g":"\\\\"}`, "[]", "{}", "[[]]", `"s"`, "3", `{"n":{"m":{}}}`];
   const want = nodeIndented(values);
   assert(want.length === values.length, "node gave too few");

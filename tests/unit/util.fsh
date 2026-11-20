@@ -1,4 +1,4 @@
-// Ports tests/util.test.ts: the std `util` module against node's: the same calls, output compared.
+// The std `util` module against node's: the same calls, output compared.
 // The node program is the Fish one with its type annotations taken out.
 import { spawnSync } from "node:child_process";
 import { built, removed, same, scratch, text } from "./support.fsh";

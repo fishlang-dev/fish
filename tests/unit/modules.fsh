@@ -1,7 +1,6 @@
-// Ports tests/modules.test.ts: rules the checker's source keeps, read by parsing src with the
-// compiler's own parser and walking the trees, in process through the compiler's parser and
-// walker, as the Bun test does. Where the Bun test compares nodes by identity, a node is told
-// apart by what it is instead, and its tables are kept as indexes into one list of items.
+// Rules the checker's source keeps, read by parsing src with the compiler's own parser and walking
+// the trees in process. A node is told apart by what it is rather than by identity, and its tables
+// are kept as indexes into one list of items.
 import { join } from "node:path";
 import { forEachChild, walk, walkWhile, type AnyNode } from "../../src/nodes.fsh";
 import { parse, type ClassMember, type Expr, type Param, type PropertyName, type Pattern, type Stmt, type TypeNode } from "../../src/parser.fsh";
@@ -176,7 +175,8 @@ test("no code in the checker destructures a method out of a module class's insta
   none(offenders);
 });
 
-// Whether a type named so lends what it holds, which the Bun test's `unwrapped` sees through.
+// Whether a type named so lends what it holds, so a field typed with it is seen through to its
+// type argument.
 function lentName(name: string): boolean {
   return name === "Mut" || name === "Ref";
 }

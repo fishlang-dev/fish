@@ -1,9 +1,9 @@
 // Writes `src/unquote.fsh`, which turns a value a macro made while compiling, of an `Ast` type,
 // back into the syntax tree it stands for, from the parser's own AST types in `src/parser.fsh`:
 // the `Ast` types mirror them field for field, so each record reads as a node of its kind.
-// `tests/walk.test.ts` fails when the file is stale.
+// `tests/unit/walk.fsh` fails when the file is stale.
 import { type CompileError } from "../../src/diag.fsh";
-import { append, hasWord, indented, nodeTypes, ref, type NodeTypes, type Shape, type Ty } from "./dumpgen.fsh";
+import { append, hasWord, indented, nodeTypes, ref, type NodeTypes, type Shape, type Ty } from "./ast.fsh";
 
 // The fields the compiler sets on nodes for its own passes, which no `Ast` type has.
 const INTERNAL = ["narrows"];

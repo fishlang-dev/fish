@@ -1,4 +1,4 @@
-// Ports tests/unsupported.test.ts. Each table is one test looping over its rows, every failing row
+// Each table is one test looping over its rows, every failing row
 // reported with the message and span it expected and the ones it got.
 import { check } from "../../src/check.fsh";
 import { newCompilation } from "../../src/compilation.fsh";

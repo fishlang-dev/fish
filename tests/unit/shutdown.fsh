@@ -1,4 +1,4 @@
-// Ports tests/shutdown.test.ts: signals, process.shutdown and serve's drain. Each program runs under
+// Signals, process.shutdown and serve's drain. Each program runs under
 // `sh`, which starts a Node driver in the background and then execs the program, so the test sees
 // the program's own exit code and signal. The driver, given the program's pid and the file its
 // stderr goes to, waits for the program's ready lines, sends its signals, acts as its clients, and

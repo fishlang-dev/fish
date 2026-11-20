@@ -1,7 +1,7 @@
-// Ports tests/typings.test.ts: where a package's declarations are found and what they export, in
-// process through the compiler's typings module, and the refusals a program's imports get, from
-// `fishc check`, which loads the program as the Bun test's `load` does. JSON is written as text,
-// since Fish's JSON.stringify sorts an object's keys and `exports` conditions keep their order.
+// Where a package's declarations are found and what they export, in process through the compiler's
+// typings module, and the refusals a program's imports get, from `fishc check`, which loads the
+// program without building it. JSON is written as text, since Fish's JSON.stringify sorts an
+// object's keys and `exports` conditions keep their order.
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { exportsOf, findTypings } from "../../src/typings.fsh";

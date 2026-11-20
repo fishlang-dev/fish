@@ -4,7 +4,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type CompileError } from "../src/diag.fsh";
-import { parserSource } from "./gen/dumpgen.fsh";
+import { parserSource } from "./gen/ast.fsh";
 import { walkSources } from "./gen/walkgen.fsh";
 
 function main(): void throws Error | CompileError | IoError {

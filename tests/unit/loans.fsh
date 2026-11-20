@@ -1,4 +1,4 @@
-// Ports tests/loans.test.ts. The borrow checker keys each loan by where it is made. Keys derived
+// The borrow checker keys each loan by where it is made. Keys derived
 // from offsets must never meet: a `for...of` loop far into a file once took the key of a closure's
 // loan made near its start, losing the closure's borrow. Each program puts the loop where that
 // happened.

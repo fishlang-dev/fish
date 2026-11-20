@@ -1,7 +1,7 @@
-// Ports tests/rust.test.ts: Rust crates a package calls through a generated shim, built by the
-// native fishc with cargo from the command line. Where the Bun test compiles in process, a build
-// with `--emit-llvm` gives the IR, or the compile error it stops at, before cargo or clang runs.
-// Each package has its own cache, as the Bun test's do, so cargo builds its shim from nothing.
+// Rust crates a package calls through a generated shim, built by the native fishc with cargo from
+// the command line. A build with `--emit-llvm` gives the IR, or the compile error it stops at,
+// before cargo or clang runs. Each package has its own cache, so cargo builds its shim from
+// nothing.
 // The shim's name checks run in process through the compiler's rust module; a name it refuses
 // panics, so that check runs in a child process `again` starts on the same test.
 import { spawnSync } from "node:child_process";

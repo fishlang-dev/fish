@@ -1,4 +1,4 @@
-// Ports tests/parse.test.ts. Each table is one test looping over its rows, and the source being
+// Each table is one test looping over its rows, and the source being
 // shown is passed along rather than kept in a module-level variable.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -903,15 +903,15 @@ const MODULES: [string, string][] = [
 
 test("import and export shapes", () => table(MODULES, statementsShape, "expected ','"));
 
-// The compiler's own source, and the tests beside it, parse as Fish.
-test("src and tests parse", () => {
+// The compiler's own source, its unit tests and its scripts parse as Fish.
+test("src, the unit tests and the scripts parse", () => {
   let failed: string[] = [];
   let parsed = 0;
-  for (const dir of ["src", "tests"]) {
+  for (const dir of ["src", "tests/unit", "scripts"]) {
     const path = join(root(), dir);
     let files: string[] = [];
     try {
-      files = readdirSync(path).filter((f) => f.endsWith(".fsh") || f.endsWith(".ts"));
+      files = readdirSync(path).filter((f) => f.endsWith(".fsh"));
     } catch (e) {
       assert(false, e.message);
     }
@@ -925,7 +925,7 @@ test("src and tests parse", () => {
     }
   }
   assert(failed.length === 0, failed.join("\n"));
-  assert(parsed > 100, `only ${parsed} files parsed`);
+  assert(parsed > 150, `only ${parsed} files parsed`);
 });
 
 // A declaration's kind with its decorators in front.

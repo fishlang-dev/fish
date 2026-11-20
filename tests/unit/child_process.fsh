@@ -1,4 +1,4 @@
-// Ports tests/child_process.test.ts: the std `child_process` module against node's: the same body
+// The std `child_process` module against node's: the same body
 // run by both, output compared.
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";

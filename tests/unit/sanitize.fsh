@@ -1,8 +1,8 @@
-// Ports tests/sanitize.test.ts: `fishc build --sanitize address|thread`, the program, std and the C
+// `fishc build --sanitize address|thread`, the program, std and the C
 // runtime instrumented by one of clang's sanitizers, its reports naming .fsh lines. Resolving the
-// target is tested in process; the runtime's compile flags, which the Bun test reads from
-// `runtimeUnits`, are read from what the native fishc hands clang; and every build is the native
-// fishc's. The fetch test's server is a Node child process, where the Bun test serves in process.
+// target is tested in process; the runtime's compile flags are read from what the native fishc
+// hands clang; and every build is the native fishc's. The fetch test's server is a Node child
+// process.
 import type { Subprocess } from "bun";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -128,7 +128,7 @@ test("each definition in the IR is marked for the sanitizer, and an unsanitized 
 }, { timeout: 120_000 });
 
 // Read from builds rather than from `runtimeUnits`, so the host needs the address sanitizer's
-// runtime for this one, where the Bun test doesn't.
+// runtime for this one.
 test("an instrumented runtime is cached apart from a plain one, a dev build's at -O1", () => {
   if (!can("address")) return;
   const root = scratch("fish-sanitize-");
@@ -368,7 +368,7 @@ function main() {
 }, { timeout: 120_000 });
 
 // A server answering one request with "ok" and writing what it was sent: its method, path, x-tag
-// header and body, as the Bun test's in-process server records them.
+// header and body.
 function server(): string {
   return String.raw`const fs = require("node:fs");
 const [portFile, seenFile] = process.argv.slice(2);

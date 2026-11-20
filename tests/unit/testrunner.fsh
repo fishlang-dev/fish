@@ -1,4 +1,4 @@
-// Ports tests/testrunner.test.ts: `fishc test` run as the native fishc on small packages in a
+// `fishc test` run as the native fishc on small packages in a
 // scratch directory. The two tests the Bun one makes in process are made through the command line:
 // the test program `buildTests` writes is kept by a clang on PATH that copies what it links, and
 // a test program that can't be started is one that clang removes once linked.

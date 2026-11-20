@@ -1,7 +1,7 @@
-// Ports tests/leaks.test.ts: `fishc build --leaks`, what a program never freed, reported at exit by
-// where it was allocated, each program built by the native fishc. The runtime's compile flags,
-// which the Bun test reads from `runtimeUnits`, are read here from what the native fishc hands
-// clang, through a clang on PATH that logs each runtime compile and stops the build there.
+// `fishc build --leaks`, what a program never freed, reported at exit by
+// where it was allocated, each program built by the native fishc. The runtime's compile flags are
+// read from what the native fishc hands clang, through a clang on PATH that logs each runtime
+// compile and stops the build there.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -64,7 +64,7 @@ function run(root: string, name: string, src: string, release: boolean, leaks: b
   if (release) args.push("--release");
   if (leaks) args.push("--leaks");
   const built = fishc(dir, args);
-  // Warnings are printed and the build goes on, as the Bun test's in-process build gives them back.
+  // Warnings are printed and the build goes on.
   assert(built.code === 0, `building ${name} exited with ${built.code}:\n${built.err}`);
   const done = spawnSync("env", ["FISH_LEAKS=0", ...vars, join(dir, "main")], { cwd: dir });
   return { code: done.status ?? -1, out: text(done.stdout), err: text(done.stderr).replaceAll(`${dir}/`, "") };

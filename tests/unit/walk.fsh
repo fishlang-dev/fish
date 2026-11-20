@@ -1,7 +1,7 @@
-// Ports tests/walk.test.ts, and the generator comparisons that left it once the generators were
-// Fish. The test finding every node by reading every field needs reflection Fish doesn't have.
+// The generated tree walkers, rebuild and macro reader, and that each is current with the parser's
+// AST types.
 import { join } from "node:path";
-import { parserSource } from "../../scripts/gen/dumpgen.fsh";
+import { parserSource } from "../../scripts/gen/ast.fsh";
 import { unquoteSource } from "../../scripts/gen/unquotegen.fsh";
 import { walkSources } from "../../scripts/gen/walkgen.fsh";
 import { forEachChild, Rewrites, walkWhile, type AnyNode } from "../../src/nodes.fsh";

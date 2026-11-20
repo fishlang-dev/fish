@@ -2,9 +2,9 @@
 // types in `src/parser.fsh`, so the compiler can walk a tree without reading arbitrary objects'
 // fields, which Fish can't. Beside it, `src/rebuild.fsh` puts the replacements a rewrite table holds
 // in place in a tree, updates node ids and spans, and clones AST subtrees by the same fields.
-// `tests/walk.test.ts` fails when either file is stale.
+// `tests/unit/walk.fsh` fails when either file is stale.
 import { type CompileError } from "../../src/diag.fsh";
-import { append, hasWord, indented, nodeTypes, ref, refTo, type Field, type NodeTypes, type Shape, type Ty } from "./dumpgen.fsh";
+import { append, hasWord, indented, nodeTypes, ref, refTo, type Field, type NodeTypes, type Shape, type Ty } from "./ast.fsh";
 
 function method(name: string): string {
   return name.slice(0, 1).toLowerCase() + name.slice(1);

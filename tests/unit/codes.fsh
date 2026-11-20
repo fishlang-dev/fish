@@ -1,4 +1,4 @@
-// Ports tests/codes.test.ts.
+// The error codes: every code the compiler raises is in the table, and fishc explain prints each.
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

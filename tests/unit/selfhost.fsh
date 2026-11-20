@@ -1,5 +1,5 @@
-// Ports tests/selfhost.test.ts. The baseline survey waits on scripts/selfhost.ts becoming Fish. Where the Bun tests find nodes by
-// reading every field, these walk the tree with the generated walker.
+// Rules the compiler's own source keeps so it compiles as Fish: typed default parameters and no
+// module state, found by walking each file's tree with the generated walker.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { walk } from "../../src/nodes.fsh";

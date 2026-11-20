@@ -1,4 +1,4 @@
-// Ports tests/stable.test.ts. Codegen names what it generates from what it stands for, so editing
+// Codegen names what it generates from what it stands for, so editing
 // a program leaves the IR of std's functions, and of the constants and glue they use, exactly as
 // it was.
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";

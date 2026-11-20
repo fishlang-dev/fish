@@ -1,4 +1,4 @@
-// Ports tests/debuginfo.test.ts: `fishc build -g`, DWARF line tables mapping the program's
+// `fishc build -g`, DWARF line tables mapping the program's
 // instructions to `.fsh` lines, each IR read from the native fishc's `--emit-llvm`.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readdirSync, writeFileSync } from "node:fs";

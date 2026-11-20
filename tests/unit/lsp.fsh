@@ -1,10 +1,10 @@
-// Ports tests/lsp.test.ts: checking documents and splitting frames in process, through the
+// Checking documents and splitting frames in process, through the
 // compiler's own functions, and `fishc lsp` itself as the native fishc. A Fish child's output comes
 // whole once it ends, while the server is driven message by message, so each server test runs a
-// Bun driver, a reference harness only, that starts `fishc lsp`, speaks the protocol to it as the
-// Bun test does, and prints what it saw once done: one fact per line, a name, a tab and a JSON
-// string. Objects in a fact are written with their keys sorted, as Fish's JSON.stringify writes
-// them, so the expected JSON below is written that way too.
+// Bun driver, a reference harness only, that starts `fishc lsp`, speaks the protocol to it, and
+// prints what it saw once done: one fact per line, a name, a tab and a JSON string. Objects in a
+// fact are written with their keys sorted, as Fish's JSON.stringify writes them, so the expected
+// JSON below is written that way too.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
