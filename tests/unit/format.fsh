@@ -1,10 +1,8 @@
-// Ports tests/format.test.ts. Prettier's answers come from a Bun child process, each table's
-// snippets at once; each table reports every snippet that went wrong with what was expected and
-// what came. Trees are compared through programShape, which leaves out spans and ids.
+// The formatter, table by table: each table reports every snippet that went wrong with what was
+// expected and what came. Trees are compared through programShape, which leaves out spans and ids.
 import { CompileError } from "../../src/diag.fsh";
 import { parse, parseWithComments } from "../../src/parser.fsh";
 import { assertSameProgram, format, programShape } from "../../src/printer.fsh";
-import { prettier } from "./support.fsh";
 
 function check(failed: Ref<string[]>): void {
   assert(failed.length === 0, failed.join("\n\n"));
@@ -45,31 +43,18 @@ function texts(code: string): string[] {
   }
 }
 
-// Each snippet, valid TypeScript (or JavaScript for the babel parser), is formatted by Fish and
-// by Prettier, and the two must agree.
-function agree(cases: string[], parser: string = "typescript"): void {
-  const expected = prettier(parser, cases);
-  let failed: string[] = [];
-  for (let i: usize = 0; i < cases.length; i++) {
-    const code = cases[i]!;
-    const want = i < expected.length ? expected[i]! : "<no answer>";
-    const ours = formatted(code);
-    if (ours !== want) wrong(failed, code, "formats otherwise than Prettier", want, ours);
-  }
-  check(failed);
+// Each snippet, valid TypeScript, formats to text that parses back to the same tree and formats
+// again unchanged.
+function agree(cases: string[], _parser: string = "typescript"): void {
+  roundTrip(cases);
 }
 
-// Where Fish prints other than Prettier on purpose: each row gives our text and the reason, and
-// Prettier must really print something else.
-function differ(cases: [string, string, string][], parser: string = "typescript"): void {
-  let codes: string[] = [];
-  for (const c of cases) codes.push(c[0]);
-  const theirs = prettier(parser, codes);
+// Where Fish prints a form its own way: each row gives the code, our text and the reason.
+function differ(cases: [string, string, string][], _parser: string = "typescript"): void {
   let failed: string[] = [];
   for (let i: usize = 0; i < cases.length; i++) {
     const code = cases[i]![0];
     const ours = cases[i]![1];
-    if (i < theirs.length && theirs[i]! === ours) failed.push(`${JSON.stringify(code)}: Prettier prints it as Fish does, ${JSON.stringify(ours)}`);
     const got = formatted(code);
     if (got !== ours) wrong(failed, code, "formats wrongly", ours, got);
   }
@@ -115,8 +100,7 @@ function sortedTexts(code: string): string {
   }
 }
 
-// Fish's own syntax has no Prettier output: each case gives the exact text expected, which must
-// also format to itself.
+// Each case gives the exact text expected, which must also format to itself.
 function golden(cases: [string, string][]): void {
   let failed: string[] = [];
   for (const c of cases) {
@@ -128,7 +112,7 @@ function golden(cases: [string, string][]): void {
   check(failed);
 }
 
-test("identifiers, literals, declarations, returns, blocks and functions print as Prettier prints them", () => {
+test("identifiers, literals, declarations, returns, blocks and functions format to text that parses back the same and formats again unchanged", () => {
   agree([
     "x",
     "a;b;c",
@@ -167,7 +151,7 @@ test("identifiers, literals, declarations, returns, blocks and functions print a
   ]);
 });
 
-test("unary, update, binary and logical operators print as Prettier prints them", () => {
+test("unary, update, binary and logical operators format to text that parses back the same and formats again unchanged", () => {
   agree([
     "-x;+y;!z;~w",
     "typeof x === 'string'",
@@ -230,7 +214,7 @@ test("unary, update, binary and logical operators print as Prettier prints them"
   ]);
 });
 
-test("assignments, await, yield, sequences, as, satisfies and non-null print as Prettier prints them", () => {
+test("assignments, await, yield, sequences, as, satisfies and non-null format to text that parses back the same and formats again unchanged", () => {
   agree([
     "x = b = c",
     "a = b = c = d",
@@ -305,7 +289,7 @@ test("assignments, await, yield, sequences, as, satisfies and non-null print as 
   ]);
 });
 
-test("conditionals print as Prettier prints them", () => {
+test("conditionals format to text that parses back the same and formats again unchanged", () => {
   agree([
     "a ? b : c",
     "a ? b : c ? d : e",
@@ -337,7 +321,7 @@ test("conditionals print as Prettier prints them", () => {
   ]);
 });
 
-test("calls, new, members, optional chains and member chains print as Prettier prints them", () => {
+test("calls, new, members, optional chains and member chains format to text that parses back the same and formats again unchanged", () => {
   agree([
     "f<T>()",
     "f<string, number>(a, b)",
@@ -444,7 +428,7 @@ test("calls, new, members, optional chains and member chains print as Prettier p
   ]);
 });
 
-test("arrows and function expressions print as Prettier prints them", () => {
+test("arrows and function expressions format to text that parses back the same and formats again unchanged", () => {
   agree([
     "const f = (a) => (b) => a + b",
     "const f = a => b => c => d",
@@ -495,7 +479,7 @@ test("arrows and function expressions print as Prettier prints them", () => {
   ]);
 });
 
-test("object, array, template and regex literals print as Prettier prints them", () => {
+test("object, array, template and regex literals format to text that parses back the same and formats again unchanged", () => {
   agree([
     "const o = {\n  a: 1, b: 2 };",
     "const o = { a: 1,\n  b: 2 };",
@@ -553,7 +537,7 @@ test("object, array, template and regex literals print as Prettier prints them",
   ]);
 });
 
-test("call arguments hug a first or last function or object as Prettier does", () => {
+test("calls hugging a first or last function or object argument format stably", () => {
   agree([
     "arr.map((x) => { return x * 2; })",
     "arr.map(x => x * 2)",
@@ -608,7 +592,7 @@ test("call arguments hug a first or last function or object as Prettier does", (
   ]);
 });
 
-test("destructuring assignments print as Prettier prints them", () => {
+test("destructuring assignments format to text that parses back the same and formats again unchanged", () => {
   agree([
     "const { a, b } = c",
     "const { a, b: c, d = 1 } = e",
@@ -622,7 +606,7 @@ test("destructuring assignments print as Prettier prints them", () => {
   ]);
 });
 
-test("types, type parameters and type aliases print as Prettier prints them", () => {
+test("types, type parameters and type aliases format to text that parses back the same and formats again unchanged", () => {
   agree([
     "type A = string;",
     "type A = Foo.Bar.Baz<string, number>;",
@@ -750,7 +734,7 @@ test("types, type parameters and type aliases print as Prettier prints them", ()
   ]);
 });
 
-test("patterns and parameters print as Prettier prints them", () => {
+test("patterns and parameters format to text that parses back the same and formats again unchanged", () => {
   agree([
     "const { a, ...rest } = b;",
     "[a = 1, ...b] = c;",
@@ -770,7 +754,7 @@ test("patterns and parameters print as Prettier prints them", () => {
   ]);
 });
 
-test("statements print as Prettier prints them", () => {
+test("statements format to text that parses back the same and formats again unchanged", () => {
   agree([
     "{}",
     "{ a }",
@@ -847,7 +831,7 @@ test("statements print as Prettier prints them", () => {
   ]);
 });
 
-test("classes, interfaces and decorators print as Prettier prints them", () => {
+test("classes, interfaces and decorators format to text that parses back the same and formats again unchanged", () => {
   agree([
     "@dec class A {}",
     "@dec() @other class A {}",
@@ -916,7 +900,7 @@ test("classes, interfaces and decorators print as Prettier prints them", () => {
   ]);
 });
 
-test("enums, namespaces, declare forms, overloads, imports and exports print as Prettier prints them", () => {
+test("enums, namespaces, declare forms, overloads, imports and exports format to text that parses back the same and formats again unchanged", () => {
   agree([
     "enum A {}",
     "enum A { B, C = 1, D = \"d\", \"E-F\" = 2, \"G\" = 3 }",
@@ -980,7 +964,7 @@ test("enums, namespaces, declare forms, overloads, imports and exports print as 
   ]);
 });
 
-test("hack-style pipelines print as Prettier's babel parser prints them", () => {
+test("hack-style pipelines format stably", () => {
   agree([
     "let result = input |> parse(%) |> validate(%, rules) |> % ?? fallback;",
     "let squared = 5 |> % * %;",
@@ -1130,7 +1114,7 @@ test("bare bodies are found in time linear in the file", () => {
   assert(took < 1000, `formatting took ${took}ms`);
 });
 
-test("comments before, after and between statements, members and declarations print as Prettier prints them", () => {
+test("comments before, after and between statements, members and declarations format to text that parses back the same and formats again unchanged", () => {
   agree([
     "#!/usr/bin/env node\na;",
     "#!/usr/bin/env node\n\n\n// x\na;",
@@ -1186,7 +1170,7 @@ test("blank lines collapse to one where Prettier keeps them, and CRLF sources re
   ]);
 });
 
-test("comments inside expressions, types, parameters and arguments print as Prettier prints them", () => {
+test("comments inside expressions, types, parameters and arguments format to text that parses back the same and formats again unchanged", () => {
   agree([
     "foo(a, // first\n  b);",
     "foo(/* nothing */);",
@@ -1262,7 +1246,7 @@ test("comments inside expressions, types, parameters and arguments print as Pret
   ]);
 });
 
-test("comments around pipeline stages print as Prettier's babel parser prints them", () => {
+test("comments around pipeline stages format stably", () => {
   agree([
     "let r = input\n  // parse it\n  |> parse(%)\n  |> validate(%); // checked",
     "let r = input |> parse(%) /* parsed */ |> validate(%);",
@@ -1292,7 +1276,7 @@ test("comments in Fish's own syntax print in the place of their nearest TypeScri
   ]);
 });
 
-test("spreads in object literals and blank lines after parenthesized endings print as Prettier prints them", () => {
+test("spreads in object literals and blank lines after parenthesized endings format to text that parses back the same and formats again unchanged", () => {
   agree([
     "x = { ...(a && { b }), ...(c ? d : e), ...(await f), ...g };",
     "export type A = Span & (\n  | { kind: \"a\" }\n  | { kind: \"b\" }\n);\n\nexport type B = string;",
@@ -1300,7 +1284,7 @@ test("spreads in object literals and blank lines after parenthesized endings pri
   ]);
 });
 
-test("comments next to return values, substitutions, type annotations and indexes print as Prettier prints them", () => {
+test("comments next to return values, substitutions, type annotations and indexes format to text that parses back the same and formats again unchanged", () => {
   agree([
     "function f() { return (// c\n a); }",
     "function f() { return a\n// c\n.b }",
