@@ -344,10 +344,14 @@ function built(session: BuildSession, file: string, out: string, release: boolea
 export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): { ir: string; warnings: CompileError[]; session: BuildSession; kept: Kept } {
   let { core, caches } = apart(session);
   let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest);
+  const instrumenting = stageStart(made.kept.checked.tables.session);
   const ir = instrumented(made.ir, target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
   if (shim !== undefined) refuseForeignRust(target);
+  stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
+  const splitting = stageStart(made.kept.checked.tables.session);
   const split = parts(ir, made.kept.checked, release, target, debug);
+  stageEnd(made.kept.checked.tables.session, "split", splitting);
   let { checked, parts: checkerParts, loaded, contents, carried, emitted } = made.kept;
   let { instances, tables, warnings } = checked;
   let building = together(tables.session, caches);
@@ -361,7 +365,10 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
 // to keep.
 /** @throws {CompileError | Error | IoError | JsonError} */
 export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): { ir: string; warnings: CompileError[]; kept: Kept } {
+  // Reading the files again and putting the changed ones back, apart from the check it times itself.
+  const reloading = stageStart(session);
   let start = checkedFrom(session, file, looked, kept, manifest);
+  stageEnd(start.checked.tables.session, "reload", reloading);
   const failed = start.checked.tables.session.failed;
   start.checked.tables.session.failed = undefined;
   const sources = [...start.loaded.sources];
@@ -1011,7 +1018,14 @@ function rebuilt(r: Ref<Rebuild>, kept: Kept | undefined): Rebuilt {
   try {
     const start = performance.now();
     let made = builtKept(sessionWith(r.locked, r.timed), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded, kept, r.manifest);
-    reportTimings(made.session, [...FRONT_END, "codegen", ...CODEGEN_PARTS, ...NATIVE_STAGES], start);
+    const stages = ["reload", ...FRONT_END, "codegen", "instrument", "split", ...NATIVE_STAGES];
+    reportTimings(made.session, ["reload", ...FRONT_END, "codegen", ...CODEGEN_PARTS, "instrument", "split", ...NATIVE_STAGES], start);
+    // What no stage holds, so a rebuild's time is all accounted for.
+    if (made.session.timings !== undefined) {
+      let staged: f64 = 0;
+      for (const s of stages) staged += made.session.timings!.ms.get(s) ?? 0;
+      console.error(`other    ${(performance.now() - start - staged).toFixed(1).padStart(9)} ms`);
+    }
     if (r.timed && made.kept.emitted !== undefined && made.kept.carried > 0) {
       const why = [...made.kept.emitted!.refusals].map(([k, n]) => `${n} ${k}`).join(", ");
       console.error(`codegen emitted ${made.kept.emitted!.reemitted} of ${made.kept.emitted!.made.size} functions again${why === "" ? "" : ` (${why})`}`);
