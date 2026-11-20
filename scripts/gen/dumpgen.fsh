@@ -1,5 +1,5 @@
 // Writes `tests/selfhost/dump.ts`, which prints a parsed tree in full, from the parser's own AST
-// types in `src/parser.ts`, so it prints every field of every node kind. The printer is plain
+// types in `src/parser.fsh`, so it prints every field of every node kind. The printer is plain
 // enough to be valid TypeScript and valid Fish, so the parser built by fishc and run by Bun can
 // print the same trees. `tests/selfhost_parser.test.ts` fails when the file is stale.
 import { readFileSync } from "node:fs";
@@ -331,7 +331,7 @@ export function nodeTypes(parserSource: string): NodeTypes throws Error | Compil
 }
 
 export function parserSource(): string throws IoError {
-  return readFileSync(join(import.meta.dir, "..", "..", "src", "parser.ts"), "utf8");
+  return readFileSync(join(import.meta.dir, "..", "..", "src", "parser.fsh"), "utf8");
 }
 
 class Dumper {
@@ -477,7 +477,7 @@ class Dumper {
     for (const name of this.nt.names) if (out.some((l) => hasWord(l, name))) imports.push(name);
     const all = [
       `// Generated from the parser's AST types by \`fishc run scripts/dumpgen.fsh\`; a test fails when it is stale.`,
-      `import type { ${imports.join(", ")} } from "../../src/parser.ts";`,
+      `import type { ${imports.join(", ")} } from "../../src/parser.fsh";`,
       ``,
       ...out,
     ];

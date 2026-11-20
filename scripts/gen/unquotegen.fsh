@@ -1,5 +1,5 @@
-// Writes `src/unquote.ts`, which turns a value a macro made while compiling, of an `Ast` type,
-// back into the syntax tree it stands for, from the parser's own AST types in `src/parser.ts`:
+// Writes `src/unquote.fsh`, which turns a value a macro made while compiling, of an `Ast` type,
+// back into the syntax tree it stands for, from the parser's own AST types in `src/parser.fsh`:
 // the `Ast` types mirror them field for field, so each record reads as a node of its kind.
 // `tests/walk.test.ts` fails when the file is stale.
 import { type CompileError } from "../../tests/compiler/diag.fsh";
@@ -290,7 +290,7 @@ class Unquoter {
     }
     let imports: string[] = [];
     for (const name of this.nt.names) if (out.some((l) => hasWord(l, name))) imports.push(name);
-    const all = [HEADER.trimEnd(), `import type { ${imports.join(", ")} } from "./parser.ts";`, HELPERS, ...out];
+    const all = [HEADER.trimEnd(), `import type { ${imports.join(", ")} } from "./parser.fsh";`, HELPERS, ...out];
     return all.join("\n").trimEnd() + "\n";
   }
 

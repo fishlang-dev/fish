@@ -1,6 +1,6 @@
-// Writes `src/walk.ts`, which visits the child nodes of every node kind, from the parser's own AST
-// types in `src/parser.ts`, so the compiler can walk a tree without reading arbitrary objects'
-// fields, which Fish can't. Beside it, `src/rebuild.ts` puts the replacements a rewrite table holds
+// Writes `src/walk.fsh`, which visits the child nodes of every node kind, from the parser's own AST
+// types in `src/parser.fsh`, so the compiler can walk a tree without reading arbitrary objects'
+// fields, which Fish can't. Beside it, `src/rebuild.fsh` puts the replacements a rewrite table holds
 // in place in a tree, updates node ids and spans, and clones AST subtrees by the same fields.
 // `tests/walk.test.ts` fails when either file is stale.
 import { type CompileError } from "../../tests/compiler/diag.fsh";
@@ -711,7 +711,7 @@ class Walkgen {
       `// Generated from the parser's AST types by \`fishc run scripts/walkgen.fsh\`; a test fails when it is stale.`,
       `// Visits each node a node holds, tagged, in the order its type lists the fields.`,
       `import assert from "node:assert";`,
-      `import type { ${this.importsOf(both).join(", ")} } from "./parser.ts";`,
+      `import type { ${this.importsOf(both).join(", ")} } from "./parser.fsh";`,
       ``,
       ...visitor,
       ...read,
@@ -720,7 +720,7 @@ class Walkgen {
       `// Generated from the parser's AST types by \`fishc run scripts/walkgen.fsh\`; a test fails when it is stale.`,
       `// Each \`rebuilt\` function gives a node as the rewrite table has it, each node under it put in`,
       `// place the same way, writing the slots that held replaced nodes.`,
-      `import type { ${this.importsOf(rebuilt).join(", ")} } from "./parser.ts";`,
+      `import type { ${this.importsOf(rebuilt).join(", ")} } from "./parser.fsh";`,
       ``,
       ...rebuilt,
     ];
@@ -977,7 +977,7 @@ class Readers {
   }
 }
 
-// The walkers, `src/walk.ts`, and the rebuild, `src/rebuild.ts`, from the parser's source.
+// The walkers, `src/walk.fsh`, and the rebuild, `src/rebuild.fsh`, from the parser's source.
 export function walkSources(source: string): string[] throws Error | CompileError {
   let g = new Walkgen(nodeTypes(source));
   return g.sources();
