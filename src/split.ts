@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import { atNamesIn, firstNameIn, typeNamesIn } from "./layout.ts";
 // A dev build's IR split into modules: std's part, whose text is the same whatever the program's
 // own code says, a part per group of the program's functions (one per source file), and the
 // program's part holding the rest. Each part's text changes only when what it holds does, so its
@@ -14,30 +15,28 @@ import assert from "node:assert";
 // debug metadata goes with the program's part, the only one whose functions refer to it.
 
 // `name` as the IR spells it, and `key` without the quotes it may have, so `@"f"` and `@f` meet.
-// `refs` is what it refers to, read once.
-type Item = { kind: "define" | "declare" | "global"; name: string; key: string; text: string; refs: string[] };
+// `refs` is what it refers to, and `copied` whether it is a private constant each part holds its
+// own copy of, both read once.
+type Item = { kind: "define" | "declare" | "global"; name: string; key: string; text: string; refs: string[]; copied: boolean };
 
 const key = (name: string) => name.replace(/^"(.*)"$/, "$1");
 
-const NAME = /@("[^"]*"|[\w.$-]+)/;
-const NAMES = /@("[^"]*"|[\w.$-]+)/g;
 
-function items(ir: string): Item[] {
+function items(lines: Ref<string[]>): Item[] {
   let found: Item[] = [];
-  const lines = ir.split("\n");
-  for (let i = 0; i < lines.length; i++) {
+  for (let i: usize = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (line === "") continue;
-    const named = NAME.exec(line);
-    const name = named === null ? "" : named[1]!;
+    if (line.startsWith("!") || line.startsWith('%"<')) continue;
+    const name = firstNameIn(line) ?? "";
     if (line.startsWith("define ")) {
-      const end = lines.indexOf("}", i as i64);
-      const text = lines.slice(i as i64, end + 1).join("\n");
-      found.push({ kind: "define", name, key: key(name), text, refs: references(text) });
-      i = end as usize;
-    } else if (line.startsWith("declare ")) found.push({ kind: "declare", name, key: key(name), text: line, refs: references(line) });
-    else if (line.startsWith("!") || line.startsWith('%"<')) continue;
-    else if (line.startsWith("@")) found.push({ kind: "global", name, key: key(name), text: line, refs: references(line) });
+      let end = i;
+      while (lines[end]! !== "}") end++;
+      const text = lines.slice(i as i64, (end + 1) as i64).join("\n");
+      found.push({ kind: "define", name, key: key(name), text, refs: references(text), copied: false });
+      i = end;
+    } else if (line.startsWith("declare ")) found.push({ kind: "declare", name, key: key(name), text: line, refs: references(line), copied: false });
+    else if (line.startsWith("@")) found.push({ kind: "global", name, key: key(name), text: line, refs: references(line), copied: / = private unnamed_addr constant /.test(line) });
     else assert(false, `can't split the IR at '${line}'`);
   }
   return found;
@@ -47,11 +46,11 @@ function items(ir: string): Item[] {
 // `@` in them names nothing.
 function references(text: string): string[] {
   let out: string[] = [];
-  for (const m of text.replace(/ x i8\] c"[^"]*"/g, "").matchAll(NAMES)) out.push(key(m[1]!));
+  for (const name of atNamesIn(text)) out.push(key(name));
   return out;
 }
 
-const copied = (item: Ref<Item>) => item.kind === "global" && / = private unnamed_addr constant /.test(item.text);
+const copied = (item: Ref<Item>) => item.copied;
 
 // A definition as the other part declares it.
 function declaration(item: Ref<Item>): string {
@@ -92,11 +91,12 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
   const began = performance.now();
   const std = keysOf(stdSymbols);
   const own = keysOf(ownSymbols);
-  const all = items(ir);
+  const lines = ir.split("\n");
+  const all = items(lines);
   const read = performance.now();
   // Each named struct's definition, by its name, for the parts that use it.
   let types = new Map<string, string>();
-  for (const l of ir.split("\n")) if (l.startsWith('%"<')) types.set(l.slice(0, l.indexOf(" = type ")), l);
+  for (const l of lines) if (l.startsWith('%"<')) types.set(l.slice(0, l.indexOf(" = type ")), l);
   // Where each key's item sits in `all`; of two items with one key, the later.
   let byName = new Map<string, usize>();
   for (let i: usize = 0; i < all.length; i++) byName.set(all[i]!.key, i);
@@ -152,7 +152,7 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
   for (const [group, symbols] of groups) for (const k of keysOf(symbols)) if (!reached.has(k)) where.set(k, group);
   const reachedAt = performance.now();
   let metadata = "";
-  for (const line of ir.split("\n")) if (line.startsWith("!")) metadata += `${line}\n`;
+  for (const line of lines) if (line.startsWith("!")) metadata += `${line}\n`;
   let out = new Map<string, string>();
   for (const group of groups.keys()) out.set(group, typed(types, part(all, byName, where, group)));
   const stdPart = typed(types, part(all, byName, where, STD));
@@ -183,13 +183,13 @@ function owns(item: Ref<Item>, where: Ref<Map<string, string>>, at: string): boo
 // types are.
 function typed(types: Ref<Map<string, string>>, text: string): string {
   let used = new Set<string>();
-  let pending = [...text.matchAll(/%"<[^"]*>"/g)].map((m) => m[0]);
+  let pending = typeNamesIn(text);
   while (pending.length > 0) {
     const n = pending.pop()!;
     if (used.has(n)) continue;
     used.add(n);
     const line = types.get(n);
-    if (line !== undefined) for (const m of line.slice(n.length as i64).matchAll(/%"<[^"]*>"/g)) pending.push(m[0]);
+    if (line !== undefined) for (const m of typeNamesIn(line.slice(n.length as i64))) pending.push(m);
   }
   let lines: string[] = [];
   for (const n of [...used].toSorted()) {

@@ -11,7 +11,7 @@ import { CompileError, locate, sourceOf, type Source } from "./diag.ts";
 import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, isMember, memberOf, toFloat, type ComptimeHost, type Value } from "./comptime.ts";
 import { Printer, RUNTIME, type PrintHost } from "./runtime.ts";
 import type { ArithmeticOp, AssignOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.ts";
-import { ARRAY, DYN, compound, Conversions, llvmOf, structNames, textOf, typeDefinitions } from "./layout.ts";
+import { ARRAY, DYN, atNamesIn, compound, Conversions, llvmOf, nameAt, structNames, textOf, typeDefinitions } from "./layout.ts";
 import { made, type PatternInfo } from "./match.ts";
 import { STD_BASE } from "./std.ts";
 import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.ts";
@@ -14463,17 +14463,24 @@ function newlinesOf(text: string): usize[] {
 // `[N x i8] c"..."`; a quoted name may end in `c` too.
 function namesIn(text: string): string[] {
   let names: string[] = [];
-  for (const m of text.replace(/x i8\] c"[^"]*"/g, "").matchAll(/@("(?:[^"\\]|\\.)*"|[\w.$-]+)/g)) names.push(`@${m[1]!}`);
+  for (const name of atNamesIn(text)) names.push(`@${name}`);
   return names;
 }
 
 // The name a global, define or declaration line gives, if it gives one.
 function itemName(line: string): string | undefined {
-  const global = /^(@(?:"(?:[^"\\]|\\.)*"|[\w.$-]+)) =/.exec(line);
-  if (global !== null) return global[1]!;
+  if (line.startsWith("@")) {
+    const name = nameAt(line, 0);
+    return name !== undefined && line.startsWith(" =", (1 + name.length) as i64) ? `@${name}` : undefined;
+  }
   if (!line.startsWith("define ") && !line.startsWith("declare ")) return undefined;
-  const m = /@("(?:[^"\\]|\\.)*"|[\w.$-]+)\(/.exec(line);
-  return m !== null ? `@${m[1]!}` : undefined;
+  // A function's name is the first `@` name followed by its parameters.
+  for (let sign = line.indexOf("@"); sign >= 0; sign = line.indexOf("@", sign + 1)) {
+    const name = nameAt(line, sign);
+    const after = sign + 1 + (name !== undefined ? (name.length as i64) : 0);
+    if (name !== undefined && after < (line.length as i64) && line.charCodeAt(after as usize) === 40) return `@${name}`;
+  }
+  return undefined;
 }
 
 // The module's globals and declarations by name, and where each goes.

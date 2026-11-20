@@ -464,6 +464,26 @@ int64_t fsh_rt_str_last_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
   from = fsh_clamp(from, n);
   if (m > n) return -1;
   if (from > n - m) from = n - m;
+  // By bytes, back from where unit from is, at each character's start; the unit a match is at
+  // is its byte offset when every character is one byte, else counted up to it.
+  if (needle->length == 0) return from;
+  if (!fsh_has_lone(needle)) {
+    int half;
+    int64_t start = fsh_seek(s, from, &half);
+    for (int64_t at = start; at >= 0; at--) {
+      if ((((const unsigned char *)s->bytes)[at] & 0xc0) == 0x80) continue;
+      if (at + needle->length > s->length || memcmp(s->bytes + at, needle->bytes, needle->length) != 0) continue;
+      if (n == s->length) return at;
+      int64_t unit = 0, i = 0;
+      int h = 0;
+      while (i < at) {
+        fsh_next((const unsigned char *)s->bytes, &i, &h);
+        unit++;
+      }
+      return unit;
+    }
+    return -1;
+  }
   uint16_t *a = fsh_utf16(s), *b = fsh_utf16(needle);
   int64_t found = -1;
   for (int64_t i = from; found < 0 && i >= 0; i--) {

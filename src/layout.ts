@@ -428,9 +428,84 @@ export function structNames(typing: Ref<Typing>): { names: TypeMap<Type, string>
 // The definitions of the named structs `text` uses, each once and in name order, with those their
 // own layouts use. A name two types with different layouts share would hold one of them where the
 // other was meant, so it is an internal error.
+// Each named struct type IR text uses, as `%"<...>"`, once, in the order first used: what
+// `/%"<[^"]*>"/g` matches, found without the regex engine, which a module's size makes slow.
+export function typeNamesIn(text: string): string[] {
+  let out: string[] = [];
+  let seen = new Set<string>();
+  let at: i64 = 0;
+  for (;;) {
+    const start = text.indexOf('%"<', at);
+    if (start < 0) break;
+    const close = text.indexOf('"', start + 3);
+    if (close < 0) break;
+    if (text.charCodeAt((close - 1) as usize) === 62) {
+      const name = text.slice(start, close + 1);
+      if (!seen.has(name)) {
+        seen.add(name);
+        out.push(name);
+      }
+      at = close + 1;
+    } else at = start + 1;
+  }
+  return out;
+}
+
+// Whether a code unit is one an unquoted IR name holds: a letter, a digit, `_`, `.`, `$` or `-`.
+function nameUnit(c: u16): boolean {
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 46 || c === 36 || c === 45;
+}
+
+// Every `@` name IR text uses, quoted names with their quotes, leaving out what string constants'
+// bytes hold: what `/@("[^"]*"|[\w.$-]+)/g` matches over the text with each `x i8] c"..."` taken
+// out, found without the regex engine.
+export function atNamesIn(text: string): string[] {
+  let out: string[] = [];
+  let at: i64 = 0;
+  let constant = text.indexOf('x i8] c"', 0);
+  for (;;) {
+    const sign = text.indexOf("@", at);
+    if (sign < 0) break;
+    if (constant >= 0 && constant < sign) {
+      const close = text.indexOf('"', constant + 8);
+      if (close < 0) break;
+      if (close >= sign) {
+        at = close + 1;
+        constant = text.indexOf('x i8] c"', at);
+        continue;
+      }
+      constant = text.indexOf('x i8] c"', close + 1);
+      continue;
+    }
+    const name = nameAt(text, sign);
+    if (name !== undefined) out.push(name);
+    at = sign + 1 + (name !== undefined ? (name.length as i64) : 0);
+  }
+  return out;
+}
+
+// The name after the `@` at `sign`, quotes and all, if one is there.
+export function nameAt(text: string, sign: i64): string | undefined {
+  if (sign + 1 < (text.length as i64) && text.charCodeAt((sign + 1) as usize) === 34) {
+    const close = text.indexOf('"', sign + 2);
+    return close < 0 ? undefined : text.slice(sign + 1, close + 1);
+  }
+  let end = sign + 1;
+  while (end < (text.length as i64) && nameUnit(text.charCodeAt(end as usize))) end++;
+  return end > sign + 1 ? text.slice(sign + 1, end) : undefined;
+}
+
+// The first name after an `@` in `text`, as `/@("[^"]*"|[\w.$-]+)/` finds it.
+export function firstNameIn(text: string): string | undefined {
+  for (let sign = text.indexOf("@"); sign >= 0; sign = text.indexOf("@", sign + 1)) {
+    const name = nameAt(text, sign);
+    if (name !== undefined) return name;
+  }
+  return undefined;
+}
+
 export function typeDefinitions(typing: Ref<Typing>, text: string): string[] {
-  // Angle brackets, which no local's name holds, set these apart from the IR's other names.
-  const used = (s: string): string[] => [...s.matchAll(/%"<[^"]*>"/g)].map((m) => m[0]);
+  const used = (s: string): string[] => typeNamesIn(s);
   // The first type given each name, and every later one, which must be laid out as the first is.
   let byName = new Map<string, Type>();
   let again: [string, Type][] = [];
