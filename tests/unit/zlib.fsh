@@ -4,10 +4,10 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { compile, runtimeLinks, runtimeUnits } from "../compiler/main.fsh";
-import { ZLIB_NATIVE } from "../compiler/native.fsh";
-import { cachedSession } from "../compiler/stdcache.fsh";
-import { HOST_TARGET, sanitizedTarget } from "../compiler/target.fsh";
+import { compile, runtimeLinks, runtimeUnits } from "../../src/main.fsh";
+import { ZLIB_NATIVE } from "../../src/native.fsh";
+import { cachedSession } from "../../src/stdcache.fsh";
+import { HOST_TARGET, sanitizedTarget } from "../../src/target.fsh";
 import { built, fishc, read, removed, root, same, scratch, text } from "./support.fsh";
 
 function fishHelpers(): string {
@@ -155,7 +155,7 @@ test("small inputs compress to node's bytes at every level, and decompress", () 
 function large(): string {
   let letters: string[] = [];
   for (let i: i64 = 0; i < 200000; i++) letters.push(String.fromCharCode((97 + ((i * i * 7 + i) % 26)) as u16) + (i % 13 === 0 ? " " : ""));
-  return letters.join("") + read(join(root(), "src", "check.ts"));
+  return letters.join("") + read(join(root(), "src", "check.fsh"));
 }
 
 test("a large input round-trips with node both ways", () => {

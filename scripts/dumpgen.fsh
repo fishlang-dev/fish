@@ -3,7 +3,7 @@
 //   fishc run scripts/dumpgen.fsh
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type CompileError } from "../tests/compiler/diag.fsh";
+import { type CompileError } from "../src/diag.fsh";
 import { dumperSource, parserSource } from "./gen/dumpgen.fsh";
 
 function main(): void throws Error | CompileError | IoError {

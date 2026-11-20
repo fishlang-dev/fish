@@ -1,11 +1,11 @@
 // Ports tests/unsupported.test.ts. Each table is one test looping over its rows, every failing row
 // reported with the message and span it expected and the ones it got.
-import { check } from "../compiler/check.fsh";
-import { newCompilation } from "../compiler/compilation.fsh";
-import { CompileError } from "../compiler/diag.fsh";
-import { runtimeNames } from "../compiler/main.fsh";
-import { parse } from "../compiler/parser.fsh";
-import { cachedSession } from "../compiler/stdcache.fsh";
+import { check } from "../../src/check.fsh";
+import { newCompilation } from "../../src/compilation.fsh";
+import { CompileError } from "../../src/diag.fsh";
+import { runtimeNames } from "../../src/main.fsh";
+import { parse } from "../../src/parser.fsh";
+import { cachedSession } from "../../src/stdcache.fsh";
 
 // The error `src`, checked as a program of its own, is refused with; code "none" when it checks.
 function refusal(src: string, library: boolean): CompileError {

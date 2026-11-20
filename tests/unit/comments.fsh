@@ -2,8 +2,8 @@
 // npm typescript package.
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { lexer, type Comment } from "../compiler/lexer.fsh";
-import { parseWithComments } from "../compiler/parser.fsh";
+import { lexer, type Comment } from "../../src/lexer.fsh";
+import { parseWithComments } from "../../src/parser.fsh";
 import { read, root, same } from "./support.fsh";
 
 // Each comment as kind and text, one per line, failing the test when a span doesn't hold its text.

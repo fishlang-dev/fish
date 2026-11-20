@@ -3,7 +3,7 @@
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { REJECTS } from "../compiler/migrate.fsh";
+import { REJECTS } from "../../src/migrate.fsh";
 import { fishc, ran, read, same, type Ran } from "./support.fsh";
 
 // A fresh directory for one test, by its real path.

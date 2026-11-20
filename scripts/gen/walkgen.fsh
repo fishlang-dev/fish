@@ -3,7 +3,7 @@
 // fields, which Fish can't. Beside it, `src/rebuild.fsh` puts the replacements a rewrite table holds
 // in place in a tree, updates node ids and spans, and clones AST subtrees by the same fields.
 // `tests/walk.test.ts` fails when either file is stale.
-import { type CompileError } from "../../tests/compiler/diag.fsh";
+import { type CompileError } from "../../src/diag.fsh";
 import { append, hasWord, indented, nodeTypes, ref, refTo, type Field, type NodeTypes, type Shape, type Ty } from "./dumpgen.fsh";
 
 function method(name: string): string {

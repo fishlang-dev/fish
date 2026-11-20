@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { parserSource } from "../../scripts/gen/dumpgen.fsh";
 import { unquoteSource } from "../../scripts/gen/unquotegen.fsh";
 import { walkSources } from "../../scripts/gen/walkgen.fsh";
-import { forEachChild, Rewrites, walkWhile, type AnyNode } from "../compiler/nodes.fsh";
-import { parseExpression, type Expr } from "../compiler/parser.fsh";
-import { rebuiltExpr } from "../compiler/rebuild.fsh";
+import { forEachChild, Rewrites, walkWhile, type AnyNode } from "../../src/nodes.fsh";
+import { parseExpression, type Expr } from "../../src/parser.fsh";
+import { rebuiltExpr } from "../../src/rebuild.fsh";
 import { read, root, same } from "./support.fsh";
 
 function kindOf(n: Ref<AnyNode>): string {
@@ -94,8 +94,8 @@ test("a rebuild puts each replacement where its node was, under that node's id, 
 test("the walkers and the rebuild are generated from the parser's current AST types; run 'fishc run scripts/walkgen.fsh' when they aren't", () => {
   try {
     const both = walkSources(parserSource());
-    same(read(join(root(), "src", "walk.ts")), both[0]!, "src/walk.ts");
-    same(read(join(root(), "src", "rebuild.ts")), both[1]!, "src/rebuild.ts");
+    same(read(join(root(), "src", "walk.fsh")), both[0]!, "src/walk.fsh");
+    same(read(join(root(), "src", "rebuild.fsh")), both[1]!, "src/rebuild.fsh");
   } catch (e) {
     assert(false, e.message);
   }
@@ -103,7 +103,7 @@ test("the walkers and the rebuild are generated from the parser's current AST ty
 
 test("the Ast reader macros' results go through is generated from the parser's current AST types; run 'fishc run scripts/unquotegen.fsh' when it isn't", () => {
   try {
-    same(read(join(root(), "src", "unquote.ts")), unquoteSource(parserSource()), "src/unquote.ts");
+    same(read(join(root(), "src", "unquote.fsh")), unquoteSource(parserSource()), "src/unquote.fsh");
   } catch (e) {
     assert(false, e.message);
   }

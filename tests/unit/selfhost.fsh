@@ -2,18 +2,18 @@
 // reading every field, these walk the tree with the generated walker.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { walk } from "../compiler/nodes.fsh";
-import { parse, type Expr, type Stmt } from "../compiler/parser.fsh";
+import { walk } from "../../src/nodes.fsh";
+import { parse, type Expr, type Stmt } from "../../src/parser.fsh";
 import { read, root } from "./support.fsh";
 
 function srcDir(): string {
   return join(root(), "src");
 }
 
-// src's TypeScript files.
+// src's Fish files.
 function sources(): string[] {
   try {
-    return readdirSync(srcDir()).filter((f) => f.endsWith(".ts"));
+    return readdirSync(srcDir()).filter((f) => f.endsWith(".fsh"));
   } catch (e) {
     assert(false, e.message);
     return [];

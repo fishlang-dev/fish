@@ -4,7 +4,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { indented } from "../compiler/main.fsh";
+import { indented } from "../../src/main.fsh";
 import { fishcPath, ran, read, removed, same, scratch, text, type Ran } from "./support.fsh";
 
 // Runs the native fishc with `args` in `cwd`, without the variables that decide whether output is

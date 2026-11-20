@@ -1,8 +1,8 @@
 // Ports tests/diag.test.ts. A group is made with `compileErrors`, since a `CompileErrors` isn't taken
 // where a `CompileError` is.
 import { join } from "node:path";
-import { CompileError, compileErrors, formatError, shown } from "../compiler/diag.fsh";
-import { errorsOf } from "../compiler/lsp.fsh";
+import { CompileError, compileErrors, formatError, shown } from "../../src/diag.fsh";
+import { errorsOf } from "../../src/lsp.fsh";
 import { read, root, same } from "./support.fsh";
 
 function src(): string {
@@ -76,6 +76,6 @@ test("only names the compiler made up are rewritten in messages, never text a us
 });
 
 test("diagnostics import nothing, so they compile without the rest of the compiler", () => {
-  const source = read(join(root(), "src", "diag.ts"));
+  const source = read(join(root(), "src", "diag.fsh"));
   same(source.split("\n").filter((line) => line.startsWith("import ")).join("\n"), "", "imports");
 });

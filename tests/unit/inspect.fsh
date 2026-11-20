@@ -4,7 +4,7 @@
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { NATIVE } from "../compiler/native.fsh";
+import { NATIVE } from "../../src/native.fsh";
 import { removed, same, scratch, text } from "./support.fsh";
 
 // Bun's script printing the C statements that build and print each value of the array literal in

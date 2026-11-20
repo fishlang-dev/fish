@@ -11,12 +11,12 @@ import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSyn
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { argv } from "node:process";
-import { CompileError, formatError } from "../compiler/diag.fsh";
-import { build, buildAsync, compile, engineDir, runtimeLinks, runtimeUnits } from "../compiler/main.fsh";
-import { buildSession, cachedObject, cachedObjectAsync, files, mathObjectsAsync, type Unit } from "../compiler/mathlib.fsh";
-import { newSession } from "../compiler/compilation.fsh";
-import { hostTarget } from "../compiler/target.fsh";
-import { cachedSession } from "../compiler/stdcache.fsh";
+import { CompileError, formatError } from "../../src/diag.fsh";
+import { build, buildAsync, compile, engineDir, runtimeLinks, runtimeUnits } from "../../src/main.fsh";
+import { buildSession, cachedObject, cachedObjectAsync, files, mathObjectsAsync, type Unit } from "../../src/mathlib.fsh";
+import { newSession } from "../../src/compilation.fsh";
+import { hostTarget } from "../../src/target.fsh";
+import { cachedSession } from "../../src/stdcache.fsh";
 import { fishcPath, read, removed, root as repo, same, scratch, text } from "./support.fsh";
 
 // The directory the parent test made, in the child `again` starts, else "".

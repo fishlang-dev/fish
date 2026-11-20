@@ -1,6 +1,6 @@
 // Ports tests/doc.test.ts. Each document is printed by Fish's layout and, sent as JSON to a Bun
 // child process, by Prettier's own printer, the oracle for ours; each test's documents go at once.
-import { conditionalGroup, fill, group, ifBreak, indent, indentIfBreak, join, newBreakParent, newHardline, newLine, newSoftline, print, type Doc } from "../compiler/doc.fsh";
+import { conditionalGroup, fill, group, ifBreak, indent, indentIfBreak, join, newBreakParent, newHardline, newLine, newSoftline, print, type Doc } from "../../src/doc.fsh";
 import { prettier } from "./support.fsh";
 
 function optional(s: string | undefined): string {

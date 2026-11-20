@@ -8,9 +8,9 @@
 // name, both held to the files there are by the last test.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import type { Comment } from "../compiler/lexer.fsh";
-import { parse, parseWithComments } from "../compiler/parser.fsh";
-import { format, programShape } from "../compiler/printer.fsh";
+import type { Comment } from "../../src/lexer.fsh";
+import { parse, parseWithComments } from "../../src/parser.fsh";
+import { format, programShape } from "../../src/printer.fsh";
 import { prettier, read, root } from "./support.fsh";
 
 // Where a source file deliberately formats otherwise than Prettier: in Prettier's output, each
@@ -37,95 +37,95 @@ const REFUSED: [string, string][] = [
 
 // The compiler's sources, each with a test of its own below.
 const SOURCES: string[] = [
-  "src/analysis.ts",
-  "src/arenas.ts",
-  "src/arithmetic.ts",
-  "src/ast.ts",
-  "src/astgen.ts",
-  "src/bundle.ts",
-  "src/casemap.ts",
-  "src/check.ts",
-  "src/classes.ts",
-  "src/codegen.ts",
-  "src/codes.ts",
-  "src/comments.ts",
-  "src/compilation.ts",
-  "src/comptime.ts",
-  "src/debuginfo.ts",
-  "src/declarations.ts",
-  "src/defaults.ts",
-  "src/dependencies.ts",
-  "src/deps.ts",
-  "src/diag.ts",
-  "src/edits.ts",
-  "src/doc.ts",
-  "src/enums.ts",
-  "src/expressions.ts",
+  "src/analysis.fsh",
+  "src/arenas.fsh",
+  "src/arithmetic.fsh",
+  "src/ast.fsh",
+  "src/astgen.fsh",
+  "src/bundle.fsh",
+  "src/casemap.fsh",
+  "src/check.fsh",
+  "src/classes.fsh",
+  "src/codegen.fsh",
+  "src/codes.fsh",
+  "src/comments.fsh",
+  "src/compilation.fsh",
+  "src/comptime.fsh",
+  "src/debuginfo.fsh",
+  "src/declarations.fsh",
+  "src/defaults.fsh",
+  "src/dependencies.fsh",
+  "src/deps.fsh",
+  "src/diag.fsh",
+  "src/edits.fsh",
+  "src/doc.fsh",
+  "src/enums.fsh",
+  "src/expressions.fsh",
   "src/fish.d.ts",
-  "src/flow.ts",
-  "src/fmt.ts",
-  "src/generics.ts",
-  "src/git.ts",
-  "src/ids.ts",
-  "src/incremental.ts",
-  "src/interfaces.ts",
-  "src/js.ts",
-  "src/js_native.ts",
-  "src/keys.ts",
-  "src/layout.ts",
-  "src/lexer.ts",
-  "src/locals.ts",
-  "src/lsp.ts",
-  "src/macros.ts",
-  "src/main.ts",
-  "src/manifest.ts",
-  "src/match.ts",
-  "src/mathlib.ts",
-  "src/migrate.ts",
-  "src/modules.ts",
-  "src/moves.ts",
-  "src/narrow.ts",
-  "src/native.ts",
-  "src/nodes.ts",
-  "src/operators.ts",
-  "src/overloads.ts",
-  "src/parseargs.ts",
-  "src/parser.ts",
-  "src/patterns.ts",
-  "src/printer.ts",
-  "src/program.ts",
-  "src/publish.ts",
-  "src/quote.ts",
-  "src/rank.ts",
-  "src/rebuild.ts",
-  "src/regex.ts",
-  "src/registry.ts",
-  "src/registry_index.ts",
-  "src/resolve.ts",
-  "src/runtime.ts",
-  "src/rust.ts",
-  "src/rustshim.ts",
-  "src/semver.ts",
-  "src/sizes.ts",
-  "src/split.ts",
-  "src/std.ts",
-  "src/stdcache.ts",
-  "src/suggest.ts",
-  "src/survey.ts",
-  "src/tar.ts",
-  "src/target.ts",
-  "src/tests.ts",
-  "src/typefns.ts",
-  "src/types.ts",
-  "src/typing.ts",
-  "src/typings.ts",
-  "src/unions.ts",
-  "src/unquote.ts",
-  "src/unsupported.ts",
-  "src/values.ts",
-  "src/walk.ts",
-  "src/warnings.ts",
-  "src/watch.ts",
+  "src/flow.fsh",
+  "src/fmt.fsh",
+  "src/generics.fsh",
+  "src/git.fsh",
+  "src/ids.fsh",
+  "src/incremental.fsh",
+  "src/interfaces.fsh",
+  "src/js.fsh",
+  "src/js_native.fsh",
+  "src/keys.fsh",
+  "src/layout.fsh",
+  "src/lexer.fsh",
+  "src/locals.fsh",
+  "src/lsp.fsh",
+  "src/macros.fsh",
+  "src/main.fsh",
+  "src/manifest.fsh",
+  "src/match.fsh",
+  "src/mathlib.fsh",
+  "src/migrate.fsh",
+  "src/modules.fsh",
+  "src/moves.fsh",
+  "src/narrow.fsh",
+  "src/native.fsh",
+  "src/nodes.fsh",
+  "src/operators.fsh",
+  "src/overloads.fsh",
+  "src/parseargs.fsh",
+  "src/parser.fsh",
+  "src/patterns.fsh",
+  "src/printer.fsh",
+  "src/program.fsh",
+  "src/publish.fsh",
+  "src/quote.fsh",
+  "src/rank.fsh",
+  "src/rebuild.fsh",
+  "src/regex.fsh",
+  "src/registry.fsh",
+  "src/registry_index.fsh",
+  "src/resolve.fsh",
+  "src/runtime.fsh",
+  "src/rust.fsh",
+  "src/rustshim.fsh",
+  "src/semver.fsh",
+  "src/sizes.fsh",
+  "src/split.fsh",
+  "src/std.fsh",
+  "src/stdcache.fsh",
+  "src/suggest.fsh",
+  "src/survey.fsh",
+  "src/tar.fsh",
+  "src/target.fsh",
+  "src/tests.fsh",
+  "src/typefns.fsh",
+  "src/types.fsh",
+  "src/typing.fsh",
+  "src/typings.fsh",
+  "src/unions.fsh",
+  "src/unquote.fsh",
+  "src/unsupported.fsh",
+  "src/values.fsh",
+  "src/walk.fsh",
+  "src/warnings.fsh",
+  "src/watch.fsh",
 ];
 
 // Each `.fsh` file under `dir`, relative to the repository's root as `rel`.
@@ -145,7 +145,7 @@ function srcFiles(): string[] {
   try {
     let out: string[] = [];
     const names = readdirSync(join(root(), "src"));
-    for (const f of names) if (f.endsWith(".ts")) out.push(`src/${f}`);
+    for (const f of names) if (f.endsWith(".fsh") || f.endsWith(".ts")) out.push(`src/${f}`);
     out.sort();
     return out;
   } catch (e) {
@@ -187,7 +187,7 @@ function programs(file: string, units: Mut<Units>): void {
 // depth. Each is left out until the documents are shared natively too.
 const SLOW: [string, string][] = [
   ["tests/programs/lock.fsh > lock_reentrant_deep", "seventeen nested callbacks never finish"],
-  ["src/codegen.ts", "takes about 9 of the 10 seconds a test has"],
+  ["src/codegen.fsh", "takes about 9 of the 10 seconds a test has"],
 ];
 
 function slow(name: string): boolean {
@@ -334,94 +334,94 @@ function likePrettier(file: string): void {
   assert(ours === adjusted, `${file} formats otherwise than Prettier with its known differences:\n--- expected\n${adjusted}\n--- got\n${ours}`);
 }
 
-test("src/analysis.ts formats as Prettier formats it", () => likePrettier("src/analysis.ts"));
-test("src/arenas.ts formats as Prettier formats it", () => likePrettier("src/arenas.ts"));
-test("src/arithmetic.ts formats as Prettier formats it", () => likePrettier("src/arithmetic.ts"));
-test("src/ast.ts formats as Prettier formats it", () => likePrettier("src/ast.ts"));
-test("src/astgen.ts formats as Prettier formats it", () => likePrettier("src/astgen.ts"));
-test("src/bundle.ts formats as Prettier formats it", () => likePrettier("src/bundle.ts"));
-test("src/casemap.ts formats as Prettier formats it", () => likePrettier("src/casemap.ts"));
-test("src/check.ts formats as Prettier formats it", () => likePrettier("src/check.ts"));
-test("src/classes.ts formats as Prettier formats it", () => likePrettier("src/classes.ts"));
-test("src/codes.ts formats as Prettier formats it", () => likePrettier("src/codes.ts"));
-test("src/comments.ts formats as Prettier formats it", () => likePrettier("src/comments.ts"));
-test("src/compilation.ts formats as Prettier formats it", () => likePrettier("src/compilation.ts"));
-test("src/comptime.ts formats as Prettier formats it", () => likePrettier("src/comptime.ts"));
-test("src/debuginfo.ts formats as Prettier formats it", () => likePrettier("src/debuginfo.ts"));
-test("src/declarations.ts formats as Prettier formats it", () => likePrettier("src/declarations.ts"));
-test("src/defaults.ts formats as Prettier formats it", () => likePrettier("src/defaults.ts"));
-test("src/dependencies.ts formats as Prettier formats it", () => likePrettier("src/dependencies.ts"));
-test("src/deps.ts formats as Prettier formats it", () => likePrettier("src/deps.ts"));
-test("src/diag.ts formats as Prettier formats it", () => likePrettier("src/diag.ts"));
-test("src/edits.ts formats as Prettier formats it", () => likePrettier("src/edits.ts"));
-test("src/doc.ts formats as Prettier formats it", () => likePrettier("src/doc.ts"));
-test("src/enums.ts formats as Prettier formats it", () => likePrettier("src/enums.ts"));
-test("src/expressions.ts formats as Prettier formats it", () => likePrettier("src/expressions.ts"));
+test("src/analysis.fsh formats as Prettier formats it", () => likePrettier("src/analysis.fsh"));
+test("src/arenas.fsh formats as Prettier formats it", () => likePrettier("src/arenas.fsh"));
+test("src/arithmetic.fsh formats as Prettier formats it", () => likePrettier("src/arithmetic.fsh"));
+test("src/ast.fsh formats as Prettier formats it", () => likePrettier("src/ast.fsh"));
+test("src/astgen.fsh formats as Prettier formats it", () => likePrettier("src/astgen.fsh"));
+test("src/bundle.fsh formats as Prettier formats it", () => likePrettier("src/bundle.fsh"));
+test("src/casemap.fsh formats as Prettier formats it", () => likePrettier("src/casemap.fsh"));
+test("src/check.fsh formats as Prettier formats it", () => likePrettier("src/check.fsh"));
+test("src/classes.fsh formats as Prettier formats it", () => likePrettier("src/classes.fsh"));
+test("src/codes.fsh formats as Prettier formats it", () => likePrettier("src/codes.fsh"));
+test("src/comments.fsh formats as Prettier formats it", () => likePrettier("src/comments.fsh"));
+test("src/compilation.fsh formats as Prettier formats it", () => likePrettier("src/compilation.fsh"));
+test("src/comptime.fsh formats as Prettier formats it", () => likePrettier("src/comptime.fsh"));
+test("src/debuginfo.fsh formats as Prettier formats it", () => likePrettier("src/debuginfo.fsh"));
+test("src/declarations.fsh formats as Prettier formats it", () => likePrettier("src/declarations.fsh"));
+test("src/defaults.fsh formats as Prettier formats it", () => likePrettier("src/defaults.fsh"));
+test("src/dependencies.fsh formats as Prettier formats it", () => likePrettier("src/dependencies.fsh"));
+test("src/deps.fsh formats as Prettier formats it", () => likePrettier("src/deps.fsh"));
+test("src/diag.fsh formats as Prettier formats it", () => likePrettier("src/diag.fsh"));
+test("src/edits.fsh formats as Prettier formats it", () => likePrettier("src/edits.fsh"));
+test("src/doc.fsh formats as Prettier formats it", () => likePrettier("src/doc.fsh"));
+test("src/enums.fsh formats as Prettier formats it", () => likePrettier("src/enums.fsh"));
+test("src/expressions.fsh formats as Prettier formats it", () => likePrettier("src/expressions.fsh"));
 test("src/fish.d.ts formats as Prettier formats it", () => likePrettier("src/fish.d.ts"));
-test("src/flow.ts formats as Prettier formats it", () => likePrettier("src/flow.ts"));
-test("src/fmt.ts formats as Prettier formats it", () => likePrettier("src/fmt.ts"));
-test("src/generics.ts formats as Prettier formats it", () => likePrettier("src/generics.ts"));
-test("src/git.ts formats as Prettier formats it", () => likePrettier("src/git.ts"));
-test("src/ids.ts formats as Prettier formats it", () => likePrettier("src/ids.ts"));
-test("src/incremental.ts formats as Prettier formats it", () => likePrettier("src/incremental.ts"));
-test("src/interfaces.ts formats as Prettier formats it", () => likePrettier("src/interfaces.ts"));
-test("src/js.ts formats as Prettier formats it", () => likePrettier("src/js.ts"));
-test("src/js_native.ts formats as Prettier formats it", () => likePrettier("src/js_native.ts"));
-test("src/keys.ts formats as Prettier formats it", () => likePrettier("src/keys.ts"));
-test("src/layout.ts formats as Prettier formats it", () => likePrettier("src/layout.ts"));
-test("src/lexer.ts formats as Prettier formats it", () => likePrettier("src/lexer.ts"));
-test("src/locals.ts formats as Prettier formats it", () => likePrettier("src/locals.ts"));
-test("src/lsp.ts formats as Prettier formats it", () => likePrettier("src/lsp.ts"));
-test("src/macros.ts formats as Prettier formats it", () => likePrettier("src/macros.ts"));
-test("src/main.ts formats as Prettier formats it", () => likePrettier("src/main.ts"));
-test("src/manifest.ts formats as Prettier formats it", () => likePrettier("src/manifest.ts"));
-test("src/match.ts formats as Prettier formats it", () => likePrettier("src/match.ts"));
-test("src/mathlib.ts formats as Prettier formats it", () => likePrettier("src/mathlib.ts"));
-test("src/migrate.ts formats as Prettier formats it", () => likePrettier("src/migrate.ts"));
-test("src/modules.ts formats as Prettier formats it", () => likePrettier("src/modules.ts"));
-test("src/moves.ts formats as Prettier formats it", () => likePrettier("src/moves.ts"));
-test("src/narrow.ts formats as Prettier formats it", () => likePrettier("src/narrow.ts"));
-test("src/native.ts formats as Prettier formats it", () => likePrettier("src/native.ts"));
-test("src/nodes.ts formats as Prettier formats it", () => likePrettier("src/nodes.ts"));
-test("src/operators.ts formats as Prettier formats it", () => likePrettier("src/operators.ts"));
-test("src/overloads.ts formats as Prettier formats it", () => likePrettier("src/overloads.ts"));
-test("src/parseargs.ts formats as Prettier formats it", () => likePrettier("src/parseargs.ts"));
-test("src/parser.ts formats as Prettier formats it", () => likePrettier("src/parser.ts"));
-test("src/patterns.ts formats as Prettier formats it", () => likePrettier("src/patterns.ts"));
-test("src/printer.ts formats as Prettier formats it", () => likePrettier("src/printer.ts"));
-test("src/program.ts formats as Prettier formats it", () => likePrettier("src/program.ts"));
-test("src/publish.ts formats as Prettier formats it", () => likePrettier("src/publish.ts"));
-test("src/quote.ts formats as Prettier formats it", () => likePrettier("src/quote.ts"));
-test("src/rank.ts formats as Prettier formats it", () => likePrettier("src/rank.ts"));
-test("src/rebuild.ts formats as Prettier formats it", () => likePrettier("src/rebuild.ts"));
-test("src/regex.ts formats as Prettier formats it", () => likePrettier("src/regex.ts"));
-test("src/registry.ts formats as Prettier formats it", () => likePrettier("src/registry.ts"));
-test("src/registry_index.ts formats as Prettier formats it", () => likePrettier("src/registry_index.ts"));
-test("src/resolve.ts formats as Prettier formats it", () => likePrettier("src/resolve.ts"));
-test("src/runtime.ts formats as Prettier formats it", () => likePrettier("src/runtime.ts"));
-test("src/rust.ts formats as Prettier formats it", () => likePrettier("src/rust.ts"));
-test("src/rustshim.ts formats as Prettier formats it", () => likePrettier("src/rustshim.ts"));
-test("src/semver.ts formats as Prettier formats it", () => likePrettier("src/semver.ts"));
-test("src/sizes.ts formats as Prettier formats it", () => likePrettier("src/sizes.ts"));
-test("src/split.ts formats as Prettier formats it", () => likePrettier("src/split.ts"));
-test("src/std.ts formats as Prettier formats it", () => likePrettier("src/std.ts"));
-test("src/stdcache.ts formats as Prettier formats it", () => likePrettier("src/stdcache.ts"));
-test("src/suggest.ts formats as Prettier formats it", () => likePrettier("src/suggest.ts"));
-test("src/survey.ts formats as Prettier formats it", () => likePrettier("src/survey.ts"));
-test("src/tar.ts formats as Prettier formats it", () => likePrettier("src/tar.ts"));
-test("src/target.ts formats as Prettier formats it", () => likePrettier("src/target.ts"));
-test("src/tests.ts formats as Prettier formats it", () => likePrettier("src/tests.ts"));
-test("src/typefns.ts formats as Prettier formats it", () => likePrettier("src/typefns.ts"));
-test("src/types.ts formats as Prettier formats it", () => likePrettier("src/types.ts"));
-test("src/typing.ts formats as Prettier formats it", () => likePrettier("src/typing.ts"));
-test("src/typings.ts formats as Prettier formats it", () => likePrettier("src/typings.ts"));
-test("src/unions.ts formats as Prettier formats it", () => likePrettier("src/unions.ts"));
-test("src/unquote.ts formats as Prettier formats it", () => likePrettier("src/unquote.ts"));
-test("src/unsupported.ts formats as Prettier formats it", () => likePrettier("src/unsupported.ts"));
-test("src/values.ts formats as Prettier formats it", () => likePrettier("src/values.ts"));
-test("src/walk.ts formats as Prettier formats it", () => likePrettier("src/walk.ts"));
-test("src/warnings.ts formats as Prettier formats it", () => likePrettier("src/warnings.ts"));
-test("src/watch.ts formats as Prettier formats it", () => likePrettier("src/watch.ts"));
+test("src/flow.fsh formats as Prettier formats it", () => likePrettier("src/flow.fsh"));
+test("src/fmt.fsh formats as Prettier formats it", () => likePrettier("src/fmt.fsh"));
+test("src/generics.fsh formats as Prettier formats it", () => likePrettier("src/generics.fsh"));
+test("src/git.fsh formats as Prettier formats it", () => likePrettier("src/git.fsh"));
+test("src/ids.fsh formats as Prettier formats it", () => likePrettier("src/ids.fsh"));
+test("src/incremental.fsh formats as Prettier formats it", () => likePrettier("src/incremental.fsh"));
+test("src/interfaces.fsh formats as Prettier formats it", () => likePrettier("src/interfaces.fsh"));
+test("src/js.fsh formats as Prettier formats it", () => likePrettier("src/js.fsh"));
+test("src/js_native.fsh formats as Prettier formats it", () => likePrettier("src/js_native.fsh"));
+test("src/keys.fsh formats as Prettier formats it", () => likePrettier("src/keys.fsh"));
+test("src/layout.fsh formats as Prettier formats it", () => likePrettier("src/layout.fsh"));
+test("src/lexer.fsh formats as Prettier formats it", () => likePrettier("src/lexer.fsh"));
+test("src/locals.fsh formats as Prettier formats it", () => likePrettier("src/locals.fsh"));
+test("src/lsp.fsh formats as Prettier formats it", () => likePrettier("src/lsp.fsh"));
+test("src/macros.fsh formats as Prettier formats it", () => likePrettier("src/macros.fsh"));
+test("src/main.fsh formats as Prettier formats it", () => likePrettier("src/main.fsh"));
+test("src/manifest.fsh formats as Prettier formats it", () => likePrettier("src/manifest.fsh"));
+test("src/match.fsh formats as Prettier formats it", () => likePrettier("src/match.fsh"));
+test("src/mathlib.fsh formats as Prettier formats it", () => likePrettier("src/mathlib.fsh"));
+test("src/migrate.fsh formats as Prettier formats it", () => likePrettier("src/migrate.fsh"));
+test("src/modules.fsh formats as Prettier formats it", () => likePrettier("src/modules.fsh"));
+test("src/moves.fsh formats as Prettier formats it", () => likePrettier("src/moves.fsh"));
+test("src/narrow.fsh formats as Prettier formats it", () => likePrettier("src/narrow.fsh"));
+test("src/native.fsh formats as Prettier formats it", () => likePrettier("src/native.fsh"));
+test("src/nodes.fsh formats as Prettier formats it", () => likePrettier("src/nodes.fsh"));
+test("src/operators.fsh formats as Prettier formats it", () => likePrettier("src/operators.fsh"));
+test("src/overloads.fsh formats as Prettier formats it", () => likePrettier("src/overloads.fsh"));
+test("src/parseargs.fsh formats as Prettier formats it", () => likePrettier("src/parseargs.fsh"));
+test("src/parser.fsh formats as Prettier formats it", () => likePrettier("src/parser.fsh"));
+test("src/patterns.fsh formats as Prettier formats it", () => likePrettier("src/patterns.fsh"));
+test("src/printer.fsh formats as Prettier formats it", () => likePrettier("src/printer.fsh"));
+test("src/program.fsh formats as Prettier formats it", () => likePrettier("src/program.fsh"));
+test("src/publish.fsh formats as Prettier formats it", () => likePrettier("src/publish.fsh"));
+test("src/quote.fsh formats as Prettier formats it", () => likePrettier("src/quote.fsh"));
+test("src/rank.fsh formats as Prettier formats it", () => likePrettier("src/rank.fsh"));
+test("src/rebuild.fsh formats as Prettier formats it", () => likePrettier("src/rebuild.fsh"));
+test("src/regex.fsh formats as Prettier formats it", () => likePrettier("src/regex.fsh"));
+test("src/registry.fsh formats as Prettier formats it", () => likePrettier("src/registry.fsh"));
+test("src/registry_index.fsh formats as Prettier formats it", () => likePrettier("src/registry_index.fsh"));
+test("src/resolve.fsh formats as Prettier formats it", () => likePrettier("src/resolve.fsh"));
+test("src/runtime.fsh formats as Prettier formats it", () => likePrettier("src/runtime.fsh"));
+test("src/rust.fsh formats as Prettier formats it", () => likePrettier("src/rust.fsh"));
+test("src/rustshim.fsh formats as Prettier formats it", () => likePrettier("src/rustshim.fsh"));
+test("src/semver.fsh formats as Prettier formats it", () => likePrettier("src/semver.fsh"));
+test("src/sizes.fsh formats as Prettier formats it", () => likePrettier("src/sizes.fsh"));
+test("src/split.fsh formats as Prettier formats it", () => likePrettier("src/split.fsh"));
+test("src/std.fsh formats as Prettier formats it", () => likePrettier("src/std.fsh"));
+test("src/stdcache.fsh formats as Prettier formats it", () => likePrettier("src/stdcache.fsh"));
+test("src/suggest.fsh formats as Prettier formats it", () => likePrettier("src/suggest.fsh"));
+test("src/survey.fsh formats as Prettier formats it", () => likePrettier("src/survey.fsh"));
+test("src/tar.fsh formats as Prettier formats it", () => likePrettier("src/tar.fsh"));
+test("src/target.fsh formats as Prettier formats it", () => likePrettier("src/target.fsh"));
+test("src/tests.fsh formats as Prettier formats it", () => likePrettier("src/tests.fsh"));
+test("src/typefns.fsh formats as Prettier formats it", () => likePrettier("src/typefns.fsh"));
+test("src/types.fsh formats as Prettier formats it", () => likePrettier("src/types.fsh"));
+test("src/typing.fsh formats as Prettier formats it", () => likePrettier("src/typing.fsh"));
+test("src/typings.fsh formats as Prettier formats it", () => likePrettier("src/typings.fsh"));
+test("src/unions.fsh formats as Prettier formats it", () => likePrettier("src/unions.fsh"));
+test("src/unquote.fsh formats as Prettier formats it", () => likePrettier("src/unquote.fsh"));
+test("src/unsupported.fsh formats as Prettier formats it", () => likePrettier("src/unsupported.fsh"));
+test("src/values.fsh formats as Prettier formats it", () => likePrettier("src/values.fsh"));
+test("src/walk.fsh formats as Prettier formats it", () => likePrettier("src/walk.fsh"));
+test("src/warnings.fsh formats as Prettier formats it", () => likePrettier("src/warnings.fsh"));
+test("src/watch.fsh formats as Prettier formats it", () => likePrettier("src/watch.fsh"));
 
 // Rows of the Fish oracle, tests/unit/format.fsh: lines opening a row at four spaces, and the
 // lines inside its `differ([` tables.

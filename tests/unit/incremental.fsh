@@ -3,11 +3,11 @@
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type Kept } from "../compiler/incremental.fsh";
-import { CompileError } from "../compiler/diag.fsh";
-import { builtKept, cleanDifference, compiledKept } from "../compiler/main.fsh";
-import { cachedSession } from "../compiler/stdcache.fsh";
-import { hostTarget } from "../compiler/target.fsh";
+import { type Kept } from "../../src/incremental.fsh";
+import { CompileError } from "../../src/diag.fsh";
+import { builtKept, cleanDifference, compiledKept } from "../../src/main.fsh";
+import { cachedSession } from "../../src/stdcache.fsh";
+import { hostTarget } from "../../src/target.fsh";
 import { removed, scratch, text } from "./support.fsh";
 
 function write(path: string, contents: string): void {

@@ -1,10 +1,10 @@
 // Ports tests/std.test.ts: the classes and functions std gives a program, by name. A program's own
 // name for one of std's leaves std's under a name no program can write, or leaves out the library
 // it would clash with.
-import { newCompilation } from "../compiler/compilation.fsh";
-import { parse } from "../compiler/parser.fsh";
-import { cachedSession } from "../compiler/stdcache.fsh";
-import { stdFor } from "../compiler/std.fsh";
+import { newCompilation } from "../../src/compilation.fsh";
+import { parse } from "../../src/parser.fsh";
+import { cachedSession } from "../../src/stdcache.fsh";
+import { stdFor } from "../../src/std.fsh";
 
 function given(src: string): string[] {
   try {

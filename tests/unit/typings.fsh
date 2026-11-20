@@ -4,7 +4,7 @@
 // since Fish's JSON.stringify sorts an object's keys and `exports` conditions keep their order.
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
-import { exportsOf, findTypings } from "../compiler/typings.fsh";
+import { exportsOf, findTypings } from "../../src/typings.fsh";
 import { fishc, removed, same, scratch } from "./support.fsh";
 
 // A project directory holding these files, by its real path, as found files are given by theirs.

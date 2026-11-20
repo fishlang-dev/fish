@@ -10,9 +10,9 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { argv } from "node:process";
-import { readManifest } from "../compiler/manifest.fsh";
-import { DEFAULT_REGISTRY, openIndex, registryUrl, resolveVersions, Index, type Request } from "../compiler/registry_index.fsh";
-import { formatVersion } from "../compiler/semver.fsh";
+import { readManifest } from "../../src/manifest.fsh";
+import { DEFAULT_REGISTRY, openIndex, registryUrl, resolveVersions, Index, type Request } from "../../src/registry_index.fsh";
+import { formatVersion } from "../../src/semver.fsh";
 import { fishcPath, read, removed, same, scratch, text } from "./support.fsh";
 
 // The directory the parent test made, in the child `again` starts, else "".

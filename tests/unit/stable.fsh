@@ -4,11 +4,11 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bodyOf } from "../compiler/arenas.fsh";
-import { compiledOf } from "../compiler/codegen.fsh";
-import { analyze, compile } from "../compiler/main.fsh";
-import { STD_BASE } from "../compiler/std.fsh";
-import { cachedSession } from "../compiler/stdcache.fsh";
+import { bodyOf } from "../../src/arenas.fsh";
+import { compiledOf } from "../../src/codegen.fsh";
+import { analyze, compile } from "../../src/main.fsh";
+import { STD_BASE } from "../../src/std.fsh";
+import { cachedSession } from "../../src/stdcache.fsh";
 
 function base(): string {
   return `class Point {

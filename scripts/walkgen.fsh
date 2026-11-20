@@ -3,7 +3,7 @@
 //   fishc run scripts/walkgen.fsh
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type CompileError } from "../tests/compiler/diag.fsh";
+import { type CompileError } from "../src/diag.fsh";
 import { parserSource } from "./gen/dumpgen.fsh";
 import { walkSources } from "./gen/walkgen.fsh";
 

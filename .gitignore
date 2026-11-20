@@ -8,9 +8,6 @@ religion/
 AGENTS.md
 CLAUDE.md
 
-# The compiler mirrored as Fish for tests/unit, written by scripts/mirror.fsh
-tests/compiler/
-tests/vendor
 
 # fishc as scripts/build.fsh builds it
 build/

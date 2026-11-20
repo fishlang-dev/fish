@@ -4,12 +4,12 @@
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { CompileError, formatError } from "../compiler/diag.fsh";
-import { JS_NATIVE } from "../compiler/js_native.fsh";
-import { buildAsync, callsEngine, compile, engineDir, engineSources } from "../compiler/main.fsh";
-import { mathObjects, type BuildSession } from "../compiler/mathlib.fsh";
-import { NATIVE } from "../compiler/native.fsh";
-import { cachedSession } from "../compiler/stdcache.fsh";
+import { CompileError, formatError } from "../../src/diag.fsh";
+import { JS_NATIVE } from "../../src/js_native.fsh";
+import { buildAsync, callsEngine, compile, engineDir, engineSources } from "../../src/main.fsh";
+import { mathObjects, type BuildSession } from "../../src/mathlib.fsh";
+import { NATIVE } from "../../src/native.fsh";
+import { cachedSession } from "../../src/stdcache.fsh";
 import { removed, same, scratch, text } from "./support.fsh";
 
 // A session whose programs may import the compiler's own test hook.

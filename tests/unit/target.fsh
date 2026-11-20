@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { copyTarget, dockerfile, dockerfilePath, HOST_TARGET, hostTarget, hostTriple, resolveTarget, runsOnMusl, staticTarget, type Target } from "../compiler/target.fsh";
+import { copyTarget, dockerfile, dockerfilePath, HOST_TARGET, hostTarget, hostTriple, resolveTarget, runsOnMusl, staticTarget, type Target } from "../../src/target.fsh";
 import { fishcPath, removed, same, scratch, text } from "./support.fsh";
 
 const mac = "aarch64-apple-darwin";

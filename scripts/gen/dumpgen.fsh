@@ -4,8 +4,8 @@
 // print the same trees. `tests/selfhost_parser.test.ts` fails when the file is stale.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type CompileError } from "../../tests/compiler/diag.fsh";
-import { parse, type Expr, type Stmt, type TypeNode } from "../../tests/compiler/parser.fsh";
+import { type CompileError } from "../../src/diag.fsh";
+import { parse, type Expr, type Stmt, type TypeNode } from "../../src/parser.fsh";
 
 // A type as the generators read it: the parser's `TypeNode` with only what they look at, so it
 // can be built, copied and compared freely. A literal keeps its value as JSON, and its text when

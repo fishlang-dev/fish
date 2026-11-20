@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { argv } from "node:process";
-import { rustSymbol, trusted } from "../compiler/rust.fsh";
+import { rustSymbol, trusted } from "../../src/rust.fsh";
 import { fishcPath, ran, removed, root as repo, same, scratch, text, type Ran } from "./support.fsh";
 
 function fixture(): string {

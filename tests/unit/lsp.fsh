@@ -8,13 +8,13 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { compiledOf } from "../compiler/codegen.fsh";
-import { newCompilation } from "../compiler/compilation.fsh";
-import { CompileError } from "../compiler/diag.fsh";
-import { frames } from "../compiler/lsp.fsh";
-import { analyze } from "../compiler/main.fsh";
-import { load } from "../compiler/modules.fsh";
-import { cachedSession } from "../compiler/stdcache.fsh";
+import { compiledOf } from "../../src/codegen.fsh";
+import { newCompilation } from "../../src/compilation.fsh";
+import { CompileError } from "../../src/diag.fsh";
+import { frames } from "../../src/lsp.fsh";
+import { analyze } from "../../src/main.fsh";
+import { load } from "../../src/modules.fsh";
+import { cachedSession } from "../../src/stdcache.fsh";
 import { fishcPath, removed, same, scratch, text } from "./support.fsh";
 
 // A file in the test's directory holding `src`, as an editor's file would be on disk.

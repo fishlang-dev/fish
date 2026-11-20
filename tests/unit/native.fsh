@@ -3,8 +3,8 @@
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { CASEMAP, CASEMAP_UNICODE } from "../compiler/casemap.fsh";
-import { NATIVE } from "../compiler/native.fsh";
+import { CASEMAP, CASEMAP_UNICODE } from "../../src/casemap.fsh";
+import { NATIVE } from "../../src/native.fsh";
 import { removed, same, scratch, text } from "./support.fsh";
 
 type Ran = { stdout: string; stderr: string };
@@ -67,7 +67,7 @@ test("the halves of a surrogate pair join into one character", () => {
   same(got.stderr, "", "stderr");
 });
 
-// A case table of src/casemap.ts, by its C name: each row's first code point and what it maps to.
+// A case table of src/casemap.fsh, by its C name: each row's first code point and what it maps to.
 function table(name: string): Map<i64, i64[]> {
   let rows = new Map<i64, i64[]>();
   const head = `${name}[][`;

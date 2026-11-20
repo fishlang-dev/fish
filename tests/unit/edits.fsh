@@ -1,5 +1,5 @@
 // What an edit to one file changed, as `fishc watch` decides whether rechecking bodies is enough.
-import { classified, type Edit } from "../compiler/edits.fsh";
+import { classified, type Edit } from "../../src/edits.fsh";
 
 const FILE = `import { x } from "./x.fsh";
 

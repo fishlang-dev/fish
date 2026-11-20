@@ -3,8 +3,8 @@
 // walker, as the Bun test does. Where the Bun test compares nodes by identity, a node is told
 // apart by what it is instead, and its tables are kept as indexes into one list of items.
 import { join } from "node:path";
-import { forEachChild, walk, walkWhile, type AnyNode } from "../compiler/nodes.fsh";
-import { parse, type ClassMember, type Expr, type Param, type PropertyName, type Pattern, type Stmt, type TypeNode } from "../compiler/parser.fsh";
+import { forEachChild, walk, walkWhile, type AnyNode } from "../../src/nodes.fsh";
+import { parse, type ClassMember, type Expr, type Param, type PropertyName, type Pattern, type Stmt, type TypeNode } from "../../src/parser.fsh";
 import { read, root } from "./support.fsh";
 
 // The checker's files, read as Fish reads them: with the compiler's own parser.
@@ -15,7 +15,7 @@ function checker(): string[] {
 type Parsed = { name: string; text: string; program: Stmt[] };
 
 function source(name: string): string {
-  return read(join(root(), "src", `${name}.ts`));
+  return read(join(root(), "src", `${name}.fsh`));
 }
 
 function parsedFile(name: string): Parsed {
@@ -23,7 +23,7 @@ function parsedFile(name: string): Parsed {
   try {
     return { name, text, program: parse(text, { last: 0 }) };
   } catch (e) {
-    assert(false, `${name}.ts doesn't parse: ${e.message}`);
+    assert(false, `${name}.fsh doesn't parse: ${e.message}`);
     return { name, text, program: [] };
   }
 }
@@ -80,7 +80,7 @@ test("no top-level function in the checker returns an object of its own inner fu
           if (p.kind === "shorthand" && inner.has(p.name)) handed = true;
           if (p.kind === "property" && p.value.kind === "ident" && inner.has(p.value.name)) handed = true;
         }
-        if (handed) offenders.push(`${file.name}.ts:${lineOf(file.text, s.start)}: ${fname}`);
+        if (handed) offenders.push(`${file.name}.fsh:${lineOf(file.text, s.start)}: ${fname}`);
         return true;
       });
     }
@@ -137,7 +137,7 @@ function destructured(pattern: Ref<Pattern>, of: string | undefined, at: usize, 
   if (own === undefined) return;
   let taken: string[] = [];
   for (const p of pattern.props) if (typeof p.key === "string" && own.has(p.key)) taken.push(p.key);
-  if (taken.length > 0) offenders.push(`${file.name}.ts:${lineOf(file.text, at)}: ${taken.join(", ")} of ${of}`);
+  if (taken.length > 0) offenders.push(`${file.name}.fsh:${lineOf(file.text, at)}: ${taken.join(", ")} of ${of}`);
 }
 
 // Destructuring a method takes it off its object, which Fish can't call later, so a module's
@@ -245,7 +245,7 @@ function heldFields(name: string | undefined, members: Ref<ClassMember[]>, hoste
     }
     if (m.init !== undefined && m.init.kind === "new" && m.init.callee.kind === "ident") held.push(m.init.callee.name);
     const field = typeof m.name === "string" ? m.name : "[object Object]";
-    for (const h of held) if (hosted.has(h)) offenders.push(`${file.name}.ts:${lineOf(file.text, m.start)}: ${name ?? "undefined"}.${field} holds ${h}`);
+    for (const h of held) if (hosted.has(h)) offenders.push(`${file.name}.fsh:${lineOf(file.text, m.start)}: ${name ?? "undefined"}.${field} holds ${h}`);
   }
 }
 
@@ -269,7 +269,7 @@ test("no class in the checker holds, as a field, a module that calls back into i
 function stateful(name: string | undefined, members: Ref<ClassMember[]>, hosted: Ref<Set<string>>, file: Ref<Parsed>, offenders: Mut<string[]>): void {
   if (name === undefined || !hosted.has(name)) return;
   for (const m of members) {
-    if (m.kind === "field" && m.init !== undefined) offenders.push(`${file.name}.ts:${lineOf(file.text, m.start)}: ${name}.${typeof m.name === "string" ? m.name : "[object Object]"}`);
+    if (m.kind === "field" && m.init !== undefined) offenders.push(`${file.name}.fsh:${lineOf(file.text, m.start)}: ${name}.${typeof m.name === "string" ? m.name : "[object Object]"}`);
   }
 }
 
@@ -308,8 +308,8 @@ test("the checker's files reach only the modules meant to be checked with them",
     if (reached.has(name)) continue;
     reached.add(name);
     const text = source(name);
-    // `from "./m.ts"`, a side-effect `import "./m.ts"`, and `import("./m.ts")`, dynamic or in a type.
-    for (const m of text.matchAll(/(?:\bfrom|\bimport)\s*\(?\s*["']\.\/([\w.-]+)\.ts["']/g)) pending.push(m[1]);
+    // `from "./m.fsh"`, a side-effect `import "./m.fsh"`, and `import("./m.fsh")`, dynamic or in a type.
+    for (const m of text.matchAll(/(?:\bfrom|\bimport)\s*\(?\s*["']\.\/([\w.-]+)\.fsh["']/g)) pending.push(m[1]);
   }
   let got: string[] = [];
   for (const r of reached) got.push(r);
@@ -423,8 +423,8 @@ function classItems(cx: Mut<Throws>, file: string, name: string | undefined, mem
 
 function collect(cx: Mut<Throws>, file: string, prog: Ref<Stmt[]>): void {
   for (const raw of prog) {
-    if (raw.kind === "import" && raw.module.startsWith("./") && raw.module.endsWith(".ts") && raw.named !== undefined) {
-      const fromFile = raw.module.slice(2, -3);
+    if (raw.kind === "import" && raw.module.startsWith("./") && raw.module.endsWith(".fsh") && raw.named !== undefined) {
+      const fromFile = raw.module.slice(2, -4);
       for (const spec of raw.named!) cx.imports.set(`${file}|${spec.alias ?? spec.name}`, [fromFile, spec.name]);
     }
     const s = declared(raw);
@@ -661,7 +661,7 @@ function missingFrom(cx: Ref<Throws>, i: usize, found: Ref<Set<string>>, offende
   for (const err of found) if (!it.throwsSet.has(err)) missing.push(err);
   if (missing.length === 0) return;
   const label = it.className !== undefined ? `${it.className!}.${it.name}` : it.name;
-  offenders.push(`${it.file}.ts:${lineOf(cx.texts.get(it.file) ?? "", it.start)}: ${label} missing @throws {${missing.join(" | ")}}`);
+  offenders.push(`${it.file}.fsh:${lineOf(cx.texts.get(it.file) ?? "", it.start)}: ${label} missing @throws {${missing.join(" | ")}}`);
 }
 
 // Analyzes the body of each item `prog` holds, found where `collect` found it.
@@ -756,7 +756,7 @@ test("every fallible function, method, constructor and interface method in the c
       }
       if (missing.length > 0) {
         const it: Ref<Item> = cx.items[im];
-        offenders.push(`${it.file}.ts:${lineOf(cx.texts.get(it.file) ?? "", it.start)}: ${it.className ?? ""}.${it.name} missing @throws {${missing.join(" | ")}}`);
+        offenders.push(`${it.file}.fsh:${lineOf(cx.texts.get(it.file) ?? "", it.start)}: ${it.className ?? ""}.${it.name} missing @throws {${missing.join(" | ")}}`);
       }
     }
   }
@@ -764,7 +764,7 @@ test("every fallible function, method, constructor and interface method in the c
     const it: Ref<Item> = cx.items[im];
     if (it.kind !== "interfaceMethod" || it.className !== "Builder" || it.name !== "name") continue;
     if (!it.throwsSet.has("CompileError")) {
-      offenders.push(`${it.file}.ts:${lineOf(cx.texts.get(it.file) ?? "", it.start)}: Builder.name missing @throws {CompileError}`);
+      offenders.push(`${it.file}.fsh:${lineOf(cx.texts.get(it.file) ?? "", it.start)}: Builder.name missing @throws {CompileError}`);
       cx.items[im].throwsSet.add("CompileError");
     }
   }

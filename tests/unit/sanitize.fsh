@@ -7,7 +7,7 @@ import type { Subprocess } from "bun";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { hostTarget, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "../compiler/target.fsh";
+import { hostTarget, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "../../src/target.fsh";
 import { fishc, removed, runtimeArgs, same, scratch, text } from "./support.fsh";
 
 function write(path: string, contents: string): void {

@@ -6,7 +6,7 @@ import type { Subprocess } from "bun";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { changed, directories, snapshot, stop, watchedFiles } from "../compiler/watch.fsh";
+import { changed, directories, snapshot, stop, watchedFiles } from "../../src/watch.fsh";
 import { fishcPath, removed, same, scratch, text } from "./support.fsh";
 
 function write(path: string, contents: string): void {

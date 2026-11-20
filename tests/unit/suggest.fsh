@@ -2,10 +2,10 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CompileError } from "../compiler/diag.fsh";
-import { analyze } from "../compiler/main.fsh";
-import { cachedSession } from "../compiler/stdcache.fsh";
-import { didYouMean, suggestion } from "../compiler/suggest.fsh";
+import { CompileError } from "../../src/diag.fsh";
+import { analyze } from "../../src/main.fsh";
+import { cachedSession } from "../../src/stdcache.fsh";
+import { didYouMean, suggestion } from "../../src/suggest.fsh";
 import { same } from "./support.fsh";
 
 function suggests(name: string, candidates: string[], want: string | undefined): void {

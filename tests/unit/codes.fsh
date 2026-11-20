@@ -2,12 +2,12 @@
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CODES, explain } from "../compiler/codes.fsh";
-import { newSession } from "../compiler/compilation.fsh";
-import { CompileError } from "../compiler/diag.fsh";
-import { analyze } from "../compiler/main.fsh";
-import { walk } from "../compiler/nodes.fsh";
-import { parse, type Expr, type Stmt } from "../compiler/parser.fsh";
+import { CODES, explain } from "../../src/codes.fsh";
+import { newSession } from "../../src/compilation.fsh";
+import { CompileError } from "../../src/diag.fsh";
+import { analyze } from "../../src/main.fsh";
+import { walk } from "../../src/nodes.fsh";
+import { parse, type Expr, type Stmt } from "../../src/parser.fsh";
 import { read, root, same } from "./support.fsh";
 
 type Site = { site: string; codes: string[] | undefined };
@@ -30,7 +30,7 @@ function codesGiven(): Site[] {
   let found: Site[] = [];
   let files: string[] = [];
   try {
-    files = readdirSync(join(root(), "src")).filter((f) => f.endsWith(".ts"));
+    files = readdirSync(join(root(), "src")).filter((f) => f.endsWith(".fsh"));
   } catch (e) {
     assert(false, e.message);
   }

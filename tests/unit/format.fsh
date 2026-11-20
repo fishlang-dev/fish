@@ -1,9 +1,9 @@
 // Ports tests/format.test.ts. Prettier's answers come from a Bun child process, each table's
 // snippets at once; each table reports every snippet that went wrong with what was expected and
 // what came. Trees are compared through programShape, which leaves out spans and ids.
-import { CompileError } from "../compiler/diag.fsh";
-import { parse, parseWithComments } from "../compiler/parser.fsh";
-import { assertSameProgram, format, programShape } from "../compiler/printer.fsh";
+import { CompileError } from "../../src/diag.fsh";
+import { parse, parseWithComments } from "../../src/parser.fsh";
+import { assertSameProgram, format, programShape } from "../../src/printer.fsh";
 import { prettier } from "./support.fsh";
 
 function check(failed: Ref<string[]>): void {

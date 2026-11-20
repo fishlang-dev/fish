@@ -1,14 +1,14 @@
 // Ports tests/instances.test.ts. Where the Bun test makes instances and bodies with only the fields
 // a function reads, these are made whole, with empty tables.
 import { join } from "node:path";
-import { Arenas, type BodyId, type InstanceId } from "../compiler/arenas.fsh";
-import { emptyTables, unreached } from "../compiler/check.fsh";
-import { shortened, symbolIn, symbolNames } from "../compiler/codegen.fsh";
-import { CompileError } from "../compiler/diag.fsh";
-import { compile } from "../compiler/main.fsh";
-import type { Expr } from "../compiler/parser.fsh";
-import { cachedSession } from "../compiler/stdcache.fsh";
-import { Typing, TypeMap, digest, type ClassType, type Type } from "../compiler/typing.fsh";
+import { Arenas, type BodyId, type InstanceId } from "../../src/arenas.fsh";
+import { emptyTables, unreached } from "../../src/check.fsh";
+import { shortened, symbolIn, symbolNames } from "../../src/codegen.fsh";
+import { CompileError } from "../../src/diag.fsh";
+import { compile } from "../../src/main.fsh";
+import type { Expr } from "../../src/parser.fsh";
+import { cachedSession } from "../../src/stdcache.fsh";
+import { Typing, TypeMap, digest, type ClassType, type Type } from "../../src/typing.fsh";
 import { read, root } from "./support.fsh";
 
 function program(name: string): string {

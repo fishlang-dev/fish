@@ -8,8 +8,8 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { NATIVE, tlsStub } from "../compiler/native.fsh";
-import { findOpenSsl, type OpenSsl, type Target } from "../compiler/target.fsh";
+import { NATIVE, tlsStub } from "../../src/native.fsh";
+import { findOpenSsl, type OpenSsl, type Target } from "../../src/target.fsh";
 import { built, fishc, freePort, removed, root, same, scratch, text } from "./support.fsh";
 
 function fixtures(): string {

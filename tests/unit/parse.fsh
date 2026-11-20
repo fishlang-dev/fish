@@ -2,10 +2,10 @@
 // shown is passed along rather than kept in a module-level variable.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { CompileError } from "../compiler/diag.fsh";
-import { walk } from "../compiler/nodes.fsh";
-import { programShape } from "../compiler/printer.fsh";
-import { parse, type ClassMember, type ClassNode, type Expr, type Param, type Pattern, type PropertyName, type Declarator, type Specifier, type Stmt, type TypeMember, type TypeNode, type TypeParam } from "../compiler/parser.fsh";
+import { CompileError } from "../../src/diag.fsh";
+import { walk } from "../../src/nodes.fsh";
+import { programShape } from "../../src/printer.fsh";
+import { parse, type ClassMember, type ClassNode, type Expr, type Param, type Pattern, type PropertyName, type Declarator, type Specifier, type Stmt, type TypeMember, type TypeNode, type TypeParam } from "../../src/parser.fsh";
 import { read, root } from "./support.fsh";
 
 function list(xs: Ref<TypeNode[]>, src: string, sep: string): string {
@@ -903,7 +903,7 @@ const MODULES: [string, string][] = [
 
 test("import and export shapes", () => table(MODULES, statementsShape, "expected ','"));
 
-// The design doc's bootstrap path: the compiler's own TypeScript is already valid Fish.
+// The compiler's own source, and the tests beside it, parse as Fish.
 test("src and tests parse", () => {
   let failed: string[] = [];
   let parsed = 0;
@@ -911,7 +911,7 @@ test("src and tests parse", () => {
     const path = join(root(), dir);
     let files: string[] = [];
     try {
-      files = readdirSync(path).filter((f) => f.endsWith(".ts"));
+      files = readdirSync(path).filter((f) => f.endsWith(".fsh") || f.endsWith(".ts"));
     } catch (e) {
       assert(false, e.message);
     }

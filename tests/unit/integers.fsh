@@ -2,8 +2,8 @@
 // because Fish reads `number` as `f64`, which can't index an array or mix with a length.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { parse, type Stmt } from "../compiler/parser.fsh";
-import { walk } from "../compiler/nodes.fsh";
+import { parse, type Stmt } from "../../src/parser.fsh";
+import { walk } from "../../src/nodes.fsh";
 import { read, root } from "./support.fsh";
 
 // Type nodes naming `number` in a file of src.
@@ -24,7 +24,7 @@ function numberTypes(file: string): i64 {
 test("the compiler's source writes Fish's number types, not number", () => {
   let files: string[] = [];
   try {
-    files = readdirSync(join(root(), "src")).filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"));
+    files = readdirSync(join(root(), "src")).filter((f) => f.endsWith(".fsh"));
   } catch (e) {
     assert(false, e.message);
   }

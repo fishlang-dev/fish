@@ -3,9 +3,9 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CompileError, formatError } from "../compiler/diag.fsh";
-import { build } from "../compiler/main.fsh";
-import { cachedSession } from "../compiler/stdcache.fsh";
+import { CompileError, formatError } from "../../src/diag.fsh";
+import { build } from "../../src/main.fsh";
+import { cachedSession } from "../../src/stdcache.fsh";
 import { same } from "./support.fsh";
 
 // A seeded generator, so a failure names values that reproduce.

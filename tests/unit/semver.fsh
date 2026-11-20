@@ -1,6 +1,6 @@
 // Ports tests/semver.test.ts: versions and npm's ranges, in process through the compiler's semver
 // module, which imports nothing else.
-import { compare, formatVersion, maxSatisfying, parseRange, parseVersion, satisfies, type Range, type Version } from "../compiler/semver.fsh";
+import { compare, formatVersion, maxSatisfying, parseRange, parseVersion, satisfies, type Range, type Version } from "../../src/semver.fsh";
 
 function v(text: string): Version {
   const got = parseVersion(text);

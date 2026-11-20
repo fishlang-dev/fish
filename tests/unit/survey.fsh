@@ -4,9 +4,9 @@
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { dependencies, type Dependencies } from "../compiler/deps.fsh";
-import { formatRanking, rank, readPlan, stepsOf, type Curve, type Plan, type Ranking, type Step, type Unit } from "../compiler/rank.fsh";
-import { compare, featureOf, featuresOf, formatComparison, formatReport, grade, readReport, scanFiles, survey, type Builtin, type Comparison, type Report, type RuleCount } from "../compiler/survey.fsh";
+import { dependencies, type Dependencies } from "../../src/deps.fsh";
+import { formatRanking, rank, readPlan, stepsOf, type Curve, type Plan, type Ranking, type Step, type Unit } from "../../src/rank.fsh";
+import { compare, featureOf, featuresOf, formatComparison, formatReport, grade, readReport, scanFiles, survey, type Builtin, type Comparison, type Report, type RuleCount } from "../../src/survey.fsh";
 import { fishc, root, same, type Ran } from "./support.fsh";
 
 function sample(): string {

@@ -2,7 +2,7 @@
 // back into the syntax tree it stands for, from the parser's own AST types in `src/parser.fsh`:
 // the `Ast` types mirror them field for field, so each record reads as a node of its kind.
 // `tests/walk.test.ts` fails when the file is stale.
-import { type CompileError } from "../../tests/compiler/diag.fsh";
+import { type CompileError } from "../../src/diag.fsh";
 import { append, hasWord, indented, nodeTypes, ref, type NodeTypes, type Shape, type Ty } from "./dumpgen.fsh";
 
 // The fields the compiler sets on nodes for its own passes, which no `Ast` type has.
@@ -12,8 +12,8 @@ const HEADER = `// Generated from the parser's AST types by \`fishc run scripts/
 // A value a macro made while compiling, of an \`Ast\` type, as the syntax tree it stands for: each
 // record a node of its kind, its fields read by name, an absent part \`undefined\`, and a node made
 // from one given a fresh id once its parts have theirs.
-import type { Value } from "./comptime.ts";
-import { nextId, type Ids } from "./ids.ts";
+import type { Value } from "./comptime.fsh";
+import { nextId, type Ids } from "./ids.fsh";
 `;
 
 const HELPERS = `

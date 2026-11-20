@@ -2,11 +2,11 @@
 // of names, a literal matching any name captures it and the name is looked up in the list.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { NodeMap, NodeSet, nodeIdOf, renumberExpr, Rewrites, walk, type AnyNode } from "../compiler/nodes.fsh";
-import { parse, type Expr } from "../compiler/parser.fsh";
-import { cloneExpr } from "../compiler/rebuild.fsh";
-import { Typing, TypeMap, TypeSet, type Type } from "../compiler/typing.fsh";
-import { nodeSpanKey } from "../compiler/walk.fsh";
+import { NodeMap, NodeSet, nodeIdOf, renumberExpr, Rewrites, walk, type AnyNode } from "../../src/nodes.fsh";
+import { parse, type Expr } from "../../src/parser.fsh";
+import { cloneExpr } from "../../src/rebuild.fsh";
+import { Typing, TypeMap, TypeSet, type Type } from "../../src/typing.fsh";
+import { nodeSpanKey } from "../../src/walk.fsh";
 import { read, root } from "./support.fsh";
 
 function srcDir(): string {
@@ -16,7 +16,7 @@ function srcDir(): string {
 // src's TypeScript files.
 function sources(): string[] {
   try {
-    return readdirSync(srcDir()).filter((f) => f.endsWith(".ts"));
+    return readdirSync(srcDir()).filter((f) => f.endsWith(".fsh"));
   } catch (e) {
     assert(false, e.message);
     return [];
@@ -135,12 +135,12 @@ function aliasesIn(text: string, names: Ref<string[]>): string[] {
   return found;
 }
 
-// The AST types a table may not be keyed by: every type in src/parser.ts carrying `Id`, and any
+// The AST types a table may not be keyed by: every type in src/parser.fsh carrying `Id`, and any
 // alias a file gives one, as `type Arrow = Extract<Expr, ...>`, `type Decl = Stmt & ...` or
 // `Func as Declared`. Tables keyed by `object` or `unknown` are left out: they key reflective
 // walks over any value, arrays and non-node objects included.
 test("no Map, WeakMap, Set or WeakSet in src is keyed by an AST node", () => {
-  const parser = read(join(srcDir(), "parser.ts"));
+  const parser = read(join(srcDir(), "parser.fsh"));
   let nodes: string[] = [];
   for (const m of parser.matchAll(/^export type (\w+) = Span & Id\b/gm)) nodes.push(m[1]);
   assert(nodes.includes("Expr"), `no Expr among ${nodes.join(", ")}`);
@@ -170,10 +170,10 @@ test("a type table keys primitives and types by id, in the order they were added
 });
 
 // The types a table may not be keyed by: `Type`, `Bound`, each kind's id and record in
-// src/typing.ts, and any alias a file gives one, as `type Shape = ObjectType | UnionType`. A type
+// src/typing.fsh, and any alias a file gives one, as `type Shape = ObjectType | UnionType`. A type
 // keys by its id through TypeMap and TypeSet, which give a primitive its own integer.
 test("no Map, WeakMap, Set or WeakSet in src is keyed by a type", () => {
-  const typing = read(join(srcDir(), "typing.ts"));
+  const typing = read(join(srcDir(), "typing.fsh"));
   let kinds: string[] = [];
   for (const m of typing.matchAll(/^export type (\w+)Type = Brand<usize, "\w+">;/gm)) {
     kinds.push(`${m[1]}Type`);
@@ -212,7 +212,7 @@ test("no Map, WeakMap, Set or WeakSet in src is keyed by an instance, body, loca
 // The checker's records and its tables, by where each is declared. They name one another by id,
 // read back through the compilation's arenas, which alone hold the records themselves.
 function records(): [string, string][] {
-  return [["compilation.ts", "Tables"], ["check.ts", "Checked"], ["check.ts", "Instance"], ["check.ts", "Local"], ["classes.ts", "Body"], ["classes.ts", "ClassInfo"], ["values.ts", "DynTable"]];
+  return [["compilation.fsh", "Tables"], ["check.fsh", "Checked"], ["check.fsh", "Instance"], ["check.fsh", "Local"], ["classes.fsh", "Body"], ["classes.fsh", "ClassInfo"], ["values.fsh", "DynTable"]];
 }
 
 test("no instance, body, local or class holds another, nor does a checker table, but through its id", () => {
@@ -243,7 +243,7 @@ function checker(): string[] {
 test("no Map or Set in the checker holds an instance, body, local or class", () => {
   let offenders: string[] = [];
   for (const name of checker()) {
-    const f = `${name}.ts`;
+    const f = `${name}.fsh`;
     const text = read(join(srcDir(), f));
     for (const m of text.matchAll(/\b(?:Map|Set)<([^;=()]*)/g)) if (/\b(?:Instance|Body|Local|ClassInfo)\b/.test(m[1])) offenders.push(`${f}: ${m[0]}`);
   }
@@ -253,7 +253,7 @@ test("no Map or Set in the checker holds an instance, body, local or class", () 
 // Tables still keyed by objects, each until it is given a key of its own: a walk's set of the
 // values it has visited, and codegen's.
 function objectKeyed(): string[] {
-  return ["check.ts: Set<unknown", "locals.ts: Set<unknown", "warnings.ts: Set<unknown", "codegen.ts: WeakSet<object"];
+  return ["check.fsh: Set<unknown", "locals.fsh: Set<unknown", "warnings.fsh: Set<unknown", "codegen.fsh: WeakSet<object"];
 }
 
 // Fish's Map and Set key on strings and numbers, so every table the checker keeps does: by a
@@ -263,7 +263,7 @@ test("no Map, WeakMap, Set or WeakSet in the checker is keyed by anything but st
   let offenders: string[] = [];
   const allowed = objectKeyed();
   for (const name of checker()) {
-    const f = `${name}.ts`;
+    const f = `${name}.fsh`;
     const text = read(join(srcDir(), f));
     for (const m of text.matchAll(/\b(?:Weak)?(?:Map|Set)<\s*([A-Za-z_][\w.]*(?:\[\])?|"[^"]*")/g)) {
       if (/^(?:string|usize|isize|[iu](?:8|16|32|64|128)|f32|f64|number|bigint|boolean|BinaryOp|(?:Instance|Body|Local|Class)Id|[KT]|"[^"]*")$/.test(m[1])) continue;
@@ -283,7 +283,7 @@ function lowering(): string[] {
 // only when computed, and a rename writes a string.
 function children(): string[] {
   let found: string[] = [];
-  for (const m of read(join(srcDir(), "rebuild.ts")).matchAll(/^\s+m\.(\w+)/gm)) {
+  for (const m of read(join(srcDir(), "rebuild.fsh")).matchAll(/^\s+m\.(\w+)/gm)) {
     const field = m[1];
     if (field !== "name" && !found.includes(field)) found.push(field);
   }
@@ -294,26 +294,26 @@ function children(): string[] {
 function inPlace(): string[] {
   return [
     // the spans of nodes just made, before any tree holds them;
-    "parseargs.ts: Object.assign(node, { start", "tests.ts: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.ts: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
+    "parseargs.fsh: Object.assign(node, { start", "tests.fsh: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.fsh: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
     // a Body's overloads, given as ids, an enum's record, a Body's template mark and a Local's type, which are no nodes;
-    "check.ts: for (const f of this.funcs) if (f.overloadNames) f.overloads =", "check.ts: for (const e of this.enums.values())", "classes.ts: f.template = true", "check.ts: local.type = type;",
+    "check.fsh: for (const f of this.funcs) if (f.overloadNames) f.overloads =", "check.fsh: for (const e of this.enums.values())", "classes.fsh: f.template = true", "check.fsh: local.type = type;",
     // lists of statements the checker walks, which it edits as a copy recorded by the list's owner
     // in the rewrite table for the rebuild: a statement that becomes several, nested functions
     // hoisted, statements added after the one being checked, and the same edits given to a later
     // copy of a list; and, before checking, a local declaration hoisted out and an export a library
     // lists, each where the list is read next;
-    "check.ts: list.splice(", "check.ts: list[i] = block;", "check.ts: while (added.length > 0) list.splice(", "check.ts: while (parts.length > 0) list.splice(", "check.ts: let removed = list.splice(", "locals.ts: stmts[stmts.indexOf(local)] =",
-    "check.ts: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.ts: if (inserted !== undefined && inserted.length > 0",
-    "modules.ts: let removed = l.body.splice(at, 1);", "modules.ts: l.body.splice(at, 0, {", "macros.ts: statements.splice(", "modules.ts: if (startsMain(statements[i]!)) statements.splice(",
+    "check.fsh: list.splice(", "check.fsh: list[i] = block;", "check.fsh: while (added.length > 0) list.splice(", "check.fsh: while (parts.length > 0) list.splice(", "check.fsh: let removed = list.splice(", "locals.fsh: stmts[stmts.indexOf(local)] =",
+    "check.fsh: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.fsh: if (inserted !== undefined && inserted.length > 0",
+    "modules.fsh: let removed = l.body.splice(at, 1);", "modules.fsh: l.body.splice(at, 0, {", "macros.fsh: statements.splice(", "modules.fsh: if (startsMain(statements[i]!)) statements.splice(",
     // a kept check's class node given a member's body read again, so a generic class's later
     // instances read it, which the node owns there;
-    "check.ts: m.body = cloneStmts(statements);",
+    "check.fsh: m.body = cloneStmts(statements);",
     // a file's statements lent to linking and put back where they were;
-    "modules.ts: let taken = m.statements.splice(0);",
+    "modules.fsh: let taken = m.statements.splice(0);",
     // a package's function just made, given the overloads it lists before any tree holds it;
-    "modules.ts: if (listed.length > 0 && made.kind === \"function\" && made.js !== undefined) made.js.overloads =",
+    "modules.fsh: if (listed.length > 0 && made.kind === \"function\" && made.js !== undefined) made.js.overloads =",
     // the edits a rebuild makes to the node it is handed, which it owns there, as a rename does;
-    "modules.ts: if (at !== undefined && n.kind === \"call\") n.args.splice(", "modules.ts: let props = n.props.splice(0);", "modules.ts: if (!isEncoding(p)) n.props.push(p);",
+    "modules.fsh: if (at !== undefined && n.kind === \"call\") n.args.splice(", "modules.fsh: let props = n.props.splice(0);", "modules.fsh: if (!isEncoding(p)) n.props.push(p);",
   ];
 }
 
@@ -336,7 +336,7 @@ test("no lowering pass changes a node's kind or children in place", () => {
   const allowed = inPlace();
   let offenders: string[] = [];
   for (const name of lowering()) {
-    const f = `${name}.ts`;
+    const f = `${name}.fsh`;
     for (const line of read(join(srcDir(), f)).split("\n")) {
       const text = `${f}: ${line.trim()}`;
       const found = /Object\.assign\((?!\{|<)/.test(line) || /\bdelete \(/.test(line) || writesChild(line, fields) || /\b(?:list|stmts|statements|place\.list|l\.body)(?:\.splice\(|\[[^\]]+\] = )/.test(line);

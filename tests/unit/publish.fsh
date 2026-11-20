@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { untar } from "../compiler/tar.fsh";
+import { untar } from "../../src/tar.fsh";
 import { fishcPath, read, removed, same, scratch, text } from "./support.fsh";
 
 type Ran = { code: i64; out: string; err: string };
