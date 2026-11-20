@@ -14,7 +14,8 @@ import assert from "node:assert";
 // debug metadata goes with the program's part, the only one whose functions refer to it.
 
 // `name` as the IR spells it, and `key` without the quotes it may have, so `@"f"` and `@f` meet.
-type Item = { kind: "define" | "declare" | "global"; name: string; key: string; text: string };
+// `refs` is what it refers to, read once.
+type Item = { kind: "define" | "declare" | "global"; name: string; key: string; text: string; refs: string[] };
 
 const key = (name: string) => name.replace(/^"(.*)"$/, "$1");
 
@@ -31,11 +32,12 @@ function items(ir: string): Item[] {
     const name = named === null ? "" : named[1]!;
     if (line.startsWith("define ")) {
       const end = lines.indexOf("}", i as i64);
-      found.push({ kind: "define", name, key: key(name), text: lines.slice(i as i64, end + 1).join("\n") });
+      const text = lines.slice(i as i64, end + 1).join("\n");
+      found.push({ kind: "define", name, key: key(name), text, refs: references(text) });
       i = end as usize;
-    } else if (line.startsWith("declare ")) found.push({ kind: "declare", name, key: key(name), text: line });
+    } else if (line.startsWith("declare ")) found.push({ kind: "declare", name, key: key(name), text: line, refs: references(line) });
     else if (line.startsWith("!") || line.startsWith('%"<')) continue;
-    else if (line.startsWith("@")) found.push({ kind: "global", name, key: key(name), text: line });
+    else if (line.startsWith("@")) found.push({ kind: "global", name, key: key(name), text: line, refs: references(line) });
     else assert(false, `can't split the IR at '${line}'`);
   }
   return found;
@@ -43,9 +45,9 @@ function items(ir: string): Item[] {
 
 // The names an item refers to, its own included. String constants' bytes are left out, since an
 // `@` in them names nothing.
-function references(item: Ref<Item>): string[] {
+function references(text: string): string[] {
   let out: string[] = [];
-  for (const m of item.text.replace(/ x i8\] c"[^"]*"/g, "").matchAll(NAMES)) out.push(key(m[1]!));
+  for (const m of text.replace(/ x i8\] c"[^"]*"/g, "").matchAll(NAMES)) out.push(key(m[1]!));
   return out;
 }
 
@@ -85,10 +87,13 @@ const exposed = (item: Ref<Item>) => (item.kind === "define" ? item.text.replace
 // The IR split into std's part, a part for each of `groups`, and the program's. `stdSymbols` names
 // std's functions and `ownSymbols` the program's, as the IR spells them; `groups` names parts of
 // the program's functions, which leave the program's part for one of their own.
-export function split(ir: string, stdSymbols: string[], ownSymbols: string[], groups: Ref<Map<string, string[]>>): { std: string; groups: Map<string, string>; program: string } {
+// `times` is how long its reading, reaching and writing took, for `--timings`.
+export function split(ir: string, stdSymbols: string[], ownSymbols: string[], groups: Ref<Map<string, string[]>>): { std: string; groups: Map<string, string>; program: string; times: [string, f64][] } {
+  const began = performance.now();
   const std = keysOf(stdSymbols);
   const own = keysOf(ownSymbols);
   const all = items(ir);
+  const read = performance.now();
   // Each named struct's definition, by its name, for the parts that use it.
   let types = new Map<string, string>();
   for (const l of ir.split("\n")) if (l.startsWith('%"<')) types.set(l.slice(0, l.indexOf(" = type ")), l);
@@ -100,7 +105,7 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
   for (let i: usize = 0; i < all.length; i++) {
     const item: Ref<Item> = all[i]!;
     if (item.kind === "declare" || copied(item) || std.has(item.key) || own.has(item.key)) continue;
-    for (const name of references(item)) {
+    for (const name of item.refs) {
       const had = referrers.get(name);
       if (had === undefined) referrers.set(name, [i]);
       else {
@@ -138,18 +143,22 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
     const item: Ref<Item> = all[at]!;
     if (item.kind === "declare" || copied(item) || program.has(name)) continue;
     reached.add(name);
-    for (const r of references(item)) work.push(r);
+    for (const r of item.refs) work.push(r);
   }
   // Which part defines each name: STD for std's, a group's name for its functions, and none for the
   // program's.
   let where = new Map<string, string>();
   for (const name of reached) where.set(name, STD);
   for (const [group, symbols] of groups) for (const k of keysOf(symbols)) if (!reached.has(k)) where.set(k, group);
+  const reachedAt = performance.now();
   let metadata = "";
   for (const line of ir.split("\n")) if (line.startsWith("!")) metadata += `${line}\n`;
   let out = new Map<string, string>();
   for (const group of groups.keys()) out.set(group, typed(types, part(all, byName, where, group)));
-  return { std: typed(types, part(all, byName, where, STD)), groups: out, program: typed(types, part(all, byName, where, "")) + metadata };
+  const stdPart = typed(types, part(all, byName, where, STD));
+  const programPart = typed(types, part(all, byName, where, "")) + metadata;
+  const done = performance.now();
+  return { std: stdPart, groups: out, program: programPart, times: [["split items", read - began], ["split reach", reachedAt - read], ["split parts", done - reachedAt]] };
 }
 
 // Std's part's name in `where`, which no group of the program's can have, since groups are named
@@ -202,7 +211,7 @@ function part(all: Ref<Item[]>, byName: Ref<Map<string, usize>>, where: Ref<Map<
     const at = byName.get(name);
     if (at === undefined) continue;
     const item: Ref<Item> = all[at]!;
-    if (owns(item, where, label) || copied(item)) for (const r of references(item)) pending.push(r);
+    if (owns(item, where, label) || copied(item)) for (const r of item.refs) pending.push(r);
   }
   let lines: string[] = [];
   for (const item of all) {

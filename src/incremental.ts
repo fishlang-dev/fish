@@ -12,9 +12,10 @@ import { testOf } from "./tests.ts";
 // besides its tables, the files it was loaded from, and each file a build of it reads or looked
 // for with its text then, undefined for one that was missing; and how many builds in a row have
 // started from what an earlier one kept, 0 for one checked afresh.
-// `emitted` is what the last build's codegen made, absent while only a check has run, and
-// `rechecked` the instances checked again since it.
-export type Kept = { checked: Checked; parts: CheckerParts; loaded: Loaded; contents: Map<string, string | undefined>; carried: usize; emitted?: Emitted; rechecked?: Set<InstanceId> };
+// `emitted` is what the last build's codegen made, absent while only a check has run,
+// `rechecked` the instances checked again since it, and `units` each unit's last text and the
+// object built from it, by the unit's name.
+export type Kept = { checked: Checked; parts: CheckerParts; loaded: Loaded; contents: Map<string, string | undefined>; carried: usize; emitted?: Emitted; rechecked?: Set<InstanceId>; units?: Map<string, string[]> };
 
 // The text each of the program's own files was loaded with, by path, then each other file in
 // `looked` as it reads now, and `manifest` as it read before the build. Std's modules aren't

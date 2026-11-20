@@ -333,7 +333,8 @@ function built(session: BuildSession, file: string, out: string, release: boolea
   if (shim !== undefined) refuseForeignRust(target);
   const split = parts(ir, made.checked, release, target, debug);
   let building = together(made.checked.tables.session, caches);
-  linked(building, ir, split, out, release, links, shim, target, leaks, debug);
+  let none = new Map<string, string[]>();
+  linked(building, ir, split, out, release, links, shim, target, leaks, debug, none);
   return { warnings: made.checked.warnings, session: building };
 }
 
@@ -352,13 +353,15 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
   const splitting = stageStart(made.kept.checked.tables.session);
   const split = parts(ir, made.kept.checked, release, target, debug);
   stageEnd(made.kept.checked.tables.session, "split", splitting);
-  let { checked, parts: checkerParts, loaded, contents, carried, emitted } = made.kept;
+  if (made.kept.checked.tables.session.timings !== undefined) for (const [name, ms] of split.times) made.kept.checked.tables.session.timings!.ms.set(name, ms);
+  let { checked, parts: checkerParts, loaded, contents, carried, emitted, units } = made.kept;
   let { instances, tables, warnings } = checked;
   let building = together(tables.session, caches);
   // The next build gives the kept tables its own session.
   tables.session = newSession();
-  linked(building, ir, split, out, release, links, shim, target, leaks, debug);
-  return { ir: made.ir, warnings: made.warnings, session: building, kept: { checked: { instances, tables, warnings }, parts: checkerParts, loaded, contents, carried, emitted } };
+  let known: Map<string, string[]> = units !== undefined ? units! : new Map<string, string[]>();
+  linked(building, ir, split, out, release, links, shim, target, leaks, debug, known);
+  return { ir: made.ir, warnings: made.warnings, session: building, kept: { checked: { instances, tables, warnings }, parts: checkerParts, loaded, contents, carried, emitted, units: known } };
 }
 
 // `compile` for `fishc watch`, from what its last build kept, giving the IR, the warnings and what
@@ -379,7 +382,7 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   // positions only give through their files' maps.
   const placed: Ref<Source[]> = made.loaded.sources;
   warnings.sort((a, b) => (realOffset(a.start, placed) as i64) - (realOffset(b.start, placed) as i64));
-  return { ir: made.ir, warnings, kept: { checked: made.checked, parts: start.parts, loaded: made.loaded, contents: start.contents, carried: start.carried, emitted: made.emitted } };
+  return { ir: made.ir, warnings, kept: { checked: made.checked, parts: start.parts, loaded: made.loaded, contents: start.contents, carried: start.carried, emitted: made.emitted, units: start.units } };
 }
 
 // The kept program checked again after edits to its own files, rechecking only their bodies when
@@ -390,6 +393,7 @@ function rechecked(kept: Kept): { done: Kept | undefined; session: Session | und
   let k = kept;
   let edits: [usize, string][] = [];
   let fresh = false;
+  const reading = partStart(k.checked.tables.session);
   for (const [f, text] of k.contents) {
     const now = fileText(f);
     if (now === text) continue;
@@ -397,12 +401,15 @@ function rechecked(kept: Kept): { done: Kept | undefined; session: Session | und
     if (index < 0 || now === undefined) fresh = true;
     else edits.push([index as usize, now!]);
   }
+  partEnd(k.checked.tables.session, "reload read", reading);
+  const classifying = partStart(k.checked.tables.session);
   let classes: Edit[] = [];
   for (const [index, now] of edits) {
     const edit = classified(k.loaded.modules[index]!.src, now);
     if (edit.fallback !== undefined || edit.changed.some((c) => c.name === "constructor")) fresh = true;
     classes.push(edit);
   }
+  partEnd(k.checked.tables.session, "reload classify", classifying);
   if (fresh) return spent(k);
   const started = stageStart(k.checked.tables.session);
   let bodies: Replaced[] = [];
@@ -464,7 +471,7 @@ function rechecked(kept: Kept): { done: Kept | undefined; session: Session | und
   }
   for (let i: usize = 0; i < done.checked.warnings.length; i++) done.checked.warnings[i]!.sources = [...loaded.sources];
   stageEnd(done.checked.tables.session, "check", started);
-  return { done: { checked: done.checked, parts: done.parts, loaded, contents, carried: k.carried, emitted: k.emitted, rechecked: done.rechecked }, session: undefined };
+  return { done: { checked: done.checked, parts: done.parts, loaded, contents, carried: k.carried, emitted: k.emitted, rechecked: done.rechecked, units: k.units }, session: undefined };
 }
 
 // The name a top-level declaration of the file at `index` has in the program.
@@ -563,7 +570,10 @@ function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept
   if (kept !== undefined) {
     let reused = kept!;
     reused.checked.tables.session = session;
-    if (unchanged(reused.contents)) {
+    const comparing = partStart(reused.checked.tables.session);
+    const same = unchanged(reused.contents);
+    partEnd(reused.checked.tables.session, "reload compare", comparing);
+    if (same) {
       for (const f of reused.contents.keys()) looked.push(f);
       reused.carried++;
       reused.rechecked = new Set<InstanceId>();
@@ -601,8 +611,9 @@ function refuseForeignRust(target: Ref<Target>) {
 // program's files a unit of its own that the cache keeps by its text, so a rebuild compiles only
 // the files whose code changed. A `-g` build keeps its files in the program's part, which holds
 // the debug metadata their functions refer to.
-function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<Target>, debug = false): { cached: Unit[]; program: string } {
-  if (release) return { cached: [], program: ir };
+function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<Target>, debug = false): { cached: Unit[]; program: string; times: [string, f64][] } {
+  if (release) return { cached: [], program: ir, times: [] };
+  const naming = performance.now();
   const arenas: Ref<Arenas> = checked.tables.arenas;
   const names = symbolNames(arenas);
   let std: string[] = [];
@@ -627,20 +638,23 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
       byFile.set(file, list);
     }
   }
+  const named = performance.now() - naming;
   const halves = split(ir, std, own, byFile);
   const args = [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"];
   let cached: Unit[] = [{ name: "std", args: [...args], stdin: halves.std, inputs: [] }];
   for (const [file, text] of halves.groups) cached.push({ name: `file-${file.replace(/[^\w.-]/g, "_")}`, args: [...args], stdin: text, inputs: [] });
-  return { cached, program: halves.program };
+  return { cached, program: halves.program, times: [["split names", named], ...halves.times] };
 }
 
 // Builds the program's IR, split into `halves`, into the executable `out`.
 /** @throws {Error | IoError} */
-function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ cached: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean) {
+// `known` is each unit's text and object from the build before, kept by `fishc watch`, so a unit
+// whose text is the same takes its object without hashing the text again.
+function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ cached: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean, known: Mut<Map<string, string[]>>) {
   const started = stageStart(session);
   let objects: string[] = [];
-  for (const u of runtimeUnits(ir, release, false, copyTarget(target), leaks)) objects.push(cachedObject(session, u));
-  for (const u of halves.cached) objects.push(cachedObject(session, u));
+  for (const u of runtimeUnits(ir, release, false, copyTarget(target), leaks)) objects.push(knownObject(session, u, known));
+  for (const u of halves.cached) objects.push(knownObject(session, u, known));
   for (const o of mathObjects(session, [...target.compile])) objects.push(o);
   stageEnd(session, "runtime", started);
   const none: string[] = [];
@@ -669,6 +683,21 @@ function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ cached: Un
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+// A unit's object: the one built from its text before when the text is the same and the object is
+// still there, else the cache's, hashed from its text.
+/** @throws {Error | IoError} */
+function knownObject(session: Mut<BuildSession>, u: Ref<Unit>, known: Mut<Map<string, string[]>>): string {
+  const text = u.stdin ?? "";
+  const was = known.get(u.name);
+  if (u.inputs.length === 0 && was !== undefined && was[0]! === text && existsSync(was[1]!)) {
+    if (session.timings !== undefined) session.timings!.objects.cached++;
+    return was[1]!;
+  }
+  const object = cachedObject(session, u);
+  known.set(u.name, [text, object]);
+  return object;
 }
 
 // Runs clang, or a tool beside it, throwing what it printed if it fails.
@@ -744,7 +773,8 @@ export function buildTests(session: BuildSession, dir: string, out: string, rele
   const host = hostTarget();
   const halves = parts(made.ir, made.checked, release, host);
   let building = together(made.checked.tables.session, caches);
-  linked(building, made.ir, halves, out, release, [], shim, host, false, false);
+  let none = new Map<string, string[]>();
+  linked(building, made.ir, halves, out, release, [], shim, host, false, false, none);
   return tests;
 }
 
@@ -1008,6 +1038,7 @@ function sessionWith(locked: boolean, timed: boolean): BuildSession {
 
 // Codegen's own parts, which watch's timings show apart since a rebuild may skip only some.
 const CODEGEN_PARTS = ["codegen names", "codegen setup", "codegen comptime", "codegen sharing", "codegen functions", "codegen tail", "codegen assembly", "codegen kept", "codegen bundle"];
+const OTHER_PARTS = ["reload compare", "reload read", "reload classify", "split names", "split items", "split reach", "split parts"];
 
 // What one of `fishc watch`'s builds takes.
 type Rebuild = { entry: string; binary: string; links: string[]; release: boolean; panic: Panic; leaks: boolean; debug: boolean; locked: boolean; timed: boolean; manifest: string | undefined };
@@ -1019,7 +1050,7 @@ function rebuilt(r: Ref<Rebuild>, kept: Kept | undefined): Rebuilt {
     const start = performance.now();
     let made = builtKept(sessionWith(r.locked, r.timed), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded, kept, r.manifest);
     const stages = ["reload", ...FRONT_END, "codegen", "instrument", "split", ...NATIVE_STAGES];
-    reportTimings(made.session, ["reload", ...FRONT_END, "codegen", ...CODEGEN_PARTS, "instrument", "split", ...NATIVE_STAGES], start);
+    reportTimings(made.session, ["reload", ...FRONT_END, "codegen", ...CODEGEN_PARTS, "instrument", "split", ...OTHER_PARTS, ...NATIVE_STAGES], start);
     // What no stage holds, so a rebuild's time is all accounted for.
     if (made.session.timings !== undefined) {
       let staged: f64 = 0;
