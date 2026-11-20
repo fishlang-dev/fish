@@ -1768,18 +1768,25 @@ async function __wsRead(conn: TcpStream, start: u8[], socket: WebSocketSender, i
   let buffer = start;
   try {
     const why = await __wsFrames(conn, buffer, socket, incoming, signal, limits);
+    // A frame breaking the protocol is answered before the messages end: the handler returns
+    // once they do, and the 1000 its return closes with would otherwise race the code it earned.
+    if (why !== null && !why.heard) {
+      socket.__wsEnd(why.code, why.reason);
+      incoming.close();
+      return;
+    }
     incoming.close();
     if (why === null) {
       if (stop.aborted) socket.__wsEnd(1001, "");
       else socket.__wsStop();
-    } else if (why.heard) {
+    } else {
       // The client's close is answered once the handler returns, so its replies to what came
       // before go out first, or after a second when it doesn't.
       socket.__wsHeard(why.code);
       const either = AbortSignal.any([socket.__wsReturned(), AbortSignal.timeout(1000)]);
       await Http1.abortOf(either);
       socket.__wsEnd(why.code, "");
-    } else socket.__wsEnd(why.code, why.reason);
+    }
   } catch (e) {
     incoming.close();
     socket.__wsStop();
