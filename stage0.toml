@@ -1,0 +1,7 @@
+# The fishc that builds the compiler: the commit it is built from, and for each target the sha256
+# of its binary with the Mach-O UUID zeroed and the code signature left out, which every link makes
+# anew. Changed only when stage 0 moves to a later commit that passed the bootstrap fixpoint.
+commit = "4368baa1d284111ff1df43dbcfe41d5caa74c9ec"
+
+[digests]
+"arm64-darwin" = "d8cf21f87d9278fb7c7b76d4e37fb4f3d4808c1a5b3e7a48061458f283e10db3"
