@@ -365,7 +365,8 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   const failed = start.checked.tables.session.failed;
   start.checked.tables.session.failed = undefined;
   const sources = [...start.loaded.sources];
-  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed, prior: start.emitted, rechecked: start.rechecked, keep: true });
+  // Debug info marks every function's lines, so a `-g` build emits every function again.
+  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed, prior: debug ? undefined : start.emitted, rechecked: start.rechecked, keep: true });
   let warnings = [...made.checked.warnings];
   // A clean check gives its warnings in the order they are written in, which a kept one's
   // positions only give through their files' maps.

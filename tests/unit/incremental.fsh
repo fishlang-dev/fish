@@ -202,6 +202,26 @@ test("a build after an edit emits again only the functions it changed or moved, 
   assert(said.join(" | ") === "1 same | 1 same | 2 same", said.join(" | "));
 }, { timeout: 120_000 });
 
+test("a build with debug info emits every function again, as its lines are all marked", () => {
+  const dir = scratch("fish-incremental-");
+  const entry = join(dir, "main.fsh");
+  write(entry, USES);
+  write(join(dir, "lib.fsh"), LIB);
+  let looked: string[] = [];
+  let first: { ir: string; warnings: CompileError[]; kept: Kept } | undefined = undefined;
+  let second: { ir: string; warnings: CompileError[]; kept: Kept } | undefined = undefined;
+  try {
+    first = compiledKept(cachedSession(), entry, false, "unwind", false, true, looked, undefined, undefined);
+    write(join(dir, "lib.fsh"), LIB.replace("return n * 2;", "return n * 3;"));
+    second = compiledKept(cachedSession(), entry, false, "unwind", false, true, looked, first!.kept, undefined);
+  } catch (e) {
+    throw new Error(`the build failed: ${(e as { message: string }).message}`);
+  }
+  const emitted = second!.kept.emitted!;
+  removed(dir);
+  assert(emitted.reemitted === emitted.made.size, `${emitted.reemitted} of ${emitted.made.size} emitted again`);
+}, { timeout: 120_000 });
+
 test("an edit reaching other functions' code emits them again: behind a vtable, raced and cancelled, shared, and no longer used", () => {
   let said: string[] = [];
   const dyn = `import { Circle, Shape, area } from "./lib.fsh";\nfunction main() {\n  const s: Dyn<Shape> = new Circle(2);\n  console.log(area(s));\n}\n`;
