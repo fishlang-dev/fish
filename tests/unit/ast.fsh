@@ -13,7 +13,7 @@ function parserSource(): string {
   }
 }
 
-test("the Ast declarations match the parser's AST types; run 'bun src/astgen.fsh' when they don't", () => {
+test("the Ast declarations match the parser's AST types; run 'fishc run src/astgen.fsh' when they don't", () => {
   let generated = "";
   try {
     generated = astDeclarations(parserSource());

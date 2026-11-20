@@ -206,11 +206,11 @@ export function astDeclarations(src: string): string {
   return out.join("\n") + "\n";
 }
 
-// `bun src/astgen.fsh` writes the declarations into `src/ast.fsh`.
+// `fishc run src/astgen.fsh` writes the declarations into `src/ast.fsh`.
 /** @throws {Error | IoError | CompileError} */
 function main() {
   const declarations = astDeclarations(readFileSync(join(import.meta.dir, "parser.fsh"), "utf8"));
-  const file = `// Generated from the parser's AST types by \`bun src/astgen.fsh\`; a test fails when it is stale.\nexport const AST = String.raw\`\n${declarations}\`;\n`;
+  const file = `// Generated from the parser's AST types by \`fishc run src/astgen.fsh\`; a test fails when it is stale.\nexport const AST = String.raw\`\n${declarations}\`;\n`;
   writeFileSync(join(import.meta.dir, "ast.fsh"), file);
 }
 

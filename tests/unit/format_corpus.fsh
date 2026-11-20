@@ -54,7 +54,6 @@ const SOURCES: string[] = [
   "src/doc.fsh",
   "src/enums.fsh",
   "src/expressions.fsh",
-  "src/fish.d.ts",
   "src/flow.fsh",
   "src/fmt.fsh",
   "src/generics.fsh",
@@ -138,7 +137,7 @@ function srcFiles(): string[] {
   try {
     let out: string[] = [];
     const names = readdirSync(join(root(), "src"));
-    for (const f of names) if (f.endsWith(".fsh") || f.endsWith(".ts")) out.push(`src/${f}`);
+    for (const f of names) if (f.endsWith(".fsh")) out.push(`src/${f}`);
     out.sort();
     return out;
   } catch (e) {
@@ -330,7 +329,6 @@ test("src/edits.fsh formats keeping its comments, parses back to the same tree a
 test("src/doc.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/doc.fsh"));
 test("src/enums.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/enums.fsh"));
 test("src/expressions.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/expressions.fsh"));
-test("src/fish.d.ts formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/fish.d.ts"));
 test("src/flow.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/flow.fsh"));
 test("src/fmt.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/fmt.fsh"));
 test("src/generics.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/generics.fsh"));

@@ -1,5 +1,5 @@
-// The compiler's source names its numbers with Fish's types (src/fish.d.ts aliases them for tsc),
-// because Fish reads `number` as `f64`, which can't index an array or mix with a length.
+// The compiler's source names its numbers with Fish's types, because Fish reads `number` as
+// `f64`, which can't index an array or mix with a length.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse, type Stmt } from "../../src/parser.fsh";

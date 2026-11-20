@@ -1,4 +1,4 @@
-// Generated from the parser's AST types by `bun src/astgen.fsh`; a test fails when it is stale.
+// Generated from the parser's AST types by `fishc run src/astgen.fsh`; a test fails when it is stale.
 export const AST = String.raw`
 type AstType =
   | { start: i64; end: i64; kind: "ref"; name: string; args: AstType[] }
