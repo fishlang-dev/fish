@@ -1,10 +1,10 @@
 // The bootstrap fixpoint, with no Bun: a native fishc given with `--from` builds the compiler's own
 // source into a second fishc, that one builds a third, and each prints the source's IR. The second
-// and third generations' IR must be identical. `--out <dir>` keeps the mirror, binaries and IR
-// there. Run by hand: a chain takes about an hour.
+// and third generations' IR must be identical. Each builds src in place; `--out <dir>` keeps the
+// binaries and IR there. Run by hand: a chain takes about an hour.
 //   fishc run scripts/fixpoint.fsh -- --from <fishc> [--out <dir>]
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,28 +12,6 @@ import { join } from "node:path";
 function option(args: Ref<string[]>, flag: string): string | undefined {
   for (let i: usize = 0; i + 1 < args.length; i++) if (args[i]! === flag) return args[i + 1]!.clone();
   return undefined;
-}
-
-function linked(target: string, path: string): void throws IoError {
-  if (lstatSync(path, { throwIfNoEntry: false }) === undefined) symlinkSync(target, path);
-}
-
-// The compiler's source as Fish in `to`, as scripts/mirror.fsh writes it, with the runtime's C
-// sources inside it and vendor beside it, where a build from the mirror looks for them.
-function mirror(root: string, out: string, to: string): usize throws IoError {
-  const src = join(root, "src");
-  mkdirSync(to, { recursive: true });
-  let n: usize = 0;
-  for (const f of readdirSync(src)) {
-    if (!f.endsWith(".ts") || f.endsWith(".d.ts")) continue;
-    const twin = join(src, f.slice(0, (f.length as i64) - 3) + ".fsh");
-    const text = readFileSync(existsSync(twin) ? twin : join(src, f), "utf8");
-    writeFileSync(join(to, f.slice(0, (f.length as i64) - 3) + ".fsh"), text.replace(/(["'])(\.{1,2}\/[^"']+)\.ts\1/g, "$1$2.fsh$1"));
-    n++;
-  }
-  linked(join(src, "runtime"), join(to, "runtime"));
-  linked(join(root, "vendor"), join(out, "vendor"));
-  return n;
 }
 
 // Runs `fishc build main.fsh --release` in `src` with `args`, sending its stdout to `into`, and
@@ -63,8 +41,8 @@ function main(): void throws IoError {
   }
   const root = join(import.meta.dir, "..");
   const out = option(args, "--out") ?? mkdtempSync(join(tmpdir(), "fish-fixpoint-"));
-  const src = join(out, "src");
-  console.log(`mirrored ${mirror(root, out, src)} files`);
+  const src = join(root, "src");
+  mkdirSync(out, { recursive: true });
   let fishc: string = from!;
   for (let gen = 1; gen <= 3; gen++) {
     if (!build(fishc, src, "--emit-llvm", join(out, `gen${gen}.ll`), `generation ${gen} printed the IR`)) process.exit(1);

@@ -62,8 +62,8 @@ function linked(target: string, path: string): void throws IoError {
   if (lstatSync(path, { throwIfNoEntry: false }) === undefined) symlinkSync(target, path);
 }
 
-// The compiler's source as Fish in `to`: each src/*.ts, or its .fsh twin, with its `.ts` imports
-// renamed `.fsh`, the runtime's C sources inside it and vendor beside it, as the fixpoint mirrors.
+// The pinned commit's source as Fish in `to`, its src being TypeScript: each src/*.ts, or its .fsh
+// twin, with its `.ts` imports renamed `.fsh`, the runtime's C sources inside it and vendor beside it.
 export function mirror(root: string, to: string): usize throws IoError {
   const src = join(root, "src");
   mkdirSync(to, { recursive: true });
@@ -80,14 +80,12 @@ export function mirror(root: string, to: string): usize throws IoError {
   return n;
 }
 
-// fishc built by `fishc` from `root`'s source mirrored into `at`, as a release build. A fishc finds
-// vendor and the runtime's sources from where its source was when it was built, so `at` is a
-// directory that stays: build/src for the repository's fishc, and stage 0's own tree for stage 0.
-export function built(fishc: string, root: string, out: string, at: string): boolean throws IoError {
-  if (existsSync(at)) for (const f of readdirSync(at)) if (f.endsWith(".fsh")) rmSync(join(at, f));
-  mirror(root, at);
+// fishc built by `fishc` from the source in `src` into `out`, as a release build. A fishc finds
+// vendor and the runtime's sources from where its source was when it was built, so `src` is a
+// directory that stays: the repository's src, or the mirror in stage 0's own tree.
+export function compiled(fishc: string, src: string, out: string): boolean throws IoError {
   const started = performance.now();
-  const r = spawnSync(fishc, ["build", "main.fsh", "--release", "-o", out], { cwd: at });
+  const r = spawnSync(fishc, ["build", "main.fsh", "--release", "-o", out], { cwd: src });
   if (r.status !== 0) {
     console.error(new TextDecoder().decode(r.stderr).slice(0, 8000));
     return false;
@@ -135,7 +133,10 @@ function rebuilt(p: Ref<Pinned>, root: string, record: boolean): string throws I
   step("mirror its source", "bun src/main.ts run scripts/mirror.fsh", tree);
   step("build a first fishc with Bun", `bun src/main.ts build tests/compiler/main.fsh --release -o "${join(tree, "first")}"`, tree);
   console.log("stage 0: build it again with that fishc");
-  if (!built(join(tree, "first"), tree, join(tree, "second"), join(tree, "build", "src"))) fail("stage 0: the first fishc couldn't build the commit's source");
+  const at = join(tree, "build", "src");
+  for (const f of readdirSync(at)) if (f.endsWith(".fsh")) rmSync(join(at, f));
+  mirror(tree, at);
+  if (!compiled(join(tree, "first"), at, join(tree, "second"))) fail("stage 0: the first fishc couldn't build the commit's source");
   if (record) recorded(root, stage0Digest(join(tree, "second")));
   return adopted(p, join(tree, "second"), record);
 }
@@ -168,5 +169,5 @@ function main(): void throws IoError | Error {
   else if (!checked(p, stage0)) fail("the cached stage 0 has changed; adopt a good one with --stage0 <fishc>");
   prepared(p, root);
   mkdirSync(dirname(out), { recursive: true });
-  if (!built(stage0, root, out, join(root, "build", "src"))) fail(`stage 0 couldn't build ${out}`);
+  if (!compiled(stage0, join(root, "src"), out)) fail(`stage 0 couldn't build ${out}`);
 }
