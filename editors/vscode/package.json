@@ -1,0 +1,20 @@
+{
+  "name": "fish-lang",
+  "displayName": "Fish Lang",
+  "publisher": "fishlang",
+  "version": "0.1.0",
+  "private": true,
+  "engines": { "vscode": "^1.91.0" },
+  "contributes": {
+    "grammars": [
+      { "language": "fsh", "scopeName": "source.fsh", "path": "./syntaxes/fsh.tmLanguage.json" },
+      { "scopeName": "fsh.injection", "path": "./syntaxes/fsh.injection.tmLanguage.json", "injectTo": ["source.fsh"] }
+    ]
+  },
+  "scripts": {
+    "test:grammar": "vscode-tmgrammar-test -c package.json -g test/grammar/TypeScript.tmLanguage.json 'test/grammar/*.fsh'"
+  },
+  "devDependencies": {
+    "vscode-tmgrammar-test": "0.1.3"
+  }
+}
