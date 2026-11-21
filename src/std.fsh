@@ -559,7 +559,7 @@ function __cookieAttribute(name: string, attribute: string, value: string): stri
 
 // unix is a socket path to send the request over in place of the URL's host and port; tls.ca is
 // PEM certificates an https: server's is verified against in place of the system's, as Bun's is.
-type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal; unix?: string; tls?: { ca?: string } };
+type RequestInit = { method?: string; headers?: Headers; body?: string | u8[] | ReadableStream<u8[]>; signal?: AbortSignal; unix?: string; tls?: { ca?: string } };
 
 // A body given as text or bytes, as the bytes sent.
 function __httpBody(body: string | u8[]): u8[] {
@@ -571,7 +571,10 @@ class Request {
   url: string;
   path: string;
   headers: Headers;
-  body: u8[];
+  // The body's bytes; read through body, text(), bytes() or json().
+  #body: u8[];
+  // A body given as a stream, at most one, read into #body when the request is sent or read.
+  #bytes: Lock<ReadableStream<u8[]>[]>;
   signal: AbortSignal;
   // The :params a Router's route took from the path, as name then value.
   params: string[] = [];
@@ -581,37 +584,74 @@ class Request {
     this.path = __urlRequestPath(url);
     let method = "GET";
     let headers = new Headers();
-    let body: u8[] = [];
     let signal = new AbortController().signal;
+    let bytes: u8[] = [];
+    let streams: ReadableStream<u8[]>[] = [];
     if (init !== null) {
       const m = init.method;
       if (m !== null) method = m.toUpperCase();
       const h = init.headers;
       if (h !== null) headers = h;
       const b = init.body;
-      if (b !== null) body = __httpBody(b);
+      if (b instanceof ReadableStream) streams.push(b);
+      else if (b !== null) bytes = __httpBody(b);
       const s = init.signal;
       if (s !== null) signal = s;
     }
     this.method = method;
     this.headers = headers;
-    this.body = body;
+    this.#body = bytes;
+    this.#bytes = new Lock(streams);
     this.signal = signal;
+  }
+
+  __setBody(this: Mut<this>, body: string | u8[] | ReadableStream<u8[]>) {
+    if (body instanceof ReadableStream) {
+      this.#body = [];
+      this.#bytes.update((s) => {
+        s.length = 0;
+        s.push(body);
+      });
+    } else this.#body = __httpBody(body);
+  }
+
+  __bytes(this: Ref<this>): Ref<u8[]> {
+    return this.#body;
+  }
+
+  // A body given as a stream, read to its end into the bytes, as fetch sends it with a length.
+  async __drain(this: Mut<this>) {
+    const given = this.#bytes.update((s) => s.pop());
+    if (given === null) return;
+    const bytes = await __streamBytes(given);
+    this.#body = bytes;
+  }
+
+  // The body as a stream of bytes, or null when there is none.
+  get body(): ReadableStream<u8[]> | null {
+    const given = this.#bytes.update((s) => s.pop());
+    if (given !== null) return given;
+    if (this.#body.length === 0) return null;
+    return ReadableStream.from(__streamOnce(this.#body.clone()));
   }
 
   // The body as UTF-8 text, each malformed sequence as U+FFFD.
   async text(): Promise<string> {
-    return new TextDecoder().decode(this.body);
+    const bytes = await this.bytes();
+    return new TextDecoder().decode(bytes);
   }
 
-  // The body's bytes as they were sent.
+  // The body's bytes as they were sent; a streamed one's read to its end, once.
   async bytes(): Promise<u8[]> {
-    return this.body.clone();
+    const given = this.#bytes.update((s) => s.pop());
+    if (given !== null) return await __streamBytes(given);
+    return this.#body.clone();
   }
 
   // The body read as JSON into a T.
   async json<T>(): Promise<T> throws JsonError {
-    return JSON.parse<T>(new TextDecoder().decode(this.body));
+    const text = await this.text();
+    return JSON.parse<T>(text);
   }
 
   // The cookies of every Cookie header the request has.
@@ -774,7 +814,8 @@ class Response {
     const given = this.__byteStream();
     if (given !== null) {
       this.#read.store(1);
-      return new TextDecoder().decode(await __streamBytes(given));
+      const bytes = await __streamBytes(given);
+      return new TextDecoder().decode(bytes);
     }
     const stream = this.__stream();
     if (stream === null) return new TextDecoder().decode(this.#body);
@@ -1001,7 +1042,7 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const watching = spawn(Http1.watch(conn.clone(), client, done.signal));
       // The body is set after, not passed in init, which would copy it.
       let req = new Request((limits.secure ? "https://" : "http://") + authority + head.target, { method: method, headers: head.headers, signal: signal.clone() });
-      req.body = body;
+      req.__setBody(body);
       // The handler runs as a task of its own, so a panic in it ends only that task: its client
       // gets a bare 500 and the connection closes, and the server goes on serving.
       let res: Response;
@@ -2141,10 +2182,10 @@ class Http1 {
     if (bad.length > 0) throw new IoError("can't fetch '" + req.url + "': header '" + bad + "' holds a line break or isn't a header name");
     if (!req.headers.has("accept")) text = text + "accept: */*\\r\\n";
     if (!req.headers.has("user-agent")) text = text + "user-agent: fish\\r\\n";
-    const size = req.body.length as i64;
+    const size = req.__bytes().length as i64;
     if (size > 0 || req.method === "POST" || req.method === "PUT" || req.method === "PATCH") text = text + "content-length: " + String(size) + "\\r\\n";
     let out = new TextEncoder().encode(text + "connection: close\\r\\n\\r\\n");
-    for (const b of req.body) out.push(b);
+    for (const b of req.__bytes()) out.push(b);
     return out;
   }
 
@@ -2532,7 +2573,8 @@ const FETCH = `
 async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
   const unix = init !== null ? init.unix : null;
   const ca = init !== null ? init.tls?.ca ?? "" : "";
-  const req = __urlFetchRequest(input, init);
+  let req = __urlFetchRequest(input, init);
+  await req.__drain();
   const signal = req.signal.clone();
   const to = __urlFetchAddress(req.url);
   const sent = Http1.requestBytes(req, to.authority, to.path);
@@ -2557,7 +2599,7 @@ function __urlFetchRequest(input: string | Request | URL, init?: RequestInit): R
     const h = init.headers;
     if (h !== null) req.headers = h;
     const b = init.body;
-    if (b !== null) req.body = __httpBody(b);
+    if (b !== null) req.__setBody(b);
     const s = init.signal;
     if (s !== null) req.signal = s;
   }

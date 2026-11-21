@@ -248,5 +248,31 @@ async function main(): Promise<void> throws IoError | AbortError {
   }));
   while (found.port.load() === 0) await sleep(1);
   const res = await fetch("http://127.0.0.1:" + String(found.port.load()) + "/");
-  console.log(res.status, res.headers.get("transfer-encoding"), await res.text());
+  const text = await res.text();
+  console.log(res.status, res.headers.get("transfer-encoding"), text);
+}
+// case: readable_stream_request_body
+// expect: handler stream: 9 bytes
+// expect: POST got 9 bytes: streamed!
+// A request body given as a stream is read whole and sent with a length, and a handler reads
+// the request's body through req.body.
+async function* parts(): AsyncGenerator<u8[]> {
+  yield new TextEncoder().encode("stream");
+  yield new TextEncoder().encode("ed!");
+}
+
+async function main(): Promise<void> throws IoError | AbortError {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    const body = req.body;
+    let size = 0;
+    if (body !== null) for await (const chunk of body) size += chunk.length as i64;
+    console.log("handler stream:", size, "bytes");
+    return new Response(req.method + " got " + req.headers.get("content-length") + " bytes: ");
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  const res = await fetch("http://127.0.0.1:" + String(found.port.load()) + "/", { method: "POST", body: ReadableStream.from(parts()) });
+  const text = await res.text();
+  console.log(text + "streamed!");
 }
