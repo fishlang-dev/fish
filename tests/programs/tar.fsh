@@ -92,3 +92,119 @@ async function main(): Promise<void> throws IoError {
   console.log("fifo:", fifo.includes("is a device, FIFO or another special entry"));
   rmSync(dir, { recursive: true });
 }
+// case: tar_extract_and_read_back
+// expect: a.txt hello
+// expect: sub/b.txt bye
+// expect: link -> a.txt
+// expect: mode 493
+// An archive the system's tar made, extracted and read back: files, a directory, a symlink and
+// a file's mode.
+import { extract } from "fish:tar";
+import { spawnSync } from "node:child_process";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function main(): Promise<void> throws IoError | Error {
+  const dir = mkdtempSync(join(tmpdir(), "fish-tar-"));
+  mkdirSync(join(dir, "src", "sub"), { recursive: true });
+  writeFileSync(join(dir, "src", "a.txt"), "hello");
+  writeFileSync(join(dir, "src", "sub", "b.txt"), "bye");
+  chmodSync(join(dir, "src", "sub", "b.txt"), 0o755);
+  symlinkSync("a.txt", join(dir, "src", "link"));
+  const env = { COPYFILE_DISABLE: "1", PATH: process.env.PATH ?? "/usr/bin:/bin" };
+  spawnSync("tar", ["-cf", join(dir, "x.tar"), "-C", join(dir, "src"), "a.txt", "sub", "link"], { env });
+  const out = join(dir, "out");
+  const _written = await extract(join(dir, "x.tar"), out);
+  console.log("a.txt", new TextDecoder().decode(readFileSync(join(out, "a.txt"))));
+  console.log("sub/b.txt", new TextDecoder().decode(readFileSync(join(out, "sub", "b.txt"))));
+  console.log("link ->", readlinkSync(join(out, "link")));
+  console.log("mode", lstatSync(join(out, "sub", "b.txt")).mode & 0o777);
+  rmSync(dir, { recursive: true });
+}
+// case: tar_extract_refuses_escapes
+// expect: climbing: '../evil.txt' climbs out of the target, which extract refuses
+// expect: absolute link: 'up' is a symlink to the absolute path '/tmp', which extract refuses
+// expect: link out: '../../outside' climbs out of the target, which extract refuses
+// expect: through a link: 'hop/x.txt' would be written through the symlink 'hop', which extract refuses
+// expect: nothing outside: true
+// Archives made with each escaping entry are refused, and nothing lands outside the target.
+import { extract, pack } from "fish:tar";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function archive(paths: string[], cwd: string): Promise<u8[]> throws IoError | ZlibError {
+  let out: u8[] = [];
+  let chunks = pack(paths, { cwd });
+  for await (const chunk of chunks) for (const b of chunk) out.push(b);
+  return out;
+}
+
+async function attempt(what: string, bytes: u8[], to: string): Promise<void> {
+  try {
+    const _w = await extract(bytes, to);
+    console.log(what + ": extracted");
+  } catch (e) {
+    console.log(what + ": " + e.message);
+  }
+}
+
+async function main(): Promise<void> throws IoError | ZlibError {
+  const dir = mkdtempSync(join(tmpdir(), "fish-tar-"));
+  // The climbing entry is packed from beside inner, so extracting it into dir/t1 would write
+  // dir/evil.txt, which nothing else makes.
+  const inner = join(dir, "a", "inner");
+  mkdirSync(join(inner, "real"), { recursive: true });
+  writeFileSync(join(dir, "a", "evil.txt"), "x");
+  writeFileSync(join(inner, "real", "x.txt"), "x");
+  symlinkSync("/tmp", join(inner, "up"));
+  symlinkSync("../../outside", join(inner, "out"));
+  symlinkSync("real", join(inner, "hop"));
+  const climbing = await archive(["../evil.txt"], inner);
+  await attempt("climbing", climbing, join(dir, "t1"));
+  const absolute = await archive(["up"], inner);
+  await attempt("absolute link", absolute, join(dir, "t2"));
+  const linkOut = await archive(["out"], inner);
+  await attempt("link out", linkOut, join(dir, "t3"));
+  const through = await archive(["hop", "hop/x.txt"], inner);
+  await attempt("through a link", through, join(dir, "t4"));
+  console.log("nothing outside:", !existsSync(join(dir, "evil.txt")));
+  rmSync(dir, { recursive: true });
+}
+// case: tar_pack_round_trip
+// expect: entries: a.txt file 5 hello | sub/ directory 0 | sub/b.txt file 3 bye
+// expect: long: true
+// expect: system: a.txt|sub/|sub/b.txt
+// expect: system gzip: a.txt|sub/|sub/b.txt
+// An archive pack writes reads back through entries() and through the system's tar, plain and
+// gzipped, with a long path kept through a PAX header.
+import { create, entries, list } from "fish:tar";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function main(): Promise<void> throws IoError | ZlibError | Error {
+  const dir = mkdtempSync(join(tmpdir(), "fish-tar-"));
+  mkdirSync(join(dir, "src", "sub"), { recursive: true });
+  writeFileSync(join(dir, "src", "a.txt"), "hello");
+  writeFileSync(join(dir, "src", "sub", "b.txt"), "bye");
+  await create(join(dir, "x.tar"), ["a.txt", "sub"], { cwd: join(dir, "src") });
+  await create(join(dir, "x.tgz"), ["a.txt", "sub"], { cwd: join(dir, "src"), gzip: true });
+  let parts: string[] = [];
+  let all = entries(join(dir, "x.tar"));
+  for await (const e of all) parts.push(e.path + " " + e.type + " " + String(e.size) + (e.type === "file" ? " " + new TextDecoder().decode(e.data) : ""));
+  console.log("entries:", parts.join(" | "));
+  const name = "d".repeat(150) + "/" + "f".repeat(120);
+  mkdirSync(join(dir, "long", "d".repeat(150)), { recursive: true });
+  writeFileSync(join(dir, "long", name), "x");
+  await create(join(dir, "long.tar"), [name], { cwd: join(dir, "long") });
+  const long = await list(join(dir, "long.tar"));
+  console.log("long:", long[0]!.path === name);
+  const t = spawnSync("tar", ["-tf", join(dir, "x.tar")]);
+  console.log("system:", new TextDecoder().decode(t.stdout).trim().split("\n").join("|"));
+  const z = spawnSync("tar", ["-tzf", join(dir, "x.tgz")]);
+  console.log("system gzip:", new TextDecoder().decode(z.stdout).trim().split("\n").join("|"));
+  rmSync(dir, { recursive: true });
+}
