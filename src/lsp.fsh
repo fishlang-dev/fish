@@ -1,10 +1,15 @@
 // `fishc lsp`: the Language Server Protocol's JSON-RPC over stdin and stdout.
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Checked } from "./check.fsh";
 import { compiledOf } from "./codegen.fsh";
 import { type Session } from "./compilation.fsh";
 import { type Kept } from "./incremental.fsh";
+import { Index, membersOf, staticsOf, type Declared, type Member, type Typed } from "./navigate.fsh";
+import type { Ids } from "./ids.fsh";
+import { parse, type Stmt } from "./parser.fsh";
+import { format } from "./printer.fsh";
+import { testOf } from "./tests.fsh";
 import { Queries } from "./queries.fsh";
 import { cachedSession } from "./stdcache.fsh";
 import { CompileError, copyNames, locate, shown, sourceOf, written, type Source } from "./diag.fsh";
@@ -13,7 +18,7 @@ import type { Type } from "./typing.fsh";
 
 // The parameters of the methods served, each of which names a document; the methods that take
 // none name nothing.
-type Params = { textDocument?: { uri: string; text?: string }; contentChanges?: { text: string }[]; range?: Range };
+type Params = { textDocument?: { uri: string; text?: string }; contentChanges?: { text: string }[]; range?: Range; position?: Position; context?: { includeDeclaration?: boolean } };
 type Message = { id?: i64 | string | null; method?: string; params?: Params };
 
 type Position = { line: usize; character: usize };
@@ -53,6 +58,19 @@ function headersEnd(buffer: Ref<Buffer>, from: usize): i64 {
 }
 
 // LSP's positions count UTF-16 code units, as the compiler's offsets into a JavaScript string do.
+// The offset of a position in `src`, clamped to its line's end and to the text's.
+function offsetOf(src: string, at: Ref<Position>): usize {
+  let start: usize = 0;
+  for (let line: usize = 0; line < at.line; line++) {
+    const newline = src.indexOf("\n", start as i64);
+    if (newline < 0) return src.length;
+    start = (newline as usize) + 1;
+  }
+  const newline = src.indexOf("\n", start as i64);
+  const end: usize = newline < 0 ? src.length : newline as usize;
+  return Math.min(start + at.character, end);
+}
+
 function position(src: string, offset: usize): Position {
   const { line, col } = locate(src, Math.min(offset, src.length));
   return { line: line - 1, character: col - 1 };
@@ -148,6 +166,160 @@ export function hints(checked: Ref<Checked>, text: string, range: Ref<Range>): H
   return out;
 }
 
+// What hovering at `offset` shows: the type of the expression there, as `name: type` for a name,
+// and where the name is declared.
+/** @throws {TypeError} */
+export function hover(checked: Ref<Checked>, index: Ref<Index>, sources: Ref<Source[]>, path: string, text: string, offset: usize): string {
+  const typed = index.typedAt(offset);
+  if (typed === undefined) return "null";
+  const t = named(checked, typed!.type);
+  let value = "```fsh\n" + (typed!.name === undefined ? t : `${typed!.name!}: ${t}`) + "\n```";
+  const decl = index.declAt(offset);
+  if (decl !== undefined) {
+    const at = located(path, text, sources, decl!.start, decl!.end);
+    if (at !== undefined) value += `\n\nDeclared in \`${relative(dirname(path), fileURLToPath(at!.uri))}:${at!.range.start.line + 1}\``;
+  }
+  const range = { start: position(text, typed!.start), end: position(text, typed!.end) };
+  return JSON.stringify({ contents: { kind: "markdown", value }, range });
+}
+
+// The places naming the declaration at `offset`, with the declaration itself when `withDecl`;
+// std's have no file to show.
+export function references(index: Ref<Index>, sources: Ref<Source[]>, path: string, text: string, offset: usize, withDecl: boolean): Location[] {
+  const decl = index.declAt(offset);
+  if (decl === undefined) return [];
+  let places: Declared[] = index.usesOf(decl!);
+  if (withDecl) places.unshift(decl!);
+  let out: Location[] = [];
+  for (const p of places) {
+    const at = located(path, text, sources, p.start, p.end);
+    if (at !== undefined) out.push(at!);
+  }
+  return out;
+}
+
+// The start of the expression a `.` at `end` follows: names, `.`, `?.` and bracketed calls and
+// indexes, read backwards.
+function chainStart(src: string, end: usize): usize {
+  let i = end;
+  while (i > 0) {
+    const c = src.charAt((i - 1) as i64);
+    if (c === ")" || c === "]") {
+      const open = c === ")" ? "(" : "[";
+      let depth: usize = 0;
+      while (i > 0) {
+        const d = src.charAt((i - 1) as i64);
+        i--;
+        if (d === c) depth++;
+        else if (d === open) {
+          depth--;
+          if (depth === 0) break;
+        }
+      }
+      continue;
+    }
+    if (!/[\w$#]/.test(c)) break;
+    while (i > 0 && /[\w$#]/.test(src.charAt((i - 1) as i64))) i--;
+    if (i > 0 && src.charAt((i - 1) as i64) === ".") {
+      i--;
+      if (i > 0 && src.charAt((i - 1) as i64) === "?") i--;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+// Completion items for members, by LSP's kinds: a field, a method, a property.
+function items(checked: Ref<Checked>, members: Ref<Member[]>): string {
+  let out: { label: string; kind: i64; detail?: string }[] = [];
+  for (const m of members) {
+    let item: { label: string; kind: i64; detail?: string } = { label: m.name, kind: m.kind === "field" ? 5 : m.kind === "method" ? 2 : 10 };
+    if (m.type !== undefined) item.detail = named(checked, m.type!);
+    out.push(item);
+  }
+  return JSON.stringify({ isIncomplete: false, items: out });
+}
+
+// The members offered after the `.` before `offset` in `text`, the document at `path`. Code being
+// typed doesn't parse with `x.` in it, so the document is checked with the `.` and what follows it
+// up to the cursor left out, and the expression ending where the `.` was gives the type.
+/** @throws {Error | IoError} */
+export function complete(session: Session, path: string, text: string, offset: usize, open: Map<string, string>): string {
+  const none = '{"isIncomplete":false,"items":[]}';
+  let start = offset;
+  while (start > 0 && /[\w$#]/.test(text.charAt((start - 1) as i64))) start--;
+  if (start === 0 || text.charAt((start - 1) as i64) !== ".") return none;
+  let objectEnd = start - 1;
+  if (objectEnd > 0 && text.charAt((objectEnd - 1) as i64) === "?") objectEnd--;
+  const stripped = text.slice(0, objectEnd as i64) + text.slice(offset as i64);
+  let files = open;
+  files.set(path, stripped);
+  let looked: string[] = [];
+  try {
+    const made = new Queries(path, undefined, files, true).checked(session, looked, undefined);
+    const index = new Index(made.checked, made.loaded.modules);
+    const from = chainStart(stripped, objectEnd);
+    let found: i64 = -1;
+    for (let i: usize = 0; i < index.typed.length; i++) {
+      const t: Ref<Typed> = index.typed[i]!;
+      if (t.end !== objectEnd || t.start < from) continue;
+      if (found < 0 || t.start < index.typed[found as usize]!.start) found = i as i64;
+    }
+    if (found >= 0) return items(made.checked, membersOf(made.checked, index.typed[found as usize]!.type, objectEnd));
+    const name = stripped.slice(from as i64, objectEnd as i64);
+    if (/^[A-Za-z_$][\w$]*$/.test(name)) return items(made.checked, staticsOf(made.checked, name, objectEnd));
+    return none;
+  } catch (e) {
+    if (e instanceof CompileError) return none;
+    throw e;
+  }
+}
+
+// The edit formatting `text` makes: the whole document replaced, or none when it is formatted
+// already or doesn't parse.
+export function formatting(text: string): string {
+  let formatted = "";
+  try {
+    formatted = format(text);
+  } catch (e) {
+    return "null";
+  }
+  if (formatted === text) return "[]";
+  return JSON.stringify([{ range: { start: { line: 0, character: 0 }, end: position(text, text.length) }, newText: formatted }]);
+}
+
+// A "Run" lens above `main` and a "Run test" lens above each test, whose commands the editor runs
+// as `fishc run` and `fishc test <name>`; a document that doesn't parse has none.
+export function lenses(path: string, text: string): string {
+  let out: { range: Range; command: { title: string; command: string; arguments: string[] } }[] = [];
+  let ids: Ids = { last: 0 };
+  let program: Stmt[] = [];
+  try {
+    program = parse(text, ids);
+  } catch (e) {
+    return "[]";
+  }
+  for (const s of program) {
+    const declared: Ref<Stmt> = s.kind === "export" ? s.body : s;
+    if (declared.kind === "function" && declared.name === "main" && declared.body !== undefined) {
+      const range = { start: position(text, s.start), end: position(text, s.start) };
+      out.push({ range, command: { title: "Run", command: "fsh.run", arguments: [path] } });
+      continue;
+    }
+    try {
+      const test = testOf(s);
+      if (test !== undefined) {
+        const range = { start: position(text, s.start), end: position(text, s.start) };
+        out.push({ range, command: { title: "Run test", command: "fsh.runTest", arguments: [path, test!.name] } });
+      }
+    } catch (e) {
+      continue;
+    }
+  }
+  return JSON.stringify(out);
+}
+
 // A message framed as LSP sends one.
 function send(body: string) {
   process.stdout.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
@@ -159,6 +331,12 @@ function notify(method: string, params: string) {
 
 // What a request gives: its result's JSON, or an error with its code.
 type Reply = { result: string } | { code: i64; message: string };
+
+// What the server answers, sent in reply to `initialize`.
+const CAPABILITIES = {
+  textDocumentSync: 1, inlayHintProvider: true, hoverProvider: true, definitionProvider: true, referencesProvider: true,
+  completionProvider: { triggerCharacters: ["."] }, documentFormattingProvider: true, codeLensProvider: { resolveProvider: false },
+};
 
 // The document last checked cleanly: which one, the text it was checked with, and the check
 // itself, which the next check of the same document starts from.
@@ -174,12 +352,15 @@ class Server {
   shutdown: boolean;
   documents: Map<string, string>;
   held: Held[];
+  // What hover, definition and references read from the held check, made when one first asks.
+  index: Index[];
   changed: boolean;
 
   constructor() {
     this.shutdown = false;
     this.documents = new Map<string, string>();
     this.held = [];
+    this.index = [];
     this.changed = false;
   }
 
@@ -206,6 +387,7 @@ class Server {
       for (const [u, t] of this.documents) if (u.startsWith("file:")) open.set(resolve(fileURLToPath(u)), t);
       const found = diagnose(cachedSession(), fileURLToPath(uri), now, open, kept);
       notify("textDocument/publishDiagnostics", JSON.stringify({ uri, diagnostics: found.diagnostics }));
+      this.index = [];
       if (found.kept !== undefined) this.held = [{ uri, text: now, kept: found.kept! }];
     } catch (e) {
       notify("window/logMessage", JSON.stringify({ type: 1, message: `fishc couldn't check ${uri}: ${(e as { message: string }).message}` }));
@@ -235,7 +417,10 @@ class Server {
     } else if (method === "textDocument/didSave") this.changed = true;
     else if (method === "textDocument/didClose") {
       this.documents.delete(uri);
-      if (this.held.length > 0 && this.held[0]!.uri === uri) this.held = [];
+      if (this.held.length > 0 && this.held[0]!.uri === uri) {
+        this.held = [];
+        this.index = [];
+      }
       const none: Diagnostic[] = [];
       notify("textDocument/publishDiagnostics", JSON.stringify({ uri, diagnostics: none }));
       // Its importers now read it from disk.
@@ -243,18 +428,80 @@ class Server {
     }
   }
 
+  // Whether the held check is of the document at `uri` as it reads now, checking it first when it
+  // isn't, so a request made before the change was checked doesn't wait for the next edit.
+  current(this: Mut<this>, uri: string): boolean {
+    if (!this.fresh(uri)) this.check(uri);
+    return this.fresh(uri);
+  }
+
+  fresh(uri: string): boolean {
+    const written = this.documents.get(uri);
+    return this.held.length > 0 && this.held[0]!.uri === uri && written !== undefined && this.held[0]!.text === written!;
+  }
+
+  // The held check's index, made the first time a request needs it.
+  indexed(this: Mut<this>) {
+    if (this.index.length > 0) return;
+    const made = new Index(this.held[0]!.kept.checked, this.held[0]!.kept.loaded.modules);
+    this.index.push(made);
+  }
+
+  // Hover, definition and references, at the request's position in the held check's document.
+  navigate(this: Mut<this>, method: string, params: Ref<Params>): string {
+    const uri = params.textDocument?.uri ?? "";
+    const at: Ref<Position | undefined> = params.position;
+    if (at === undefined || !this.current(uri)) return method === "textDocument/references" ? "[]" : "null";
+    this.indexed();
+    const held: Ref<Held> = this.held[0]!;
+    const index: Ref<Index> = this.index[0]!;
+    let path = "";
+    try {
+      path = fileURLToPath(uri);
+      if (method === "textDocument/hover") return hover(held.kept.checked, index, held.kept.loaded.sources, path, held.text, offsetOf(held.text, at!));
+    } catch (e) {
+      return "null";
+    }
+    const offset = offsetOf(held.text, at!);
+    const sources: Ref<Source[]> = held.kept.loaded.sources;
+    if (method === "textDocument/definition") {
+      const decl = index.declAt(offset);
+      const there = decl === undefined ? undefined : located(path, held.text, sources, decl!.start, decl!.end);
+      return there === undefined ? "null" : JSON.stringify(there!);
+    }
+    return JSON.stringify(references(index, sources, path, held.text, offset, params.context?.includeDeclaration ?? true));
+  }
+
+  // Completion, formatting and code lenses, which read the document's text as it is now.
+  edited(this: Mut<this>, method: string, params: Ref<Params>): string {
+    const uri = params.textDocument?.uri ?? "";
+    const text = this.documents.get(uri);
+    if (text === undefined || !uri.startsWith("file:")) return "null";
+    try {
+      const path = resolve(fileURLToPath(uri));
+      if (method === "textDocument/formatting") return formatting(text!);
+      if (method === "textDocument/codeLens") return lenses(path, text!);
+      const at: Ref<Position | undefined> = params.position;
+      if (at === undefined) return "null";
+      let open = new Map<string, string>();
+      for (const [u, t] of this.documents) if (u.startsWith("file:")) open.set(resolve(fileURLToPath(u)), t);
+      return complete(cachedSession(), path, text!, offsetOf(text!, at!), open);
+    } catch (e) {
+      notify("window/logMessage", JSON.stringify({ type: 1, message: `fishc couldn't answer '${method}': ${(e as { message: string }).message}` }));
+      return "null";
+    }
+  }
+
   request(this: Mut<this>, method: string, params: Ref<Params>): Reply {
     if (method === "textDocument/inlayHint") {
       const uri = params.textDocument?.uri ?? "";
-      // A hint asked for before the change was checked shouldn't wait for the next edit.
-      const written = this.documents.get(uri);
-      const checked = this.held.length > 0 && this.held[0]!.uri === uri && written !== undefined && this.held[0]!.text === written!;
-      if (!checked) this.check(uri);
       const range: Ref<Range | undefined> = params.range;
-      if (this.held.length === 0 || this.held[0]!.uri !== uri || range === undefined) return { result: "[]" };
+      if (!this.current(uri) || range === undefined) return { result: "[]" };
       return { result: JSON.stringify(hints(this.held[0]!.kept.checked, this.held[0]!.text, range)) };
     }
-    if (method === "initialize") return { result: JSON.stringify({ capabilities: { textDocumentSync: 1, inlayHintProvider: true }, serverInfo: { name: "fishc" } }) };
+    if (method === "textDocument/hover" || method === "textDocument/definition" || method === "textDocument/references") return { result: this.navigate(method, params) };
+    if (method === "textDocument/completion" || method === "textDocument/formatting" || method === "textDocument/codeLens") return { result: this.edited(method, params) };
+    if (method === "initialize") return { result: JSON.stringify({ capabilities: CAPABILITIES, serverInfo: { name: "fishc" } }) };
     if (method === "shutdown") {
       this.shutdown = true;
       return { result: "null" };

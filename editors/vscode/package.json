@@ -68,13 +68,18 @@
             "enum": [
               "build",
               "run",
-              "check"
+              "check",
+              "test"
             ],
             "description": "The fishc command to run."
           },
           "file": {
             "type": "string",
-            "description": "The .fsh file it runs on."
+            "description": "The .fsh file it runs on; for test, a file in the package whose tests run."
+          },
+          "test": {
+            "type": "string",
+            "description": "For test: the text the names of the tests to run contain."
           }
         }
       }
@@ -97,7 +102,13 @@
           "message": 6
         }
       }
-    ]
+    ],
+    "configurationDefaults": {
+      "[fsh]": {
+        "editor.defaultFormatter": "fishlang.fish-lang",
+        "editor.formatOnSave": true
+      }
+    }
   },
   "scripts": {
     "test:grammar": "vscode-tmgrammar-test -c package.json -g test/grammar/TypeScript.tmLanguage.json 'test/grammar/*.fsh'",
