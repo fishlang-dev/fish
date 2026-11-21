@@ -4,21 +4,28 @@
 // expect: stream: 3 entries
 // Archives the system's zip made, listed from a path and read from a stream, a deflated file's
 // data read back.
-import { entries, list } from "fish:zip";
+import { entries, list, ZipError } from "fish:zip";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+// Text that deflates at well under the default 100:1 limit, unlike a run of one letter.
+function varied(size: i64): string {
+  let t = "";
+  for (let i = 0; (t.length as i64) < size; i++) t += String(i * 7919 % 10007) + ",";
+  return t.slice(0, size);
+}
+
 async function* chunked(bytes: u8[]): AsyncGenerator<u8[]> {
   for (let at = 0; at < (bytes.length as i64); at += 300) yield bytes.slice(at, at + 300);
 }
 
-async function main(): Promise<void> throws IoError | Error {
+async function main(): Promise<void> throws IoError | Error | ZipError {
   const dir = mkdtempSync(join(tmpdir(), "fish-zip-"));
   mkdirSync(join(dir, "src", "sub"), { recursive: true });
   writeFileSync(join(dir, "src", "a.txt"), "hello");
-  writeFileSync(join(dir, "src", "sub", "b.txt"), "b".repeat(3000));
+  writeFileSync(join(dir, "src", "sub", "b.txt"), varied(3000));
   spawnSync("zip", ["-q", "-r", join(dir, "x.zip"), "a.txt", "sub"], { cwd: join(dir, "src") });
   const headers = await list(join(dir, "x.zip"));
   let parts: string[] = [];
@@ -42,7 +49,7 @@ async function main(): Promise<void> throws IoError | Error {
 // expect: ratio: 'z.txt' unpacks more than 2 bytes per byte packed; raise maxRatio if it is trusted
 // expect: not zip: this isn't a zip archive: it has no end of central directory record
 // A corrupt entry, an encrypted one, each limit and bytes that aren't zip are refused.
-import { list } from "fish:zip";
+import { list, ZipError } from "fish:zip";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -57,7 +64,7 @@ async function attempt(source: u8[], limits: { maxEntries?: i64; maxBytes?: i64;
   }
 }
 
-async function main(): Promise<void> throws IoError {
+async function main(): Promise<void> throws IoError | ZipError {
   const dir = mkdtempSync(join(tmpdir(), "fish-zip-"));
   writeFileSync(join(dir, "a.txt"), "hello");
   writeFileSync(join(dir, "z.txt"), "0".repeat(100000));
@@ -96,10 +103,11 @@ async function main(): Promise<void> throws IoError {
 // expect: nothing outside: true
 // An archive the system's zip made extracted and read back, and archives with each escaping
 // entry refused with nothing written outside the target.
-import { extract, pack } from "fish:zip";
+import { extract, pack, ZipError } from "fish:zip";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { ZlibError } from "node:zlib";
 import { join } from "node:path";
 
 async function archive(paths: string[], cwd: string): Promise<u8[]> throws IoError | ZlibError {
@@ -118,7 +126,7 @@ async function attempt(what: string, bytes: u8[], to: string): Promise<void> {
   }
 }
 
-async function main(): Promise<void> throws IoError | ZlibError | Error {
+async function main(): Promise<void> throws IoError | ZlibError | Error | ZipError {
   const dir = mkdtempSync(join(tmpdir(), "fish-zip-"));
   mkdirSync(join(dir, "src"), { recursive: true });
   writeFileSync(join(dir, "src", "a.txt"), "hello");
@@ -149,17 +157,24 @@ async function main(): Promise<void> throws IoError | ZlibError | Error {
 // expect: unzip -l: a.txt big.txt sub/ sub/b.txt
 // An archive create writes reads back through entries() and through the system's unzip, which
 // tests every entry's CRC.
-import { create, entries } from "fish:zip";
+import { create, entries, ZipError } from "fish:zip";
+
+function varied(size: i64): string {
+  let t = "";
+  for (let i = 0; (t.length as i64) < size; i++) t += String(i * 7919 % 10007) + ",";
+  return t.slice(0, size);
+}
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { ZlibError } from "node:zlib";
 import { join } from "node:path";
 
-async function main(): Promise<void> throws IoError | ZlibError | Error {
+async function main(): Promise<void> throws IoError | ZlibError | Error | ZipError {
   const dir = mkdtempSync(join(tmpdir(), "fish-zip-"));
   mkdirSync(join(dir, "src", "sub"), { recursive: true });
   writeFileSync(join(dir, "src", "a.txt"), "hello");
-  writeFileSync(join(dir, "src", "big.txt"), "abc".repeat(16666) + "ab");
+  writeFileSync(join(dir, "src", "big.txt"), varied(50000));
   writeFileSync(join(dir, "src", "sub", "b.txt"), "bye");
   await create(join(dir, "x.zip"), ["a.txt", "big.txt", "sub"], { cwd: join(dir, "src") });
   let parts: string[] = [];

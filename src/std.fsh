@@ -574,7 +574,10 @@ class Request {
   // The body's bytes; read through body, text(), bytes() or json().
   #body: u8[];
   // A body given as a stream, at most one, read into #body when the request is sent or read.
-  #bytes: Lock<ReadableStream<u8[]>[]>;
+  // Shared, so a request still clones, its copies sharing the one stream. The stream's
+  // generator is held rather than the stream, since a class field naming a ReadableStream
+  // instance makes it before its type parameter is bound.
+  #bytes: shared<{ s: Lock<Dyn<AsyncGenerator<u8[]>>[]> }>;
   signal: AbortSignal;
   // The :params a Router's route took from the path, as name then value.
   params: string[] = [];
@@ -586,14 +589,14 @@ class Request {
     let headers = new Headers();
     let signal = new AbortController().signal;
     let bytes: u8[] = [];
-    let streams: ReadableStream<u8[]>[] = [];
+    let streams: Dyn<AsyncGenerator<u8[]>>[] = [];
     if (init !== null) {
       const m = init.method;
       if (m !== null) method = m.toUpperCase();
       const h = init.headers;
       if (h !== null) headers = h;
       const b = init.body;
-      if (b instanceof ReadableStream) streams.push(b);
+      if (b instanceof ReadableStream) streams.push(b.__values());
       else if (b !== null) bytes = __httpBody(b);
       const s = init.signal;
       if (s !== null) signal = s;
@@ -601,16 +604,17 @@ class Request {
     this.method = method;
     this.headers = headers;
     this.#body = bytes;
-    this.#bytes = new Lock(streams);
+    this.#bytes = shared({ s: new Lock(streams) });
     this.signal = signal;
   }
 
   __setBody(this: Mut<this>, body: string | u8[] | ReadableStream<u8[]>) {
     if (body instanceof ReadableStream) {
       this.#body = [];
-      this.#bytes.update((s) => {
-        s.length = 0;
-        s.push(body);
+      const chunks = body.__values();
+      this.#bytes.s.update((s) => {
+        while (s.length > 0) s.pop();
+        s.push(chunks);
       });
     } else this.#body = __httpBody(body);
   }
@@ -621,16 +625,16 @@ class Request {
 
   // A body given as a stream, read to its end into the bytes, as fetch sends it with a length.
   async __drain(this: Mut<this>) {
-    const given = this.#bytes.update((s) => s.pop());
+    const given = this.#bytes.s.update((s) => s.pop());
     if (given === null) return;
-    const bytes = await __streamBytes(given);
+    const bytes = await __streamBytes(ReadableStream.from(__streamDyn(given)));
     this.#body = bytes;
   }
 
   // The body as a stream of bytes, or null when there is none.
   get body(): ReadableStream<u8[]> | null {
-    const given = this.#bytes.update((s) => s.pop());
-    if (given !== null) return given;
+    const given = this.#bytes.s.update((s) => s.pop());
+    if (given !== null) return ReadableStream.from(__streamDyn(given));
     if (this.#body.length === 0) return null;
     return ReadableStream.from(__streamOnce(this.#body.clone()));
   }
@@ -643,8 +647,8 @@ class Request {
 
   // The body's bytes as they were sent; a streamed one's read to its end, once.
   async bytes(): Promise<u8[]> {
-    const given = this.#bytes.update((s) => s.pop());
-    if (given !== null) return await __streamBytes(given);
+    const given = this.#bytes.s.update((s) => s.pop());
+    if (given !== null) return await __streamBytes(ReadableStream.from(__streamDyn(given)));
     return this.#body.clone();
   }
 
@@ -685,7 +689,8 @@ class Response {
   // The body's bytes, when it isn't streamed; read through body, text(), bytes() or json().
   #body: u8[];
   // A body given as a stream of bytes, in place of #body, at most one, taken out once read.
-  #bytes: Lock<ReadableStream<u8[]>[]>;
+  // Its generator, not the stream, as Request holds one.
+  #bytes: Lock<Dyn<AsyncGenerator<u8[]>>[]>;
   // A body sent in pieces as the generator produces them, in place of #body. Locked, in an
   // array of at most one, so whoever reads it can take it out through a shared borrow; private,
   // so a response prints as it would without one.
@@ -715,12 +720,12 @@ class Response {
     }
     let bytes: u8[] = [];
     let stream: Dyn<AsyncGenerator<string>>[] = [];
-    let streamed: ReadableStream<u8[]>[] = [];
+    let streamed: Dyn<AsyncGenerator<u8[]>>[] = [];
     if (typeof body === "string") {
       bytes = new TextEncoder().encode(body);
       if (!headers.has("content-type")) headers.set("content-type", "text/plain;charset=UTF-8");
     } else if (Array.isArray(body)) bytes = body;
-    else if (body instanceof ReadableStream) streamed.push(body);
+    else if (body instanceof ReadableStream) streamed.push(body.__values());
     else if (body !== null) {
       stream.push(body);
       if (!headers.has("content-type")) headers.set("content-type", "text/plain;charset=UTF-8");
@@ -776,7 +781,9 @@ class Response {
 
   // A body given as a stream of bytes, taken out for whoever sends or reads it, or null.
   __byteStream(): ReadableStream<u8[]> | null {
-    return this.#bytes.update((s) => s.pop());
+    const chunks = this.#bytes.update((s) => s.pop());
+    if (chunks === null) return null;
+    return ReadableStream.from(__streamDyn(chunks));
   }
 
   // The bytes of a body that isn't streamed.
@@ -847,6 +854,12 @@ class Response {
 
 // A stream's chunks joined into one array of bytes. A body's readers don't throw, so a source
 // that errors ends the body where it failed.
+// A byte stream's generator, as a generator a stream can be made from again.
+async function* __streamDyn(chunks: Dyn<AsyncGenerator<u8[]>>): AsyncGenerator<u8[]> {
+  let source = chunks;
+  for await (const chunk of source) yield chunk;
+}
+
 async function __streamBytes(stream: ReadableStream<u8[]>): Promise<u8[]> {
   let out: u8[] = [];
   for await (const chunk of stream) for (const b of chunk) out.push(b);
@@ -2113,7 +2126,9 @@ class Http1 {
       return;
     }
     await conn.write(out, AbortSignal.timeout(30000));
-    await conn.write(body, AbortSignal.timeout(30000));
+    // ponytail: the body is private to the response now, so a large one is copied once to write
+    // it; handing the bytes over would need the response by value here.
+    await conn.write(body.clone(), AbortSignal.timeout(30000));
   }
 
   // Where a request's head ends: the index of its blank line's CR LF CR LF, or -1. The search
@@ -6750,6 +6765,7 @@ export class Pool {
 import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve } from "path";
 import { gunzipSync, gzipSync, ZlibError } from "zlib";
+import { open } from "fs/promises";
 
 // What reading, extracting or writing an archive refuses, naming the entry where it can.
 export class TarError extends Error {
@@ -6857,7 +6873,7 @@ function typeOf(flag: i64, path: string): TarEntryType | null {
 }
 
 // The archive's raw chunks, inflated first when they start as gzip does, within the limits.
-async function* inflated(source: TarSource, limits: Ref<TarLimits>): AsyncGenerator<u8[]> throws IoError | TarError {
+async function* inflated(source: TarSource, maxBytes: i64, maxEntries: i64, ratio: i64): AsyncGenerator<u8[]> throws IoError | TarError {
   let first = true;
   let packed: u8[] = [];
   let gzip = false;
@@ -6876,10 +6892,8 @@ async function* inflated(source: TarSource, limits: Ref<TarLimits>): AsyncGenera
     for (const b of chunk) packed.push(b);
   }
   if (!gzip) return;
-  const maxBytes = limits.maxBytes ?? MAX_BYTES;
-  const ratio = limits.maxRatio ?? MAX_RATIO;
   // The headers come on top of the entries' data, up to three blocks an entry with long names.
-  const headers = maxBytes + 512 * 3 * (limits.maxEntries ?? MAX_ENTRIES);
+  const headers = maxBytes + 512 * 3 * maxEntries;
   const cap = headers < (packed.length as i64) * ratio ? headers : (packed.length as i64) * ratio;
   let unpacked: u8[] = [];
   try {
@@ -6895,7 +6909,7 @@ async function* inflated(source: TarSource, limits: Ref<TarLimits>): AsyncGenera
 export async function* entries(source: TarSource, limits: TarLimits = {}): AsyncGenerator<TarEntry> throws IoError | TarError {
   const maxEntries = limits.maxEntries ?? MAX_ENTRIES;
   const maxBytes = limits.maxBytes ?? MAX_BYTES;
-  let chunks = inflated(source, limits);
+  let chunks = inflated(source, maxBytes, maxEntries, limits.maxRatio ?? MAX_RATIO);
   // What has arrived and not been read, and whether the input has ended.
   let held: u8[] = [];
   let ended = false;
@@ -6908,7 +6922,7 @@ export async function* entries(source: TarSource, limits: TarLimits = {}): Async
   while (true) {
     while ((held.length as i64) < 512 && !ended) {
       const step = await chunks.next();
-      if (step.done) ended = true;
+      if (step.done === true) ended = true;
       else for (const b of step.value) held.push(b);
     }
     const block = held.slice(0, 512);
@@ -6927,7 +6941,7 @@ export async function* entries(source: TarSource, limits: TarLimits = {}): Async
     const padded = (size + 511) / 512 * 512;
     while ((held.length as i64) < padded && !ended) {
       const step = await chunks.next();
-      if (step.done) ended = true;
+      if (step.done === true) ended = true;
       else for (const b of step.value) held.push(b);
     }
     const data = held.slice(0, padded);
@@ -6963,7 +6977,8 @@ export async function* entries(source: TarSource, limits: TarLimits = {}): Async
     count++;
     if (count > maxEntries) throw new TarError("this tar archive holds more than " + String(maxEntries) + " entries; raise maxEntries if it is trusted", path);
     total += size;
-    yield { path, type, size: type === "file" ? size : 0, mode: number(block, 100, 8) & 0o7777, mtime: number(block, 136, 12), target, data: type === "file" ? body : [] };
+    const none: u8[] = [];
+    yield { path, type, size: type === "file" ? size : 0, mode: number(block, 100, 8) & 0o7777, mtime: number(block, 136, 12), target, data: type === "file" ? body : none };
   }
 }
 
@@ -7123,21 +7138,27 @@ function ustarBlock(name: string, prefix: string, flag: i64, size: i64, mode: i6
   return block;
 }
 
-// The entries for path and, for a directory, everything under it in sorted order.
-function* walked(cwd: string, path: string): Generator<string> throws IoError {
-  yield path;
+// path and, for a directory, everything under it in sorted order, added to out.
+function walked(cwd: string, path: string, out: Mut<string[]>): void throws IoError {
+  out.push(path);
   const st = lstatSync(join(cwd, path));
   if (!st.isDirectory()) return;
   let names = readdirSync(join(cwd, path));
   names.sort();
-  for (const n of names) for (const p of walked(cwd, join(path, n))) yield p;
+  for (const n of names) walked(cwd, join(path, n), out);
 }
 
-async function* packed(paths: string[], cwd: string, gzip: boolean): AsyncGenerator<u8[]> throws IoError | ZlibError {
+// An archive of the paths, each relative to cwd, and everything under each directory, as its
+// chunks; gzipped with gzip.
+export async function* pack(paths: string[], options: TarPackOptions = {}): AsyncGenerator<u8[]> throws IoError | ZlibError {
+  const cwd = options.cwd ?? ".";
+  const gzip = options.gzip === true;
   // ponytail: zlib in std deflates whole buffers, so a gzipped archive is gathered first.
   let gathered: u8[] = [];
   for (const given of paths) {
-    for (const path of walked(cwd, given)) {
+    let found: string[] = [];
+    walked(cwd, given, found);
+    for (const path of found) {
       const full = join(cwd, path);
       const st = lstatSync(full);
       const mtime = Math.floor(st.mtimeMs / 1000.0) as i64;
@@ -7166,25 +7187,22 @@ async function* packed(paths: string[], cwd: string, gzip: boolean): AsyncGenera
   yield gzipSync(gathered);
 }
 
-// An archive of the paths, each relative to cwd, and everything under each directory, as its
-// chunks; gzipped with gzip.
-export function pack(paths: string[], options: TarPackOptions = {}): AsyncGenerator<u8[]> throws IoError | ZlibError {
-  return packed(paths, options.cwd ?? ".", options.gzip === true);
-}
-
 // The archive pack makes, written to file.
 export async function create(file: string, paths: string[], options: TarPackOptions = {}): Promise<void> throws IoError | ZlibError {
-  const fd = openSync(file, "w");
+  let out = await open(file, "w");
   let chunks = pack(paths, options);
-  for await (const chunk of chunks) writeSync(fd, chunk);
-  closeSync(fd);
+  for await (const chunk of chunks) {
+    const _n = await out.write(chunk);
+  }
+  await out.close();
 }
 `,
   // Zip archives, read through their central directory and written deflated, as fish:zip.
   "fish:zip": String.raw`
-import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, utimesSync, chmodSync, writeFileSync, writeSync } from "fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, utimesSync, chmodSync, writeFileSync } from "fs";
 import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { deflateRawSync, inflateRawSync, ZlibError } from "zlib";
+import { open } from "fs/promises";
 
 // What reading, extracting or writing an archive refuses, naming the entry where it can.
 export class ZipError extends Error {
@@ -7359,8 +7377,9 @@ export async function* entries(source: ZipSource, limits: ZipLimits = {}): Async
     const dataAt = local + 30 + le(z, local + 26, 2) + le(z, local + 28, 2);
     if (dataAt + packed > size) throw new ZipError("'" + path + "' runs past the archive's end", path);
     const raw = z.slice(dataAt, dataAt + packed);
-    let data: u8[] = raw;
-    if (method === 8) {
+    let data: u8[] = [];
+    if (method === 0) data = raw;
+    else {
       try {
         data = inflateRawSync(raw, { maxOutputLength: unpacked > 0 ? unpacked : 1 });
       } catch (err) {
@@ -7376,7 +7395,8 @@ export async function* entries(source: ZipSource, limits: ZipLimits = {}): Async
     const type: ZipEntryType = path.endsWith("/") || kind === 0o040000 ? "directory" : kind === 0o120000 ? "symlink" : "file";
     if (kind !== 0 && kind !== 0o100000 && kind !== 0o040000 && kind !== 0o120000) throw new ZipError("'" + path + "' is a device, FIFO or another special entry, which isn't read", path);
     const target = type === "symlink" ? new TextDecoder().decode(data) : "";
-    yield { path, type, size: type === "file" ? unpacked : 0, mode: mode & 0o7777, mtime, target, data: type === "file" ? data : [] };
+    const none: u8[] = [];
+    yield { path, type, size: type === "file" ? unpacked : 0, mode: mode & 0o7777, mtime, target, data: type === "file" ? data : none };
   }
 }
 
@@ -7435,14 +7455,14 @@ export async function extract(source: ZipSource, dir: string, limits: ZipLimits 
   return written;
 }
 
-// The entries for path and, for a directory, everything under it in sorted order.
-function* walked(cwd: string, path: string): Generator<string> throws IoError {
-  yield path;
+// path and, for a directory, everything under it in sorted order, added to out.
+function walked(cwd: string, path: string, out: Mut<string[]>): void throws IoError {
+  out.push(path);
   const st = lstatSync(join(cwd, path));
   if (!st.isDirectory()) return;
   let names = readdirSync(join(cwd, path));
   names.sort();
-  for (const n of names) for (const p of walked(cwd, join(path, n))) yield p;
+  for (const n of names) walked(cwd, join(path, n), out);
 }
 
 // A time in seconds since the epoch as a DOS date and time, in UTC, clamped to DOS's 1980.
@@ -7456,11 +7476,17 @@ function dosParts(seconds: i64): [i64, i64] {
 
 type __zipRecord = { name: u8[]; method: i64; crc: i64; packed: i64; unpacked: i64; date: i64; time: i64; mtime: i64; external: i64; offset: i64 };
 
-async function* packed(paths: string[], cwd: string, level: i64): AsyncGenerator<u8[]> throws IoError | ZlibError {
+// A zip archive of the paths, each relative to cwd, and everything under each directory, as its
+// chunks, each file deflated at level unless storing it is smaller.
+export async function* pack(paths: string[], options: ZipPackOptions = {}): AsyncGenerator<u8[]> throws IoError | ZlibError {
+  const cwd = options.cwd ?? ".";
+  const level = options.level ?? 6;
   let records: __zipRecord[] = [];
   let offset = 0;
   for (const given of paths) {
-    for (const path of walked(cwd, given)) {
+    let found: string[] = [];
+    walked(cwd, given, found);
+    for (const path of found) {
       const full = join(cwd, path);
       const st = lstatSync(full);
       const mtime = Math.floor(st.mtimeMs / 1000.0) as i64;
@@ -7473,7 +7499,7 @@ async function* packed(paths: string[], cwd: string, level: i64): AsyncGenerator
       const unpacked = data.length as i64;
       let method = 0;
       if (!directory && !link && unpacked > 0) {
-        const deflated = deflateRawSync(data, { level });
+        const deflated = deflateRawSync(data.clone(), { level });
         if ((deflated.length as i64) < unpacked) {
           data = deflated;
           method = 8;
@@ -7579,18 +7605,14 @@ async function* packed(paths: string[], cwd: string, level: i64): AsyncGenerator
   yield central;
 }
 
-// A zip archive of the paths, each relative to cwd, and everything under each directory, as its
-// chunks, each file deflated at level unless storing it is smaller.
-export function pack(paths: string[], options: ZipPackOptions = {}): AsyncGenerator<u8[]> throws IoError | ZlibError {
-  return packed(paths, options.cwd ?? ".", options.level ?? 6);
-}
-
 // The archive pack makes, written to file.
 export async function create(file: string, paths: string[], options: ZipPackOptions = {}): Promise<void> throws IoError | ZlibError {
-  const fd = openSync(file, "w");
+  let out = await open(file, "w");
   let chunks = pack(paths, options);
-  for await (const chunk of chunks) writeSync(fd, chunk);
-  closeSync(fd);
+  for await (const chunk of chunks) {
+    const _n = await out.write(chunk);
+  }
+  await out.close();
 }
 `,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
@@ -8310,62 +8332,134 @@ const STREAMS = `
 // What a reader's read() gives: a value, or the end of the stream, as a generator's next() does.
 type ReadableStreamReadResult<T> = { done: true } | { done: false; value: T };
 
-// A stream's values, read once, by one reader at a time. Every stream holds a generator; one
-// made from an underlying source reads what its controller queues. Shared, so a reader and the
-// stream it came from see one generator and one lock.
-type __streamState<T> = { source: Lock<Dyn<AsyncGenerator<T>>[]>; locked: Atomic<i64>; queue: Lock<__streamQueue<T>[]> };
-
+// A stream's state, shared by the stream, its reader and its controller: the generator its
+// values come from, whether a reader holds it, and for a stream made from an underlying source,
+// the values queued and not yet read, whether the source closed, the error it reported and its
+// cancel callback. Written out in place rather than named, and one level deep, since a type
+// argument inside an alias or a shared inside a shared isn't carried into a generic class's
+// instances.
 class ReadableStream<T> {
-  #state: shared<__streamState<T>>;
+  private state: shared<{ source: Lock<Dyn<AsyncGenerator<T>>[]>; locked: Atomic<i64>; items: Lock<T[]>; closed: Atomic<i64>; failure: Lock<Error[]>; cancel: Lock<((reason: string) => void)[]> }>;
 
   constructor(source?: UnderlyingSource<T>) {
-    const cancels: ((reason: string) => void)[] = [];
-    const queue = shared<__streamQueue<T>>({ items: new Lock<T[]>([]), closed: new Atomic(0), failure: new Lock<Error[]>([]), cancel: new Lock(cancels) });
     const generators: Dyn<AsyncGenerator<T>>[] = [];
-    const queues: __streamQueue<T>[] = [];
-    this.#state = shared<__streamState<T>>({ source: new Lock(generators), locked: new Atomic(0), queue: new Lock(queues) });
+    const cancels: ((reason: string) => void)[] = [];
+    this.state = shared<{ source: Lock<Dyn<AsyncGenerator<T>>[]>; locked: Atomic<i64>; items: Lock<T[]>; closed: Atomic<i64>; failure: Lock<Error[]>; cancel: Lock<((reason: string) => void)[]> }>({ source: new Lock(generators), locked: new Atomic(0), items: new Lock<T[]>([]), closed: new Atomic(0), failure: new Lock<Error[]>([]), cancel: new Lock(cancels) });
     if (source !== null) {
       const start = source.start;
       const pull = source.pull;
       const cancel = source.cancel;
-      if (cancel !== null) queue.cancel.update((c) => c.push(cancel));
-      const controller = new ReadableStreamDefaultController<T>(queue.clone());
-      this.#state.source.update((g) => g.push(__streamPulled(start, pull, controller)));
-      this.#state.queue.update((q) => q.push(queue));
+      if (cancel !== null) this.state.cancel.update((c) => c.push(cancel));
+      const controller = new ReadableStreamDefaultController<T>(this.__handle());
+      this.state.source.update((g) => g.push(__streamPulled<T>(start, pull, controller)));
     }
   }
 
   // A stream of what the generator yields, as ReadableStream.from reads an async iterable.
-  static from(generator: Dyn<AsyncGenerator<T>>): ReadableStream<T> {
-    let stream = new ReadableStream<T>();
-    stream.#state.source.update((g) => g.push(generator));
+  static from<V>(generator: AsyncGenerator<V>): ReadableStream<V> {
+    let stream = new ReadableStream<V>();
+    stream.state.source.update((g) => g.push(generator));
     return stream;
   }
 
   // Whether a reader holds the stream, so no other can read it.
   get locked(): boolean {
-    return this.#state.locked.load() === 1;
+    return this.state.locked.load() === 1;
   }
 
   // A reader of the stream, which locks it until the reader lets it go.
   getReader(): ReadableStreamDefaultReader<T> throws TypeError {
-    if (this.#state.locked.load() === 1) throw new TypeError("this ReadableStream is locked to a reader; release it with 'reader.releaseLock()' first");
-    this.#state.locked.store(1);
-    return new ReadableStreamDefaultReader<T>(this.#state.clone());
+    if (this.state.locked.load() === 1) throw new TypeError("this ReadableStream is locked to a reader; release it with 'reader.releaseLock()' first");
+    this.state.locked.store(1);
+    return new ReadableStreamDefaultReader<T>(this.__handle());
   }
 
   // Ends the stream without reading the rest, running its source's cancel.
   async cancel(reason?: string): Promise<void> throws TypeError {
-    if (this.#state.locked.load() === 1) throw new TypeError("a locked ReadableStream can't be cancelled; cancel it through its reader");
-    __streamCancel(this.#state.clone(), reason ?? "");
+    if (this.state.locked.load() === 1) throw new TypeError("a locked ReadableStream can't be cancelled; cancel it through its reader");
+    this.__cancel(reason ?? "");
+  }
+
+  // A second handle on the same stream, which a reader, a controller or a pipe in another task
+  // reads and changes it through.
+  __handle(): ReadableStream<T> {
+    let stream = new ReadableStream<T>();
+    stream.state = this.state.clone();
+    return stream;
+  }
+
+  // The generator, taken out while a read runs it, since a lock can't be held across an await.
+  __pop(): Dyn<AsyncGenerator<T>> | null {
+    return this.state.source.update((s) => s.pop());
+  }
+
+  __push(g: Dyn<AsyncGenerator<T>>) {
+    this.state.source.update((s) => s.push(g));
+  }
+
+  __lock(): void throws TypeError {
+    if (this.state.locked.load() === 1) throw new TypeError("this ReadableStream is locked to a reader; release it with 'reader.releaseLock()' first");
+    this.state.locked.store(1);
+  }
+
+  // Throws the error the stream's source reported through its controller, if it did.
+  __failed(): void throws Error {
+    const failed = this.state.failure.update((f) => f.length > 0 ? f[0]!.message : null);
+    if (failed !== null) throw new Error(failed);
+  }
+
+  // Drops the stream's generator unread and runs its source's cancel, once.
+  __cancel(reason: string) {
+    this.state.source.update((s) => {
+      while (s.length > 0) s.pop();
+    });
+    this.state.closed.store(1);
+    const cancel = this.state.cancel.update((c) => c.pop());
+    if (cancel !== null) cancel(reason);
+  }
+
+  __unlock() {
+    this.state.locked.store(0);
+  }
+
+  // Queuing into a closed stream panics, where JavaScript throws, so a source's callbacks
+  // needn't declare a throw.
+  __enqueue(chunk: T) {
+    assert(this.state.closed.load() === 0, "this ReadableStream is closed, so nothing more can be enqueued");
+    this.state.items.update((xs) => xs.push(chunk));
+  }
+
+  __close() {
+    this.state.closed.store(1);
+  }
+
+  __error(e: Error) {
+    this.state.failure.update((f) => f.push(e));
+    this.state.items.update((xs) => {
+      while (xs.length > 0) xs.pop();
+    });
+    this.state.closed.store(1);
+  }
+
+  // The first queued value, taken out, or null when nothing is queued.
+  __take(): T | null {
+    return this.state.items.update((xs) => xs.length > 0 ? xs.shift() : null);
+  }
+
+  __closed(): boolean {
+    return this.state.closed.load() === 1;
+  }
+
+  __empty(): boolean {
+    return this.state.items.update((xs) => xs.length === 0);
   }
 
   // What 'for await' over the stream reads, which locks it for good: the generator itself. A
   // loop can't catch, so reading a locked stream this way panics, where JavaScript throws.
   __values(): Dyn<AsyncGenerator<T>> {
-    assert(this.#state.locked.load() === 0, "this ReadableStream is locked to a reader, so 'for await' can't read it; release the reader's lock first");
-    this.#state.locked.store(1);
-    const g = this.#state.source.update((s) => s.pop());
+    assert(this.state.locked.load() === 0, "this ReadableStream is locked to a reader, so 'for await' can't read it; release the reader's lock first");
+    this.state.locked.store(1);
+    const g = this.state.source.update((s) => s.pop());
     if (g === null) return __streamNone<T>();
     return g;
   }
@@ -8373,118 +8467,112 @@ class ReadableStream<T> {
   // Writes each value into the destination, closing it at the end; a failure on either side
   // aborts the destination and is thrown here.
   async pipeTo(dest: Ref<WritableStream<T>>): Promise<void> throws Error | TypeError {
-    let reader = this.getReader();
-    let writer = dest.getWriter();
-    try {
-      while (true) {
-        const r = await reader.read();
-        if (r.done) break;
-        await writer.write(r.value);
-      }
-    } catch (e) {
-      writer.abort(e.message);
-      throw e;
-    }
-    await writer.close();
-    writer.releaseLock();
-    reader.releaseLock();
+    await __streamPipe<T>(this, dest);
   }
 
-  // The pair's readable side, with this stream piped into its writable side in the background.
+  // The pair's readable side, with this stream piped into its writable side once it is read.
   pipeThrough<U>(pair: { writable: WritableStream<T>; readable: ReadableStream<U> }): ReadableStream<U> {
     const writable = pair.writable;
     const readable = pair.readable;
-    const _piping = spawn(__streamPiped<T>(ReadableStream.__sharing<T>(this.#state.clone()), writable));
-    return readable;
+    return ReadableStream.from<U>(__streamThrough<T, U>(this.__handle(), writable, readable));
   }
+}
 
-  // A second handle on the same stream, for a pipe running in another task.
-  static __sharing(state: shared<__streamState<T>>): ReadableStream<T> {
-    let stream = new ReadableStream<T>();
-    stream.#state = state;
-    return stream;
-  }
+async function* __streamNone<T>(): AsyncGenerator<T> {}
+
+// The readable side of a pair, with the pipe into its writable side started on the first read,
+// where a task can be spawned.
+async function* __streamThrough<T, U>(from: ReadableStream<T>, to: WritableStream<T>, out: ReadableStream<U>): AsyncGenerator<U> {
+  const _piping = spawn(__streamPiped<T>(from, to));
+  for await (const x of out) yield x;
 }
 
 // A pipe run for its effect: its failure has already aborted the destination.
 async function __streamPiped<T>(from: ReadableStream<T>, to: WritableStream<T>): Promise<void> {
   try {
-    await from.pipeTo(to);
+    await __streamPipe<T>(from, to);
   } catch (_e) {}
 }
 
-async function* __streamNone<T>(): AsyncGenerator<T> {}
+// Generic code awaits these free functions rather than a stream's async methods, which
+// code generation can't yet reach from inside another generic body.
+
+// A stream's next value, or its end; an error its source reported is thrown here.
+async function __streamRead<T>(s: Ref<ReadableStream<T>>): Promise<ReadableStreamReadResult<T>> throws Error {
+  const taken = s.__pop();
+  if (taken === null) {
+    s.__failed();
+    return { done: true };
+  }
+  let g = taken;
+  const step = await g.next();
+  s.__push(g);
+  if (step.done === false) return { done: false, value: step.value };
+  s.__failed();
+  return { done: true };
+}
+
+// Writes each of a stream's values into the destination and closes it; a failure aborts the
+// destination and is thrown.
+async function __streamPipe<T>(from: Ref<ReadableStream<T>>, to: Ref<WritableStream<T>>): Promise<void> throws Error | TypeError {
+  from.__lock();
+  to.__lock();
+  try {
+    while (true) {
+      const r = await __streamRead<T>(from);
+      if (r.done === true) break;
+      to.__write(r.value);
+    }
+  } catch (e) {
+    to.__abort(e.message);
+    throw e;
+  }
+  to.__close();
+  to.__unlock();
+  from.__unlock();
+}
 
 class ReadableStreamDefaultReader<T> {
-  #state: shared<__streamState<T>>;
-  #released: boolean = false;
+  private stream: ReadableStream<T>;
+  private released: boolean = false;
 
-  constructor(state: shared<__streamState<T>>) {
-    this.#state = state;
+  constructor(stream: ReadableStream<T>) {
+    this.stream = stream;
   }
 
   // The stream's next value, or its end; an error its source reported is thrown here.
-  async read(this: Mut<this>): Promise<ReadableStreamReadResult<T>> throws Error | TypeError {
-    if (this.#released) throw new TypeError("this reader has released its lock, so it can't read");
-    // The generator is taken out while it runs, since a lock can't be held across an await.
-    const taken = this.#state.source.update((s) => s.pop());
-    if (taken === null) {
-      __streamFailed(this.#state.clone());
-      return { done: true };
-    }
-    let g = taken;
-    const step = await g.next();
-    this.#state.source.update((s) => s.push(g));
-    if (step.done === false) return { done: false, value: step.value };
-    __streamFailed(this.#state.clone());
-    return { done: true };
+  async read(): Promise<ReadableStreamReadResult<T>> throws Error | TypeError {
+    if (this.released) throw new TypeError("this reader has released its lock, so it can't read");
+    const r = await __streamRead<T>(this.stream);
+    return r;
   }
 
   // Ends the stream without reading the rest, running its source's cancel.
-  async cancel(this: Mut<this>, reason?: string): Promise<void> {
-    __streamCancel(this.#state.clone(), reason ?? "");
+  async cancel(reason?: string): Promise<void> {
+    this.stream.__cancel(reason ?? "");
   }
 
   // Lets the stream go, so another reader can take it.
   releaseLock(this: Mut<this>) {
-    if (this.#released) return;
-    this.#released = true;
-    this.#state.locked.store(0);
+    if (this.released) return;
+    this.released = true;
+    this.stream.__unlock();
   }
-}
-
-// Throws the error a stream's source reported through its controller, if it did.
-function __streamFailed<T>(state: shared<__streamState<T>>): void throws Error {
-  const failed = state.queue.update((q) => q.length > 0 ? q[0]!.failure.update((f) => f.length > 0 ? f[0]!.message : null) : null);
-  if (failed !== null) throw new Error(failed);
-}
-
-// Drops a stream's generator unread and runs its source's cancel, once.
-function __streamCancel<T>(state: shared<__streamState<T>>, reason: string) {
-  state.source.update((s) => {
-    s.length = 0;
-  });
-  const queue = state.queue.update((q) => q.pop());
-  if (queue === null) return;
-  queue.closed.store(1);
-  const cancel = queue.cancel.update((c) => c.pop());
-  if (cancel !== null) cancel(reason);
 }
 
 // What a writable stream's sink is given: each chunk to write, then close at the end, or abort
 // with the reason when the pipe or writer gives up.
-type UnderlyingSink<T> = { write?: (chunk: T) => Promise<void>; close?: () => Promise<void>; abort?: (reason: string) => void };
-
-type __sinkState<T> = { write: Lock<((chunk: T) => Promise<void>)[]>; close: Lock<(() => Promise<void>)[]>; abort: Lock<((reason: string) => void)[]>; locked: Atomic<i64>; closed: Atomic<i64> };
+// Plain functions, not async ones: a function stored in an object can't be async yet.
+type UnderlyingSink<T> = { write?: (chunk: T) => void; close?: () => void; abort?: (reason: string) => void };
 
 // A destination values are written into through a writer, one at a time.
 class WritableStream<T> {
-  #sink: shared<__sinkState<T>>;
+  private sink: shared<{ write: Lock<((chunk: T) => void)[]>; close: Lock<(() => void)[]>; abort: Lock<((reason: string) => void)[]>; locked: Atomic<i64>; closed: Atomic<i64> }>;
 
   constructor(sink?: UnderlyingSink<T>) {
-    const writes: ((chunk: T) => Promise<void>)[] = [];
-    const closes: (() => Promise<void>)[] = [];
-    const aborts: ((reason: string) => void)[] = [];
+    let writes: ((chunk: T) => void)[] = [];
+    let closes: (() => void)[] = [];
+    let aborts: ((reason: string) => void)[] = [];
     if (sink !== null) {
       const write = sink.write;
       if (write !== null) writes.push(write);
@@ -8493,113 +8581,138 @@ class WritableStream<T> {
       const abort = sink.abort;
       if (abort !== null) aborts.push(abort);
     }
-    this.#sink = shared<__sinkState<T>>({ write: new Lock(writes), close: new Lock(closes), abort: new Lock(aborts), locked: new Atomic(0), closed: new Atomic(0) });
+    this.sink = shared<{ write: Lock<((chunk: T) => void)[]>; close: Lock<(() => void)[]>; abort: Lock<((reason: string) => void)[]>; locked: Atomic<i64>; closed: Atomic<i64> }>({ write: new Lock(writes), close: new Lock(closes), abort: new Lock(aborts), locked: new Atomic(0), closed: new Atomic(0) });
   }
 
   get locked(): boolean {
-    return this.#sink.locked.load() === 1;
+    return this.sink.locked.load() === 1;
+  }
+
+  __lock(): void throws TypeError {
+    if (this.sink.locked.load() === 1) throw new TypeError("this WritableStream is locked to a writer; release it with 'writer.releaseLock()' first");
+    this.sink.locked.store(1);
+  }
+
+  __unlock() {
+    this.sink.locked.store(0);
+  }
+
+  __write(chunk: T) {
+    if (this.sink.closed.load() === 1) return;
+    const write = this.sink.write.update((w) => w.length > 0 ? w[0]!.clone() : null);
+    if (write !== null) write(chunk);
+  }
+
+  __close() {
+    if (this.sink.closed.load() === 1) return;
+    this.sink.closed.store(1);
+    const close = this.sink.close.update((c) => c.pop());
+    if (close !== null) close();
+  }
+
+  __abort(reason: string) {
+    if (this.sink.closed.load() === 1) return;
+    this.sink.closed.store(1);
+    const abort = this.sink.abort.update((a) => a.pop());
+    if (abort !== null) abort(reason);
   }
 
   // A writer of the stream, which locks it until the writer lets it go.
   getWriter(): WritableStreamDefaultWriter<T> throws TypeError {
-    if (this.#sink.locked.load() === 1) throw new TypeError("this WritableStream is locked to a writer; release it with 'writer.releaseLock()' first");
-    this.#sink.locked.store(1);
-    return new WritableStreamDefaultWriter<T>(this.#sink.clone());
+    if (this.sink.locked.load() === 1) throw new TypeError("this WritableStream is locked to a writer; release it with 'writer.releaseLock()' first");
+    this.sink.locked.store(1);
+    return new WritableStreamDefaultWriter<T>(this.sink.clone());
   }
 }
 
 class WritableStreamDefaultWriter<T> {
-  #sink: shared<__sinkState<T>>;
-  #released: boolean = false;
+  private sink: shared<{ write: Lock<((chunk: T) => void)[]>; close: Lock<(() => void)[]>; abort: Lock<((reason: string) => void)[]>; locked: Atomic<i64>; closed: Atomic<i64> }>;
+  private released: boolean = false;
 
-  constructor(sink: shared<__sinkState<T>>) {
-    this.#sink = sink;
+  constructor(sink: shared<{ write: Lock<((chunk: T) => void)[]>; close: Lock<(() => void)[]>; abort: Lock<((reason: string) => void)[]>; locked: Atomic<i64>; closed: Atomic<i64> }>) {
+    this.sink = sink;
   }
 
   // Hands the chunk to the sink's write, waiting until it has taken it.
   async write(chunk: T): Promise<void> throws TypeError {
-    if (this.#released) throw new TypeError("this writer has released its lock, so it can't write");
-    if (this.#sink.closed.load() === 1) throw new TypeError("this WritableStream is closed, so nothing more can be written");
-    const write = this.#sink.write.update((w) => w.length > 0 ? w[0]!.clone() : null);
-    if (write !== null) await write(chunk);
+    if (this.released) throw new TypeError("this writer has released its lock, so it can't write");
+    if (this.sink.closed.load() === 1) throw new TypeError("this WritableStream is closed, so nothing more can be written");
+    const write = this.sink.write.update((w) => w.length > 0 ? w[0]!.clone() : null);
+    if (write !== null) write(chunk);
   }
 
   // Ends the stream, running the sink's close once.
   async close(): Promise<void> {
-    if (this.#sink.closed.load() === 1) return;
-    this.#sink.closed.store(1);
-    const close = this.#sink.close.update((c) => c.pop());
-    if (close !== null) await close();
+    if (this.sink.closed.load() === 1) return;
+    this.sink.closed.store(1);
+    const close = this.sink.close.update((c) => c.pop());
+    if (close !== null) close();
   }
 
   // Gives the stream up, running the sink's abort with the reason once.
   abort(reason?: string) {
-    if (this.#sink.closed.load() === 1) return;
-    this.#sink.closed.store(1);
-    const abort = this.#sink.abort.update((a) => a.pop());
+    if (this.sink.closed.load() === 1) return;
+    this.sink.closed.store(1);
+    const abort = this.sink.abort.update((a) => a.pop());
     if (abort !== null) abort(reason ?? "");
   }
 
   releaseLock(this: Mut<this>) {
-    if (this.#released) return;
-    this.#released = true;
-    this.#sink.locked.store(0);
+    if (this.released) return;
+    this.released = true;
+    this.sink.locked.store(0);
   }
 }
 
 // What an underlying source's callbacks are given: start once before the first read, pull when
 // the queue is empty, and cancel with its reason when a reader cancels.
-type UnderlyingSource<T> = { start?: (controller: ReadableStreamDefaultController<T>) => void; pull?: (controller: ReadableStreamDefaultController<T>) => Promise<void>; cancel?: (reason: string) => void };
-
-// The values a source has queued and not yet read, whether it has closed, the error it reported,
-// and its cancel callback.
-type __streamQueue<T> = { items: Lock<T[]>; closed: Atomic<i64>; failure: Lock<Error[]>; cancel: Lock<((reason: string) => void)[]> };
+// Plain functions, not async ones: a function stored in an object can't be async yet.
+type UnderlyingSource<T> = { start?: (controller: ReadableStreamDefaultController<T>) => void; pull?: (controller: ReadableStreamDefaultController<T>) => void; cancel?: (reason: string) => void };
 
 // What a source queues values through. The queue is unbounded and enqueue never waits: a source
 // held back reads the queue's emptiness through pull being called only when nothing is queued.
 class ReadableStreamDefaultController<T> {
-  #queue: shared<__streamQueue<T>>;
+  private stream: ReadableStream<T>;
 
-  constructor(queue: shared<__streamQueue<T>>) {
-    this.#queue = queue;
+  constructor(stream: ReadableStream<T>) {
+    this.stream = stream;
   }
 
-  enqueue(chunk: T): void throws TypeError {
-    if (this.#queue.closed.load() === 1) throw new TypeError("this ReadableStream is closed, so nothing more can be enqueued");
-    this.#queue.items.update((xs) => xs.push(chunk));
+  // Queuing into a closed stream panics, where JavaScript throws.
+  enqueue(chunk: T) {
+    this.stream.__enqueue(chunk);
   }
 
   // Ends the stream once what is queued has been read.
   close() {
-    this.#queue.closed.store(1);
+    this.stream.__close();
   }
 
   // Ends the stream with an error, which its reader's next read throws.
   error(e: Error) {
-    this.#queue.failure.update((f) => f.push(e));
-    this.#queue.items.update((xs) => {
-      xs.length = 0;
-    });
-    this.#queue.closed.store(1);
+    this.stream.__error(e);
   }
 
   __copy(): ReadableStreamDefaultController<T> {
-    return new ReadableStreamDefaultController<T>(this.#queue.clone());
+    return new ReadableStreamDefaultController<T>(this.stream.__handle());
   }
 
-  // The first queued value, taken out, or null when nothing is queued.
   __take(): T | null {
-    return this.#queue.items.update((xs) => xs.length > 0 ? xs.shift() : null);
+    return this.stream.__take();
   }
 
   __closed(): boolean {
-    return this.#queue.closed.load() === 1;
+    return this.stream.__closed();
+  }
+
+  __empty(): boolean {
+    return this.stream.__empty();
   }
 }
 
 // A source's values as a generator: start first, then each queued value, pulling for more when
 // none is queued, until the source closes or errors.
-async function* __streamPulled<T>(start: ((controller: ReadableStreamDefaultController<T>) => void) | null, pull: ((controller: ReadableStreamDefaultController<T>) => Promise<void>) | null, controller: ReadableStreamDefaultController<T>): AsyncGenerator<T> {
+async function* __streamPulled<T>(start: ((controller: ReadableStreamDefaultController<T>) => void) | null, pull: ((controller: ReadableStreamDefaultController<T>) => void) | null, controller: ReadableStreamDefaultController<T>): AsyncGenerator<T> {
   if (start !== null) start(controller.__copy());
   while (true) {
     const next = controller.__take();
@@ -8608,10 +8721,10 @@ async function* __streamPulled<T>(start: ((controller: ReadableStreamDefaultCont
       continue;
     }
     if (controller.__closed()) return;
-    if (pull !== null) await pull(controller.__copy());
-    // ponytail: a source with no pull, enqueuing from elsewhere, is polled each millisecond; a
-    // notification from enqueue would wake the reader at once.
-    else await sleep(1);
+    if (pull !== null) pull(controller.__copy());
+    // ponytail: a source that queued nothing, enqueuing from elsewhere, is polled each
+    // millisecond; a notification from enqueue would wake the reader at once.
+    if (!controller.__closed() && controller.__empty()) await sleep(1);
   }
 }
 `;

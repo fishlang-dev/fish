@@ -5,13 +5,13 @@
 // expect: stream: 3 entries
 // Archives the system's tar made, plain and gzipped, from a path, bytes and a stream, and a
 // path past ustar's 100 bytes.
-import { list, entries } from "fish:tar";
+import { list, entries, TarError, type TarHeader } from "fish:tar";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-function shown(headers: Ref<{ path: string; type: string; size: i64 }[]>): string {
+function shown(headers: Ref<TarHeader[]>): string {
   let parts: string[] = [];
   for (const h of headers) parts.push(h.path + " " + h.type + " " + String(h.size));
   parts.sort();
@@ -22,14 +22,13 @@ async function* chunked(bytes: u8[]): AsyncGenerator<u8[]> {
   for (let at = 0; at < (bytes.length as i64); at += 700) yield bytes.slice(at, at + 700);
 }
 
-async function main(): Promise<void> throws IoError | Error {
+async function main(): Promise<void> throws IoError | Error | TarError {
   const dir = mkdtempSync(join(tmpdir(), "fish-tar-"));
   mkdirSync(join(dir, "src", "sub"), { recursive: true });
   writeFileSync(join(dir, "src", "a.txt"), "hello");
   writeFileSync(join(dir, "src", "sub", "b.txt"), "bye");
-  const env = { COPYFILE_DISABLE: "1", PATH: process.env.PATH ?? "/usr/bin:/bin" };
-  spawnSync("tar", ["-cf", join(dir, "x.tar"), "-C", join(dir, "src"), "a.txt", "sub"], { env });
-  spawnSync("tar", ["-czf", join(dir, "x.tgz"), "-C", join(dir, "src"), "a.txt", "sub"], { env });
+  spawnSync("env", ["COPYFILE_DISABLE=1", "tar", "-cf", join(dir, "x.tar"), "-C", join(dir, "src"), "a.txt", "sub"]);
+  spawnSync("env", ["COPYFILE_DISABLE=1", "tar", "-czf", join(dir, "x.tgz"), "-C", join(dir, "src"), "a.txt", "sub"]);
   const plain = await list(join(dir, "x.tar"));
   console.log("plain:", shown(plain));
   const gz = await list(readFileSync(join(dir, "x.tgz")));
@@ -37,7 +36,7 @@ async function main(): Promise<void> throws IoError | Error {
   const name = "d".repeat(60) + "/" + "f".repeat(59);
   mkdirSync(join(dir, "long", "d".repeat(60)), { recursive: true });
   writeFileSync(join(dir, "long", name), "x");
-  spawnSync("tar", ["-cf", join(dir, "long.tar"), "-C", join(dir, "long"), name], { env });
+  spawnSync("env", ["COPYFILE_DISABLE=1", "tar", "-cf", join(dir, "long.tar"), "-C", join(dir, "long"), name]);
   const long = await list(join(dir, "long.tar"));
   console.log("long:", long[0]!.path.length, long[0]!.path === name);
   let count = 0;
@@ -53,7 +52,7 @@ async function main(): Promise<void> throws IoError | Error {
 // expect: ratio: true
 // expect: fifo: true
 // A corrupt header, each limit, and a FIFO are refused with TarError.
-import { list } from "fish:tar";
+import { list, TarError } from "fish:tar";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -68,13 +67,12 @@ async function attempt(what: string, source: u8[], limits: { maxEntries?: i64; m
   }
 }
 
-async function main(): Promise<void> throws IoError {
+async function main(): Promise<void> throws IoError | TarError {
   const dir = mkdtempSync(join(tmpdir(), "fish-tar-"));
   writeFileSync(join(dir, "a.txt"), "hello");
   writeFileSync(join(dir, "z.txt"), "0".repeat(100000));
-  const env = { COPYFILE_DISABLE: "1", PATH: process.env.PATH ?? "/usr/bin:/bin" };
-  spawnSync("tar", ["-cf", join(dir, "x.tar"), "-C", dir, "a.txt", "z.txt"], { env });
-  spawnSync("tar", ["-czf", join(dir, "z.tgz"), "-C", dir, "z.txt"], { env });
+  spawnSync("env", ["COPYFILE_DISABLE=1", "tar", "-cf", join(dir, "x.tar"), "-C", dir, "a.txt", "z.txt"]);
+  spawnSync("env", ["COPYFILE_DISABLE=1", "tar", "-czf", join(dir, "z.tgz"), "-C", dir, "z.txt"]);
   let bytes = readFileSync(join(dir, "x.tar"));
   let corrupt = bytes.clone();
   corrupt[3] = 120;
@@ -87,7 +85,7 @@ async function main(): Promise<void> throws IoError {
   const ratio = await attempt("ratio", readFileSync(join(dir, "z.tgz")), { maxRatio: 2 });
   console.log("ratio:", ratio.includes("unpacks past its limits"));
   spawnSync("mkfifo", [join(dir, "pipe")]);
-  spawnSync("tar", ["-cf", join(dir, "f.tar"), "-C", dir, "pipe"], { env });
+  spawnSync("env", ["COPYFILE_DISABLE=1", "tar", "-cf", join(dir, "f.tar"), "-C", dir, "pipe"]);
   const fifo = await attempt("fifo", readFileSync(join(dir, "f.tar")), {});
   console.log("fifo:", fifo.includes("is a device, FIFO or another special entry"));
   rmSync(dir, { recursive: true });
@@ -99,21 +97,20 @@ async function main(): Promise<void> throws IoError {
 // expect: mode 493
 // An archive the system's tar made, extracted and read back: files, a directory, a symlink and
 // a file's mode.
-import { extract } from "fish:tar";
+import { extract, TarError } from "fish:tar";
 import { spawnSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-async function main(): Promise<void> throws IoError | Error {
+async function main(): Promise<void> throws IoError | Error | TarError {
   const dir = mkdtempSync(join(tmpdir(), "fish-tar-"));
   mkdirSync(join(dir, "src", "sub"), { recursive: true });
   writeFileSync(join(dir, "src", "a.txt"), "hello");
   writeFileSync(join(dir, "src", "sub", "b.txt"), "bye");
   chmodSync(join(dir, "src", "sub", "b.txt"), 0o755);
   symlinkSync("a.txt", join(dir, "src", "link"));
-  const env = { COPYFILE_DISABLE: "1", PATH: process.env.PATH ?? "/usr/bin:/bin" };
-  spawnSync("tar", ["-cf", join(dir, "x.tar"), "-C", join(dir, "src"), "a.txt", "sub", "link"], { env });
+  spawnSync("env", ["COPYFILE_DISABLE=1", "tar", "-cf", join(dir, "x.tar"), "-C", join(dir, "src"), "a.txt", "sub", "link"]);
   const out = join(dir, "out");
   const _written = await extract(join(dir, "x.tar"), out);
   console.log("a.txt", new TextDecoder().decode(readFileSync(join(out, "a.txt"))));
@@ -129,9 +126,10 @@ async function main(): Promise<void> throws IoError | Error {
 // expect: through a link: 'hop/x.txt' would be written through the symlink 'hop', which extract refuses
 // expect: nothing outside: true
 // Archives made with each escaping entry are refused, and nothing lands outside the target.
-import { extract, pack } from "fish:tar";
+import { extract, pack, TarError } from "fish:tar";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { ZlibError } from "node:zlib";
 import { join } from "node:path";
 
 async function archive(paths: string[], cwd: string): Promise<u8[]> throws IoError | ZlibError {
@@ -150,7 +148,7 @@ async function attempt(what: string, bytes: u8[], to: string): Promise<void> {
   }
 }
 
-async function main(): Promise<void> throws IoError | ZlibError {
+async function main(): Promise<void> throws IoError | ZlibError | TarError {
   const dir = mkdtempSync(join(tmpdir(), "fish-tar-"));
   // The climbing entry is packed from beside inner, so extracting it into dir/t1 would write
   // dir/evil.txt, which nothing else makes.
@@ -179,13 +177,14 @@ async function main(): Promise<void> throws IoError | ZlibError {
 // expect: system gzip: a.txt|sub/|sub/b.txt
 // An archive pack writes reads back through entries() and through the system's tar, plain and
 // gzipped, with a long path kept through a PAX header.
-import { create, entries, list } from "fish:tar";
+import { create, entries, list, TarError } from "fish:tar";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { ZlibError } from "node:zlib";
 import { join } from "node:path";
 
-async function main(): Promise<void> throws IoError | ZlibError | Error {
+async function main(): Promise<void> throws IoError | ZlibError | Error | TarError {
   const dir = mkdtempSync(join(tmpdir(), "fish-tar-"));
   mkdirSync(join(dir, "src", "sub"), { recursive: true });
   writeFileSync(join(dir, "src", "a.txt"), "hello");

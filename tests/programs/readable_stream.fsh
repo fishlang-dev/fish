@@ -16,7 +16,7 @@ async function main(): Promise<void> throws Error | TypeError {
   console.log(stream.locked);
   while (true) {
     const r = await reader.read();
-    if (r.done) break;
+    if (r.done === true) break;
     console.log(r.value);
   }
   console.log("done");
@@ -59,7 +59,7 @@ async function main(): Promise<void> throws Error | TypeError {
 // expect: closed
 async function main() {
   const stream = new ReadableStream<i64>({
-    start: (c) => {
+    start: (c: ReadableStreamDefaultController<i64>) => {
       c.enqueue(10);
       c.enqueue(20);
       c.close();
@@ -77,7 +77,7 @@ async function main() {
 async function main(): Promise<void> throws Error | TypeError {
   const made = new Atomic(0);
   const stream = new ReadableStream<i64>({
-    pull: async (c) => {
+    pull: (c: ReadableStreamDefaultController<i64>) => {
       const n = made.add(1);
       console.log("pull", n);
       if (n < 2) c.enqueue(n);
@@ -89,9 +89,9 @@ async function main(): Promise<void> throws Error | TypeError {
 // case: readable_stream_error_reaches_reader
 // expect: caught source failed
 // An error drops what was queued, as the web streams spec has it, so the 1 is never read.
-async function main() {
+async function main(): Promise<void> throws TypeError {
   const stream = new ReadableStream<i64>({
-    start: (c) => {
+    start: (c: ReadableStreamDefaultController<i64>) => {
       c.enqueue(1);
       c.error(new Error("source failed"));
     },
@@ -100,7 +100,7 @@ async function main() {
   try {
     while (true) {
       const r = await reader.read();
-      if (r.done) break;
+      if (r.done === true) break;
       console.log(r.value);
     }
   } catch (e) {
@@ -112,11 +112,11 @@ async function main() {
 // expect: cancelled enough
 async function main(): Promise<void> throws Error | TypeError {
   const stream = new ReadableStream<i64>({
-    start: (c) => {
+    start: (c: ReadableStreamDefaultController<i64>) => {
       c.enqueue(1);
       c.enqueue(2);
     },
-    cancel: (reason) => console.log("cancelled", reason),
+    cancel: (reason: string) => console.log("cancelled", reason),
   });
   let reader = stream.getReader();
   const r = await reader.read();
@@ -134,24 +134,25 @@ async function* two(): AsyncGenerator<i64> {
 
 async function main(): Promise<void> throws Error | TypeError {
   const dest = new WritableStream<i64>({
-    write: async (chunk) => console.log("wrote", chunk),
-    close: async () => console.log("closed"),
+    write: (chunk: i64) => console.log("wrote", chunk),
+    close: () => console.log("closed"),
   });
-  await ReadableStream.from(two()).pipeTo(dest);
+  const source = ReadableStream.from(two());
+  await source.pipeTo(dest);
 }
 // case: readable_stream_pipe_aborts_on_error
 // expect: aborted broken
 // expect: caught broken
 async function main(): Promise<void> {
   const source = new ReadableStream<i64>({
-    pull: async (c) => {
+    pull: (c: ReadableStreamDefaultController<i64>) => {
       c.enqueue(1);
       c.error(new Error("broken"));
     },
   });
   const dest = new WritableStream<i64>({
-    write: async (chunk) => console.log("wrote", chunk),
-    abort: (reason) => console.log("aborted", reason),
+    write: (chunk: i64) => console.log("wrote", chunk),
+    abort: (reason: string) => console.log("aborted", reason),
   });
   try {
     await source.pipeTo(dest);
@@ -164,7 +165,7 @@ async function main(): Promise<void> {
 // expect: true
 // expect: false
 async function main(): Promise<void> throws TypeError {
-  const dest = new WritableStream<string>({ write: async (chunk) => console.log("got", chunk) });
+  const dest = new WritableStream<string>({ write: (chunk: string) => console.log("got", chunk) });
   let writer = dest.getWriter();
   await writer.write("x");
   console.log(dest.locked);
@@ -172,33 +173,33 @@ async function main(): Promise<void> throws TypeError {
   console.log(dest.locked);
 }
 // case: readable_stream_pipe_through_pair
-// expect: 1
-// expect: 2
+// expect: 7
+// expect: 8
+// expect: piped 3
+// pipeThrough pipes into the pair's writable side in the background and gives its readable
+// side, which is read here; the writable side counts what reached it.
 async function* two(): AsyncGenerator<i64> {
   yield 1;
   yield 2;
 }
 
-async function main() {
-  // A pair whose writable side queues into its readable side, as a TransformStream would.
-  const queue = new Channel<i64>(8);
-  const into = queue.clone();
-  const writable = new WritableStream<i64>({
-    write: async (chunk) => {
-      await into.send(chunk);
-    },
-    close: async () => into.close(),
-  });
-  const readable = ReadableStream.from(drained(queue));
-  const out = ReadableStream.from(two()).pipeThrough({ writable, readable });
-  for await (const x of out) console.log(x);
+async function* out(): AsyncGenerator<i64> {
+  yield 7;
+  yield 8;
 }
 
-async function* drained(queue: Channel<i64>): AsyncGenerator<i64> {
-  for await (const x of queue) yield x;
+async function main() {
+  const seen = shared({ total: new Atomic(0) });
+  const counted = seen.clone();
+  const writable = new WritableStream<i64>({ write: (chunk: i64) => { counted.total.add(chunk); } });
+  const readable = ReadableStream.from(out());
+  const through = ReadableStream.from(two()).pipeThrough({ writable, readable });
+  for await (const x of through) console.log(x);
+  while (seen.total.load() < 3) await sleep(1);
+  console.log("piped", seen.total.load());
 }
 // case: readable_stream_response_body
-// expect: null
+// expect: true
 // expect: 2 chunks, 5 bytes
 // expect: {"n":4} 4
 // A response's body as a stream: none for an empty one, the stream it was given, and a
@@ -214,7 +215,7 @@ async function* json(): AsyncGenerator<u8[]> {
 }
 
 async function main(): Promise<void> throws Error | TypeError | JsonError {
-  console.log(new Response(null).body);
+  console.log(new Response(null).body === null);
   const res = new Response(ReadableStream.from(chunks()));
   const body = res.body!;
   let reader = body.getReader();
@@ -222,13 +223,15 @@ async function main(): Promise<void> throws Error | TypeError | JsonError {
   let size = 0;
   while (true) {
     const r = await reader.read();
-    if (r.done) break;
+    if (r.done === true) break;
     count++;
     size += r.value.length as i64;
   }
   console.log(count, "chunks,", size, "bytes");
-  const text = await new Response(ReadableStream.from(json())).text();
-  const data = await new Response(ReadableStream.from(json())).json<{ n: i64 }>();
+  const first = new Response(ReadableStream.from(json()));
+  const text = await first.text();
+  const second = new Response(ReadableStream.from(json()));
+  const data = await second.json<{ n: i64 }>();
   console.log(text, data.n);
 }
 // case: readable_stream_served_and_fetched
@@ -269,7 +272,7 @@ async function main(): Promise<void> throws IoError | AbortError {
     let size = 0;
     if (body !== null) for await (const chunk of body) size += chunk.length as i64;
     console.log("handler stream:", size, "bytes");
-    return new Response(req.method + " got " + req.headers.get("content-length") + " bytes: ");
+    return new Response(req.method + " got " + (req.headers.get("content-length") ?? "") + " bytes: ");
   }));
   while (found.port.load() === 0) await sleep(1);
   const res = await fetch("http://127.0.0.1:" + String(found.port.load()) + "/", { method: "POST", body: ReadableStream.from(parts()) });
