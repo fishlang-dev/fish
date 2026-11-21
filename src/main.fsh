@@ -63,11 +63,11 @@ type Compiled = { ir: string; checked: Checked; loaded: Loaded; emitted: Emitted
 type Caches = { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
 
 function apart(session: BuildSession): { core: Session; caches: Caches } {
-  return { core: { locking: session.locking, engineHook: session.engineHook, std: session.std, timings: session.timings, failed: session.failed }, caches: { clang: session.clang, digests: session.digests, mathUnits: session.mathUnits } };
+  return { core: { locking: session.locking, engineHook: session.engineHook, std: session.std, timings: session.timings, failed: session.failed, checkCache: session.checkCache }, caches: { clang: session.clang, digests: session.digests, mathUnits: session.mathUnits } };
 }
 
 function together(core: Session, caches: Caches): BuildSession {
-  return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, clang: caches.clang, digests: caches.digests, mathUnits: caches.mathUnits };
+  return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, checkCache: core.checkCache, clang: caches.clang, digests: caches.digests, mathUnits: caches.mathUnits };
 }
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
@@ -839,11 +839,13 @@ export function indented(json: string): string {
   return out;
 }
 
-// A session for one build, with the lockfile kept as it is when `locked`, and timed when `timed`.
-function sessionWith(locked: boolean, timed: boolean): BuildSession {
+// A session for one build, with the lockfile kept as it is when `locked`, timed when `timed`, and
+// reading no cached check when `checking`.
+function sessionWith(locked: boolean, timed: boolean, checking = false): BuildSession {
   let made = cachedSession();
   made.locking.locked = locked;
   if (timed) made.timings = newTimings();
+  if (checking) made.checkCache = false;
   return made;
 }
 
@@ -905,7 +907,7 @@ function saved(carried: usize, ir: string, warnings: Ref<CompileError[]>): void 
 function verified(r: Ref<Rebuild>, got: Ref<{ ir: string; warnings: CompileError[] } | CompileError>): void {
   if (process.env.FISH_WATCH_VERIFY === undefined) return;
   try {
-    const wrong = cleanDifference(sessionWith(r.locked, false), r.entry, r.release, r.panic, r.leaks, r.debug, got);
+    const wrong = cleanDifference(sessionWith(r.locked, false, true), r.entry, r.release, r.panic, r.leaks, r.debug, got);
     console.error(wrong === undefined ? "[fishc] verified: the build matches a clean one" : `[fishc] verify failed: ${wrong}`);
   } catch (e) {
     console.error(`[fishc] verify failed: ${(e as { message: string }).message}`);
@@ -1094,6 +1096,7 @@ async function main(): Promise<void> {
           leaks: { type: "boolean" },
           debug: { type: "boolean", short: "g" },
           timings: { type: "boolean" },
+          "no-check-cache": { type: "boolean" },
           sanitize: { type: "string", multiple: true },
           timeout: { type: "string" },
           jobs: { type: "string" },
@@ -1110,7 +1113,8 @@ async function main(): Promise<void> {
   // Each build compiles within a session of its own, since a check uses up the one it is given.
   const locked = values.locked === true;
   const timed = values.timings === true;
-  const sessionFor = (): BuildSession => sessionWith(locked, timed);
+  const checking = values["no-check-cache"] === true;
+  const sessionFor = (): BuildSession => sessionWith(locked, timed, checking);
   // `fishc run` and `fishc watch` take the program's arguments after the file, or all of them with no file.
   const command = positionals.length > 0 ? positionals[0] : undefined;
   const named = positionals.length > 1 ? positionals[1] : undefined;
@@ -1388,7 +1392,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
