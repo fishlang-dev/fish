@@ -1,0 +1,93 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "scopeName": "fsh.injection",
+  "injectionSelector": "L:source.fsh -comment -string",
+  "patterns": [
+    {
+      "include": "#pipe"
+    },
+    {
+      "include": "#topic"
+    },
+    {
+      "include": "#match"
+    },
+    {
+      "include": "#wildcard"
+    },
+    {
+      "include": "#comptime"
+    },
+    {
+      "include": "#unsafe"
+    },
+    {
+      "include": "#macro"
+    },
+    {
+      "include": "#throws"
+    },
+    {
+      "include": "#move"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#builtins"
+    }
+  ],
+  "repository": {
+    "pipe": {
+      "match": "\\|>",
+      "name": "keyword.operator.pipe.fsh"
+    },
+    "topic": {
+      "comment": "`%` standing for the value on the left of `|>`: after an opening bracket, a comma or `|>`, and not before an operand",
+      "match": "(?<=[(\\[{,]|[(\\[{,]\\s|\\|>|\\|>\\s)%(?!=)(?=\\s*[.)\\],;}?:|]|\\s*$|\\s*\\[|\\s*\\()",
+      "name": "variable.language.topic.fsh"
+    },
+    "match": {
+      "comment": "`match (subject) {`, which TypeScript reads as a call followed by a block",
+      "match": "(?<![.$\\w])match(?=\\s*\\()",
+      "name": "keyword.control.match.fsh"
+    },
+    "wildcard": {
+      "match": "(?<=\\bcase\\s)_(?=\\s*(?:=>|\\bif\\b|\\|))",
+      "name": "variable.language.wildcard.fsh"
+    },
+    "comptime": {
+      "match": "(?<![.$\\w])comptime(?=\\s*\\{|[ \\t]+(?!(?:in|instanceof|as|satisfies)\\b)[\\w$\"'`])",
+      "name": "storage.modifier.comptime.fsh"
+    },
+    "unsafe": {
+      "match": "(?<![.$\\w])unsafe(?=\\s*\\{)",
+      "name": "storage.modifier.unsafe.fsh"
+    },
+    "macro": {
+      "match": "(?<![.$\\w])macro(?=[ \\t]+function\\b)",
+      "name": "storage.modifier.macro.fsh"
+    },
+    "throws": {
+      "comment": "`throws E` after a function's result or parameters",
+      "match": "(?<=[\\w$>)\\]}])[ \\t]+(throws)(?=[ \\t]+[\\w${\\[(])",
+      "captures": {
+        "1": {
+          "name": "storage.modifier.throws.fsh"
+        }
+      }
+    },
+    "move": {
+      "match": "(?<![.$\\w])move(?=[ \\t]*\\(|[ \\t]+(?:async\\b|[\\w$]+[ \\t]*=>))",
+      "name": "storage.modifier.move.fsh"
+    },
+    "types": {
+      "match": "(?<![.$\\w])(?:i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64)(?![\\w$])",
+      "name": "support.type.primitive.fsh"
+    },
+    "builtins": {
+      "match": "(?<![.$\\w])(?:Ref|Mut|Dyn|Option|Some|None|Rc|shared|Lock|Atomic|Cell|FixedArray)(?=\\s*[<(])|(?<![.$\\w])None(?![\\w$])",
+      "name": "support.class.builtin.fsh"
+    }
+  }
+}

@@ -1,0 +1,243 @@
+================================================================================
+match with guards, variants and a wildcard
+================================================================================
+
+const label = match (shape) {
+  case Circle(r) if r > 0 => "round",
+  case Shape.Square | Shape.Rect(_, _) => "square",
+  case { kind: "a", x } => x,
+  case [first, ...rest] => first,
+  case -1 => "minus",
+  case _ => "other",
+};
+
+--------------------------------------------------------------------------------
+
+(program
+  (lexical_declaration
+    (variable_declarator
+      (identifier)
+      (match_expression
+        (parenthesized_expression
+          (identifier))
+        (match_arm
+          (variant_pattern
+            (identifier)
+            (identifier))
+          (binary_expression
+            (identifier)
+            (number))
+          (string
+            (string_fragment)))
+        (match_arm
+          (or_pattern
+            (variant_pattern
+              (identifier)
+              (property_identifier))
+            (variant_pattern
+              (identifier)
+              (property_identifier)
+              (wildcard_pattern)
+              (wildcard_pattern)))
+          (string
+            (string_fragment)))
+        (match_arm
+          (object_match_pattern
+            (property_identifier)
+            (string
+              (string_fragment))
+            (shorthand_property_identifier_pattern))
+          (identifier))
+        (match_arm
+          (array_match_pattern
+            (identifier)
+            (identifier))
+          (identifier))
+        (match_arm
+          (number)
+          (string
+            (string_fragment)))
+        (match_arm
+          (wildcard_pattern)
+          (string
+            (string_fragment)))))))
+
+================================================================================
+pipes and the topic
+================================================================================
+
+const n = xs |> sum(%) |> % * 2;
+
+--------------------------------------------------------------------------------
+
+(program
+  (lexical_declaration
+    (variable_declarator
+      (identifier)
+      (pipe_expression
+        (pipe_expression
+          (identifier)
+          (call_expression
+            (identifier)
+            (arguments
+              (topic))))
+        (binary_expression
+          (topic)
+          (number))))))
+
+================================================================================
+comptime and unsafe
+================================================================================
+
+comptime {
+  console.log("now");
+}
+const size = comptime fib(10);
+unsafe {
+  free(p);
+}
+const v = unsafe { p.read() };
+
+--------------------------------------------------------------------------------
+
+(program
+  (comptime_statement
+    (statement_block
+      (expression_statement
+        (call_expression
+          (member_expression
+            (identifier)
+            (property_identifier))
+          (arguments
+            (string
+              (string_fragment)))))))
+  (lexical_declaration
+    (variable_declarator
+      (identifier)
+      (comptime_expression
+        (call_expression
+          (identifier)
+          (arguments
+            (number))))))
+  (unsafe_statement
+    (statement_block
+      (expression_statement
+        (call_expression
+          (identifier)
+          (arguments
+            (identifier))))))
+  (lexical_declaration
+    (variable_declarator
+      (identifier)
+      (unsafe_expression
+        (call_expression
+          (member_expression
+            (identifier)
+            (property_identifier))
+          (arguments))))))
+
+================================================================================
+macros, throws, comptime parameters and move closures
+================================================================================
+
+macro function derive(ast: Ast): Ast {
+  return ast;
+}
+function parse(comptime base: i64, s: string): i64 throws ParseError {
+  return 0;
+}
+type Parser = (s: string) => i64 throws ParseError;
+const f = move (x: u8) => x;
+
+--------------------------------------------------------------------------------
+
+(program
+  (macro_declaration
+    (function_declaration
+      (identifier)
+      (formal_parameters
+        (required_parameter
+          (identifier)
+          (type_annotation
+            (type_identifier))))
+      (type_annotation
+        (type_identifier))
+      (statement_block
+        (return_statement
+          (identifier)))))
+  (function_declaration
+    (identifier)
+    (formal_parameters
+      (required_parameter
+        (identifier)
+        (type_annotation
+          (type_identifier)))
+      (required_parameter
+        (identifier)
+        (type_annotation
+          (predefined_type))))
+    (type_annotation
+      (type_identifier))
+    (throws_clause
+      (type_identifier))
+    (statement_block
+      (return_statement
+        (number))))
+  (type_alias_declaration
+    (type_identifier)
+    (function_type
+      (formal_parameters
+        (required_parameter
+          (identifier)
+          (type_annotation
+            (predefined_type))))
+      (type_identifier)
+      (throws_clause
+        (type_identifier))))
+  (lexical_declaration
+    (variable_declarator
+      (identifier)
+      (arrow_function
+        (formal_parameters
+          (required_parameter
+            (identifier)
+            (type_annotation
+              (type_identifier))))
+        (identifier)))))
+
+================================================================================
+Fish's words as plain names
+================================================================================
+
+const match = s.match(/a/);
+const comptime = 1;
+move(1);
+unsafe(2);
+
+--------------------------------------------------------------------------------
+
+(program
+  (lexical_declaration
+    (variable_declarator
+      (identifier)
+      (call_expression
+        (member_expression
+          (identifier)
+          (property_identifier))
+        (arguments
+          (regex
+            (regex_pattern))))))
+  (lexical_declaration
+    (variable_declarator
+      (identifier)
+      (number)))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (number))))
+  (expression_statement
+    (call_expression
+      (identifier)
+      (arguments
+        (number)))))
