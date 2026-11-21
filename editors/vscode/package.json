@@ -1,20 +1,113 @@
 {
   "name": "fish-lang",
   "displayName": "Fish Lang",
+  "description": "Fish Lang (.fsh): highlighting, the fishc language server, and build, run and check tasks",
   "publisher": "fishlang",
   "version": "0.1.0",
-  "private": true,
-  "engines": { "vscode": "^1.91.0" },
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fishlang-dev/fish",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
   "contributes": {
+    "languages": [
+      {
+        "id": "fsh",
+        "aliases": [
+          "Fish Lang",
+          "fsh"
+        ],
+        "extensions": [
+          ".fsh"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
     "grammars": [
-      { "language": "fsh", "scopeName": "source.fsh", "path": "./syntaxes/fsh.tmLanguage.json" },
-      { "scopeName": "fsh.injection", "path": "./syntaxes/fsh.injection.tmLanguage.json", "injectTo": ["source.fsh"] }
+      {
+        "language": "fsh",
+        "scopeName": "source.fsh",
+        "path": "./syntaxes/fsh.tmLanguage.json"
+      },
+      {
+        "scopeName": "fsh.injection",
+        "path": "./syntaxes/fsh.injection.tmLanguage.json",
+        "injectTo": [
+          "source.fsh"
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "Fish Lang",
+      "properties": {
+        "fsh.fishc.path": {
+          "type": "string",
+          "default": "fishc",
+          "description": "The fishc executable the language server and tasks run. A change applies after reloading the window."
+        }
+      }
+    },
+    "taskDefinitions": [
+      {
+        "type": "fishc",
+        "required": [
+          "command",
+          "file"
+        ],
+        "properties": {
+          "command": {
+            "type": "string",
+            "enum": [
+              "build",
+              "run",
+              "check"
+            ],
+            "description": "The fishc command to run."
+          },
+          "file": {
+            "type": "string",
+            "description": "The .fsh file it runs on."
+          }
+        }
+      }
+    ],
+    "problemMatchers": [
+      {
+        "name": "fishc",
+        "owner": "fsh",
+        "fileLocation": [
+          "autoDetect",
+          "${workspaceFolder}"
+        ],
+        "pattern": {
+          "regexp": "^(.+?):(\\d+):(\\d+): (error|warning)(?:\\[(\\w+)\\])?: (.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "code": 5,
+          "message": 6
+        }
+      }
     ]
   },
   "scripts": {
-    "test:grammar": "vscode-tmgrammar-test -c package.json -g test/grammar/TypeScript.tmLanguage.json 'test/grammar/*.fsh'"
+    "test:grammar": "vscode-tmgrammar-test -c package.json -g test/grammar/TypeScript.tmLanguage.json 'test/grammar/*.fsh'",
+    "package": "vsce package --skip-license"
+  },
+  "dependencies": {
+    "vscode-languageclient": "10.1.2"
   },
   "devDependencies": {
-    "vscode-tmgrammar-test": "0.1.3"
+    "vscode-tmgrammar-test": "0.1.3",
+    "@vscode/vsce": "4.0.0"
   }
 }
