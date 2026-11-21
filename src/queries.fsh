@@ -4,13 +4,14 @@
 // the bodies that changed. `fishc build`, `fishc check` and `fishc watch` all drive it; the
 // language server holds one per program, and the cache on disk reads and writes one here.
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { InstanceId } from "./arenas.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { checkKeeping, recheckKept, type Checked, type CheckerParts } from "./check.fsh";
 import { newCompilation, partEnd, partStart, stageEnd, stageStart, type Compilation, type Session } from "./compilation.fsh";
 import { CompileError, copyNames, type Source } from "./diag.fsh";
 import { classified, type Changed, type Edit, type Replaced } from "./edits.fsh";
-import { composedMoves, loadedContents, reloaded, spillFrom, takenBodies, textOf as fileText, unchanged, type Kept } from "./incremental.fsh";
+import { composedMoves, loadedContents, reloaded, spillFrom, takenBodies, textIn, unchanged, type Kept } from "./incremental.fsh";
 import { load, type Loaded } from "./modules.fsh";
 import { movedStmt } from "./nodes.fsh";
 import type { Stmt } from "./parser.fsh";
@@ -22,30 +23,33 @@ import { FILE_SPAN } from "./program.fsh";
 export class Queries {
   entry: string;
   manifest: string | undefined;
+  open: Map<string, string>;
 
-  // `entry` is the program's entry file and `manifest` its package's, which a build may read.
-  constructor(entry: string, manifest: string | undefined) {
+  // `entry` is the program's entry file, `manifest` its package's, which a build may read, and
+  // `open` the text of any file an editor holds unsaved, by path, which is read before the disk.
+  constructor(entry: string, manifest: string | undefined, open: Map<string, string>) {
     this.entry = entry;
     this.manifest = manifest;
+    this.open = open;
   }
 
   // The program checked: `kept`, when every file it read still reads as it did; that check with
   // the edited bodies checked again, where they can be; or the program checked afresh.
   /** @throws {CompileError | Error | IoError} */
   checked(this: Ref<this>, session: Session, looked: Mut<string[]>, kept: Kept | undefined): Kept {
-    return checkedFrom(session, this.entry, looked, kept, this.manifest);
+    return checkedFrom(session, this.entry, looked, kept, this.manifest, this.open);
   }
 }
 
 // The program checked: `kept`'s, given `session`, when every file it read reads as it did, or else
 // loaded and checked afresh.
 /** @throws {CompileError | Error | IoError} */
-function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): Kept {
+function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, open: Ref<Map<string, string>>): Kept {
   if (kept !== undefined) {
     let reused = kept!;
     reused.checked.tables.session = session;
     const comparing = partStart(reused.checked.tables.session);
-    const same = unchanged(reused.contents);
+    const same = unchanged(reused.contents, open);
     partEnd(reused.checked.tables.session, "reload compare", comparing);
     if (same) {
       for (const f of reused.contents.keys()) looked.push(f);
@@ -53,24 +57,25 @@ function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept
       reused.rechecked = new Set<InstanceId>();
       return reused;
     }
-    let { done, session: back } = rechecked(reused);
+    let { done, session: back } = rechecked(reused, open);
     if (done !== undefined) {
       let carried = done!;
       for (const f of carried.contents.keys()) looked.push(f);
       carried.carried++;
       return carried;
     }
-    return checkedAfresh(back!, file, looked, manifest);
+    return checkedAfresh(back!, file, looked, manifest, open);
   }
-  return checkedAfresh(session, file, looked, manifest);
+  return checkedAfresh(session, file, looked, manifest, open);
 }
 
 // The program loaded and checked afresh, with what to keep of it.
 /** @throws {CompileError | Error | IoError} */
-function checkedAfresh(session: Session, file: string, looked: Mut<string[]>, manifest: string | undefined): Kept {
-  const manifestText = manifest !== undefined ? fileText(manifest) : undefined;
-  let made = checkedSourceKeeping(newCompilation(session), file, readFileSync(file, "utf8"), false, looked);
-  const contents = loadedContents(made.loaded, looked, manifest, manifestText);
+function checkedAfresh(session: Session, file: string, looked: Mut<string[]>, manifest: string | undefined, open: Ref<Map<string, string>>): Kept {
+  const manifestText = manifest !== undefined ? textIn(open, manifest!) : undefined;
+  const src = textIn(open, file);
+  let made = checkedSourceKeeping(newCompilation(session), file, src !== undefined ? src! : readFileSync(file, "utf8"), false, looked, open);
+  const contents = loadedContents(made.loaded, looked, manifest, manifestText, open);
   return { checked: made.checked, parts: made.parts, loaded: made.loaded, contents, carried: 0 };
 }
 
@@ -78,13 +83,13 @@ function checkedAfresh(session: Session, file: string, looked: Mut<string[]>, ma
 // each edit changed nothing else; or the session back, for a build afresh, when one did, a file
 // other than the program's own changed, or the recheck can't stand for a clean check.
 /** @throws {CompileError | IoError} */
-function rechecked(kept: Kept): { done: Kept | undefined; session: Session | undefined } {
+function rechecked(kept: Kept, open: Ref<Map<string, string>>): { done: Kept | undefined; session: Session | undefined } {
   let k = kept;
   let edits: [usize, string][] = [];
   let fresh = false;
   const reading = partStart(k.checked.tables.session);
   for (const [f, text] of k.contents) {
-    const now = fileText(f);
+    const now = textIn(open, f);
     if (now === text) continue;
     const index = k.loaded.modules.findIndex((m) => m.path === f);
     if (index < 0 || now === undefined) fresh = true;
@@ -181,16 +186,17 @@ function spent(kept: Kept): { done: Kept | undefined; session: Session | undefin
 // its files. `looked` is given the files it read or looked for, whether or not they load.
 /** @throws {CompileError | Error | IoError} */
 export function checkedSource(compilation: Compilation, file: string, src: string, taken: Set<string> | false, looked: Mut<string[]>): { checked: Checked; loaded: Loaded } {
-  let made = checkedSourceKeeping(compilation, file, src, taken, looked);
+  let none = new Map<string, string>();
+  let made = checkedSourceKeeping(compilation, file, src, taken, looked, none);
   return { checked: made.checked, loaded: made.loaded };
 }
 
 // `checkedSource`, giving back what the checker kept besides its tables as well.
 /** @throws {CompileError | Error | IoError} */
-export function checkedSourceKeeping(compilation: Compilation, file: string, src: string, taken: Set<string> | false, looked: Mut<string[]>): { checked: Checked; loaded: Loaded; parts: CheckerParts } {
+export function checkedSourceKeeping(compilation: Compilation, file: string, src: string, taken: Set<string> | false, looked: Mut<string[]>, open: Ref<Map<string, string>>): { checked: Checked; loaded: Loaded; parts: CheckerParts } {
   let program = compilation;
   const library = taken !== false;
-  let modules = loadedFrom(program, file, src, looked);
+  let modules = loadedFrom(program, file, src, looked, open);
   let statements: Stmt[] = [];
   try {
     statements = expanded(program, modules, library);
@@ -205,10 +211,14 @@ export function checkedSourceKeeping(compilation: Compilation, file: string, src
 
 // The program's files loaded, timed as the parse stage.
 /** @throws {CompileError | Error | IoError} */
-function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, looked: Mut<string[]>): Loaded {
+function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, looked: Mut<string[]>, open: Ref<Map<string, string>>): Loaded {
   const started = stageStart(compilation.session);
+  // The loader keeps the reader, so it owns the texts it answers from rather than borrowing the
+  // holder's: a copy of a handful of open documents against a program's whole parse.
+  let held = new Map<string, string>();
+  for (const [path, text] of open) held.set(path, text);
   try {
-    return load(compilation, file, src);
+    return load(compilation, file, src, move (path) => held.get(resolve(path)));
   } finally {
     stageEnd(compilation.session, "parse", started);
     for (const f of compilation.looked) looked.push(f);

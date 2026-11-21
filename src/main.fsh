@@ -88,7 +88,9 @@ export function checkProgram(session: Session, file: string): CompileError[] {
 /** @throws {CompileError | Error | IoError} */
 function checkedFile(session: Session, file: string): { warnings: CompileError[]; session: Session } {
   let looked: string[] = [];
-  const { checked } = checkedSource(newCompilation(session), file, readFileSync(file, "utf8"), false, looked);
+  let queries = new Queries(file, undefined, new Map<string, string>());
+  const kept = queries.checked(session, looked, undefined);
+  let { checked } = kept;
   return { warnings: checked.warnings, session: checked.tables.session };
 }
 
@@ -271,25 +273,17 @@ export function build(session: BuildSession, file: string, out: string, release 
 // files the program was read from, or looked for, even when it doesn't build.
 /** @throws {CompileError | Error | IoError | JsonError} */
 function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>): { warnings: CompileError[]; session: BuildSession } {
-  let { core, caches } = apart(session);
-  let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, looked);
-  const ir = instrumented(made.ir, target);
-  const shim = rustShim(made.loaded.rust, made.checked);
-  if (shim !== undefined) refuseForeignRust(target);
-  const split = parts(ir, made.checked, release, target, debug);
-  let building = together(made.checked.tables.session, caches);
-  let none = new Map<string, string[]>();
-  linked(building, ir, split, out, release, links, shim, target, leaks, debug, none);
-  return { warnings: made.checked.warnings, session: building };
+  let made = builtKept(session, file, out, release, panic, links, target, leaks, debug, looked, undefined, undefined, false);
+  return { warnings: made.warnings, session: made.session };
 }
 
 // `built` for `fishc watch`, from what its last build kept: a program whose files all read as they
 // did is not loaded or checked again. Gives what to keep for the next build. `manifest` is the
 // package's, which a build may read.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): { ir: string; warnings: CompileError[]; session: BuildSession; kept: Kept } {
+export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string; warnings: CompileError[]; session: BuildSession; kept: Kept } {
   let { core, caches } = apart(session);
-  let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest);
+  let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest, keep);
   const instrumenting = stageStart(made.kept.checked.tables.session);
   const ir = instrumented(made.ir, target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
@@ -312,14 +306,15 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
 // `compile` for `fishc watch`, from what its last build kept, giving the IR, the warnings and what
 // to keep.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): { ir: string; warnings: CompileError[]; kept: Kept } {
+export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string; warnings: CompileError[]; kept: Kept } {
+  const reusing = kept !== undefined;
   // Reading the files again and putting the changed ones back, apart from the check it times itself.
   // Counted by hand from the front end's stages, since the session it starts on moves into the
   // check's tables and takes its own copy of the timings with it.
   const began = performance.now();
   let before: f64 = 0;
   if (session.timings !== undefined) for (const name of FRONT_END) before += session.timings!.ms.get(name) ?? 0;
-  let queries = new Queries(file, manifest);
+  let queries = new Queries(file, manifest, new Map<string, string>());
   let start = queries.checked(session, looked, kept);
   if (start.checked.tables.session.timings !== undefined) {
     let after: f64 = 0;
@@ -330,12 +325,14 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   start.checked.tables.session.failed = undefined;
   const sources = [...start.loaded.sources];
   // Debug info marks every function's lines, so a `-g` build emits every function again.
-  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed, prior: debug ? undefined : start.emitted, rechecked: start.rechecked, keep: true });
+  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed, prior: debug ? undefined : start.emitted, rechecked: start.rechecked, keep });
   let warnings = [...made.checked.warnings];
   // A clean check gives its warnings in the order they are written in, which a kept one's
   // positions only give through their files' maps.
-  const placed: Ref<Source[]> = made.loaded.sources;
-  warnings.sort((a, b) => (realOffset(a.start, placed) as i64) - (realOffset(b.start, placed) as i64));
+  if (reusing) {
+    const placed: Ref<Source[]> = made.loaded.sources;
+    warnings.sort((a, b) => (realOffset(a.start, placed) as i64) - (realOffset(b.start, placed) as i64));
+  }
   return { ir: made.ir, warnings, kept: { checked: made.checked, parts: start.parts, loaded: made.loaded, contents: start.contents, carried: start.carried, emitted: made.emitted, units: start.units } };
 }
 
