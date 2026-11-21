@@ -1,0 +1,17 @@
+{
+  "name": "tree-sitter-fsh",
+  "version": "0.1.0",
+  "description": "Fish Lang (.fsh) grammar for tree-sitter",
+  "license": "MIT OR Apache-2.0",
+  "private": true,
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "corpus": "node script/corpus.js"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "0.25.10",
+    "tree-sitter-javascript": "0.23.1",
+    "tree-sitter-typescript": "0.23.2"
+  }
+}
