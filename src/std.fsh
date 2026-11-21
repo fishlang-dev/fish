@@ -6745,6 +6745,441 @@ export class Pool {
   }
 }
 `,
+  // Tar archives, read an entry at a time and written from files, imported as fish:tar.
+  "fish:tar": String.raw`
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "fs";
+import { dirname, isAbsolute, join, normalize, relative, resolve } from "path";
+import { gunzipSync, gzipSync, ZlibError } from "zlib";
+
+// What reading, extracting or writing an archive refuses, naming the entry where it can.
+export class TarError extends Error {
+  path: string;
+  constructor(message: string, path: string = "") {
+    super(message);
+    this.path = path;
+  }
+}
+
+export type TarEntryType = "file" | "directory" | "symlink" | "link";
+// An entry's header: its path inside the archive, what it is, its data's size, its mode's
+// permission bits, its time in seconds since the epoch, and a link's target.
+export type TarHeader = { path: string; type: TarEntryType; size: i64; mode: i64; mtime: i64; target: string };
+export type TarEntry = { path: string; type: TarEntryType; size: i64; mode: i64; mtime: i64; target: string; data: u8[] };
+// An archive given as a path, its bytes, or a stream of its chunks.
+export type TarSource = string | u8[] | ReadableStream<u8[]>;
+// How much an archive may hold before it is refused: entries, bytes of entry data in all, and
+// for a gzip archive bytes unpacked per byte packed.
+export type TarLimits = { maxEntries?: i64; maxBytes?: i64; maxRatio?: i64 };
+
+const MAX_ENTRIES = 10000;
+const MAX_BYTES = 1073741824;
+const MAX_RATIO = 100;
+
+// A source's bytes as chunks, read a block at a time from a path.
+async function* chunksOf(source: TarSource): AsyncGenerator<u8[]> throws IoError {
+  if (typeof source === "string") {
+    // ponytail: a generator can't yield inside try...finally yet, so a reader that stops early
+    // leaves the descriptor open until the program ends.
+    const fd = openSync(source, "r");
+    while (true) {
+      let buffer: u8[] = new Array<u8>(65536).fill(0);
+      const n = readSync(fd, buffer, 0, 65536, null);
+      if (n === 0) break;
+      yield buffer.slice(0, n);
+    }
+    closeSync(fd);
+  } else if (Array.isArray(source)) yield source;
+  else for await (const chunk of source) yield chunk;
+}
+
+// A field of a header: ASCII up to its first NUL.
+function text(block: Ref<u8[]>, at: i64, length: i64): string {
+  let end = at;
+  while (end < at + length && block[end as usize]! !== 0) end++;
+  return new TextDecoder().decode(block.slice(at, end));
+}
+
+// A numeric field: octal digits, or, with its top bit set, a big-endian binary number, as GNU
+// tar writes sizes past octal's reach.
+function number(block: Ref<u8[]>, at: i64, length: i64): i64 {
+  if (((block[at as usize]! as i64) & 0x80) !== 0) {
+    let n = 0;
+    for (let i = at + 1; i < at + length; i++) n = n * 256 + (block[i as usize]! as i64);
+    return n;
+  }
+  let n = 0;
+  for (let i = at; i < at + length; i++) {
+    const c = block[i as usize]! as i64;
+    if (c >= 48 && c <= 55) n = n * 8 + (c - 48);
+    else if (n > 0 || (c !== 32 && c !== 0)) break;
+  }
+  return n;
+}
+
+// Whether a block's checksum, its bytes summed with the checksum field read as spaces, matches.
+function checked(block: Ref<u8[]>): boolean {
+  let sum = 0;
+  for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : (block[i as usize]! as i64);
+  return sum === number(block, 148, 8);
+}
+
+function zeros(block: Ref<u8[]>): boolean {
+  for (const b of block) if (b !== 0) return false;
+  return true;
+}
+
+// A PAX header's records, "length key=value\n" each, as their keys and values.
+function paxRecords(data: Ref<u8[]>): Map<string, string> {
+  let out = new Map<string, string>();
+  const all = new TextDecoder().decode(data);
+  let at = 0;
+  while (at < (all.length as i64)) {
+    const space = all.indexOf(" ", at);
+    if (space < 0) break;
+    const length = parseInt(all.slice(at, space)) ?? 0;
+    if (length <= 0) break;
+    const record = all.slice(space + 1, at + length - 1);
+    const eq = record.indexOf("=");
+    if (eq > 0) out.set(record.slice(0, eq), record.slice(eq + 1, record.length as i64));
+    at += length;
+  }
+  return out;
+}
+
+function typeOf(flag: i64, path: string): TarEntryType | null {
+  // '0' and NUL are files, as is '7', a contiguous file; '5' a directory, '2' a symlink and '1'
+  // a hard link. A name ending in '/' is an old-style directory.
+  if (flag === 48 || flag === 0 || flag === 55) return path.endsWith("/") ? "directory" : "file";
+  if (flag === 53) return "directory";
+  if (flag === 50) return "symlink";
+  if (flag === 49) return "link";
+  return null;
+}
+
+// The archive's raw chunks, inflated first when they start as gzip does, within the limits.
+async function* inflated(source: TarSource, limits: Ref<TarLimits>): AsyncGenerator<u8[]> throws IoError | TarError {
+  let first = true;
+  let packed: u8[] = [];
+  let gzip = false;
+  let chunks = chunksOf(source);
+  for await (const chunk of chunks) {
+    if (first) {
+      gzip = chunk.length >= 2 && chunk[0]! === 0x1f && chunk[1]! === 0x8b;
+      first = false;
+    }
+    if (!gzip) {
+      yield chunk;
+      continue;
+    }
+    // ponytail: zlib in std inflates whole buffers, so a gzip archive is held packed and then
+    // unpacked; a streaming inflate would hold a window instead.
+    for (const b of chunk) packed.push(b);
+  }
+  if (!gzip) return;
+  const maxBytes = limits.maxBytes ?? MAX_BYTES;
+  const ratio = limits.maxRatio ?? MAX_RATIO;
+  // The headers come on top of the entries' data, up to three blocks an entry with long names.
+  const headers = maxBytes + 512 * 3 * (limits.maxEntries ?? MAX_ENTRIES);
+  const cap = headers < (packed.length as i64) * ratio ? headers : (packed.length as i64) * ratio;
+  let unpacked: u8[] = [];
+  try {
+    unpacked = gunzipSync(packed, { maxOutputLength: cap });
+  } catch (e) {
+    throw new TarError("this gzip archive unpacks past its limits, or isn't gzip: " + e.message + "; raise maxBytes or maxRatio if it is trusted");
+  }
+  yield unpacked;
+}
+
+// The archive's entries, one at a time, each read whole. Throws TarError on a corrupt header or
+// past a limit.
+export async function* entries(source: TarSource, limits: TarLimits = {}): AsyncGenerator<TarEntry> throws IoError | TarError {
+  const maxEntries = limits.maxEntries ?? MAX_ENTRIES;
+  const maxBytes = limits.maxBytes ?? MAX_BYTES;
+  let chunks = inflated(source, limits);
+  // What has arrived and not been read, and whether the input has ended.
+  let held: u8[] = [];
+  let ended = false;
+  let count = 0;
+  let total = 0;
+  // A GNU long name or PAX header before an entry, for that entry alone.
+  let longPath = "";
+  let longTarget = "";
+  let paxSize = -1;
+  while (true) {
+    while ((held.length as i64) < 512 && !ended) {
+      const step = await chunks.next();
+      if (step.done) ended = true;
+      else for (const b of step.value) held.push(b);
+    }
+    const block = held.slice(0, 512);
+    held = held.slice(block.length as i64, held.length as i64);
+    if (block.length === 0 || zeros(block)) return;
+    if (block.length < 512) throw new TarError("this tar archive ends inside a header");
+    if (!checked(block)) throw new TarError("a tar header's checksum doesn't match; the archive is corrupt or isn't tar");
+    const name = text(block, 0, 100);
+    const prefix = text(block, 345, 155);
+    const magic = text(block, 257, 6);
+    let path = magic.startsWith("ustar") && prefix.length > 0 ? prefix + "/" + name : name;
+    const flag = block[156]! as i64;
+    let size = number(block, 124, 12);
+    if (paxSize >= 0) size = paxSize;
+    if (size < 0 || total + size > maxBytes) throw new TarError("this tar archive holds more than " + String(maxBytes) + " bytes; raise maxBytes if it is trusted", path);
+    const padded = (size + 511) / 512 * 512;
+    while ((held.length as i64) < padded && !ended) {
+      const step = await chunks.next();
+      if (step.done) ended = true;
+      else for (const b of step.value) held.push(b);
+    }
+    const data = held.slice(0, padded);
+    held = held.slice(data.length as i64, held.length as i64);
+    if ((data.length as i64) < size) throw new TarError("this tar archive ends inside an entry's data", path);
+    const body = data.slice(0, size);
+    // 'L' and 'K' are GNU's long name and long link target; 'x' a PAX header for the next
+    // entry, 'g' one for every entry, which nothing here reads.
+    if (flag === 76) {
+      longPath = text(body, 0, size);
+      continue;
+    }
+    if (flag === 75) {
+      longTarget = text(body, 0, size);
+      continue;
+    }
+    if (flag === 120) {
+      const records = paxRecords(body);
+      longPath = records.get("path") ?? longPath;
+      longTarget = records.get("linkpath") ?? longTarget;
+      const s = records.get("size");
+      if (s !== undefined) paxSize = parseInt(s) ?? -1;
+      continue;
+    }
+    if (flag === 103) continue;
+    if (longPath.length > 0) path = longPath;
+    const target = longTarget.length > 0 ? longTarget : text(block, 157, 100);
+    longPath = "";
+    longTarget = "";
+    paxSize = -1;
+    const type = typeOf(flag, path);
+    if (type === null) throw new TarError("'" + path + "' is a device, FIFO or another special entry, which isn't read", path);
+    count++;
+    if (count > maxEntries) throw new TarError("this tar archive holds more than " + String(maxEntries) + " entries; raise maxEntries if it is trusted", path);
+    total += size;
+    yield { path, type, size: type === "file" ? size : 0, mode: number(block, 100, 8) & 0o7777, mtime: number(block, 136, 12), target, data: type === "file" ? body : [] };
+  }
+}
+
+// The headers of the archive's entries, its data read past.
+export async function list(source: TarSource, limits: TarLimits = {}): Promise<TarHeader[]> throws IoError | TarError {
+  let out: TarHeader[] = [];
+  let all = entries(source, limits);
+  for await (const e of all) out.push({ path: e.path, type: e.type, size: e.size, mode: e.mode, mtime: e.mtime, target: e.target });
+  return out;
+}
+
+// Where an entry's path lands under root, refusing an absolute path or one that climbs out.
+function landing(root: string, path: string): string throws TarError {
+  if (isAbsolute(path)) throw new TarError("'" + path + "' is an absolute path, which extract refuses; an entry lands inside the target", path);
+  const to = resolve(root, path);
+  const rel = relative(root, to);
+  if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) throw new TarError("'" + path + "' climbs out of the target, which extract refuses", path);
+  return to;
+}
+
+// Refuses a landing reached through a symlink, which an earlier entry may have made to point
+// anywhere: every directory between root and the landing, and the landing itself, must be real.
+function throughLinks(root: string, to: string, path: string): void throws IoError | TarError {
+  let at = to;
+  while (at !== root && at.length > root.length) {
+    const st = lstatSync(at, { throwIfNoEntry: false });
+    if (st !== undefined && st.isSymbolicLink()) throw new TarError("'" + path + "' would be written through the symlink '" + relative(root, at) + "', which extract refuses", path);
+    at = dirname(at);
+  }
+}
+
+// Writes the archive's entries under dir, made if it isn't there, and gives the paths written.
+// Nothing lands outside dir: absolute paths, climbing paths, links pointing out and paths
+// through symlinks are refused with TarError, as are devices and FIFOs.
+export async function extract(source: TarSource, dir: string, limits: TarLimits = {}): Promise<string[]> throws IoError | TarError {
+  const root = resolve(dir);
+  mkdirSync(root, { recursive: true });
+  let written: string[] = [];
+  let all = entries(source, limits);
+  for await (const e of all) {
+    const to = landing(root, e.path);
+    throughLinks(root, to, e.path);
+    if (e.type === "directory") {
+      mkdirSync(to, { recursive: true });
+      if (e.mode !== 0) chmodSync(to, e.mode & 0o777);
+      written.push(to);
+      continue;
+    }
+    mkdirSync(dirname(to), { recursive: true });
+    if (e.type === "symlink") {
+      if (isAbsolute(e.target)) throw new TarError("'" + e.path + "' is a symlink to the absolute path '" + e.target + "', which extract refuses", e.path);
+      landing(root, join(dirname(relative(root, to)), e.target));
+      symlinkSync(e.target, to);
+    } else if (e.type === "link") {
+      const from = landing(root, e.target);
+      throughLinks(root, from, e.path);
+      linkSync(from, to);
+    } else {
+      writeFileSync(to, e.data);
+      chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
+      utimesSync(to, e.mtime as f64, e.mtime as f64);
+    }
+    written.push(to);
+  }
+  return written;
+}
+
+export type TarPackOptions = { cwd?: string; gzip?: boolean };
+
+// A field of a header written as ASCII, cut to its length.
+function put(block: Mut<u8[]>, at: i64, length: i64, value: string) {
+  const bytes = new TextEncoder().encode(value);
+  for (let i = 0; i < length && i < (bytes.length as i64); i++) block[(at + i) as usize] = bytes[i as usize]!;
+}
+
+function octalDigits(n: i64): string {
+  if (n === 0) return "0";
+  let digits = "";
+  let left = n;
+  while (left > 0) {
+    digits = String(left % 8) + digits;
+    left = left / 8;
+  }
+  return digits;
+}
+
+// A numeric field as zero-padded octal digits and a NUL.
+function octal(block: Mut<u8[]>, at: i64, length: i64, n: i64) {
+  let digits = octalDigits(n);
+  while ((digits.length as i64) < length - 1) digits = "0" + digits;
+  put(block, at, length - 1, digits);
+}
+
+// A PAX record, "length key=value\n", whose length counts its own digits.
+function paxRecord(key: string, value: string): string {
+  // The record past its length's digits: a space, key=value, and a newline.
+  const rest = (new TextEncoder().encode(key + "=" + value).length as i64) + 2;
+  let length = rest + (String(rest).length as i64);
+  if ((String(length).length as i64) !== (String(rest).length as i64)) length = rest + (String(length).length as i64);
+  return String(length) + " " + key + "=" + value + "\n";
+}
+
+// A header block for one entry, with a PAX header before it when its path, target or size don't
+// fit ustar's fields.
+function headerBlocks(path: string, flag: i64, size: i64, mode: i64, mtime: i64, target: string): u8[] {
+  let out: u8[] = [];
+  const pathBytes = new TextEncoder().encode(path).length as i64;
+  const targetBytes = new TextEncoder().encode(target).length as i64;
+  let name = path;
+  let prefix = "";
+  if (pathBytes > 100) {
+    // ustar splits a long path at a slash into a prefix of up to 155 bytes and a name of 100.
+    let slash = -1;
+    for (let i = 0; i < (path.length as i64) && i <= 155; i++) if (path.slice(i, i + 1) === "/") slash = i;
+    if (slash > 0 && (new TextEncoder().encode(path.slice(slash + 1, path.length as i64)).length as i64) <= 100) {
+      prefix = path.slice(0, slash);
+      name = path.slice(slash + 1, path.length as i64);
+    }
+  }
+  const big = size > 8589934591;
+  const pax = (prefix === "" && pathBytes > 100) || targetBytes > 100 || big;
+  if (pax) {
+    let records = "";
+    if (prefix === "" && pathBytes > 100) records += paxRecord("path", path);
+    if (targetBytes > 100) records += paxRecord("linkpath", target);
+    if (big) records += paxRecord("size", String(size));
+    const data = new TextEncoder().encode(records);
+    for (const b of ustarBlock("PaxHeader", "", 120, data.length as i64, 0o644, mtime, "")) out.push(b);
+    for (const b of data) out.push(b);
+    for (let i = data.length as i64; i % 512 !== 0; i++) out.push(0);
+  }
+  for (const b of ustarBlock(name.slice(0, 100), prefix, flag, big ? 0 : size, mode, mtime, target.slice(0, 100))) out.push(b);
+  return out;
+}
+
+function ustarBlock(name: string, prefix: string, flag: i64, size: i64, mode: i64, mtime: i64, target: string): u8[] {
+  let block: u8[] = new Array<u8>(512).fill(0);
+  put(block, 0, 100, name);
+  octal(block, 100, 8, mode);
+  octal(block, 108, 8, 0);
+  octal(block, 116, 8, 0);
+  octal(block, 124, 12, size);
+  octal(block, 136, 12, mtime);
+  put(block, 148, 8, "        ");
+  block[156] = flag as u8;
+  put(block, 157, 100, target);
+  put(block, 257, 6, "ustar");
+  put(block, 263, 2, "00");
+  put(block, 345, 155, prefix);
+  let sum = 0;
+  for (const b of block) sum += b as i64;
+  let digits = octalDigits(sum);
+  while ((digits.length as i64) < 6) digits = "0" + digits;
+  put(block, 148, 6, digits);
+  block[154] = 0;
+  block[155] = 32;
+  return block;
+}
+
+// The entries for path and, for a directory, everything under it in sorted order.
+function* walked(cwd: string, path: string): Generator<string> throws IoError {
+  yield path;
+  const st = lstatSync(join(cwd, path));
+  if (!st.isDirectory()) return;
+  let names = readdirSync(join(cwd, path));
+  names.sort();
+  for (const n of names) for (const p of walked(cwd, join(path, n))) yield p;
+}
+
+async function* packed(paths: string[], cwd: string, gzip: boolean): AsyncGenerator<u8[]> throws IoError | ZlibError {
+  // ponytail: zlib in std deflates whole buffers, so a gzipped archive is gathered first.
+  let gathered: u8[] = [];
+  for (const given of paths) {
+    for (const path of walked(cwd, given)) {
+      const full = join(cwd, path);
+      const st = lstatSync(full);
+      const mtime = Math.floor(st.mtimeMs / 1000.0) as i64;
+      const mode = st.mode & 0o7777;
+      if (st.isSymbolicLink() || st.isDirectory()) {
+        const out = st.isSymbolicLink() ? headerBlocks(path, 50, 0, mode, mtime, readlinkSync(full)) : headerBlocks(path.endsWith("/") ? path : path + "/", 53, 0, mode, mtime, "");
+        if (gzip) for (const b of out) gathered.push(b);
+        else yield out;
+      } else if (st.isFile()) {
+        let data = readFileSync(full);
+        let out = headerBlocks(path, 48, data.length as i64, mode, mtime, "");
+        for (const b of data) out.push(b);
+        for (let i = data.length as i64; i % 512 !== 0; i++) out.push(0);
+        if (gzip) for (const b of out) gathered.push(b);
+        else yield out;
+      }
+    }
+  }
+  // Two zero blocks end an archive.
+  const end = new Array<u8>(1024).fill(0);
+  if (!gzip) {
+    yield end;
+    return;
+  }
+  for (const b of end) gathered.push(b);
+  yield gzipSync(gathered);
+}
+
+// An archive of the paths, each relative to cwd, and everything under each directory, as its
+// chunks; gzipped with gzip.
+export function pack(paths: string[], options: TarPackOptions = {}): AsyncGenerator<u8[]> throws IoError | ZlibError {
+  return packed(paths, options.cwd ?? ".", options.gzip === true);
+}
+
+// The archive pack makes, written to file.
+export async function create(file: string, paths: string[], options: TarPackOptions = {}): Promise<void> throws IoError | ZlibError {
+  const fd = openSync(file, "w");
+  let chunks = pack(paths, options);
+  for await (const chunk of chunks) writeSync(fd, chunk);
+  closeSync(fd);
+}
+`,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
   // buffer so readers can be mixed.
   stdin: String.raw`
@@ -7436,10 +7871,12 @@ export function evaluate(module: string): JsValue {
 
 // The std module a specifier names, if any: `node:os` and `os` both name `os`.
 export function stdModule(specifier: string): string | undefined {
+  // Fish's own modules are reached only by their fish: names, so npm keeps the bare ones.
+  if (specifier.startsWith("fish:")) return STD_MODULES[specifier] !== undefined ? specifier : undefined;
   const bare = specifier.startsWith("node:") ? specifier.slice("node:".length as i64) : specifier;
   // "path/posix" is "path", which is POSIX's here.
   const name = bare === "path/posix" ? "path" : bare === "bun" ? "Bun" : bare;
-  return STD_MODULES[name] !== undefined ? name : undefined;
+  return STD_MODULES[name] !== undefined && !name.startsWith("fish:") ? name : undefined;
 }
 
 // What awaiting a JS promise that rejects throws: the JS error's message, and what JS threw. It
