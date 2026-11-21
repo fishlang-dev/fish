@@ -3665,6 +3665,7 @@ class URLSearchParams {
 const BYTE_METHODS = ["toBase64", "toHex"];
 const BYTE_STATICS = ["fromBase64", "fromHex"];
 const URL_NAMES = ["URL", "URLSearchParams"];
+const STREAM_NAMES = ["ReadableStream", "WritableStream", "ReadableStreamDefaultReader", "WritableStreamDefaultWriter", "ReadableStreamDefaultController", "ReadableStreamReadResult", "UnderlyingSource", "UnderlyingSink"];
 // std's names a program may declare its own of, which std's own code then reaches under another.
 const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date", "RangeError"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
@@ -7302,7 +7303,200 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS;
+// The web streams API over async generators, in a program that names a stream or uses HTTP.
+const STREAMS = `
+// What a reader's read() gives: a value, or the end of the stream, as a generator's next() does.
+type ReadableStreamReadResult<T> = { done: true } | { done: false; value: T };
+
+// A stream's values, read once, by one reader at a time. Every stream holds a generator; one
+// made from an underlying source reads what its controller queues. Shared, so a reader and the
+// stream it came from see one generator and one lock.
+type __streamState<T> = { source: Lock<Dyn<AsyncGenerator<T>>[]>; locked: Atomic<i64>; queue: Lock<__streamQueue<T>[]> };
+
+class ReadableStream<T> {
+  #state: shared<__streamState<T>>;
+
+  constructor(source?: UnderlyingSource<T>) {
+    const cancels: ((reason: string) => void)[] = [];
+    const queue = shared<__streamQueue<T>>({ items: new Lock<T[]>([]), closed: new Atomic(0), failure: new Lock<Error[]>([]), cancel: new Lock(cancels) });
+    const generators: Dyn<AsyncGenerator<T>>[] = [];
+    const queues: __streamQueue<T>[] = [];
+    this.#state = shared<__streamState<T>>({ source: new Lock(generators), locked: new Atomic(0), queue: new Lock(queues) });
+    if (source !== null) {
+      const start = source.start;
+      const pull = source.pull;
+      const cancel = source.cancel;
+      if (cancel !== null) queue.cancel.update((c) => c.push(cancel));
+      const controller = new ReadableStreamDefaultController<T>(queue.clone());
+      this.#state.source.update((g) => g.push(__streamPulled(start, pull, controller)));
+      this.#state.queue.update((q) => q.push(queue));
+    }
+  }
+
+  // A stream of what the generator yields, as ReadableStream.from reads an async iterable.
+  static from(generator: Dyn<AsyncGenerator<T>>): ReadableStream<T> {
+    let stream = new ReadableStream<T>();
+    stream.#state.source.update((g) => g.push(generator));
+    return stream;
+  }
+
+  // Whether a reader holds the stream, so no other can read it.
+  get locked(): boolean {
+    return this.#state.locked.load() === 1;
+  }
+
+  // A reader of the stream, which locks it until the reader lets it go.
+  getReader(): ReadableStreamDefaultReader<T> throws TypeError {
+    if (this.#state.locked.load() === 1) throw new TypeError("this ReadableStream is locked to a reader; release it with 'reader.releaseLock()' first");
+    this.#state.locked.store(1);
+    return new ReadableStreamDefaultReader<T>(this.#state.clone());
+  }
+
+  // Ends the stream without reading the rest, running its source's cancel.
+  async cancel(reason?: string): Promise<void> throws TypeError {
+    if (this.#state.locked.load() === 1) throw new TypeError("a locked ReadableStream can't be cancelled; cancel it through its reader");
+    __streamCancel(this.#state.clone(), reason ?? "");
+  }
+
+  // What 'for await' over the stream reads, which locks it for good: the generator itself. A
+  // loop can't catch, so reading a locked stream this way panics, where JavaScript throws.
+  __values(): Dyn<AsyncGenerator<T>> {
+    assert(this.#state.locked.load() === 0, "this ReadableStream is locked to a reader, so 'for await' can't read it; release the reader's lock first");
+    this.#state.locked.store(1);
+    const g = this.#state.source.update((s) => s.pop());
+    if (g === null) return __streamNone<T>();
+    return g;
+  }
+}
+
+async function* __streamNone<T>(): AsyncGenerator<T> {}
+
+class ReadableStreamDefaultReader<T> {
+  #state: shared<__streamState<T>>;
+  #released: boolean = false;
+
+  constructor(state: shared<__streamState<T>>) {
+    this.#state = state;
+  }
+
+  // The stream's next value, or its end; an error its source reported is thrown here.
+  async read(this: Mut<this>): Promise<ReadableStreamReadResult<T>> throws Error | TypeError {
+    if (this.#released) throw new TypeError("this reader has released its lock, so it can't read");
+    // The generator is taken out while it runs, since a lock can't be held across an await.
+    const taken = this.#state.source.update((s) => s.pop());
+    if (taken === null) {
+      __streamFailed(this.#state.clone());
+      return { done: true };
+    }
+    let g = taken;
+    const step = await g.next();
+    this.#state.source.update((s) => s.push(g));
+    if (step.done === false) return { done: false, value: step.value };
+    __streamFailed(this.#state.clone());
+    return { done: true };
+  }
+
+  // Ends the stream without reading the rest, running its source's cancel.
+  async cancel(this: Mut<this>, reason?: string): Promise<void> {
+    __streamCancel(this.#state.clone(), reason ?? "");
+  }
+
+  // Lets the stream go, so another reader can take it.
+  releaseLock(this: Mut<this>) {
+    if (this.#released) return;
+    this.#released = true;
+    this.#state.locked.store(0);
+  }
+}
+
+// Throws the error a stream's source reported through its controller, if it did.
+function __streamFailed<T>(state: shared<__streamState<T>>): void throws Error {
+  const failed = state.queue.update((q) => q.length > 0 ? q[0]!.failure.update((f) => f.length > 0 ? f[0]!.message : null) : null);
+  if (failed !== null) throw new Error(failed);
+}
+
+// Drops a stream's generator unread and runs its source's cancel, once.
+function __streamCancel<T>(state: shared<__streamState<T>>, reason: string) {
+  state.source.update((s) => {
+    s.length = 0;
+  });
+  const queue = state.queue.update((q) => q.pop());
+  if (queue === null) return;
+  queue.closed.store(1);
+  const cancel = queue.cancel.update((c) => c.pop());
+  if (cancel !== null) cancel(reason);
+}
+
+// What an underlying source's callbacks are given: start once before the first read, pull when
+// the queue is empty, and cancel with its reason when a reader cancels.
+type UnderlyingSource<T> = { start?: (controller: ReadableStreamDefaultController<T>) => void; pull?: (controller: ReadableStreamDefaultController<T>) => Promise<void>; cancel?: (reason: string) => void };
+
+// The values a source has queued and not yet read, whether it has closed, the error it reported,
+// and its cancel callback.
+type __streamQueue<T> = { items: Lock<T[]>; closed: Atomic<i64>; failure: Lock<Error[]>; cancel: Lock<((reason: string) => void)[]> };
+
+// What a source queues values through. The queue is unbounded and enqueue never waits: a source
+// held back reads the queue's emptiness through pull being called only when nothing is queued.
+class ReadableStreamDefaultController<T> {
+  #queue: shared<__streamQueue<T>>;
+
+  constructor(queue: shared<__streamQueue<T>>) {
+    this.#queue = queue;
+  }
+
+  enqueue(chunk: T): void throws TypeError {
+    if (this.#queue.closed.load() === 1) throw new TypeError("this ReadableStream is closed, so nothing more can be enqueued");
+    this.#queue.items.update((xs) => xs.push(chunk));
+  }
+
+  // Ends the stream once what is queued has been read.
+  close() {
+    this.#queue.closed.store(1);
+  }
+
+  // Ends the stream with an error, which its reader's next read throws.
+  error(e: Error) {
+    this.#queue.failure.update((f) => f.push(e));
+    this.#queue.items.update((xs) => {
+      xs.length = 0;
+    });
+    this.#queue.closed.store(1);
+  }
+
+  __copy(): ReadableStreamDefaultController<T> {
+    return new ReadableStreamDefaultController<T>(this.#queue.clone());
+  }
+
+  // The first queued value, taken out, or null when nothing is queued.
+  __take(): T | null {
+    return this.#queue.items.update((xs) => xs.length > 0 ? xs.shift() : null);
+  }
+
+  __closed(): boolean {
+    return this.#queue.closed.load() === 1;
+  }
+}
+
+// A source's values as a generator: start first, then each queued value, pulling for more when
+// none is queued, until the source closes or errors.
+async function* __streamPulled<T>(start: ((controller: ReadableStreamDefaultController<T>) => void) | null, pull: ((controller: ReadableStreamDefaultController<T>) => Promise<void>) | null, controller: ReadableStreamDefaultController<T>): AsyncGenerator<T> {
+  if (start !== null) start(controller.__copy());
+  while (true) {
+    const next = controller.__take();
+    if (next !== null) {
+      yield next;
+      continue;
+    }
+    if (controller.__closed()) return;
+    if (pull !== null) await pull(controller.__copy());
+    // ponytail: a source with no pull, enqueuing from elsewhere, is polled each millisecond; a
+    // notification from enqueue would wake the reader at once.
+    else await sleep(1);
+  }
+}
+`;
+
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -7320,7 +7514,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS]) {
+  for (const text of [PRELUDE, HTTP, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -7344,6 +7538,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let dates = sections.shift()!;
   let reading = sections.shift()!;
   let tls = sections.shift()!;
+  let streaming = sections.shift()!;
   renamed(json, { kind: "json" });
   renamed(jsonName, { kind: "json" });
   let astNames: string[] = [];
@@ -7374,6 +7569,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const encoding = httpUsed || bufferUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);
   const dated = httpUsed || uses(written, dates, ["Date"]);
   const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
+  const streamed = httpUsed || uses(written, streaming, STREAM_NAMES);
   // The checker turns typed arrays' constructors and methods into calls of these helpers.
   const typing = (dataViewUsed && dataView.length > 0) || mentionsTypedArray(written);
   let chosen: Stmt[] = prelude;
@@ -7395,6 +7591,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   if (encoding) chosen = chosen.concat(bytes);
   if (typing) chosen = chosen.concat(typed);
   if (secure) chosen = chosen.concat(tls);
+  if (streamed) chosen = chosen.concat(streaming);
   if (own.size > 0) renamed(chosen, { kind: "own", names: own });
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.

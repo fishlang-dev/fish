@@ -405,7 +405,7 @@ async function main() {
 }
 // expect: 11
 // case: for_await_array
-// error: 'for await' loops over an async generator or a Channel, not 'i64[]'
+// error: 'for await' loops over an async generator, a Channel or a ReadableStream, not 'i64[]'
 async function main() {
   const xs = [1, 2];
   for await (const x of xs) console.log(x);
