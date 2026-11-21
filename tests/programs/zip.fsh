@@ -87,3 +87,88 @@ async function main(): Promise<void> throws IoError {
   console.log("not zip:", notZip);
   rmSync(dir, { recursive: true });
 }
+// case: zip_extract_and_refusals
+// expect: a.txt hello
+// expect: link -> a.txt
+// expect: climbing: '../evil.txt' climbs out of the target, which extract refuses
+// expect: absolute link: 'up' is a symlink to the absolute path '/tmp', which extract refuses
+// expect: through a link: 'hop/x.txt' would be written through the symlink 'hop', which extract refuses
+// expect: nothing outside: true
+// An archive the system's zip made extracted and read back, and archives with each escaping
+// entry refused with nothing written outside the target.
+import { extract, pack } from "fish:zip";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function archive(paths: string[], cwd: string): Promise<u8[]> throws IoError | ZlibError {
+  let out: u8[] = [];
+  let chunks = pack(paths, { cwd });
+  for await (const chunk of chunks) for (const b of chunk) out.push(b);
+  return out;
+}
+
+async function attempt(what: string, bytes: u8[], to: string): Promise<void> {
+  try {
+    const _w = await extract(bytes, to);
+    console.log(what + ": extracted");
+  } catch (e) {
+    console.log(what + ": " + e.message);
+  }
+}
+
+async function main(): Promise<void> throws IoError | ZlibError | Error {
+  const dir = mkdtempSync(join(tmpdir(), "fish-zip-"));
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "a.txt"), "hello");
+  symlinkSync("a.txt", join(dir, "src", "link"));
+  spawnSync("zip", ["-q", "-y", join(dir, "x.zip"), "a.txt", "link"], { cwd: join(dir, "src") });
+  const out = join(dir, "out");
+  const _w = await extract(join(dir, "x.zip"), out);
+  console.log("a.txt", new TextDecoder().decode(readFileSync(join(out, "a.txt"))));
+  console.log("link ->", readlinkSync(join(out, "link")));
+  const inner = join(dir, "a", "inner");
+  mkdirSync(join(inner, "real"), { recursive: true });
+  writeFileSync(join(dir, "a", "evil.txt"), "x");
+  writeFileSync(join(inner, "real", "x.txt"), "x");
+  symlinkSync("/tmp", join(inner, "up"));
+  symlinkSync("real", join(inner, "hop"));
+  const climbing = await archive(["../evil.txt"], inner);
+  await attempt("climbing", climbing, join(dir, "t1"));
+  const absolute = await archive(["up"], inner);
+  await attempt("absolute link", absolute, join(dir, "t2"));
+  const through = await archive(["hop", "hop/x.txt"], inner);
+  await attempt("through a link", through, join(dir, "t3"));
+  console.log("nothing outside:", !existsSync(join(dir, "evil.txt")));
+  rmSync(dir, { recursive: true });
+}
+// case: zip_create_round_trip
+// expect: entries: a.txt file 5 hello | big.txt file 50000 | sub/ directory 0 | sub/b.txt file 3 bye
+// expect: unzip -t: No errors detected in compressed data
+// expect: unzip -l: a.txt big.txt sub/ sub/b.txt
+// An archive create writes reads back through entries() and through the system's unzip, which
+// tests every entry's CRC.
+import { create, entries } from "fish:zip";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function main(): Promise<void> throws IoError | ZlibError | Error {
+  const dir = mkdtempSync(join(tmpdir(), "fish-zip-"));
+  mkdirSync(join(dir, "src", "sub"), { recursive: true });
+  writeFileSync(join(dir, "src", "a.txt"), "hello");
+  writeFileSync(join(dir, "src", "big.txt"), "abc".repeat(16666) + "ab");
+  writeFileSync(join(dir, "src", "sub", "b.txt"), "bye");
+  await create(join(dir, "x.zip"), ["a.txt", "big.txt", "sub"], { cwd: join(dir, "src") });
+  let parts: string[] = [];
+  let all = entries(join(dir, "x.zip"));
+  for await (const e of all) parts.push(e.path + " " + e.type + " " + String(e.size) + (e.type === "file" && e.size < 10 ? " " + new TextDecoder().decode(e.data) : ""));
+  console.log("entries:", parts.join(" | "));
+  const tested = new TextDecoder().decode(spawnSync("unzip", ["-t", join(dir, "x.zip")]).stdout);
+  console.log("unzip -t:", tested.includes("No errors detected in compressed data") ? "No errors detected in compressed data" : tested);
+  const listed = new TextDecoder().decode(spawnSync("unzip", ["-Z1", join(dir, "x.zip")]).stdout);
+  console.log("unzip -l:", listed.trim().split("\n").join(" "));
+  rmSync(dir, { recursive: true });
+}
