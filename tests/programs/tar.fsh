@@ -78,9 +78,12 @@ async function main(): Promise<void> throws IoError {
   let bytes = readFileSync(join(dir, "x.tar"));
   let corrupt = bytes.clone();
   corrupt[3] = 120;
-  console.log(await attempt("checksum", corrupt, {}));
-  console.log(await attempt("entries", bytes.clone(), { maxEntries: 1 }));
-  console.log(await attempt("bytes", bytes.clone(), { maxBytes: 4 }));
+  const checksumSaid = await attempt("checksum", corrupt, {});
+  console.log(checksumSaid);
+  const entriesSaid = await attempt("entries", bytes.clone(), { maxEntries: 1 });
+  console.log(entriesSaid);
+  const bytesSaid = await attempt("bytes", bytes.clone(), { maxBytes: 4 });
+  console.log(bytesSaid);
   const ratio = await attempt("ratio", readFileSync(join(dir, "z.tgz")), { maxRatio: 2 });
   console.log("ratio:", ratio.includes("unpacks past its limits"));
   spawnSync("mkfifo", [join(dir, "pipe")]);
