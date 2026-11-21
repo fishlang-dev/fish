@@ -8,5 +8,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 commit=$(sed -n 's/^commit = "\(.*\)"$/\1/p' "$root/stage0.toml")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+echo "unpacking the compiler at $commit, which Bun runs to start the build"
 git -C "$root" archive "$commit" | tar -x -C "$work"
+echo "running scripts/build.fsh with Bun; compiling it takes a minute or two before it prints"
 bun "$work/src/main.ts" run "$root/scripts/build.fsh" -- "$@"

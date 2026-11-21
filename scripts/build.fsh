@@ -80,17 +80,38 @@ export function mirror(root: string, to: string): usize throws IoError {
   return n;
 }
 
+async function exitOf(exited: Promise<i64>): Promise<i64> {
+  return await exited;
+}
+
+const STILL = -1000;
+
+async function aMinute(): Promise<i64> {
+  await sleep(60000);
+  return STILL;
+}
+
+// `cmd` run in `cwd` with its output shown as it comes, saying once a minute how long it has run,
+// since a build of fishc says nothing of its own for tens of minutes. Its exit code.
+async function ran(label: string, cmd: string[], cwd: string): Promise<i64> throws IoError {
+  console.log(label);
+  const started = Date.now();
+  const child = Bun.spawn(cmd, { cwd: cwd, stdout: "inherit", stderr: "inherit" });
+  while (true) {
+    const code = await Promise.race([exitOf(child.exited), aMinute()]);
+    if (code !== STILL) return code;
+    console.log(`  still running, ${(Date.now() - started) / 60000} min`);
+  }
+}
+
 // fishc built by `fishc` from the source in `src` into `out`, as a release build. A fishc finds
 // vendor and the runtime's sources from where its source was when it was built, so `src` is a
 // directory that stays: the repository's src, or the mirror in stage 0's own tree.
-export function compiled(fishc: string, src: string, out: string): boolean throws IoError {
-  const started = performance.now();
-  const r = spawnSync(fishc, ["build", "main.fsh", "--release", "-o", out], { cwd: src });
-  if (r.status !== 0) {
-    console.error(new TextDecoder().decode(r.stderr).slice(0, 8000));
-    return false;
-  }
-  console.log(`built ${out} in ${Math.round((performance.now() - started) / 1000)}s`);
+export async function compiled(fishc: string, src: string, out: string): Promise<boolean> throws IoError {
+  const started = Date.now();
+  const code = await ran(`building ${out} from ${src}, about 25 minutes on a fast machine`, [fishc, "build", "main.fsh", "--release", "-o", out], src);
+  if (code !== 0) return false;
+  console.log(`built ${out} in ${(Date.now() - started) / 1000}s`);
   return true;
 }
 
@@ -115,28 +136,26 @@ function prepared(p: Ref<Pinned>, root: string): string throws IoError {
   return tree;
 }
 
-function step(label: string, command: string, cwd: string): void throws IoError {
-  console.log(`stage 0: ${label}`);
-  const r = spawnSync("sh", ["-c", command], { cwd });
-  if (r.status !== 0) {
-    console.error(new TextDecoder().decode(r.stderr).slice(0, 8000));
-    fail(`stage 0: couldn't ${label}`);
-  }
+async function step(label: string, command: string, cwd: string): Promise<void> throws IoError {
+  const code = await ran(`stage 0: ${label}`, ["sh", "-c", command], cwd);
+  if (code !== 0) fail(`stage 0: couldn't ${label}`);
 }
 
 // Stage 0 built from the pinned commit in its tree: the commit's own compiler, run by Bun, builds a
 // first fishc from its source, and that one builds the source again, as the fixpoint's second
 // generation is built; only the second is the binary the digest pins. Checked against the digest,
 // or with `record`, its digest written into stage0.toml for this machine's target.
-function rebuilt(p: Ref<Pinned>, root: string, record: boolean): string throws IoError {
+async function rebuilt(p: Ref<Pinned>, root: string, record: boolean): Promise<string> throws IoError {
+  console.log(`stage 0 isn't cached; building it from ${p.commit}, about an hour, once`);
   const tree = prepared(p, root);
-  step("mirror its source", "bun src/main.ts run scripts/mirror.fsh", tree);
-  step("build a first fishc with Bun", `bun src/main.ts build tests/compiler/main.fsh --release -o "${join(tree, "first")}"`, tree);
+  await step("mirror its source", "bun src/main.ts run scripts/mirror.fsh", tree);
+  await step("build a first fishc with Bun", `bun src/main.ts build tests/compiler/main.fsh --release -o "${join(tree, "first")}"`, tree);
   console.log("stage 0: build it again with that fishc");
   const at = join(tree, "build", "src");
   for (const f of readdirSync(at)) if (f.endsWith(".fsh")) rmSync(join(at, f));
   mirror(tree, at);
-  if (!compiled(join(tree, "first"), at, join(tree, "second"))) fail("stage 0: the first fishc couldn't build the commit's source");
+  const second = await compiled(join(tree, "first"), at, join(tree, "second"));
+  if (!second) fail("stage 0: the first fishc couldn't build the commit's source");
   if (record) recorded(root, stage0Digest(join(tree, "second")));
   return adopted(p, join(tree, "second"), record);
 }
@@ -153,7 +172,7 @@ function recorded(root: string, digest: string): void throws IoError {
   console.log(`stage0.toml: ${line}`);
 }
 
-function main(): void throws IoError | Error {
+async function main(): Promise<void> throws IoError | Error {
   const args = process.argv.slice(2);
   const root = join(import.meta.dir, "..");
   const record = args.includes("--record");
@@ -162,12 +181,17 @@ function main(): void throws IoError | Error {
   const given = option(args, "--stage0");
   let stage0 = stage0Path(p);
   if (record) {
-    stage0 = rebuilt(p, root, true);
+    stage0 = await rebuilt(p, root, true);
     p = pinned(root);
   } else if (given !== undefined) stage0 = adopted(p, resolve(given!), false);
-  else if (!existsSync(stage0)) stage0 = rebuilt(p, root, false);
-  else if (!checked(p, stage0)) fail("the cached stage 0 has changed; adopt a good one with --stage0 <fishc>");
+  else if (!existsSync(stage0)) stage0 = await rebuilt(p, root, false);
+  else {
+    console.log(`checking the cached stage 0, ${stage0}`);
+    if (!checked(p, stage0)) fail("the cached stage 0 has changed; adopt a good one with --stage0 <fishc>");
+    console.log("stage 0's digest matches stage0.toml");
+  }
   prepared(p, root);
   mkdirSync(dirname(out), { recursive: true });
-  if (!compiled(stage0, join(root, "src"), out)) fail(`stage 0 couldn't build ${out}`);
+  const built = await compiled(stage0, join(root, "src"), out);
+  if (!built) fail(`stage 0 couldn't build ${out}`);
 }
