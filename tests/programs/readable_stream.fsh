@@ -197,3 +197,56 @@ async function main() {
 async function* drained(queue: Channel<i64>): AsyncGenerator<i64> {
   for await (const x of queue) yield x;
 }
+// case: readable_stream_response_body
+// expect: null
+// expect: 2 chunks, 5 bytes
+// expect: {"n":4} 4
+// A response's body as a stream: none for an empty one, the stream it was given, and a
+// streamed body read whole by text() and json().
+async function* chunks(): AsyncGenerator<u8[]> {
+  yield [104, 101];
+  yield [108, 108, 111];
+}
+
+async function* json(): AsyncGenerator<u8[]> {
+  yield new TextEncoder().encode("{\"n\":");
+  yield new TextEncoder().encode("4}");
+}
+
+async function main(): Promise<void> throws Error | TypeError | JsonError {
+  console.log(new Response(null).body);
+  const res = new Response(ReadableStream.from(chunks()));
+  const body = res.body!;
+  let reader = body.getReader();
+  let count = 0;
+  let size = 0;
+  while (true) {
+    const r = await reader.read();
+    if (r.done) break;
+    count++;
+    size += r.value.length as i64;
+  }
+  console.log(count, "chunks,", size, "bytes");
+  const text = await new Response(ReadableStream.from(json())).text();
+  const data = await new Response(ReadableStream.from(json())).json<{ n: i64 }>();
+  console.log(text, data.n);
+}
+// case: readable_stream_served_and_fetched
+// expect: 200 chunked hello world
+// A handler's response made from a byte stream goes out chunk by chunk, and fetch reads it back.
+async function* greeting(): AsyncGenerator<u8[]> {
+  yield new TextEncoder().encode("hello ");
+  await sleep(5);
+  yield new TextEncoder().encode("world");
+}
+
+async function main(): Promise<void> throws IoError | AbortError {
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    return new Response(ReadableStream.from(greeting()));
+  }));
+  while (found.port.load() === 0) await sleep(1);
+  const res = await fetch("http://127.0.0.1:" + String(found.port.load()) + "/");
+  console.log(res.status, res.headers.get("transfer-encoding"), await res.text());
+}

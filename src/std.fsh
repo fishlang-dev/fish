@@ -642,8 +642,11 @@ class Response {
   status: i64;
   statusText: string;
   headers: Headers;
-  body: u8[];
-  // A body sent in pieces as the generator produces them, in place of body. Locked, in an
+  // The body's bytes, when it isn't streamed; read through body, text(), bytes() or json().
+  #body: u8[];
+  // A body given as a stream of bytes, in place of #body, at most one, taken out once read.
+  #bytes: Lock<ReadableStream<u8[]>[]>;
+  // A body sent in pieces as the generator produces them, in place of #body. Locked, in an
   // array of at most one, so whoever reads it can take it out through a shared borrow; private,
   // so a response prints as it would without one.
   #stream: Lock<Dyn<AsyncGenerator<string>>[]>;
@@ -658,7 +661,7 @@ class Response {
 
   // A text or streamed body is typed 'text/plain;charset=UTF-8' unless the headers say
   // otherwise; bytes are given no type, as Bun does.
-  constructor(body?: string | u8[] | Dyn<AsyncGenerator<string>> | null, init?: ResponseInit) {
+  constructor(body?: string | u8[] | Dyn<AsyncGenerator<string>> | ReadableStream<u8[]> | null, init?: ResponseInit) {
     let status: i64 = 200;
     let statusText = "";
     let headers = new Headers();
@@ -672,10 +675,12 @@ class Response {
     }
     let bytes: u8[] = [];
     let stream: Dyn<AsyncGenerator<string>>[] = [];
+    let streamed: ReadableStream<u8[]>[] = [];
     if (typeof body === "string") {
       bytes = new TextEncoder().encode(body);
       if (!headers.has("content-type")) headers.set("content-type", "text/plain;charset=UTF-8");
     } else if (Array.isArray(body)) bytes = body;
+    else if (body instanceof ReadableStream) streamed.push(body);
     else if (body !== null) {
       stream.push(body);
       if (!headers.has("content-type")) headers.set("content-type", "text/plain;charset=UTF-8");
@@ -683,7 +688,8 @@ class Response {
     this.status = status;
     this.statusText = statusText;
     this.headers = headers;
-    this.body = bytes;
+    this.#body = bytes;
+    this.#bytes = new Lock(streamed);
     this.#stream = new Lock(stream);
     const upgrade: __wsUpgrade[] = [];
     this.#upgrade = new Lock(upgrade);
@@ -694,7 +700,7 @@ class Response {
   static json<T>(data: Ref<T>, init?: ResponseInit): Response {
     let res = new Response(null, init);
     if (!res.headers.has("content-type")) res.headers.set("content-type", "application/json");
-    res.body = new TextEncoder().encode(JSON.stringify(data));
+    res.#body = new TextEncoder().encode(JSON.stringify(data));
     return res;
   }
 
@@ -713,11 +719,11 @@ class Response {
 
   // A copy of the response. A streamed body runs its generator once, so it can't be copied.
   clone(): Response {
-    const streamed = this.#stream.update((s) => s.length > 0);
+    const streamed = this.#stream.update((s) => s.length > 0) || this.#bytes.update((s) => s.length > 0);
     assert(this.#read.load() === 0, "this Response's streamed body was already read, so it can't be cloned; make each copy from the text it gave");
     assert(!streamed, "a Response with a streamed body can't be cloned, since its generator runs once; read it with 'await res.text()' and make each copy from that text");
     let copy = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers.clone() });
-    copy.body = this.body.clone();
+    copy.#body = this.#body.clone();
     copy.url = this.url;
     copy.cookies = this.cookies.clone();
     return copy;
@@ -726,6 +732,30 @@ class Response {
   // The streamed body, taken out for whoever sends or reads it, or null when there is none.
   __stream(): Dyn<AsyncGenerator<string>> | null {
     return this.#stream.update((s) => s.pop());
+  }
+
+  // A body given as a stream of bytes, taken out for whoever sends or reads it, or null.
+  __byteStream(): ReadableStream<u8[]> | null {
+    return this.#bytes.update((s) => s.pop());
+  }
+
+  // The bytes of a body that isn't streamed.
+  __bytes(this: Ref<this>): Ref<u8[]> {
+    return this.#body;
+  }
+
+  // The body as a stream of bytes, or null when there is none. A streamed body is handed over
+  // once, as reading it consumes it; its bytes are read from the stream, not kept.
+  get body(): ReadableStream<u8[]> | null {
+    const given = this.__byteStream();
+    if (given !== null) return given;
+    const pieces = this.__stream();
+    if (pieces !== null) {
+      this.#read.store(1);
+      return ReadableStream.from(__streamEncoded(pieces));
+    }
+    if (this.#body.length === 0) return null;
+    return ReadableStream.from(__streamOnce(this.#body.clone()));
   }
 
   // The session a WebSocket route's 101 hands the connection to, taken out, or null.
@@ -741,8 +771,13 @@ class Response {
   // The body as UTF-8 text, each malformed sequence as U+FFFD. A streamed one is read to its
   // end, once: a second read finds it empty.
   async text(): Promise<string> {
+    const given = this.__byteStream();
+    if (given !== null) {
+      this.#read.store(1);
+      return new TextDecoder().decode(await __streamBytes(given));
+    }
     const stream = this.__stream();
-    if (stream === null) return new TextDecoder().decode(this.body);
+    if (stream === null) return new TextDecoder().decode(this.#body);
     this.#read.store(1);
     let pieces = stream;
     let text = "";
@@ -752,15 +787,39 @@ class Response {
 
   // The body's bytes as they were sent; a streamed one's as text() reads it.
   async bytes(): Promise<u8[]> {
-    if (!this.#stream.update((s) => s.length > 0)) return this.body.clone();
+    const given = this.__byteStream();
+    if (given !== null) {
+      this.#read.store(1);
+      return await __streamBytes(given);
+    }
+    if (!this.#stream.update((s) => s.length > 0)) return this.#body.clone();
     const text = await this.text();
     return new TextEncoder().encode(text);
   }
 
-  // The body read as JSON into a T.
+  // The body read as JSON into a T, a streamed one read to its end first.
   async json<T>(): Promise<T> throws JsonError {
-    return JSON.parse<T>(new TextDecoder().decode(this.body));
+    const text = await this.text();
+    return JSON.parse<T>(text);
   }
+}
+
+// A stream's chunks joined into one array of bytes. A body's readers don't throw, so a source
+// that errors ends the body where it failed.
+async function __streamBytes(stream: ReadableStream<u8[]>): Promise<u8[]> {
+  let out: u8[] = [];
+  for await (const chunk of stream) for (const b of chunk) out.push(b);
+  return out;
+}
+
+// Text pieces as the UTF-8 bytes a body stream gives.
+async function* __streamEncoded(pieces: Dyn<AsyncGenerator<string>>): AsyncGenerator<u8[]> {
+  let source = pieces;
+  for await (const piece of source) yield new TextEncoder().encode(piece);
+}
+
+async function* __streamOnce(bytes: u8[]): AsyncGenerator<u8[]> {
+  yield bytes;
 }
 
 // Each event as the event-stream format writes it: a field per line, a data line per line of
@@ -974,6 +1033,16 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const said = res.headers.get("connection");
       const close = !keep || stop.aborted || (said !== null && Http1.hasToken(said, "close"));
       // A streamed body is taken out of the response; one that won't be sent is dropped unstarted.
+      const byteStream = res.__byteStream();
+      if (byteStream !== null && Http1.sendable(res) && res.status !== 204 && res.status !== 304) {
+        let chunks = byteStream.__values();
+        const open = await Http1.streamBytes(conn, res, chunks, method === "HEAD", close, version, signal, stop);
+        done.abort();
+        const early = await watching;
+        if (!open) return;
+        for (const b of early) buffer.push(b);
+        continue;
+      }
       const stream = res.__stream();
       if (stream !== null && Http1.sendable(res) && res.status !== 204 && res.status !== 304) {
         let pieces = stream;
@@ -1996,13 +2065,14 @@ class Http1 {
   static async send(conn: Ref<TcpStream>, res: Response, head: boolean, close: boolean, version: string): Promise<void> throws IoError | AbortError {
     let out = new TextEncoder().encode(Http1.responseText(res, head, close, version));
     const sends = !head && res.status !== 204 && res.status !== 304;
-    if (!sends || res.body.length <= 16384) {
-      if (sends) for (const b of res.body) out.push(b);
+    const body = res.__bytes();
+    if (!sends || body.length <= 16384) {
+      if (sends) for (const b of body) out.push(b);
       await conn.write(out, AbortSignal.timeout(30000));
       return;
     }
     await conn.write(out, AbortSignal.timeout(30000));
-    await conn.write(res.body, AbortSignal.timeout(30000));
+    await conn.write(body, AbortSignal.timeout(30000));
   }
 
   // Where a request's head ends: the index of its blank line's CR LF CR LF, or -1. The search
@@ -2132,8 +2202,7 @@ class Http1 {
           for (const b of got) body.push(b);
         }
       }
-      let res = new Response(null, { status: status, statusText: lines[0].split(" ").slice(2).join(" "), headers: headers });
-      res.body = body;
+      let res = new Response(body, { status: status, statusText: lines[0].split(" ").slice(2).join(" "), headers: headers });
       return res;
     }
   }
@@ -2283,7 +2352,7 @@ class Http1 {
   static responseText(res: Ref<Response>, head: boolean, close: boolean, version: string): string {
     const bodiless = res.status === 204 || res.status === 304;
     let framing = "";
-    if (!bodiless) framing = "content-length: " + String(res.body.length as i64) + "\\r\\n";
+    if (!bodiless) framing = "content-length: " + String(res.__bytes().length as i64) + "\\r\\n";
     return Http1.headText(res, framing, close, version);
   }
 
@@ -2330,15 +2399,45 @@ class Http1 {
     return sent && !close && !stop.aborted;
   }
 
+  // stream's twin for a body given as a stream of bytes, its chunks framed as they come.
+  static async streamBytes(conn: Ref<TcpStream>, res: Ref<Response>, chunks: Mut<Dyn<AsyncGenerator<u8[]>>>, head: boolean, close: boolean, version: string, client: Ref<AbortSignal>, stop: Ref<AbortSignal>): Promise<boolean> {
+    const chunked = version === "HTTP/1.1";
+    const framing = chunked ? "transfer-encoding: chunked\\r\\n" : "";
+    const started = await Http1.put(conn, Http1.headText(res, framing, close || !chunked, version), stop);
+    if (!started) return false;
+    if (head) return chunked && !close;
+    while (!stop.aborted) {
+      const chunk = await Promise.race([Http1.nextBytes(chunks), Http1.abortOfBytes(client), Http1.abortOfBytes(stop)]);
+      if (client.aborted) return false;
+      if (chunk === null) break;
+      if (chunk.length === 0) continue;
+      let framed: u8[] = chunked ? new TextEncoder().encode(Http1.hexOf(chunk.length as i64) + "\\r\\n") : [];
+      for (const b of chunk) framed.push(b);
+      if (chunked) {
+        framed.push(13);
+        framed.push(10);
+      }
+      const sent = await Http1.putBytes(conn, framed, stop);
+      if (!sent) return false;
+    }
+    if (!chunked) return false;
+    const sent = await Http1.put(conn, "0\\r\\n\\r\\n", stop);
+    return sent && !close && !stop.aborted;
+  }
+
   // Whether text was written within 30 seconds, and within a second of the server stopping.
   static async put(conn: Ref<TcpStream>, text: string, stop: Ref<AbortSignal>): Promise<boolean> {
-    const sent = await Promise.race([Http1.written(conn, text), Http1.late(30000), Http1.graced(stop)]);
+    return await Http1.putBytes(conn, new TextEncoder().encode(text), stop);
+  }
+
+  static async putBytes(conn: Ref<TcpStream>, bytes: u8[], stop: Ref<AbortSignal>): Promise<boolean> {
+    const sent = await Promise.race([Http1.written(conn, bytes), Http1.late(30000), Http1.graced(stop)]);
     return sent;
   }
 
-  static async written(conn: Ref<TcpStream>, text: string): Promise<boolean> {
+  static async written(conn: Ref<TcpStream>, bytes: u8[]): Promise<boolean> {
     try {
-      await conn.write(new TextEncoder().encode(text));
+      await conn.write(bytes);
       return true;
     } catch (e) {
       return false;
@@ -2362,6 +2461,17 @@ class Http1 {
   static async next(pieces: Mut<Dyn<AsyncGenerator<string>>>): Promise<string | null> {
     const r = await pieces.next();
     if (r.done === false) return r.value;
+    return null;
+  }
+
+  static async nextBytes(chunks: Mut<Dyn<AsyncGenerator<u8[]>>>): Promise<u8[] | null> {
+    const r = await chunks.next();
+    if (r.done === false) return r.value;
+    return null;
+  }
+
+  static async abortOfBytes(signal: Ref<AbortSignal>): Promise<u8[] | null> {
+    await Http1.abortOf(signal);
     return null;
   }
 
