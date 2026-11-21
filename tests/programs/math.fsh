@@ -406,3 +406,37 @@ function main(): void { console.log(f(4.0)); }
 // expect: 1
 enum Math { A = 1 }
 function main(): void { console.log(Math.A); }
+// case: number_predicates
+// expect: true false false
+// expect: false false false true true
+// expect: true false false true
+// expect: true false true false
+function main() {
+  const nan = 0.0 / 0.0;
+  const inf = 1.0 / 0.0;
+  console.log(Number.isNaN(nan), Number.isNaN(1.5), Number.isNaN(3));
+  console.log(Number.isFinite(inf), Number.isFinite(-inf), Number.isFinite(nan), Number.isFinite(2.5), Number.isFinite(7));
+  console.log(Number.isInteger(2.0), Number.isInteger(2.5), Number.isInteger(inf), Number.isInteger(5 as u8));
+  console.log(Number.isSafeInteger(9007199254740991), Number.isSafeInteger(9007199254740992), Number.isSafeInteger(-9007199254740991.0), Number.isSafeInteger(1.5));
+}
+// case: number_constants
+// expect: 9223372036854775807 -9223372036854775808 0 255 -128 340282366920938463463374607431768211455 2147483647
+// expect: 9007199254740991 9007199254740991 -9007199254740991 2.220446049250313e-16 1.7976931348623157e+308 5e-324
+// expect: Infinity -Infinity true true
+function main() {
+  console.log(i64.MAX, i64.MIN, u8.MIN, u8.MAX, i8.MIN, u128.MAX, i32.MAX + 0);
+  const big: i64 = Number.MAX_SAFE_INTEGER;
+  const small: u64 = Number.MAX_SAFE_INTEGER;
+  console.log(big, small, Number.MIN_SAFE_INTEGER, Number.EPSILON, Number.MAX_VALUE, Number.MIN_VALUE);
+  console.log(Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.isNaN(Number.NaN), 1.0 + Number.EPSILON > 1.0);
+}
+// case: number_unknown_constant
+// error: 'Number.MAX_INT' is a function, or not in Fish yet; the constants are MAX_SAFE_INTEGER
+function main() {
+  console.log(Number.MAX_INT);
+}
+// case: number_predicate_arity
+// error: 'Number.isNaN' takes one number
+function main() {
+  console.log(Number.isNaN());
+}

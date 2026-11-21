@@ -1,4 +1,3 @@
-node_modules/
 *.ll
 
 # Religion workflow files, kept local
@@ -7,3 +6,7 @@ religion/
 .agents/
 AGENTS.md
 CLAUDE.md
+
+
+# fishc as scripts/build.fsh builds it
+build/

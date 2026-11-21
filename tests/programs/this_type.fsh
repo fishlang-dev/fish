@@ -475,3 +475,73 @@ function main() {
   d.show(new Q());
   console.log(d.n);
 }
+
+// case: borrowed_chain_drops_temporary
+// expect: 2
+// expect: 1
+// expect: 1
+// A temporary a 'Mut<this>' method changes is dropped once its statement ends, as it was left.
+class Bag {
+  xs: i64[] = [];
+  add(this: Mut<this>, x: i64): Mut<this> {
+    this.xs.push(x);
+    return this;
+  }
+  total(): i64 {
+    return this.xs.length as i64;
+  }
+}
+
+function make(): Bag {
+  return new Bag();
+}
+
+function main() {
+  make().add(1);
+  console.log(make().add(1).add(2).total());
+  console.log(new Bag().add(3).total());
+  for (let i = 0; i < 3; i++) make().add(i);
+  const b = true;
+  console.log((b ? make().add(1) : make()).total());
+}
+
+// case: mut_void_method_drops_temporary
+// expect: done
+// A temporary a void 'Mut<this>' method changes is dropped once its statement ends.
+class Bag {
+  xs: i64[] = [];
+  put(this: Mut<this>, x: i64): void {
+    this.xs.push(x);
+  }
+}
+
+function make(): Bag {
+  return new Bag();
+}
+
+function main() {
+  make().put(1);
+  new Bag().put(2);
+  console.log("done");
+}
+
+// case: borrowed_chain_panic_drops_temporary
+// expect: 1
+// panic: attempt to divide by zero
+// A temporary a 'Mut<this>' method changed before it panicked is dropped as it was left.
+class Bag {
+  xs: i64[] = [];
+  add(this: Mut<this>, x: i64): Mut<this> {
+    this.xs.push(x);
+    console.log(1 / (2 - this.xs.length as i64));
+    return this;
+  }
+}
+
+function make(): Bag {
+  return new Bag();
+}
+
+function main() {
+  make().add(1).add(2);
+}

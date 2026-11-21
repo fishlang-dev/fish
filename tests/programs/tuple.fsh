@@ -677,3 +677,13 @@ function main(): void { let t: [i64, i64, i64] = [1, 2, 3]; for (const x of t) {
 // expect: 5
 // expect: 3
 function main(): void { let t: [i64, i64, i64] = [1, 2, 3]; for (const x of t) { t[1] = 5; console.log(x); } }
+
+// case: tuple_named_types_swapped
+// Two tuples holding the same types at swapped depths are laid out apart, so each has a name of its own.
+// expect: 1 [ 'x' ] y [ 2 ]
+type L = Brand<usize, "literal">;
+function main() {
+  const a: [L, string[]] = [1 as L, ["x"]];
+  const b: [string, usize[]] = ["y", [2]];
+  console.log(a[0], a[1], b[0], b[1]);
+}

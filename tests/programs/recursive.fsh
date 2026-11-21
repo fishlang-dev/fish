@@ -789,3 +789,18 @@ function main() {
   const a: S = { tag: "oth", b: { tag: "blk", n: 5 }, kids: [] };
   console.log(f(a));
 }
+// case: recursive_moved_into_a_map_entry
+// expect: 2
+// A recursive value moved into a map's entry keeps the blocks it owns.
+type Rec = { kind: "record"; fields: Map<string, Val> };
+type Table = { kind: "map"; entries: Map<string, [Val, Val]> };
+type Val = string | Rec | Table;
+function main() {
+  let fields = new Map<string, Val>();
+  fields.set("name", "plus");
+  const op: Val = { kind: "record", fields };
+  let made: Table = { kind: "map", entries: new Map() };
+  made.entries.set("add", ["add", op]);
+  made.entries.set("neg", ["neg", "minus"]);
+  console.log(made.entries.size);
+}

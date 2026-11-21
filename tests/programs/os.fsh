@@ -39,7 +39,7 @@ function main() {
   console.log(hostname(), os.hostname().length > 0);
 }
 // case: os_unknown_member
-// error: 'node:os' has no export named 'cpus'; it has 'hostname', 'tmpdir', 'homedir', 'platform', 'availableParallelism'
+// error: 'node:os' has no export named 'cpus'; it has 'hostname', 'tmpdir', 'constants', 'homedir', 'platform', 'availableParallelism'
 import os from "node:os";
 function main() {
   console.log(os.cpus());
@@ -70,4 +70,11 @@ function main() {
     console.log(true, os.message);
   }
   for (let os: Box = { platform: "local" }; os.platform === "local"; os = { platform: "done" }) console.log(os.platform);
+}
+// case: os_constants_signals
+// expect: 15 9 2 true
+import { constants } from "node:os";
+function main() {
+  const found = Object.entries(constants.signals).find(([name]) => name === "SIGINT");
+  console.log(constants.signals["SIGTERM"], os.constants.signals.SIGKILL, found === undefined ? 0 : found[1], constants.signals["SIGNOPE"] === undefined);
 }

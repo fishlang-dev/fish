@@ -107,3 +107,18 @@ async function main() {
   console.log(all.trim().split("\n").join("+"));
 }
 
+
+// case: stdin_read_file_sync
+// stdin: "first\nhé rest\n"
+// expect: first
+// expect: 9 [hé rest]
+// expect: 0
+// readFileSync(0) reads through readLine's buffer, so it gives what a line read left.
+import { readFileSync } from "node:fs";
+async function main(): Promise<void> throws IoError {
+  const first = await readLine();
+  console.log(first);
+  const rest = readFileSync(0);
+  console.log(rest.length, `[${new TextDecoder().decode(rest).trim()}]`);
+  console.log(readFileSync(0, "utf8").length);
+}

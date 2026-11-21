@@ -629,3 +629,21 @@ function main() {
   const s = make(7 as B);
   console.log(s.c !== undefined ? show(s.c) : "none");
 }
+// case: brand_union_in_class_field
+// expect: x 7 1
+type GenT = Brand<usize, "generator">;
+type FutT = Brand<usize, "future">;
+class C {
+  r: { t: GenT | FutT; s: string; xs: string[] } | undefined;
+  constructor() {
+    this.r = undefined;
+  }
+  go(this: Mut<this>) {
+    this.r = { t: 7 as GenT, s: "x", xs: ["a"] };
+    console.log(this.r!.s, this.r!.t as usize, this.r!.xs.length);
+  }
+}
+function main() {
+  let c = new C();
+  c.go();
+}

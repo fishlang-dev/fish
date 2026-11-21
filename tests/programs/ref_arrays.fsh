@@ -146,7 +146,7 @@ function main() {
   m.s = "z" + 9;
 }
 // case: ref_arrays_mut_owner_used_while_held
-// error: cannot use 'b1'
+// error: cannot use 'b1.s' while 'ms' borrows 'b1' mutably
 class B { s: string; constructor(s: string) { this.s = s; } }
 function main() {
   let b1 = new B("a" + 1);
@@ -163,7 +163,7 @@ function main() {
   const copy = ms.slice(0);
 }
 // case: ref_arrays_mut_spread_refused
-// error: spreads of arrays of mutable references are not supported yet
+// error: can't clone a value holding a mutable reference ('Mut')
 class B { s: string; constructor(s: string) { this.s = s; } }
 function main() {
   let b1 = new B("a" + 1);

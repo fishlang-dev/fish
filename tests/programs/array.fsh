@@ -1275,3 +1275,29 @@ function main() {
   let xs = [1, 2];
   for (const x of xs) xs.copyWithin(0, 1);
 }
+// case: array_join_long
+// expect: 4688888 i32 0, i32 1 i32 399999
+// A long join takes time linear in its result, not in the square of it.
+function main() {
+  let parts: u32[] = [];
+  for (let i: u32 = 0; i < 400000; i++) parts.push(i);
+  const joined = parts.map((w) => `i32 ${w}`).join(", ");
+  console.log(joined.length, joined.slice(0, 12), joined.slice(-10));
+}
+// case: array_join_unions
+// expect: a.1
+// expect: rc.2.x rc2x
+// expect: true|1.5|lit
+// expect: []
+// join writes whichever member each element of a union holds, as String(x) does.
+type V = { pre: (string | u64)[] };
+function main() {
+  const x: (string | i64)[] = ["a", 1];
+  console.log(x.join("."));
+  const v: V = { pre: ["rc", 2 as u64, "x"] };
+  console.log(v.pre.join("."), v.pre.join(""));
+  const b: (boolean | f64 | "lit")[] = [true, 1.5, "lit"];
+  console.log(b.join("|"));
+  const e: (string | i64)[] = [];
+  console.log(`[${e.join(",")}]`);
+}
