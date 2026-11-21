@@ -2167,6 +2167,32 @@ export class Typing {
     return found;
   }
 
+  // The generator or promise interface `of` stands for with what it yields or gives lowered, or
+  // undefined when `of` is neither or lowering changes nothing. These are made from what they
+  // carry rather than from type arguments, so lowering a generic one's arguments can't reach them.
+  private generatorLowered(this: Mut<this>, of: InterfaceType): InterfaceType | undefined {
+    const gives = this.promised.get(of);
+    if (gives !== undefined) {
+      const lowered = this.lower(gives);
+      if (lowered === gives) return undefined;
+      if (!this.borrowing.has(of)) return this.promiseInterface(lowered);
+      const lent = this.lentPromise(lowered);
+      return this.rec(lent).of;
+    }
+    const yieldsAsync = this.asyncElements.get(of);
+    if (yieldsAsync !== undefined) {
+      const lowered = this.lower(yieldsAsync);
+      return lowered === yieldsAsync ? undefined : this.asyncGeneratorInterface(lowered);
+    }
+    const yields = this.elements.get(of);
+    if (yields === undefined) return undefined;
+    const lowered = this.lower(yields);
+    const sends = this.sent.get(of);
+    const sendsLowered = sends === undefined ? undefined : this.lower(sends);
+    if (lowered === yields && sendsLowered === sends) return undefined;
+    return this.generatorInterface(lowered, sendsLowered);
+  }
+
   // `AsyncGenerator<T>`: anything whose awaited `next()` gives `T`s.
   asyncGeneratorInterface(this: Mut<this>, t: Type): InterfaceType {
     const key = `async ${this.keyOf(t)}`;
@@ -2655,12 +2681,20 @@ export class Typing {
       const args = r.generic.args.map((t) => this.lower(t));
       return this.instanceInterface(t as InterfaceType, args);
     }
+    // A generator interface is made from what it yields rather than from type arguments, so one
+    // made from a type parameter is made again from what the parameter stands for.
+    if (r.kind === "interface") {
+      const generated = this.generatorLowered(t as InterfaceType);
+      if (generated !== undefined) return generated;
+    }
     if (r.kind === "dyn") {
       const ir = this.rec(r.of);
       if (ir.generic !== undefined && ir.generic.args.some((a) => this.lower(a) !== a)) {
         const of = this.lower(r.of) as InterfaceType;
         return this.dynType(of);
       }
+      const generated = this.generatorLowered(r.of);
+      if (generated !== undefined) return this.dynType(generated);
       if (r.shown !== undefined) return this.dynType(r.of);
     }
     if (r.kind === "unknown" || (r.kind === "union" && r.unknown === true) || r.kind === "literal" || r.kind === "interface" || r.kind === "closure" || r.kind === "function" || r.kind === "generator" || r.kind === "future" || r.kind === "dyn" || r.kind === "regex") return t;
