@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpath
 import { constants, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
-import { bodyOf, type Arenas, type InstanceId } from "./arenas.fsh";
-import { C_KEYWORDS, checkKeeping, recheckKept, type CheckerParts } from "./check.fsh";
+import { bodyOf, type Arenas } from "./arenas.fsh";
+import { C_KEYWORDS } from "./check.fsh";
 import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.fsh";
 import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, type Compilation, type Session, type Tables } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
@@ -37,10 +37,8 @@ import { rustShim, type Shim } from "./rustshim.fsh";
 import { split } from "./split.fsh";
 import { withDebugInfo } from "./debuginfo.fsh";
 import { watchProgram, type Rebuilt } from "./watch.fsh";
-import { composedMoves, loadedContents, reloaded, spillFrom, takenBodies, textOf as fileText, unchanged, type Kept } from "./incremental.fsh";
-import { classified, type Changed, type Edit, type Replaced } from "./edits.fsh";
-import { movedStmt } from "./nodes.fsh";
-import { FILE_SPAN } from "./program.fsh";
+import { type Kept } from "./incremental.fsh";
+import { checkedProgram, checkedSource, Queries } from "./queries.fsh";
 import { fileAt } from "./program.fsh";
 import { STD_BASE } from "./std.fsh";
 
@@ -90,61 +88,10 @@ export function checkProgram(session: Session, file: string): CompileError[] {
 /** @throws {CompileError | Error | IoError} */
 function checkedFile(session: Session, file: string): { warnings: CompileError[]; session: Session } {
   let looked: string[] = [];
-  const { checked } = checkedSource(newCompilation(session), file, readFileSync(file, "utf8"), false, looked);
+  let queries = new Queries(file, undefined, new Map<string, string>());
+  const kept = queries.checked(session, looked, undefined);
+  let { checked } = kept;
   return { warnings: checked.warnings, session: checked.tables.session };
-}
-
-// The program whose entry is `file`, with text `src`, loaded and checked, with each warning given
-// its files. `looked` is given the files it read or looked for, whether or not they load.
-/** @throws {CompileError | Error | IoError} */
-function checkedSource(compilation: Compilation, file: string, src: string, library: boolean, looked: Mut<string[]>): { checked: Checked; loaded: Loaded } {
-  let made = checkedSourceKeeping(compilation, file, src, library, looked);
-  return { checked: made.checked, loaded: made.loaded };
-}
-
-// `checkedSource`, giving back what the checker kept besides its tables as well.
-/** @throws {CompileError | Error | IoError} */
-function checkedSourceKeeping(compilation: Compilation, file: string, src: string, library: boolean, looked: Mut<string[]>): { checked: Checked; loaded: Loaded; parts: CheckerParts } {
-  let program = compilation;
-  let modules = loadedFrom(program, file, src, looked);
-  let statements: Stmt[] = [];
-  try {
-    statements = expanded(program, modules, library);
-  } catch (e) {
-    if (e instanceof CompileError) throw sourced(e, copyNames(program.names), modules.sources);
-    throw e;
-  }
-  let { checked, parts } = checkedProgram(program, statements, library, modules.sources);
-  for (let i: usize = 0; i < checked.warnings.length; i++) checked.warnings[i]!.sources = [...modules.sources];
-  return { checked, loaded: modules, parts };
-}
-
-// The program's files loaded, timed as the parse stage.
-/** @throws {CompileError | Error | IoError} */
-function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, looked: Mut<string[]>): Loaded {
-  const started = stageStart(compilation.session);
-  try {
-    return load(compilation, file, src);
-  } finally {
-    stageEnd(compilation.session, "parse", started);
-    for (const f of compilation.looked) looked.push(f);
-  }
-}
-
-// `check` of a whole program, timed as the check stage, its errors given the program's files.
-/** @throws {CompileError} */
-function checkedProgram(compilation: Compilation, program: Stmt[], library: boolean, sources: Ref<Source[]>): { checked: Checked; parts: CheckerParts } {
-  const started = stageStart(compilation.session);
-  let made: { checked: Checked; parts: CheckerParts } | undefined = undefined;
-  try {
-    made = checkKeeping(compilation, program, library ? runtimeNames() : false, false, false);
-  } catch (e) {
-    if (e instanceof CompileError) throw sourced(e, undefined, sources);
-    throw e;
-  }
-  let done = made!;
-  stageEnd(done.checked.tables.session, "check", started);
-  return done;
 }
 
 // The program checked and turned into IR, timed as the codegen stage, its packages bundled in and,
@@ -155,7 +102,7 @@ function compiledIn(compilation: Compilation, src: string, file: string, release
   // What a build's codegen fails on is collected in the session's list, when it has one.
   const failed = program.session.failed;
   program.session.failed = undefined;
-  let made = checkedSource(program, file, src, library, looked);
+  let made = checkedSource(program, file, src, library ? runtimeNames() : false, looked);
   const sources = [...made.loaded.sources];
   return generated(made.checked, made.loaded, { src, file, release, panic, library, sources, leaks, debug, failed });
 }
@@ -326,25 +273,17 @@ export function build(session: BuildSession, file: string, out: string, release 
 // files the program was read from, or looked for, even when it doesn't build.
 /** @throws {CompileError | Error | IoError | JsonError} */
 function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>): { warnings: CompileError[]; session: BuildSession } {
-  let { core, caches } = apart(session);
-  let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, looked);
-  const ir = instrumented(made.ir, target);
-  const shim = rustShim(made.loaded.rust, made.checked);
-  if (shim !== undefined) refuseForeignRust(target);
-  const split = parts(ir, made.checked, release, target, debug);
-  let building = together(made.checked.tables.session, caches);
-  let none = new Map<string, string[]>();
-  linked(building, ir, split, out, release, links, shim, target, leaks, debug, none);
-  return { warnings: made.checked.warnings, session: building };
+  let made = builtKept(session, file, out, release, panic, links, target, leaks, debug, looked, undefined, undefined, false);
+  return { warnings: made.warnings, session: made.session };
 }
 
 // `built` for `fishc watch`, from what its last build kept: a program whose files all read as they
 // did is not loaded or checked again. Gives what to keep for the next build. `manifest` is the
 // package's, which a build may read.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): { ir: string; warnings: CompileError[]; session: BuildSession; kept: Kept } {
+export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string; warnings: CompileError[]; session: BuildSession; kept: Kept } {
   let { core, caches } = apart(session);
-  let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest);
+  let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest, keep);
   const instrumenting = stageStart(made.kept.checked.tables.session);
   const ir = instrumented(made.ir, target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
@@ -367,14 +306,16 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
 // `compile` for `fishc watch`, from what its last build kept, giving the IR, the warnings and what
 // to keep.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): { ir: string; warnings: CompileError[]; kept: Kept } {
+export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string; warnings: CompileError[]; kept: Kept } {
+  const reusing = kept !== undefined;
   // Reading the files again and putting the changed ones back, apart from the check it times itself.
   // Counted by hand from the front end's stages, since the session it starts on moves into the
   // check's tables and takes its own copy of the timings with it.
   const began = performance.now();
   let before: f64 = 0;
   if (session.timings !== undefined) for (const name of FRONT_END) before += session.timings!.ms.get(name) ?? 0;
-  let start = checkedFrom(session, file, looked, kept, manifest);
+  let queries = new Queries(file, manifest, new Map<string, string>());
+  let start = queries.checked(session, looked, kept);
   if (start.checked.tables.session.timings !== undefined) {
     let after: f64 = 0;
     for (const name of FRONT_END) after += start.checked.tables.session.timings!.ms.get(name) ?? 0;
@@ -384,116 +325,15 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   start.checked.tables.session.failed = undefined;
   const sources = [...start.loaded.sources];
   // Debug info marks every function's lines, so a `-g` build emits every function again.
-  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed, prior: debug ? undefined : start.emitted, rechecked: start.rechecked, keep: true });
+  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed, prior: debug ? undefined : start.emitted, rechecked: start.rechecked, keep });
   let warnings = [...made.checked.warnings];
   // A clean check gives its warnings in the order they are written in, which a kept one's
   // positions only give through their files' maps.
-  const placed: Ref<Source[]> = made.loaded.sources;
-  warnings.sort((a, b) => (realOffset(a.start, placed) as i64) - (realOffset(b.start, placed) as i64));
+  if (reusing) {
+    const placed: Ref<Source[]> = made.loaded.sources;
+    warnings.sort((a, b) => (realOffset(a.start, placed) as i64) - (realOffset(b.start, placed) as i64));
+  }
   return { ir: made.ir, warnings, kept: { checked: made.checked, parts: start.parts, loaded: made.loaded, contents: start.contents, carried: start.carried, emitted: made.emitted, units: start.units } };
-}
-
-// The kept program checked again after edits to its own files, rechecking only their bodies when
-// each edit changed nothing else; or the session back, for a build afresh, when one did, a file
-// other than the program's own changed, or the recheck can't stand for a clean check.
-/** @throws {CompileError | IoError} */
-function rechecked(kept: Kept): { done: Kept | undefined; session: Session | undefined } {
-  let k = kept;
-  let edits: [usize, string][] = [];
-  let fresh = false;
-  const reading = partStart(k.checked.tables.session);
-  for (const [f, text] of k.contents) {
-    const now = fileText(f);
-    if (now === text) continue;
-    const index = k.loaded.modules.findIndex((m) => m.path === f);
-    if (index < 0 || now === undefined) fresh = true;
-    else edits.push([index as usize, now!]);
-  }
-  partEnd(k.checked.tables.session, "reload read", reading);
-  const classifying = partStart(k.checked.tables.session);
-  let classes: Edit[] = [];
-  for (const [index, now] of edits) {
-    const edit = classified(k.loaded.modules[index]!.src, now);
-    if (edit.fallback !== undefined || edit.changed.some((c) => c.name === "constructor")) fresh = true;
-    classes.push(edit);
-  }
-  partEnd(k.checked.tables.session, "reload classify", classifying);
-  if (fresh) return spent(k);
-  const started = stageStart(k.checked.tables.session);
-  let bodies: Replaced[] = [];
-  let at: usize = 0;
-  for (const [index, now] of edits) {
-    const edit: Ref<Edit> = classes[at]!;
-    at++;
-    const base = k.loaded.modules[index]!.base;
-    const file = k.loaded.modules[index]!.file;
-    const before = k.loaded.modules[index]!.src;
-    // A changed body is named in the program as its file's link names it.
-    let wanted: { owner: string | undefined; name: string; whole: boolean }[] = [];
-    for (const c of edit.changed) wanted.push(c.owner !== undefined ? { owner: uniqueIn(k.loaded, index, c.owner!), name: c.name, whole: false } : { owner: undefined, name: uniqueIn(k.loaded, index, c.name), whole: c.whole });
-    let r = reloaded(k, index, now);
-    if (r.fallback !== undefined) return spent(k);
-    let taken = takenBodies(r.statements, wanted);
-    if (taken === undefined) return spent(k);
-    // The entry has no source of its own until a kept check maps its positions.
-    const known = k.loaded.sources.findIndex((x) => x.base === base);
-    if (known < 0) k.loaded.sources.unshift({ base, src: before, file });
-    const s: usize = known < 0 ? 0 : (known as usize);
-    const mapped: Ref<[usize, usize, usize][] | undefined> = k.loaded.sources[s]!.moves;
-    const was: [usize, usize, usize][] | undefined = mapped !== undefined ? [...mapped!] : undefined;
-    let moves = composedMoves(was, before.length, edit.moves);
-    let spill = spillFrom(was, before.length);
-    // Each body read again is put past every position the kept check holds, mapped to where it is.
-    let found = taken!;
-    while (found.length > 0) {
-      let body = found.shift()!;
-      const ci = wanted.findIndex((w) => w.owner === body.owner && w.name === body.name);
-      const c: Ref<Changed> = edit.changed[ci as usize]!;
-      const by = (spill as i64) - (c.start as i64);
-      let moved: Stmt[] = [];
-      while (body.statements.length > 0) moved.push(movedStmt(body.statements.shift()!, by));
-      moves.push([spill, spill + (c.end - c.start), c.start]);
-      spill = spill + (c.end - c.start) + 1;
-      if (body.func !== undefined) {
-        const whole = movedStmt(body.func!, by);
-        if (whole.kind === "function") bodies.push({ owner: undefined, name: body.name, statements: [], func: whole });
-      } else bodies.push({ owner: body.owner, name: body.name, statements: moved });
-    }
-    if (spill >= (FILE_SPAN as usize)) return spent(k);
-    k.loaded.sources[s]!.src = now;
-    k.loaded.sources[s]!.moves = moves;
-    k.contents.set(k.loaded.modules[index]!.path, now);
-  }
-  let { checked, parts, loaded, contents } = k;
-  let made: { checked: Checked; parts: CheckerParts; fallback: string | undefined; rechecked: Set<InstanceId> } | undefined = undefined;
-  try {
-    made = recheckKept(checked, parts, bodies);
-  } catch (e) {
-    if (e instanceof CompileError) throw sourced(e, undefined, loaded.sources);
-    throw e;
-  }
-  let done = made!;
-  if (done.fallback !== undefined) {
-    let { tables } = done.checked;
-    return { done: undefined, session: tables.session };
-  }
-  for (let i: usize = 0; i < done.checked.warnings.length; i++) done.checked.warnings[i]!.sources = [...loaded.sources];
-  stageEnd(done.checked.tables.session, "check", started);
-  return { done: { checked: done.checked, parts: done.parts, loaded, contents, carried: k.carried, emitted: k.emitted, rechecked: done.rechecked, units: k.units }, session: undefined };
-}
-
-// The name a top-level declaration of the file at `index` has in the program.
-function uniqueIn(loaded: Ref<Loaded>, index: usize, written: string): string {
-  if (loaded.links === undefined) return written;
-  const d = loaded.links![index]!.own.get(written);
-  return d !== undefined ? d.unique : written;
-}
-
-// A kept program given up on: its session, for a build afresh.
-function spent(kept: Kept): { done: Kept | undefined; session: Session | undefined } {
-  let { checked } = kept;
-  let { tables } = checked;
-  return { done: undefined, session: tables.session };
 }
 
 // How a build from what `fishc watch` kept differs from a clean build of `file`: its IR, its
@@ -569,43 +409,6 @@ function firstDifference(a: string, b: string): usize {
   let i: usize = 0;
   while (i < x.length && i < y.length && x[i] === y[i]) i++;
   return i + 1;
-}
-
-// The program checked: `kept`'s, given `session`, when every file it read reads as it did, or else
-// loaded and checked afresh.
-/** @throws {CompileError | Error | IoError} */
-function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined): Kept {
-  if (kept !== undefined) {
-    let reused = kept!;
-    reused.checked.tables.session = session;
-    const comparing = partStart(reused.checked.tables.session);
-    const same = unchanged(reused.contents);
-    partEnd(reused.checked.tables.session, "reload compare", comparing);
-    if (same) {
-      for (const f of reused.contents.keys()) looked.push(f);
-      reused.carried++;
-      reused.rechecked = new Set<InstanceId>();
-      return reused;
-    }
-    let { done, session: back } = rechecked(reused);
-    if (done !== undefined) {
-      let carried = done!;
-      for (const f of carried.contents.keys()) looked.push(f);
-      carried.carried++;
-      return carried;
-    }
-    return checkedAfresh(back!, file, looked, manifest);
-  }
-  return checkedAfresh(session, file, looked, manifest);
-}
-
-// The program loaded and checked afresh, with what to keep of it.
-/** @throws {CompileError | Error | IoError} */
-function checkedAfresh(session: Session, file: string, looked: Mut<string[]>, manifest: string | undefined): Kept {
-  const manifestText = manifest !== undefined ? fileText(manifest) : undefined;
-  let made = checkedSourceKeeping(newCompilation(session), file, readFileSync(file, "utf8"), false, looked);
-  const contents = loadedContents(made.loaded, looked, manifest, manifestText);
-  return { checked: made.checked, parts: made.parts, loaded: made.loaded, contents, carried: 0 };
 }
 
 // Cargo isn't told the target yet, so a crate would be built for the host.

@@ -87,6 +87,7 @@ const SOURCES: string[] = [
   "src/printer.fsh",
   "src/program.fsh",
   "src/publish.fsh",
+  "src/queries.fsh",
   "src/quote.fsh",
   "src/rank.fsh",
   "src/rebuild.fsh",
@@ -362,6 +363,7 @@ test("src/patterns.fsh formats keeping its comments, parses back to the same tre
 test("src/printer.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/printer.fsh"));
 test("src/program.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/program.fsh"));
 test("src/publish.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/publish.fsh"));
+test("src/queries.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/queries.fsh"));
 test("src/quote.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/quote.fsh"));
 test("src/rank.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/rank.fsh"));
 test("src/rebuild.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/rebuild.fsh"));

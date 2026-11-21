@@ -21,27 +21,36 @@ export type Kept = { checked: Checked; parts: CheckerParts; loaded: Loaded; cont
 // `looked` as it reads now, and `manifest` as it read before the build. Std's modules aren't
 // files; a declaration file's path follows its `dts:` key.
 /** @throws {IoError} */
-export function loadedContents(loaded: Ref<Loaded>, looked: Ref<string[]>, manifest: string | undefined, manifestText: string | undefined): Map<string, string | undefined> {
+export function loadedContents(loaded: Ref<Loaded>, looked: Ref<string[]>, manifest: string | undefined, manifestText: string | undefined, open: Ref<Map<string, string>>): Map<string, string | undefined> {
   let contents = new Map<string, string | undefined>();
   for (const m of loaded.modules) {
     if (m.path.startsWith("std:")) continue;
     contents.set(m.path.startsWith("dts:") ? m.path.slice(4) : m.path, m.src);
   }
-  for (const f of looked) if (!contents.has(f)) contents.set(f, textOf(f));
+  for (const f of looked) if (!contents.has(f)) contents.set(f, textIn(open, f));
   if (manifest !== undefined) contents.set(manifest, manifestText);
   return contents;
 }
 
 // Whether every file in `contents` still reads as it did.
 /** @throws {IoError} */
-export function unchanged(contents: Ref<Map<string, string | undefined>>): boolean {
-  for (const [f, text] of contents) if (textOf(f) !== text) return false;
+export function unchanged(contents: Ref<Map<string, string | undefined>>, open: Ref<Map<string, string>>): boolean {
+  for (const [f, text] of contents) if (textIn(open, f) !== text) return false;
   return true;
 }
 
 /** @throws {IoError} */
 export function textOf(f: string): string | undefined {
   return existsSync(f) ? readFileSync(f, "utf8") : undefined;
+}
+
+// The file as whoever drives the check holds it: an editor's unsaved text where there is one, and
+// the disk otherwise. A check compares and reloads through this, so a document nobody has saved is
+// what its program is checked from.
+/** @throws {IoError} */
+export function textIn(open: Ref<Map<string, string>>, f: string): string | undefined {
+  const held = open.get(f);
+  return held !== undefined ? held! : textOf(f);
 }
 
 // The file at `index` of the kept program read again from `text`: parsed, its tests left out,

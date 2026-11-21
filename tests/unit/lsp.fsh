@@ -11,7 +11,8 @@ import { join } from "node:path";
 import { compiledOf } from "../../src/codegen.fsh";
 import { newCompilation } from "../../src/compilation.fsh";
 import { CompileError } from "../../src/diag.fsh";
-import { frames } from "../../src/lsp.fsh";
+import { type Kept } from "../../src/incremental.fsh";
+import { diagnose, frames } from "../../src/lsp.fsh";
 import { analyze } from "../../src/main.fsh";
 import { load } from "../../src/modules.fsh";
 import { cachedSession } from "../../src/stdcache.fsh";
@@ -47,6 +48,44 @@ test("a file without main is checked as a module", () => {
   }
   removed(dir);
 });
+
+// One of the server's checks of the document at `path`, from the last one.
+function diagnosed(path: string, text: string, open: Map<string, string>, kept: Kept | undefined): { warnings: usize; checks: usize; kept: Kept | undefined } throws Error {
+  try {
+    let found = diagnose(cachedSession(), path, text, open, kept);
+    const warnings = found.diagnostics.length;
+    let checks: usize = 0;
+    if (found.kept !== undefined) checks = found.kept!.checked.tables.counts.checks;
+    return { warnings, checks, kept: found.kept };
+  } catch (e) {
+    throw new Error(`the check failed: ${(e as { message: string }).message}`);
+  }
+}
+
+test("a document checked again from the last check checks nothing again, and after an edit only the body that changed", () => {
+  const dir = scratch("fishc-lsp-kept-");
+  const lib = "export function twice(n: i64): i64 { return n * 2; }\n";
+  const src = 'import { twice } from "./lib.fsh";\n\nfunction main() {\n  console.log(twice(21));\n}\n';
+  const libPath = file(dir, "lib.fsh", lib);
+  const path = file(dir, "main.fsh", src);
+  let open = new Map<string, string>();
+  open.set(path, src);
+  open.set(libPath, lib);
+  let first = diagnosed(path, src, open.clone(), undefined);
+  assert(first.warnings === 0, `the first check gave ${first.warnings} diagnostic(s)`);
+  assert(first.checks > 0, "the first check checked nothing");
+  let second = diagnosed(path, src, open.clone(), first.kept);
+  assert(second.checks === first.checks, `the second check checked ${second.checks - first.checks} instances again`);
+  // An unsaved edit to the imported file: only that body and what reads it are checked again, and
+  // its unused local is reported, though the file on disk still has none.
+  let edited = new Map<string, string>();
+  edited.set(path, src);
+  edited.set(libPath, "export function twice(n: i64): i64 { const spare = n; return n * 2; }\n");
+  let third = diagnosed(path, src, edited, second.kept);
+  assert(third.checks > second.checks, "the check after an unsaved edit checked nothing again");
+  assert(third.checks < second.checks * 2, `the check after an edit checked ${third.checks - second.checks} instances, which is not only what changed`);
+  removed(dir);
+}, { timeout: 120_000 });
 
 // The source an analysis of `src` is refused at, or what else happened.
 function refusedAt(src: string, path: string): string {

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { type Kept } from "../../src/incremental.fsh";
 import { CompileError } from "../../src/diag.fsh";
 import { builtKept, cleanDifference, compiledKept } from "../../src/main.fsh";
+import { Queries } from "../../src/queries.fsh";
 import { cachedSession } from "../../src/stdcache.fsh";
 import { hostTarget } from "../../src/target.fsh";
 import { removed, scratch, text } from "./support.fsh";
@@ -59,6 +60,43 @@ test("a rebuild with every file as it was checks nothing again, and one after an
   let [third, _edited] = rebuild(entry, out, second);
   assert(third.checked.tables.counts.checks > 0, "the build after an edit checked nothing");
   assert(output(out) === "43\n", `the build after an edit printed ${output(out)}`);
+  removed(dir);
+}, { timeout: 120_000 });
+
+// One of the driver's checks of `entry`, with the texts it holds standing in for the disk.
+function driven(queries: Ref<Queries>, looked: Mut<string[]>, kept: Kept | undefined): Kept throws Error {
+  try {
+    return queries.checked(cachedSession(), looked, kept);
+  } catch (e) {
+    throw new Error(`the check failed: ${(e as { message: string }).message}`);
+  }
+}
+
+// The text a driver is given stands in for the disk, as an editor's unsaved documents do.
+test("a driver checks the text it is given, checks nothing again while that text holds, and rechecks one body when it changes", () => {
+  const dir = scratch("fish-queries-");
+  write(join(dir, "main.fsh"), MAIN);
+  write(join(dir, "lib.fsh"), "export function twice(n: i64): i64 { return n * 2; }\n");
+  const lib = join(dir, "lib.fsh");
+  let open = new Map<string, string>();
+  open.set(lib, "export function twice(n: i64): i64 { return n + n; }\n");
+  let queries = new Queries(join(dir, "main.fsh"), undefined, open);
+  let looked: string[] = [];
+  let first = driven(queries, looked, undefined);
+  const checks = first.checked.tables.counts.checks;
+  assert(checks > 0, "the first check checked nothing");
+  assert(first.checked.warnings.length === 0, `the first check warned: ${first.checked.warnings.length}`);
+  let again: string[] = [];
+  let second = driven(queries, again, first);
+  const over = second.checked.tables.counts.checks;
+  assert(over === checks, `the second check checked ${over - checks} instances again`);
+  // An unused local in the text the driver holds is warned about, though the file on disk has
+  // none: the check followed the driver's text rather than reading the file.
+  queries.open.set(lib, "export function twice(n: i64): i64 { const spare = n; return n + n; }\n");
+  let edited: string[] = [];
+  let third = driven(queries, edited, second);
+  assert(third.checked.tables.counts.checks > checks, "the check after an edit to the held text checked nothing again");
+  assert(third.checked.warnings.some((w) => w.code === "W0001"), `the unused local in the held text wasn't warned about: ${third.checked.warnings.length} warning(s)`);
   removed(dir);
 }, { timeout: 120_000 });
 
