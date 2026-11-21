@@ -7180,6 +7180,419 @@ export async function create(file: string, paths: string[], options: TarPackOpti
   closeSync(fd);
 }
 `,
+  // Zip archives, read through their central directory and written deflated, as fish:zip.
+  "fish:zip": String.raw`
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, utimesSync, chmodSync, writeFileSync, writeSync } from "fs";
+import { dirname, isAbsolute, join, relative, resolve } from "path";
+import { deflateRawSync, inflateRawSync, ZlibError } from "zlib";
+
+// What reading, extracting or writing an archive refuses, naming the entry where it can.
+export class ZipError extends Error {
+  path: string;
+  constructor(message: string, path: string = "") {
+    super(message);
+    this.path = path;
+  }
+}
+
+export type ZipEntryType = "file" | "directory" | "symlink";
+// As fish:tar's: an entry's path, what it is, its unpacked size, its mode's permission bits, its
+// time in seconds since the epoch, and a symlink's target.
+export type ZipHeader = { path: string; type: ZipEntryType; size: i64; mode: i64; mtime: i64; target: string };
+export type ZipEntry = { path: string; type: ZipEntryType; size: i64; mode: i64; mtime: i64; target: string; data: u8[] };
+export type ZipSource = string | u8[] | ReadableStream<u8[]>;
+export type ZipLimits = { maxEntries?: i64; maxBytes?: i64; maxRatio?: i64 };
+export type ZipPackOptions = { cwd?: string; level?: i64 };
+
+const MAX_ENTRIES = 10000;
+const MAX_BYTES = 1073741824;
+const MAX_RATIO = 100;
+const ALL32 = 4294967295;
+
+function le(b: Ref<u8[]>, at: i64, size: i64): i64 {
+  let n = 0;
+  for (let i = size - 1; i >= 0; i--) n = n * 256 + (b[(at + i) as usize]! as i64);
+  return n;
+}
+
+function put(out: Mut<u8[]>, n: i64, size: i64) {
+  let left = n;
+  for (let i = 0; i < size; i++) {
+    out.push((left % 256) as u8);
+    left = left / 256;
+  }
+}
+
+// CRC-32 as zip and gzip compute it, over the reflected polynomial 0xEDB88320.
+export function crc32(data: Ref<u8[]>): i64 {
+  let table: i64[] = [];
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) !== 0 ? 0xedb88320 ^ (c >> 1) : c >> 1;
+    table.push(c);
+  }
+  let crc = ALL32;
+  for (const b of data) crc = table[((crc ^ (b as i64)) & 255) as usize]! ^ (crc >> 8);
+  return crc ^ ALL32;
+}
+
+// A source's bytes, whole, refused past maxBytes.
+async function whole(source: ZipSource, maxBytes: i64): Promise<u8[]> throws IoError | ZipError {
+  if (typeof source === "string") {
+    const st = lstatSync(source);
+    if (st.size > maxBytes) throw new ZipError("this zip archive is larger than " + String(maxBytes) + " bytes; raise maxBytes if it is trusted");
+    return readFileSync(source);
+  }
+  if (Array.isArray(source)) return source;
+  let out: u8[] = [];
+  for await (const chunk of source) {
+    for (const b of chunk) out.push(b);
+    if ((out.length as i64) > maxBytes) throw new ZipError("this zip archive is larger than " + String(maxBytes) + " bytes; raise maxBytes if it is trusted");
+  }
+  return out;
+}
+
+// Days since 1970-01-01 for a civil date, and back, as Howard Hinnant's algorithms give them.
+function daysFrom(y: i64, m: i64, d: i64): i64 {
+  const year = m <= 2 ? y - 1 : y;
+  const era = (year >= 0 ? year : year - 399) / 400;
+  const yoe = year - era * 400;
+  const doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+  const doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
+function civil(days: i64): [i64, i64, i64] {
+  const z = days + 719468;
+  const era = (z >= 0 ? z : z - 146096) / 146097;
+  const doe = z - era * 146097;
+  const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const mp = (5 * doy + 2) / 153;
+  const d = doy - (153 * mp + 2) / 5 + 1;
+  const m = mp < 10 ? mp + 3 : mp - 9;
+  return [m <= 2 ? yoe + era * 400 + 1 : yoe + era * 400, m, d];
+}
+
+// A DOS date and time, read as UTC, in seconds since the epoch.
+function dosTime(date: i64, time: i64): i64 {
+  const days = daysFrom((date >> 9) + 1980, (date >> 5) & 15, date & 31);
+  return days * 86400 + (time >> 11) * 3600 + ((time >> 5) & 63) * 60 + (time & 31) * 2;
+}
+
+// The archive's entries from its central directory, each read and checked whole. Throws
+// ZipError on a corrupt archive, an entry it can't read, or past a limit.
+export async function* entries(source: ZipSource, limits: ZipLimits = {}): AsyncGenerator<ZipEntry> throws IoError | ZipError {
+  const maxEntries = limits.maxEntries ?? MAX_ENTRIES;
+  const maxBytes = limits.maxBytes ?? MAX_BYTES;
+  const maxRatio = limits.maxRatio ?? MAX_RATIO;
+  const z = await whole(source, maxBytes);
+  const size = z.length as i64;
+  // The end of central directory record is the last 22 bytes, before a comment of up to 65535.
+  let end = -1;
+  for (let at = size - 22; at >= 0 && at >= size - 22 - 65535; at--) {
+    if (le(z, at, 4) === 0x06054b50) {
+      end = at;
+      break;
+    }
+  }
+  if (end < 0) throw new ZipError("this isn't a zip archive: it has no end of central directory record");
+  let count = le(z, end + 10, 2);
+  let cdSize = le(z, end + 12, 4);
+  let cdAt = le(z, end + 16, 4);
+  // ZIP64 keeps the counts and offsets that overflow in a record its locator points at.
+  if (end >= 20 && le(z, end - 20, 4) === 0x07064b50) {
+    const at = le(z, end - 12, 8);
+    if (at + 56 > size || le(z, at, 4) !== 0x06064b50) throw new ZipError("this zip archive's ZIP64 end record is missing or corrupt");
+    count = le(z, at + 32, 8);
+    cdSize = le(z, at + 40, 8);
+    cdAt = le(z, at + 48, 8);
+  }
+  if (count > maxEntries) throw new ZipError("this zip archive holds more than " + String(maxEntries) + " entries; raise maxEntries if it is trusted");
+  if (cdAt + cdSize > size) throw new ZipError("this zip archive's central directory runs past its end");
+  let at = cdAt;
+  let total = 0;
+  for (let n = 0; n < count; n++) {
+    if (at + 46 > size || le(z, at, 4) !== 0x02014b50) throw new ZipError("this zip archive's central directory is corrupt");
+    const madeBy = le(z, at + 4, 2);
+    const flags = le(z, at + 8, 2);
+    const method = le(z, at + 10, 2);
+    const time = le(z, at + 12, 2);
+    const date = le(z, at + 14, 2);
+    const crc = le(z, at + 16, 4);
+    let packed = le(z, at + 20, 4);
+    let unpacked = le(z, at + 24, 4);
+    const nameLength = le(z, at + 28, 2);
+    const extraLength = le(z, at + 30, 2);
+    const commentLength = le(z, at + 32, 2);
+    const external = le(z, at + 38, 4);
+    let local = le(z, at + 42, 4);
+    const path = new TextDecoder().decode(z.slice(at + 46, at + 46 + nameLength));
+    let mtime = dosTime(date, time);
+    // Extra fields: ZIP64's sizes and offset where the 32-bit fields are all ones, and the
+    // extended timestamp's modification time.
+    let e = at + 46 + nameLength;
+    const extraEnd = e + extraLength;
+    while (e + 4 <= extraEnd) {
+      const id = le(z, e, 2);
+      const length = le(z, e + 2, 2);
+      let v = e + 4;
+      if (id === 1) {
+        if (unpacked === ALL32) {
+          unpacked = le(z, v, 8);
+          v += 8;
+        }
+        if (packed === ALL32) {
+          packed = le(z, v, 8);
+          v += 8;
+        }
+        if (local === ALL32) local = le(z, v, 8);
+      } else if (id === 0x5455 && length >= 5 && (le(z, v, 1) & 1) !== 0) mtime = le(z, v + 1, 4);
+      e += 4 + length;
+    }
+    at = extraEnd + commentLength;
+    if ((flags & 1) !== 0) throw new ZipError("'" + path + "' is encrypted, which isn't read", path);
+    if (method !== 0 && method !== 8) throw new ZipError("'" + path + "' uses compression method " + String(method) + "; only stored and deflate are read", path);
+    if (total + unpacked > maxBytes) throw new ZipError("this zip archive unpacks to more than " + String(maxBytes) + " bytes; raise maxBytes if it is trusted", path);
+    if (packed > 0 && unpacked > packed * maxRatio) throw new ZipError("'" + path + "' unpacks more than " + String(maxRatio) + " bytes per byte packed; raise maxRatio if it is trusted", path);
+    if (local + 30 > size || le(z, local, 4) !== 0x04034b50) throw new ZipError("'" + path + "' has no local header where the central directory says", path);
+    const dataAt = local + 30 + le(z, local + 26, 2) + le(z, local + 28, 2);
+    if (dataAt + packed > size) throw new ZipError("'" + path + "' runs past the archive's end", path);
+    const raw = z.slice(dataAt, dataAt + packed);
+    let data: u8[] = raw;
+    if (method === 8) {
+      try {
+        data = inflateRawSync(raw, { maxOutputLength: unpacked > 0 ? unpacked : 1 });
+      } catch (err) {
+        throw new ZipError("'" + path + "' doesn't inflate to the size its header gives: " + err.message, path);
+      }
+    }
+    if ((data.length as i64) !== unpacked) throw new ZipError("'" + path + "' unpacks to " + String(data.length) + " bytes where its header says " + String(unpacked), path);
+    if (crc32(data) !== crc) throw new ZipError("'" + path + "' fails its CRC-32 check; the archive is corrupt", path);
+    total += unpacked;
+    // A Unix maker keeps the mode in the external attributes' top half.
+    const mode = (madeBy >> 8) === 3 ? external >> 16 : 0;
+    const kind = mode & 0o170000;
+    const type: ZipEntryType = path.endsWith("/") || kind === 0o040000 ? "directory" : kind === 0o120000 ? "symlink" : "file";
+    if (kind !== 0 && kind !== 0o100000 && kind !== 0o040000 && kind !== 0o120000) throw new ZipError("'" + path + "' is a device, FIFO or another special entry, which isn't read", path);
+    const target = type === "symlink" ? new TextDecoder().decode(data) : "";
+    yield { path, type, size: type === "file" ? unpacked : 0, mode: mode & 0o7777, mtime, target, data: type === "file" ? data : [] };
+  }
+}
+
+// The headers of the archive's entries.
+export async function list(source: ZipSource, limits: ZipLimits = {}): Promise<ZipHeader[]> throws IoError | ZipError {
+  let out: ZipHeader[] = [];
+  let all = entries(source, limits);
+  for await (const e of all) out.push({ path: e.path, type: e.type, size: e.size, mode: e.mode, mtime: e.mtime, target: e.target });
+  return out;
+}
+
+function landing(root: string, path: string): string throws ZipError {
+  if (isAbsolute(path)) throw new ZipError("'" + path + "' is an absolute path, which extract refuses; an entry lands inside the target", path);
+  const to = resolve(root, path);
+  const rel = relative(root, to);
+  if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) throw new ZipError("'" + path + "' climbs out of the target, which extract refuses", path);
+  return to;
+}
+
+function throughLinks(root: string, to: string, path: string): void throws IoError | ZipError {
+  let at = to;
+  while (at !== root && at.length > root.length) {
+    const st = lstatSync(at, { throwIfNoEntry: false });
+    if (st !== undefined && st.isSymbolicLink()) throw new ZipError("'" + path + "' would be written through the symlink '" + relative(root, at) + "', which extract refuses", path);
+    at = dirname(at);
+  }
+}
+
+// Writes the archive's entries under dir and gives the paths written, refusing as fish:tar's
+// extract does anything that would land outside dir.
+export async function extract(source: ZipSource, dir: string, limits: ZipLimits = {}): Promise<string[]> throws IoError | ZipError {
+  const root = resolve(dir);
+  mkdirSync(root, { recursive: true });
+  let written: string[] = [];
+  let all = entries(source, limits);
+  for await (const e of all) {
+    const to = landing(root, e.path);
+    throughLinks(root, to, e.path);
+    if (e.type === "directory") {
+      mkdirSync(to, { recursive: true });
+      if (e.mode !== 0) chmodSync(to, e.mode & 0o777);
+    } else {
+      mkdirSync(dirname(to), { recursive: true });
+      if (e.type === "symlink") {
+        if (isAbsolute(e.target)) throw new ZipError("'" + e.path + "' is a symlink to the absolute path '" + e.target + "', which extract refuses", e.path);
+        landing(root, join(dirname(relative(root, to)), e.target));
+        symlinkSync(e.target, to);
+      } else {
+        writeFileSync(to, e.data);
+        chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
+        utimesSync(to, e.mtime as f64, e.mtime as f64);
+      }
+    }
+    written.push(to);
+  }
+  return written;
+}
+
+// The entries for path and, for a directory, everything under it in sorted order.
+function* walked(cwd: string, path: string): Generator<string> throws IoError {
+  yield path;
+  const st = lstatSync(join(cwd, path));
+  if (!st.isDirectory()) return;
+  let names = readdirSync(join(cwd, path));
+  names.sort();
+  for (const n of names) for (const p of walked(cwd, join(path, n))) yield p;
+}
+
+// A time in seconds since the epoch as a DOS date and time, in UTC, clamped to DOS's 1980.
+function dosParts(seconds: i64): [i64, i64] {
+  const days = seconds / 86400;
+  const left = seconds % 86400;
+  const [y, m, d] = civil(days);
+  if (y < 1980) return [(0 << 9) | (1 << 5) | 1, 0];
+  return [((y - 1980) << 9) | (m << 5) | d, ((left / 3600) << 11) | (((left % 3600) / 60) << 5) | ((left % 60) / 2)];
+}
+
+type __zipRecord = { name: u8[]; method: i64; crc: i64; packed: i64; unpacked: i64; date: i64; time: i64; mtime: i64; external: i64; offset: i64 };
+
+async function* packed(paths: string[], cwd: string, level: i64): AsyncGenerator<u8[]> throws IoError | ZlibError {
+  let records: __zipRecord[] = [];
+  let offset = 0;
+  for (const given of paths) {
+    for (const path of walked(cwd, given)) {
+      const full = join(cwd, path);
+      const st = lstatSync(full);
+      const mtime = Math.floor(st.mtimeMs / 1000.0) as i64;
+      const directory = st.isDirectory();
+      const link = st.isSymbolicLink();
+      if (!directory && !link && !st.isFile()) continue;
+      const name = new TextEncoder().encode(directory && !path.endsWith("/") ? path + "/" : path);
+      let data: u8[] = link ? new TextEncoder().encode(readlinkSync(full)) : directory ? [] : readFileSync(full);
+      const crc = crc32(data);
+      const unpacked = data.length as i64;
+      let method = 0;
+      if (!directory && !link && unpacked > 0) {
+        const deflated = deflateRawSync(data, { level });
+        if ((deflated.length as i64) < unpacked) {
+          data = deflated;
+          method = 8;
+        }
+      }
+      const [date, time] = dosParts(mtime);
+      const kind = directory ? 0o040000 : link ? 0o120000 : 0o100000;
+      const external = (kind | (st.mode & 0o7777)) * 65536 + (directory ? 16 : 0);
+      const big = unpacked >= ALL32 || (data.length as i64) >= ALL32;
+      let out: u8[] = [];
+      put(out, 0x04034b50, 4);
+      put(out, big ? 45 : 20, 2);
+      // Bit 11 marks names as UTF-8.
+      put(out, 0x0800, 2);
+      put(out, method, 2);
+      put(out, time, 2);
+      put(out, date, 2);
+      put(out, crc, 4);
+      put(out, big ? ALL32 : data.length as i64, 4);
+      put(out, big ? ALL32 : unpacked, 4);
+      put(out, name.length as i64, 2);
+      put(out, big ? 29 : 9, 2);
+      for (const b of name) out.push(b);
+      if (big) {
+        put(out, 1, 2);
+        put(out, 16, 2);
+        put(out, unpacked, 8);
+        put(out, data.length as i64, 8);
+      }
+      // The extended timestamp: its modification time to the second.
+      put(out, 0x5455, 2);
+      put(out, 5, 2);
+      out.push(1);
+      put(out, mtime, 4);
+      for (const b of data) out.push(b);
+      records.push({ name, method, crc, packed: data.length as i64, unpacked, date, time, mtime, external, offset });
+      offset += out.length as i64;
+      yield out;
+    }
+  }
+  let central: u8[] = [];
+  for (const r of records) {
+    const wide = r.unpacked >= ALL32 || r.packed >= ALL32 || r.offset >= ALL32;
+    put(central, 0x02014b50, 4);
+    // Made by Unix, so readers take the mode from the external attributes.
+    put(central, 3 * 256 + (wide ? 45 : 20), 2);
+    put(central, wide ? 45 : 20, 2);
+    put(central, 0x0800, 2);
+    put(central, r.method, 2);
+    put(central, r.time, 2);
+    put(central, r.date, 2);
+    put(central, r.crc, 4);
+    put(central, wide ? ALL32 : r.packed, 4);
+    put(central, wide ? ALL32 : r.unpacked, 4);
+    put(central, r.name.length as i64, 2);
+    put(central, wide ? 37 : 9, 2);
+    put(central, 0, 2);
+    put(central, 0, 2);
+    put(central, 0, 2);
+    put(central, r.external, 4);
+    put(central, wide ? ALL32 : r.offset, 4);
+    for (const b of r.name) central.push(b);
+    if (wide) {
+      put(central, 1, 2);
+      put(central, 24, 2);
+      put(central, r.unpacked, 8);
+      put(central, r.packed, 8);
+      put(central, r.offset, 8);
+    }
+    put(central, 0x5455, 2);
+    put(central, 5, 2);
+    central.push(1);
+    put(central, r.mtime, 4);
+  }
+  const count = records.length as i64;
+  const cdSize = central.length as i64;
+  if (count >= 65535 || offset >= ALL32 || cdSize >= ALL32) {
+    // ZIP64's end record, then its locator, before the classic record pointing past them.
+    const at = offset + cdSize;
+    put(central, 0x06064b50, 4);
+    put(central, 44, 8);
+    put(central, 3 * 256 + 45, 2);
+    put(central, 45, 2);
+    put(central, 0, 4);
+    put(central, 0, 4);
+    put(central, count, 8);
+    put(central, count, 8);
+    put(central, cdSize, 8);
+    put(central, offset, 8);
+    put(central, 0x07064b50, 4);
+    put(central, 0, 4);
+    put(central, at, 8);
+    put(central, 1, 4);
+  }
+  put(central, 0x06054b50, 4);
+  put(central, 0, 2);
+  put(central, 0, 2);
+  put(central, count >= 65535 ? 65535 : count, 2);
+  put(central, count >= 65535 ? 65535 : count, 2);
+  put(central, cdSize >= ALL32 ? ALL32 : cdSize, 4);
+  put(central, offset >= ALL32 ? ALL32 : offset, 4);
+  put(central, 0, 2);
+  yield central;
+}
+
+// A zip archive of the paths, each relative to cwd, and everything under each directory, as its
+// chunks, each file deflated at level unless storing it is smaller.
+export function pack(paths: string[], options: ZipPackOptions = {}): AsyncGenerator<u8[]> throws IoError | ZlibError {
+  return packed(paths, options.cwd ?? ".", options.level ?? 6);
+}
+
+// The archive pack makes, written to file.
+export async function create(file: string, paths: string[], options: ZipPackOptions = {}): Promise<void> throws IoError | ZlibError {
+  const fd = openSync(file, "w");
+  let chunks = pack(paths, options);
+  for await (const chunk of chunks) writeSync(fd, chunk);
+  closeSync(fd);
+}
+`,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
   // buffer so readers can be mixed.
   stdin: String.raw`
