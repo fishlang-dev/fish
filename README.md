@@ -47,9 +47,9 @@ have done, and how to fix it.
 
 ## Status
 
-Fish is pre-release and built by one person. This repository holds the bootstrap compiler,
-written in TypeScript and run on Bun. It parses Fish, checks types and borrows, emits LLVM IR as
-text, and links it with clang into a native executable.
+Fish is pre-release and built by one person. This repository holds the compiler, `fishc`,
+written in Fish and built by an earlier `fishc`. It parses Fish, checks types and borrows, emits
+LLVM IR as text, and links it with clang into a native executable.
 
 Working today:
 - classes, structural types, interfaces, generics, enums with data, `match`, pipes (`x |> f(%)`)
@@ -63,13 +63,30 @@ Designed but not built yet: `Lazy<T>`, `Arena<T>`, the `@route` registry, in-fil
 blocks, lazy iterators (`arr.iter()`), operator-overloading traits, and the package manager,
 formatter and language server.
 
-## Building a program
+## Building fishc
 
-You need [Bun](https://bun.sh) 1.4 and clang, on Linux or macOS (x86-64 or ARM64).
+You need clang 15 or newer, on Linux or macOS (x86-64 or ARM64). `fishc` is built by stage 0,
+an earlier `fishc` that `stage0.toml` pins by commit and checksum, kept in `~/.cache/fish`.
+
+With a `fishc` already:
 
 ```sh
-bun install
-bun src/main.ts build hello.fsh -o hello
+fishc run scripts/build.fsh
+```
+
+With none, the first time: this unpacks the pinned commit and builds stage 0 from it, which needs
+git and [Bun](https://bun.sh) once, then builds `fishc` with it.
+
+```sh
+sh scripts/bootstrap.sh
+```
+
+Either way `fishc` is written to `build/fishc`, and `-o <path>` puts it elsewhere.
+
+## Building a program
+
+```sh
+build/fishc build hello.fsh -o hello
 ./hello
 ```
 
@@ -82,23 +99,25 @@ Its functions are correctly rounded, so a program prints the same numbers on eve
 ## Tests
 
 ```sh
-bun test           # every program in tests/programs, plus the unit tests
-bun run typecheck
+build/fishc run tests/run.fsh -- --fishc "$PWD/build/fishc"    # every program in tests/programs
+cd tests/unit && FISHC="$PWD/../../build/fishc" ../../build/fishc test --release   # unit tests
 ```
 
 Each program in `tests/programs` states what it expects in comments: `// expect:` for output,
-and `// error:` or `// panic:` for a failure. `tests/run.test.ts` explains the format.
+and `// error:` or `// panic:` for a failure, which the golden runner, `tests/run.fsh`, checks.
 
 ## Layout
 
 | Path | What it holds |
 | --- | --- |
-| `src/main.ts` | the `fishc` command |
-| `src/parser.ts`, `src/check.ts`, `src/values.ts`, `src/moves.ts` | parsing, type checking, and the borrow checker |
-| `src/codegen.ts` | LLVM IR generation |
-| `src/native.ts` | the C half of the runtime: allocation, strings, tasks, I/O |
+| `src/main.fsh` | the `fishc` command |
+| `src/parser.fsh`, `src/check.fsh`, `src/values.fsh`, `src/moves.fsh` | parsing, type checking, and the borrow checker |
+| `src/codegen.fsh` | LLVM IR generation |
+| `src/native.fsh` | the C half of the runtime: allocation, strings, tasks, I/O |
 | `src/runtime/math.cpp`, `vendor/` | the correctly rounded `Math` functions (see `vendor/README.md`) |
 | `tests/programs` | the `.fsh` test programs |
+| `tests/unit` | the unit tests, run by `fishc test` |
+| `stage0.toml`, `scripts/build.fsh`, `scripts/bootstrap.sh` | building `fishc` with stage 0 |
 
 ## Licence
 

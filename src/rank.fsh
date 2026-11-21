@@ -40,7 +40,7 @@ export function rank(dirs: Ref<string[]>, self?: string, plan?: Plan): Ranking {
     while (scans.length > 0) all.push(scans.shift()!);
   }
   let ranking: Ranking = { repos, curve: curveOf(all, plan) };
-  if (self !== undefined) ranking.self = { dir: self, curve: curveOf(scanFiles(self), plan) };
+  if (self !== undefined) ranking.self = { dir: self, curve: curveOf(scanFiles(self, true), plan) };
   return ranking;
 }
 

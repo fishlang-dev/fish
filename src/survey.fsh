@@ -115,7 +115,9 @@ const GRADES: [string, f64][] = [["A", 5], ["B", 15], ["C", 40], ["D", 100]];
 
 // Every TypeScript file under `dir`, skipping dependencies, hidden directories, declarations and
 // symbolic links (which may loop, or count a file twice); an entry that can't be read is skipped.
-export function sources(dir: string): string[] {
+// The TypeScript files under `dir`, outside node_modules and dot-directories; with `fish`, its Fish
+// files too, as the compiler's own source is read when a ranking is compared with it.
+export function sources(dir: string, fish: boolean = false): string[] {
   let found: string[] = [];
   let names: string[] = [];
   try {
@@ -135,8 +137,9 @@ export function sources(dir: string): string[] {
       continue;
     }
     if (directory) {
-      if (name !== "node_modules" && !name.startsWith(".")) for (const p of sources(path)) found.push(p);
+      if (name !== "node_modules" && !name.startsWith(".")) for (const p of sources(path, fish)) found.push(p);
     } else if (file && /\.(ts|tsx|mts)$/.test(name) && !/\.d\.(ts|mts)$/.test(name)) found.push(path);
+    else if (fish && file && name.endsWith(".fsh")) found.push(path);
   }
   return found;
 }
@@ -145,8 +148,8 @@ export function sources(dir: string): string[] {
 // source order.
 export type FileScan = { file: string; lines: usize; read: boolean; findings: [string, Example][] };
 
-export function scanFiles(dir: string): FileScan[] {
-  let paths = sources(dir);
+export function scanFiles(dir: string, fish: boolean = false): FileScan[] {
+  let paths = sources(dir, fish);
   paths.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   let scans: FileScan[] = [];
   for (const path of paths) scans.push(scanFile(path, relative(dir, path)));

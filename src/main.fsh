@@ -1241,7 +1241,7 @@ function reportTimings(session: Ref<Session>, stages: Ref<string[]>, start: f64)
 
 // A directory `fishc survey` can read, holding TypeScript.
 /** @throws {IoError} */
-function checkProject(dir: string) {
+function checkProject(dir: string, fish: boolean = false) {
   if (!existsSync(dir)) fail(`fishc survey: '${dir}' doesn't exist`);
   if (!statSync(dir).isDirectory()) fail(`fishc survey: '${dir}' is a file; give the directory of a TypeScript project`);
   try {
@@ -1249,7 +1249,7 @@ function checkProject(dir: string) {
   } catch (e) {
     fail(`fishc survey: '${dir}' can't be read: ${(e as { message: string }).message}`);
   }
-  if (sources(dir).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript files (.ts, .tsx or .mts, outside node_modules)`);
+  if (sources(dir, fish).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript ${fish ? "or Fish " : ""}files (.ts, .tsx or .mts${fish ? ", or .fsh" : ""}, outside node_modules)`);
 }
 
 /** @throws {Error | IoError | JsonError} */
@@ -1341,7 +1341,7 @@ async function main(): Promise<void> {
     if (dirs.length === 0 || (values.rank !== true && (dirs.length > 1 || extra))) fail(usage);
     if (values.rank === true && values.compare !== undefined) fail("fishc survey: --compare compares one project's survey; rankings can't be compared yet");
     for (const dir of dirs) checkProject(dir);
-    if (values.self !== undefined) checkProject(values.self);
+    if (values.self !== undefined) checkProject(values.self, true);
     // A directory given twice, or inside another given, would count its files twice.
     const real = dirs.map((d) => realpathSync(d));
     const nested = real.findIndex((d, k) => real.some((e, l) => l !== k && (d === e ? l < k : d.startsWith(e + sep))));
