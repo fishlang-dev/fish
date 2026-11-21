@@ -128,7 +128,7 @@ async function main(): Promise<void> {
   const text = await res.text();
   console.log(text);
   const empty = new Response(null, { status: 404 });
-  console.log(empty.status, empty.ok, empty.headers.has("content-type"), empty.body.length);
+  console.log(empty.status, empty.ok, empty.headers.has("content-type"), empty.body === null ? 0 : 1);
   const bare = new Response();
   console.log(bare.status);
 }
@@ -1111,19 +1111,19 @@ async function main(): Promise<void> throws IoError {
 // expect:     names: [ 'content-type' ],
 // expect:     values: [ 'text/plain;charset=UTF-8' ]
 // expect:   },
-// expect:   body: [ 104, 105 ],
 // expect:   url: '',
 // expect:   cookies: CookieMap {}
 // expect: }
 // expect: true
-// A response clones and prints as it always has, a streamed body left out of the print.
+// A response clones and prints with its body left out, as a stream or as bytes.
 import { inspect } from "node:util";
 async function* one(): AsyncGenerator<string> { yield "x"; }
 
 async function main() {
   const res = new Response("hi", { status: 201 });
   const copy = res.clone();
-  console.log(copy.status, copy.body, res.status);
+  const copied = await copy.bytes();
+  console.log(copy.status, copied, res.status);
   console.log(copy);
   const streamed = new Response(one(), { status: 201 });
   console.log(inspect(streamed) === inspect(new Response("", { status: 201 })));

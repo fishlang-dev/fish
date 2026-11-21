@@ -217,9 +217,11 @@ async function main(): Promise<void> throws IoError | AbortError {
     console.log(what + "|" + text);
   }
   const head = await fetch(url, { method: "HEAD" });
-  console.log("head|" + String(head.status), head.body.length);
+  const headBody = await head.bytes();
+  console.log("head|" + String(head.status), headBody.length);
   const none = await fetch(url);
-  console.log("no content|" + String(none.status), none.body.length);
+  const noneBody = await none.bytes();
+  console.log("no content|" + String(none.status), noneBody.length);
   const hinted = await fetch(url);
   const text = await hinted.text();
   console.log("early hints|" + String(hinted.status), text);
