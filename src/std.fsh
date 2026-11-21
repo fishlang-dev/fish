@@ -7367,6 +7367,48 @@ class ReadableStream<T> {
     if (g === null) return __streamNone<T>();
     return g;
   }
+
+  // Writes each value into the destination, closing it at the end; a failure on either side
+  // aborts the destination and is thrown here.
+  async pipeTo(dest: Ref<WritableStream<T>>): Promise<void> throws Error | TypeError {
+    let reader = this.getReader();
+    let writer = dest.getWriter();
+    try {
+      while (true) {
+        const r = await reader.read();
+        if (r.done) break;
+        await writer.write(r.value);
+      }
+    } catch (e) {
+      writer.abort(e.message);
+      throw e;
+    }
+    await writer.close();
+    writer.releaseLock();
+    reader.releaseLock();
+  }
+
+  // The pair's readable side, with this stream piped into its writable side in the background.
+  pipeThrough<U>(pair: { writable: WritableStream<T>; readable: ReadableStream<U> }): ReadableStream<U> {
+    const writable = pair.writable;
+    const readable = pair.readable;
+    const _piping = spawn(__streamPiped<T>(ReadableStream.__sharing<T>(this.#state.clone()), writable));
+    return readable;
+  }
+
+  // A second handle on the same stream, for a pipe running in another task.
+  static __sharing(state: shared<__streamState<T>>): ReadableStream<T> {
+    let stream = new ReadableStream<T>();
+    stream.#state = state;
+    return stream;
+  }
+}
+
+// A pipe run for its effect: its failure has already aborted the destination.
+async function __streamPiped<T>(from: ReadableStream<T>, to: WritableStream<T>): Promise<void> {
+  try {
+    await from.pipeTo(to);
+  } catch (_e) {}
 }
 
 async function* __streamNone<T>(): AsyncGenerator<T> {}
@@ -7425,6 +7467,82 @@ function __streamCancel<T>(state: shared<__streamState<T>>, reason: string) {
   queue.closed.store(1);
   const cancel = queue.cancel.update((c) => c.pop());
   if (cancel !== null) cancel(reason);
+}
+
+// What a writable stream's sink is given: each chunk to write, then close at the end, or abort
+// with the reason when the pipe or writer gives up.
+type UnderlyingSink<T> = { write?: (chunk: T) => Promise<void>; close?: () => Promise<void>; abort?: (reason: string) => void };
+
+type __sinkState<T> = { write: Lock<((chunk: T) => Promise<void>)[]>; close: Lock<(() => Promise<void>)[]>; abort: Lock<((reason: string) => void)[]>; locked: Atomic<i64>; closed: Atomic<i64> };
+
+// A destination values are written into through a writer, one at a time.
+class WritableStream<T> {
+  #sink: shared<__sinkState<T>>;
+
+  constructor(sink?: UnderlyingSink<T>) {
+    const writes: ((chunk: T) => Promise<void>)[] = [];
+    const closes: (() => Promise<void>)[] = [];
+    const aborts: ((reason: string) => void)[] = [];
+    if (sink !== null) {
+      const write = sink.write;
+      if (write !== null) writes.push(write);
+      const close = sink.close;
+      if (close !== null) closes.push(close);
+      const abort = sink.abort;
+      if (abort !== null) aborts.push(abort);
+    }
+    this.#sink = shared<__sinkState<T>>({ write: new Lock(writes), close: new Lock(closes), abort: new Lock(aborts), locked: new Atomic(0), closed: new Atomic(0) });
+  }
+
+  get locked(): boolean {
+    return this.#sink.locked.load() === 1;
+  }
+
+  // A writer of the stream, which locks it until the writer lets it go.
+  getWriter(): WritableStreamDefaultWriter<T> throws TypeError {
+    if (this.#sink.locked.load() === 1) throw new TypeError("this WritableStream is locked to a writer; release it with 'writer.releaseLock()' first");
+    this.#sink.locked.store(1);
+    return new WritableStreamDefaultWriter<T>(this.#sink.clone());
+  }
+}
+
+class WritableStreamDefaultWriter<T> {
+  #sink: shared<__sinkState<T>>;
+  #released: boolean = false;
+
+  constructor(sink: shared<__sinkState<T>>) {
+    this.#sink = sink;
+  }
+
+  // Hands the chunk to the sink's write, waiting until it has taken it.
+  async write(chunk: T): Promise<void> throws TypeError {
+    if (this.#released) throw new TypeError("this writer has released its lock, so it can't write");
+    if (this.#sink.closed.load() === 1) throw new TypeError("this WritableStream is closed, so nothing more can be written");
+    const write = this.#sink.write.update((w) => w.length > 0 ? w[0]!.clone() : null);
+    if (write !== null) await write(chunk);
+  }
+
+  // Ends the stream, running the sink's close once.
+  async close(): Promise<void> {
+    if (this.#sink.closed.load() === 1) return;
+    this.#sink.closed.store(1);
+    const close = this.#sink.close.update((c) => c.pop());
+    if (close !== null) await close();
+  }
+
+  // Gives the stream up, running the sink's abort with the reason once.
+  abort(reason?: string) {
+    if (this.#sink.closed.load() === 1) return;
+    this.#sink.closed.store(1);
+    const abort = this.#sink.abort.update((a) => a.pop());
+    if (abort !== null) abort(reason ?? "");
+  }
+
+  releaseLock(this: Mut<this>) {
+    if (this.#released) return;
+    this.#released = true;
+    this.#sink.locked.store(0);
+  }
 }
 
 // What an underlying source's callbacks are given: start once before the first read, pull when

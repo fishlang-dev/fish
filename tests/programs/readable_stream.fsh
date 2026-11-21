@@ -123,3 +123,77 @@ async function main(): Promise<void> throws Error | TypeError {
   if (r.done === false) console.log(r.value);
   await reader.cancel("enough");
 }
+// case: readable_stream_pipe_to_writer
+// expect: wrote 1
+// expect: wrote 2
+// expect: closed
+async function* two(): AsyncGenerator<i64> {
+  yield 1;
+  yield 2;
+}
+
+async function main(): Promise<void> throws Error | TypeError {
+  const dest = new WritableStream<i64>({
+    write: async (chunk) => console.log("wrote", chunk),
+    close: async () => console.log("closed"),
+  });
+  await ReadableStream.from(two()).pipeTo(dest);
+}
+// case: readable_stream_pipe_aborts_on_error
+// expect: aborted broken
+// expect: caught broken
+async function main(): Promise<void> {
+  const source = new ReadableStream<i64>({
+    pull: async (c) => {
+      c.enqueue(1);
+      c.error(new Error("broken"));
+    },
+  });
+  const dest = new WritableStream<i64>({
+    write: async (chunk) => console.log("wrote", chunk),
+    abort: (reason) => console.log("aborted", reason),
+  });
+  try {
+    await source.pipeTo(dest);
+  } catch (e) {
+    console.log("caught", e.message);
+  }
+}
+// case: readable_stream_writer_direct
+// expect: got x
+// expect: true
+// expect: false
+async function main(): Promise<void> throws TypeError {
+  const dest = new WritableStream<string>({ write: async (chunk) => console.log("got", chunk) });
+  let writer = dest.getWriter();
+  await writer.write("x");
+  console.log(dest.locked);
+  writer.releaseLock();
+  console.log(dest.locked);
+}
+// case: readable_stream_pipe_through_pair
+// expect: 1
+// expect: 2
+async function* two(): AsyncGenerator<i64> {
+  yield 1;
+  yield 2;
+}
+
+async function main() {
+  // A pair whose writable side queues into its readable side, as a TransformStream would.
+  const queue = new Channel<i64>(8);
+  const into = queue.clone();
+  const writable = new WritableStream<i64>({
+    write: async (chunk) => {
+      await into.send(chunk);
+    },
+    close: async () => into.close(),
+  });
+  const readable = ReadableStream.from(drained(queue));
+  const out = ReadableStream.from(two()).pipeThrough({ writable, readable });
+  for await (const x of out) console.log(x);
+}
+
+async function* drained(queue: Channel<i64>): AsyncGenerator<i64> {
+  for await (const x of queue) yield x;
+}
