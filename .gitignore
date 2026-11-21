@@ -1,4 +1,5 @@
 *.ll
+.vscode/
 
 # Religion workflow files, kept local
 religion/
