@@ -13,6 +13,7 @@ import { argv } from "node:process";
 import { CompileError, formatError } from "../../src/diag.fsh";
 import { build, buildAsync, compile, engineDir, runtimeLinks, runtimeUnits } from "../../src/main.fsh";
 import { buildSession, cachedObject, cachedObjectAsync, files, mathObjectsAsync, type Unit } from "../../src/mathlib.fsh";
+import { checkKey, checkPath, readCheck, readEnvelope, writeCheck, writtenEnvelope, type Envelope } from "../../src/checkcache.fsh";
 import { newSession } from "../../src/compilation.fsh";
 import { hostTarget } from "../../src/target.fsh";
 import { cachedSession } from "../../src/stdcache.fsh";
@@ -538,3 +539,68 @@ test("giving a session the build caches again keeps the ones it has", () => {
   const again = buildSession(session);
   assert(again.digests.get("a.c:1:1") === "digest", `the digest: ${again.digests.get("a.c:1:1") ?? "none"}`);
 }, { timeout: 120_000 });
+
+// The key of a check, over the files it read: the same inputs give the same key, and any change to
+// what a check reads or how it is made gives another.
+function keyed(contents: Ref<Map<string, string | undefined>>, compiler = "c1", entry = "/p/main.fsh", editing = false, library = false): string {
+  return checkKey(compiler, entry, editing, library, contents);
+}
+
+function twoFiles(lib: string | undefined): Map<string, string | undefined> {
+  let contents = new Map<string, string | undefined>();
+  contents.set("/p/main.fsh", "function main() {}\n");
+  contents.set("/p/lib.fsh", lib);
+  return contents;
+}
+
+test("a check's key covers its files, its compiler, its entry and the flags that change a check", () => {
+  const same = keyed(twoFiles("export const n = 1;\n")) === keyed(twoFiles("export const n = 1;\n"));
+  assert(same, "the same inputs gave two keys");
+  const base = keyed(twoFiles("export const n = 1;\n"));
+  assert(keyed(twoFiles("export const n = 2;\n")) !== base, "an edited file gave the same key");
+  assert(keyed(twoFiles(undefined)) !== base, "a file that is no longer there gave the same key");
+  assert(keyed(twoFiles("export const n = 1;\n"), "c2") !== base, "another compiler gave the same key");
+  assert(keyed(twoFiles("export const n = 1;\n"), "c1", "/q/main.fsh") !== base, "another entry gave the same key");
+  assert(keyed(twoFiles("export const n = 1;\n"), "c1", "/p/main.fsh", true) !== base, "checking for an editor gave the same key");
+  assert(keyed(twoFiles("export const n = 1;\n"), "c1", "/p/main.fsh", false, true) !== base, "a library check gave the same key");
+  let moved = new Map<string, string | undefined>();
+  moved.set("/p/lib.fsh", "export const n = 1;\n");
+  moved.set("/p/main.fsh", "function main() {}\n");
+  assert(keyed(moved) === base, "the key followed the order the files were put in");
+  let swapped = new Map<string, string | undefined>();
+  swapped.set("/p/main.fsh", "export const n = 1;\n");
+  swapped.set("/p/lib.fsh", "function main() {}\n");
+  assert(keyed(swapped) !== base, "two files with each other's text gave the same key");
+  let joined = new Map<string, string | undefined>();
+  joined.set("/p/main.fsh", "function main() {}\n/p/lib.fsh");
+  joined.set("/p/lib.fsh", "export const n = 1;\n");
+  assert(keyed(joined) !== base, "a path written into a file's text gave the same key");
+  assert(checkPath(base).endsWith(`${base.slice(0, 16)}.fshcheck`), `the path ${checkPath(base)} isn't named by the key`);
+});
+
+test("a cached check is read back only when it is this compiler's, this program's and whole", () => {
+  const dir = scratch("fish-checkcache-");
+  const path = join(dir, "one.fshcheck");
+  const key = keyed(twoFiles("export const n = 1;\n"));
+  const envelope: Envelope = { format: 1, key, instances: 7, bodies: 5, classes: 2, entries: 99 };
+  assert(writeCheck(path, envelope, "the state"), "the check wasn't written");
+  const back = readCheck(path, key);
+  assert(back !== undefined, "a check written wasn't read back");
+  assert(back!.state === "the state", `the state read back as '${back!.state}'`);
+  assert(back!.envelope.instances === 7 && back!.envelope.entries === 99, "the counts didn't survive");
+  assert(readCheck(path, `${key.slice(0, 63)}0`) === undefined, "another program's key was taken for this one's");
+  assert(readCheck(join(dir, "none.fshcheck"), key) === undefined, "a missing file wasn't a miss");
+  const line = writtenEnvelope(envelope);
+  assert(readEnvelope(line.slice(0, 12), key) === undefined, "a truncated envelope was read");
+  assert(readEnvelope(`${line.replace(" 1 ", " 2 ")}the state`, key) === undefined, "another format was read");
+  assert(readEnvelope(`fshother 1 ${key} 1 1 1 1\nthe state`, key) === undefined, "another file's first line was read as an envelope");
+  // Nothing is left beside a written check: the temporary name is renamed, never left.
+  let left: string[] = [];
+  try {
+    for (const name of readdirSync(dir)) if (name !== "one.fshcheck") left.push(name);
+  } catch (e) {
+    assert(false, `can't read ${dir}: ${e.message}`);
+  }
+  assert(left.length === 0, `the cache left ${left.join(", ")}`);
+  removed(dir);
+});

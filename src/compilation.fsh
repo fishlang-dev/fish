@@ -53,6 +53,7 @@ export type Counts = { enums: usize; expansions: usize; constants: usize; checks
 // `timings`: each build stage's time, kept only when `--timings` asks.
 // `failed`: when present, codegen goes on past a function it fails on, declaring it in place of
 // its code and adding `symbol: message` here, so one build lists every failure.
+// `checkCache`: false where a run must check rather than read a check from the cache directory.
 
 export type Session = {
   locking: Locking;
@@ -60,6 +61,7 @@ export type Session = {
   std: { tree: Stmt[]; cached: boolean; parses: usize };
   timings?: Timings;
   failed?: string[];
+  checkCache?: boolean;
 };
 
 export function newSession(): Session {

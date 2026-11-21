@@ -9,6 +9,7 @@ import type { InstanceId } from "./arenas.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { checkKeeping, recheckKept, type Checked, type CheckerParts } from "./check.fsh";
 import { newCompilation, partEnd, partStart, stageEnd, stageStart, type Compilation, type Session } from "./compilation.fsh";
+import { checkKey, checkPath, compilerDigest, readCheck, writeCheck, type Envelope } from "./checkcache.fsh";
 import { CompileError, copyNames, type Source } from "./diag.fsh";
 import { classified, type Changed, type Edit, type Replaced } from "./edits.fsh";
 import { composedMoves, loadedContents, reloaded, spillFrom, takenBodies, textIn, unchanged, type Kept } from "./incremental.fsh";
@@ -80,9 +81,36 @@ function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept
 function checkedAfresh(session: Session, file: string, looked: Mut<string[]>, manifest: string | undefined, open: Ref<Map<string, string>>, editing: boolean): Kept {
   const manifestText = manifest !== undefined ? textIn(open, manifest!) : undefined;
   const src = textIn(open, file);
-  let made = checkedSourceKeeping(newCompilation(session), file, src !== undefined ? src! : readFileSync(file, "utf8"), false, looked, open, editing);
-  const contents = loadedContents(made.loaded, looked, manifest, manifestText, open);
+  let compilation = newCompilation(session);
+  let loaded = loadedFrom(compilation, file, src !== undefined ? src! : readFileSync(file, "utf8"), looked, open);
+  // Every file the load read, which is what the cached check is keyed by.
+  const contents = loadedContents(loaded, looked, manifest, manifestText, open);
+  const key = cached(compilation.session) ? checkKey(compilerDigest(), file, editing, false, contents) : "";
+  // The check on disk is looked for before this one is made, since restoring it is what the cache
+  // is for. Until it carries the state, a hit is only noted and the check still runs.
+  const found = key !== "" ? readCheck(checkPath(key), key) : undefined;
+  noteCache(compilation.session, found !== undefined ? "cache hit" : "cache miss");
+  let made = checkedLoaded(compilation, loaded, false, editing);
+  if (key !== "" && found === undefined) kept(key, made.checked);
   return { checked: made.checked, parts: made.parts, loaded: made.loaded, contents, carried: 0 };
+}
+
+// Whether this run may read and write cached checks. `FISH_NO_CHECK_CACHE` turns it off, which
+// `--no-check-cache` sets, so a build can be made to check whatever the cache holds.
+function cached(session: Ref<Session>): boolean {
+  return session.checkCache !== false && process.env.FISH_NO_CHECK_CACHE === undefined;
+}
+
+// What the check stage's line says about the cache, when a run is timing itself.
+function noteCache(session: Mut<Session>, note: string): void {
+  if (session.timings !== undefined) session.timings!.notes.set("check", note);
+}
+
+// Writes the check for `key` to the cache. Until the state is encoded, that is the envelope and
+// its counts alone. A cache that cannot be written is not a failure.
+function kept(key: string, checked: Ref<Checked>): void {
+  const envelope: Envelope = { format: 1, key, instances: checked.tables.arenas.instanceCount(), bodies: checked.tables.arenas.bodyCount(), classes: checked.tables.arenas.classCount(), entries: 0 };
+  writeCheck(checkPath(key), envelope, "");
 }
 
 // The kept program checked again after edits to its own files, rechecking only their bodies when
@@ -201,8 +229,17 @@ export function checkedSource(compilation: Compilation, file: string, src: strin
 /** @throws {CompileError | Error | IoError} */
 export function checkedSourceKeeping(compilation: Compilation, file: string, src: string, taken: Set<string> | false, looked: Mut<string[]>, open: Ref<Map<string, string>>, editing: boolean): { checked: Checked; loaded: Loaded; parts: CheckerParts } {
   let program = compilation;
-  const library = taken !== false;
   let modules = loadedFrom(program, file, src, looked, open);
+  return checkedLoaded(program, modules, taken, editing);
+}
+
+// The program loaded, then expanded and checked. Apart from the load so that whatever drives a
+// check can read the files it holds, and so key it, before deciding to check at all.
+/** @throws {CompileError | Error | IoError} */
+export function checkedLoaded(compilation: Compilation, loaded: Loaded, taken: Set<string> | false, editing: boolean): { checked: Checked; loaded: Loaded; parts: CheckerParts } {
+  let program = compilation;
+  let modules = loaded;
+  const library = taken !== false;
   let statements: Stmt[] = [];
   try {
     // An editor checks the package's tests too, so an error inside a `test` block is reported;
