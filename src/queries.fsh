@@ -15,6 +15,7 @@ import { composedMoves, loadedContents, reloaded, spillFrom, takenBodies, textIn
 import { load, type Loaded } from "./modules.fsh";
 import { movedStmt } from "./nodes.fsh";
 import type { Stmt } from "./parser.fsh";
+import { liftTests } from "./tests.fsh";
 import { FILE_SPAN } from "./program.fsh";
 
 // What one program is checked with: everything a check of it needs that is not the check itself.
@@ -24,27 +25,32 @@ export class Queries {
   entry: string;
   manifest: string | undefined;
   open: Map<string, string>;
+  editing: boolean;
 
   // `entry` is the program's entry file, `manifest` its package's, which a build may read, and
   // `open` the text of any file an editor holds unsaved, by path, which is read before the disk.
-  constructor(entry: string, manifest: string | undefined, open: Map<string, string>) {
+  // `editing` checks as an editor needs it rather than as a build does: the package's tests are
+  // lifted into the program, so an error inside a `test` block is reported, and the entry needs
+  // no `main`, since it may be a file another imports.
+  constructor(entry: string, manifest: string | undefined, open: Map<string, string>, editing = false) {
     this.entry = entry;
     this.manifest = manifest;
     this.open = open;
+    this.editing = editing;
   }
 
   // The program checked: `kept`, when every file it read still reads as it did; that check with
   // the edited bodies checked again, where they can be; or the program checked afresh.
   /** @throws {CompileError | Error | IoError} */
   checked(this: Ref<this>, session: Session, looked: Mut<string[]>, kept: Kept | undefined): Kept {
-    return checkedFrom(session, this.entry, looked, kept, this.manifest, this.open);
+    return checkedFrom(session, this.entry, looked, kept, this.manifest, this.open, this.editing);
   }
 }
 
 // The program checked: `kept`'s, given `session`, when every file it read reads as it did, or else
 // loaded and checked afresh.
 /** @throws {CompileError | Error | IoError} */
-function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, open: Ref<Map<string, string>>): Kept {
+function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, open: Ref<Map<string, string>>, editing: boolean): Kept {
   if (kept !== undefined) {
     let reused = kept!;
     reused.checked.tables.session = session;
@@ -64,17 +70,17 @@ function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept
       carried.carried++;
       return carried;
     }
-    return checkedAfresh(back!, file, looked, manifest, open);
+    return checkedAfresh(back!, file, looked, manifest, open, editing);
   }
-  return checkedAfresh(session, file, looked, manifest, open);
+  return checkedAfresh(session, file, looked, manifest, open, editing);
 }
 
 // The program loaded and checked afresh, with what to keep of it.
 /** @throws {CompileError | Error | IoError} */
-function checkedAfresh(session: Session, file: string, looked: Mut<string[]>, manifest: string | undefined, open: Ref<Map<string, string>>): Kept {
+function checkedAfresh(session: Session, file: string, looked: Mut<string[]>, manifest: string | undefined, open: Ref<Map<string, string>>, editing: boolean): Kept {
   const manifestText = manifest !== undefined ? textIn(open, manifest!) : undefined;
   const src = textIn(open, file);
-  let made = checkedSourceKeeping(newCompilation(session), file, src !== undefined ? src! : readFileSync(file, "utf8"), false, looked, open);
+  let made = checkedSourceKeeping(newCompilation(session), file, src !== undefined ? src! : readFileSync(file, "utf8"), false, looked, open, editing);
   const contents = loadedContents(made.loaded, looked, manifest, manifestText, open);
   return { checked: made.checked, parts: made.parts, loaded: made.loaded, contents, carried: 0 };
 }
@@ -187,24 +193,32 @@ function spent(kept: Kept): { done: Kept | undefined; session: Session | undefin
 /** @throws {CompileError | Error | IoError} */
 export function checkedSource(compilation: Compilation, file: string, src: string, taken: Set<string> | false, looked: Mut<string[]>): { checked: Checked; loaded: Loaded } {
   let none = new Map<string, string>();
-  let made = checkedSourceKeeping(compilation, file, src, taken, looked, none);
+  let made = checkedSourceKeeping(compilation, file, src, taken, looked, none, false);
   return { checked: made.checked, loaded: made.loaded };
 }
 
 // `checkedSource`, giving back what the checker kept besides its tables as well.
 /** @throws {CompileError | Error | IoError} */
-export function checkedSourceKeeping(compilation: Compilation, file: string, src: string, taken: Set<string> | false, looked: Mut<string[]>, open: Ref<Map<string, string>>): { checked: Checked; loaded: Loaded; parts: CheckerParts } {
+export function checkedSourceKeeping(compilation: Compilation, file: string, src: string, taken: Set<string> | false, looked: Mut<string[]>, open: Ref<Map<string, string>>, editing: boolean): { checked: Checked; loaded: Loaded; parts: CheckerParts } {
   let program = compilation;
   const library = taken !== false;
   let modules = loadedFrom(program, file, src, looked, open);
   let statements: Stmt[] = [];
   try {
+    // An editor checks the package's tests too, so an error inside a `test` block is reported;
+    // a build leaves them out.
+    if (editing) {
+      const first = modules.modules[0]!.pkg;
+      let own: string[] = [];
+      for (const m of modules.modules) if (m.pkg === first && !m.path.startsWith("std:")) own.push(m.path);
+      liftTests(program, modules.modules, own);
+    }
     statements = expanded(program, modules, library);
   } catch (e) {
     if (e instanceof CompileError) throw sourced(e, copyNames(program.names), modules.sources);
     throw e;
   }
-  let { checked, parts } = checkedProgram(program, statements, taken, modules.sources);
+  let { checked, parts } = checkedProgram(program, statements, taken, modules.sources, editing);
   for (let i: usize = 0; i < checked.warnings.length; i++) checked.warnings[i]!.sources = [...modules.sources];
   return { checked, loaded: modules, parts };
 }
@@ -227,11 +241,11 @@ function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, lo
 
 // `check` of a whole program, timed as the check stage, its errors given the program's files.
 /** @throws {CompileError} */
-export function checkedProgram(compilation: Compilation, program: Stmt[], taken: Set<string> | false, sources: Ref<Source[]>): { checked: Checked; parts: CheckerParts } {
+export function checkedProgram(compilation: Compilation, program: Stmt[], taken: Set<string> | false, sources: Ref<Source[]>, module = false): { checked: Checked; parts: CheckerParts } {
   const started = stageStart(compilation.session);
   let made: { checked: Checked; parts: CheckerParts } | undefined = undefined;
   try {
-    made = checkKeeping(compilation, program, taken, false, false);
+    made = checkKeeping(compilation, program, taken, false, module);
   } catch (e) {
     if (e instanceof CompileError) throw sourced(e, undefined, sources);
     throw e;

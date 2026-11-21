@@ -1,10 +1,11 @@
 // `fishc lsp`: the Language Server Protocol's JSON-RPC over stdin and stdout.
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { analyze } from "./analysis.fsh";
 import type { Checked } from "./check.fsh";
 import { compiledOf } from "./codegen.fsh";
 import { type Session } from "./compilation.fsh";
+import { type Kept } from "./incremental.fsh";
+import { Queries } from "./queries.fsh";
 import { cachedSession } from "./stdcache.fsh";
 import { CompileError, copyNames, locate, shown, sourceOf, written, type Source } from "./diag.fsh";
 import { STD_BASE } from "./std.fsh";
@@ -67,19 +68,23 @@ function located(path: string, text: string, sources: Ref<Source[]>, start: usiz
 }
 
 // The diagnostics checking `text`, the document at `path`, gives, with its imports read from the
-// open documents, by path, before the disk, and the checked program when there are none, with its warnings in this
-// document. An error in another file shows at the document's start, saying where it is.
+// open documents, by path, before the disk, and the check itself when there are none, with its
+// warnings in this document. An error in another file shows at the document's start, saying where
+// it is. `kept` is the last check of this document, which an edit rechecks only the changed bodies
+// of; a check that fails gives nothing back, so the next one starts afresh.
 /** @throws {Error | IoError} */
-function diagnose(session: Session, path: string, text: string, open: Map<string, string>): { diagnostics: Diagnostic[]; checked?: Checked } {
+export function diagnose(session: Session, path: string, text: string, open: Map<string, string>, kept: Kept | undefined): { diagnostics: Diagnostic[]; kept?: Kept } {
+  let queries = new Queries(path, undefined, open, true);
+  let looked: string[] = [];
   try {
-    const { checked, sources } = analyze(session, text, path, (p) => open.get(resolve(p)));
+    let made = queries.checked(session, looked, kept);
     const uri = pathToFileURL(path).href;
     let warnings: Diagnostic[] = [];
-    for (const w of checked.warnings) {
-      const at = located(path, text, sources, w.start, w.end);
+    for (const w of made.checked.warnings) {
+      const at = located(path, text, made.loaded.sources, w.start, w.end);
       if (at !== undefined && at.uri === uri) warnings.push({ range: at.range, severity: 2, code: w.code, source: "fish", message: shown(w.message, w.names) });
     }
-    return { diagnostics: warnings, checked };
+    return { diagnostics: warnings, kept: made };
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
     let diagnostics: Diagnostic[] = [];
@@ -155,19 +160,26 @@ function notify(method: string, params: string) {
 // What a request gives: its result's JSON, or an error with its code.
 type Reply = { result: string } | { code: i64; message: string };
 
-// The server's state: the open documents' text, by URI, and the text each was last checked with,
-// with the program when it checked cleanly. A change is checked once the input that has arrived is
-// read, so a burst of edits read together is checked once.
+// The document last checked cleanly: which one, the text it was checked with, and the check
+// itself, which the next check of the same document starts from.
+type Held = { uri: string; text: string; kept: Kept };
+
+// The server's state: the open documents' text, by URI, and the last clean check of one of them.
+// A change is checked once the input that has arrived is read, so a burst of edits read together
+// is checked once, and that check starts from the one before it.
+// `held` holds at most one, in an array because a check is an owned value a method has to take out
+// and put back. ponytail: one document's check, not one each; a table when editing two programs at
+// once proves to cost.
 class Server {
   shutdown: boolean;
   documents: Map<string, string>;
-  results: Map<string, { text: string; checked?: Checked }>;
+  held: Held[];
   changed: boolean;
 
   constructor() {
     this.shutdown = false;
     this.documents = new Map<string, string>();
-    this.results = new Map<string, { text: string; checked?: Checked }>();
+    this.held = [];
     this.changed = false;
   }
 
@@ -176,18 +188,25 @@ class Server {
   }
 
   // Checks the open document at `uri` and publishes what it found. Each check compiles within a
-  // session of its own, since a check uses up the one it is given.
+  // session of its own, since a check uses up the one it is given, and starts from the last check
+  // of this document when there is one.
   check(this: Mut<this>, uri: string) {
     const text = this.documents.get(uri);
     if (text === undefined || !uri.startsWith("file:")) return;
-    this.results.set(uri, { text });
+    const now = text!;
+    // Another document's check can't stand in for this one's, so it is dropped rather than kept.
+    let kept: Kept | undefined = undefined;
+    if (this.held.length > 0) {
+      let was = this.held.shift()!;
+      if (was.uri === uri) kept = was.kept;
+    }
     try {
       // An open file's unsaved text, and any other's on disk.
       let open = new Map<string, string>();
       for (const [u, t] of this.documents) if (u.startsWith("file:")) open.set(resolve(fileURLToPath(u)), t);
-      const found = diagnose(cachedSession(), fileURLToPath(uri), text, open);
+      const found = diagnose(cachedSession(), fileURLToPath(uri), now, open, kept);
       notify("textDocument/publishDiagnostics", JSON.stringify({ uri, diagnostics: found.diagnostics }));
-      this.results.set(uri, { text, checked: found.checked });
+      if (found.kept !== undefined) this.held = [{ uri, text: now, kept: found.kept! }];
     } catch (e) {
       notify("window/logMessage", JSON.stringify({ type: 1, message: `fishc couldn't check ${uri}: ${(e as { message: string }).message}` }));
     }
@@ -216,7 +235,7 @@ class Server {
     } else if (method === "textDocument/didSave") this.changed = true;
     else if (method === "textDocument/didClose") {
       this.documents.delete(uri);
-      this.results.delete(uri);
+      if (this.held.length > 0 && this.held[0]!.uri === uri) this.held = [];
       const none: Diagnostic[] = [];
       notify("textDocument/publishDiagnostics", JSON.stringify({ uri, diagnostics: none }));
       // Its importers now read it from disk.
@@ -228,11 +247,12 @@ class Server {
     if (method === "textDocument/inlayHint") {
       const uri = params.textDocument?.uri ?? "";
       // A hint asked for before the change was checked shouldn't wait for the next edit.
-      if (this.results.get(uri)?.text !== this.documents.get(uri)) this.check(uri);
-      const result = this.results.get(uri);
+      const written = this.documents.get(uri);
+      const checked = this.held.length > 0 && this.held[0]!.uri === uri && written !== undefined && this.held[0]!.text === written!;
+      if (!checked) this.check(uri);
       const range: Ref<Range | undefined> = params.range;
-      if (result === undefined || result.checked === undefined || range === undefined) return { result: "[]" };
-      return { result: JSON.stringify(hints(result.checked, result.text, range)) };
+      if (this.held.length === 0 || this.held[0]!.uri !== uri || range === undefined) return { result: "[]" };
+      return { result: JSON.stringify(hints(this.held[0]!.kept.checked, this.held[0]!.text, range)) };
     }
     if (method === "initialize") return { result: JSON.stringify({ capabilities: { textDocumentSync: 1, inlayHintProvider: true }, serverInfo: { name: "fishc" } }) };
     if (method === "shutdown") {
