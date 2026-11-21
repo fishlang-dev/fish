@@ -45,11 +45,13 @@ class C {
 }
 function show<T>(v: Ref<T>): string { return JSON.stringify(v); }
 function shown<T>(v: Ref<T>) { console.log(v); }
-function main() {
+async function main() {
   const p: P = { a: undefined, b: null };
   shown(p);
   console.log(p, new C());
-  console.log(JSON.stringify(p), show(p), show([p.clone()]), new TextDecoder().decode(Response.json(p).body));
+  const res = Response.json(p);
+  const sent = await res.text();
+  console.log(JSON.stringify(p), show(p), show([p.clone()]), sent);
 }
 // case: print_deep_and_signs
 // expect: { a: { b: { c: [Object], e: [], f: [Array], g: {}, h: [P] } } }

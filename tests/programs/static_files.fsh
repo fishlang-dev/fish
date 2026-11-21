@@ -33,8 +33,9 @@ async function show(port: i64, path: string): Promise<void> throws IoError | Abo
   const res = await get(port, path, "");
   const type = res.headers.get("content-type") ?? "-";
   const binary = !type.includes("charset");
-  const bytes = res.body.length;
-  const text = await res.text();
+  const body = await res.bytes();
+  const bytes = body.length;
+  const text = new TextDecoder().decode(body);
   console.log(path, res.status, type, binary ? String(bytes) + " bytes" : text);
 }
 
@@ -68,7 +69,8 @@ async function main(): Promise<void> throws IoError | AbortError {
   const modified = first.headers.get("last-modified") ?? "";
   console.log("weak etag", tag.startsWith("W/\"") && tag.endsWith("\""), "last-modified", modified.endsWith(" GMT"));
   const again = await get(port, "/assets/a.txt", tag);
-  console.log("if-none-match", again.status, again.body.length, "bytes, same etag", again.headers.get("etag") === tag);
+  const unsent = await again.bytes();
+  console.log("if-none-match", again.status, unsent.length, "bytes, same etag", again.headers.get("etag") === tag);
   const listed = await get(port, "/assets/a.txt", "\"other\", " + tag.slice(2));
   console.log("if-none-match list", listed.status);
   const star = await get(port, "/assets/a.txt", "*");

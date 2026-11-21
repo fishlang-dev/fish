@@ -36,6 +36,9 @@ function equivalents(): Map<string, Equivalent> {
   add(m, ["dayjs", "date-fns", "moment", "luxon"], PLANNED("Date parsing and formatting"));
   add(m, ["pino", "winston", "bunyan"], PLANNED("Structured logging"));
   add(m, ["pg", "postgres"], IN_STD("the postgres module's Pool"));
+  add(m, ["tar", "tar-stream", "tar-fs"], IN_STD("the fish:tar module"));
+  add(m, ["adm-zip", "jszip", "yauzl", "yazl", "unzipper", "extract-zip"], IN_STD("the fish:zip module"));
+  m.set("archiver", IN_STD("the fish:zip and fish:tar modules"));
   add(m, ["better-sqlite3", "sqlite3"], PLANNED("SQLite binding"));
   add(m, ["ioredis", "redis"], PLANNED("Redis client"));
   add(m, ["glob", "fast-glob", "globby"], PLANNED("Glob"));

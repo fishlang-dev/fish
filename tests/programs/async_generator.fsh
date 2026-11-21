@@ -405,7 +405,7 @@ async function main() {
 }
 // expect: 11
 // case: for_await_array
-// error: 'for await' loops over an async generator or a Channel, not 'i64[]'
+// error: 'for await' loops over an async generator, a Channel or a ReadableStream, not 'i64[]'
 async function main() {
   const xs = [1, 2];
   for await (const x of xs) console.log(x);
@@ -635,3 +635,71 @@ async function main() {
   for await (const s of new Bag("a" + 1).each()) console.log(s);
 }
 // error: 7:25: error[E0204]: 'for...of' would keep borrowing this temporary
+// case: async_generator_dyn_in_generic_class_named_by_a_field
+// expect: 2
+// A generic class holding a Dyn of its type parameter's async generator, first named by another
+// class's field, binds the parameter in what its methods write, as it does named anywhere else.
+class Source<T> {
+  gens: Lock<Dyn<AsyncGenerator<T>>[]>;
+  constructor() {
+    const none: Dyn<AsyncGenerator<T>>[] = [];
+    this.gens = new Lock(none);
+  }
+  add(g: AsyncGenerator<T>) {
+    this.gens.update((gs) => gs.push(g));
+  }
+  count(): usize {
+    return this.gens.update((gs) => gs.length);
+  }
+}
+
+class Holder {
+  sources: Source<u8[]>[] = [];
+}
+
+async function* one(): AsyncGenerator<u8[]> {
+  yield [1];
+}
+
+function main() {
+  const _h = new Holder();
+  let s = new Source<u8[]>();
+  s.add(one());
+  s.add(one());
+  console.log(s.count());
+}
+// case: async_generator_dyn_next_in_generic_function
+// expect: 7
+// expect: done
+// A generic function awaiting next() on a Dyn of its type parameter's async generator gets the
+// instance's element, not the definition's placeholder.
+class Held<T> {
+  gens: Lock<Dyn<AsyncGenerator<T>>[]>;
+  constructor(g: AsyncGenerator<T>) {
+    let all: Dyn<AsyncGenerator<T>>[] = [];
+    all.push(g);
+    this.gens = new Lock(all);
+  }
+}
+
+async function nextOf<T>(h: Ref<Held<T>>): Promise<T | null> {
+  const taken = h.gens.update((s) => s.pop());
+  if (taken === null) return null;
+  let g = taken;
+  const step = await g.next();
+  h.gens.update((s) => s.push(g));
+  if (step.done === false) return step.value;
+  return null;
+}
+
+async function* seven(): AsyncGenerator<i64> {
+  yield 7;
+}
+
+async function main() {
+  const h = new Held<i64>(seven());
+  const a = await nextOf<i64>(h);
+  console.log(a);
+  const b = await nextOf<i64>(h);
+  if (b === null) console.log("done");
+}

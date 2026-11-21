@@ -559,7 +559,7 @@ function __cookieAttribute(name: string, attribute: string, value: string): stri
 
 // unix is a socket path to send the request over in place of the URL's host and port; tls.ca is
 // PEM certificates an https: server's is verified against in place of the system's, as Bun's is.
-type RequestInit = { method?: string; headers?: Headers; body?: string | u8[]; signal?: AbortSignal; unix?: string; tls?: { ca?: string } };
+type RequestInit = { method?: string; headers?: Headers; body?: string | u8[] | ReadableStream<u8[]>; signal?: AbortSignal; unix?: string; tls?: { ca?: string } };
 
 // A body given as text or bytes, as the bytes sent.
 function __httpBody(body: string | u8[]): u8[] {
@@ -571,7 +571,13 @@ class Request {
   url: string;
   path: string;
   headers: Headers;
-  body: u8[];
+  // The body's bytes; read through body, text(), bytes() or json().
+  #body: u8[];
+  // A body given as a stream, at most one, read into #body when the request is sent or read.
+  // Shared, so a request still clones, its copies sharing the one stream. The stream's
+  // generator is held rather than the stream, since a class field naming a ReadableStream
+  // instance makes it before its type parameter is bound.
+  #bytes: shared<{ s: Lock<Dyn<AsyncGenerator<u8[]>>[]> }>;
   signal: AbortSignal;
   // The :params a Router's route took from the path, as name then value.
   params: string[] = [];
@@ -581,37 +587,75 @@ class Request {
     this.path = __urlRequestPath(url);
     let method = "GET";
     let headers = new Headers();
-    let body: u8[] = [];
     let signal = new AbortController().signal;
+    let bytes: u8[] = [];
+    let streams: Dyn<AsyncGenerator<u8[]>>[] = [];
     if (init !== null) {
       const m = init.method;
       if (m !== null) method = m.toUpperCase();
       const h = init.headers;
       if (h !== null) headers = h;
       const b = init.body;
-      if (b !== null) body = __httpBody(b);
+      if (b instanceof ReadableStream) streams.push(b.__values());
+      else if (b !== null) bytes = __httpBody(b);
       const s = init.signal;
       if (s !== null) signal = s;
     }
     this.method = method;
     this.headers = headers;
-    this.body = body;
+    this.#body = bytes;
+    this.#bytes = shared({ s: new Lock(streams) });
     this.signal = signal;
+  }
+
+  __setBody(this: Mut<this>, body: string | u8[] | ReadableStream<u8[]>) {
+    if (body instanceof ReadableStream) {
+      this.#body = [];
+      const chunks = body.__values();
+      this.#bytes.s.update((s) => {
+        while (s.length > 0) s.pop();
+        s.push(chunks);
+      });
+    } else this.#body = __httpBody(body);
+  }
+
+  __bytes(this: Ref<this>): Ref<u8[]> {
+    return this.#body;
+  }
+
+  // A body given as a stream, read to its end into the bytes, as fetch sends it with a length.
+  async __drain(this: Mut<this>) {
+    const given = this.#bytes.s.update((s) => s.pop());
+    if (given === null) return;
+    const bytes = await __streamBytes(ReadableStream.from(__streamDyn(given)));
+    this.#body = bytes;
+  }
+
+  // The body as a stream of bytes, or null when there is none.
+  get body(): ReadableStream<u8[]> | null {
+    const given = this.#bytes.s.update((s) => s.pop());
+    if (given !== null) return ReadableStream.from(__streamDyn(given));
+    if (this.#body.length === 0) return null;
+    return ReadableStream.from(__streamOnce(this.#body.clone()));
   }
 
   // The body as UTF-8 text, each malformed sequence as U+FFFD.
   async text(): Promise<string> {
-    return new TextDecoder().decode(this.body);
+    const bytes = await this.bytes();
+    return new TextDecoder().decode(bytes);
   }
 
-  // The body's bytes as they were sent.
+  // The body's bytes as they were sent; a streamed one's read to its end, once.
   async bytes(): Promise<u8[]> {
-    return this.body.clone();
+    const given = this.#bytes.s.update((s) => s.pop());
+    if (given !== null) return await __streamBytes(ReadableStream.from(__streamDyn(given)));
+    return this.#body.clone();
   }
 
   // The body read as JSON into a T.
   async json<T>(): Promise<T> throws JsonError {
-    return JSON.parse<T>(new TextDecoder().decode(this.body));
+    const text = await this.text();
+    return JSON.parse<T>(text);
   }
 
   // The cookies of every Cookie header the request has.
@@ -642,8 +686,12 @@ class Response {
   status: i64;
   statusText: string;
   headers: Headers;
-  body: u8[];
-  // A body sent in pieces as the generator produces them, in place of body. Locked, in an
+  // The body's bytes, when it isn't streamed; read through body, text(), bytes() or json().
+  #body: u8[];
+  // A body given as a stream of bytes, in place of #body, at most one, taken out once read.
+  // Its generator, not the stream, as Request holds one.
+  #bytes: Lock<Dyn<AsyncGenerator<u8[]>>[]>;
+  // A body sent in pieces as the generator produces them, in place of #body. Locked, in an
   // array of at most one, so whoever reads it can take it out through a shared borrow; private,
   // so a response prints as it would without one.
   #stream: Lock<Dyn<AsyncGenerator<string>>[]>;
@@ -658,7 +706,7 @@ class Response {
 
   // A text or streamed body is typed 'text/plain;charset=UTF-8' unless the headers say
   // otherwise; bytes are given no type, as Bun does.
-  constructor(body?: string | u8[] | Dyn<AsyncGenerator<string>> | null, init?: ResponseInit) {
+  constructor(body?: string | u8[] | Dyn<AsyncGenerator<string>> | ReadableStream<u8[]> | null, init?: ResponseInit) {
     let status: i64 = 200;
     let statusText = "";
     let headers = new Headers();
@@ -672,10 +720,12 @@ class Response {
     }
     let bytes: u8[] = [];
     let stream: Dyn<AsyncGenerator<string>>[] = [];
+    let streamed: Dyn<AsyncGenerator<u8[]>>[] = [];
     if (typeof body === "string") {
       bytes = new TextEncoder().encode(body);
       if (!headers.has("content-type")) headers.set("content-type", "text/plain;charset=UTF-8");
     } else if (Array.isArray(body)) bytes = body;
+    else if (body instanceof ReadableStream) streamed.push(body.__values());
     else if (body !== null) {
       stream.push(body);
       if (!headers.has("content-type")) headers.set("content-type", "text/plain;charset=UTF-8");
@@ -683,7 +733,8 @@ class Response {
     this.status = status;
     this.statusText = statusText;
     this.headers = headers;
-    this.body = bytes;
+    this.#body = bytes;
+    this.#bytes = new Lock(streamed);
     this.#stream = new Lock(stream);
     const upgrade: __wsUpgrade[] = [];
     this.#upgrade = new Lock(upgrade);
@@ -694,7 +745,7 @@ class Response {
   static json<T>(data: Ref<T>, init?: ResponseInit): Response {
     let res = new Response(null, init);
     if (!res.headers.has("content-type")) res.headers.set("content-type", "application/json");
-    res.body = new TextEncoder().encode(JSON.stringify(data));
+    res.#body = new TextEncoder().encode(JSON.stringify(data));
     return res;
   }
 
@@ -713,11 +764,11 @@ class Response {
 
   // A copy of the response. A streamed body runs its generator once, so it can't be copied.
   clone(): Response {
-    const streamed = this.#stream.update((s) => s.length > 0);
+    const streamed = this.#stream.update((s) => s.length > 0) || this.#bytes.update((s) => s.length > 0);
     assert(this.#read.load() === 0, "this Response's streamed body was already read, so it can't be cloned; make each copy from the text it gave");
     assert(!streamed, "a Response with a streamed body can't be cloned, since its generator runs once; read it with 'await res.text()' and make each copy from that text");
     let copy = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers.clone() });
-    copy.body = this.body.clone();
+    copy.#body = this.#body.clone();
     copy.url = this.url;
     copy.cookies = this.cookies.clone();
     return copy;
@@ -726,6 +777,32 @@ class Response {
   // The streamed body, taken out for whoever sends or reads it, or null when there is none.
   __stream(): Dyn<AsyncGenerator<string>> | null {
     return this.#stream.update((s) => s.pop());
+  }
+
+  // A body given as a stream of bytes, taken out for whoever sends or reads it, or null.
+  __byteStream(): ReadableStream<u8[]> | null {
+    const chunks = this.#bytes.update((s) => s.pop());
+    if (chunks === null) return null;
+    return ReadableStream.from(__streamDyn(chunks));
+  }
+
+  // The bytes of a body that isn't streamed.
+  __bytes(this: Ref<this>): Ref<u8[]> {
+    return this.#body;
+  }
+
+  // The body as a stream of bytes, or null when there is none. A streamed body is handed over
+  // once, as reading it consumes it; its bytes are read from the stream, not kept.
+  get body(): ReadableStream<u8[]> | null {
+    const given = this.__byteStream();
+    if (given !== null) return given;
+    const pieces = this.__stream();
+    if (pieces !== null) {
+      this.#read.store(1);
+      return ReadableStream.from(__streamEncoded(pieces));
+    }
+    if (this.#body.length === 0) return null;
+    return ReadableStream.from(__streamOnce(this.#body.clone()));
   }
 
   // The session a WebSocket route's 101 hands the connection to, taken out, or null.
@@ -741,8 +818,14 @@ class Response {
   // The body as UTF-8 text, each malformed sequence as U+FFFD. A streamed one is read to its
   // end, once: a second read finds it empty.
   async text(): Promise<string> {
+    const given = this.__byteStream();
+    if (given !== null) {
+      this.#read.store(1);
+      const bytes = await __streamBytes(given);
+      return new TextDecoder().decode(bytes);
+    }
     const stream = this.__stream();
-    if (stream === null) return new TextDecoder().decode(this.body);
+    if (stream === null) return new TextDecoder().decode(this.#body);
     this.#read.store(1);
     let pieces = stream;
     let text = "";
@@ -752,15 +835,45 @@ class Response {
 
   // The body's bytes as they were sent; a streamed one's as text() reads it.
   async bytes(): Promise<u8[]> {
-    if (!this.#stream.update((s) => s.length > 0)) return this.body.clone();
+    const given = this.__byteStream();
+    if (given !== null) {
+      this.#read.store(1);
+      return await __streamBytes(given);
+    }
+    if (!this.#stream.update((s) => s.length > 0)) return this.#body.clone();
     const text = await this.text();
     return new TextEncoder().encode(text);
   }
 
-  // The body read as JSON into a T.
+  // The body read as JSON into a T, a streamed one read to its end first.
   async json<T>(): Promise<T> throws JsonError {
-    return JSON.parse<T>(new TextDecoder().decode(this.body));
+    const text = await this.text();
+    return JSON.parse<T>(text);
   }
+}
+
+// A stream's chunks joined into one array of bytes. A body's readers don't throw, so a source
+// that errors ends the body where it failed.
+// A byte stream's generator, as a generator a stream can be made from again.
+async function* __streamDyn(chunks: Dyn<AsyncGenerator<u8[]>>): AsyncGenerator<u8[]> {
+  let source = chunks;
+  for await (const chunk of source) yield chunk;
+}
+
+async function __streamBytes(stream: ReadableStream<u8[]>): Promise<u8[]> {
+  let out: u8[] = [];
+  for await (const chunk of stream) for (const b of chunk) out.push(b);
+  return out;
+}
+
+// Text pieces as the UTF-8 bytes a body stream gives.
+async function* __streamEncoded(pieces: Dyn<AsyncGenerator<string>>): AsyncGenerator<u8[]> {
+  let source = pieces;
+  for await (const piece of source) yield new TextEncoder().encode(piece);
+}
+
+async function* __streamOnce(bytes: u8[]): AsyncGenerator<u8[]> {
+  yield bytes;
 }
 
 // Each event as the event-stream format writes it: a field per line, a data line per line of
@@ -942,7 +1055,7 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const watching = spawn(Http1.watch(conn.clone(), client, done.signal));
       // The body is set after, not passed in init, which would copy it.
       let req = new Request((limits.secure ? "https://" : "http://") + authority + head.target, { method: method, headers: head.headers, signal: signal.clone() });
-      req.body = body;
+      req.__setBody(body);
       // The handler runs as a task of its own, so a panic in it ends only that task: its client
       // gets a bare 500 and the connection closes, and the server goes on serving.
       let res: Response;
@@ -974,6 +1087,16 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       const said = res.headers.get("connection");
       const close = !keep || stop.aborted || (said !== null && Http1.hasToken(said, "close"));
       // A streamed body is taken out of the response; one that won't be sent is dropped unstarted.
+      const byteStream = res.__byteStream();
+      if (byteStream !== null && Http1.sendable(res) && res.status !== 204 && res.status !== 304) {
+        let chunks = byteStream.__values();
+        const open = await Http1.streamBytes(conn, res, chunks, method === "HEAD", close, version, signal, stop);
+        done.abort();
+        const early = await watching;
+        if (!open) return;
+        for (const b of early) buffer.push(b);
+        continue;
+      }
       const stream = res.__stream();
       if (stream !== null && Http1.sendable(res) && res.status !== 204 && res.status !== 304) {
         let pieces = stream;
@@ -1996,13 +2119,16 @@ class Http1 {
   static async send(conn: Ref<TcpStream>, res: Response, head: boolean, close: boolean, version: string): Promise<void> throws IoError | AbortError {
     let out = new TextEncoder().encode(Http1.responseText(res, head, close, version));
     const sends = !head && res.status !== 204 && res.status !== 304;
-    if (!sends || res.body.length <= 16384) {
-      if (sends) for (const b of res.body) out.push(b);
+    const body = res.__bytes();
+    if (!sends || body.length <= 16384) {
+      if (sends) for (const b of body) out.push(b);
       await conn.write(out, AbortSignal.timeout(30000));
       return;
     }
     await conn.write(out, AbortSignal.timeout(30000));
-    await conn.write(res.body, AbortSignal.timeout(30000));
+    // ponytail: the body is private to the response now, so a large one is copied once to write
+    // it; handing the bytes over would need the response by value here.
+    await conn.write(body.clone(), AbortSignal.timeout(30000));
   }
 
   // Where a request's head ends: the index of its blank line's CR LF CR LF, or -1. The search
@@ -2071,10 +2197,10 @@ class Http1 {
     if (bad.length > 0) throw new IoError("can't fetch '" + req.url + "': header '" + bad + "' holds a line break or isn't a header name");
     if (!req.headers.has("accept")) text = text + "accept: */*\\r\\n";
     if (!req.headers.has("user-agent")) text = text + "user-agent: fish\\r\\n";
-    const size = req.body.length as i64;
+    const size = req.__bytes().length as i64;
     if (size > 0 || req.method === "POST" || req.method === "PUT" || req.method === "PATCH") text = text + "content-length: " + String(size) + "\\r\\n";
     let out = new TextEncoder().encode(text + "connection: close\\r\\n\\r\\n");
-    for (const b of req.body) out.push(b);
+    for (const b of req.__bytes()) out.push(b);
     return out;
   }
 
@@ -2132,8 +2258,7 @@ class Http1 {
           for (const b of got) body.push(b);
         }
       }
-      let res = new Response(null, { status: status, statusText: lines[0].split(" ").slice(2).join(" "), headers: headers });
-      res.body = body;
+      let res = new Response(body, { status: status, statusText: lines[0].split(" ").slice(2).join(" "), headers: headers });
       return res;
     }
   }
@@ -2283,7 +2408,7 @@ class Http1 {
   static responseText(res: Ref<Response>, head: boolean, close: boolean, version: string): string {
     const bodiless = res.status === 204 || res.status === 304;
     let framing = "";
-    if (!bodiless) framing = "content-length: " + String(res.body.length as i64) + "\\r\\n";
+    if (!bodiless) framing = "content-length: " + String(res.__bytes().length as i64) + "\\r\\n";
     return Http1.headText(res, framing, close, version);
   }
 
@@ -2330,15 +2455,45 @@ class Http1 {
     return sent && !close && !stop.aborted;
   }
 
+  // stream's twin for a body given as a stream of bytes, its chunks framed as they come.
+  static async streamBytes(conn: Ref<TcpStream>, res: Ref<Response>, chunks: Mut<Dyn<AsyncGenerator<u8[]>>>, head: boolean, close: boolean, version: string, client: Ref<AbortSignal>, stop: Ref<AbortSignal>): Promise<boolean> {
+    const chunked = version === "HTTP/1.1";
+    const framing = chunked ? "transfer-encoding: chunked\\r\\n" : "";
+    const started = await Http1.put(conn, Http1.headText(res, framing, close || !chunked, version), stop);
+    if (!started) return false;
+    if (head) return chunked && !close;
+    while (!stop.aborted) {
+      const chunk = await Promise.race([Http1.nextBytes(chunks), Http1.abortOfBytes(client), Http1.abortOfBytes(stop)]);
+      if (client.aborted) return false;
+      if (chunk === null) break;
+      if (chunk.length === 0) continue;
+      let framed: u8[] = chunked ? new TextEncoder().encode(Http1.hexOf(chunk.length as i64) + "\\r\\n") : [];
+      for (const b of chunk) framed.push(b);
+      if (chunked) {
+        framed.push(13);
+        framed.push(10);
+      }
+      const sent = await Http1.putBytes(conn, framed, stop);
+      if (!sent) return false;
+    }
+    if (!chunked) return false;
+    const sent = await Http1.put(conn, "0\\r\\n\\r\\n", stop);
+    return sent && !close && !stop.aborted;
+  }
+
   // Whether text was written within 30 seconds, and within a second of the server stopping.
   static async put(conn: Ref<TcpStream>, text: string, stop: Ref<AbortSignal>): Promise<boolean> {
-    const sent = await Promise.race([Http1.written(conn, text), Http1.late(30000), Http1.graced(stop)]);
+    return await Http1.putBytes(conn, new TextEncoder().encode(text), stop);
+  }
+
+  static async putBytes(conn: Ref<TcpStream>, bytes: u8[], stop: Ref<AbortSignal>): Promise<boolean> {
+    const sent = await Promise.race([Http1.written(conn, bytes), Http1.late(30000), Http1.graced(stop)]);
     return sent;
   }
 
-  static async written(conn: Ref<TcpStream>, text: string): Promise<boolean> {
+  static async written(conn: Ref<TcpStream>, bytes: u8[]): Promise<boolean> {
     try {
-      await conn.write(new TextEncoder().encode(text));
+      await conn.write(bytes);
       return true;
     } catch (e) {
       return false;
@@ -2362,6 +2517,17 @@ class Http1 {
   static async next(pieces: Mut<Dyn<AsyncGenerator<string>>>): Promise<string | null> {
     const r = await pieces.next();
     if (r.done === false) return r.value;
+    return null;
+  }
+
+  static async nextBytes(chunks: Mut<Dyn<AsyncGenerator<u8[]>>>): Promise<u8[] | null> {
+    const r = await chunks.next();
+    if (r.done === false) return r.value;
+    return null;
+  }
+
+  static async abortOfBytes(signal: Ref<AbortSignal>): Promise<u8[] | null> {
+    await Http1.abortOf(signal);
     return null;
   }
 
@@ -2422,7 +2588,8 @@ const FETCH = `
 async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
   const unix = init !== null ? init.unix : null;
   const ca = init !== null ? init.tls?.ca ?? "" : "";
-  const req = __urlFetchRequest(input, init);
+  let req = __urlFetchRequest(input, init);
+  await req.__drain();
   const signal = req.signal.clone();
   const to = __urlFetchAddress(req.url);
   const sent = Http1.requestBytes(req, to.authority, to.path);
@@ -2447,7 +2614,7 @@ function __urlFetchRequest(input: string | Request | URL, init?: RequestInit): R
     const h = init.headers;
     if (h !== null) req.headers = h;
     const b = init.body;
-    if (b !== null) req.body = __httpBody(b);
+    if (b !== null) req.__setBody(b);
     const s = init.signal;
     if (s !== null) req.signal = s;
   }
@@ -3665,6 +3832,7 @@ class URLSearchParams {
 const BYTE_METHODS = ["toBase64", "toHex"];
 const BYTE_STATICS = ["fromBase64", "fromHex"];
 const URL_NAMES = ["URL", "URLSearchParams"];
+const STREAM_NAMES = ["ReadableStream", "WritableStream", "ReadableStreamDefaultReader", "WritableStreamDefaultWriter", "ReadableStreamDefaultController", "ReadableStreamReadResult", "UnderlyingSource", "UnderlyingSink"];
 // std's names a program may declare its own of, which std's own code then reaches under another.
 const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date", "RangeError"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
@@ -6592,6 +6760,861 @@ export class Pool {
   }
 }
 `,
+  // Tar archives, read an entry at a time and written from files, imported as fish:tar.
+  "fish:tar": String.raw`
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "fs";
+import { dirname, isAbsolute, join, normalize, relative, resolve } from "path";
+import { gunzipSync, gzipSync, ZlibError } from "zlib";
+import { open } from "fs/promises";
+
+// What reading, extracting or writing an archive refuses, naming the entry where it can.
+export class TarError extends Error {
+  path: string;
+  constructor(message: string, path: string = "") {
+    super(message);
+    this.path = path;
+  }
+}
+
+export type TarEntryType = "file" | "directory" | "symlink" | "link";
+// An entry's header: its path inside the archive, what it is, its data's size, its mode's
+// permission bits, its time in seconds since the epoch, and a link's target.
+export type TarHeader = { path: string; type: TarEntryType; size: i64; mode: i64; mtime: i64; target: string };
+export type TarEntry = { path: string; type: TarEntryType; size: i64; mode: i64; mtime: i64; target: string; data: u8[] };
+// An archive given as a path, its bytes, or a stream of its chunks.
+export type TarSource = string | u8[] | ReadableStream<u8[]>;
+// How much an archive may hold before it is refused: entries, bytes of entry data in all, and
+// for a gzip archive bytes unpacked per byte packed.
+export type TarLimits = { maxEntries?: i64; maxBytes?: i64; maxRatio?: i64 };
+
+const MAX_ENTRIES = 10000;
+const MAX_BYTES = 1073741824;
+const MAX_RATIO = 100;
+
+// A source's bytes as chunks, read a block at a time from a path.
+async function* chunksOf(source: TarSource): AsyncGenerator<u8[]> throws IoError {
+  if (typeof source === "string") {
+    // ponytail: a generator can't yield inside try...finally yet, so a reader that stops early
+    // leaves the descriptor open until the program ends.
+    const fd = openSync(source, "r");
+    while (true) {
+      let buffer: u8[] = new Array<u8>(65536).fill(0);
+      const n = readSync(fd, buffer, 0, 65536, null);
+      if (n === 0) break;
+      yield buffer.slice(0, n);
+    }
+    closeSync(fd);
+  } else if (Array.isArray(source)) yield source;
+  else for await (const chunk of source) yield chunk;
+}
+
+// A field of a header: ASCII up to its first NUL.
+function text(block: Ref<u8[]>, at: i64, length: i64): string {
+  let end = at;
+  while (end < at + length && block[end as usize]! !== 0) end++;
+  return new TextDecoder().decode(block.slice(at, end));
+}
+
+// A numeric field: octal digits, or, with its top bit set, a big-endian binary number, as GNU
+// tar writes sizes past octal's reach.
+function number(block: Ref<u8[]>, at: i64, length: i64): i64 {
+  if (((block[at as usize]! as i64) & 0x80) !== 0) {
+    let n = 0;
+    for (let i = at + 1; i < at + length; i++) n = n * 256 + (block[i as usize]! as i64);
+    return n;
+  }
+  let n = 0;
+  for (let i = at; i < at + length; i++) {
+    const c = block[i as usize]! as i64;
+    if (c >= 48 && c <= 55) n = n * 8 + (c - 48);
+    else if (n > 0 || (c !== 32 && c !== 0)) break;
+  }
+  return n;
+}
+
+// Whether a block's checksum, its bytes summed with the checksum field read as spaces, matches.
+function checked(block: Ref<u8[]>): boolean {
+  let sum = 0;
+  for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 32 : (block[i as usize]! as i64);
+  return sum === number(block, 148, 8);
+}
+
+function zeros(block: Ref<u8[]>): boolean {
+  for (const b of block) if (b !== 0) return false;
+  return true;
+}
+
+// A PAX header's records, "length key=value\n" each, as their keys and values.
+function paxRecords(data: Ref<u8[]>): Map<string, string> {
+  let out = new Map<string, string>();
+  const all = new TextDecoder().decode(data);
+  let at = 0;
+  while (at < (all.length as i64)) {
+    const space = all.indexOf(" ", at);
+    if (space < 0) break;
+    const length = parseInt(all.slice(at, space)) ?? 0;
+    if (length <= 0) break;
+    const record = all.slice(space + 1, at + length - 1);
+    const eq = record.indexOf("=");
+    if (eq > 0) out.set(record.slice(0, eq), record.slice(eq + 1, record.length as i64));
+    at += length;
+  }
+  return out;
+}
+
+function typeOf(flag: i64, path: string): TarEntryType | null {
+  // '0' and NUL are files, as is '7', a contiguous file; '5' a directory, '2' a symlink and '1'
+  // a hard link. A name ending in '/' is an old-style directory.
+  if (flag === 48 || flag === 0 || flag === 55) return path.endsWith("/") ? "directory" : "file";
+  if (flag === 53) return "directory";
+  if (flag === 50) return "symlink";
+  if (flag === 49) return "link";
+  return null;
+}
+
+// The archive's raw chunks, inflated first when they start as gzip does, within the limits.
+async function* inflated(source: TarSource, maxBytes: i64, maxEntries: i64, ratio: i64): AsyncGenerator<u8[]> throws IoError | TarError {
+  let first = true;
+  let packed: u8[] = [];
+  let gzip = false;
+  let chunks = chunksOf(source);
+  for await (const chunk of chunks) {
+    if (first) {
+      gzip = chunk.length >= 2 && chunk[0]! === 0x1f && chunk[1]! === 0x8b;
+      first = false;
+    }
+    if (!gzip) {
+      yield chunk;
+      continue;
+    }
+    // ponytail: zlib in std inflates whole buffers, so a gzip archive is held packed and then
+    // unpacked; a streaming inflate would hold a window instead.
+    for (const b of chunk) packed.push(b);
+  }
+  if (!gzip) return;
+  // The headers come on top of the entries' data, up to three blocks an entry with long names.
+  const headers = maxBytes + 512 * 3 * maxEntries;
+  const cap = headers < (packed.length as i64) * ratio ? headers : (packed.length as i64) * ratio;
+  let unpacked: u8[] = [];
+  try {
+    unpacked = gunzipSync(packed, { maxOutputLength: cap });
+  } catch (e) {
+    throw new TarError("this gzip archive unpacks past its limits, or isn't gzip: " + e.message + "; raise maxBytes or maxRatio if it is trusted");
+  }
+  yield unpacked;
+}
+
+// The archive's entries, one at a time, each read whole. Throws TarError on a corrupt header or
+// past a limit.
+export async function* entries(source: TarSource, limits: TarLimits = {}): AsyncGenerator<TarEntry> throws IoError | TarError {
+  const maxEntries = limits.maxEntries ?? MAX_ENTRIES;
+  const maxBytes = limits.maxBytes ?? MAX_BYTES;
+  let chunks = inflated(source, maxBytes, maxEntries, limits.maxRatio ?? MAX_RATIO);
+  // What has arrived and not been read, and whether the input has ended.
+  let held: u8[] = [];
+  let ended = false;
+  let count = 0;
+  let total = 0;
+  // A GNU long name or PAX header before an entry, for that entry alone.
+  let longPath = "";
+  let longTarget = "";
+  let paxSize = -1;
+  while (true) {
+    while ((held.length as i64) < 512 && !ended) {
+      const step = await chunks.next();
+      if (step.done === true) ended = true;
+      else for (const b of step.value) held.push(b);
+    }
+    const block = held.slice(0, 512);
+    held = held.slice(block.length as i64, held.length as i64);
+    if (block.length === 0 || zeros(block)) return;
+    if (block.length < 512) throw new TarError("this tar archive ends inside a header");
+    if (!checked(block)) throw new TarError("a tar header's checksum doesn't match; the archive is corrupt or isn't tar");
+    const name = text(block, 0, 100);
+    const prefix = text(block, 345, 155);
+    const magic = text(block, 257, 6);
+    let path = magic.startsWith("ustar") && prefix.length > 0 ? prefix + "/" + name : name;
+    const flag = block[156]! as i64;
+    let size = number(block, 124, 12);
+    if (paxSize >= 0) size = paxSize;
+    if (size < 0 || total + size > maxBytes) throw new TarError("this tar archive holds more than " + String(maxBytes) + " bytes; raise maxBytes if it is trusted", path);
+    const padded = (size + 511) / 512 * 512;
+    while ((held.length as i64) < padded && !ended) {
+      const step = await chunks.next();
+      if (step.done === true) ended = true;
+      else for (const b of step.value) held.push(b);
+    }
+    const data = held.slice(0, padded);
+    held = held.slice(data.length as i64, held.length as i64);
+    if ((data.length as i64) < size) throw new TarError("this tar archive ends inside an entry's data", path);
+    const body = data.slice(0, size);
+    // 'L' and 'K' are GNU's long name and long link target; 'x' a PAX header for the next
+    // entry, 'g' one for every entry, which nothing here reads.
+    if (flag === 76) {
+      longPath = text(body, 0, size);
+      continue;
+    }
+    if (flag === 75) {
+      longTarget = text(body, 0, size);
+      continue;
+    }
+    if (flag === 120) {
+      const records = paxRecords(body);
+      longPath = records.get("path") ?? longPath;
+      longTarget = records.get("linkpath") ?? longTarget;
+      const s = records.get("size");
+      if (s !== undefined) paxSize = parseInt(s) ?? -1;
+      continue;
+    }
+    if (flag === 103) continue;
+    if (longPath.length > 0) path = longPath;
+    const target = longTarget.length > 0 ? longTarget : text(block, 157, 100);
+    longPath = "";
+    longTarget = "";
+    paxSize = -1;
+    const type = typeOf(flag, path);
+    if (type === null) throw new TarError("'" + path + "' is a device, FIFO or another special entry, which isn't read", path);
+    count++;
+    if (count > maxEntries) throw new TarError("this tar archive holds more than " + String(maxEntries) + " entries; raise maxEntries if it is trusted", path);
+    total += size;
+    const none: u8[] = [];
+    yield { path, type, size: type === "file" ? size : 0, mode: number(block, 100, 8) & 0o7777, mtime: number(block, 136, 12), target, data: type === "file" ? body : none };
+  }
+}
+
+// The headers of the archive's entries, its data read past.
+export async function list(source: TarSource, limits: TarLimits = {}): Promise<TarHeader[]> throws IoError | TarError {
+  let out: TarHeader[] = [];
+  let all = entries(source, limits);
+  for await (const e of all) out.push({ path: e.path, type: e.type, size: e.size, mode: e.mode, mtime: e.mtime, target: e.target });
+  return out;
+}
+
+// Where an entry's path lands under root, refusing an absolute path or one that climbs out.
+function landing(root: string, path: string): string throws TarError {
+  if (isAbsolute(path)) throw new TarError("'" + path + "' is an absolute path, which extract refuses; an entry lands inside the target", path);
+  const to = resolve(root, path);
+  const rel = relative(root, to);
+  if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) throw new TarError("'" + path + "' climbs out of the target, which extract refuses", path);
+  return to;
+}
+
+// Refuses a landing reached through a symlink, which an earlier entry may have made to point
+// anywhere: every directory between root and the landing, and the landing itself, must be real.
+function throughLinks(root: string, to: string, path: string): void throws IoError | TarError {
+  let at = to;
+  while (at !== root && at.length > root.length) {
+    const st = lstatSync(at, { throwIfNoEntry: false });
+    if (st !== undefined && st.isSymbolicLink()) throw new TarError("'" + path + "' would be written through the symlink '" + relative(root, at) + "', which extract refuses", path);
+    at = dirname(at);
+  }
+}
+
+// Writes the archive's entries under dir, made if it isn't there, and gives the paths written.
+// Nothing lands outside dir: absolute paths, climbing paths, links pointing out and paths
+// through symlinks are refused with TarError, as are devices and FIFOs.
+export async function extract(source: TarSource, dir: string, limits: TarLimits = {}): Promise<string[]> throws IoError | TarError {
+  const root = resolve(dir);
+  mkdirSync(root, { recursive: true });
+  let written: string[] = [];
+  let all = entries(source, limits);
+  for await (const e of all) {
+    const to = landing(root, e.path);
+    throughLinks(root, to, e.path);
+    if (e.type === "directory") {
+      mkdirSync(to, { recursive: true });
+      if (e.mode !== 0) chmodSync(to, e.mode & 0o777);
+      written.push(to);
+      continue;
+    }
+    mkdirSync(dirname(to), { recursive: true });
+    if (e.type === "symlink") {
+      if (isAbsolute(e.target)) throw new TarError("'" + e.path + "' is a symlink to the absolute path '" + e.target + "', which extract refuses", e.path);
+      landing(root, join(dirname(relative(root, to)), e.target));
+      symlinkSync(e.target, to);
+    } else if (e.type === "link") {
+      const from = landing(root, e.target);
+      throughLinks(root, from, e.path);
+      linkSync(from, to);
+    } else {
+      writeFileSync(to, e.data);
+      chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
+      utimesSync(to, e.mtime as f64, e.mtime as f64);
+    }
+    written.push(to);
+  }
+  return written;
+}
+
+export type TarPackOptions = { cwd?: string; gzip?: boolean };
+
+// A field of a header written as ASCII, cut to its length.
+function put(block: Mut<u8[]>, at: i64, length: i64, value: string) {
+  const bytes = new TextEncoder().encode(value);
+  for (let i = 0; i < length && i < (bytes.length as i64); i++) block[(at + i) as usize] = bytes[i as usize]!;
+}
+
+function octalDigits(n: i64): string {
+  if (n === 0) return "0";
+  let digits = "";
+  let left = n;
+  while (left > 0) {
+    digits = String(left % 8) + digits;
+    left = left / 8;
+  }
+  return digits;
+}
+
+// A numeric field as zero-padded octal digits and a NUL.
+function octal(block: Mut<u8[]>, at: i64, length: i64, n: i64) {
+  let digits = octalDigits(n);
+  while ((digits.length as i64) < length - 1) digits = "0" + digits;
+  put(block, at, length - 1, digits);
+}
+
+// A PAX record, "length key=value\n", whose length counts its own digits.
+function paxRecord(key: string, value: string): string {
+  // The record past its length's digits: a space, key=value, and a newline.
+  const rest = (new TextEncoder().encode(key + "=" + value).length as i64) + 2;
+  let length = rest + (String(rest).length as i64);
+  if ((String(length).length as i64) !== (String(rest).length as i64)) length = rest + (String(length).length as i64);
+  return String(length) + " " + key + "=" + value + "\n";
+}
+
+// A header block for one entry, with a PAX header before it when its path, target or size don't
+// fit ustar's fields.
+function headerBlocks(path: string, flag: i64, size: i64, mode: i64, mtime: i64, target: string): u8[] {
+  let out: u8[] = [];
+  const pathBytes = new TextEncoder().encode(path).length as i64;
+  const targetBytes = new TextEncoder().encode(target).length as i64;
+  let name = path;
+  let prefix = "";
+  if (pathBytes > 100) {
+    // ustar splits a long path at a slash into a prefix of up to 155 bytes and a name of 100.
+    let slash = -1;
+    for (let i = 0; i < (path.length as i64) && i <= 155; i++) if (path.slice(i, i + 1) === "/") slash = i;
+    if (slash > 0 && (new TextEncoder().encode(path.slice(slash + 1, path.length as i64)).length as i64) <= 100) {
+      prefix = path.slice(0, slash);
+      name = path.slice(slash + 1, path.length as i64);
+    }
+  }
+  const big = size > 8589934591;
+  const pax = (prefix === "" && pathBytes > 100) || targetBytes > 100 || big;
+  if (pax) {
+    let records = "";
+    if (prefix === "" && pathBytes > 100) records += paxRecord("path", path);
+    if (targetBytes > 100) records += paxRecord("linkpath", target);
+    if (big) records += paxRecord("size", String(size));
+    const data = new TextEncoder().encode(records);
+    for (const b of ustarBlock("PaxHeader", "", 120, data.length as i64, 0o644, mtime, "")) out.push(b);
+    for (const b of data) out.push(b);
+    for (let i = data.length as i64; i % 512 !== 0; i++) out.push(0);
+  }
+  for (const b of ustarBlock(name.slice(0, 100), prefix, flag, big ? 0 : size, mode, mtime, target.slice(0, 100))) out.push(b);
+  return out;
+}
+
+function ustarBlock(name: string, prefix: string, flag: i64, size: i64, mode: i64, mtime: i64, target: string): u8[] {
+  let block: u8[] = new Array<u8>(512).fill(0);
+  put(block, 0, 100, name);
+  octal(block, 100, 8, mode);
+  octal(block, 108, 8, 0);
+  octal(block, 116, 8, 0);
+  octal(block, 124, 12, size);
+  octal(block, 136, 12, mtime);
+  put(block, 148, 8, "        ");
+  block[156] = flag as u8;
+  put(block, 157, 100, target);
+  put(block, 257, 6, "ustar");
+  put(block, 263, 2, "00");
+  put(block, 345, 155, prefix);
+  let sum = 0;
+  for (const b of block) sum += b as i64;
+  let digits = octalDigits(sum);
+  while ((digits.length as i64) < 6) digits = "0" + digits;
+  put(block, 148, 6, digits);
+  block[154] = 0;
+  block[155] = 32;
+  return block;
+}
+
+// path and, for a directory, everything under it in sorted order, added to out.
+function walked(cwd: string, path: string, out: Mut<string[]>): void throws IoError {
+  out.push(path);
+  const st = lstatSync(join(cwd, path));
+  if (!st.isDirectory()) return;
+  let names = readdirSync(join(cwd, path));
+  names.sort();
+  for (const n of names) walked(cwd, join(path, n), out);
+}
+
+// An archive of the paths, each relative to cwd, and everything under each directory, as its
+// chunks; gzipped with gzip.
+export async function* pack(paths: string[], options: TarPackOptions = {}): AsyncGenerator<u8[]> throws IoError | ZlibError {
+  const cwd = options.cwd ?? ".";
+  const gzip = options.gzip === true;
+  // ponytail: zlib in std deflates whole buffers, so a gzipped archive is gathered first.
+  let gathered: u8[] = [];
+  for (const given of paths) {
+    let found: string[] = [];
+    walked(cwd, given, found);
+    for (const path of found) {
+      const full = join(cwd, path);
+      const st = lstatSync(full);
+      const mtime = Math.floor(st.mtimeMs / 1000.0) as i64;
+      const mode = st.mode & 0o7777;
+      if (st.isSymbolicLink() || st.isDirectory()) {
+        const out = st.isSymbolicLink() ? headerBlocks(path, 50, 0, mode, mtime, readlinkSync(full)) : headerBlocks(path.endsWith("/") ? path : path + "/", 53, 0, mode, mtime, "");
+        if (gzip) for (const b of out) gathered.push(b);
+        else yield out;
+      } else if (st.isFile()) {
+        let data = readFileSync(full);
+        let out = headerBlocks(path, 48, data.length as i64, mode, mtime, "");
+        for (const b of data) out.push(b);
+        for (let i = data.length as i64; i % 512 !== 0; i++) out.push(0);
+        if (gzip) for (const b of out) gathered.push(b);
+        else yield out;
+      }
+    }
+  }
+  // Two zero blocks end an archive.
+  const end = new Array<u8>(1024).fill(0);
+  if (!gzip) {
+    yield end;
+    return;
+  }
+  for (const b of end) gathered.push(b);
+  yield gzipSync(gathered);
+}
+
+// The archive pack makes, written to file.
+export async function create(file: string, paths: string[], options: TarPackOptions = {}): Promise<void> throws IoError | ZlibError {
+  let out = await open(file, "w");
+  let chunks = pack(paths, options);
+  for await (const chunk of chunks) {
+    const _n = await out.write(chunk);
+  }
+  await out.close();
+}
+`,
+  // Zip archives, read through their central directory and written deflated, as fish:zip.
+  "fish:zip": String.raw`
+import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, utimesSync, chmodSync, writeFileSync } from "fs";
+import { dirname, isAbsolute, join, relative, resolve } from "path";
+import { deflateRawSync, inflateRawSync, ZlibError } from "zlib";
+import { open } from "fs/promises";
+
+// What reading, extracting or writing an archive refuses, naming the entry where it can.
+export class ZipError extends Error {
+  path: string;
+  constructor(message: string, path: string = "") {
+    super(message);
+    this.path = path;
+  }
+}
+
+export type ZipEntryType = "file" | "directory" | "symlink";
+// As fish:tar's: an entry's path, what it is, its unpacked size, its mode's permission bits, its
+// time in seconds since the epoch, and a symlink's target.
+export type ZipHeader = { path: string; type: ZipEntryType; size: i64; mode: i64; mtime: i64; target: string };
+export type ZipEntry = { path: string; type: ZipEntryType; size: i64; mode: i64; mtime: i64; target: string; data: u8[] };
+export type ZipSource = string | u8[] | ReadableStream<u8[]>;
+export type ZipLimits = { maxEntries?: i64; maxBytes?: i64; maxRatio?: i64 };
+export type ZipPackOptions = { cwd?: string; level?: i64 };
+
+const MAX_ENTRIES = 10000;
+const MAX_BYTES = 1073741824;
+const MAX_RATIO = 100;
+const ALL32 = 4294967295;
+
+function le(b: Ref<u8[]>, at: i64, size: i64): i64 {
+  let n = 0;
+  for (let i = size - 1; i >= 0; i--) n = n * 256 + (b[(at + i) as usize]! as i64);
+  return n;
+}
+
+function put(out: Mut<u8[]>, n: i64, size: i64) {
+  let left = n;
+  for (let i = 0; i < size; i++) {
+    out.push((left % 256) as u8);
+    left = left / 256;
+  }
+}
+
+// CRC-32 as zip and gzip compute it, over the reflected polynomial 0xEDB88320.
+export function crc32(data: Ref<u8[]>): i64 {
+  let table: i64[] = [];
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) !== 0 ? 0xedb88320 ^ (c >> 1) : c >> 1;
+    table.push(c);
+  }
+  let crc = ALL32;
+  for (const b of data) crc = table[((crc ^ (b as i64)) & 255) as usize]! ^ (crc >> 8);
+  return crc ^ ALL32;
+}
+
+// A source's bytes, whole, refused past maxBytes.
+async function whole(source: ZipSource, maxBytes: i64): Promise<u8[]> throws IoError | ZipError {
+  if (typeof source === "string") {
+    const st = lstatSync(source);
+    if (st.size > maxBytes) throw new ZipError("this zip archive is larger than " + String(maxBytes) + " bytes; raise maxBytes if it is trusted");
+    return readFileSync(source);
+  }
+  if (Array.isArray(source)) return source;
+  let out: u8[] = [];
+  for await (const chunk of source) {
+    for (const b of chunk) out.push(b);
+    if ((out.length as i64) > maxBytes) throw new ZipError("this zip archive is larger than " + String(maxBytes) + " bytes; raise maxBytes if it is trusted");
+  }
+  return out;
+}
+
+// Days since 1970-01-01 for a civil date, and back, as Howard Hinnant's algorithms give them.
+function daysFrom(y: i64, m: i64, d: i64): i64 {
+  const year = m <= 2 ? y - 1 : y;
+  const era = (year >= 0 ? year : year - 399) / 400;
+  const yoe = year - era * 400;
+  const doy = (153 * (m > 2 ? m - 3 : m + 9) + 2) / 5 + d - 1;
+  const doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
+function civil(days: i64): [i64, i64, i64] {
+  const z = days + 719468;
+  const era = (z >= 0 ? z : z - 146096) / 146097;
+  const doe = z - era * 146097;
+  const yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const mp = (5 * doy + 2) / 153;
+  const d = doy - (153 * mp + 2) / 5 + 1;
+  const m = mp < 10 ? mp + 3 : mp - 9;
+  return [m <= 2 ? yoe + era * 400 + 1 : yoe + era * 400, m, d];
+}
+
+// A DOS date and time, read as UTC, in seconds since the epoch.
+function dosTime(date: i64, time: i64): i64 {
+  const days = daysFrom((date >> 9) + 1980, (date >> 5) & 15, date & 31);
+  return days * 86400 + (time >> 11) * 3600 + ((time >> 5) & 63) * 60 + (time & 31) * 2;
+}
+
+// The archive's entries from its central directory, each read and checked whole. Throws
+// ZipError on a corrupt archive, an entry it can't read, or past a limit.
+export async function* entries(source: ZipSource, limits: ZipLimits = {}): AsyncGenerator<ZipEntry> throws IoError | ZipError {
+  const maxEntries = limits.maxEntries ?? MAX_ENTRIES;
+  const maxBytes = limits.maxBytes ?? MAX_BYTES;
+  const maxRatio = limits.maxRatio ?? MAX_RATIO;
+  const z = await whole(source, maxBytes);
+  const size = z.length as i64;
+  // The end of central directory record is the last 22 bytes, before a comment of up to 65535.
+  let end = -1;
+  for (let at = size - 22; at >= 0 && at >= size - 22 - 65535; at--) {
+    if (le(z, at, 4) === 0x06054b50) {
+      end = at;
+      break;
+    }
+  }
+  if (end < 0) throw new ZipError("this isn't a zip archive: it has no end of central directory record");
+  let count = le(z, end + 10, 2);
+  let cdSize = le(z, end + 12, 4);
+  let cdAt = le(z, end + 16, 4);
+  // ZIP64 keeps the counts and offsets that overflow in a record its locator points at.
+  if (end >= 20 && le(z, end - 20, 4) === 0x07064b50) {
+    const at = le(z, end - 12, 8);
+    if (at + 56 > size || le(z, at, 4) !== 0x06064b50) throw new ZipError("this zip archive's ZIP64 end record is missing or corrupt");
+    count = le(z, at + 32, 8);
+    cdSize = le(z, at + 40, 8);
+    cdAt = le(z, at + 48, 8);
+  }
+  if (count > maxEntries) throw new ZipError("this zip archive holds more than " + String(maxEntries) + " entries; raise maxEntries if it is trusted");
+  if (cdAt + cdSize > size) throw new ZipError("this zip archive's central directory runs past its end");
+  let at = cdAt;
+  let total = 0;
+  for (let n = 0; n < count; n++) {
+    if (at + 46 > size || le(z, at, 4) !== 0x02014b50) throw new ZipError("this zip archive's central directory is corrupt");
+    const madeBy = le(z, at + 4, 2);
+    const flags = le(z, at + 8, 2);
+    const method = le(z, at + 10, 2);
+    const time = le(z, at + 12, 2);
+    const date = le(z, at + 14, 2);
+    const crc = le(z, at + 16, 4);
+    let packed = le(z, at + 20, 4);
+    let unpacked = le(z, at + 24, 4);
+    const nameLength = le(z, at + 28, 2);
+    const extraLength = le(z, at + 30, 2);
+    const commentLength = le(z, at + 32, 2);
+    const external = le(z, at + 38, 4);
+    let local = le(z, at + 42, 4);
+    const path = new TextDecoder().decode(z.slice(at + 46, at + 46 + nameLength));
+    let mtime = dosTime(date, time);
+    // Extra fields: ZIP64's sizes and offset where the 32-bit fields are all ones, and the
+    // extended timestamp's modification time.
+    let e = at + 46 + nameLength;
+    const extraEnd = e + extraLength;
+    while (e + 4 <= extraEnd) {
+      const id = le(z, e, 2);
+      const length = le(z, e + 2, 2);
+      let v = e + 4;
+      if (id === 1) {
+        if (unpacked === ALL32) {
+          unpacked = le(z, v, 8);
+          v += 8;
+        }
+        if (packed === ALL32) {
+          packed = le(z, v, 8);
+          v += 8;
+        }
+        if (local === ALL32) local = le(z, v, 8);
+      } else if (id === 0x5455 && length >= 5 && (le(z, v, 1) & 1) !== 0) mtime = le(z, v + 1, 4);
+      e += 4 + length;
+    }
+    at = extraEnd + commentLength;
+    if ((flags & 1) !== 0) throw new ZipError("'" + path + "' is encrypted, which isn't read", path);
+    if (method !== 0 && method !== 8) throw new ZipError("'" + path + "' uses compression method " + String(method) + "; only stored and deflate are read", path);
+    if (total + unpacked > maxBytes) throw new ZipError("this zip archive unpacks to more than " + String(maxBytes) + " bytes; raise maxBytes if it is trusted", path);
+    if (packed > 0 && unpacked > packed * maxRatio) throw new ZipError("'" + path + "' unpacks more than " + String(maxRatio) + " bytes per byte packed; raise maxRatio if it is trusted", path);
+    if (local + 30 > size || le(z, local, 4) !== 0x04034b50) throw new ZipError("'" + path + "' has no local header where the central directory says", path);
+    const dataAt = local + 30 + le(z, local + 26, 2) + le(z, local + 28, 2);
+    if (dataAt + packed > size) throw new ZipError("'" + path + "' runs past the archive's end", path);
+    const raw = z.slice(dataAt, dataAt + packed);
+    let data: u8[] = [];
+    if (method === 0) data = raw;
+    else {
+      try {
+        data = inflateRawSync(raw, { maxOutputLength: unpacked > 0 ? unpacked : 1 });
+      } catch (err) {
+        throw new ZipError("'" + path + "' doesn't inflate to the size its header gives: " + err.message, path);
+      }
+    }
+    if ((data.length as i64) !== unpacked) throw new ZipError("'" + path + "' unpacks to " + String(data.length) + " bytes where its header says " + String(unpacked), path);
+    if (crc32(data) !== crc) throw new ZipError("'" + path + "' fails its CRC-32 check; the archive is corrupt", path);
+    total += unpacked;
+    // A Unix maker keeps the mode in the external attributes' top half.
+    const mode = (madeBy >> 8) === 3 ? external >> 16 : 0;
+    const kind = mode & 0o170000;
+    const type: ZipEntryType = path.endsWith("/") || kind === 0o040000 ? "directory" : kind === 0o120000 ? "symlink" : "file";
+    if (kind !== 0 && kind !== 0o100000 && kind !== 0o040000 && kind !== 0o120000) throw new ZipError("'" + path + "' is a device, FIFO or another special entry, which isn't read", path);
+    const target = type === "symlink" ? new TextDecoder().decode(data) : "";
+    const none: u8[] = [];
+    yield { path, type, size: type === "file" ? unpacked : 0, mode: mode & 0o7777, mtime, target, data: type === "file" ? data : none };
+  }
+}
+
+// The headers of the archive's entries.
+export async function list(source: ZipSource, limits: ZipLimits = {}): Promise<ZipHeader[]> throws IoError | ZipError {
+  let out: ZipHeader[] = [];
+  let all = entries(source, limits);
+  for await (const e of all) out.push({ path: e.path, type: e.type, size: e.size, mode: e.mode, mtime: e.mtime, target: e.target });
+  return out;
+}
+
+function landing(root: string, path: string): string throws ZipError {
+  if (isAbsolute(path)) throw new ZipError("'" + path + "' is an absolute path, which extract refuses; an entry lands inside the target", path);
+  const to = resolve(root, path);
+  const rel = relative(root, to);
+  if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) throw new ZipError("'" + path + "' climbs out of the target, which extract refuses", path);
+  return to;
+}
+
+function throughLinks(root: string, to: string, path: string): void throws IoError | ZipError {
+  let at = to;
+  while (at !== root && at.length > root.length) {
+    const st = lstatSync(at, { throwIfNoEntry: false });
+    if (st !== undefined && st.isSymbolicLink()) throw new ZipError("'" + path + "' would be written through the symlink '" + relative(root, at) + "', which extract refuses", path);
+    at = dirname(at);
+  }
+}
+
+// Writes the archive's entries under dir and gives the paths written, refusing as fish:tar's
+// extract does anything that would land outside dir.
+export async function extract(source: ZipSource, dir: string, limits: ZipLimits = {}): Promise<string[]> throws IoError | ZipError {
+  const root = resolve(dir);
+  mkdirSync(root, { recursive: true });
+  let written: string[] = [];
+  let all = entries(source, limits);
+  for await (const e of all) {
+    const to = landing(root, e.path);
+    throughLinks(root, to, e.path);
+    if (e.type === "directory") {
+      mkdirSync(to, { recursive: true });
+      if (e.mode !== 0) chmodSync(to, e.mode & 0o777);
+    } else {
+      mkdirSync(dirname(to), { recursive: true });
+      if (e.type === "symlink") {
+        if (isAbsolute(e.target)) throw new ZipError("'" + e.path + "' is a symlink to the absolute path '" + e.target + "', which extract refuses", e.path);
+        landing(root, join(dirname(relative(root, to)), e.target));
+        symlinkSync(e.target, to);
+      } else {
+        writeFileSync(to, e.data);
+        chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
+        utimesSync(to, e.mtime as f64, e.mtime as f64);
+      }
+    }
+    written.push(to);
+  }
+  return written;
+}
+
+// path and, for a directory, everything under it in sorted order, added to out.
+function walked(cwd: string, path: string, out: Mut<string[]>): void throws IoError {
+  out.push(path);
+  const st = lstatSync(join(cwd, path));
+  if (!st.isDirectory()) return;
+  let names = readdirSync(join(cwd, path));
+  names.sort();
+  for (const n of names) walked(cwd, join(path, n), out);
+}
+
+// A time in seconds since the epoch as a DOS date and time, in UTC, clamped to DOS's 1980.
+function dosParts(seconds: i64): [i64, i64] {
+  const days = seconds / 86400;
+  const left = seconds % 86400;
+  const [y, m, d] = civil(days);
+  if (y < 1980) return [(0 << 9) | (1 << 5) | 1, 0];
+  return [((y - 1980) << 9) | (m << 5) | d, ((left / 3600) << 11) | (((left % 3600) / 60) << 5) | ((left % 60) / 2)];
+}
+
+type __zipRecord = { name: u8[]; method: i64; crc: i64; packed: i64; unpacked: i64; date: i64; time: i64; mtime: i64; external: i64; offset: i64 };
+
+// A zip archive of the paths, each relative to cwd, and everything under each directory, as its
+// chunks, each file deflated at level unless storing it is smaller.
+export async function* pack(paths: string[], options: ZipPackOptions = {}): AsyncGenerator<u8[]> throws IoError | ZlibError {
+  const cwd = options.cwd ?? ".";
+  const level = options.level ?? 6;
+  let records: __zipRecord[] = [];
+  let offset = 0;
+  for (const given of paths) {
+    let found: string[] = [];
+    walked(cwd, given, found);
+    for (const path of found) {
+      const full = join(cwd, path);
+      const st = lstatSync(full);
+      const mtime = Math.floor(st.mtimeMs / 1000.0) as i64;
+      const directory = st.isDirectory();
+      const link = st.isSymbolicLink();
+      if (!directory && !link && !st.isFile()) continue;
+      const name = new TextEncoder().encode(directory && !path.endsWith("/") ? path + "/" : path);
+      let data: u8[] = link ? new TextEncoder().encode(readlinkSync(full)) : directory ? [] : readFileSync(full);
+      const crc = crc32(data);
+      const unpacked = data.length as i64;
+      let method = 0;
+      if (!directory && !link && unpacked > 0) {
+        const deflated = deflateRawSync(data.clone(), { level });
+        if ((deflated.length as i64) < unpacked) {
+          data = deflated;
+          method = 8;
+        }
+      }
+      const [date, time] = dosParts(mtime);
+      const kind = directory ? 0o040000 : link ? 0o120000 : 0o100000;
+      const external = (kind | (st.mode & 0o7777)) * 65536 + (directory ? 16 : 0);
+      const big = unpacked >= ALL32 || (data.length as i64) >= ALL32;
+      let out: u8[] = [];
+      put(out, 0x04034b50, 4);
+      put(out, big ? 45 : 20, 2);
+      // Bit 11 marks names as UTF-8.
+      put(out, 0x0800, 2);
+      put(out, method, 2);
+      put(out, time, 2);
+      put(out, date, 2);
+      put(out, crc, 4);
+      put(out, big ? ALL32 : data.length as i64, 4);
+      put(out, big ? ALL32 : unpacked, 4);
+      put(out, name.length as i64, 2);
+      put(out, big ? 29 : 9, 2);
+      for (const b of name) out.push(b);
+      if (big) {
+        put(out, 1, 2);
+        put(out, 16, 2);
+        put(out, unpacked, 8);
+        put(out, data.length as i64, 8);
+      }
+      // The extended timestamp: its modification time to the second.
+      put(out, 0x5455, 2);
+      put(out, 5, 2);
+      out.push(1);
+      put(out, mtime, 4);
+      for (const b of data) out.push(b);
+      records.push({ name, method, crc, packed: data.length as i64, unpacked, date, time, mtime, external, offset });
+      offset += out.length as i64;
+      yield out;
+    }
+  }
+  let central: u8[] = [];
+  for (const r of records) {
+    const wide = r.unpacked >= ALL32 || r.packed >= ALL32 || r.offset >= ALL32;
+    put(central, 0x02014b50, 4);
+    // Made by Unix, so readers take the mode from the external attributes.
+    put(central, 3 * 256 + (wide ? 45 : 20), 2);
+    put(central, wide ? 45 : 20, 2);
+    put(central, 0x0800, 2);
+    put(central, r.method, 2);
+    put(central, r.time, 2);
+    put(central, r.date, 2);
+    put(central, r.crc, 4);
+    put(central, wide ? ALL32 : r.packed, 4);
+    put(central, wide ? ALL32 : r.unpacked, 4);
+    put(central, r.name.length as i64, 2);
+    put(central, wide ? 37 : 9, 2);
+    put(central, 0, 2);
+    put(central, 0, 2);
+    put(central, 0, 2);
+    put(central, r.external, 4);
+    put(central, wide ? ALL32 : r.offset, 4);
+    for (const b of r.name) central.push(b);
+    if (wide) {
+      put(central, 1, 2);
+      put(central, 24, 2);
+      put(central, r.unpacked, 8);
+      put(central, r.packed, 8);
+      put(central, r.offset, 8);
+    }
+    put(central, 0x5455, 2);
+    put(central, 5, 2);
+    central.push(1);
+    put(central, r.mtime, 4);
+  }
+  const count = records.length as i64;
+  const cdSize = central.length as i64;
+  if (count >= 65535 || offset >= ALL32 || cdSize >= ALL32) {
+    // ZIP64's end record, then its locator, before the classic record pointing past them.
+    const at = offset + cdSize;
+    put(central, 0x06064b50, 4);
+    put(central, 44, 8);
+    put(central, 3 * 256 + 45, 2);
+    put(central, 45, 2);
+    put(central, 0, 4);
+    put(central, 0, 4);
+    put(central, count, 8);
+    put(central, count, 8);
+    put(central, cdSize, 8);
+    put(central, offset, 8);
+    put(central, 0x07064b50, 4);
+    put(central, 0, 4);
+    put(central, at, 8);
+    put(central, 1, 4);
+  }
+  put(central, 0x06054b50, 4);
+  put(central, 0, 2);
+  put(central, 0, 2);
+  put(central, count >= 65535 ? 65535 : count, 2);
+  put(central, count >= 65535 ? 65535 : count, 2);
+  put(central, cdSize >= ALL32 ? ALL32 : cdSize, 4);
+  put(central, offset >= ALL32 ? ALL32 : offset, 4);
+  put(central, 0, 2);
+  yield central;
+}
+
+// The archive pack makes, written to file.
+export async function create(file: string, paths: string[], options: ZipPackOptions = {}): Promise<void> throws IoError | ZlibError {
+  let out = await open(file, "w");
+  let chunks = pack(paths, options);
+  for await (const chunk of chunks) {
+    const _n = await out.write(chunk);
+  }
+  await out.close();
+}
+`,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
   // buffer so readers can be mixed.
   stdin: String.raw`
@@ -7283,10 +8306,12 @@ export function evaluate(module: string): JsValue {
 
 // The std module a specifier names, if any: `node:os` and `os` both name `os`.
 export function stdModule(specifier: string): string | undefined {
+  // Fish's own modules are reached only by their fish: names, so npm keeps the bare ones.
+  if (specifier.startsWith("fish:")) return STD_MODULES[specifier] !== undefined ? specifier : undefined;
   const bare = specifier.startsWith("node:") ? specifier.slice("node:".length as i64) : specifier;
   // "path/posix" is "path", which is POSIX's here.
   const name = bare === "path/posix" ? "path" : bare === "bun" ? "Bun" : bare;
-  return STD_MODULES[name] !== undefined ? name : undefined;
+  return STD_MODULES[name] !== undefined && !name.startsWith("fish:") ? name : undefined;
 }
 
 // What awaiting a JS promise that rejects throws: the JS error's message, and what JS threw. It
@@ -7302,7 +8327,409 @@ class JsError extends Error {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS;
+// The web streams API over async generators, in a program that names a stream or uses HTTP.
+const STREAMS = `
+// What a reader's read() gives: a value, or the end of the stream, as a generator's next() does.
+type ReadableStreamReadResult<T> = { done: true } | { done: false; value: T };
+
+// A stream's state, shared by the stream, its reader and its controller: the generator its
+// values come from, whether a reader holds it, and for a stream made from an underlying source,
+// the values queued and not yet read, whether the source closed, the error it reported and its
+// cancel callback. Written out in place rather than named, and one level deep, since a type
+// argument inside an alias or a shared inside a shared isn't carried into a generic class's
+// instances.
+class ReadableStream<T> {
+  private state: shared<{ source: Lock<Dyn<AsyncGenerator<T>>[]>; locked: Atomic<i64>; items: Lock<T[]>; closed: Atomic<i64>; failure: Lock<Error[]>; cancel: Lock<((reason: string) => void)[]> }>;
+
+  constructor(source?: UnderlyingSource<T>) {
+    const generators: Dyn<AsyncGenerator<T>>[] = [];
+    const cancels: ((reason: string) => void)[] = [];
+    this.state = shared<{ source: Lock<Dyn<AsyncGenerator<T>>[]>; locked: Atomic<i64>; items: Lock<T[]>; closed: Atomic<i64>; failure: Lock<Error[]>; cancel: Lock<((reason: string) => void)[]> }>({ source: new Lock(generators), locked: new Atomic(0), items: new Lock<T[]>([]), closed: new Atomic(0), failure: new Lock<Error[]>([]), cancel: new Lock(cancels) });
+    if (source !== null) {
+      const start = source.start;
+      const pull = source.pull;
+      const cancel = source.cancel;
+      if (cancel !== null) this.state.cancel.update((c) => c.push(cancel));
+      const controller = new ReadableStreamDefaultController<T>(this.__handle());
+      this.state.source.update((g) => g.push(__streamPulled<T>(start, pull, controller)));
+    }
+  }
+
+  // A stream of what the generator yields, as ReadableStream.from reads an async iterable.
+  static from<V>(generator: AsyncGenerator<V>): ReadableStream<V> {
+    let stream = new ReadableStream<V>();
+    stream.state.source.update((g) => g.push(generator));
+    return stream;
+  }
+
+  // Whether a reader holds the stream, so no other can read it.
+  get locked(): boolean {
+    return this.state.locked.load() === 1;
+  }
+
+  // A reader of the stream, which locks it until the reader lets it go.
+  getReader(): ReadableStreamDefaultReader<T> throws TypeError {
+    if (this.state.locked.load() === 1) throw new TypeError("this ReadableStream is locked to a reader; release it with 'reader.releaseLock()' first");
+    this.state.locked.store(1);
+    return new ReadableStreamDefaultReader<T>(this.__handle());
+  }
+
+  // Ends the stream without reading the rest, running its source's cancel.
+  async cancel(reason?: string): Promise<void> throws TypeError {
+    if (this.state.locked.load() === 1) throw new TypeError("a locked ReadableStream can't be cancelled; cancel it through its reader");
+    this.__cancel(reason ?? "");
+  }
+
+  // A second handle on the same stream, which a reader, a controller or a pipe in another task
+  // reads and changes it through.
+  __handle(): ReadableStream<T> {
+    let stream = new ReadableStream<T>();
+    stream.state = this.state.clone();
+    return stream;
+  }
+
+  // The generator, taken out while a read runs it, since a lock can't be held across an await.
+  __pop(): Dyn<AsyncGenerator<T>> | null {
+    return this.state.source.update((s) => s.pop());
+  }
+
+  __push(g: Dyn<AsyncGenerator<T>>) {
+    this.state.source.update((s) => s.push(g));
+  }
+
+  __lock(): void throws TypeError {
+    if (this.state.locked.load() === 1) throw new TypeError("this ReadableStream is locked to a reader; release it with 'reader.releaseLock()' first");
+    this.state.locked.store(1);
+  }
+
+  // Throws the error the stream's source reported through its controller, if it did.
+  __failed(): void throws Error {
+    const failed = this.state.failure.update((f) => f.length > 0 ? f[0]!.message : null);
+    if (failed !== null) throw new Error(failed);
+  }
+
+  // Drops the stream's generator unread and runs its source's cancel, once.
+  __cancel(reason: string) {
+    this.state.source.update((s) => {
+      while (s.length > 0) s.pop();
+    });
+    this.state.closed.store(1);
+    const cancel = this.state.cancel.update((c) => c.pop());
+    if (cancel !== null) cancel(reason);
+  }
+
+  __unlock() {
+    this.state.locked.store(0);
+  }
+
+  // Queuing into a closed stream panics, where JavaScript throws, so a source's callbacks
+  // needn't declare a throw.
+  __enqueue(chunk: T) {
+    assert(this.state.closed.load() === 0, "this ReadableStream is closed, so nothing more can be enqueued");
+    this.state.items.update((xs) => xs.push(chunk));
+  }
+
+  __close() {
+    this.state.closed.store(1);
+  }
+
+  __error(e: Error) {
+    this.state.failure.update((f) => f.push(e));
+    this.state.items.update((xs) => {
+      while (xs.length > 0) xs.pop();
+    });
+    this.state.closed.store(1);
+  }
+
+  // The first queued value, taken out, or null when nothing is queued.
+  __take(): T | null {
+    return this.state.items.update((xs) => xs.length > 0 ? xs.shift() : null);
+  }
+
+  __closed(): boolean {
+    return this.state.closed.load() === 1;
+  }
+
+  __empty(): boolean {
+    return this.state.items.update((xs) => xs.length === 0);
+  }
+
+  // What 'for await' over the stream reads, which locks it for good: the generator itself. A
+  // loop can't catch, so reading a locked stream this way panics, where JavaScript throws.
+  __values(): Dyn<AsyncGenerator<T>> {
+    assert(this.state.locked.load() === 0, "this ReadableStream is locked to a reader, so 'for await' can't read it; release the reader's lock first");
+    this.state.locked.store(1);
+    const g = this.state.source.update((s) => s.pop());
+    if (g === null) return __streamNone<T>();
+    return g;
+  }
+
+  // Writes each value into the destination, closing it at the end; a failure on either side
+  // aborts the destination and is thrown here.
+  async pipeTo(dest: Ref<WritableStream<T>>): Promise<void> throws Error | TypeError {
+    await __streamPipe<T>(this, dest);
+  }
+
+  // The pair's readable side, with this stream piped into its writable side once it is read.
+  pipeThrough<U>(pair: { writable: WritableStream<T>; readable: ReadableStream<U> }): ReadableStream<U> {
+    const writable = pair.writable;
+    const readable = pair.readable;
+    return ReadableStream.from<U>(__streamThrough<T, U>(this.__handle(), writable, readable));
+  }
+}
+
+async function* __streamNone<T>(): AsyncGenerator<T> {}
+
+// The readable side of a pair, with the pipe into its writable side started on the first read,
+// where a task can be spawned.
+async function* __streamThrough<T, U>(from: ReadableStream<T>, to: WritableStream<T>, out: ReadableStream<U>): AsyncGenerator<U> {
+  const _piping = spawn(__streamPiped<T>(from, to));
+  for await (const x of out) yield x;
+}
+
+// A pipe run for its effect: its failure has already aborted the destination.
+async function __streamPiped<T>(from: ReadableStream<T>, to: WritableStream<T>): Promise<void> {
+  try {
+    await __streamPipe<T>(from, to);
+  } catch (_e) {}
+}
+
+// Generic code awaits these free functions rather than a stream's async methods, which
+// code generation can't yet reach from inside another generic body.
+
+// A stream's next value, or its end; an error its source reported is thrown here.
+async function __streamRead<T>(s: Ref<ReadableStream<T>>): Promise<ReadableStreamReadResult<T>> throws Error {
+  const taken = s.__pop();
+  if (taken === null) {
+    s.__failed();
+    return { done: true };
+  }
+  let g = taken;
+  const step = await g.next();
+  s.__push(g);
+  if (step.done === false) return { done: false, value: step.value };
+  s.__failed();
+  return { done: true };
+}
+
+// Writes each of a stream's values into the destination and closes it; a failure aborts the
+// destination and is thrown.
+async function __streamPipe<T>(from: Ref<ReadableStream<T>>, to: Ref<WritableStream<T>>): Promise<void> throws Error | TypeError {
+  from.__lock();
+  to.__lock();
+  try {
+    while (true) {
+      const r = await __streamRead<T>(from);
+      if (r.done === true) break;
+      to.__write(r.value);
+    }
+  } catch (e) {
+    to.__abort(e.message);
+    throw e;
+  }
+  to.__close();
+  to.__unlock();
+  from.__unlock();
+}
+
+class ReadableStreamDefaultReader<T> {
+  private stream: ReadableStream<T>;
+  private released: boolean = false;
+
+  constructor(stream: ReadableStream<T>) {
+    this.stream = stream;
+  }
+
+  // The stream's next value, or its end; an error its source reported is thrown here.
+  async read(): Promise<ReadableStreamReadResult<T>> throws Error | TypeError {
+    if (this.released) throw new TypeError("this reader has released its lock, so it can't read");
+    const r = await __streamRead<T>(this.stream);
+    return r;
+  }
+
+  // Ends the stream without reading the rest, running its source's cancel.
+  async cancel(reason?: string): Promise<void> {
+    this.stream.__cancel(reason ?? "");
+  }
+
+  // Lets the stream go, so another reader can take it.
+  releaseLock(this: Mut<this>) {
+    if (this.released) return;
+    this.released = true;
+    this.stream.__unlock();
+  }
+}
+
+// What a writable stream's sink is given: each chunk to write, then close at the end, or abort
+// with the reason when the pipe or writer gives up.
+// Plain functions, not async ones: a function stored in an object can't be async yet.
+type UnderlyingSink<T> = { write?: (chunk: T) => void; close?: () => void; abort?: (reason: string) => void };
+
+// A destination values are written into through a writer, one at a time.
+class WritableStream<T> {
+  private sink: shared<{ write: Lock<((chunk: T) => void)[]>; close: Lock<(() => void)[]>; abort: Lock<((reason: string) => void)[]>; locked: Atomic<i64>; closed: Atomic<i64> }>;
+
+  constructor(sink?: UnderlyingSink<T>) {
+    let writes: ((chunk: T) => void)[] = [];
+    let closes: (() => void)[] = [];
+    let aborts: ((reason: string) => void)[] = [];
+    if (sink !== null) {
+      const write = sink.write;
+      if (write !== null) writes.push(write);
+      const close = sink.close;
+      if (close !== null) closes.push(close);
+      const abort = sink.abort;
+      if (abort !== null) aborts.push(abort);
+    }
+    this.sink = shared<{ write: Lock<((chunk: T) => void)[]>; close: Lock<(() => void)[]>; abort: Lock<((reason: string) => void)[]>; locked: Atomic<i64>; closed: Atomic<i64> }>({ write: new Lock(writes), close: new Lock(closes), abort: new Lock(aborts), locked: new Atomic(0), closed: new Atomic(0) });
+  }
+
+  get locked(): boolean {
+    return this.sink.locked.load() === 1;
+  }
+
+  __lock(): void throws TypeError {
+    if (this.sink.locked.load() === 1) throw new TypeError("this WritableStream is locked to a writer; release it with 'writer.releaseLock()' first");
+    this.sink.locked.store(1);
+  }
+
+  __unlock() {
+    this.sink.locked.store(0);
+  }
+
+  __write(chunk: T) {
+    if (this.sink.closed.load() === 1) return;
+    const write = this.sink.write.update((w) => w.length > 0 ? w[0]!.clone() : null);
+    if (write !== null) write(chunk);
+  }
+
+  __close() {
+    if (this.sink.closed.load() === 1) return;
+    this.sink.closed.store(1);
+    const close = this.sink.close.update((c) => c.pop());
+    if (close !== null) close();
+  }
+
+  __abort(reason: string) {
+    if (this.sink.closed.load() === 1) return;
+    this.sink.closed.store(1);
+    const abort = this.sink.abort.update((a) => a.pop());
+    if (abort !== null) abort(reason);
+  }
+
+  // A writer of the stream, which locks it until the writer lets it go.
+  getWriter(): WritableStreamDefaultWriter<T> throws TypeError {
+    if (this.sink.locked.load() === 1) throw new TypeError("this WritableStream is locked to a writer; release it with 'writer.releaseLock()' first");
+    this.sink.locked.store(1);
+    return new WritableStreamDefaultWriter<T>(this.sink.clone());
+  }
+}
+
+class WritableStreamDefaultWriter<T> {
+  private sink: shared<{ write: Lock<((chunk: T) => void)[]>; close: Lock<(() => void)[]>; abort: Lock<((reason: string) => void)[]>; locked: Atomic<i64>; closed: Atomic<i64> }>;
+  private released: boolean = false;
+
+  constructor(sink: shared<{ write: Lock<((chunk: T) => void)[]>; close: Lock<(() => void)[]>; abort: Lock<((reason: string) => void)[]>; locked: Atomic<i64>; closed: Atomic<i64> }>) {
+    this.sink = sink;
+  }
+
+  // Hands the chunk to the sink's write, waiting until it has taken it.
+  async write(chunk: T): Promise<void> throws TypeError {
+    if (this.released) throw new TypeError("this writer has released its lock, so it can't write");
+    if (this.sink.closed.load() === 1) throw new TypeError("this WritableStream is closed, so nothing more can be written");
+    const write = this.sink.write.update((w) => w.length > 0 ? w[0]!.clone() : null);
+    if (write !== null) write(chunk);
+  }
+
+  // Ends the stream, running the sink's close once.
+  async close(): Promise<void> {
+    if (this.sink.closed.load() === 1) return;
+    this.sink.closed.store(1);
+    const close = this.sink.close.update((c) => c.pop());
+    if (close !== null) close();
+  }
+
+  // Gives the stream up, running the sink's abort with the reason once.
+  abort(reason?: string) {
+    if (this.sink.closed.load() === 1) return;
+    this.sink.closed.store(1);
+    const abort = this.sink.abort.update((a) => a.pop());
+    if (abort !== null) abort(reason ?? "");
+  }
+
+  releaseLock(this: Mut<this>) {
+    if (this.released) return;
+    this.released = true;
+    this.sink.locked.store(0);
+  }
+}
+
+// What an underlying source's callbacks are given: start once before the first read, pull when
+// the queue is empty, and cancel with its reason when a reader cancels.
+// Plain functions, not async ones: a function stored in an object can't be async yet.
+type UnderlyingSource<T> = { start?: (controller: ReadableStreamDefaultController<T>) => void; pull?: (controller: ReadableStreamDefaultController<T>) => void; cancel?: (reason: string) => void };
+
+// What a source queues values through. The queue is unbounded and enqueue never waits: a source
+// held back reads the queue's emptiness through pull being called only when nothing is queued.
+class ReadableStreamDefaultController<T> {
+  private stream: ReadableStream<T>;
+
+  constructor(stream: ReadableStream<T>) {
+    this.stream = stream;
+  }
+
+  // Queuing into a closed stream panics, where JavaScript throws.
+  enqueue(chunk: T) {
+    this.stream.__enqueue(chunk);
+  }
+
+  // Ends the stream once what is queued has been read.
+  close() {
+    this.stream.__close();
+  }
+
+  // Ends the stream with an error, which its reader's next read throws.
+  error(e: Error) {
+    this.stream.__error(e);
+  }
+
+  __copy(): ReadableStreamDefaultController<T> {
+    return new ReadableStreamDefaultController<T>(this.stream.__handle());
+  }
+
+  __take(): T | null {
+    return this.stream.__take();
+  }
+
+  __closed(): boolean {
+    return this.stream.__closed();
+  }
+
+  __empty(): boolean {
+    return this.stream.__empty();
+  }
+}
+
+// A source's values as a generator: start first, then each queued value, pulling for more when
+// none is queued, until the source closes or errors.
+async function* __streamPulled<T>(start: ((controller: ReadableStreamDefaultController<T>) => void) | null, pull: ((controller: ReadableStreamDefaultController<T>) => void) | null, controller: ReadableStreamDefaultController<T>): AsyncGenerator<T> {
+  if (start !== null) start(controller.__copy());
+  while (true) {
+    const next = controller.__take();
+    if (next !== null) {
+      yield next;
+      continue;
+    }
+    if (controller.__closed()) return;
+    if (pull !== null) pull(controller.__copy());
+    // ponytail: a source that queued nothing, enqueuing from elsewhere, is polled each
+    // millisecond; a notification from enqueue would wake the reader at once.
+    if (!controller.__closed() && controller.__empty()) await sleep(1);
+  }
+}
+`;
+
+export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -7320,7 +8747,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS]) {
+  for (const text of [PRELUDE, HTTP, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -7344,6 +8771,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let dates = sections.shift()!;
   let reading = sections.shift()!;
   let tls = sections.shift()!;
+  let streaming = sections.shift()!;
   renamed(json, { kind: "json" });
   renamed(jsonName, { kind: "json" });
   let astNames: string[] = [];
@@ -7374,6 +8802,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const encoding = httpUsed || bufferUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);
   const dated = httpUsed || uses(written, dates, ["Date"]);
   const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
+  const streamed = httpUsed || uses(written, streaming, STREAM_NAMES);
   // The checker turns typed arrays' constructors and methods into calls of these helpers.
   const typing = (dataViewUsed && dataView.length > 0) || mentionsTypedArray(written);
   let chosen: Stmt[] = prelude;
@@ -7395,6 +8824,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   if (encoding) chosen = chosen.concat(bytes);
   if (typing) chosen = chosen.concat(typed);
   if (secure) chosen = chosen.concat(tls);
+  if (streamed) chosen = chosen.concat(streaming);
   if (own.size > 0) renamed(chosen, { kind: "own", names: own });
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.

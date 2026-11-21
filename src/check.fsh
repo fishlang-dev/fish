@@ -5786,6 +5786,14 @@ class BodyChecker implements Context, GuardHost {
           const messages = this.cx.tables.rewrites.replaceStmt(s, { ...s, right: { id: callId, kind: "call", callee, typeArgs: [], args: [], optional: false, ...at } });
           return this.statement(messages);
         }
+        // std's ReadableStream gives its values through the generator it holds.
+        if (s.await && o?.kind === "class" && (o.generic?.name ?? o.name) === "ReadableStream" && this.cx.registry().classOf(object as ClassType).node.start >= STD_BASE) {
+          const at = { start: s.right.start, end: s.right.end };
+          const callee: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: cloneExpr(s.right), name: "__values", optional: false, ...at };
+          const callId = nextId(this.cx.tables.ids);
+          const values = this.cx.tables.rewrites.replaceStmt(s, { ...s, right: { id: callId, kind: "call", callee, typeArgs: [], args: [], optional: false, ...at } });
+          return this.statement(values);
+        }
         if (s.await) {
           this.awaitLoop(s, d.target.name, left.keyword === "let", through, object);
           return undefined;
@@ -6074,7 +6082,7 @@ class BodyChecker implements Context, GuardHost {
     const o = this.cx.recOf(object);
     const channel = o?.kind === "block" && o.which === "Channel" ? this.cx.tables.typing.lowerKeepingBrands(o.of) : undefined;
     if (yields === undefined && channel === undefined) {
-      throw new CompileError("E0119", `'for await' loops over an async generator or a Channel, not '${this.cx.tables.typing.show(through)}'`, s.right.start, s.right.end);
+      throw new CompileError("E0119", `'for await' loops over an async generator, a Channel or a ReadableStream, not '${this.cx.tables.typing.show(through)}'`, s.right.start, s.right.end);
     }
     if (yields !== undefined && this.cx.isRef(through) && !this.cx.tables.typing.rec(through).mutable) throw new CompileError("E0206", "a 'for await' loop advances its generator, so it needs a 'Mut' reference to it, not a 'Ref'", s.right.start, s.right.end);
     const error = this.cx.tables.typing.generatorThrows(object);
