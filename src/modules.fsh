@@ -142,11 +142,9 @@ class Loader {
     // The module is known before its imports are, so a cycle of imports finds it; its imports
     // and globals are filled in once they are loaded.
     const made: Module = { path: key, file, base, src: text, statements: [], targets: noTargets(), globals: new Map<string, Module>(), pkg };
-    let [kept, rest] = dup(made);
-    let [shared, module] = dup(rest);
     const index = this.modules.length;
-    this.modules.push(kept);
-    this.byPath.set(key, shared);
+    this.byPath.set(key, handleOf(made));
+    this.modules.push(made);
     let targets = noTargets();
     for (const s of statements) {
       const specifier = specifierOf(s);
@@ -160,14 +158,10 @@ class Loader {
       const global = this.std(cx, read, name);
       globals.set(name, global);
     }
-    module.statements = statements;
-    module.targets = targets;
-    module.globals = globals;
-    // In Fish the list's copy was made before the statements were known, so it is replaced by the
-    // whole module; an import found the module by its path, which it already had.
-    let [stored, given] = dup(module);
-    this.modules[index] = stored;
-    return given;
+    this.modules[index]!.statements = statements;
+    this.modules[index]!.targets = targets;
+    this.modules[index]!.globals = globals;
+    return handleOf(this.modules[index]!);
   }
 
   // The module an import or re-export in the file at `path`, known as `key`, names.
@@ -230,9 +224,8 @@ class Loader {
     const shown = relative(dirname(this.entry), file);
     this.sources.push({ base, src: text, file: shown });
     const made: Module = { path: key, file: shown, base, src: text, statements: [], targets: noTargets(), globals: new Map<string, Module>() };
-    const [kept, holder] = dup(made);
-    this.modules.push(kept);
-    this.byPath.set(key, holder);
+    this.byPath.set(key, handleOf(made));
+    this.modules.push(made);
     return base;
   }
 
@@ -297,11 +290,10 @@ class Loader {
     }
     const path = `pkg:${this.modules.length}`;
     const made: Module = { path, file: specifier, base: this.modules.length * (FILE_SPAN as usize), src: "", statements: g.statements, targets: noTargets(), globals: new Map<string, Module>(), whole: whole !== undefined };
-    const [kept, rest] = dup(made);
-    const [stored, module] = dup(rest);
-    this.modules.push(kept);
-    this.byPath.set(path, stored);
-    return module;
+    const handle = handleOf(made);
+    this.byPath.set(path, handleOf(made));
+    this.modules.push(made);
+    return handle;
   }
 
   // Declares `name` in the package's module, as the declaration `declared` the package has.
@@ -409,11 +401,10 @@ class Loader {
     const block = blocks.shift()!;
     if (block.body !== undefined) statements = block.body.map((st) => rustFunction(cx.ids, cx.rust, crate, st));
     const made: Module = { path: key, file: `rust:${crate}`, base: this.modules.length * (FILE_SPAN as usize), src: "", statements, targets: noTargets(), globals: new Map<string, Module>() };
-    const [kept, rest] = dup(made);
-    const [stored, module] = dup(rest);
-    this.modules.push(kept);
-    this.byPath.set(key, stored);
-    return module;
+    const handle = handleOf(made);
+    this.byPath.set(key, handleOf(made));
+    this.modules.push(made);
+    return handle;
   }
 }
 
@@ -427,6 +418,16 @@ function samePackage(dir: string, fish: Ref<FishPackage[]>, file: string): boole
 function copiedDependency(d: Ref<RustDependency>): RustDependency {
   const features: Ref<string[] | undefined> = d.features;
   return { name: d.name, start: d.start, end: d.end, version: d.version, features: features !== undefined ? features.slice() : undefined, defaultFeatures: d.defaultFeatures, path: d.path, git: d.git, rev: d.rev, tag: d.tag, branch: d.branch };
+}
+
+// What an importer holds of the module it names: where it is, with none of its statements or of
+// the modules it imports in turn, which the loader's list holds once. A reader of a target takes
+// its path or its base and finds the module itself in that list; a copy of the module in every
+// importer held a program's whole tree several times over.
+function handleOf(m: Ref<Module>): Module {
+  let out: Module = { path: m.path, file: m.file, base: m.base, src: "", statements: [], targets: noTargets(), globals: new Map<string, Module>(), whole: m.whole, pkg: m.pkg };
+  if (m.owner !== undefined) out.owner = { name: m.owner.name, dir: m.owner.dir, lib: m.owner.lib };
+  return out;
 }
 
 function noTargets(): Targets {
