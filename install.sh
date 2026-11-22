@@ -2,17 +2,26 @@
 # Installs fishc from a GitHub release:
 #   curl -fsSL https://raw.githubusercontent.com/fishlang-dev/fish/main/install.sh | sh
 # Downloads the release for this machine, checks its sha256, unpacks it under ~/.fishc, links
-# fishc into ~/.local/bin, puts that on PATH in the shell's startup file when it isn't already, and
+# fishc into a directory on PATH (or ~/.local/bin, added to the shell's startup file), and
 # builds a hello world to check clang and warm the runtime cache. Settings, all optional:
 #   FISHC_VERSION   a release such as 0.1.0, or the latest
 #   FISHC_HOME      where releases are unpacked, ~/.fishc
-#   FISHC_BIN_DIR   where fishc is linked, ~/.local/bin
+#   FISHC_BIN_DIR   where fishc is linked, a writable directory on PATH or ~/.local/bin
 #   FISHC_NO_MODIFY_PATH=1  leave the shell's startup file alone
 set -eu
 
 repo="https://github.com/fishlang-dev/fish"
 home="${FISHC_HOME:-$HOME/.fishc}"
-bin="${FISHC_BIN_DIR:-$HOME/.local/bin}"
+# A piped script can't change the PATH of the shell that ran it, so fishc is linked into a writable
+# directory already on PATH when there is one, and works at once; ~/.local/bin, added to the
+# startup file, is the fallback and needs a new terminal.
+bin="${FISHC_BIN_DIR:-}"
+if [ -z "$bin" ]; then
+  for dir in "$HOME/.local/bin" "$HOME/bin" /opt/homebrew/bin /usr/local/bin; do
+    case ":$PATH:" in *":$dir:"*) [ -d "$dir" ] && [ -w "$dir" ] && { bin=$dir; break; } ;; esac
+  done
+  bin="${bin:-$HOME/.local/bin}"
+fi
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'install: %s\n' "$*" >&2; exit 1; }
