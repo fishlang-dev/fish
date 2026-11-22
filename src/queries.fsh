@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import type { InstanceId } from "./arenas.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { checkKeeping, recheckKept, type Checked, type CheckerParts } from "./check.fsh";
-import { newCompilation, partEnd, partStart, stageEnd, stageStart, type Compilation, type Session } from "./compilation.fsh";
+import { newCompilation, partEnd, partStart, stageEnd, stageStart, stopAfter, type Compilation, type Session } from "./compilation.fsh";
 import { checkKey, checkPath, compilerDigest, readCheck, writeCheck, type Envelope } from "./checkcache.fsh";
 import { CompileError, copyNames, type Source } from "./diag.fsh";
 import { classified, type Changed, type Edit, type Replaced } from "./edits.fsh";
@@ -83,6 +83,7 @@ function checkedAfresh(session: Session, file: string, looked: Mut<string[]>, ma
   const src = textIn(open, file);
   let compilation = newCompilation(session);
   let loaded = loadedFrom(compilation, file, src !== undefined ? src! : readFileSync(file, "utf8"), looked, open);
+  stopAfter(compilation.session, "parse");
   // Every file the load read, which is what the cached check is keyed by.
   const contents = loadedContents(loaded, looked, manifest, manifestText, open);
   const key = cached(compilation.session) ? checkKey(compilerDigest(), file, editing, false, contents) : "";
@@ -199,6 +200,7 @@ function rechecked(kept: Kept, open: Ref<Map<string, string>>): { done: Kept | u
   }
   for (let i: usize = 0; i < done.checked.warnings.length; i++) done.checked.warnings[i]!.sources = [...loaded.sources];
   stageEnd(done.checked.tables.session, "check", started);
+  stopAfter(done.checked.tables.session, "check");
   return { done: { checked: done.checked, parts: done.parts, loaded, contents, carried: k.carried, emitted: k.emitted, rechecked: done.rechecked, units: k.units }, session: undefined };
 }
 
@@ -230,6 +232,7 @@ export function checkedSource(compilation: Compilation, file: string, src: strin
 export function checkedSourceKeeping(compilation: Compilation, file: string, src: string, taken: Set<string> | false, looked: Mut<string[]>, open: Ref<Map<string, string>>, editing: boolean): { checked: Checked; loaded: Loaded; parts: CheckerParts } {
   let program = compilation;
   let modules = loadedFrom(program, file, src, looked, open);
+  stopAfter(program.session, "parse");
   return checkedLoaded(program, modules, taken, editing);
 }
 
@@ -289,5 +292,6 @@ export function checkedProgram(compilation: Compilation, program: Stmt[], taken:
   }
   let done = made!;
   stageEnd(done.checked.tables.session, "check", started);
+  stopAfter(done.checked.tables.session, "check");
   return done;
 }

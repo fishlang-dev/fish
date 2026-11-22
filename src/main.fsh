@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { bodyOf, type Arenas } from "./arenas.fsh";
 import { C_KEYWORDS } from "./check.fsh";
 import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.fsh";
-import { formatMemory, formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, type Compilation, type Reading, type Session, type Tables } from "./compilation.fsh";
+import { formatMemory, formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Reading, type Session, type Tables } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { cachedSession } from "./stdcache.fsh";
 import { CompileError, copyNames, formatError, movedOffset, type Source } from "./diag.fsh";
@@ -128,6 +128,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   if (debug) ir = withDebugInfo(ir, src, file, [...loaded.sources], release);
   partEnd(done.checked.tables.session, "codegen bundle", bundling);
   stageEnd(done.checked.tables.session, "codegen", started);
+  stopAfter(done.checked.tables.session, "codegen");
   return { ir, checked: done.checked, loaded, emitted: done.emitted };
 }
 
@@ -846,10 +847,14 @@ function sessionWith(locked: boolean, timed: boolean, checking = false): BuildSe
   made.locking.locked = locked;
   // FISH_MEM=1 records what the process holds as each stage ends, as stages are timed.
   const memory = process.env.FISH_MEM === "1";
-  if (timed || memory) {
+  // FISH_MEM_STOP=<stage> ends the process as that stage ends, with the same readings.
+  const stop = process.env.FISH_MEM_STOP;
+  if (stop !== undefined && !STOP_STAGES.includes(stop!)) fail(`fishc: FISH_MEM_STOP names '${stop!}', which is no stage to stop after; give ${STOP_STAGES.join(", ")}`);
+  if (timed || memory || stop !== undefined) {
     let timings = newTimings();
     timings.report = timed;
-    if (memory) timings.memory = new Map<string, Reading>();
+    if (memory || stop !== undefined) timings.memory = new Map<string, Reading>();
+    if (stop !== undefined) timings.stop = stop!;
     made.timings = timings;
   }
   if (checking) made.checkCache = false;
