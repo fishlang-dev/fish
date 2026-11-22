@@ -49,6 +49,10 @@ export type Local = { name: string; type: Type; mutable: boolean; param: boolean
 // `warnings`: what the build reports without failing, in source order.
 export type Checked = { instances: InstanceId[]; tables: Tables; warnings: CompileError[] };
 
+// The loop, `switch`, labeled statement or match arm a jump leaves, by its id and span: a copy of
+// the statement would hold its whole body once for every `break` in it.
+export type JumpTarget = Span & { id: usize };
+
 // The instances a checked program compiles, read from its arena.
 // What stands in an instance's place in the arena while it is lent out: what it is, and what reads
 // of it by id need meanwhile, whether it keeps what it is lent and what it captures.
@@ -63,7 +67,7 @@ function instanceStandIn(held: Ref<Instance>): Instance {
 export function emptyTables(): Pick<Instance, "types" | "locals" | "calls" | "setters" | "coercions" | "jumps" | "borrowsFrom" | "raises" | "caught" | "consumes" | "patterns" | "copiesOut"> {
   return {
     types: new TypeTable<Type>(), locals: new NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>(), calls: new NodeMap<Expr, InstanceId>(), setters: new NodeMap<Expr, InstanceId>(),
-    coercions: new NodeMap<Expr, Type>(), jumps: new NodeMap<Stmt, Stmt>(), borrowsFrom: new NodeMap<Expr, Expr[]>(),
+    coercions: new NodeMap<Expr, Type>(), jumps: new NodeMap<Stmt, JumpTarget>(), borrowsFrom: new NodeMap<Expr, Expr[]>(),
     raises: new NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>(), caught: new NodeMap<Stmt, Type>(),
     consumes: new Set<usize>(), patterns: new NodeMap<Pattern, PatternInfo>(), copiesOut: new NodeSet<Expr>(),
   };
@@ -103,7 +107,7 @@ export type Instance = {
   // down to.
   coercions: NodeMap<Expr, Type>;
   // The loop, switch or labeled statement each `break` leaves and each `continue` repeats.
-  jumps: NodeMap<Stmt, Stmt>;
+  jumps: NodeMap<Stmt, JumpTarget>;
   // The arguments, or the receiver, each call returning a reference borrows from.
   borrowsFrom: NodeMap<Expr, Expr[]>;
   // The error type a `throws` clause declares.
@@ -723,10 +727,89 @@ export function check(compilation: Compilation, written: Stmt[], exportsToC: Set
 /** @throws {CompileError} */
 export function checkKeeping(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean): { checked: Checked; parts: CheckerParts } {
   let { checked, parts } = checkAll(compilation, written, exportsToC, macros, module);
+  if (checked.tables.session.timings !== undefined && checked.tables.session.timings.memory !== undefined) {
+    const counts = tableCounts(checked);
+    checked.tables.session.timings.tables = counts;
+  }
   let renamed: CompileError[] = [];
   while (checked.warnings.length > 0) renamed.push(named(checked.warnings.shift()!, copyNames(checked.tables.names)));
   while (renamed.length > 0) checked.warnings.push(renamed.shift()!);
   return { checked, parts };
+}
+
+// How many entries a per-instance table holds across every instance, and how much source the
+// nodes it holds span: a node a table holds is a copy with everything under it, so its span is
+// about what the copy weighs.
+type Counted = { entries: usize; keys: usize; values: usize };
+
+// FISH_MEM's table of what the checker's per-instance tables hold, summed over every instance.
+function tableCounts(checked: Ref<Checked>): string {
+  const arenas: Ref<Arenas> = checked.tables.arenas;
+  const fresh = (): Counted => ({ entries: 0, keys: 0, values: 0 });
+  let types = fresh();
+  let locals = fresh();
+  let calls = fresh();
+  let setters = fresh();
+  let coercions = fresh();
+  let jumps = fresh();
+  let borrowsFrom = fresh();
+  let raises = fresh();
+  let caught = fresh();
+  let patterns = fresh();
+  let copiesOut = fresh();
+  for (let i: usize = 1; i <= arenas.instanceCount(); i++) {
+    const x = arenas.instanceOf(i as InstanceId);
+    types.entries += x.types.size;
+    for (const [k] of x.locals.entries()) {
+      locals.entries++;
+      locals.keys += k.end - k.start;
+    }
+    for (const [k] of x.calls.entries()) {
+      calls.entries++;
+      calls.keys += k.end - k.start;
+    }
+    for (const [k] of x.setters.entries()) {
+      setters.entries++;
+      setters.keys += k.end - k.start;
+    }
+    for (const [k] of x.coercions.entries()) {
+      coercions.entries++;
+      coercions.keys += k.end - k.start;
+    }
+    for (const [k, v] of x.jumps.entries()) {
+      jumps.entries++;
+      jumps.keys += k.end - k.start;
+      jumps.values += v.end - v.start;
+    }
+    for (const [k, v] of x.borrowsFrom.entries()) {
+      borrowsFrom.entries++;
+      borrowsFrom.keys += k.end - k.start;
+      for (const e of v) borrowsFrom.values += e.end - e.start;
+    }
+    for (const [k] of x.raises.entries()) {
+      raises.entries++;
+      raises.keys += k.end - k.start;
+    }
+    for (const [k] of x.caught.entries()) {
+      caught.entries++;
+      caught.keys += k.end - k.start;
+    }
+    for (const [k] of x.patterns.entries()) {
+      patterns.entries++;
+      patterns.keys += k.end - k.start;
+    }
+    for (const e of x.copiesOut.values()) {
+      copiesOut.entries++;
+      copiesOut.keys += e.end - e.start;
+    }
+  }
+  const mb = (n: usize) => `${((n as f64) / 1048576).toFixed(1)} MB`.padStart(12);
+  const row = (name: string, c: Ref<Counted>) => `${name.padEnd(12)}${`${c.entries}`.padStart(12)}${mb(c.keys)}${mb(c.values)}\n`;
+  let out = `${arenas.instanceCount()} instances, ${arenas.bodyCount()} bodies, ${arenas.classCount()} classes\n`;
+  out += `${"table".padEnd(12)}${"entries".padStart(12)}${"key spans".padStart(12)}${"value spans".padStart(12)}\n`;
+  out += row("types", types) + row("locals", locals) + row("calls", calls) + row("setters", setters) + row("coercions", coercions) + row("jumps", jumps);
+  out += row("borrowsFrom", borrowsFrom) + row("raises", raises) + row("caught", caught) + row("patterns", patterns) + row("copiesOut", copiesOut);
+  return out;
 }
 
 // The body a class's member key names: `m`, `static m`, `get x`, `set x`, `static get x`.
@@ -5961,7 +6044,7 @@ class BodyChecker implements Context, GuardHost {
         if (this.state.floors.length > 0 && this.state.targets.findIndex((t) => t.stmt.id === target.id) < (this.state.floors.at(-1)! as i64)) {
           throw new CompileError("E1102", `'${s.kind}' can't leave a comptime block, which runs while compiling, before the program does`, s.start, s.end);
         }
-        this.jumps().set(cloneStmt(s), cloneStmt(target));
+        this.jumps().set(cloneStmt(s), { id: target.id, start: target.start, end: target.end });
         if (s.kind === "break") this.cx.broken.add(target);
         else this.cx.continued.add(target);
         return undefined;
@@ -6018,7 +6101,10 @@ class BodyChecker implements Context, GuardHost {
         }
         if (armAt >= 0) {
           const wanted = this.state.targets[armAt as usize]!.wanted === true;
-          this.jumps().set(cloneStmt(s), cloneStmt(this.state.targets[armAt as usize]!.stmt));
+          const armId = this.state.targets[armAt as usize]!.stmt.id;
+          const armStart = this.state.targets[armAt as usize]!.stmt.start;
+          const armEnd = this.state.targets[armAt as usize]!.stmt.end;
+          this.jumps().set(cloneStmt(s), { id: armId, start: armStart, end: armEnd });
           if (wanted && s.value === undefined) throw new CompileError("E0605", "this match gives a value, so a 'return' in its arm needs one", s.start, s.end);
           // In TypeScript this would leave the function, which a return in an arm never does.
           if (!wanted && s.value !== undefined) {

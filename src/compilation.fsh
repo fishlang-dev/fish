@@ -510,7 +510,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
 // `manual`, when set, is the clock: a test sets it and moves it by hand.
 // `report` prints the times; `memory`, kept when FISH_MEM=1 asks, is what the process held as each
 // stage ended, the most a stage ended at when it runs more than once.
-export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading> };
+export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading>; tables?: string };
 
 // The process's memory as a stage ended, in bytes: resident now and the most it has been resident.
 // -1 where the system can't say.

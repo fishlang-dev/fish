@@ -1051,6 +1051,7 @@ function reportTimings(session: Ref<Session>, stages: Ref<string[]>, start: f64)
   if (session.timings === undefined) return;
   if (session.timings.report) process.stderr.write(formatTimings(session.timings, stages, performance.now() - start));
   if (session.timings.memory !== undefined) process.stderr.write(formatMemory(session.timings.memory!, stages));
+  if (session.timings.tables !== undefined) process.stderr.write(session.timings.tables!);
 }
 
 // A directory `fishc survey` can read, holding TypeScript.
