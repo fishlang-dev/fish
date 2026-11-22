@@ -509,8 +509,9 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
 // the cached objects built, and counts those reused. `now` is the clock, which a test replaces.
 // `manual`, when set, is the clock: a test sets it and moves it by hand.
 // `report` prints the times; `memory`, kept when FISH_MEM=1 asks, is what the process held as each
-// stage ended, the most a stage ended at when it runs more than once.
-export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading>; tables?: string };
+// stage ended, the most a stage ended at when it runs more than once. `stop`, from FISH_MEM_STOP, is
+// the stage the process ends after.
+export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading>; tables?: string; stop?: string };
 
 // The process's memory as a stage ended, in bytes: resident now and the most it has been resident.
 // -1 where the system can't say.
@@ -553,6 +554,9 @@ function reading(): Reading {
 }
 
 export const FRONT_END = ["parse", "macros", "check", "moves", "comptime"];
+// The stages FISH_MEM_STOP can name: those that end once in a build. `moves` and `comptime` end
+// once per body inside `check`, and flattening ends a stage named `check` before the check starts.
+export const STOP_STAGES = ["parse", "check", "codegen"];
 export const NATIVE_STAGES = ["compile", "runtime", "link"];
 
 export function newTimings(): Timings {
@@ -650,6 +654,20 @@ export function formatMemory(memory: Ref<Map<string, Reading>>, stages: Ref<stri
   }
   const end = reading();
   return out + `${"end".padEnd(12)}${mib(end.rss)}${mib(end.peak)}\n`;
+}
+
+// libc's `exit`, not `process.exit`: that marks the program abandoned, and a `--leaks` build's
+// runtime then reports nothing of what is live.
+declare function exit(status: i32): void;
+
+// Ends the process here when FISH_MEM_STOP names `stage`, which has just ended, after FISH_MEM's
+// table: what a `--leaks` build of fishc then reports as leaked is what the stage left live.
+export function stopAfter(session: Ref<Session>, stage: string): void {
+  if (session.timings === undefined || session.timings.stop !== stage) return;
+  if (session.timings.memory !== undefined) process.stderr.write(formatMemory(session.timings.memory!, [...FRONT_END, "codegen"]));
+  if (session.timings.tables !== undefined) process.stderr.write(session.timings.tables!);
+  console.error(`fishc: stopped after ${stage}, as FISH_MEM_STOP asked`);
+  unsafe { exit(0) };
 }
 
 // Which cached objects a build made and how many it reused, as the runtime stage's note.
