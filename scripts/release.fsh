@@ -1,8 +1,12 @@
 // Cuts a release locally: fish.toml's version bumped, a CHANGELOG.md section from the conventional
 // commits since the last tag, a release commit, an annotated `v<version>` tag, and a tarball of a
 // fishc built from that commit with its sha256, under dist/. Nothing is pushed or published.
-// `--nightly` builds and packs a tarball named for today's date, with no commit or tag.
-//   fishc run scripts/release.fsh -- <version> | --nightly
+// `--nightly` builds and packs a tarball of HEAD named for today's date, with no commit or tag, and
+// `--pack <version>` packs the tarball of a release already tagged.
+// The tarball's fishc is built from the commit's own tree at /tmp/fish-stage0/<commit>, the fixed
+// path stage 0 is built at, since a fishc holds the path it was built at: any machine building the
+// commit there gets the same binary, which is what lets a release be pinned as stage 0.
+//   fishc run scripts/release.fsh -- <version> | --nightly | --pack <version>
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -85,17 +89,22 @@ function bumped(version: string): string throws IoError {
 
 // Builds fishc from this checkout and packs it with the sources it reads as it runs, as
 // `bin/fishc` and `share/fishc/`, into dist/<name>.tar.gz beside its sha256.
-async function pack(name: string): Promise<string> throws IoError {
+async function pack(name: string, commit: string): Promise<string> throws IoError {
+  const tree = `/tmp/fish-stage0/${commit}`;
+  if (!existsSync(join(tree, "src", "runtime"))) {
+    mkdirSync(tree, { recursive: true });
+    run("sh", ["-c", `git archive ${commit} | tar -x -C "${tree}"`]);
+  }
   const dist = join(ROOT, "dist");
   const stage = join(dist, name);
   rmSync(stage, { recursive: true, force: true });
   mkdirSync(join(stage, "bin"), { recursive: true });
-  await shown(["build/fishc", "run", "scripts/build.fsh", "--", "-o", join(stage, "bin", "fishc")]);
+  await shown(["build/fishc", "run", "scripts/build.fsh", "--", "-o", join(stage, "bin", "fishc"), "--source", tree]);
   const share = join(stage, "share", "fishc");
   mkdirSync(join(share, "src"), { recursive: true });
-  run("cp", ["-R", join(ROOT, "vendor"), join(share, "vendor")]);
-  run("cp", ["-R", join(ROOT, "src", "runtime"), join(share, "src", "runtime")]);
-  run("cp", [join(ROOT, "LICENSE-MIT"), join(ROOT, "LICENSE-APACHE"), stage]);
+  run("cp", ["-R", join(tree, "vendor"), join(share, "vendor")]);
+  run("cp", ["-R", join(tree, "src", "runtime"), join(share, "src", "runtime")]);
+  run("cp", [join(tree, "LICENSE-MIT"), join(tree, "LICENSE-APACHE"), stage]);
   const tarball = join(dist, `${name}.tar.gz`);
   run("tar", ["-czf", tarball, "-C", dist, name]);
   rmSync(stage, { recursive: true, force: true });
@@ -110,10 +119,15 @@ async function main(): Promise<void> throws IoError {
   if (!existsSync(join(ROOT, "build", "fishc"))) fail("no build/fishc to build the release with; run scripts/build.fsh first");
   const date = new Date().toISOString().slice(0, 10);
   if (args.length === 1 && args[0]! === "--nightly") {
-    await pack(`fishc-nightly-${date}-${hostKey()}`);
+    await pack(`fishc-nightly-${date}-${hostKey()}`, run("git", ["rev-parse", "HEAD"]));
     return;
   }
-  if (args.length !== 1 || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(args[0]!)) fail("usage: fishc run scripts/release.fsh -- <major.minor.patch> | --nightly");
+  if (args.length === 2 && args[0]! === "--pack") {
+    const tagged = run("git", ["rev-parse", `v${args[1]!}^{commit}`]);
+    await pack(`fishc-${args[1]!}-${hostKey()}`, tagged);
+    return;
+  }
+  if (args.length !== 1 || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(args[0]!)) fail("usage: fishc run scripts/release.fsh -- <major.minor.patch> | --nightly | --pack <version>");
   const version = args[0]!;
   const tag = `v${version}`;
   if (run("git", ["status", "--porcelain"]) !== "") fail("the working tree has changes; commit or stash them first");
@@ -124,5 +138,5 @@ async function main(): Promise<void> throws IoError {
   run("git", ["commit", "-q", "-m", `chore: release ${version}`]);
   run("git", ["tag", "-a", tag, "-m", `fishc ${version}`]);
   console.log(`committed and tagged ${tag}; nothing was pushed`);
-  await pack(`fishc-${version}-${hostKey()}`);
+  await pack(`fishc-${version}-${hostKey()}`, run("git", ["rev-parse", "HEAD"]));
 }
