@@ -1030,13 +1030,17 @@ export class Rewrites implements Replacements {
   }
 }
 
-// What a table of expressions' types keeps of each expression: its id and span, and the few
-// parts its readers look at, rather than the expression itself. A copy of a node holds every node
-// under it, so a table keeping one per typed expression held each expression's subtree once for
-// every node in it, and again for each instance, which made checking the compiler peak near 21GB.
-export type Site = { id: usize; start: usize; end: usize; kind: Expr["kind"]; name?: string; op?: string; object?: { id: usize; end: usize }; left?: usize; right?: usize };
+// What an instance's tables of expressions keep of each one: its id and span, and the few parts
+// their readers look at, rather than the expression itself. A copy of a node holds every node under
+// it, and an array of expressions holds each at the size of the largest kind, so the types, calls
+// and coercions tables keeping a copy per entry held most of the program's expressions many times
+// over: a quarter of what checking the compiler keeps live.
+export type Site = { id: usize; start: usize; end: usize; kind: Expr["kind"]; name?: string; op?: string; object?: { id: usize; end: usize }; left?: usize; right?: usize; callee?: Callee };
 
-// The site of `e`, as a TypeTable keeps it.
+// A call's callee, as a site keeps it: what it is, where, and the name it calls by.
+export type Callee = { kind: Expr["kind"]; start: usize; end: usize; name?: string; objectEnd?: usize };
+
+// The site of `e`, as a SiteTable keeps it.
 export function siteOf(e: Ref<Expr>): Site {
   let s: Site = { id: e.id, start: e.start, end: e.end, kind: e.kind };
   if (e.kind === "ident") s.name = e.name;
@@ -1049,11 +1053,22 @@ export function siteOf(e: Ref<Expr>): Site {
     s.left = e.left.id;
     s.right = e.right.id;
   }
+  if (e.kind === "call" || e.kind === "new") {
+    const c: Ref<Expr> = e.callee;
+    let callee: Callee = { kind: c.kind, start: c.start, end: c.end };
+    if (c.kind === "ident") callee.name = c.name;
+    if (c.kind === "member") {
+      callee.name = c.name;
+      callee.objectEnd = c.object.end;
+    }
+    s.callee = callee;
+  }
   return s;
 }
 
-// Each expression's value by its id, beside the expression's site: an instance's `types`.
-export class TypeTable<V> {
+// Each expression's value by its id, beside the expression's site: an instance's `types`, `calls`
+// and `coercions`.
+export class SiteTable<V> {
   private sites = new Map<usize, Site>();
   private siteValues = new Map<usize, V>();
 

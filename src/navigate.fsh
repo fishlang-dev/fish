@@ -5,6 +5,7 @@ import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.fsh";
 import type { Checked } from "./check.fsh";
 import type { ClassInfo } from "./classes.fsh";
 import type { Module } from "./modules.fsh";
+import type { Callee, Site } from "./nodes.fsh";
 import type { Expr, Stmt } from "./parser.fsh";
 import type { ClassType, Type, Typing } from "./typing.fsh";
 
@@ -65,16 +66,17 @@ export class Index {
         const decl = localDecls.get(local);
         if (decl !== undefined) this.use(seen, named(modules, node.start, node.end, arenas.localOf(local).name), decl!);
       }
-      for (const [e, called] of [...instance.calls.entries(), ...instance.setters.entries()]) {
-        let bodyId = arenas.instanceOf(called).body;
-        const copied = arenas.bodyOf(bodyId).copyOf;
-        if (copied !== undefined) bodyId = copied!;
-        const body = arenas.bodyOf(bodyId);
-        // A closure's calls are calls of the local holding it, which `locals` covers.
-        if (body.closure !== undefined) continue;
-        const name = memberName(body.name);
-        const at = calleeOf(modules, e, name);
-        if (at !== undefined) this.use(seen, at!, named(modules, body.start, body.end, name));
+      for (const [site, called] of instance.calls.entries()) {
+        const target = targetOf(arenas, called, modules);
+        if (target === undefined) continue;
+        const at = siteCallee(modules, site, target!.name);
+        if (at !== undefined) this.use(seen, at!, target!.decl);
+      }
+      for (const [e, called] of instance.setters.entries()) {
+        const target = targetOf(arenas, called, modules);
+        if (target === undefined) continue;
+        const at = calleeOf(modules, e, target!.name);
+        if (at !== undefined) this.use(seen, at!, target!.decl);
       }
       for (const [e] of instance.types.entries()) {
         if (e.kind !== "member" || e.object === undefined || e.name === undefined || instance.calls.getById(e.id) !== undefined) continue;
@@ -155,6 +157,30 @@ function memberName(name: string): string {
   const last = parts[parts.length - 1]!;
   for (const prefix of ["static ", "get ", "set "]) if (last.startsWith(prefix)) return last.slice(prefix.length as i64);
   return last;
+}
+
+// The body an instance runs, by the member it copies when it is a copy, and its declared name;
+// undefined for a closure, whose calls are calls of the local holding it, which `locals` covers.
+function targetOf(arenas: Ref<Arenas>, called: InstanceId, modules: Ref<Module[]>): { name: string; decl: Declared } | undefined {
+  let bodyId = arenas.instanceOf(called).body;
+  const copied = arenas.bodyOf(bodyId).copyOf;
+  if (copied !== undefined) bodyId = copied!;
+  const body = arenas.bodyOf(bodyId);
+  if (body.closure !== undefined) return undefined;
+  const name = memberName(body.name);
+  return { name, decl: named(modules, body.start, body.end, name) };
+}
+
+// Where a call, `new` or accessor read the calls table keeps names what it runs.
+function siteCallee(modules: Ref<Module[]>, s: Ref<Site>, name: string): Declared | undefined {
+  if (s.callee !== undefined) {
+    const c: Ref<Callee> = s.callee!;
+    if (c.kind === "member" && c.objectEnd !== undefined) return named(modules, c.objectEnd!, c.end, c.name ?? name);
+    if (c.kind === "ident" || c.kind === "super") return { start: c.start, end: c.end };
+    return undefined;
+  }
+  if (s.kind === "member" && s.object !== undefined) return named(modules, s.object!.end, s.end, s.name ?? name);
+  return undefined;
 }
 
 // Where a call, `new` or accessor read names what it runs.

@@ -178,7 +178,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     let coercions = new Map<usize, Type>();
     for (const [e, to] of instance.coercions) {
       const ref = cx.tables.typing.optionRef(to);
-      const from = instance.types.get(e);
+      const from = instance.types.getById(e.id);
       const fromRef = from !== undefined && typeof from !== "string" && cx.tables.typing.kindOf(from) === "ref";
       let given: Type = to;
       if (ref !== undefined && from !== undefined && from !== "null" && cx.tables.typing.optionRef(from) === undefined && !fromRef) given = ref;
