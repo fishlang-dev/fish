@@ -1,3 +1,5 @@
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.fsh";
 import type { Value } from "./comptime.fsh";
 import { copyNames, type CompileError, type Names } from "./diag.fsh";
@@ -506,13 +508,55 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
 // `inner` is the time the stages running inside the current one have taken so far. `objects` names
 // the cached objects built, and counts those reused. `now` is the clock, which a test replaces.
 // `manual`, when set, is the clock: a test sets it and moves it by hand.
-export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64 };
+// `report` prints the times; `memory`, kept when FISH_MEM=1 asks, is what the process held as each
+// stage ended, the most a stage ended at when it runs more than once.
+export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading>; tables?: string };
+
+// The process's memory as a stage ended, in bytes: resident now and the most it has been resident.
+// -1 where the system can't say.
+export type Reading = { rss: i64; peak: i64 };
+
+// POSIX's, so it links on every target: the compiler is linked against stage 0's runtime, which a
+// function added to the runtime now can't reach until stage 0 moves past it.
+declare function getrusage(who: i32, usage: MutPtr<u8>): i32;
+declare function getpid(): i32;
+
+// The most the process has been resident: struct rusage's ru_maxrss, after its two timevals, in
+// bytes on macOS and KiB on Linux.
+function peakResident(): i64 {
+  let usage: u8[] = new Array(144).fill(0 as u8);
+  const ok = unsafe { getrusage(0, mutPtrOf(usage[0])) };
+  if (ok !== 0) return -1;
+  let n: i64 = 0;
+  for (let i: usize = 0; i < 8; i++) n = n | ((usage[32 + i]! as i64) << ((8 * i) as i64));
+  return process.platform === "darwin" ? n : n * 1024;
+}
+
+// What the process is resident at now: Linux's /proc/self/statm in pages, or what ps reports in KiB.
+function residentNow(): i64 {
+  try {
+    if (process.platform === "linux") {
+      const fields = readFileSync("/proc/self/statm", "utf8").split(" ");
+      return fields.length > 1 && /^\d+$/.test(fields[1]!) ? Number(fields[1]!)! as i64 * 4096 : -1;
+    }
+    const pid = unsafe { getpid() };
+    const r = spawnSync("ps", ["-o", "rss=", "-p", `${pid}`], { encoding: "utf8" });
+    const kib = r.stdout.trim();
+    return r.status === 0 && /^\d+$/.test(kib) ? Number(kib)! as i64 * 1024 : -1;
+  } catch (e) {
+    return -1;
+  }
+}
+
+function reading(): Reading {
+  return { rss: residentNow(), peak: peakResident() };
+}
 
 export const FRONT_END = ["parse", "macros", "check", "moves", "comptime"];
 export const NATIVE_STAGES = ["compile", "runtime", "link"];
 
 export function newTimings(): Timings {
-  const made: Timings = { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 } };
+  const made: Timings = { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 }, report: true };
   return made;
 }
 
@@ -555,6 +599,12 @@ export function stageEnd(session: Mut<Session>, name: string, started: Ref<Start
   const spent = now(session.timings) - started.start;
   session.timings.ms.set(name, (session.timings.ms.get(name) ?? 0) + spent - session.timings.inner);
   session.timings.inner = started.outer + spent;
+  if (session.timings.memory !== undefined) {
+    const now = reading();
+    const was = session.timings.memory.get(name);
+    const kept: Reading = was === undefined ? now : { rss: Math.max(was!.rss, now.rss), peak: now.peak };
+    session.timings.memory.set(name, kept);
+  }
 }
 
 // A part of a stage, timed apart while the stage keeps all of its own time.
@@ -588,6 +638,18 @@ export function timed<T>(timings: Timings | undefined, name: string, run: Timed<
 export function formatTimings(timings: Ref<Timings>, stages: Ref<string[]>, total: f64): string {
   const line = (name: string, ms: f64, note?: string) => `${name.padEnd(9)}${ms.toFixed(1).padStart(9)} ms${note !== undefined ? ` (${note})` : ""}\n`;
   return stages.map((s) => line(s, timings.ms.get(s) ?? 0, timings.notes.get(s))).join("") + line("total", total);
+}
+
+// FISH_MEM's table: for each stage that ran, in order, what the process held as it ended.
+export function formatMemory(memory: Ref<Map<string, Reading>>, stages: Ref<string[]>): string {
+  const mib = (n: i64) => (n < 0 ? "?" : `${((n as f64) / 1048576).toFixed(1)} MiB`).padStart(14);
+  let out = `${"stage".padEnd(12)}${"resident".padStart(14)}${"peak".padStart(14)}\n`;
+  for (const s of stages) {
+    const r = memory.get(s);
+    if (r !== undefined) out += `${s.padEnd(12)}${mib(r!.rss)}${mib(r!.peak)}\n`;
+  }
+  const end = reading();
+  return out + `${"end".padEnd(12)}${mib(end.rss)}${mib(end.peak)}\n`;
 }
 
 // Which cached objects a build made and how many it reused, as the runtime stage's note.

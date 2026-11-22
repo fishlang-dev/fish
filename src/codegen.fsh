@@ -2,7 +2,7 @@ import assert from "node:assert";
 import type { Body } from "./classes.fsh";
 import { cloneExpr, cloneStmt } from "./rebuild.fsh";
 import { bodyOf, type Arenas, type InstanceId, type LocalId } from "./arenas.fsh";
-import { selfOf, type Checked, type Instance, type Local, type Type } from "./check.fsh";
+import { selfOf, type Checked, type Instance, type JumpTarget, type Local, type Type } from "./check.fsh";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.fsh";
 import { formatPlan, printStream, integerMethod, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.fsh";
 import { compile as compileRegex, parsePattern, type RegexSyntaxError, type RegexTables } from "./regex.fsh";
@@ -4995,7 +4995,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       case "break":
       case "continue": {
-        const target = this.exits.get(this.cur().jumps.get(s)!)!;
+        const target = this.exits.getById(this.cur().jumps.get(s)!.id)!;
         this.jump(s.kind === "break" ? target.exit : target.next!, target.depth);
         const label2 = this.label();
         this.startBlock(label2);
@@ -5268,15 +5268,15 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // A `return` in a match arm's block: its value goes where the match keeps what it gives, and
   // control leaves the arm, dropping what the scopes inside it own.
-  given(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "return" }>>, arm: Ref<Stmt>) {
-    const into = this.arms.get(arm);
+  given(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "return" }>>, arm: Ref<JumpTarget>) {
+    const into = this.arms.getById(arm.id);
     if (s.value !== undefined && into !== undefined) {
       const line = `store ${this.llvm(into.type)} ${this.needsDrop(into.type) ? this.owned(s.value) : this.value(s.value)}, ptr ${into.slot}`;
       this.emit(line);
     }
     else if (s.value !== undefined) this.effect(s.value);
     this.settle();
-    const target = this.exits.get(arm)!;
+    const target = this.exits.getById(arm.id)!;
     this.jump(target.exit, target.depth);
   }
 
