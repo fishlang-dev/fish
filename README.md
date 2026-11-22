@@ -63,6 +63,19 @@ Designed but not built yet: `Lazy<T>`, `Arena<T>`, the `@route` registry, in-fil
 blocks, lazy iterators (`arr.iter()`), operator-overloading traits, and the package manager,
 formatter and language server.
 
+## Installing
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/fishlang-dev/fish/main/install.sh | sh
+```
+
+This downloads the latest release for your machine, checks its sha256, unpacks it under
+`~/.fishc`, links `fishc` into `~/.local/bin`, adds that to `PATH` in your shell's startup file,
+and builds a hello world to check it works. Releases are built for macOS on ARM64 so far. `fishc`
+needs clang 15 or newer (`xcode-select --install` on macOS). `FISHC_VERSION=0.1.0` picks a
+release, and `FISHC_NO_MODIFY_PATH=1` leaves your startup file alone. To uninstall,
+`rm -rf ~/.fishc ~/.local/bin/fishc`.
+
 ## Building fishc
 
 You need clang 15 or newer, on Linux or macOS (x86-64 or ARM64). `fishc` is built by stage 0,
