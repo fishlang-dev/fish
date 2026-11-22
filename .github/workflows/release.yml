@@ -1,0 +1,30 @@
+# Publishes a release when its tag is pushed: the tagged commit's fishc packed for macOS on ARM64,
+# attached with its sha256, and the tag's CHANGELOG.md section as the notes. The tag and its release
+# commit come from `fishc run scripts/release.fsh -- <version>`.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/fish/stage0
+          key: stage0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('stage0.toml') }}
+      - run: sh scripts/bootstrap.sh
+      - run: build/fishc run scripts/release.fsh -- --pack "${GITHUB_REF_NAME#v}"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '$0 ~ "^## " v " " {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.tar.gz.sha256 --title "fishc $version" --notes-file notes.md

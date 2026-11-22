@@ -1,8 +1,14 @@
-# Builds fishc from source with the pinned stage 0 and runs its tests. Run by hand while CI is
-# off; add push and pull_request triggers when it comes back. Bun is needed only to build stage 0
-# from its pinned commit, when the cache has none.
+# Builds fishc from source with the pinned stage 0 and runs its tests. Bun is needed only to build
+# stage 0 from its pinned commit, when the cache has none.
 name: self-hosting
-on: workflow_dispatch
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: selfhost-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   selfhost:
     runs-on: macos-latest
@@ -11,6 +17,11 @@ jobs:
         with:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
+      # Stage 0 takes over an hour to build from source and changes only with stage0.toml.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/fish/stage0
+          key: stage0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('stage0.toml') }}
       - run: sh scripts/bootstrap.sh
       - run: build/fishc run tests/run.fsh -- --fishc "$PWD/build/fishc"
       - run: cd tests/unit && FISHC="$PWD/../../build/fishc" ../../build/fishc test --release
