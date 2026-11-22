@@ -9,7 +9,7 @@ import { FILE_SPAN, stdModuleAt } from "./program.fsh";
 import { comptimeArgument, comptimeBody, stringsType, untagged, type Value } from "./comptime.fsh";
 import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, PropertyName, Span, Stmt, TypeNode, TypeParam } from "./parser.fsh";
 import { lowerPattern, type PatternInfo } from "./match.fsh";
-import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
+import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, SiteTable, walk, walkWhile, type AnyNode, type Ids, type Site } from "./nodes.fsh";
 import { cloneDeclarator, cloneExpr, cloneInterface, cloneObjectProp, cloneParam, clonePattern, clonePatternProp, cloneStmt, cloneStmts, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts, withIdExpr } from "./rebuild.fsh";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
@@ -49,6 +49,10 @@ export type Local = { name: string; type: Type; mutable: boolean; param: boolean
 // `warnings`: what the build reports without failing, in source order.
 export type Checked = { instances: InstanceId[]; tables: Tables; warnings: CompileError[] };
 
+// The loop, `switch`, labeled statement or match arm a jump leaves, by its id and span: a copy of
+// the statement would hold its whole body once for every `break` in it.
+export type JumpTarget = Span & { id: usize };
+
 // The instances a checked program compiles, read from its arena.
 // What stands in an instance's place in the arena while it is lent out: what it is, and what reads
 // of it by id need meanwhile, whether it keeps what it is lent and what it captures.
@@ -62,8 +66,8 @@ function instanceStandIn(held: Ref<Instance>): Instance {
 // The tables a new instance starts with, each empty.
 export function emptyTables(): Pick<Instance, "types" | "locals" | "calls" | "setters" | "coercions" | "jumps" | "borrowsFrom" | "raises" | "caught" | "consumes" | "patterns" | "copiesOut"> {
   return {
-    types: new NodeMap<Expr, Type>(), locals: new NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>(), calls: new NodeMap<Expr, InstanceId>(), setters: new NodeMap<Expr, InstanceId>(),
-    coercions: new NodeMap<Expr, Type>(), jumps: new NodeMap<Stmt, Stmt>(), borrowsFrom: new NodeMap<Expr, Expr[]>(),
+    types: new SiteTable<Type>(), locals: new NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>(), calls: new SiteTable<InstanceId>(), setters: new NodeMap<Expr, InstanceId>(),
+    coercions: new SiteTable<Type>(), jumps: new NodeMap<Stmt, JumpTarget>(), borrowsFrom: new NodeMap<Expr, Expr[]>(),
     raises: new NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>(), caught: new NodeMap<Stmt, Type>(),
     consumes: new Set<usize>(), patterns: new NodeMap<Pattern, PatternInfo>(), copiesOut: new NodeSet<Expr>(),
   };
@@ -88,7 +92,7 @@ export type Instance = {
   // type of a closure made from it.
   branded?: { params: Map<LocalId, Type>; returns: Type };
   // Every value expression's type.
-  types: NodeMap<Expr, Type>;
+  types: SiteTable<Type>;
   // Each `JSON.stringify` argument's type before lowering, which keeps how fields were spelled.
   spelled?: NodeMap<Expr, Type>;
   // The binding each name use, declaration, parameter and shorthand property refers to,
@@ -96,14 +100,14 @@ export type Instance = {
   locals: NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>;
   // The function each call of a user function or method runs, and the getter each read of
   // an accessor runs.
-  calls: NodeMap<Expr, InstanceId>;
+  calls: SiteTable<InstanceId>;
   // The setter each assignment to an accessor runs.
   setters: NodeMap<Expr, InstanceId>;
   // Each expression whose value meets a narrower declared type, and the type it is copied
   // down to.
-  coercions: NodeMap<Expr, Type>;
+  coercions: SiteTable<Type>;
   // The loop, switch or labeled statement each `break` leaves and each `continue` repeats.
-  jumps: NodeMap<Stmt, Stmt>;
+  jumps: NodeMap<Stmt, JumpTarget>;
   // The arguments, or the receiver, each call returning a reference borrows from.
   borrowsFrom: NodeMap<Expr, Expr[]>;
   // The error type a `throws` clause declares.
@@ -723,10 +727,89 @@ export function check(compilation: Compilation, written: Stmt[], exportsToC: Set
 /** @throws {CompileError} */
 export function checkKeeping(compilation: Compilation, written: Stmt[], exportsToC: Set<string> | false, macros: boolean, module: boolean): { checked: Checked; parts: CheckerParts } {
   let { checked, parts } = checkAll(compilation, written, exportsToC, macros, module);
+  if (checked.tables.session.timings !== undefined && checked.tables.session.timings.memory !== undefined) {
+    const counts = tableCounts(checked);
+    checked.tables.session.timings.tables = counts;
+  }
   let renamed: CompileError[] = [];
   while (checked.warnings.length > 0) renamed.push(named(checked.warnings.shift()!, copyNames(checked.tables.names)));
   while (renamed.length > 0) checked.warnings.push(renamed.shift()!);
   return { checked, parts };
+}
+
+// How many entries a per-instance table holds across every instance, and how much source the
+// nodes it holds span: a node a table holds is a copy with everything under it, so its span is
+// about what the copy weighs.
+type Counted = { entries: usize; keys: usize; values: usize };
+
+// FISH_MEM's table of what the checker's per-instance tables hold, summed over every instance.
+function tableCounts(checked: Ref<Checked>): string {
+  const arenas: Ref<Arenas> = checked.tables.arenas;
+  const fresh = (): Counted => ({ entries: 0, keys: 0, values: 0 });
+  let types = fresh();
+  let locals = fresh();
+  let calls = fresh();
+  let setters = fresh();
+  let coercions = fresh();
+  let jumps = fresh();
+  let borrowsFrom = fresh();
+  let raises = fresh();
+  let caught = fresh();
+  let patterns = fresh();
+  let copiesOut = fresh();
+  for (let i: usize = 1; i <= arenas.instanceCount(); i++) {
+    const x = arenas.instanceOf(i as InstanceId);
+    types.entries += x.types.size;
+    for (const [k] of x.locals.entries()) {
+      locals.entries++;
+      locals.keys += k.end - k.start;
+    }
+    for (const [k] of x.calls.entries()) {
+      calls.entries++;
+      calls.keys += k.end - k.start;
+    }
+    for (const [k] of x.setters.entries()) {
+      setters.entries++;
+      setters.keys += k.end - k.start;
+    }
+    for (const [k] of x.coercions.entries()) {
+      coercions.entries++;
+      coercions.keys += k.end - k.start;
+    }
+    for (const [k, v] of x.jumps.entries()) {
+      jumps.entries++;
+      jumps.keys += k.end - k.start;
+      jumps.values += v.end - v.start;
+    }
+    for (const [k, v] of x.borrowsFrom.entries()) {
+      borrowsFrom.entries++;
+      borrowsFrom.keys += k.end - k.start;
+      for (const e of v) borrowsFrom.values += e.end - e.start;
+    }
+    for (const [k] of x.raises.entries()) {
+      raises.entries++;
+      raises.keys += k.end - k.start;
+    }
+    for (const [k] of x.caught.entries()) {
+      caught.entries++;
+      caught.keys += k.end - k.start;
+    }
+    for (const [k] of x.patterns.entries()) {
+      patterns.entries++;
+      patterns.keys += k.end - k.start;
+    }
+    for (const e of x.copiesOut.values()) {
+      copiesOut.entries++;
+      copiesOut.keys += e.end - e.start;
+    }
+  }
+  const mb = (n: usize) => `${((n as f64) / 1048576).toFixed(1)} MB`.padStart(12);
+  const row = (name: string, c: Ref<Counted>) => `${name.padEnd(12)}${`${c.entries}`.padStart(12)}${mb(c.keys)}${mb(c.values)}\n`;
+  let out = `${arenas.instanceCount()} instances, ${arenas.bodyCount()} bodies, ${arenas.classCount()} classes\n`;
+  out += `${"table".padEnd(12)}${"entries".padStart(12)}${"key spans".padStart(12)}${"value spans".padStart(12)}\n`;
+  out += row("types", types) + row("locals", locals) + row("calls", calls) + row("setters", setters) + row("coercions", coercions) + row("jumps", jumps);
+  out += row("borrowsFrom", borrowsFrom) + row("raises", raises) + row("caught", caught) + row("patterns", patterns) + row("copiesOut", copiesOut);
+  return out;
 }
 
 // The body a class's member key names: `m`, `static m`, `get x`, `set x`, `static get x`.
@@ -2061,9 +2144,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     let unconverted: { start: usize; end: usize } | undefined = undefined;
     for (const id of compiledIds) {
       const i = this.tables.arenas.instanceOf(id);
-      for (const [k] of i.calls) {
-        const x: Ref<Expr> = k;
-        if (x.kind !== "call" || !this.tables.jsCalls.has(x)) continue;
+      // The program's table of package calls keeps their nodes, which the arguments are read from.
+      for (const [x] of this.tables.jsCalls.entries()) {
+        if (x.kind !== "call" || !i.calls.has(x)) continue;
         const target = i.calls.get(x);
         const gives = target !== undefined ? this.tables.arenas.instanceOf(target).returns : "void";
         let refused = false;
@@ -2075,12 +2158,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (unconverted !== undefined) throw new CompileError("E1005", "this call gives a package's function a value with no JS form yet", unconverted.start, unconverted.end);
     // A value given to JS becomes a JS value as the call or write converts it.
     let given: { start: usize; end: usize; from: Type; to: Type }[] = [];
+    let jsGiven = new Set<usize>();
+    for (const g of this.tables.jsGiven.values()) jsGiven.add(g.id);
     for (const id of compiledIds) {
       const i = this.tables.arenas.instanceOf(id);
-      for (const [k, t] of i.coercions) {
-        const x: Ref<Expr> = k;
-        if (!this.tables.jsGiven.has(x)) given.push({ start: x.start, end: x.end, from: i.types.get(x) ?? "void", to: t });
-      }
+      for (const [x, t] of i.coercions) if (!jsGiven.has(x.id)) given.push({ start: x.start, end: x.end, from: i.types.getById(x.id) ?? "void", to: t });
     }
     let crossing: { start: usize; end: usize } | undefined = undefined;
     for (const g of given) if (this.intoJs(g.from, g.to) && (crossing === undefined || g.start < crossing.start)) crossing = { start: g.start, end: g.end };
@@ -2115,7 +2197,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         let swap = new TypeMap<Type, Type>();
         const instance = this.tables.arenas.instanceOf(id);
         for (const [e, target] of instance.calls) {
-          const had = instance.types.get(e);
+          const had = instance.types.getById(e.id);
           const callee = this.tables.arenas.instanceOf(target);
           const gives: Type = callee.generator !== undefined ? callee.generator : callee.returns;
           if (had === undefined || had === gives || swap.has(had)) continue;
@@ -2134,8 +2216,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // made again for the one replacing it, checked, and compiled in its place.
   /** @throws {CompileError} */
   private remakeCallees(this: Mut<this>, id: InstanceId, swap: Ref<TypeMap<Type, Type>>, ids: Mut<InstanceId[]>): void {
-    let calls: [Expr, InstanceId][] = [];
-    for (const [e, target] of this.tables.arenas.instanceOf(id).calls) calls.push([cloneExpr(e), target]);
+    let calls: [Site, InstanceId][] = [];
+    for (const [e, target] of this.tables.arenas.instanceOf(id).calls) calls.push([{ ...e }, target]);
     for (const [e, target] of calls) {
       const callee = this.tables.arenas.instanceOf(target);
       if (callee.concrete) continue;
@@ -2153,17 +2235,17 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       this.checkBody(remade);
       if (!ids.includes(remade)) ids.push(remade);
       let instance = this.tables.arenas.instanceMut(id);
-      instance.calls.set(cloneExpr(e), remade);
+      instance.calls.setSite({ ...e }, remade);
     }
   }
 
   /** @throws {CompileError} */
   private swapTypes(this: Mut<this>, id: InstanceId, swap: Ref<TypeMap<Type, Type>>): void {
-    let types: [Expr, Type][] = [];
-    for (const [e, t] of this.tables.arenas.instanceOf(id).types) types.push([cloneExpr(e), t]);
+    let types: [Site, Type][] = [];
+    for (const [e, t] of this.tables.arenas.instanceOf(id).types) types.push([{ ...e }, t]);
     for (let i: usize = 0; i < types.length; i++) types[i]![1] = this.replaced(types[i]![1], swap);
-    let coercions: [Expr, Type][] = [];
-    for (const [e, t] of this.tables.arenas.instanceOf(id).coercions) coercions.push([cloneExpr(e), t]);
+    let coercions: [Site, Type][] = [];
+    for (const [e, t] of this.tables.arenas.instanceOf(id).coercions) coercions.push([{ ...e }, t]);
     for (let i: usize = 0; i < coercions.length; i++) coercions[i]![1] = this.replaced(coercions[i]![1], swap);
     let locals: LocalId[] = [];
     for (const l of this.tables.arenas.instanceOf(id).locals.values()) locals.push(l);
@@ -2178,11 +2260,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     let instance = this.tables.arenas.instanceMut(id);
     while (types.length > 0) {
       const [e, t] = types.shift()!;
-      instance.types.set(e, t);
+      instance.types.setSite(e, t);
     }
     while (coercions.length > 0) {
       const [e, t] = coercions.shift()!;
-      instance.coercions.set(e, t);
+      instance.coercions.setSite(e, t);
     }
     instance.returns = returns;
   }
@@ -2634,18 +2716,19 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.views.set(id, this.tables.arenas.instanceOf(id).returns);
     // `JSON.stringify` and printing write a field by how it was spelled, which lowering forgets.
     let spelled: [Expr, Type][] = [];
-    const typed = this.tables.arenas.instanceOf(id).types;
-    for (const e of typed.keys()) {
-      const instance = this.tables.arenas.instanceOf(id);
-      if (e.kind === "call" && this.tables.jsonCalls.get(e) === "stringify" && e.args.length > 0) {
-        const x: Ref<Expr> = e.args[0]!;
-        const type = instance.coercions.get(x) ?? instance.types.get(x);
-        if (type !== undefined) spelled.push([cloneExpr(x), type]);
-      }
-      if (this.tables.printed.has(e)) {
-        const type = instance.coercions.get(e) ?? instance.types.get(e);
-        if (type !== undefined) spelled.push([cloneExpr(e), type]);
-      }
+    // Read from the program's tables of those calls, which keep their nodes, since an instance's
+    // types keep only each expression's site.
+    const typed = this.tables.arenas.instanceOf(id);
+    for (const [e, which] of this.tables.jsonCalls.entries()) {
+      if (which !== "stringify" || !typed.types.has(e) || e.kind !== "call" || e.args.length === 0) continue;
+      const x: Ref<Expr> = e.args[0]!;
+      const type = typed.coercions.get(x) ?? typed.types.get(x);
+      if (type !== undefined) spelled.push([cloneExpr(x), type]);
+    }
+    for (const e of this.tables.printed.values()) {
+      if (!typed.types.has(e)) continue;
+      const type = typed.coercions.get(e) ?? typed.types.get(e);
+      if (type !== undefined) spelled.push([cloneExpr(e), type]);
     }
     if (spelled.length > 0) {
       let instance = this.tables.arenas.instanceMut(id);
@@ -2667,30 +2750,29 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       const into = this.tables.arenas.instanceOf(to).generator;
       if (from !== undefined && into !== undefined && from !== into) made.set(from, into);
     }
-    let types: [Expr, Type][] = [];
+    let types: [Site, Type][] = [];
     const typesOf = this.tables.arenas.instanceOf(id).types;
-    for (const [e, t] of typesOf) types.push([cloneExpr(e), t]);
+    for (const [e, t] of typesOf) types.push([{ ...e }, t]);
     for (let i: usize = 0; i < types.length; i++) types[i]![1] = this.lowerMade(types[i]![1], made);
-    let coercions: [Expr, Type][] = [];
+    let coercions: [Site, Type][] = [];
     const coercionsOf = this.tables.arenas.instanceOf(id).coercions;
-    for (const [e, t] of coercionsOf) coercions.push([cloneExpr(e), t]);
+    for (const [e, t] of coercionsOf) coercions.push([{ ...e }, t]);
     for (let i: usize = 0; i < coercions.length; i++) coercions[i]![1] = this.lowerMade(coercions[i]![1], made);
     {
       let instance = this.tables.arenas.instanceMut(id);
       while (types.length > 0) {
         const [e, t] = types.shift()!;
-        instance.types.set(e, t);
+        instance.types.setSite(e, t);
       }
       while (coercions.length > 0) {
         const [e, t] = coercions.shift()!;
-        instance.coercions.set(e, t);
+        instance.coercions.setSite(e, t);
       }
     }
     // A pipe's topic written in as a field read would run a getter once for each `%`.
-    const read = this.tables.arenas.instanceOf(id).types;
-    for (const e of read.keys()) {
-      if (e.kind !== "member" || !this.tables.substituted.has(e)) continue;
+    for (const e of this.tables.substituted.values()) {
       const instance = this.tables.arenas.instanceOf(id);
+      if (e.kind !== "member" || !instance.types.has(e)) continue;
       const held = this.recOf(instance.types.get(e.object));
       const objectType = held?.kind === "ref" ? held.to : instance.types.get(e.object);
       if (this.kindOf(objectType) === "class" && this.tables.typing.field(objectType as ClassType, e.name) === undefined) throw unsupported("pipes over a field a getter provides", e);
@@ -2760,9 +2842,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       let binding = this.tables.arenas.localMut(l);
     binding.type = lowered;
     }
-    let calls: [Expr, InstanceId][] = [];
+    let calls: [Site, InstanceId][] = [];
     const callsOf = this.tables.arenas.instanceOf(id).calls;
-    for (const [e, target] of callsOf) calls.push([cloneExpr(e), target]);
+    for (const [e, target] of callsOf) calls.push([{ ...e }, target]);
     for (let i: usize = 0; i < calls.length; i++) calls[i]![1] = this.counterpart(calls[i]![1]);
     let setters: [Expr, InstanceId][] = [];
     const settersOf = this.tables.arenas.instanceOf(id).setters;
@@ -2773,7 +2855,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     let instance = this.tables.arenas.instanceMut(id);
     while (calls.length > 0) {
       const [e, target] = calls.shift()!;
-      instance.calls.set(e, target);
+      instance.calls.setSite(e, target);
     }
     while (setters.length > 0) {
       const [e, target] = setters.shift()!;
@@ -4544,7 +4626,7 @@ class BodyChecker implements Context, GuardHost {
     });
     this.cx.tables.selfCalls.add(cloneExpr(e));
     const id = this.instance().id;
-    this.calls().set(cloneExpr(e), id);
+    this.calls().set(e, id);
     const errorType = this.state.errorType;
     if (errorType !== undefined) this.raise(e, errorType, `'${name}'`);
     const written = cloneTypeNode(this.f().returnType!);
@@ -5470,7 +5552,7 @@ class BodyChecker implements Context, GuardHost {
       this.cx.tables.typing.setRec(innerFuture, r);
     }
     this.cx.tables.arenas.instanceMut(innerId).closure = type;
-    this.calls().set(cloneExpr(e), innerId);
+    this.calls().set(e, innerId);
     this.cx.closureBodies.set(type, innerId);
     return type;
   }
@@ -5815,7 +5897,7 @@ class BodyChecker implements Context, GuardHost {
         }
         // A string gives each of its code points, as a string of its own.
         if (stringLike(this.cx.tables.typing, object)) {
-          if (through !== "string") this.coercions().set(cloneExpr(s.right), "string");
+          if (through !== "string") this.coercions().set(s.right, "string");
           this.pushScope(new Map<string, LocalId>());
           this.declare(d.target.name, "string", left.keyword === "let", false, { ...left });
           this.enterTarget({ stmt: standIn(s), kind: "loop" as const });
@@ -5855,7 +5937,7 @@ class BodyChecker implements Context, GuardHost {
         // order: each part borrowed, or a copy when it copies.
         if (o?.kind === "map" && o.dict === true) throw this.exprs().notIterable({ start: s.right.start, end: s.right.end });
         if (o?.kind === "map") {
-          if (object !== through) this.coercions().set(cloneExpr(s.right), object);
+          if (object !== through) this.coercions().set(s.right, object);
           const keyType = o.key;
           const valueType = o.value;
           const isSet = o.set === true;
@@ -5876,7 +5958,7 @@ class BodyChecker implements Context, GuardHost {
         }
         if (this.cx.tables.typing.yieldsOf(object, true) !== undefined) throw new CompileError("E0119", "an async generator's values are awaited, so loop over it with 'for await'", s.right.start, s.right.end);
         if (o?.kind !== "array") throw new CompileError("E0119", `'for...of' needs an array, a Map, a Set, a string, a generator or an iterable class, not '${this.cx.tables.typing.show(object)}'`, s.right.start, s.right.end);
-        if (object !== through) this.coercions().set(cloneExpr(s.right), object);
+        if (object !== through) this.coercions().set(s.right, object);
         this.pushScope(new Map<string, LocalId>());
         const elementType = o.element;
         const lentElement = this.lentElement(elementType);
@@ -5961,7 +6043,7 @@ class BodyChecker implements Context, GuardHost {
         if (this.state.floors.length > 0 && this.state.targets.findIndex((t) => t.stmt.id === target.id) < (this.state.floors.at(-1)! as i64)) {
           throw new CompileError("E1102", `'${s.kind}' can't leave a comptime block, which runs while compiling, before the program does`, s.start, s.end);
         }
-        this.jumps().set(cloneStmt(s), cloneStmt(target));
+        this.jumps().set(cloneStmt(s), { id: target.id, start: target.start, end: target.end });
         if (s.kind === "break") this.cx.broken.add(target);
         else this.cx.continued.add(target);
         return undefined;
@@ -6018,7 +6100,10 @@ class BodyChecker implements Context, GuardHost {
         }
         if (armAt >= 0) {
           const wanted = this.state.targets[armAt as usize]!.wanted === true;
-          this.jumps().set(cloneStmt(s), cloneStmt(this.state.targets[armAt as usize]!.stmt));
+          const armId = this.state.targets[armAt as usize]!.stmt.id;
+          const armStart = this.state.targets[armAt as usize]!.stmt.start;
+          const armEnd = this.state.targets[armAt as usize]!.stmt.end;
+          this.jumps().set(cloneStmt(s), { id: armId, start: armStart, end: armEnd });
           if (wanted && s.value === undefined) throw new CompileError("E0605", "this match gives a value, so a 'return' in its arm needs one", s.start, s.end);
           // In TypeScript this would leave the function, which a return in an arm never does.
           if (!wanted && s.value !== undefined) {
@@ -6717,7 +6802,7 @@ export function unreached(typing: Ref<Typing>, equalities: Ref<Tables["equalitie
   for (const each of compiled) {
     const i = arenas.instanceOf(each);
     let hit: Reach | undefined = undefined;
-    for (const [at, target] of i.calls) if (hit === undefined && dropped(arenas.instanceOf(target))) hit = reachAt(at, target, "");
+    for (const [at, target] of i.calls) if (hit === undefined && dropped(arenas.instanceOf(target))) hit = { start: at.start, end: at.end, named: at.callee?.name, target, through: "" };
     for (const [at, target] of i.setters) if (hit === undefined && dropped(arenas.instanceOf(target))) hit = reachAt(at, target, "");
     if (i.dyns !== undefined) {
       for (const [at] of i.dyns!) {
@@ -6730,14 +6815,13 @@ export function unreached(typing: Ref<Typing>, equalities: Ref<Tables["equalitie
       }
     }
     // A comparison of values runs each class's `equals` it reaches, through objects and unions.
-    for (const [k] of i.types) {
-      const e: Ref<Expr> = k;
+    for (const [e] of i.types) {
       if (hit !== undefined) break;
       if (e.kind !== "binary" || (e.op !== "===" && e.op !== "!==" && e.op !== "==" && e.op !== "!=")) continue;
-      const left = comparedBy(typing, equalities, i.types.get(e.left), new TypeSet<Type>());
-      const right = comparedBy(typing, equalities, i.types.get(e.right), new TypeSet<Type>());
-      for (const t of left) if (hit === undefined && dropped(arenas.instanceOf(t))) hit = reachAt(e, t, " to compare them");
-      for (const t of right) if (hit === undefined && dropped(arenas.instanceOf(t))) hit = reachAt(e, t, " to compare them");
+      const left = comparedBy(typing, equalities, i.types.getById(e.left!), new TypeSet<Type>());
+      const right = comparedBy(typing, equalities, i.types.getById(e.right!), new TypeSet<Type>());
+      for (const t of left) if (hit === undefined && dropped(arenas.instanceOf(t))) hit = { start: e.start, end: e.end, named: undefined, target: t, through: " to compare them" };
+      for (const t of right) if (hit === undefined && dropped(arenas.instanceOf(t))) hit = { start: e.start, end: e.end, named: undefined, target: t, through: " to compare them" };
     }
     if (hit === undefined) continue;
     const target = arenas.instanceOf(hit.target);

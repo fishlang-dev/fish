@@ -1029,3 +1029,114 @@ export class Rewrites implements Replacements {
     return this.patterns.get(id);
   }
 }
+
+// What an instance's tables of expressions keep of each one: its id and span, and the few parts
+// their readers look at, rather than the expression itself. A copy of a node holds every node under
+// it, and an array of expressions holds each at the size of the largest kind, so the types, calls
+// and coercions tables keeping a copy per entry held most of the program's expressions many times
+// over: a quarter of what checking the compiler keeps live.
+export type Site = { id: usize; start: usize; end: usize; kind: Expr["kind"]; name?: string; op?: string; object?: { id: usize; end: usize }; left?: usize; right?: usize; callee?: Callee };
+
+// A call's callee, as a site keeps it: what it is, where, and the name it calls by.
+export type Callee = { kind: Expr["kind"]; start: usize; end: usize; name?: string; objectEnd?: usize };
+
+// The site of `e`, as a SiteTable keeps it.
+export function siteOf(e: Ref<Expr>): Site {
+  let s: Site = { id: e.id, start: e.start, end: e.end, kind: e.kind };
+  if (e.kind === "ident") s.name = e.name;
+  if (e.kind === "member") {
+    s.name = e.name;
+    s.object = { id: e.object.id, end: e.object.end };
+  }
+  if (e.kind === "binary") {
+    s.op = e.op;
+    s.left = e.left.id;
+    s.right = e.right.id;
+  }
+  if (e.kind === "call" || e.kind === "new") {
+    const c: Ref<Expr> = e.callee;
+    let callee: Callee = { kind: c.kind, start: c.start, end: c.end };
+    if (c.kind === "ident") callee.name = c.name;
+    if (c.kind === "member") {
+      callee.name = c.name;
+      callee.objectEnd = c.object.end;
+    }
+    s.callee = callee;
+  }
+  return s;
+}
+
+// Each expression's value by its id, beside the expression's site: an instance's `types`, `calls`
+// and `coercions`.
+export class SiteTable<V> {
+  private sites = new Map<usize, Site>();
+  private siteValues = new Map<usize, V>();
+
+  get size(): usize {
+    return this.sites.size;
+  }
+
+  get(node: Ref<Expr>): V | undefined {
+    return this.siteValues.get(node.id);
+  }
+
+  has(node: Ref<Expr>): boolean {
+    return this.sites.has(node.id);
+  }
+
+  getById(id: usize): V | undefined {
+    return this.siteValues.get(id);
+  }
+
+  set(this: Mut<this>, node: Ref<Expr>, value: V): Mut<this> {
+    const id = node.id;
+    if (!this.sites.has(id)) this.sites.set(id, siteOf(node));
+    this.siteValues.set(id, value);
+    return this;
+  }
+
+  // A value for an expression known by its site, as when a table is rewritten from another.
+  setSite(this: Mut<this>, site: Site, value: V): Mut<this> {
+    const id = site.id;
+    if (!this.sites.has(id)) this.sites.set(id, site);
+    this.siteValues.set(id, value);
+    return this;
+  }
+
+  ids(): usize[] {
+    let out: usize[] = [];
+    for (const id of this.sites.keys()) out.push(id);
+    return out;
+  }
+
+  setValueById(this: Mut<this>, id: usize, value: V): void {
+    if (this.sites.has(id)) this.siteValues.set(id, value);
+  }
+
+  delete(this: Mut<this>, node: Ref<Expr>): boolean {
+    const id = node.id;
+    this.siteValues.delete(id);
+    return this.sites.delete(id);
+  }
+
+  clear(this: Mut<this>): void {
+    this.sites.clear();
+    this.siteValues.clear();
+  }
+
+  *keys(): IterableIterator<Site> {
+    for (const k of this.sites.keys()) yield this.sites.get(k)!;
+  }
+
+  *values(): IterableIterator<V> {
+    for (const k of this.sites.keys()) yield this.siteValues.get(k)!;
+  }
+
+  *entries(): IterableIterator<[Site, V]> {
+    for (const k of this.sites.keys()) yield [this.sites.get(k)!, this.siteValues.get(k)!];
+  }
+
+  [Symbol.iterator](): IterableIterator<[Site, V]> {
+    return this.entries();
+  }
+}

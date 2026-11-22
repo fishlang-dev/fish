@@ -13,10 +13,17 @@ import type { Session } from "./compilation.fsh";
 // The functions it defines, which an export can't replace.
 export const MATH_RUNTIME = ["acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "cbrt", "cos", "cosh", "exp", "expm1", "hypot", "log", "log10", "log1p", "log2", "pow", "sin", "sinh", "tan", "tanh"];
 
-// The vendored sources beside the compiler's own, found when a build first needs them rather than
-// while compiling, which a compiler built by Fish would otherwise do.
+// Where the vendored sources and the math runtime's are: `../share/fishc` beside the executable, as
+// a release unpacks them, or else the source tree this fishc was built from. Found when a build
+// first needs them rather than while compiling, which a compiler built by Fish would otherwise do.
+export function sourceRoot(): string {
+  const shared = join(dirname(process.execPath), "..", "share", "fishc");
+  if (existsSync(join(shared, "vendor"))) return shared;
+  return join(import.meta.dir, "..");
+}
+
 function vendor(): string {
-  return join(import.meta.dir, "..", "vendor");
+  return join(sourceRoot(), "vendor");
 }
 
 // Without contraction into fused multiply-adds, so every target computes the same steps and the
@@ -25,7 +32,7 @@ function vendor(): string {
 function mathSources(): { source: string; flags: string[] }[] {
   const common = ["-O2", "-ffp-contract=off", "-fPIC"];
   const libc = join(vendor(), "llvm-libc", "libc");
-  let sources = [{ source: join(import.meta.dir, "runtime", "math.cpp"), flags: ["-x", "c++", "-std=c++17", "-fno-exceptions", "-fno-rtti", `-I${libc}`, ...common] }];
+  let sources = [{ source: join(sourceRoot(), "src", "runtime", "math.cpp"), flags: ["-x", "c++", "-std=c++17", "-fno-exceptions", "-fno-rtti", `-I${libc}`, ...common] }];
   for (const f of ["acosh", "asinh", "atanh", "cosh", "sinh", "tanh"]) sources.push({ source: join(vendor(), "core-math", "src", "binary64", f, `${f}.c`), flags: ["-x", "c", "-std=c11", ...common] });
   return sources;
 }
