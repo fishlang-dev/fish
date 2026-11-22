@@ -9,7 +9,7 @@ import { FILE_SPAN, stdModuleAt } from "./program.fsh";
 import { comptimeArgument, comptimeBody, stringsType, untagged, type Value } from "./comptime.fsh";
 import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, PropertyName, Span, Stmt, TypeNode, TypeParam } from "./parser.fsh";
 import { lowerPattern, type PatternInfo } from "./match.fsh";
-import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
+import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, TypeTable, walk, walkWhile, type AnyNode, type Ids, type Site } from "./nodes.fsh";
 import { cloneDeclarator, cloneExpr, cloneInterface, cloneObjectProp, cloneParam, clonePattern, clonePatternProp, cloneStmt, cloneStmts, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts, withIdExpr } from "./rebuild.fsh";
 
 type Arrow = Extract<Expr, { kind: "arrow" }>;
@@ -62,7 +62,7 @@ function instanceStandIn(held: Ref<Instance>): Instance {
 // The tables a new instance starts with, each empty.
 export function emptyTables(): Pick<Instance, "types" | "locals" | "calls" | "setters" | "coercions" | "jumps" | "borrowsFrom" | "raises" | "caught" | "consumes" | "patterns" | "copiesOut"> {
   return {
-    types: new NodeMap<Expr, Type>(), locals: new NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>(), calls: new NodeMap<Expr, InstanceId>(), setters: new NodeMap<Expr, InstanceId>(),
+    types: new TypeTable<Type>(), locals: new NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>(), calls: new NodeMap<Expr, InstanceId>(), setters: new NodeMap<Expr, InstanceId>(),
     coercions: new NodeMap<Expr, Type>(), jumps: new NodeMap<Stmt, Stmt>(), borrowsFrom: new NodeMap<Expr, Expr[]>(),
     raises: new NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>(), caught: new NodeMap<Stmt, Type>(),
     consumes: new Set<usize>(), patterns: new NodeMap<Pattern, PatternInfo>(), copiesOut: new NodeSet<Expr>(),
@@ -88,7 +88,7 @@ export type Instance = {
   // type of a closure made from it.
   branded?: { params: Map<LocalId, Type>; returns: Type };
   // Every value expression's type.
-  types: NodeMap<Expr, Type>;
+  types: TypeTable<Type>;
   // Each `JSON.stringify` argument's type before lowering, which keeps how fields were spelled.
   spelled?: NodeMap<Expr, Type>;
   // The binding each name use, declaration, parameter and shorthand property refers to,
@@ -2159,8 +2159,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   /** @throws {CompileError} */
   private swapTypes(this: Mut<this>, id: InstanceId, swap: Ref<TypeMap<Type, Type>>): void {
-    let types: [Expr, Type][] = [];
-    for (const [e, t] of this.tables.arenas.instanceOf(id).types) types.push([cloneExpr(e), t]);
+    let types: [Site, Type][] = [];
+    for (const [e, t] of this.tables.arenas.instanceOf(id).types) types.push([{ ...e }, t]);
     for (let i: usize = 0; i < types.length; i++) types[i]![1] = this.replaced(types[i]![1], swap);
     let coercions: [Expr, Type][] = [];
     for (const [e, t] of this.tables.arenas.instanceOf(id).coercions) coercions.push([cloneExpr(e), t]);
@@ -2178,7 +2178,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     let instance = this.tables.arenas.instanceMut(id);
     while (types.length > 0) {
       const [e, t] = types.shift()!;
-      instance.types.set(e, t);
+      instance.types.setSite(e, t);
     }
     while (coercions.length > 0) {
       const [e, t] = coercions.shift()!;
@@ -2634,18 +2634,19 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.views.set(id, this.tables.arenas.instanceOf(id).returns);
     // `JSON.stringify` and printing write a field by how it was spelled, which lowering forgets.
     let spelled: [Expr, Type][] = [];
-    const typed = this.tables.arenas.instanceOf(id).types;
-    for (const e of typed.keys()) {
-      const instance = this.tables.arenas.instanceOf(id);
-      if (e.kind === "call" && this.tables.jsonCalls.get(e) === "stringify" && e.args.length > 0) {
-        const x: Ref<Expr> = e.args[0]!;
-        const type = instance.coercions.get(x) ?? instance.types.get(x);
-        if (type !== undefined) spelled.push([cloneExpr(x), type]);
-      }
-      if (this.tables.printed.has(e)) {
-        const type = instance.coercions.get(e) ?? instance.types.get(e);
-        if (type !== undefined) spelled.push([cloneExpr(e), type]);
-      }
+    // Read from the program's tables of those calls, which keep their nodes, since an instance's
+    // types keep only each expression's site.
+    const typed = this.tables.arenas.instanceOf(id);
+    for (const [e, which] of this.tables.jsonCalls.entries()) {
+      if (which !== "stringify" || !typed.types.has(e) || e.kind !== "call" || e.args.length === 0) continue;
+      const x: Ref<Expr> = e.args[0]!;
+      const type = typed.coercions.get(x) ?? typed.types.get(x);
+      if (type !== undefined) spelled.push([cloneExpr(x), type]);
+    }
+    for (const e of this.tables.printed.values()) {
+      if (!typed.types.has(e)) continue;
+      const type = typed.coercions.get(e) ?? typed.types.get(e);
+      if (type !== undefined) spelled.push([cloneExpr(e), type]);
     }
     if (spelled.length > 0) {
       let instance = this.tables.arenas.instanceMut(id);
@@ -2667,9 +2668,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       const into = this.tables.arenas.instanceOf(to).generator;
       if (from !== undefined && into !== undefined && from !== into) made.set(from, into);
     }
-    let types: [Expr, Type][] = [];
+    let types: [Site, Type][] = [];
     const typesOf = this.tables.arenas.instanceOf(id).types;
-    for (const [e, t] of typesOf) types.push([cloneExpr(e), t]);
+    for (const [e, t] of typesOf) types.push([{ ...e }, t]);
     for (let i: usize = 0; i < types.length; i++) types[i]![1] = this.lowerMade(types[i]![1], made);
     let coercions: [Expr, Type][] = [];
     const coercionsOf = this.tables.arenas.instanceOf(id).coercions;
@@ -2679,7 +2680,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       let instance = this.tables.arenas.instanceMut(id);
       while (types.length > 0) {
         const [e, t] = types.shift()!;
-        instance.types.set(e, t);
+        instance.types.setSite(e, t);
       }
       while (coercions.length > 0) {
         const [e, t] = coercions.shift()!;
@@ -2687,10 +2688,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       }
     }
     // A pipe's topic written in as a field read would run a getter once for each `%`.
-    const read = this.tables.arenas.instanceOf(id).types;
-    for (const e of read.keys()) {
-      if (e.kind !== "member" || !this.tables.substituted.has(e)) continue;
+    for (const e of this.tables.substituted.values()) {
       const instance = this.tables.arenas.instanceOf(id);
+      if (e.kind !== "member" || !instance.types.has(e)) continue;
       const held = this.recOf(instance.types.get(e.object));
       const objectType = held?.kind === "ref" ? held.to : instance.types.get(e.object);
       if (this.kindOf(objectType) === "class" && this.tables.typing.field(objectType as ClassType, e.name) === undefined) throw unsupported("pipes over a field a getter provides", e);
@@ -6730,14 +6730,13 @@ export function unreached(typing: Ref<Typing>, equalities: Ref<Tables["equalitie
       }
     }
     // A comparison of values runs each class's `equals` it reaches, through objects and unions.
-    for (const [k] of i.types) {
-      const e: Ref<Expr> = k;
+    for (const [e] of i.types) {
       if (hit !== undefined) break;
       if (e.kind !== "binary" || (e.op !== "===" && e.op !== "!==" && e.op !== "==" && e.op !== "!=")) continue;
-      const left = comparedBy(typing, equalities, i.types.get(e.left), new TypeSet<Type>());
-      const right = comparedBy(typing, equalities, i.types.get(e.right), new TypeSet<Type>());
-      for (const t of left) if (hit === undefined && dropped(arenas.instanceOf(t))) hit = reachAt(e, t, " to compare them");
-      for (const t of right) if (hit === undefined && dropped(arenas.instanceOf(t))) hit = reachAt(e, t, " to compare them");
+      const left = comparedBy(typing, equalities, i.types.getById(e.left!), new TypeSet<Type>());
+      const right = comparedBy(typing, equalities, i.types.getById(e.right!), new TypeSet<Type>());
+      for (const t of left) if (hit === undefined && dropped(arenas.instanceOf(t))) hit = { start: e.start, end: e.end, named: undefined, target: t, through: " to compare them" };
+      for (const t of right) if (hit === undefined && dropped(arenas.instanceOf(t))) hit = { start: e.start, end: e.end, named: undefined, target: t, through: " to compare them" };
     }
     if (hit === undefined) continue;
     const target = arenas.instanceOf(hit.target);

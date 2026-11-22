@@ -43,8 +43,7 @@ export class Index {
         const was = typedAt.get(e.id);
         if (was !== undefined && (was![1] || !definition)) continue;
         let typed: Typed = { start: e.start, end: e.end, type: t };
-        if (e.kind === "ident") typed.name = e.name;
-        if (e.kind === "member") typed.name = e.name;
+        if (e.name !== undefined) typed.name = e.name;
         if (was === undefined) {
           typedAt.set(e.id, [this.typed.length, definition]);
           this.typed.push(typed);
@@ -77,12 +76,12 @@ export class Index {
         const at = calleeOf(modules, e, name);
         if (at !== undefined) this.use(seen, at!, named(modules, body.start, body.end, name));
       }
-      for (const [e, t] of instance.types.entries()) {
-        if (e.kind !== "member" || instance.calls.has(e)) continue;
-        const object = instance.types.get(e.object);
+      for (const [e] of instance.types.entries()) {
+        if (e.kind !== "member" || e.object === undefined || e.name === undefined || instance.calls.getById(e.id) !== undefined) continue;
+        const object = instance.types.getById(e.object!.id);
         if (object === undefined) continue;
-        const field = fieldOf(checked, classes, object!, e.name);
-        if (field !== undefined) this.use(seen, named(modules, e.object.end, e.end, e.name), field!);
+        const field = fieldOf(checked, classes, object!, e.name!);
+        if (field !== undefined) this.use(seen, named(modules, e.object!.end, e.end, e.name!), field!);
       }
     }
     for (const m of modules) this.imports(seen, modules, m);

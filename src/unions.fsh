@@ -6,7 +6,7 @@ import { JS_TYPEOF, literalValue, TYPEOF, typeofTest, type Kind, type Verdict } 
 import type { Expr, Span } from "./parser.fsh";
 import { TypeMap, TypeSet, isNumeric } from "./typing.fsh";
 import type { ClassType, ClosureType, Field, FunctionRecord, LiteralType, Type, Typing, UnionType } from "./typing.fsh";
-import { NodeMap } from "./nodes.fsh";
+import { NodeMap, type TypeTable } from "./nodes.fsh";
 import { cloneExpr, cloneOneOf2 } from "./rebuild.fsh";
 
 // The checker's rules for unions: what goes into one, and what comparing one means.
@@ -16,7 +16,7 @@ export interface UnionContext {
   // The instance being checked, whose tables are in the arenas.
   checking(): InstanceId;
   tables(this: Mut<this>): Mut<Tables>;
-  types(this: Mut<this>): Mut<NodeMap<Expr, Type>>;
+  types(this: Mut<this>): Mut<TypeTable<Type>>;
   coercions(this: Mut<this>): Mut<NodeMap<Expr, Type>>;
 }
 export interface Union<B extends UnionContext> {
@@ -44,7 +44,7 @@ export type LiteralShape = { type: Type; writes: ShapeWrite[] };
 // A coercion, a type, or a coercion made only when the node's type isn't already the one given.
 type ShapeWrite = { table: "coercion" | "type" | "untyped"; node: Expr; type: Type };
 
-export function literalShape(typing: Mut<Typing>, e: Ref<Expr>, meets: Type, types: Ref<NodeMap<Expr, Type>>): LiteralShape | undefined {
+export function literalShape(typing: Mut<Typing>, e: Ref<Expr>, meets: Type, types: Ref<TypeTable<Type>>): LiteralShape | undefined {
   const to = typing.unfold(meets);
   if (typeof to === "string") return undefined;
   const r = typing.rec(to);
@@ -117,9 +117,9 @@ export function literalShape(typing: Mut<Typing>, e: Ref<Expr>, meets: Type, typ
 }
 
 // Records a literal's shape: its coercions, and the types it and its parts take.
-export function applyShape(shape: Ref<LiteralShape>, coercions: Mut<NodeMap<Expr, Type>>, types: Mut<NodeMap<Expr, Type>>): void {
+export function applyShape(shape: Ref<LiteralShape>, coercions: Mut<NodeMap<Expr, Type>>, types: Mut<TypeTable<Type>>): void {
   for (const w of shape.writes) {
-    if (w.table === "type") types.set(cloneExpr(w.node), w.type);
+    if (w.table === "type") types.set(w.node, w.type);
     else if (w.table === "coercion" || types.get(w.node) !== w.type) coercions.set(cloneExpr(w.node), w.type);
   }
 }
@@ -127,12 +127,12 @@ export function applyShape(shape: Ref<LiteralShape>, coercions: Mut<NodeMap<Expr
 // A field write must reach one member: through a union, which may hold any of several, the
 // field could sit anywhere, so the union has to be narrowed to one member first.
 /** @throws {CompileError} */
-export function intoMember(typing: Mut<Typing>, target: Ref<Expr>, types: Ref<NodeMap<Expr, Type>>, action = "assign to") {
+export function intoMember(typing: Mut<Typing>, target: Ref<Expr>, types: Ref<TypeTable<Type>>, action = "assign to") {
   intoMemberAt(typing, target, target, types, action);
 }
 
 /** @throws {CompileError} */
-function intoMemberAt(typing: Mut<Typing>, e: Ref<Expr>, target: Ref<Expr>, types: Ref<NodeMap<Expr, Type>>, action: string): void {
+function intoMemberAt(typing: Mut<Typing>, e: Ref<Expr>, target: Ref<Expr>, types: Ref<TypeTable<Type>>, action: string): void {
   if (e.kind === "member") {
     const found = types.get(e.object);
     const f = found === undefined || typeof found === "string" ? undefined : typing.rec(found);
@@ -219,7 +219,7 @@ export function instanceofCheck<B extends UnionContext, H extends Union<B>>(e: R
   if (found.length > 1) throw new CompileError("E0109", `'${name!}' is generic, and this value may be more than one instance of it, which 'instanceof' can't tell apart; test a field that says which`, e.right.start, e.right.end);
   const tested = c !== undefined ? c : found.length > 0 ? found[0] : undefined;
   if (tested === undefined) throw new CompileError("E0109", "the right side of 'instanceof' must be a class, or a generic class this value may be an instance of", e.right.start, e.right.end);
-  host.ctx.types().set(cloneExpr(e.right), tested);
+  host.ctx.types().set(e.right, tested);
   return "boolean";
 }
 
@@ -365,7 +365,7 @@ export function intoUnion<B extends UnionContext, H extends Union<B>>(e: Ref<Exp
     });
     const r = literal === undefined || typeof literal === "string" ? undefined : host.ctx.tables().typing.rec(literal);
     if (literal !== undefined && r !== undefined && r.kind === "literal" && sources.length === 1 && host.ctx.tables().typing.baseOf(literal as LiteralType) === type) {
-      host.ctx.types().set(cloneExpr(e), literal);
+      host.ctx.types().set(e, literal);
       break;
     }
     let into = host.ctx.tables().typing.membersFor(source, to);
