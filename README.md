@@ -58,10 +58,15 @@ Working today:
 - `async`/`await` on a multithreaded runtime, `spawn`, `shared<T>`, `Atomic`, `Lock`, `Cell`
 - comptime, macros and decorators
 - typed JSON, regular expressions, TCP and HTTP, modules, and C FFI behind `unsafe`
+- generators with lazy iterator helpers (`map`, `filter`, `take`, ...)
+- npm packages, Rust crates and `.d.ts` declarations
+- `fishc test` with in-file `test()` blocks, `fishc fmt`, the package manager, the migration
+  lint and `fishc survey`
+- `fishc lsp` and a VS Code extension, with hover, go to definition, references, completion and
+  formatting
 
-Designed but not built yet: `Lazy<T>`, `Arena<T>`, the `@route` registry, in-file `test()`
-blocks, lazy iterators (`arr.iter()`), operator-overloading traits, and the package manager,
-formatter and language server.
+Designed but not built yet: `Lazy<T>`, `Arena<T>`, the `@route` registry, lazy iterators over
+arrays (`arr.iter()`), and operator-overloading traits.
 
 ## Installing
 
