@@ -49,12 +49,18 @@ export const NATIVE = String.raw`
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <sys/resource.h>
 #ifdef __APPLE__
 #include <sys/event.h>
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
+#include <malloc/malloc.h>
 #else
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #endif
 
 // Tasks run on several threads, so everything they share is counted atomically.
@@ -6484,6 +6490,47 @@ int32_t fsh_rt_fs_unlink(fsh_str *path, fsh_str **error) {
 // code and text as C strings.
 void fsh_rt_errno_words(int64_t number, char *code, int64_t code_size, char *text, int64_t text_size) {
   fsh_errno_words((int)number, code, (size_t)code_size, text, (size_t)text_size);
+}
+
+// The process's memory in bytes: 0 its resident size now, 1 the most it has been resident, and 2
+// what malloc holds allocated, for FISH_MEM's table of what each compiler stage keeps.
+int64_t fsh_rt_memory(int64_t which) {
+  if (which == 1) {
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) != 0) return -1;
+#ifdef __APPLE__
+    return (int64_t)usage.ru_maxrss;
+#else
+    return (int64_t)usage.ru_maxrss * 1024;
+#endif
+  }
+#ifdef __APPLE__
+  if (which == 0) {
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) return -1;
+    return (int64_t)info.resident_size;
+  }
+  malloc_statistics_t stats;
+  malloc_zone_statistics(NULL, &stats);
+  return (int64_t)stats.size_in_use;
+#else
+  if (which == 0) {
+    long pages = 0, resident = 0;
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (!f) return -1;
+    int read = fscanf(f, "%ld %ld", &pages, &resident);
+    fclose(f);
+    return read == 2 ? (int64_t)resident * sysconf(_SC_PAGESIZE) : -1;
+  }
+  // mallinfo2 is glibc's alone, from 2.33; musl has nothing like it.
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33))
+  struct mallinfo2 info = mallinfo2();
+  return (int64_t)info.uordblks;
+#else
+  return -1;
+#endif
+#endif
 }
 
 // Node's string flags for open, as libuv's table reads them, in this system's bits; -1 for one

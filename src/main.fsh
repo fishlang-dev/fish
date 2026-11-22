@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { bodyOf, type Arenas } from "./arenas.fsh";
 import { C_KEYWORDS } from "./check.fsh";
 import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.fsh";
-import { formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, type Compilation, type Session, type Tables } from "./compilation.fsh";
+import { formatMemory, formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, type Compilation, type Reading, type Session, type Tables } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { cachedSession } from "./stdcache.fsh";
 import { CompileError, copyNames, formatError, movedOffset, type Source } from "./diag.fsh";
@@ -844,7 +844,14 @@ export function indented(json: string): string {
 function sessionWith(locked: boolean, timed: boolean, checking = false): BuildSession {
   let made = cachedSession();
   made.locking.locked = locked;
-  if (timed) made.timings = newTimings();
+  // FISH_MEM=1 records what the process holds as each stage ends, as stages are timed.
+  const memory = process.env.FISH_MEM === "1";
+  if (timed || memory) {
+    let timings = newTimings();
+    timings.report = timed;
+    if (memory) timings.memory = new Map<string, Reading>();
+    made.timings = timings;
+  }
   if (checking) made.checkCache = false;
   return made;
 }
@@ -1041,7 +1048,9 @@ function fail(message: string): never {
 
 // The time each of a build's `stages` took, printed when the build was timed.
 function reportTimings(session: Ref<Session>, stages: Ref<string[]>, start: f64) {
-  if (session.timings !== undefined) process.stderr.write(formatTimings(session.timings, stages, performance.now() - start));
+  if (session.timings === undefined) return;
+  if (session.timings.report) process.stderr.write(formatTimings(session.timings, stages, performance.now() - start));
+  if (session.timings.memory !== undefined) process.stderr.write(formatMemory(session.timings.memory!, stages));
 }
 
 // A directory `fishc survey` can read, holding TypeScript.

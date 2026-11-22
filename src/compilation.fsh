@@ -506,13 +506,25 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
 // `inner` is the time the stages running inside the current one have taken so far. `objects` names
 // the cached objects built, and counts those reused. `now` is the clock, which a test replaces.
 // `manual`, when set, is the clock: a test sets it and moves it by hand.
-export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64 };
+// `report` prints the times; `memory`, kept when FISH_MEM=1 asks, is what the process held as each
+// stage ended, the most a stage ended at when it runs more than once.
+export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading> };
+
+// The process's memory as a stage ended, in bytes: resident now, the most it has been resident,
+// and what malloc holds allocated. -1 where the system can't say.
+export type Reading = { rss: i64; peak: i64; heap: i64 };
+
+declare function fsh_rt_memory(which: i64): i64;
+
+function reading(): Reading {
+  return { rss: unsafe { fsh_rt_memory(0) }, peak: unsafe { fsh_rt_memory(1) }, heap: unsafe { fsh_rt_memory(2) } };
+}
 
 export const FRONT_END = ["parse", "macros", "check", "moves", "comptime"];
 export const NATIVE_STAGES = ["compile", "runtime", "link"];
 
 export function newTimings(): Timings {
-  const made: Timings = { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 } };
+  const made: Timings = { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 }, report: true };
   return made;
 }
 
@@ -555,6 +567,12 @@ export function stageEnd(session: Mut<Session>, name: string, started: Ref<Start
   const spent = now(session.timings) - started.start;
   session.timings.ms.set(name, (session.timings.ms.get(name) ?? 0) + spent - session.timings.inner);
   session.timings.inner = started.outer + spent;
+  if (session.timings.memory !== undefined) {
+    const now = reading();
+    const was = session.timings.memory.get(name);
+    const kept: Reading = was === undefined ? now : { rss: Math.max(was!.rss, now.rss), peak: now.peak, heap: Math.max(was!.heap, now.heap) };
+    session.timings.memory.set(name, kept);
+  }
 }
 
 // A part of a stage, timed apart while the stage keeps all of its own time.
@@ -588,6 +606,18 @@ export function timed<T>(timings: Timings | undefined, name: string, run: Timed<
 export function formatTimings(timings: Ref<Timings>, stages: Ref<string[]>, total: f64): string {
   const line = (name: string, ms: f64, note?: string) => `${name.padEnd(9)}${ms.toFixed(1).padStart(9)} ms${note !== undefined ? ` (${note})` : ""}\n`;
   return stages.map((s) => line(s, timings.ms.get(s) ?? 0, timings.notes.get(s))).join("") + line("total", total);
+}
+
+// FISH_MEM's table: for each stage that ran, in order, what the process held as it ended.
+export function formatMemory(memory: Ref<Map<string, Reading>>, stages: Ref<string[]>): string {
+  const mib = (n: i64) => (n < 0 ? "?" : `${((n as f64) / 1048576).toFixed(1)} MiB`).padStart(14);
+  let out = `${"stage".padEnd(12)}${"resident".padStart(14)}${"peak".padStart(14)}${"malloc'd".padStart(14)}\n`;
+  for (const s of stages) {
+    const r = memory.get(s);
+    if (r !== undefined) out += `${s.padEnd(12)}${mib(r!.rss)}${mib(r!.peak)}${mib(r!.heap)}\n`;
+  }
+  const end = reading();
+  return out + `${"end".padEnd(12)}${mib(end.rss)}${mib(end.peak)}${mib(end.heap)}\n`;
 }
 
 // Which cached objects a build made and how many it reused, as the runtime stage's note.
