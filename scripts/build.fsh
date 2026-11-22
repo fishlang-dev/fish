@@ -7,7 +7,8 @@
 // fishc at all.
 // `--record` rebuilds stage 0 and writes its digest for this machine into stage0.toml.
 // `--source <tree>` builds the src of another tree, as a release builds its tagged commit's.
-//   fishc run scripts/build.fsh -- [-o <fishc>] [--stage0 <fishc>|<tarball>] [--from-source] [--record] [--source <tree>]
+// `--leaks` builds fishc with `--leaks`, for scripts/memsites.fsh to read what it holds.
+//   fishc run scripts/build.fsh -- [-o <fishc>] [--stage0 <fishc>|<tarball>] [--from-source] [--record] [--source <tree>] [--leaks]
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -138,10 +139,12 @@ async function ran(label: string, cmd: string[], cwd: string): Promise<i64> thro
 
 // fishc built by `fishc` from the source in `src` into `out`, as a release build. A fishc finds
 // vendor and the runtime's sources from where its source was when it was built, so `src` is a
-// directory that stays: the repository's src, or the mirror in stage 0's own tree.
-export async function compiled(fishc: string, src: string, out: string): Promise<boolean> throws IoError {
+// directory that stays: the repository's src, or the mirror in stage 0's own tree. With `leaks`, a
+// `--leaks` build, whose fishc reports at exit what it still holds, by allocation site.
+export async function compiled(fishc: string, src: string, out: string, leaks = false): Promise<boolean> throws IoError {
   const started = Date.now();
-  const code = await ran(`building ${out} from ${src}, about 25 minutes on a fast machine`, [fishc, "build", "main.fsh", "--release", "-o", out], src);
+  const flags = leaks ? ["--release", "--leaks"] : ["--release"];
+  const code = await ran(`building ${out} from ${src}, about 25 minutes on a fast machine`, [fishc, "build", "main.fsh", ...flags, "-o", out], src);
   if (code !== 0) return false;
   console.log(`built ${out} in ${(Date.now() - started) / 1000}s`);
   return true;
@@ -267,6 +270,6 @@ async function main(): Promise<void> throws IoError | Error {
   else unpacked(p.commit, root);
   mkdirSync(dirname(out), { recursive: true });
   const tree = option(args, "--source");
-  const built = await compiled(stage0, join(tree === undefined ? root : resolve(tree!), "src"), out);
+  const built = await compiled(stage0, join(tree === undefined ? root : resolve(tree!), "src"), out, args.includes("--leaks"));
   if (!built) fail(`stage 0 couldn't build ${out}`);
 }
