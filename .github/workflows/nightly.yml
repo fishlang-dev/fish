@@ -1,0 +1,18 @@
+# Builds a nightly fishc tarball for macOS on ARM64 and keeps it as the run's artifact. Run by hand
+# while CI is off; add a schedule trigger when it comes back.
+name: nightly
+on: workflow_dispatch
+jobs:
+  nightly:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - run: sh scripts/bootstrap.sh
+      - run: build/fishc run scripts/release.fsh -- --nightly
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fishc-nightly
+          path: dist/*.tar.gz*

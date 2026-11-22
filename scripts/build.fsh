@@ -3,7 +3,8 @@
 // its digest matches; with no stage 0 cached, it is built from the pinned commit, which needs git
 // and, this once, Bun. scripts/bootstrap.sh runs this with no fishc at all.
 // `--record` rebuilds stage 0 and writes its digest for this machine into stage0.toml.
-//   fishc run scripts/build.fsh -- [-o <fishc>] [--stage0 <fishc>] [--record]
+// `--source <tree>` builds the src of another tree, as a release builds its tagged commit's.
+//   fishc run scripts/build.fsh -- [-o <fishc>] [--stage0 <fishc>] [--record] [--source <tree>]
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -192,6 +193,7 @@ async function main(): Promise<void> throws IoError | Error {
   }
   prepared(p, root);
   mkdirSync(dirname(out), { recursive: true });
-  const built = await compiled(stage0, join(root, "src"), out);
+  const source = option(args, "--source");
+  const built = await compiled(stage0, join(source === undefined ? root : resolve(source!), "src"), out);
   if (!built) fail(`stage 0 couldn't build ${out}`);
 }

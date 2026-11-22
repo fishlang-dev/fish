@@ -21,7 +21,7 @@ import type { Ids } from "./nodes.fsh";
 import { bundle } from "./bundle.fsh";
 import { JS_NATIVE } from "./js_native.fsh";
 import { NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
-import { cachedObject, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, type BuildSession, type Unit } from "./mathlib.fsh";
+import { cachedObject, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
 import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
@@ -956,7 +956,7 @@ function fixedText(src: string, shown: string, fsh: Imported): { text?: string; 
 // Found when a build needs them rather than while compiling, which a compiler built by Fish would
 // otherwise do.
 export function engineDir(): string {
-  return join(import.meta.dir, "..", "vendor", "quickjs-ng");
+  return join(sourceRoot(), "vendor", "quickjs-ng");
 }
 
 export function engineSources(): string[] {

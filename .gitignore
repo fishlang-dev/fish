@@ -11,3 +11,6 @@ CLAUDE.md
 
 # fishc as scripts/build.fsh builds it
 build/
+
+# Release tarballs scripts/release.fsh writes
+dist/
