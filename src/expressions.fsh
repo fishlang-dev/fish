@@ -88,7 +88,7 @@ function arrowFunction(c: Mut<Cursor>): Expr | undefined {
   const head = c.attempt((c) => arrowHead(c));
   if (head === undefined) return undefined;
   const body: Expr | Stmt[] = c.at("{") ? block(c) : expression(c);
-  const h = head!;
+  const h = head;
   let arrow: Extract<Expr, { kind: "arrow" }> = { id: nextId(c.ids), kind: "arrow", move: h.move, async: h.async, typeParams: h.typeParams, params: h.params, returnType: h.returnType, body, start, end: c.end() };
   if (h.throws !== undefined) arrow.throws = h.throws;
   return arrow;
@@ -357,7 +357,7 @@ function chain(c: Mut<Cursor>, head: Expr, calls: boolean): Expr {
       let typeArgs: TypeNode[] | undefined = [];
       if (c.at("<")) typeArgs = optional ? typeArguments(c, true) : c.attempt((c) => typeArguments(c, false));
       if (typeArgs === undefined) return e;
-      const written = typeArgs!;
+      const written = typeArgs;
       if (c.at("(")) {
         c.next();
         const args = c.list((c) => element(c), ")");
