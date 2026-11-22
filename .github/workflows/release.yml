@@ -1,6 +1,6 @@
-# Publishes a release when its tag is pushed: the tagged commit's fishc packed for macOS on ARM64,
-# attached with its sha256, and the tag's CHANGELOG.md section as the notes. The tag and its release
-# commit come from `fishc run scripts/release.fsh -- <version>`.
+# Publishes a release when its tag is pushed: the tagged commit's fishc packed for each target fishc
+# runs on, attached with their sha256s, and the tag's CHANGELOG.md section as the notes. The tag and
+# its release commit come from `fishc run scripts/release.fsh -- <version>`.
 name: release
 on:
   push:
@@ -8,8 +8,11 @@ on:
 permissions:
   contents: write
 jobs:
-  release:
-    runs-on: macos-latest
+  pack:
+    strategy:
+      matrix:
+        os: [macos-latest, macos-15-intel, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,8 +22,27 @@ jobs:
         with:
           path: ~/.cache/fish/stage0
           key: stage0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('stage0.toml') }}
-      - run: sh scripts/bootstrap.sh
+      - name: Bootstrap
+        id: bootstrap
+        run: |
+          arch=$(uname -m); case "$arch" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; esac
+          host="$arch-$(uname -s | tr '[:upper:]' '[:lower:]')"
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+          if grep -q "^\"$host\" = " stage0.toml; then sh scripts/bootstrap.sh; else sh scripts/bootstrap.sh --record; fi
       - run: build/fishc run scripts/release.fsh -- --pack "${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fishc-${{ steps.bootstrap.outputs.host }}
+          path: dist/*.tar.gz*
+  publish:
+    needs: pack
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
