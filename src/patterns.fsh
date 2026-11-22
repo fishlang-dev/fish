@@ -106,7 +106,7 @@ export function toPattern(c: Mut<Cursor>, e: Expr): Pattern {
         const last = items.pop();
         if (last === undefined) items.push(undefined);
         else {
-          const x = last!;
+          const x = last;
           if (x.kind === "spread") rest = toPattern(c, x.value);
           else items.push(x);
         }

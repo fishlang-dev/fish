@@ -53,7 +53,7 @@ export class Queries {
 /** @throws {CompileError | Error | IoError} */
 function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, open: Ref<Map<string, string>>, editing: boolean): Kept {
   if (kept !== undefined) {
-    let reused = kept!;
+    let reused = kept;
     reused.checked.tables.session = session;
     const comparing = partStart(reused.checked.tables.session);
     const same = unchanged(reused.contents, open);
@@ -66,7 +66,7 @@ function checkedFrom(session: Session, file: string, looked: Mut<string[]>, kept
     }
     let { done, session: back } = rechecked(reused, open);
     if (done !== undefined) {
-      let carried = done!;
+      let carried = done;
       for (const f of carried.contents.keys()) looked.push(f);
       carried.carried++;
       return carried;
@@ -165,7 +165,7 @@ function rechecked(kept: Kept, open: Ref<Map<string, string>>): { done: Kept | u
     let moves = composedMoves(was, before.length, edit.moves);
     let spill = spillFrom(was, before.length);
     // Each body read again is put past every position the kept check holds, mapped to where it is.
-    let found = taken!;
+    let found = taken;
     while (found.length > 0) {
       let body = found.shift()!;
       const ci = wanted.findIndex((w) => w.owner === body.owner && w.name === body.name);
@@ -186,14 +186,7 @@ function rechecked(kept: Kept, open: Ref<Map<string, string>>): { done: Kept | u
     k.contents.set(k.loaded.modules[index]!.path, now);
   }
   let { checked, parts, loaded, contents } = k;
-  let made: { checked: Checked; parts: CheckerParts; fallback: string | undefined; rechecked: Set<InstanceId> } | undefined = undefined;
-  try {
-    made = recheckKept(checked, parts, bodies);
-  } catch (e) {
-    if (e instanceof CompileError) throw sourced(e, undefined, loaded.sources);
-    throw e;
-  }
-  let done = made!;
+  let done = recheckedSourced(checked, parts, bodies, loaded.sources);
   if (done.fallback !== undefined) {
     let { tables } = done.checked;
     return { done: undefined, session: tables.session };
@@ -279,18 +272,35 @@ function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, lo
   }
 }
 
-// `check` of a whole program, timed as the check stage, its errors given the program's files.
+// `checkKeeping` and `recheckKept`, their errors given the program's files. Each is a function of
+// its own so that the checked program is returned straight from the call: kept in a local across
+// the `try` and unwrapped after it, as `made!`, every array and map in it would be copied while
+// the original stayed alive beside the copy, the whole checked program held twice.
 /** @throws {CompileError} */
-export function checkedProgram(compilation: Compilation, program: Stmt[], taken: Set<string> | false, sources: Ref<Source[]>, module = false): { checked: Checked; parts: CheckerParts } {
-  const started = stageStart(compilation.session);
-  let made: { checked: Checked; parts: CheckerParts } | undefined = undefined;
+function checkedSourced(compilation: Compilation, program: Stmt[], taken: Set<string> | false, sources: Ref<Source[]>, module: boolean): { checked: Checked; parts: CheckerParts } {
   try {
-    made = checkKeeping(compilation, program, taken, false, module);
+    return checkKeeping(compilation, program, taken, false, module);
   } catch (e) {
     if (e instanceof CompileError) throw sourced(e, undefined, sources);
     throw e;
   }
-  let done = made!;
+}
+
+/** @throws {CompileError} */
+function recheckedSourced(checked: Checked, parts: CheckerParts, bodies: Replaced[], sources: Ref<Source[]>): { checked: Checked; parts: CheckerParts; fallback: string | undefined; rechecked: Set<InstanceId> } {
+  try {
+    return recheckKept(checked, parts, bodies);
+  } catch (e) {
+    if (e instanceof CompileError) throw sourced(e, undefined, sources);
+    throw e;
+  }
+}
+
+// `check` of a whole program, timed as the check stage, its errors given the program's files.
+/** @throws {CompileError} */
+export function checkedProgram(compilation: Compilation, program: Stmt[], taken: Set<string> | false, sources: Ref<Source[]>, module = false): { checked: Checked; parts: CheckerParts } {
+  const started = stageStart(compilation.session);
+  let done = checkedSourced(compilation, program, taken, sources, module);
   stageEnd(done.checked.tables.session, "check", started);
   stopAfter(done.checked.tables.session, "check");
   return done;

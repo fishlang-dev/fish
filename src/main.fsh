@@ -9,7 +9,7 @@ import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type O
 import { formatMemory, formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Reading, type Session, type Tables } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { cachedSession } from "./stdcache.fsh";
-import { CompileError, copyNames, formatError, movedOffset, type Source } from "./diag.fsh";
+import { CompileError, copyNames, formatError, movedOffset, type Names, type Source } from "./diag.fsh";
 import { load, type Loaded, type RustCrate } from "./modules.fsh";
 import { resolvePackages } from "./dependencies.fsh";
 import { pack, prepare, submit, unsafeDependencies } from "./publish.fsh";
@@ -107,6 +107,19 @@ function compiledIn(compilation: Compilation, src: string, file: string, release
   return generated(made.checked, made.loaded, { src, file, release, panic, library, sources, leaks, debug, failed });
 }
 
+// `codegenChecked`, its errors given the program's files. A function of its own so that what
+// codegen made is returned straight from the call: unwrapped from a local after the `try`, the
+// checked program and its IR would be copied whole while the originals stayed alive.
+/** @throws {CompileError | Error | IoError | JsonError} */
+function codegenSourced(checked: Checked, options: Options, names: Names, sources: Ref<Source[]>): { ir: string; checked: Checked; emitted: Emitted | undefined } {
+  try {
+    return codegenChecked(checked, options);
+  } catch (e) {
+    if (e instanceof CompileError) throw sourced(e, names, sources);
+    throw e;
+  }
+}
+
 // The IR of a checked program, timed as the codegen stage, with its packages bundled in and, in a
 // debug build, its debug info added.
 /** @throws {CompileError | Error | IoError | JsonError} */
@@ -115,14 +128,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   const { src, file, release } = options;
   const debug = options.debug === true;
   const started = stageStart(checked.tables.session);
-  let made: { ir: string; checked: Checked; emitted: Emitted | undefined } | undefined = undefined;
-  try {
-    made = codegenChecked(checked, options);
-  } catch (e) {
-    if (e instanceof CompileError) throw sourced(e, names, loaded.sources);
-    throw e;
-  }
-  let done = made!;
+  let done = codegenSourced(checked, options, names, loaded.sources);
   const bundling = partStart(done.checked.tables.session);
   let ir = bundled(done.ir, loaded);
   if (debug) ir = withDebugInfo(ir, src, file, [...loaded.sources], release);
