@@ -1,7 +1,15 @@
 # The fishc that builds the compiler: the commit it is built from, and for each target the sha256
 # of its binary with the Mach-O UUID zeroed and the code signature left out, which every link makes
-# anew. Changed only when stage 0 moves to a later commit that passed the bootstrap fixpoint.
-commit = "4368baa1d284111ff1df43dbcfe41d5caa74c9ec"
+# anew. Once stage 0 is a release, bootstrap.sh downloads its tarball and checks it against
+# [tarballs]; `chain` rebuilds it from source instead, its first commit built from TypeScript by
+# Bun and each later one by the one before. Changed by scripts/promote.fsh.
+commit = "19fa9b25ea4fe8ca29bdc7a6a18d773d70367495"
+release = "v0.1.0"
+releases = "https://github.com/fishlang-dev/fish/releases/download"
+chain = ["4368baa1d284111ff1df43dbcfe41d5caa74c9ec", "19fa9b25ea4fe8ca29bdc7a6a18d773d70367495"]
 
 [digests]
-"arm64-darwin" = "57478b1990d501d3e36f41e2eba3d55f5a0a7f2c8264a951d8aeabba69d64c78"
+"arm64-darwin" = "d4a0a1c55d2cc75986cb5169b0613afe13abbc442462520d6821456660e117e0"
+
+[tarballs]
+"arm64-darwin" = "50d57e78d88ced9991e3682e691c9edcc02af517445724d574beff0e815ade20"
