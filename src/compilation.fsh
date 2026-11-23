@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.fsh";
 import type { Value } from "./comptime.fsh";
-import { copyNames, type CompileError, type Names } from "./diag.fsh";
+import { copyNames, type BorrowEvent, type CompileError, type Names } from "./diag.fsh";
 import type { Kind, Verdict } from "./narrow.fsh";
 import { Rewrites, NodeMap, NodeSet, type Id, type Ids } from "./nodes.fsh";
 import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.fsh";
@@ -56,6 +56,8 @@ export type Counts = { enums: usize; expansions: usize; constants: usize; checks
 // `failed`: when present, codegen goes on past a function it fails on, declaring it in place of
 // its code and adding `symbol: message` here, so one build lists every failure.
 // `checkCache`: false where a run must check rather than read a check from the cache directory.
+// `borrows`: when present, the move checker adds each move and loan it makes here, for a run
+// that shows them; no check reads it.
 
 export type Session = {
   locking: Locking;
@@ -64,6 +66,7 @@ export type Session = {
   timings?: Timings;
   failed?: string[];
   checkCache?: boolean;
+  borrows?: BorrowEvent[];
 };
 
 export function newSession(): Session {
