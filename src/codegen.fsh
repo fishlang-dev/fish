@@ -9288,8 +9288,10 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     const whole = to === undefined || this.keepsAll(this.cur().types.get(e)!, to);
     // A Rust handle is never copied: one made here, or moved out of its place, is taken whole.
+    // So is an instance with a disposer, unless the conversion leaves it behind: then what it
+    // keeps is a copy, and the instance is dropped whole where it is.
     const get2 = this.cur().types.get(e)!;
-    const rust = this.moveOnly(get2);
+    const rust = this.moveOnly(get2) && (whole || this.moveOnly(to!));
     if ((whole || rust) && this.fresh(e)) return this.value(e, true);
     if (!rust && !this.needsDrop(this.cur().types.get(e)!) && this.moveOnly(this.valueType(e))) return this.value(e);
     // A value owning nothing meets a recursive type's blocks only as the blocks just made for it.

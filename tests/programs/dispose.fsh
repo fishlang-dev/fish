@@ -75,7 +75,7 @@ class Res {
   [Symbol.dispose]() { return 1; }
 }
 function main() {}
-// error: error[E0
+// error: 2:31: error[E0101]: type 'i64' is not assignable to return type 'void'
 // case: dispose_by_hand
 class Res {
   [Symbol.dispose](): void {}
@@ -352,18 +352,25 @@ function main() {
 // expect: dispose inner
 // case: dispose_generic_class
 class Box<T> {
+  label: string;
   v: T;
-  constructor(v: T) { this.v = v; }
-  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose box of ${this.v}`); }
+  constructor(label: string, v: T) {
+    this.label = label;
+    this.v = v;
+  }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose box of ${this.label}`); }
 }
 function main() {
-  const a = new Box<i64>(1);
-  const b = new Box<string>("s");
+  const a = new Box<i64>("i64", 1);
+  const b = new Box<string[]>("strings", ["s"]);
+  const c = new Box<Box<i64>>("boxes", new Box<i64>("inner", 2));
   console.log("body");
 }
 // expect: body
-// expect: dispose box of s
-// expect: dispose box of 1
+// expect: dispose box of boxes
+// expect: dispose box of inner
+// expect: dispose box of strings
+// expect: dispose box of i64
 // case: dispose_subclass_and_base
 class Base {
   id: i64;
@@ -617,3 +624,138 @@ function main() {
   const r = JSON.parse<Res>("{}");
 }
 // error: error[E0509]: a class with a '[Symbol.dispose]' method can't be read from JSON
+// case: dispose_narrowed_to_an_object
+class Res {
+  name: string;
+  tags: string[];
+  constructor(name: string) {
+    this.name = name;
+    this.tags = [name];
+  }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+type Named = { name: string };
+function made(): Named { return new Res("returned"); }
+function main() {
+  const fresh: Named = new Res("fresh");
+  console.log(`kept ${fresh.name}`);
+  const r = new Res("place");
+  const from: Named = r;
+  console.log(`kept ${from.name}`);
+  const xs: Named[] = [new Res("element")];
+  console.log(`kept ${xs[0]!.name} and ${made().name}`);
+}
+// expect: dispose fresh
+// expect: kept fresh
+// expect: kept place
+// expect: dispose element
+// expect: dispose returned
+// expect: kept element and returned
+// expect: dispose place
+// case: dispose_many_owners
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function pick(flag: boolean): Res | null { return flag ? new Res("picked") : null; }
+function* held(): Generator<i64> {
+  const r = new Res("in generator");
+  yield 1;
+  yield 2;
+}
+function main() {
+  const either = pick(true) ?? new Res("fallback");
+  const none = pick(false) ?? new Res("fallback");
+  let g = held();
+  console.log(g.next());
+  const s = shared(new Res("shared"));
+  const pair = { either, none };
+  console.log("body");
+}
+// expect: { done: false, value: 1 }
+// expect: body
+// expect: dispose picked
+// expect: dispose fallback
+// expect: dispose shared
+// expect: dispose in generator
+// case: dispose_destructured_out
+class Res {
+  tags: string[];
+  constructor(tag: string) { this.tags = [tag]; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  const r = new Res("a");
+  const { tags } = r;
+}
+// error: error[E0214]: 'r.tags' can't be moved out of 'r'
+// case: dispose_map_get_copies
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  const m = new Map<string, Res>();
+  const got = m.get("k");
+}
+// error: error[E0213]: can't clone a 'Res': it has a '[Symbol.dispose]' method
+// case: dispose_abstract_base_and_subclass
+abstract class Shape {
+  abstract label(): string;
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.label()}`); }
+}
+class Circle extends Shape {
+  label(): string { return "circle"; }
+  [Symbol.dispose](this: Mut<this>): void { console.log("dispose circle itself"); }
+}
+function main() {}
+// error: error[E0704]: 'Circle' can't declare a '[Symbol.dispose]' method: the one 'Shape' declares reaches an abstract member
+// case: dispose_owned_receiver
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+  finish(this: Own<this>): void { console.log(`finish ${this.name}`); }
+}
+function main() {
+  const r = new Res("a");
+  r.finish();
+  new Res("temporary").finish();
+  console.log("end");
+}
+// expect: finish a
+// expect: dispose a
+// expect: finish temporary
+// expect: dispose temporary
+// expect: end
+// case: dispose_in_a_stored_closure
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function make(): () => void {
+  const r = new Res("captured");
+  return () => console.log(r.name);
+}
+function main() {
+  make()();
+}
+// error: error[E0801]: closures holding a value with a '[Symbol.dispose]' method, when stored or passed on as function values, are not supported yet
+// case: dispose_borrowed_by_a_closure
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function main() {
+  const r = new Res("local");
+  const show = () => console.log(`show ${r.name}`);
+  show();
+  show();
+}
+// expect: show local
+// expect: show local
+// expect: dispose local

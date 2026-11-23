@@ -10678,7 +10678,9 @@ export class Expressions<C extends Context> implements Union<C> {
     });
     if (holdsRust) throw new CompileError("E1004", `a Rust '${rust!.name}' can't become a '${this.ctx.typing().show(to)}' yet; call its methods on it, or take it as a generic parameter`, e.start, e.end);
     // A Dyn's copy is the compiler's, which an instance with a disposer never gets.
-    if (this.ctx.typing().holdsPart(held, (u) => this.ctx.typing().disposable(u))) throw unsupported("values with a '[Symbol.dispose]' method held in a Dyn", e);
+    if (this.ctx.typing().holdsPart(held, (u) => this.ctx.typing().disposable(u))) {
+      throw unsupported(this.ctx.typing().callableOf.has(this.ctx.typing().rec(to).of) ? "closures holding a value with a '[Symbol.dispose]' method, when stored or passed on as function values," : "values with a '[Symbol.dispose]' method held in a Dyn", e);
+    }
     const reason = this.ctx.typing().callableOf.has(this.ctx.typing().rec(to).of) ? undefined : unsatisfied(type, this.ctx.typing().rec(to).of, this.ctx.members(), { start: e.start, end: e.end });
     if (reason !== undefined) throw new CompileError("E0101", `${message}: ${reason}`, e.start, e.end);
     const blocker = this.unsent(held);

@@ -367,7 +367,7 @@ To fix it, clone the field you need, as in 'c.log.clone()', or give the class a 
   constructor() { this.log = ["opened"]; }
   [Symbol.dispose](this: Mut<this>): void { console.log(this.log.length); }
 }
-function keep(log: string[]) {}
+function keep(log: string[]) { console.log(log.length); }
 function main() {
   const c = new Conn();
   keep(c.log);
@@ -377,7 +377,7 @@ function main() {
   constructor() { this.log = ["opened"]; }
   [Symbol.dispose](this: Mut<this>): void { console.log(this.log.length); }
 }
-function keep(log: string[]) {}
+function keep(log: string[]) { console.log(log.length); }
 function main() {
   const c = new Conn();
   keep(c.log.clone());
@@ -707,7 +707,7 @@ function main() {
   constructor(name: string) { this.name = name; }
   [Symbol.dispose](this: Mut<this>): void { console.log("closed " + this.name); }
 }
-function end(c: Conn) {}
+function end(c: Conn) { console.log("ending " + c.name); }
 function main() {
   const c = new Conn("db");
   end(c);
