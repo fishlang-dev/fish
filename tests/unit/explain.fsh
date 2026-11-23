@@ -1,10 +1,11 @@
-// `fishc explain-borrows`: what the move checker logs for it.
+// `fishc explain-borrows`: what the move checker logs for it, and how the log is rendered.
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CompileError, type BorrowEvent } from "../../src/diag.fsh";
+import { explainBorrows } from "../../src/explain.fsh";
 import { analyze } from "../../src/main.fsh";
 import { cachedSession } from "../../src/stdcache.fsh";
-import { removed, scratch } from "./support.fsh";
+import { removed, same, scratch } from "./support.fsh";
 
 type Logged = { events: BorrowEvent[]; error: CompileError | undefined };
 
@@ -86,3 +87,67 @@ test("a check not asked to logs nothing", () => {
   }
   removed(dir);
 }, { timeout: 30_000 });
+
+const SHOWN = `function main() {
+  const a = make();
+  take(a); const r = b;
+  console.log(
+    a,
+    r);
+}
+`;
+
+// Where `text` starts in SHOWN, `skip` characters in.
+function at(text: string, skip: usize = 0): usize {
+  return (SHOWN.indexOf(text) as usize) + skip;
+}
+
+const MOVED = "'a' moved here: passing it to 'take' hands it over";
+
+function shownEvents(): BorrowEvent[] {
+  return [
+    { kind: "lend", start: at("= b", 2), end: at("= b", 3), text: "'b' is lent to 'r'", until: at("r);") },
+    { kind: "move", start: at("take(a)", 5), end: at("take(a)", 6), text: MOVED },
+    { kind: "move", start: at("take(a)", 5), end: at("take(a)", 6), text: MOVED },
+    { kind: "lend", start: at("console"), end: at("r);", 2), text: "'x' is lent to 'log' for this call" },
+    { kind: "lend", start: at("console"), end: at("r);", 2), text: "'x' is lent mutably to 'log' for this call" },
+  ];
+}
+
+test("events and errors are printed under the lines they are on", () => {
+  const error = new CompileError("E0201", "'a' was moved, so it can't be used here", at("    a,", 4), at("    a,", 5), { message: MOVED, start: at("take(a)", 5), end: at("take(a)", 6) });
+  same(explainBorrows(SHOWN, "t.fsh", shownEvents(), [error]), ` 1 | function main() {
+ 2 |   const a = make();
+ 3 |   take(a); const r = b;
+   |        ^ 'a' moved here: passing it to 'take' hands it over
+   |                      ^ 'b' is lent to 'r' until line 6
+ 4 |   console.log(
+   |   ^^^^^^^^^^^^ 'x' is lent mutably to 'log' for this call
+ 5 |     a,
+   |     ^ error[E0201]: 'a' was moved, so it can't be used here
+   |       line 3: 'a' moved here: passing it to 'take' hands it over
+   |       the rest of this function isn't analysed past this error
+ 6 |     r);
+ 7 | }`, "the whole file");
+});
+
+test("a range prints only its lines and what is on them", () => {
+  same(explainBorrows(SHOWN, "t.fsh", shownEvents(), [], { start: at("take"), end: at("= b;", 4) }), ` 3 |   take(a); const r = b;
+   |        ^ 'a' moved here: passing it to 'take' hands it over
+   |                      ^ 'b' is lent to 'r' until line 6`, "one line");
+  same(explainBorrows(SHOWN, "t.fsh", shownEvents(), [], { start: 0, end: at("{", 1) }), "nothing moves or is lent in lines 1 to 1 of t.fsh", "a line with nothing on it");
+});
+
+test("a loan ending on its own line says so, and the gutter fits the last line's number", () => {
+  const src = `${"//\n".repeat(9)}const r = b; use(r);\n`;
+  const b = src.indexOf("= b") as usize + 2;
+  const events: BorrowEvent[] = [{ kind: "lend", start: b, end: b + 1, text: "'b' is lent to 'r'", until: src.indexOf("r);") as usize }];
+  const lines = explainBorrows(src, "t.fsh", events, []).split("\n");
+  same(lines.slice(8).join("\n"), `  9 | //
+ 10 | const r = b; use(r);
+    |           ^ 'b' is lent to 'r' to the end of this line`, "the last lines");
+});
+
+test("a file with nothing to show says so", () => {
+  same(explainBorrows(SHOWN, "t.fsh", [], []), "nothing moves or is lent in t.fsh", "no events");
+});
