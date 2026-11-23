@@ -1,6 +1,6 @@
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId } from "./arenas.fsh";
 import { emptyTables, holdsNode, type Instance } from "./check.fsh";
-import { cloneBody, cloneSignature, declareClass, inherited, isApart, isLifetime, type Body, type ClassInfo } from "./classes.fsh";
+import { cloneSignature, declareClass, inherited, isApart, isLifetime, type Body, type ClassInfo } from "./classes.fsh";
 import { CompileError } from "./diag.fsh";
 import type { Declarations, Tables } from "./compilation.fsh";
 import { literalValue } from "./narrow.fsh";
@@ -789,9 +789,8 @@ export class Instancing<H extends InstancingHost> {
     const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...this.implicitOf(f.bodyId).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
     const isConcrete = complete && [...bindings].every(([name, t]) => isApart(name) || this.host.instancingState.concreteness.concrete(this.host.tables.typing, t));
     const generic = bindings.size > 0;
-    // From the arena, where an earlier check of the body rebuilt it, since `f` may be a copy taken
-    // before that.
-    const body = this.host.tables.arenas.addBody(cloneBody(this.host.tables.arenas.bodyOf(f.bodyId))).bodyId;
+    // The arena's own body, by its id: `f` may be a copy taken before an earlier check rebuilt it.
+    const body = f.bodyId;
     const symbol = generic && isConcrete ? instanceSymbol(this.host, f.name, bindings, byKey) : f.name;
     const checking = this.host.checking();
     const depth = generic && checking !== undefined ? this.host.tables.arenas.instanceOf(checking).depth + 1 : 0;
