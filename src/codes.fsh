@@ -699,6 +699,7 @@ To fix it, remove it, or name it with a leading '_' when it is unused on purpose
     },
   },
   W0002: { title: "unreachable code" },
+  W0003: { title: "a route left out of the OpenAPI document" },
 };
 
 // What 'fishc explain' prints for `code`, or undefined when no code is that.

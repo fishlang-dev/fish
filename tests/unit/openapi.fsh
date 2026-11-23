@@ -1,10 +1,11 @@
-// Typed routes: the route table a check fills in, and the OpenAPI document made from it.
+// Typed routes: the route table a check fills in, the OpenAPI document made from it, and
+// `fishc openapi` run as the native fishc.
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { analyze, indented } from "../../src/main.fsh";
 import { openapiOf } from "../../src/openapi.fsh";
 import { cachedSession } from "../../src/stdcache.fsh";
-import { removed, same, scratch } from "./support.fsh";
+import { fishc, ran, read, removed, same, scratch } from "./support.fsh";
 
 // The routes a check of `src` records, in the order they are written, each as a line.
 function routesOf(src: string): string {
@@ -177,3 +178,57 @@ test("an openapi document puts a mounted router's routes under its prefixes, a r
 app.get(computed, async (_req) => new Response("x")): its path isn't written as a string
 other.get("/x", async (_req) => new Response("x")): its router is mounted under a prefix that isn't written as a string, or in a router that isn't held in a local variable`, "the routes left out");
 }, { timeout: 60_000 });
+
+const SERVICE = `type NewUser = { name: string };
+type User = { id: i64; name: string };
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (_req, body: NewUser): Promise<User> => ({ id: 1, name: body.name }));
+  const path = "/computed";
+  app.get(path, async (_req) => new Response("x"));
+  const res = await app.handle(new Request("http://h/computed"));
+  console.log(res.status);
+}
+`;
+
+const SERVICE_DOCUMENT = `{"openapi":"3.1.0","info":{"title":"main.fsh","version":"0.0.0"},"paths":{"/users":{"post":{"requestBody":{"required":true,"content":{"application/json":{"schema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}}}},"responses":{"200":{"description":"OK","content":{"application/json":{"schema":{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"}},"required":["id","name"]}}}},"400":{"description":"Bad Request","content":{"text/plain":{"schema":{"type":"string"}}}}}}}}}`;
+
+// A directory holding `files`, each a name and its text.
+function project(files: Ref<[string, string][]>): string {
+  const dir = scratch("fish-openapi-");
+  try {
+    for (const [name, text] of files) writeFileSync(join(dir, name), text);
+  } catch (e) {
+    assert(false, `can't write the fixture: ${e.message}`);
+  }
+  return dir;
+}
+
+test("fishc openapi prints a program's document, names a route it leaves out, and -o writes the same text", () => {
+  const dir = project([["main.fsh", SERVICE]]);
+  const call = `app.get(path, async (_req) => new Response("x"))`;
+  const left = `main.fsh:7:3: warning[W0003]: this route is left out of the document: its path isn't written as a string\n 7 |   ${call};\n   |   ${"^".repeat(call.length)}\n`;
+  const document = `${indented(SERVICE_DOCUMENT)}\n`;
+  ran(fishc(dir, ["openapi", "main.fsh"]), 0, document, left, "the document on stdout");
+  ran(fishc(dir, ["openapi", "main.fsh", "-o", "api.json"]), 0, "", left, "the document written to a file");
+  same(read(join(dir, "api.json")), document, "the file -o wrote");
+  removed(dir);
+}, { timeout: 120_000 });
+
+test("fishc openapi takes its title and version from the package's manifest", () => {
+  const dir = project([["fish.toml", `[package]\nname = "shop"\nversion = "1.2.0"\nentry = "main.fsh"\n`], ["main.fsh", SERVICE]]);
+  const got = fishc(dir, ["openapi", "main.fsh"]);
+  same(got.out, `${indented(SERVICE_DOCUMENT.replace(`"title":"main.fsh","version":"0.0.0"`, `"title":"shop","version":"1.2.0"`))}\n`, "the document of a package's entry");
+  removed(dir);
+}, { timeout: 120_000 });
+
+test("fishc openapi prints a compile error as fishc check does, and its usage for no file or a flag it doesn't take", () => {
+  const dir = project([["main.fsh", `async function main(): Promise<void> {\n  let app = new Router();\n  app.get("/n", async (_req): Promise<i64> => "one");\n}\n`]]);
+  const bad = fishc(dir, ["openapi", "main.fsh"]);
+  const checked = fishc(dir, ["check", "main.fsh"]);
+  assert(bad.code === 1 && bad.out === "" && bad.err.includes("error[E0"), `a program that doesn't check:\ncode ${bad.code}\nstdout:\n${bad.out}\nstderr:\n${bad.err}`);
+  same(bad.err, checked.err, "the error as fishc check prints it");
+  ran(fishc(dir, ["openapi"]), 2, "", "usage: fishc openapi <file.fsh> [-o <out>]\n", "no file");
+  ran(fishc(dir, ["openapi", "main.fsh", "--release"]), 2, "", "usage: fishc openapi <file.fsh> [-o <out>]\n", "a flag it doesn't take");
+  removed(dir);
+}, { timeout: 120_000 });
