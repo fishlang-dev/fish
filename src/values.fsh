@@ -11723,7 +11723,6 @@ function rawProp(prop: Ref<ObjectProp>): string[] | undefined {
   return strings;
 }
 
-// A path as a message shows it, the collection a class extending Map or Set embeds left unsaid.
 // A disposer is the drop's to run, once: a call written out would be a second run.
 function disposedByHand(at: Ref<Expr>): CompileError {
   return new CompileError("E0710", "a '[Symbol.dispose]' method runs when its value is dropped, so it can't be called by hand, which would dispose the value twice; let the value go out of scope, or move it to where it should end", at.start, at.end);
@@ -11734,6 +11733,7 @@ function notByHand(e: Ref<Expr>): void {
   if (e.kind === "index" && isDisposeKey(e.index)) throw disposedByHand(e);
 }
 
+// A path as a message shows it, the collection a class extending Map or Set embeds left unsaid.
 const shownPath = (path: string) => path.replaceAll(`.${EMBEDDED}`, "");
 
 // How an index reads in a message: a name or a number as written, anything else as `...`.
