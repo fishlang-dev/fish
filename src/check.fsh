@@ -3912,7 +3912,9 @@ class BodyChecker implements Context, GuardHost {
     for (let i: usize = 0; i < count; i++) {
       const p = cloneParam(this.f().params[i]!);
       const type = this.state.params[i]!;
-      this.declare(paramName(p), type, !this.cx.tables.typing.holdsRef(type), true, { ...p });
+      // A group closure's group stays the one it was called with: its tasks' errors are laid
+      // out as that group's await throws them.
+      this.declare(paramName(p), type, !this.cx.tables.typing.holdsRef(type) && !this.st.grouping, true, { ...p });
       if (assignsOwn(this.f().body, paramName(p))) {
         const id = this.locals().get(p)!;
         this.state.assignedParams.add(id);

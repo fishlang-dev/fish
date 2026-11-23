@@ -1,3 +1,39 @@
+// case: taskgroup_child_error
+// expect: sibling stopped
+// expect: caught users/7 404
+// expect: after
+class NotFound {
+  path: string;
+  status: i64;
+  constructor(path: string, status: i64) {
+    this.path = path;
+    this.status = status;
+  }
+}
+async function find(path: string): Promise<void> throws NotFound {
+  await sleep(30);
+  throw new NotFound(path, 404);
+}
+async function sibling(signal: AbortSignal) {
+  try {
+    await sleep(60000, signal);
+    console.log("sibling slept");
+  } catch (e) {
+    console.log("sibling stopped");
+  }
+}
+async function main() {
+  try {
+    await taskGroup(async (group) => {
+      group.spawn(sibling(group.signal));
+      group.spawn(find("users/" + 7));
+    });
+    console.log("not reached");
+  } catch (e) {
+    console.log("caught", e.path, e.status);
+  }
+  console.log("after");
+}
 // case: taskgroup_child_reference
 // error: 'spawn' runs this Promise on another thread, so it must own everything it uses
 async function first(xs: Ref<string[]>): Promise<string> {
@@ -35,6 +71,61 @@ async function main() {
   });
   console.log(n);
   console.log("done");
+}
+// case: taskgroup_error_union
+// expect: denied waited
+// expect: missing a
+// expect: missing waited
+// expect: denied b
+class Missing {
+  name: string;
+  constructor(name: string) {
+    this.name = name;
+  }
+}
+class Denied {
+  name: string;
+  constructor(name: string) {
+    this.name = name;
+  }
+}
+async function missing(name: string, signal: AbortSignal, first: boolean): Promise<void> throws Missing {
+  if (first) await sleep(20);
+  else {
+    try {
+      await sleep(60000, signal);
+    } catch (e) {
+      console.log("missing waited");
+    }
+  }
+  throw new Missing(name);
+}
+async function denied(name: string, signal: AbortSignal, first: boolean): Promise<void> throws Denied {
+  if (first) await sleep(20);
+  else {
+    try {
+      await sleep(60000, signal);
+    } catch (e) {
+      console.log("denied waited");
+    }
+  }
+  throw new Denied(name);
+}
+async function both(missingFirst: boolean): Promise<void> throws Missing | Denied {
+  await taskGroup(async (group) => {
+    group.spawn(missing("a", group.signal, missingFirst));
+    group.spawn(denied("b", group.signal, !missingFirst));
+  });
+}
+async function main() {
+  for (const first of [true, false]) {
+    try {
+      await both(first);
+    } catch (e) {
+      if (e instanceof Missing) console.log("missing", e.name);
+      else console.log("denied", e.name);
+    }
+  }
 }
 // case: taskgroup_many
 // expect: 44850
@@ -96,4 +187,29 @@ function main() {
   taskGroup(async (group) => {
     await yieldNow();
   });
+}
+// case: taskgroup_try_around_spawn
+// error: nothing in this 'try' can throw, so its 'catch' never runs
+class Oops {
+  why: string;
+  constructor(why: string) {
+    this.why = why;
+  }
+}
+async function fails(n: i64): Promise<void> throws Oops {
+  await yieldNow();
+  throw new Oops("failed " + n);
+}
+async function main() {
+  try {
+    await taskGroup(async (group) => {
+      try {
+        group.spawn(fails(1));
+      } catch (e) {
+        console.log("never");
+      }
+    });
+  } catch (e) {
+    console.log(e.why);
+  }
 }

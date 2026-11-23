@@ -449,6 +449,7 @@ class Codegen implements PrintHost, ComptimeHost {
   stale: Set<string>;
   combinePolls: TypeMap<FutureType, string>;
   groupPolls: TypeMap<FutureType, string>;
+  groupFails: Map<string, string>;
   cancelled: Set<InstanceId>;
   stringers: TypeMap<Type, string>;
   constantGlobals: Map<InstanceId, string>;
@@ -643,8 +644,10 @@ class Codegen implements PrintHost, ComptimeHost {
     // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
     // cancel function is wanted for.
     this.combinePolls = new TypeMap<FutureType, string>();
-    // The poll functions of `taskGroup` futures.
+    // The poll functions of `taskGroup` futures, and the glue each kind of task of a group is
+    // spawned with, by its future and the error type it gives the group.
     this.groupPolls = new TypeMap<FutureType, string>();
+    this.groupFails = new Map<string, string>();
 
     this.cancelled = new Set<InstanceId>();
 
@@ -3484,14 +3487,17 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${has} = icmp ne i32 ${made}, 0`);
       return has;
     }
-    // `group.spawn(p)`: the future's frame moves into a new task of the group.
+    // `group.spawn(p)`: the future's frame moves into a new task of the group, with the glue
+    // that gives the group the error it throws.
     if (callee.name === "spawn" && this.tables.typing.rec(t).which === "TaskGroup") {
       const future = this.valueType(e.args[0]!) as FutureType;
       const [poll, drop, dropOutput] = this.taskGlue(future);
       const frame = this.alloca(this.llvm(future));
       const line6 = `store ${this.llvm(future)} ${this.owned(e.args[0]!)}, ptr ${frame}`;
       this.emit(line6);
-      this.unwinding(`call void @fsh_rt_group_spawn(ptr ${handle}, ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr null, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))})`);
+      const raised = this.cur().raises.get(e);
+      const fail = raised !== undefined ? this.groupFail(future, raised.from, raised.to) : "null";
+      this.unwinding(`call void @fsh_rt_group_spawn(ptr ${handle}, ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${fail}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))})`);
       return undefined;
     }
     if (callee.name === "abort") {
@@ -11999,6 +12005,33 @@ class Codegen implements PrintHost, ComptimeHost {
     this.out.push("}");
     this.out.push("");
     this.takeUp(saved);
+    return name;
+  }
+
+
+  // The glue a task of a group is spawned with: the error in its output moves into the group's
+  // room for one, as the type the group's await throws.
+  groupFail(this: Mut<this>, future: FutureType, from: Type, to: Type): string {
+    const key = `${typeOwner(future)} ${typeOwner(to)}`;
+    const made = this.groupFails.get(key);
+    if ((made !== undefined && made !== "")) return made;
+    const line = `${this.tables.typing.described(future)} ${this.tables.typing.described(to)}`;
+    const name = `@fsh.group.fail.${this.stableId("group.fail", line, key)}`;
+    this.groupFails.set(key, name);
+    const saved = this.setAsideBody();
+    const [result, error] = [this.temp(), this.temp()];
+    this.emit(`${result} = load ${this.pollType(future)}, ptr %out`);
+    this.emit(`${error} = extractvalue ${this.pollType(future)} ${result}, 2`);
+    const line2 = `store ${this.llvm(to)} ${this.convert(error, from, to)}, ptr %into`;
+    this.emit(line2);
+    this.emit("ret void");
+    this.out.push(`define internal void ${name}(ptr %out, ptr %into) ${this.unwinds} {`);
+    this.out.push("entry:");
+    for (const pushed of this.allocas) this.out.push(pushed);
+    for (const pushed of this.body) this.out.push(pushed);
+    this.out.push("}");
+    this.out.push("");
+    this.takeUpBody(saved);
     return name;
   }
 
