@@ -44,7 +44,30 @@ module.exports = grammar(TypeScript, {
       previous,
       $.macro_declaration,
       $.decorated_declaration,
+      $.using_declaration,
     ),
+
+    // `using file = open(path)` keeps a value to the end of its scope, where its disposer runs. It
+    // binds plain names only, so `using[0]` and `using as T` stay expressions.
+    using_declaration: $ => seq(
+      field('kind', 'using'),
+      commaSep1(alias($._using_declarator, $.variable_declarator)),
+      $._semicolon,
+    ),
+
+    _using_declarator: $ => seq(
+      field('name', $.identifier),
+      field('type', optional($.type_annotation)),
+      optional($._initializer),
+    ),
+
+    // TypeScript's grammar reads `using x = y` as an assignment with a word before it; here the
+    // declaration above takes it.
+    assignment_expression: $ => prec.right('assign', seq(
+      field('left', choice($.parenthesized_expression, $._lhs_expression)),
+      '=',
+      field('right', $.expression),
+    )),
 
     // Macros and derives apply to functions, types and enums as well as classes.
     decorated_declaration: $ => seq(

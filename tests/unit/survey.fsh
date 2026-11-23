@@ -125,6 +125,10 @@ test("G12 counts disposal beyond a class's [Symbol.dispose] method, which R6 lea
   countsAre("class C {\n  [Symbol.dispose]() {}\n}\nconst k = Symbol.asyncDispose;\nconst s = new DisposableStack();\n", ["G12: 2"]);
 });
 
+test("using declarations over a class with a disposer parse, so their file isn't counted as unparsed", () => {
+  countsAre("class C {\n  [Symbol.dispose]() {}\n}\nfunction f() {\n  using c = new C();\n}\n", []);
+});
+
 test("the reject rules are counted through the migration detector, R5 to R7 too", () => {
   countsAre('function f() {\n  eval("1");\n  const g = new Function("x");\n  A.prototype.m = g;\n  Object.defineProperty(o, "k", {});\n  delete o.k;\n}\n', ["R1: 2", "R2: 2", "R3: 1"]);
   countsAre('function f() {\n  return arguments.length;\n}\nconst s = Symbol("s");\n', ["R5: 1", "R6: 1"]);

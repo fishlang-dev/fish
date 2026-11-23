@@ -206,6 +206,56 @@ const f = move (x: u8) => x;
         (identifier)))))
 
 ================================================================================
+using declarations
+================================================================================
+
+function f() {
+  using file = open(path);
+  using a: Res = make(), b = make();
+  using(file);
+  using.y = 1;
+}
+
+--------------------------------------------------------------------------------
+
+(program
+  (function_declaration
+    (identifier)
+    (formal_parameters)
+    (statement_block
+      (using_declaration
+        (variable_declarator
+          (identifier)
+          (call_expression
+            (identifier)
+            (arguments
+              (identifier)))))
+      (using_declaration
+        (variable_declarator
+          (identifier)
+          (type_annotation
+            (type_identifier))
+          (call_expression
+            (identifier)
+            (arguments)))
+        (variable_declarator
+          (identifier)
+          (call_expression
+            (identifier)
+            (arguments))))
+      (expression_statement
+        (call_expression
+          (identifier)
+          (arguments
+            (identifier))))
+      (expression_statement
+        (assignment_expression
+          (member_expression
+            (identifier)
+            (property_identifier))
+          (number))))))
+
+================================================================================
 Fish's words as plain names
 ================================================================================
 
