@@ -3876,6 +3876,7 @@ class BodyChecker implements Context, GuardHost {
     this.st.locked = this.f().closure?.expected === undefined ? undefined : this.cx.tables.typing.lockCallbacks.get(this.f().closure!.expected!);
     this.st.sharing = this.f().closure?.expected !== undefined && this.cx.tables.typing.sharedCallbacks.has(this.f().closure!.expected!);
     this.st.counting = this.f().closure?.expected !== undefined && this.cx.tables.typing.rcCallbacks.has(this.f().closure!.expected!);
+    this.st.grouping = this.f().closure?.expected !== undefined && this.cx.tables.typing.groupCallbacks.has(this.f().closure!.expected!);
     this.st.async = this.f().async === true;
     this.st.unsafe = this.f().closure?.unsafe === true;
     this.exprsState.unsafeDepth = this.st.unsafe ? 1 : 0;
@@ -3911,7 +3912,9 @@ class BodyChecker implements Context, GuardHost {
     for (let i: usize = 0; i < count; i++) {
       const p = cloneParam(this.f().params[i]!);
       const type = this.state.params[i]!;
-      this.declare(paramName(p), type, !this.cx.tables.typing.holdsRef(type), true, { ...p });
+      // A group closure's group stays the one it was called with: its tasks' errors are laid
+      // out as that group's await throws them.
+      this.declare(paramName(p), type, !this.cx.tables.typing.holdsRef(type) && !this.st.grouping, true, { ...p });
       if (assignsOwn(this.f().body, paramName(p))) {
         const id = this.locals().get(p)!;
         this.state.assignedParams.add(id);
@@ -6486,6 +6489,23 @@ class BodyChecker implements Context, GuardHost {
   /** @throws {CompileError} */
   raise(this: Mut<this>, at: Ref<Expr>, type: Type, what: string): void {
     this.raiseAt(cloneExpr(at), { start: at.start, end: at.end }, type, what, at.kind === "throw");
+  }
+
+  // A task group's child fails where the group is awaited, not where it is spawned, so its
+  // error goes to what the group's closure throws whatever `try` the spawn is in.
+  /** @throws {CompileError} */
+  raisePast(this: Mut<this>, at: Ref<Expr>, type: Type): void {
+    if (this.cx.tables.typing.holdsRef(type)) throw unsupported("errors holding references", at);
+    if (this.state.inferring !== undefined) {
+      this.state.inferring!.push([cloneExpr(at), type]);
+      return;
+    }
+    const errorType = this.state.errorType;
+    if (errorType === undefined || !this.cx.tables.typing.fits(type, errorType)) {
+      const declared = errorType !== undefined ? `'${this.cx.tables.typing.show(errorType)}'` : "nothing";
+      throw new CompileError("E0602", `this task can throw '${this.cx.tables.typing.show(type)}', but the group's closure declares it throws ${declared}; declare the task's error too, or leave the 'throws' clause out so it is inferred`, at.start, at.end);
+    }
+    this.instance().raises.set(cloneExpr(at), { from: type, to: errorType });
   }
 
   // `site` raises the error, written at `span`; `throwing` when it is a `throw`.

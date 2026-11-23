@@ -24,6 +24,9 @@ function equivalents(): Map<string, Equivalent> {
   // async-mutex holds its lock across `await`, which a Semaphore's permit can and a Lock can't.
   m.set("async-mutex", IN_STD("Semaphore"));
   m.set("p-limit", IN_STD("Semaphore"));
+  // Both run a list of tasks and reject with the first to fail; a `concurrency` option still
+  // wants a Semaphore beside the group.
+  add(m, ["p-all", "p-map"], IN_STD("taskGroup, where no concurrency limit is asked for"));
   m.set("abort-controller", IN_STD("AbortController"));
   add(m, ["url-parse", "whatwg-url", "query-string", "querystringify"], IN_STD("URL and URLSearchParams"));
   add(m, ["node-fetch", "axios", "undici", "got", "cross-fetch", "superagent", "ky"], IN_STD("fetch"));

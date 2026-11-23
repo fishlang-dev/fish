@@ -232,6 +232,8 @@ export type Tables = {
   timerNames: NodeMap<Expr, string>;
   // `Promise.all`, `race`, `allSettled` and `any` calls, each its own combined future.
   combinedCalls: NodeSet<Expr>;
+  // `taskGroup` calls, each a group's future over its closure's call.
+  groupCalls: NodeSet<Expr>;
   // The operands of an `await`, while they are checked.
   awaitedNow: NodeSet<Expr>;
   // node:util's `inspect` calls.
@@ -445,6 +447,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     timerWrappers: new NodeSet<Expr>(),
     timerNames: new NodeMap<Expr, string>(),
     combinedCalls: new NodeSet<Expr>(),
+    groupCalls: new NodeSet<Expr>(),
     awaitedNow: new NodeSet<Expr>(),
     inspectCalls: new NodeSet<Expr>(),
     deepEqualities: new NodeSet<Expr>(),

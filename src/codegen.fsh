@@ -185,7 +185,7 @@ function innerOf<A extends Lifetime>(e: Ref<Expr, A>): Ref<Expr, A> {
 }
 
 // The runtime function releasing each kind of handle block.
-const RELEASES = new Map<string, string>([["Semaphore", "fsh_rt_semaphore_release"], ["Permit", "fsh_rt_permit_drop"], ["Channel", "fsh_rt_channel_release"], ["AbortController", "fsh_rt_signal_release"], ["AbortSignal", "fsh_rt_signal_release"], ["TcpListener", "fsh_rt_socket_release"], ["TcpStream", "fsh_rt_socket_release"], ["UnixListener", "fsh_rt_socket_release"], ["UnixStream", "fsh_rt_socket_release"], ["UdpSocket", "fsh_rt_socket_release"], ["FileJob", "fsh_rt_file_job_release"], ["JsValue", "fsh_rt_js_release"], ["FileDescriptor", "fsh_rt_fd_release"]]);
+const RELEASES = new Map<string, string>([["Semaphore", "fsh_rt_semaphore_release"], ["Permit", "fsh_rt_permit_drop"], ["Channel", "fsh_rt_channel_release"], ["AbortController", "fsh_rt_signal_release"], ["AbortSignal", "fsh_rt_signal_release"], ["TcpListener", "fsh_rt_socket_release"], ["TcpStream", "fsh_rt_socket_release"], ["UnixListener", "fsh_rt_socket_release"], ["UnixStream", "fsh_rt_socket_release"], ["UdpSocket", "fsh_rt_socket_release"], ["FileJob", "fsh_rt_file_job_release"], ["JsValue", "fsh_rt_js_release"], ["FileDescriptor", "fsh_rt_fd_release"], ["TaskGroup", "fsh_rt_group_release"], ["TaskScope", "fsh_rt_group_drop"]]);
 
 // What a Rust call's argument leaves to give up once the call returns: an owned value dropped,
 // an owned array given up, or an Option's array given up when there is one.
@@ -448,6 +448,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // so are emitted again rather than taken.
   stale: Set<string>;
   combinePolls: TypeMap<FutureType, string>;
+  groupPolls: TypeMap<FutureType, string>;
+  groupFails: Map<string, string>;
   cancelled: Set<InstanceId>;
   stringers: TypeMap<Type, string>;
   constantGlobals: Map<InstanceId, string>;
@@ -642,6 +644,10 @@ class Codegen implements PrintHost, ComptimeHost {
     // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
     // cancel function is wanted for.
     this.combinePolls = new TypeMap<FutureType, string>();
+    // The poll functions of `taskGroup` futures, and the glue each kind of task of a group is
+    // spawned with, by its future and the error type it gives the group.
+    this.groupPolls = new TypeMap<FutureType, string>();
+    this.groupFails = new Map<string, string>();
 
     this.cancelled = new Set<InstanceId>();
 
@@ -2143,6 +2149,12 @@ class Codegen implements PrintHost, ComptimeHost {
       const line = `${handle} = load ptr, ptr ${this.value(e.object)}`;
       this.emit(line);
     }
+    // A group's signal is a block of its own, which the group hands out counted.
+    if (e.name === "signal" && this.tables.typing.rec(this.referent(holder) as BlockType).which === "TaskGroup") {
+      const made = this.temp();
+      this.emit(`${made} = call ptr @fsh_rt_group_signal(ptr ${handle})`);
+      return made;
+    }
     if (e.name === "signal") {
       const get2 = this.cur().types.get(e)!;
       return this.copied(handle, get2);
@@ -3474,6 +3486,19 @@ class Codegen implements PrintHost, ComptimeHost {
       if (callee.name !== "has") return made;
       this.emit(`${has} = icmp ne i32 ${made}, 0`);
       return has;
+    }
+    // `group.spawn(p)`: the future's frame moves into a new task of the group, with the glue
+    // that gives the group the error it throws.
+    if (callee.name === "spawn" && this.tables.typing.rec(t).which === "TaskGroup") {
+      const future = this.valueType(e.args[0]!) as FutureType;
+      const [poll, drop, dropOutput] = this.taskGlue(future);
+      const frame = this.alloca(this.llvm(future));
+      const line6 = `store ${this.llvm(future)} ${this.owned(e.args[0]!)}, ptr ${frame}`;
+      this.emit(line6);
+      const raised = this.cur().raises.get(e);
+      const fail = raised !== undefined ? this.groupFail(future, raised.from, raised.to) : "null";
+      this.unwinding(`call void @fsh_rt_group_spawn(ptr ${handle}, ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${fail}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))})`);
+      return undefined;
     }
     if (callee.name === "abort") {
       this.emit(`call void @fsh_rt_signal_abort(ptr ${handle})`);
@@ -9935,6 +9960,28 @@ class Codegen implements PrintHost, ComptimeHost {
         this.startBlock(ok);
         return n;
       }
+      // The group a `taskGroup` call hands its closure.
+      if (e.callee.kind === "ident" && e.callee.name === "task group") {
+        const made = this.temp();
+        this.emit(`${made} = call ptr @fsh_rt_group_new()`);
+        return made;
+      }
+      // `taskGroup(...)`: its closure's future moves into the group's, with the awaiter's handle
+      // to the group the closure was called with, which its frame holds first after its captures.
+      if (this.tables.groupCalls.has(e)) {
+        const t = this.cur().types.get(e) as FutureType;
+        const body = this.tables.typing.groupOf.get(t)!.body;
+        const thrown = this.tables.typing.rec(t).throws;
+        const held = this.owned(e.args[0]!);
+        const [group, moved, made] = [this.temp(), this.temp(), this.temp()];
+        this.emit(`${group} = extractvalue ${this.llvm(body)} ${held}, 2`);
+        const room = thrown !== undefined ? this.sizeOf(this.llvm(thrown)) : "-1";
+        const dropError = thrown !== undefined && this.needsDrop(thrown) ? this.elementDrop(thrown) : "null";
+        this.emit(`call void @fsh_rt_group_scope(ptr ${group}, i64 ${room}, ptr ${dropError})`);
+        this.emit(`${moved} = insertvalue ${this.llvm(t)} zeroinitializer, ${this.llvm(body)} ${held}, 1`);
+        this.emit(`${made} = insertvalue ${this.llvm(t)} ${moved}, ptr ${group}, 2`);
+        return made;
+      }
       // `spawn(p)`: the future's frame moves into a new task, whose handle this gives.
       if (e.callee.kind === "ident" && (e.callee.name === "spawn" || e.callee.name === "timer spawn" || e.callee.name === "blocking spawn")) {
         const future = this.valueType(e.args[0]!) as FutureType;
@@ -11837,6 +11884,158 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // A group future's poll. While its closure runs, the closure's future is polled, and a task's
+  // failure ends the group once every task is done, the closure cancelled where it waits and
+  // dropped. Once the closure is done, what it gave or threw waits in the frame for the tasks;
+  // then the group fails with the first error a task threw, or else gives or throws the
+  // closure's own. A task that panicked panics the awaiter in the runtime's wait.
+  groupPoll(this: Mut<this>, t: FutureType): string {
+    const known = this.groupPolls.get(t);
+    if ((known !== undefined && known !== "")) return known;
+    const { body, at } = this.tables.typing.groupOf.get(t)!;
+    // Named by where in its function the group's call is, as a combined future's poll is.
+    const line = `${this.tables.typing.described(t)} ${this.siteName({ start: at.start, end: at.end })}`;
+    const name = `@fsh.group.${this.stableId("group", line, typeOwner(t))}`;
+    this.groupPolls.set(t, name);
+    const gives = this.tables.typing.rec(t).gives;
+    const thrown = this.tables.typing.rec(t).throws;
+    const saved = this.setAside();
+    const field = (cg: Mut<Codegen>, i: usize) => {
+      const p = cg.temp();
+      cg.emit(`${p} = getelementptr ${cg.llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
+      return p;
+    };
+    const kept = (cg: Mut<Codegen>, i: usize) => cg.tables.typing.rec(t).frame[i]!.type;
+    const finishWith = (cg: Mut<Codegen>, tag: u8, v?: string, error?: string) => {
+      const line2 = `ret ${cg.pollType(t)} ${cg.polled(t, tag, v, error)}`;
+      cg.emit(line2);
+    };
+    // What a frame's slot holds moves out of it, leaving it empty for the frame's drop.
+    const taken = (cg: Mut<Codegen>, slot: string, type: Type): string => {
+      const old = cg.temp();
+      cg.emit(`${old} = load ${cg.llvm(type)}, ptr ${slot}`);
+      cg.emit(`store ${cg.llvm(type)} zeroinitializer, ptr ${slot}`);
+      return old;
+    };
+    const [stateAt, bodyAt, scopeAt, valueAt, errorAt] = [field(this, 0), field(this, 1), field(this, 2), field(this, 3), field(this, 4)];
+    const out = thrown !== undefined ? this.alloca(this.llvm(thrown)) : "null";
+    const [group, state, running, run, wait] = [this.temp(), this.temp(), this.temp(), this.label(), this.label()];
+    this.emit(`${group} = load ptr, ptr ${scopeAt}`);
+    const waited = (cg: Mut<Codegen>, closureRuns: boolean): string => {
+      const outcome = cg.temp();
+      const line3 = `call i32 @fsh_rt_group_wait(ptr ${group}, ptr %cx, ptr ${out}, ptr ${cg.panicAt({ start: at.start, end: at.end })}, i32 ${closureRuns ? 1 : 0})`;
+      cg.unwinding(line3, outcome);
+      return outcome;
+    };
+    // The first error a task threw, which the runtime's wait moved out of the group.
+    const taskFailed = (cg: Mut<Codegen>) => {
+      if (thrown === undefined) {
+        cg.emit("unreachable");
+        return;
+      }
+      const error = cg.temp();
+      cg.emit(`${error} = load ${cg.llvm(thrown)}, ptr ${out}`);
+      finishWith(cg, 2, undefined, error);
+    };
+    this.emit(`${state} = load i32, ptr ${stateAt}`);
+    this.emit(`${running} = icmp eq i32 ${state}, 0`);
+    this.emit(`br i1 ${running}, label %${run}, label %${wait}`);
+    this.startBlock(run);
+    const step = this.pollStep(body, bodyAt, { start: at.start, end: at.end });
+    this.startBlock(step.waiting);
+    const [early, failedEarly, stop, pending] = [waited(this, true), this.temp(), this.label(), this.label()];
+    this.emit(`${failedEarly} = icmp eq i32 ${early}, 2`);
+    this.emit(`br i1 ${failedEarly}, label %${stop}, label %${pending}`);
+    this.startBlock(pending);
+    finishWith(this, 0);
+    this.startBlock(stop);
+    this.cancelAt(bodyAt, body);
+    const stopped = taken(this, bodyAt, body);
+    this.dispose(stopped, body);
+    taskFailed(this);
+    this.startBlock(step.ready);
+    const v = step.value(this);
+    if (gives !== "void" && v !== undefined) this.emit(`store ${this.llvm(gives)} ${v}, ptr ${valueAt}`);
+    const returned = taken(this, bodyAt, body);
+    this.dispose(returned, body);
+    this.emit(`store i32 1, ptr ${stateAt}`);
+    this.emit(`br label %${wait}`);
+    this.startBlock(step.failed);
+    if (thrown !== undefined) {
+      const error = step.error(this);
+      this.emit(`store ${this.llvm(thrown)} ${error}, ptr ${errorAt}`);
+      const threw = taken(this, bodyAt, body);
+      this.dispose(threw, body);
+      this.emit(`store i32 2, ptr ${stateAt}`);
+      this.emit(`call void @fsh_rt_group_abort(ptr ${group})`);
+      this.emit(`br label %${wait}`);
+    } else this.emit("unreachable");
+    this.startBlock(wait);
+    const [late, waiting, done, failed] = [waited(this, false), this.label(), this.label(), this.label()];
+    this.emit(`switch i32 ${late}, label %${waiting} [ i32 1, label %${done} i32 2, label %${failed} ]`);
+    this.startBlock(waiting);
+    finishWith(this, 0);
+    // A task's error comes first: what the closure gave or threw is dropped.
+    this.startBlock(failed);
+    const [valueKept, errorKept] = [kept(this, 3), kept(this, 4)];
+    const unread = taken(this, valueAt, valueKept);
+    this.dispose(unread, valueKept);
+    const unthrown = taken(this, errorAt, errorKept);
+    this.dispose(unthrown, errorKept);
+    taskFailed(this);
+    this.startBlock(done);
+    const [ended, threwOwn, gave, threwAt] = [this.temp(), this.temp(), this.label(), this.label()];
+    this.emit(`${ended} = load i32, ptr ${stateAt}`);
+    this.emit(`${threwOwn} = icmp eq i32 ${ended}, 2`);
+    this.emit(`br i1 ${threwOwn}, label %${threwAt}, label %${gave}`);
+    this.startBlock(gave);
+    if (gives !== "void") {
+      const value = taken(this, valueAt, gives);
+      finishWith(this, 1, value);
+    } else finishWith(this, 1);
+    this.startBlock(threwAt);
+    if (thrown !== undefined) {
+      const own = taken(this, errorAt, thrown);
+      finishWith(this, 2, undefined, own);
+    } else this.emit("unreachable");
+    this.out.push(`define internal ${this.pollType(t)} ${name}(ptr %frame, ptr %cx) ${this.unwinds} {`);
+    this.out.push("entry:");
+    for (const pushed of this.allocas) this.out.push(pushed);
+    for (const pushed of this.body) this.out.push(pushed);
+    this.out.push("}");
+    this.out.push("");
+    this.takeUp(saved);
+    return name;
+  }
+
+
+  // The glue a task of a group is spawned with: the error in its output moves into the group's
+  // room for one, as the type the group's await throws.
+  groupFail(this: Mut<this>, future: FutureType, from: Type, to: Type): string {
+    const key = `${typeOwner(future)} ${typeOwner(to)}`;
+    const made = this.groupFails.get(key);
+    if ((made !== undefined && made !== "")) return made;
+    const line = `${this.tables.typing.described(future)} ${this.tables.typing.described(to)}`;
+    const name = `@fsh.group.fail.${this.stableId("group.fail", line, key)}`;
+    this.groupFails.set(key, name);
+    const saved = this.setAsideBody();
+    const [result, error] = [this.temp(), this.temp()];
+    this.emit(`${result} = load ${this.pollType(future)}, ptr %out`);
+    this.emit(`${error} = extractvalue ${this.pollType(future)} ${result}, 2`);
+    const line2 = `store ${this.llvm(to)} ${this.convert(error, from, to)}, ptr %into`;
+    this.emit(line2);
+    this.emit("ret void");
+    this.out.push(`define internal void ${name}(ptr %out, ptr %into) ${this.unwinds} {`);
+    this.out.push("entry:");
+    for (const pushed of this.allocas) this.out.push(pushed);
+    for (const pushed of this.body) this.out.push(pushed);
+    this.out.push("}");
+    this.out.push("");
+    this.takeUpBody(saved);
+    return name;
+  }
+
+
   // `combinePoll` over an array of `Promise<T>` values. Its first poll makes the values array and
   // a flag per future, every one zero.
   combineArray(this: Mut<this>, t: FutureType, name: string, kind: "all" | "race" | "allSettled" | "any", array: ArrayType, at: Ref<Span>): string {
@@ -12151,6 +12350,25 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`${futureAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 ${1 + 3 * j}`);
         this.whileWaiting(doneAt, (cg) => cg.cancelAt(futureAt, f));
       }
+      return;
+    }
+    // A group's future: its closure where it waits, while it is still running, and then the
+    // group stops waking this task for its tasks.
+    const grouped = this.tables.typing.groupOf.get(t as FutureType);
+    if (grouped !== undefined) {
+      const [stateAt, bodyAt, scopeAt, state, running, group, yes, after] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.label(), this.label()];
+      this.emit(`${stateAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 0`);
+      this.emit(`${bodyAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 1`);
+      this.emit(`${scopeAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 2`);
+      this.emit(`${state} = load i32, ptr ${stateAt}`);
+      this.emit(`${running} = icmp eq i32 ${state}, 0`);
+      this.emit(`br i1 ${running}, label %${yes}, label %${after}`);
+      this.startBlock(yes);
+      this.cancelAt(bodyAt, grouped.body);
+      this.emit(`br label %${after}`);
+      this.startBlock(after);
+      this.emit(`${group} = load ptr, ptr ${scopeAt}`);
+      this.emit(`call void @fsh_rt_group_leave(ptr ${group})`);
       return;
     }
     const instance = this.futureOf.get(t as FutureType);
@@ -12473,7 +12691,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${tag} = extractvalue ${this.pollType(shape)} ${result}, 0`);
       this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
     } else {
-      const fn = this.tables.typing.combinedOf.has(inner as FutureType) ? this.combinePoll(inner as FutureType) : this.symbol(this.futureOf.get(inner as FutureType)!);
+      const fn = this.tables.typing.combinedOf.has(inner as FutureType) ? this.combinePoll(inner as FutureType) : this.tables.typing.groupOf.has(inner as FutureType) ? this.groupPoll(inner as FutureType) : this.symbol(this.futureOf.get(inner as FutureType)!);
       this.unwinding(`call ${this.pollType(shape)} ${fn}(ptr ${at}, ptr %cx)`, result);
       this.emit(`${tag} = extractvalue ${this.pollType(shape)} ${result}, 0`);
       this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);

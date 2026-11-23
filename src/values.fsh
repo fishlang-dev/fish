@@ -156,6 +156,7 @@ function blockArity(which: string, name: string, std: boolean): usize | undefine
   if (which === "Channel") return name === "send" || (name === "settle" && std) ? 1 : name === "receive" || name === "close" ? 0 : undefined;
   if (which === "AbortController") return name === "abort" ? 0 : undefined;
   if (which === "AbortSignal") return name === "throwIfAborted" ? 0 : undefined;
+  if (which === "TaskGroup") return name === "spawn" ? 1 : undefined;
   if (which === "TcpListener" || which === "UnixListener") return name === "accept" ? 0 : name === "listenTls" && std ? 2 : undefined;
   if (which === "TcpStream" || which === "UnixStream") return name === "read" || name === "write" ? 1 : name === "startTls" && std ? 2 : undefined;
   return undefined;
@@ -195,6 +196,8 @@ export class ContextState {
   sharing: boolean = false;
   // Whether that value is an Rc's, which only this thread reaches.
   counting: boolean = false;
+  // Whether the body is a `taskGroup` closure's, whose group takes children that throw.
+  grouping: boolean = false;
   // Whether the body is an async function's, and the awaits written where it can stop at them.
   async: boolean = false;
   awaitable: NodeSet<Expr> = new NodeSet<Expr>();
@@ -324,6 +327,9 @@ export interface Context {
   // Records an error a call raises, and what the instance called may throw.
   /** @throws {CompileError} */
   raise(this: Mut<this>, at: Ref<Expr>, type: Type, what: string): void;
+  // Records an error a task group's child gives the group, past any `try` around its spawn.
+  /** @throws {CompileError} */
+  raisePast(this: Mut<this>, at: Ref<Expr>, type: Type): void;
   // Checks comptime code, which may throw any error: one it doesn't catch is a compile error.
   enterComptime(this: Mut<this>): void;
   leaveComptime(this: Mut<this>): void;
@@ -2075,6 +2081,9 @@ export class Expressions<C extends Context> implements Union<C> {
       }
       return this.spawnOf(e, spawning);
     }
+    if (callee.kind === "ident" && callee.name === "taskGroup" && !this.ctx.byName().has("taskGroup") && (this.ctx.lookup("taskGroup", undefined) === undefined)) return this.taskGroup(e);
+    // The group a `taskGroup` call hands its closure.
+    if (callee.kind === "ident" && callee.name === "task group") return { type: this.ctx.tables().typing.blockType("TaskGroup"), what: "'taskGroup'" };
     // `sleep(ms)`: a future done once that many milliseconds have passed, holding no thread.
     if (callee.kind === "ident" && callee.name === "sleep" && (!this.ctx.byName().has("sleep") || inStd)) {
       if (e.args.length !== 1 && e.args.length !== 2) throw new CompileError("E0504", "'sleep' takes how many milliseconds to wait, like 'sleep(250)', and may take an AbortSignal", e.start, e.end);
@@ -5175,13 +5184,14 @@ export class Expressions<C extends Context> implements Union<C> {
     const which = this.ctx.typing().rec(t).which;
     if (which === "JsValue") return this.jsMethodCall(e, callee, t);
     if (which === "UdpSocket") return this.udpCall(e, callee);
+    if (which === "TaskGroup" && callee.name === "spawn") return this.groupSpawn(e, callee);
     // A wait may also take an AbortSignal, as its last argument.
     const sockets = callee.name === "accept" || callee.name === "read" || callee.name === "write";
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive" || sockets;
     const count = blockArity(which, callee.name, e.start >= STD_BASE);
     if (count === undefined) {
       const has = which === "Semaphore" ? "it has 'acquire' and 'available'" : which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
-        : which === "AbortController" ? "it has 'abort' and 'signal'" : which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'"
+        : which === "AbortController" ? "it has 'abort' and 'signal'" : which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'" : which === "TaskGroup" ? "it has 'spawn' and 'signal'"
         : which === "TcpListener" ? "it has 'accept' and 'port'" : which === "UnixListener" ? "it has 'accept', and dropping it stops listening but leaves its socket file" : which === "TcpStream" || which === "UnixStream" ? "it has 'read', 'write' and 'clone', and dropping it closes it" : "dropping it gives its slot back";
       throw new CompileError("E0502", `'${this.ctx.typing().show(t)}' has no method '${callee.name}'; ${has}`, callee.start, callee.end);
     }
@@ -5351,6 +5361,64 @@ export class Expressions<C extends Context> implements Union<C> {
       throw new CompileError("E0303", `'${spawning}' runs this ${spawning === "spawn" ? "Promise" : "function"} on another thread, so it must own everything it uses; it holds a '${this.ctx.typing().show(blocker)}', which ${typeof blocker !== "string" && this.ctx.typing().kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && this.ctx.typing().kindOf(blocker) === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : typeof blocker !== "string" && this.ctx.typing().kindOf(blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
     }
     return { type: this.ctx.tables().typing.handleType(r.gives, r.throws), what: "'spawn'" };
+  }
+
+  // `taskGroup(async (group) => ...)`: the closure's call with a new group, whose future is done
+  // once the closure and every task spawned into the group are. It is awaited where it is made,
+  // as a combined future is.
+  /** @throws {CompileError} */
+  private taskGroup(this: Mut<this>, e: Ref<Call>): { type: Type; what: string } {
+    const example = "as in 'await taskGroup(async (group) => { group.spawn(work()); })'";
+    if (!this.ctx.st.async) throw new CompileError("E0301", "'taskGroup' can only be used inside an 'async' function, where the runtime is running", e.callee.start, e.callee.end);
+    if (!this.ctx.view().awaitedNow.has(e)) throw new CompileError("E0305", `'taskGroup' is awaited where it is called, ${example}`, e.start, e.end);
+    if (e.args.length !== 1) throw new CompileError("E0305", `'taskGroup' takes one async arrow function, ${example}`, e.start, e.end);
+    const given: Ref<Expr> = e.args[0]!;
+    if (given.kind !== "arrow" || !given.async || given.params.length !== 1) throw new CompileError("E0305", `'taskGroup' takes an async arrow function written in place, which takes the group, ${example}`, given.start, given.end);
+    const group = this.ctx.tables().typing.blockType("TaskGroup");
+    const signature = this.ctx.tables().typing.functionType(["group"], [group], "void");
+    this.ctx.tables().typing.groupCallbacks.add(signature);
+    this.ctx.tables().typing.openThrows.add(signature);
+    const made: Expr = { id: nextId(this.ctx.tables().ids), kind: "ident", name: "task group", start: given.start, end: given.start };
+    const fresh: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: made, typeArgs: [], args: [], optional: false, start: given.start, end: given.start };
+    const run: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: cloneExpr(given), typeArgs: [], args: [fresh], optional: false, start: given.start, end: given.end };
+    this.expect(given, signature);
+    const later = this.ctx.tables();
+    const replaced = later.rewrites.replace(e, { ...e, args: [run] });
+    const t = replaced.kind === "call" ? this.value(replaced.args[0]!) : "void";
+    const r = this.recOf(t);
+    if (r?.kind !== "future") throw new CompileError("E0305", `'taskGroup' takes an async arrow function written in place, which takes the group, ${example}`, given.start, given.end);
+    this.ctx.tables().groupCalls.add(cloneExpr(replaced));
+    return { type: this.ctx.tables().typing.groupFuture(t as FutureType, { start: e.start, end: e.end }), what: "'taskGroup'" };
+  }
+
+  // `group.spawn(p)`: the Promise runs as a task the group waits for. What it throws surfaces
+  // where the group is awaited, so it joins what the group's closure throws; only that closure's
+  // own body, spawning into its own group, can say so.
+  /** @throws {CompileError} */
+  private groupSpawn(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>): { type: Type; what: string } {
+    if (this.linked(callee)) throw unsupported("optional chains calling 'TaskGroup' methods", callee);
+    if (e.args.length !== 1) throw new CompileError("E0305", "'spawn' takes the Promise to run, like 'group.spawn(save(user))'", e.start, e.end);
+    const given: Ref<Expr> = e.args[0]!;
+    if (given.kind === "arrow" && given.async && given.params.length === 0) {
+      const run: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: cloneExpr(given), typeArgs: [], args: [], optional: false, start: given.start, end: given.end };
+      const then = this.ctx.tables();
+      const made = then.rewrites.replace(e, { ...e, args: [run] });
+      if (made.kind === "call") return this.groupSpawned(made, callee);
+    }
+    return this.groupSpawned(e, callee);
+  }
+
+  /** @throws {CompileError} */
+  private groupSpawned(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>): { type: Type; what: string } {
+    const handle = this.spawnOf(e, "spawn").type as HandleType;
+    const throws = this.ctx.typing().rec(handle).throws;
+    if (throws !== undefined) {
+      const local = callee.object.kind === "ident" ? this.ctx.held().locals.getById(callee.object.id) : undefined;
+      const own = this.ctx.st.grouping && local !== undefined && this.ctx.view().arenas.localOf(local).param;
+      if (!own) throw new CompileError("E0306", `this task can throw '${this.ctx.typing().show(throws)}', which only the group's own closure can pass to its 'await taskGroup'; spawn it in that closure's body, or catch the error inside the task with try/catch`, e.args[0]!.start, e.args[0]!.end);
+      this.ctx.raisePast(e, throws);
+    }
+    return { type: "void", what: "'spawn'" };
   }
 
   /** @throws {CompileError} */
@@ -6526,6 +6594,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (this.ctx.typing().rec(t).which === "JsValue") return this.jsProperty(e, t);
     if (this.ctx.typing().rec(t).which === "AbortController" && e.name === "signal") return this.ctx.tables().typing.blockType("AbortSignal");
     if (this.ctx.typing().rec(t).which === "AbortSignal" && e.name === "aborted") return "boolean";
+    if (this.ctx.typing().rec(t).which === "TaskGroup" && e.name === "signal") return this.ctx.tables().typing.blockType("AbortSignal");
     if ((this.ctx.typing().rec(t).which === "TcpListener" || this.ctx.typing().rec(t).which === "UdpSocket") && e.name === "port") return "i64";
     throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.typing().show(t)}'`, e.start, e.end);
   }
@@ -11069,6 +11138,8 @@ export class Expressions<C extends Context> implements Union<C> {
     if (local.param && local.mutable) this.ctx.st.changedParams.add(id);
     if (local.param && !local.mutable) {
       if (lr?.kind === "ref") throw new CompileError("E0206", `cannot point the reference parameter '${local.name}' elsewhere; it borrows what the caller passed, so declare a 'let' for another reference`, target.start, target.end);
+      // A group closure's group, which its tasks' errors go to.
+      if (lr?.kind === "block" && lr.which === "TaskGroup") throw new CompileError("E0207", `cannot ${action} '${local.name}': a task group's closure keeps the group it was called with; declare a 'let' for another group`, target.start, target.end);
       const what = action === "assign to" ? "assigning to" : action === "mutably borrow" ? "mutably borrowing" : "calling a mutating method on";
       throw new CompileError("E0801", `${what} a parameter holding a reference is not supported yet; copy it into a 'let'`, target.start, target.end);
     }

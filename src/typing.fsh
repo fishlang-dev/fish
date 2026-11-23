@@ -534,7 +534,9 @@ export type DynType = Brand<usize, "dyn">;
 // A FileJob is a file read or write handed to the runtime's blocking pool.
 // A JsValue is a value of the JS engine, which Fish holds without knowing its type.
 // A FileDescriptor is an open file's descriptor, closed when its last count goes.
-export type BlockRecord = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket" | "FileJob" | "JsValue" | "FileDescriptor"; of: Type; fields: Field[] };
+// A TaskGroup is the handle a `taskGroup` closure spawns through, and a TaskScope the awaiter's
+// handle to the same block, whose drop before the group is over aborts the group's signal.
+export type BlockRecord = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket" | "FileJob" | "JsValue" | "FileDescriptor" | "TaskGroup" | "TaskScope"; of: Type; fields: Field[] };
 export type BlockType = Brand<usize, "block">;
 
 // The futures a Semaphore's and a Channel's methods give, and a `sleep` given a signal, polled by
@@ -1844,6 +1846,30 @@ export class Typing {
     return this.makeCombinedFuture(combined, gives, aggregate, frame);
   }
 
+  // Each `taskGroup` future, by its closure's future; and for each, that future and where the
+  // call is written.
+  private groups = new TypeMap<FutureType, FutureType>();
+  groupOf = new TypeMap<FutureType, { body: FutureType; at: { start: usize; end: usize } }>();
+
+  // A `taskGroup` call's future: its closure's future, the awaiter's handle to the group, then
+  // what the closure gave or threw, kept until every task of the group is done. It gives and
+  // throws what the closure's future does, which a child's error is converted to.
+  groupFuture(this: Mut<this>, body: FutureType, at: { start: usize; end: usize }): FutureType {
+    const known = this.groups.get(body);
+    if (known !== undefined) return known;
+    const r = this.rec(body);
+    const { gives, throws, concrete } = r;
+    let params: Field[] = [];
+    for (const p of r.params) params.push({ ...p });
+    const scope = this.blockType("TaskScope");
+    const frame: Field[] = [{ name: "state", type: "i32" }, { name: "body", type: body }, { name: "scope", type: scope }, { name: "value", type: gives === "void" ? "null" : gives }, { name: "error", type: throws ?? "null" }];
+    const id = this.declared++;
+    const t = this.made<FutureType>({ kind: "future", name: "taskGroup", gives, throws, fields: [], params, frame, concrete }, `future ${id}`);
+    this.groups.set(body, t);
+    this.groupOf.set(t, { body, at });
+    return t;
+  }
+
   private promises = new Map<string, InterfaceType>();
   private promised = new TypeMap<InterfaceType, Type>();
 
@@ -2657,6 +2683,8 @@ export class Typing {
   sharedCallbacks = new TypeSet<FunctionType>();
   // Those of an Rc's `update` and `read`, which only this thread runs.
   rcCallbacks = new TypeSet<FunctionType>();
+  // The signature a `taskGroup` closure is given as: its body may spawn children that throw.
+  groupCallbacks = new TypeSet<FunctionType>();
 
   // A type parameter as an instance sees it: standing for `concrete`, which has no type
   // parameter in it.
