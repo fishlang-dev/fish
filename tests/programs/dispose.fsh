@@ -865,7 +865,7 @@ function find(there: boolean): Res | null {
 function main() {
   using r = find(true);
 }
-// error: 8:13: error[E0411]: 'r' can't be declared with 'using': its value is a 'Res | null', which may be null; handle the null first, then declare the 'using' with the value that is there
+// error: 8:13: error[E0411]: 'r' can't be declared with 'using': its value is a 'null | Res', which may be null; handle the null first, then declare the 'using' with the value that is there
 // case: using_null
 function main() {
   using r = null;
