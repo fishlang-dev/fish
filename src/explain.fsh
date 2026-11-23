@@ -1,6 +1,7 @@
 // `fishc explain-borrows`: a file's source with a line under each place where ownership does
 // something, from what the move checker logged and the ownership errors the check gave.
 import { locate, shown, type BorrowEvent, type CompileError, type Names } from "./diag.fsh";
+import type { Stmt } from "./parser.fsh";
 
 // What is printed under a source line: where on it, how far it is underlined, and its lines of
 // text. `order` keeps marks at one spot as they were given.
@@ -70,4 +71,24 @@ export function explainBorrows(src: string, file: string, events: Ref<BorrowEven
     }
   }
   return out.join("\n");
+}
+
+// The functions a file's statements declare, for picking one by name: each top-level function
+// by its name, and each class's constructor, methods and accessors as `Class.name`.
+export function functionsIn(program: Ref<Stmt[]>): { name: string; start: usize; end: usize }[] {
+  let out: { name: string; start: usize; end: usize }[] = [];
+  for (const top of program) {
+    const s: Ref<Stmt> = top.kind === "export" ? top.body : top;
+    if (s.kind === "function" && s.body !== undefined) out.push({ name: s.name, start: s.start, end: s.end });
+    if (s.kind !== "class" || s.name === undefined) continue;
+    for (const m of s.members) {
+      let name: string | undefined = undefined;
+      if (m.kind === "constructor") name = "constructor";
+      else if (m.kind === "method" && typeof m.name === "string") name = m.name;
+      else if (m.kind === "get" && typeof m.name === "string") name = m.name;
+      else if (m.kind === "set" && typeof m.name === "string") name = m.name;
+      if (name !== undefined) out.push({ name: `${s.name}.${name}`, start: m.start, end: m.end });
+    }
+  }
+  return out;
 }

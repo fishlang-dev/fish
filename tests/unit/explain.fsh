@@ -1,11 +1,12 @@
-// `fishc explain-borrows`: what the move checker logs for it, and how the log is rendered.
+// `fishc explain-borrows`: what the move checker logs for it, how the log is rendered, and the
+// command run as the native fishc.
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CompileError, type BorrowEvent } from "../../src/diag.fsh";
 import { explainBorrows } from "../../src/explain.fsh";
 import { analyze } from "../../src/main.fsh";
 import { cachedSession } from "../../src/stdcache.fsh";
-import { removed, same, scratch } from "./support.fsh";
+import { fishc, ran, removed, same, scratch } from "./support.fsh";
 
 type Logged = { events: BorrowEvent[]; error: CompileError | undefined };
 
@@ -151,3 +152,100 @@ test("a loan ending on its own line says so, and the gutter fits the last line's
 test("a file with nothing to show says so", () => {
   same(explainBorrows(SHOWN, "t.fsh", [], []), "nothing moves or is lent in t.fsh", "no events");
 });
+
+// A use after a move and a change during a borrow, each in a function of its own.
+function program(): string {
+  return `${HEAD}function moved(): void {
+  const a = new P(1);
+  take(a);
+  console.log(a.n);
+}
+function lent(): void {
+  let b = new P(2);
+  const r: Ref<P> = b;
+  b = new P(3);
+  console.log(r.n);
+}
+function main() {
+  moved();
+  lent();
+}
+`;
+}
+
+// A directory holding `src` as main.fsh.
+function fixture(src: string): string {
+  const dir = scratch("fish-explain-");
+  try {
+    writeFileSync(join(dir, "main.fsh"), src);
+  } catch (e) {
+    assert(false, `can't write the fixture: ${e.message}`);
+  }
+  return dir;
+}
+
+const MOVE_NOTE = "'a' moved here: passing it to 'take' hands it over, as if 'take' kept it; pass 'a.clone()' to keep a copy";
+const REST = "the rest of this function isn't analysed past this error";
+
+function movedLines(): string {
+  return `  3 | function moved(): void {
+  4 |   const a = new P(1);
+  5 |   take(a);
+    |        ^ ${MOVE_NOTE}
+  6 |   console.log(a.n);
+    |               ^ error[E0201]: 'a' was moved, so it can't be used here
+    |                 line 5: ${MOVE_NOTE}
+    |                 ${REST}
+  7 | }`;
+}
+
+function lentLines(): string {
+  return `  8 | function lent(): void {
+  9 |   let b = new P(2);
+ 10 |   const r: Ref<P> = b;
+    |                     ^ 'b' is lent to 'r' until line 12
+ 11 |   b = new P(3);
+    |   ^ error[E0203]: cannot change 'b' while 'r' borrows 'b' and is used later
+    |     line 10: 'b' is lent here, so it can't change or move until the borrow's last use
+    |     ${REST}
+ 12 |   console.log(r.n);
+ 13 | }`;
+}
+
+test("fishc explain-borrows prints a file with its moves, loans and ownership errors", () => {
+  const dir = fixture(program());
+  ran(fishc(dir, ["explain-borrows", "main.fsh"]), 0, `  1 | class P { n: i64; constructor(n: i64) { this.n = n; } }
+  2 | function take(p: P): void { console.log(p.n); }
+${movedLines()}
+${lentLines()}
+ 14 | function main() {
+ 15 |   moved();
+ 16 |   lent();
+ 17 | }
+`, "", "the whole file");
+  removed(dir);
+}, { timeout: 60_000 });
+
+test("fishc explain-borrows --fn prints one function", () => {
+  const dir = fixture(program());
+  ran(fishc(dir, ["explain-borrows", "main.fsh", "--fn", "lent"]), 0, `${lentLines()}\n`, "", "--fn lent");
+  ran(fishc(dir, ["explain-borrows", "main.fsh", "--fn", "main"]), 0, "nothing moves or is lent in lines 14 to 17 of main.fsh\n", "", "--fn main");
+  ran(fishc(dir, ["explain-borrows", "main.fsh", "--fn", "gone"]), 2, "", "fishc explain-borrows: 'main.fsh' has no function 'gone'; it has P.constructor, take, moved, lent, main\n", "a function the file lacks");
+  removed(dir);
+}, { timeout: 60_000 });
+
+test("fishc explain-borrows leaves other errors to be printed as fishc check prints them", () => {
+  const dir = fixture(`function main() { const x: i64 = "no"; }\n`);
+  const bad = fishc(dir, ["explain-borrows", "main.fsh"]);
+  assert(bad.code === 1 && bad.out === "", `exited with ${bad.code}, printing: ${bad.out}`);
+  assert(bad.err.includes(`error[E0101]`) && bad.err.includes("main.fsh:1:34:"), `stderr: ${bad.err}`);
+  removed(dir);
+}, { timeout: 60_000 });
+
+test("fishc explain-borrows with nothing to show, or no file, says so", () => {
+  const dir = fixture(`function main() { console.log(1); }\n`);
+  ran(fishc(dir, ["explain-borrows", "main.fsh"]), 0, "nothing moves or is lent in main.fsh\n", "", "a file with no moves");
+  ran(fishc(dir, ["explain-borrows"]), 2, "", "usage: fishc explain-borrows <file.fsh> [--fn <name>]\n", "no file");
+  ran(fishc(dir, ["explain-borrows", "main.fsh", "--release"]), 2, "", "usage: fishc explain-borrows <file.fsh> [--fn <name>]\n", "a flag it doesn't take");
+  removed(dir);
+}, { timeout: 60_000 });

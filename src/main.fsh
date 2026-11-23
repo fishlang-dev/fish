@@ -9,7 +9,7 @@ import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type O
 import { formatMemory, formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Reading, type Session, type Tables } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { cachedSession } from "./stdcache.fsh";
-import { CompileError, copyNames, formatError, movedOffset, type Names, type Source } from "./diag.fsh";
+import { CompileError, copyNames, formatError, movedOffset, type BorrowEvent, type Names, type Source } from "./diag.fsh";
 import { load, type Loaded, type RustCrate } from "./modules.fsh";
 import { resolvePackages } from "./dependencies.fsh";
 import { pack, prepare, submit, unsafeDependencies } from "./publish.fsh";
@@ -31,6 +31,7 @@ import { hideMains, harnessImports, harnessMain, liftTests, runDefaults, runTest
 import { formatRanking, rank, readPlan, type Plan } from "./rank.fsh";
 import { compare, formatComparison, formatReport, readReport, sources, survey, type Report as SurveyReport } from "./survey.fsh";
 import { explain } from "./codes.fsh";
+import { explainBorrows, functionsIn } from "./explain.fsh";
 import type { Checked, Instance } from "./check.fsh";
 import type { Type, Typing } from "./typing.fsh";
 import { rustShim, type Shim } from "./rustshim.fsh";
@@ -1081,6 +1082,56 @@ function fail(message: string): never {
   return process.exit(2);
 }
 
+// The errors that are what `fishc explain-borrows` shows rather than what stops it.
+const OWNERSHIP = new Set(["E0201", "E0202", "E0203", "E0204", "E0205"]);
+
+// `fishc explain-borrows`: prints `file` with its moves, loans and ownership errors under the
+// lines they are on, or just the function `only` names. Any other error is printed as
+// `fishc check` prints it.
+/** @throws {Error | IoError} */
+function explainFile(file: string, only: string | undefined): never {
+  let src = "";
+  let range: { start: usize; end: usize } | undefined = undefined;
+  try {
+    src = readFileSync(file, "utf8");
+    if (only !== undefined) {
+      const functions = functionsIn(parse(src, { last: 0 }));
+      const found = functions.find((f) => f.name === only);
+      if (found === undefined) fail(`fishc explain-borrows: '${file}' has no function '${only}'; it has ${functions.length === 0 ? "none" : functions.map((f) => f.name).join(", ")}`);
+      else range = { start: found.start, end: found.end };
+    }
+  } catch (e) {
+    if (!(e instanceof CompileError)) fail(`fishc explain-borrows: can't read '${file}': ${(e as { message: string }).message}`);
+    else console.error(painted(e, file, src));
+    process.exit(1);
+  }
+  // A check read back from the cache would log nothing.
+  let session = sessionWith(false, false, true);
+  session.borrows = [];
+  // Only this file's are kept: another file's offsets start past any this file's text reaches.
+  let events: BorrowEvent[] = [];
+  let errors: CompileError[] = [];
+  try {
+    const made = checkedFile(session, file);
+    if (made.session.borrows !== undefined) for (const b of made.session.borrows) if (b.end <= src.length) events.push({ ...b });
+  } catch (e) {
+    if (!(e instanceof CompileError)) {
+      console.error((e as { message: string }).message);
+      process.exit(1);
+    } else {
+      if (e.errors.length > 0) for (const x of e.errors) errors.push(x.clone());
+      else errors.push(e.clone());
+      if (errors.some((x) => !OWNERSHIP.has(x.code) || x.end > src.length)) {
+        console.error(painted(e, file, src));
+        process.exit(1);
+      }
+      for (const b of e.borrows) if (b.end <= src.length) events.push({ ...b });
+    }
+  }
+  console.log(explainBorrows(src, file, events, errors, range));
+  return process.exit(0);
+}
+
 // The time each of a build's `stages` took, printed when the build was timed.
 function reportTimings(session: Ref<Session>, stages: Ref<string[]>, start: f64) {
   if (session.timings === undefined) return;
@@ -1145,6 +1196,7 @@ async function main(): Promise<void> {
           sanitize: { type: "string", multiple: true },
           timeout: { type: "string" },
           jobs: { type: "string" },
+          fn: { type: "string" },
         },
       });
     } catch (e) {
@@ -1185,6 +1237,10 @@ async function main(): Promise<void> {
     if (text === undefined) fail(`fishc explain: '${named ?? ""}' isn't an error code; a code looks like E0201 or W0001, as an error shows it`);
     console.log(text);
     process.exit(0);
+  }
+  if (command === "explain-borrows") {
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "fn")) fail("usage: fishc explain-borrows <file.fsh> [--fn <name>]");
+    explainFile(named!, values.fn);
   }
   if (command === "survey") {
     const dirs = positionals.slice(1);
@@ -1437,7 +1493,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
