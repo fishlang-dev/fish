@@ -1,9 +1,9 @@
 import assert from "node:assert";
 import { atNamesIn, firstNameIn, typeNamesIn } from "./layout.fsh";
-// A dev build's IR split into modules: std's part, whose text is the same whatever the program's
-// own code says, a part per group of the program's functions (one per source file), and the
-// program's part holding the rest. Each part's text changes only when what it holds does, so its
-// object can be cached by that text.
+// A dev build's IR, or a large release build's, split into modules: std's part, whose text is
+// the same whatever the program's own code says, a part per group of the program's functions
+// (one per source file), and the program's part holding the rest. Each part's text changes only
+// when what it holds does, so its object can be cached by that text.
 //
 // Std's part is every definition its functions reach, stopping at the program's: its own functions,
 // and the generated glue that reaches them, such as a Dyn's thunk calling one of its closures,
