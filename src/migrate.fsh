@@ -54,7 +54,7 @@ export const REJECTS: Record<string, string> = {
   R2: "prototype edits and Object.defineProperty change a type after it is declared, and Fish types have fixed layouts; declare the field or method on the class, or wrap the value",
   R3: "delete removes a field, and Fish objects have fixed layouts; make the field an Option and set it to null, or keep the entries in a dictionary, '{ [k: string]: T }', or a Map",
   R5: "the arguments object isn't in Fish; take the arguments as a rest parameter, as in '...args: T[]'",
-  R6: "Symbol is runtime reflection, which Fish doesn't have beyond a '[Symbol.iterator]' method; use a string or an enum for a key, and an interface for a protocol",
+  R6: "Symbol is runtime reflection, which Fish doesn't have beyond a '[Symbol.iterator]' method and a class's '[Symbol.dispose]' method; use a string or an enum for a key, and an interface for a protocol",
   R7: "declaration merging and module augmentation reopen a type after it is declared, and Fish types are closed; give everything in one declaration, or a new name",
 };
 
@@ -835,12 +835,27 @@ function identNames(f: Ref<File>, i: usize | undefined, shorthand: boolean): str
   return found;
 }
 
+// A file's reads of `Symbol.dispose` and `Symbol.asyncDispose`, each with whether it is the key of
+// a class's `[Symbol.dispose]` method, which Fish runs when an instance is dropped.
+function disposals(f: Ref<File>): Map<usize, boolean> {
+  let found = new Map<usize, boolean>();
+  if (f.bound.has("Symbol")) return found;
+  for (const n of f.order) {
+    const x: Ref<Item> = f.items[n]!;
+    if (x.kind === "member" && (x.name === "dispose" || x.name === "asyncDispose") && named(f, x.object, "Symbol") && !found.has(n)) found.set(n, false);
+    const key = x.of === "classMember" && x.kind === "method" ? x.nameExpr : undefined;
+    if (key !== undefined && f.items[key]!.kind === "member" && f.items[key]!.name === "dispose" && named(f, f.items[key]!.object, "Symbol")) found.set(key, true);
+  }
+  return found;
+}
+
 // The reject rules' hits, in no particular order. `dictionary` says which expressions are
 // dictionaries, whose keys a `delete` may remove; without one, none is.
 function rejectsIn(f: Ref<File>, dictionary: Ref<Dictionaries> | undefined): Hit[] {
   // A class with its own member named `prototype` reads it as a field, not the JS prototype.
   let ownPrototype = new Set<string>();
-  // `Symbol.iterator` as a method's key, or read as `x[Symbol.iterator]`, names an iterable's method.
+  // `Symbol.iterator` as a method's key, or read as `x[Symbol.iterator]`, names an iterable's method:
+  // the `Symbol` there is no reflection.
   let iterating = new Set<usize>();
   for (const n of f.order) {
     const x: Ref<Item> = f.items[n]!;
@@ -849,6 +864,8 @@ function rejectsIn(f: Ref<File>, dictionary: Ref<Dictionaries> | undefined): Hit
     const key = x.kind === "method" ? x.nameExpr : x.kind === "index" ? x.index : undefined;
     if (key !== undefined && f.items[key]!.kind === "member" && f.items[key]!.name === "iterator" && named(f, f.items[key]!.object, "Symbol")) iterating.add(f.items[key]!.object!);
   }
+  // `Symbol.dispose` and `Symbol.asyncDispose` are a disposer's key, or a guided rewrite's to report.
+  for (const key of disposals(f).keys()) iterating.add(f.items[key]!.object!);
   let hits: Hit[] = [];
   for (const n of f.order) {
     const x: Ref<Item> = f.items[n]!;
@@ -1750,6 +1767,7 @@ const GUIDES: Record<string, string> = {
   G9: "'.call', '.apply' and '.bind' choose a function's 'this' at run time; pass the receiver as an argument, or use a closure",
   G10: "'forEach' doesn't wait for an async callback; use 'for...of' with 'await', or spawn a task for each",
   G11: "hold one value, changed through one while the other is still used, which Fish's ownership refuses; share it as 'shared<T>', give one its own '.clone()', or restructure so one name is used at a time",
+  G12: "Fish disposes through a class's '[Symbol.dispose]()' method alone, which it runs when an instance is dropped; 'DisposableStack', '[Symbol.asyncDispose]', a call of the method by hand, and the member on an object literal or an interface aren't in Fish yet, so give a class the method and let its instance go out of scope",
 };
 
 const guideText = (rule: string): string => {
@@ -1778,6 +1796,12 @@ function callAt(f: Ref<File>, n: usize): usize {
 // The guided rules' hits: each a decision left to a person, with what to do, never an edit.
 function guided(f: Ref<File>): Hit[] {
   let hits: Hit[] = [];
+  for (const [key, disposer] of disposals(f)) if (!disposer) hits.push(guide("G12", f.items[key]!.start, f.items[key]!.end));
+  for (const n of f.order) {
+    const x: Ref<Item> = f.items[n]!;
+    const stack = x.kind === "ident" || x.kind === "ref" ? x.name : undefined;
+    if (stack !== undefined && (stack === "DisposableStack" || stack === "AsyncDisposableStack") && !f.bound.has(stack)) hits.push(guide("G12", x.start, x.end));
+  }
   for (const s of f.top) {
     const body = f.items[s]!.body;
     const top = (f.items[s]!.kind === "export" || f.items[s]!.kind === "declare") && body !== undefined && kindAt(f, body) !== "" ? body : s;

@@ -82,6 +82,7 @@ test("R5 finds the arguments object, but not a binding of that name", () => {
 test("R6 finds Symbol, but not a name the file declares", () => {
   list(hits('const s = Symbol("s");\nclass C {\n  *[Symbol.asyncIterator]() {}\n}\nlet t: Symbol;\n'), ["R6 Symbol", "R6 Symbol", "R6 Symbol"], "Symbol");
   list(hits("class C {\n  *[Symbol.iterator]() {}\n}\ninterface I {\n  [Symbol.iterator](): Iterator<i64>;\n}\nconst it = c[Symbol.iterator]();\nconst o = { [Symbol.iterator]: 1 };\n"), ["R6 Symbol"], "Symbol.iterator");
+  list(hits("class C {\n  [Symbol.dispose]() {}\n}\ninterface I {\n  [Symbol.dispose](): void;\n}\nc[Symbol.dispose]();\nconst o = { [Symbol.dispose]() {} };\nclass D {\n  async [Symbol.asyncDispose]() {}\n}\nconst s = new DisposableStack();\n"), [], "Symbol.dispose");
   list(hits('import { Symbol } from "./symbols";\nconst s = Symbol(1);\n'), [], "an import");
   list(hits("class Symbol {}\nconst s = new Symbol();\nconst t: symbol = u;\n"), [], "a class");
 });
@@ -502,6 +503,14 @@ test("G3 reports a number used as an index or as a counter against .length, and 
   same(messageOf(src, "G3"), "this 'number' counts or indexes, and a Fish 'number' is a float; make it 'i64', or 'usize' for an index", "the message");
   list(startingWith(guidedIn("function f(a: number, b: number) {\n  let c = a * b;\n  return c + 1;\n}\n"), "G3"), [], "arithmetic");
   list(startingWith(guidedIn("let i = 0;\nfunction g(xs: string[], i: string) {\n  return xs[0] + i;\n}\n"), "G3"), [], "a string parameter");
+});
+
+test("G12 reports disposal beyond a class's [Symbol.dispose] method, which R6 leaves alone", () => {
+  const src = "class C {\n  [Symbol.dispose]() {}\n}\ninterface I {\n  [Symbol.dispose](): void;\n}\nc[Symbol.dispose]();\nconst o = { [Symbol.dispose]() {} };\nclass D {\n  async [Symbol.asyncDispose]() {}\n}\nconst s = new DisposableStack();\n";
+  list(startingWith(guidedIn(src), "G12"), ["G12 Symbol.dispose", "G12 Symbol.dispose", "G12 Symbol.dispose", "G12 Symbol.asyncDispose", "G12 DisposableStack"], "hits");
+  list(startingWith(guidedIn("class C {\n  [Symbol.dispose]() {}\n}\n"), "G12"), [], "a class's disposer");
+  list(startingWith(guidedIn('import { Symbol, DisposableStack } from "./own";\nconst o = { [Symbol.dispose]: 1 };\nconst s = new DisposableStack();\n'), "G12"), [], "names the file declares");
+  assert(messageOf(src, "G12").startsWith("Fish disposes through a class's '[Symbol.dispose]()' method alone"), "G12's message");
 });
 
 test("G11 reports an alias changed through one name while the other is still used, naming the three fixes", () => {

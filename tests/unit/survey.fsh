@@ -120,6 +120,11 @@ test("fetch counts as available", () => {
   countsAre('async function f(): Promise<string> {\n  const res = await fetch("http://localhost/");\n  return await res.text();\n}\n', []);
 });
 
+test("G12 counts disposal beyond a class's [Symbol.dispose] method, which R6 leaves alone", () => {
+  countsAre("class C {\n  [Symbol.dispose]() {}\n}\n", []);
+  countsAre("class C {\n  [Symbol.dispose]() {}\n}\nconst k = Symbol.asyncDispose;\nconst s = new DisposableStack();\n", ["G12: 2"]);
+});
+
 test("the reject rules are counted through the migration detector, R5 to R7 too", () => {
   countsAre('function f() {\n  eval("1");\n  const g = new Function("x");\n  A.prototype.m = g;\n  Object.defineProperty(o, "k", {});\n  delete o.k;\n}\n', ["R1: 2", "R2: 2", "R3: 1"]);
   countsAre('function f() {\n  return arguments.length;\n}\nconst s = Symbol("s");\n', ["R5: 1", "R6: 1"]);
