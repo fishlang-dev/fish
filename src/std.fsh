@@ -1423,6 +1423,21 @@ class Router {
   }
 }
 
+// What the checker writes around a route's handler that says its types: a 400 saying why the
+// body isn't the JSON its type reads, a 204 for a handler giving nothing, and what a handler
+// gives as JSON.
+function __routerRefused(message: string): Response {
+  return new Response(message, { status: 400 });
+}
+
+function __routerEmpty(): Response {
+  return new Response(null, { status: 204 });
+}
+
+function __routerJson<T>(data: Ref<T>): Response {
+  return Response.json(data);
+}
+
 // The response Router.static gives a request: the file below root its path names past the
 // route's skip segments, a directory's index.html, or a 404 for anything else. Each segment is
 // percent-decoded before it is checked, so an encoded slash, dot or NUL is refused like a plain one.

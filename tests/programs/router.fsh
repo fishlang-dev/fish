@@ -569,3 +569,64 @@ async function main(): Promise<void> {
   await show(app, "OPTIONS", "/admin/secret", true);
   for (const p of ["/users/1/2", "/e", "/s"]) await show(app, "GET", p, false);
 }
+// case: router_typed_body
+// expect: 200 application/json [{"id":4,"name":"ann"}]
+// expect: 200 application/json [{"id":4,"name":"bob"}]
+// expect: 400 text/plain;charset=UTF-8 [Unexpected end of JSON input]
+// expect: 400 text/plain;charset=UTF-8 [missing field 'name' at $]
+// expect: 200 text/plain;charset=UTF-8 [plain POST]
+// A handler taking its body as a type has it read from JSON and answers with what it gives as
+// JSON; a body that isn't that type is answered 400 with why, and the handler never runs.
+type NewUser = { name: string; age?: i64 };
+type User = { id: i64; name: string };
+async function show(app: Ref<Router>, method: string, path: string, body: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method, body }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (req, body: NewUser): Promise<User> => ({ id: req.method.length, name: body.name }));
+  app.post("/plain", async (req) => new Response("plain " + req.method));
+  await show(app, "POST", "/users", "{\"name\":\"ann\"}");
+  await show(app, "POST", "/users", "{\"name\":\"bob\",\"age\":3}");
+  await show(app, "POST", "/users", "{\"name\":");
+  await show(app, "POST", "/users", "{\"age\":3}");
+  await show(app, "POST", "/plain", "{\"name\":");
+}
+// case: router_typed_response
+// expect: 200 application/json [{"id":3,"name":"/users/7"}]
+// expect: 200 application/json [[1,2,3]]
+// expect: 200 application/json ["sync"]
+// expect: gone /users/7
+// expect: 204 none []
+// expect: 200 application/json [{"hits":1}]
+// expect: 200 application/json [{"hits":2}]
+// A handler's written return type is what it answers with as JSON, a handler giving nothing
+// answers 204, and a handler keeps what it captures.
+type User = { id: i64; name: string };
+type Hits = { hits: i64 };
+async function show(app: Ref<Router>, method: string, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  const hits = shared({ n: new Atomic(0) });
+  app.get("/users/:id", async (req): Promise<User> => ({ id: req.method.length, name: req.path }));
+  app.get("/list", async (): Promise<i64[]> => [1, 2, 3]);
+  app.get("/sync", (_req): string => "sync");
+  app.delete("/users/:id", async (req: Request): Promise<void> => {
+    console.log("gone", req.path);
+  });
+  app.get("/hits", async (_req): Promise<Hits> => ({ hits: hits.n.add(1) + 1 }));
+  await show(app, "GET", "/users/7");
+  await show(app, "GET", "/list");
+  await show(app, "GET", "/sync");
+  await show(app, "DELETE", "/users/7");
+  await show(app, "GET", "/hits");
+  await show(app, "GET", "/hits");
+}

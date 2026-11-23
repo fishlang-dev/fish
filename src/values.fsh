@@ -20,13 +20,14 @@ import { isIteratorKey, keyParts, leafOf, unknownKey } from "./keys.fsh";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.fsh";
 import { BUFFER_ENCODINGS, BUFFER_READS, BUFFER_REFUSED, BUFFER_STATICS, JSON_VALUE_NAME, STD_BASE } from "./std.fsh";
 import { parseArgsArgs } from "./parseargs.fsh";
+import { parseExpression } from "./parser.fsh";
 import { holesOf, quoted, type Category } from "./quote.fsh";
 import { holdsNull } from "./defaults.fsh";
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.fsh";
 import type { Instance, Local } from "./check.fsh";
 import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./narrow.fsh";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, applyShape, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.fsh";
-import { forEachChild, nextId, NodeMap, NodeSet, reborrowNode, renumberExpr, respanExpr, someNode, walk, walkWhile, type AnyNode, type Ids, type Rewrites, type SiteTable } from "./nodes.fsh";
+import { forEachChild, nextId, NodeMap, NodeSet, reborrowNode, renumberExpr, respanExpr, Rewrites, someNode, walk, walkWhile, type AnyNode, type Ids, type SiteTable } from "./nodes.fsh";
 import { cloneExpr, cloneJsName, cloneObjectProp, cloneParam, clonePattern, cloneTypeMember, cloneTypeNode, idOfExpr, idOfObjectProp, rebuiltExpr, withIdExpr } from "./rebuild.fsh";
 import { typedNamed } from "./typing.fsh";
 
@@ -37,6 +38,11 @@ type Call = Extract<Expr, { kind: "call" }>;
 type Elements = Extract<Expr, { kind: "array" }>["elements"];
 
 const I64_MAX = (1n << 63n) - 1n;
+// The methods of std's Router that add a route for one path and one handler.
+const ROUTE_METHODS = ["get", "post", "put", "patch", "delete", "all"];
+// What a route's handler says beyond a plain one: how many parameters it takes, the type it reads
+// the request's body as, what it gives when that isn't a Response, and whether its call is awaited.
+type RouteHandler = { params: usize; body?: TypeNode; gives?: Type; awaits: boolean };
 // Stands in for an argument's mismatch message until an error needs the real one.
 const ARGUMENT_MISMATCH = "\u0000argument mismatch\u0000";
 
@@ -2205,7 +2211,15 @@ export class Expressions<C extends Context> implements Union<C> {
     if (foundId === undefined && callee.kind === "ident") {
       const named = this.bodyNamed(callee.name);
       if (named !== undefined) foundId = named.bodyId;
-    } else if (foundId === undefined && callee.kind === "member") foundId = this.method(callee, receiver).bodyId;
+    } else if (foundId === undefined && callee.kind === "member") {
+      foundId = this.method(callee, receiver).bodyId;
+      const routed = this.routeArgs(e, foundId);
+      if (routed !== undefined) {
+        const tb = this.ctx.tables();
+        const made = tb.rewrites.replace(e, withArgs(e, routed));
+        if (made.kind === "call") return this.calleeFound(made, foundId);
+      }
+    }
     return this.calleeFound(e, foundId);
   }
 
@@ -5646,6 +5660,73 @@ export class Expressions<C extends Context> implements Union<C> {
     const made = this.ctx.tables().rewrites.replace(e, cloneExpr(call));
     if (made.kind === "call") return made;
     return call;
+  }
+
+  // The arguments of a route added to std's Router whose handler says its body's type or what it
+  // answers with: the handler becomes a plain one, `handler |> (async (req) => ...)`, whose arrow reads the
+  // body as JSON, answers 400 with why when it isn't that, calls the handler and answers with
+  // what it gives as JSON. As the pipe's value the handler keeps what it captures, so the arrow
+  // captures nothing of its own. Its helpers are std's, under names no program can write.
+  /** @throws {CompileError} */
+  private routeArgs(this: Mut<this>, e: Ref<Call>, found: BodyId): Expr[] | undefined {
+    const callee: Ref<Expr> = e.callee;
+    if (callee.kind !== "member" || e.start >= STD_BASE || !ROUTE_METHODS.includes(callee.name) || e.args.length !== 2) return undefined;
+    const method = this.ctx.view().arenas.bodyOf(found);
+    const owner = method.start >= STD_BASE ? method.owner : undefined;
+    if (owner === undefined || this.ctx.typing().rec(owner).name !== "Router") return undefined;
+    const handler: Ref<Expr> = e.args[1]!;
+    const typed = this.typedHandler(handler);
+    if (typed === undefined) return undefined;
+    const request = this.ctx.view().arenas.classOf(this.ctx.classes().get("Request")!).type;
+    // As a pipe's value the handler meets no function type to take its request's type from.
+    if (handler.kind === "arrow" && handler.params.length > 0 && handler.params[0]!.type === undefined) this.ctx.tables().presetParams.set(cloneParam(handler.params[0]!), request);
+    const count = typed.params;
+    const run = `${typed.awaits ? "await " : ""}%(${count === 0 ? "" : count === 1 ? "req" : "req, body"})`;
+    const read = typed.body === undefined ? "" : "let body: fsh_body; try { body = await req.json<fsh_body>(); } catch (e) { return fsh_refused(e.message); } ";
+    const answer = typed.gives === undefined ? `return ${run};` : typed.gives === "void" ? `${run}; return fsh_empty();` : `const out = ${run}; return fsh_json(out);`;
+    const text = `fsh_handler |> (async (${count === 0 ? "_req" : "req"}) => { ${read}${answer} })`;
+    const at: Span = { start: handler.start, end: handler.end };
+    const tb = this.ctx.tables();
+    const parsed = respanExpr(parseExpression(text, tb.ids), at);
+    let slots: TypeNode[] = [];
+    let names: Expr[] = [];
+    walk({ of: "expr", node: parsed }, (n) => {
+      if (n.of === "typeNode" && n.node.kind === "ref" && n.node.name === "fsh_body") slots.push(cloneTypeNode(n.node));
+      else if (n.of === "expr" && n.node.kind === "ident" && n.node.name.startsWith("fsh_")) names.push(cloneExpr(n.node));
+    });
+    let rewrites = new Rewrites();
+    for (const slot of slots) if (slot.kind === "ref") rewrites.replaceTypeNode(slot, cloneTypeNode(typed.body!));
+    for (const name of names) {
+      if (name.kind !== "ident") continue;
+      if (name.name === "fsh_handler") rewrites.replace(name, cloneExpr(handler));
+      else rewrites.replace(name, { ...name, name: `router ${name.name.slice(4)}` });
+    }
+    const wrapped = rebuiltExpr(parsed, rewrites);
+    if (wrapped.kind === "pipe" && wrapped.body.kind === "arrow") {
+      this.ctx.tables().presetParams.set(cloneParam(wrapped.body.params[0]!), request);
+      this.ctx.tables().madeArrows.add(cloneExpr(wrapped.body));
+    }
+    return [cloneExpr(e.args[0]!), wrapped];
+  }
+
+  // What an arrow written as a route's handler says beyond a plain one, if anything: a second
+  // parameter is the body's type, and a written return type that isn't a Response is what it
+  // answers with.
+  /** @throws {CompileError} */
+  private typedHandler(this: Mut<this>, handler: Ref<Expr>): RouteHandler | undefined {
+    if (handler.kind !== "arrow" || handler.typeParams.length > 0) return undefined;
+    let awaits = handler.async;
+    let given: TypeNode | undefined = undefined;
+    if (handler.returnType !== undefined && handler.returnType.kind === "ref" && handler.returnType.name === "Promise" && handler.returnType.args.length === 1) {
+      given = cloneTypeNode(handler.returnType.args[0]!);
+      awaits = true;
+    } else if (handler.returnType !== undefined && !handler.async) given = cloneTypeNode(handler.returnType);
+    const gives = given === undefined ? undefined : this.ctx.resolveType(given);
+    const response = this.ctx.view().arenas.classOf(this.ctx.classes().get("Response")!).type;
+    const answers = gives !== response ? gives : undefined;
+    const body = handler.params.length === 2 && handler.params[1]!.type !== undefined ? cloneTypeNode(handler.params[1]!.type!) : undefined;
+    if (body === undefined && answers === undefined) return undefined;
+    return { params: handler.params.length, body, gives: answers, awaits };
   }
 
   // `Promise.resolve(v)` and `Promise.reject(e)`, rewritten as the prelude's async functions
