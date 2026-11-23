@@ -1846,14 +1846,15 @@ export class Typing {
     return this.makeCombinedFuture(combined, gives, aggregate, frame);
   }
 
-  // Each `taskGroup` future, by its closure's future, and the closure's future each is over.
+  // Each `taskGroup` future, by its closure's future; and for each, that future and where the
+  // call is written.
   private groups = new TypeMap<FutureType, FutureType>();
-  groupOf = new TypeMap<FutureType, FutureType>();
+  groupOf = new TypeMap<FutureType, { body: FutureType; at: { start: usize; end: usize } }>();
 
   // A `taskGroup` call's future: its closure's future, the awaiter's handle to the group, then
   // what the closure gave or threw, kept until every task of the group is done. It gives and
   // throws what the closure's future does, which a child's error is converted to.
-  groupFuture(this: Mut<this>, body: FutureType): FutureType {
+  groupFuture(this: Mut<this>, body: FutureType, at: { start: usize; end: usize }): FutureType {
     const known = this.groups.get(body);
     if (known !== undefined) return known;
     const r = this.rec(body);
@@ -1865,7 +1866,7 @@ export class Typing {
     const id = this.declared++;
     const t = this.made<FutureType>({ kind: "future", name: "taskGroup", gives, throws, fields: [], params, frame, concrete }, `future ${id}`);
     this.groups.set(body, t);
-    this.groupOf.set(t, body);
+    this.groupOf.set(t, { body, at });
     return t;
   }
 

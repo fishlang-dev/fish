@@ -4334,6 +4334,10 @@ struct fsh_task {
   // In a debug build, the call that spawned it, which its backtraces end with: for a task std
   // spawned with none of the program's frames below, the call that spawned the task doing so.
   const char *spawned;
+  // The task group it was spawned into, which it holds a count on, and the glue that moves the
+  // error it threw out of its output into the group, as the type the group's await throws.
+  struct fsh_group *group;
+  void (*fail)(void *output, void *error);
   char memory[];
 };
 
@@ -4410,10 +4414,15 @@ static void fsh_schedule(fsh_task *t) {
   pthread_mutex_unlock(&fsh_park);
 }
 
+struct fsh_group;
+static void fsh_group_done(struct fsh_group *g, fsh_task *t, int32_t result);
+void fsh_rt_group_release(struct fsh_group *g);
+
 void fsh_task_release(fsh_task *t) {
   if (__atomic_sub_fetch(&t->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
   if (t->outcome == 1 || t->outcome == 2) t->drop_output(fsh_output(t));
   fsh_rt_str_release(t->panic);
+  fsh_rt_group_release(t->group);
   fsh_rt_free(t);
 }
 
@@ -4479,6 +4488,7 @@ static void fsh_run(fsh_task *t) {
   pthread_mutex_unlock(&fsh_alive_lock);
   // Before the joiner wakes, so a main that ends once it is woken sees this one done.
   if (t->blocking) __atomic_sub_fetch(&fsh_blocking_live, 1, __ATOMIC_RELEASE);
+  if (t->group) fsh_group_done(t->group, t, result);
   if (joiner) {
     fsh_rt_wake(joiner);
     fsh_task_release(joiner);
@@ -4529,6 +4539,8 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   t->refs = 2;
   t->joiner = NULL;
   t->panic = NULL;
+  t->group = NULL;
+  t->fail = NULL;
   t->state = FSH_QUEUED;
   t->spawned = fsh_rt_frames ? fsh_rt_frames->site : fsh_spawned_at;
   pthread_mutex_lock(&fsh_alive_lock);
@@ -5545,6 +5557,166 @@ void fsh_rt_signal_abort(fsh_signal *s) {
     fsh_rt_signal_release(s);
   }
   fsh_rt_free(todo.at);
+}
+
+// A task group's block, shared by the 'taskGroup' call awaiting it, the handle its closure spawns
+// through, and every task spawned into it: its count, its lock, how many of its tasks aren't
+// done, the task awaiting them, its signal, the first error a task threw, kept as the type the
+// await throws until the awaiter takes it, the first panic's reason, and whether the await is
+// over, after which dropping the awaiter's handle aborts nothing.
+//
+// Lock order: a group's lock is the innermost there is. Nothing else is locked and nothing is
+// called while it is held: fsh_run gives fsh_alive_lock back before a task's end takes it, and
+// the signal is aborted, the awaiter woken and every count released only once it is given back.
+typedef struct fsh_group {
+  int64_t count; pthread_mutex_t lock; int64_t live; fsh_task *waiter; fsh_signal *signal;
+  int32_t errored, over; fsh_str *panic; void *error; int64_t error_size; fsh_drop_fn drop_error;
+} fsh_group;
+
+// A new group with one count, its closure's.
+fsh_group *fsh_rt_group_new(void) {
+  fsh_group *g = fsh_rt_alloc(sizeof(fsh_group));
+  g->count = 1;
+  pthread_mutex_init(&g->lock, NULL);
+  g->live = 0;
+  g->waiter = NULL;
+  g->signal = fsh_rt_signal_new();
+  g->errored = g->over = 0;
+  g->panic = NULL;
+  g->error = NULL;
+  g->error_size = 0;
+  g->drop_error = NULL;
+  return g;
+}
+
+// The awaiter's count on a group just made, before anything runs: with it, room for an error of
+// the type the await throws, when it throws one, and the function dropping one never taken.
+void fsh_rt_group_scope(fsh_group *g, int64_t error_size, fsh_drop_fn drop_error) {
+  __atomic_fetch_add(&g->count, 1, __ATOMIC_RELAXED);
+  if (error_size < 0) return;
+  g->error = fsh_rt_alloc(error_size > 0 ? error_size : 1);
+  g->error_size = error_size;
+  g->drop_error = drop_error;
+}
+
+// Another handle to the group's signal.
+fsh_signal *fsh_rt_group_signal(fsh_group *g) {
+  __atomic_fetch_add(&g->signal->count, 1, __ATOMIC_RELAXED);
+  return g->signal;
+}
+
+// The group's closure threw: its tasks are told to stop.
+void fsh_rt_group_abort(fsh_group *g) {
+  fsh_rt_signal_abort(g->signal);
+}
+
+void fsh_rt_group_release(fsh_group *g) {
+  if (!g || __atomic_sub_fetch(&g->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  if (g->errored && g->drop_error) g->drop_error(g->error);
+  fsh_rt_free(g->error);
+  fsh_rt_str_release(g->panic);
+  if (g->waiter) fsh_task_release(g->waiter);
+  fsh_rt_signal_release(g->signal);
+  pthread_mutex_destroy(&g->lock);
+  fsh_rt_free(g);
+}
+
+// Drops the awaiter's handle. Before the await is over, its future was dropped where it waited:
+// the group's signal is aborted, and its tasks finish on their own, waking nobody.
+void fsh_rt_group_drop(fsh_group *g) {
+  if (!g) return;
+  pthread_mutex_lock(&g->lock);
+  int32_t over = g->over;
+  fsh_task *waiter = g->waiter;
+  g->waiter = NULL;
+  pthread_mutex_unlock(&g->lock);
+  if (waiter) fsh_task_release(waiter);
+  if (!over) fsh_rt_signal_abort(g->signal);
+  fsh_rt_group_release(g);
+}
+
+// Starts a future as a task of the group, which waits for it and gives no handle to it: the
+// runtime's reference is the task's only one, and the task holds a count on the group.
+void fsh_rt_group_spawn(fsh_group *g, fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void (*fail)(void *, void *), void *frame, int64_t frame_size, int64_t output_size) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+  t->refs = 1;
+  __atomic_fetch_add(&g->count, 1, __ATOMIC_RELAXED);
+  t->group = g;
+  t->fail = fail;
+  pthread_mutex_lock(&g->lock);
+  g->live++;
+  pthread_mutex_unlock(&g->lock);
+  fsh_schedule(t);
+}
+
+// A task of a group is done. The first to throw gives the group its error and the first to
+// panic its reason, and either aborts the group's signal; then the task is no longer live, and
+// the last one wakes the awaiter. The error is moved outside the lock: only the task that
+// claimed the group's room for it writes there, and it is read once no task is live.
+static void fsh_group_done(fsh_group *g, fsh_task *t, int32_t result) {
+  if (result >= 2) {
+    fsh_str *reason = result == 3 ? t->panic : NULL;
+    int32_t claimed = 0;
+    fsh_rt_str_retain(reason);
+    pthread_mutex_lock(&g->lock);
+    if (result == 2 && t->fail && g->error && !g->errored) g->errored = claimed = 1;
+    if (reason && !g->panic) {
+      g->panic = reason;
+      reason = NULL;
+    }
+    pthread_mutex_unlock(&g->lock);
+    fsh_rt_str_release(reason);
+    if (claimed) {
+      t->fail(fsh_output(t), g->error);
+      t->outcome = 0;
+    }
+    fsh_rt_signal_abort(g->signal);
+  }
+  pthread_mutex_lock(&g->lock);
+  fsh_task *waiter = --g->live == 0 ? g->waiter : NULL;
+  if (waiter) g->waiter = NULL;
+  pthread_mutex_unlock(&g->lock);
+  fsh_wake_waiter(waiter);
+}
+
+// Awaits a group's tasks. While any is live, the awaiting task is noted for the last of them to
+// wake, and this gives 0; so it does while the group's closure is still running and no task has
+// failed. Once none is live, it gives 1, or 2 with the first error a task threw moved to out; if
+// a task panicked, the awaiter panics at at instead, as one awaiting that task would.
+int32_t fsh_rt_group_wait(fsh_group *g, fsh_task *waiter, void *out, const char *at, int32_t running) {
+  fsh_task *old = NULL;
+  fsh_str *panic = NULL;
+  int32_t result = 0;
+  pthread_mutex_lock(&g->lock);
+  if (g->live > 0) {
+    if (g->waiter != waiter) {
+      old = g->waiter;
+      __atomic_fetch_add(&waiter->refs, 1, __ATOMIC_RELAXED);
+      g->waiter = waiter;
+    }
+  } else if (!running || g->errored || g->panic) {
+    g->over = 1;
+    panic = g->panic;
+    g->panic = NULL;
+    result = 1;
+    if (!panic && g->errored) {
+      memcpy(out, g->error, g->error_size);
+      g->errored = 0;
+      result = 2;
+    }
+  }
+  pthread_mutex_unlock(&g->lock);
+  if (old) fsh_task_release(old);
+  if (panic) {
+    char reason[1100];
+    int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)panic->length, panic->bytes);
+    fsh_rt_str_release(panic);
+    fsh_panic_at(at);
+    fputs(reason, stderr);
+    fsh_panic_reason(reason, n < (int)sizeof reason ? (size_t)n : sizeof reason - 1);
+    fsh_rt_panic("\ncatch what can fail inside the group's tasks, or 'spawn' one and await 'handle.join()' to catch its panic\n");
+  }
+  return result;
 }
 
 // 'process.shutdown': a signal the first SIGINT or SIGTERM aborts. Its handlers are installed the

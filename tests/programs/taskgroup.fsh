@@ -9,6 +9,49 @@ async function main() {
     group.spawn(first(names));
   });
 }
+// case: taskgroup_children
+// expect: child 2 done
+// expect: child 1 done
+// expect: after group
+async function work(n: i64, ms: i64) {
+  await sleep(ms);
+  console.log("child", n, "done");
+}
+async function main() {
+  await taskGroup(async (group) => {
+    group.spawn(work(1, 250));
+    group.spawn(work(2, 20));
+  });
+  console.log("after group");
+}
+// case: taskgroup_empty
+// expect: 7
+// expect: done
+async function main() {
+  const n = await taskGroup(async (group) => {
+    await yieldNow();
+    const signal = group.signal;
+    return signal.aborted ? 0 : 7;
+  });
+  console.log(n);
+  console.log("done");
+}
+// case: taskgroup_many
+// expect: 44850
+// expect: after group
+async function add(total: shared<{ sum: Atomic<i64> }>, n: i64) {
+  if (n % 3 === 0) await yieldNow();
+  total.sum.add(n);
+}
+async function main() {
+  const total = shared({ sum: new Atomic(0) });
+  const mine = total.clone();
+  await taskGroup(async (group) => {
+    for (let i = 0; i < 300; i++) group.spawn(add(mine.clone(), i));
+  });
+  console.log(total.sum.load());
+  console.log("after group");
+}
 // case: taskgroup_nested_throwing_child
 // error: which only the group's own closure can pass to its 'await taskGroup'
 class Oops {

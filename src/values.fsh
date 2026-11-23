@@ -5388,7 +5388,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const r = this.recOf(t);
     if (r?.kind !== "future") throw new CompileError("E0305", `'taskGroup' takes an async arrow function written in place, which takes the group, ${example}`, given.start, given.end);
     this.ctx.tables().groupCalls.add(cloneExpr(replaced));
-    return { type: this.ctx.tables().typing.groupFuture(t as FutureType), what: "'taskGroup'" };
+    return { type: this.ctx.tables().typing.groupFuture(t as FutureType, { start: e.start, end: e.end }), what: "'taskGroup'" };
   }
 
   // `group.spawn(p)`: the Promise runs as a task the group waits for. What it throws surfaces
