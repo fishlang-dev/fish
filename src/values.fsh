@@ -5683,16 +5683,27 @@ export class Expressions<C extends Context> implements Union<C> {
     const callee: Ref<Expr> = e.callee;
     if (callee.kind !== "member" || e.start >= STD_BASE) return undefined;
     const added = ROUTE_METHODS.includes(callee.name) && e.args.length === 2;
-    if (!added && (callee.name !== "route" || e.args.length !== 3)) return undefined;
+    const mounted = callee.name === "route" && e.args.length === 2;
+    if (!added && !mounted && (callee.name !== "route" || e.args.length !== 3)) return undefined;
     const method = this.ctx.view().arenas.bodyOf(found);
     const owner = method.start >= STD_BASE ? method.owner : undefined;
     if (owner === undefined || this.ctx.typing().rec(owner).name !== "Router") return undefined;
+    // Each call is recorded once, as written: checked again, its handler is the one made here.
+    const record = !this.ctx.view().routes.has(e);
+    const router = callee.object.kind === "ident" ? this.ctx.lookup(callee.object.name, undefined) : undefined;
+    const first: Ref<Expr> = e.args[0]!;
     const handler: Ref<Expr> = e.args[e.args.length - 1]!;
+    if (mounted) {
+      const child = handler.kind === "ident" ? this.ctx.lookup(handler.name, undefined) : undefined;
+      if (record) this.ctx.tables().routes.set(cloneExpr(e), { mount: true, path: first.kind === "string" ? first.value : undefined, router, child });
+      return undefined;
+    }
     const typed = this.typedHandler(handler);
+    const verb = added ? callee.name : first.kind === "string" ? first.value.toLowerCase() : undefined;
+    const where: Ref<Expr> = e.args[e.args.length - 2]!;
+    if (record) this.ctx.tables().routes.set(cloneExpr(e), { mount: false, method: verb === undefined ? undefined : verb.toUpperCase(), path: where.kind === "string" ? where.value : undefined, router, body: typed?.reads, response: typed?.gives });
     if (typed === undefined) return undefined;
     const at: Span = { start: handler.start, end: handler.end };
-    const first: Ref<Expr> = e.args[0]!;
-    const verb = added ? callee.name : first.kind === "string" ? first.value.toLowerCase() : "";
     if (typed.params > 2) throw new CompileError("E0511", `a route's handler takes the request and, to have its body read as JSON, a second parameter of the body's type, not ${typed.params} parameters`, at.start, at.end);
     if (typed.reads !== undefined && verb === "get") throw new CompileError("E0511", "a GET request carries no body, so its handler can't take one as a second parameter; take the request alone, or add the route with 'post', 'put' or 'patch'", at.start, at.end);
     if (typed.throws) throw new CompileError("E0511", ROUTE_THROWS, at.start, at.end);

@@ -112,6 +112,13 @@ export function macroCompilation(c: Ref<Compilation>): Compilation {
   };
 }
 
+// A call on one of std's routers that adds a route or, when `mount`, mounts the router `child`
+// under `path`. `method` is in upper case, `ALL` for every method; `router` and `child` are the
+// locals holding the routers; `body` and `response` are what a handler that says its types reads
+// the request's body as and answers with. What a call doesn't write as a string, or holds in
+// something other than a local, is left out.
+export type Route = { mount: boolean; method?: string; path?: string; router?: LocalId; child?: LocalId; body?: Type; response?: Type };
+
 // The tables one check of a program fills in, by node and by type, for the rest of that check
 // and for the passes after it: moves, comptime and codegen. `check` makes a fresh set, and every
 // instance it makes holds it, so nothing one program records reaches another.
@@ -235,6 +242,9 @@ export type Tables = {
   blockingRuns: NodeSet<Expr>;
   // The `parseArgs` calls whose config has been turned into the arguments std's port takes.
   parsedArgs: NodeSet<Expr>;
+  // The calls that add a route to one of std's routers or mount one router in another, which
+  // nothing in codegen reads.
+  routes: NodeMap<Expr, Route>;
   // The values printed as Node's util.inspect prints them, whose types as written say how their
   // fields were spelled.
   printed: NodeSet<Expr>;
@@ -440,6 +450,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     deepEqualities: new NodeSet<Expr>(),
     blockingRuns: new NodeSet<Expr>(),
     parsedArgs: new NodeSet<Expr>(),
+    routes: new NodeMap<Expr, Route>(),
     printed: new NodeSet<Expr>(),
     clocks: new NodeMap<Expr, "Date.now" | "performance.now" | "Math.random">(),
     jsonCalls: new NodeMap<Expr, "stringify" | "parse">(),
