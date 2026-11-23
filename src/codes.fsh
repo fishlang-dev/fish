@@ -525,6 +525,26 @@ To fix it, check the spelling (the message suggests a near match when there is o
   E0508: { title: "invalid use of a regex" },
   E0509: { title: "a type that can't be read from or written to JSON" },
   E0510: { title: "a value that can't be printed or formatted" },
+  E0511: {
+    title: "invalid typed route handler",
+    long: {
+      text: `A handler given to a Router says its types: a second parameter is the type the request's body is read as from JSON, and a written return type that isn't a Response is what the handler answers with as JSON. Such a handler takes at most those two parameters, takes no body on a GET route, since a GET request carries none, and can't throw yet.
+
+Hono and Express handlers read the body themselves, with 'await c.req.json()' or a body parser, and nothing checks it against a type.
+
+To fix it, take the request alone or the request and the body, add a route that reads a body with 'post', 'put' or 'patch', and catch an error inside the handler, giving back a Response for it.`,
+      example: `type NewUser = { name: string };
+async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/users", async (_req, body: NewUser): Promise<NewUser> => body);
+}`,
+      fixed: `type NewUser = { name: string };
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (_req, body: NewUser): Promise<NewUser> => body);
+}`,
+    },
+  },
 
   E0601: {
     title: "a path that ends without giving a value",

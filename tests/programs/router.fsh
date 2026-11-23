@@ -630,3 +630,90 @@ async function main(): Promise<void> {
   await show(app, "GET", "/hits");
   await show(app, "GET", "/hits");
 }
+// case: router_typed_named
+// expect: 200 application/json [{"id":7,"name":"cy"}]
+// expect: 400 text/plain;charset=UTF-8 [missing field 'name' at $]
+// expect: 200 application/json [{"id":3,"name":"PUT"}]
+// expect: 200 application/json [{"id":1,"name":"di"}]
+// expect: 200 application/json [{"id":7,"name":"ed"}]
+// A function named as a handler is typed by its declaration, and 'route' takes a handler that
+// says its types as the methods named for a verb do.
+type NewUser = { name: string };
+type User = { id: i64; name: string };
+async function create(_req: Request, body: NewUser): Promise<User> {
+  return { id: 7, name: body.name };
+}
+function describe(req: Request): User {
+  return { id: req.method.length, name: req.method };
+}
+async function show(app: Ref<Router>, method: string, path: string, body: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method, body }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", create);
+  app.put("/users", describe);
+  app.route("POST", "/things", async (_req, body: NewUser): Promise<User> => ({ id: 1, name: body.name }));
+  app.route("patch", "/users", create);
+  await show(app, "POST", "/users", "{\"name\":\"cy\"}");
+  await show(app, "POST", "/users", "{}");
+  await show(app, "PUT", "/users", "");
+  await show(app, "POST", "/things", "{\"name\":\"di\"}");
+  await show(app, "PATCH", "/users", "{\"name\":\"ed\"}");
+}
+// case: router_typed_body_not_json
+// error: values of type 'Set<string>' can't be read from JSON: a Set has no JSON form; use an array of its members
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/tags", async (_req, body: Set<string>) => new Response("" + body.size));
+}
+// case: router_typed_answer_not_json
+// error: values of type 'Point' can't be written as JSON: a class is written as JSON when it has '@derive(Json)', which 'Point' doesn't
+class Point {
+  x: i64;
+  constructor(x: i64) { this.x = x; }
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/point", async (_req): Promise<Point> => new Point(1));
+}
+// case: router_typed_throws
+// error: a route's handler that says its types can't throw yet; catch the error inside the handler and give back a 'Response' for it
+type NewUser = { name: string };
+class Taken extends Error {}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (_req, body: NewUser): Promise<NewUser> => {
+    if (body.name === "root") throw new Taken("taken");
+    return body;
+  });
+}
+// case: router_typed_named_throws
+// error: a route's handler that says its types can't throw yet; catch the error inside the handler and give back a 'Response' for it
+type NewUser = { name: string };
+class Taken extends Error {}
+async function create(_req: Request, body: NewUser): Promise<NewUser> throws Taken {
+  if (body.name === "root") throw new Taken("taken");
+  return body;
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", create);
+}
+// case: router_typed_three_parameters
+// error: a route's handler takes the request and, to have its body read as JSON, a second parameter of the body's type, not 3 parameters
+type NewUser = { name: string };
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (_req: Request, body: NewUser, _extra: i64): Promise<NewUser> => body);
+}
+// case: router_typed_get_body
+// error: a GET request carries no body, so its handler can't take one as a second parameter
+type Query = { q: string };
+async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/search", async (_req, body: Query): Promise<Query> => body);
+}
