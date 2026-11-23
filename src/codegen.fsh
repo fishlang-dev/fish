@@ -5701,6 +5701,67 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // The disposers a drop of an instance runs, the class's own first, then each base's.
+  disposerNames(this: Mut<this>, type: ClassType): string {
+    let out = "";
+    let c: ClassType | undefined = type;
+    while (c !== undefined) {
+      const own = this.tables.disposers.get(c);
+      if (own !== undefined) out += ` ${this.symbol(own)}`;
+      c = this.tables.typing.rec(c).base;
+    }
+    return out;
+  }
+
+  // In a drop's helper, runs the disposers of the instance `%v`, when `new` finished making it and
+  // nothing has disposed it: its class's own, then each base's, each on the part it belongs to.
+  // Gives the instance as they left it, whose fields the drop goes on to free. The marker is
+  // cleared first, so a disposer that panics isn't run again, and its panic still frees the fields.
+  disposed(this: Mut<this>, type: ClassType): string {
+    const live = this.liveAt(type);
+    if (live === undefined) return "%v";
+    const t = this.llvm(type);
+    const [slot, marker, set, run, done, left] = [this.alloca(t), this.temp(), this.temp(), this.label(), this.label(), this.temp()];
+    this.emit(`store ${t} %v, ptr ${slot}`);
+    this.emit(`${marker} = getelementptr ${t}, ptr ${slot}, i32 0, ${live.map((i) => `i32 ${i}`).join(", ")}`);
+    this.emit(`${set} = load i1, ptr ${marker}`);
+    this.emit(`br i1 ${set}, label %${run}, label %${done}`);
+    this.startBlock(run);
+    this.emit(`store i1 false, ptr ${marker}`);
+    let part = slot;
+    let c: ClassType | undefined = type;
+    while (c !== undefined) {
+      const own = this.tables.disposers.get(c);
+      if (own !== undefined) {
+        const hooks = { unwound: (cg: Mut<Codegen>) => {
+          const v = cg.temp();
+          cg.emit(`${v} = load ${t}, ptr ${slot}`);
+          cg.dropParts(v, type);
+        } };
+        const none: string[] = [];
+        this.invoke(own, part, none, undefined, hooks);
+      }
+      const base = this.tables.typing.rec(c).base;
+      if (base !== undefined) part = this.upcast(part, c, base);
+      c = base;
+    }
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
+    this.emit(`${left} = load ${t}, ptr ${slot}`);
+    return left;
+  }
+
+  // Drops each part of an aggregate that owns something.
+  dropParts(this: Mut<this>, v: string, type: Exclude<Type, string>): void {
+    const t = this.llvm(type);
+    for (const [part, i] of this.parts(type)) {
+      if (!this.needsDrop(part)) continue;
+      const x = this.temp();
+      this.emit(`${x} = extractvalue ${t} ${v}, ${i}`);
+      this.dispose(x, part);
+    }
+  }
+
   // The function that drops what a value of an aggregate type owns, or returns a copy of it,
   // part by part, or for a union, in the member it holds. It is named before it is made, so a
   // type holding itself calls it.
@@ -5712,8 +5773,9 @@ class Codegen implements PrintHost, ComptimeHost {
     const described2 = this.tables.typing.described(type);
     const t = this.llvm(type);
     // Types described alike and laid out alike are dropped and copied alike, so they share one
-    // helper, named by what they are rather than by which of them came first.
-    const shape = `${kind} ${described2} ${t}`;
+    // helper, named by what they are rather than by which of them came first. A drop that runs
+    // disposers is told apart by which it runs.
+    const shape = `${kind} ${described2} ${t}${kind === "drop" && r.kind === "class" ? this.disposerNames(type as ClassType) : ""}`;
     const shared = this.glueByShape.get(shape);
     if (shared !== undefined) {
       if (kind === "copy") this.glue.copy.set(type, shared);
@@ -5832,10 +5894,11 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`${result} = load ${t}, ptr ${copy}`);
       }
     } else {
+      const whole = kind === "drop" && r.kind === "class" ? this.disposed(type as ClassType) : "%v";
       for (const [part, i] of this.parts(type)) {
         if (!this.needsDrop(part)) continue;
         const v = this.temp();
-        this.emit(`${v} = extractvalue ${t} %v, ${i}`);
+        this.emit(`${v} = extractvalue ${t} ${whole}, ${i}`);
         const made = each(this, v, part);
         if (kind === "drop") continue;
         const next = this.temp();
