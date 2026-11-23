@@ -79,9 +79,10 @@ export type ObjectType = Brand<usize, "object">;
 // A class is nominal: one per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
 // An instance of a generic class also records the class it came from and its type arguments.
+// `disposes`: the class declares a disposer, a `[Symbol.dispose]` method.
 // `rust`: the Rust type a class a Rust module declares stands for. An abstract class only ever
 // exists embedded in a concrete one, so it is never a value's type.
-export type ClassRecord = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true };
+export type ClassRecord = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true; disposes?: true };
 export type ClassType = Brand<usize, "class">;
 
 // An interface is a trait: fields and method signatures that any value with those members
@@ -376,6 +377,11 @@ export const ITERATOR = "[Symbol.iterator]";
 // The name a class's `[Symbol.dispose]` method takes, its disposer, which runs when an instance is
 // dropped and which no call can name.
 export const DISPOSE = "[Symbol.dispose]";
+
+// The field an instance with a disposer keeps its liveness in: `new` sets it once the constructor
+// returns, and the drop clears it as it calls the disposer, so an instance never finished, or
+// moved away, is not disposed. A private name no source can spell, as `EMBEDDED` is.
+export const LIVE = "#not disposed";
 
 // The field a class extending Map or Set holds its collection in: a private name no source can
 // spell, so printing and JSON leave it out.
@@ -979,6 +985,18 @@ export class Typing {
     while (x !== undefined) {
       if (x === c) return true;
       x = this.rec(x).base;
+    }
+    return false;
+  }
+
+  // Whether a type is a class with a disposer, its own or a base's: an instance is moved, and
+  // never copied or taken apart, so the disposer runs once on the whole of it.
+  disposable(t: Type): boolean {
+    let x: ClassType | undefined = this.kindOf(t) === "class" ? (t as ClassType) : undefined;
+    while (x !== undefined) {
+      const r = this.rec(x);
+      if (r.disposes === true) return true;
+      x = r.base;
     }
     return false;
   }

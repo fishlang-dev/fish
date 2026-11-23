@@ -4,7 +4,7 @@ import { CompileError } from "./diag.fsh";
 import type { RustName } from "./rust.fsh";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Modifier, Param, Pattern, Span, Stmt, TypeNode, TypeParam } from "./parser.fsh";
 import { cloneClassNode, cloneExpr, cloneJsName, cloneParam, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltParam, rebuiltStmts, rebuiltTypeNode } from "./rebuild.fsh";
-import { DISPOSE, EMBEDDED, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.fsh";
+import { DISPOSE, EMBEDDED, LIVE, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.fsh";
 import { unsupported } from "./unsupported.fsh";
 import { symbolKey } from "./keys.fsh";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.fsh";
@@ -202,6 +202,11 @@ export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: 
     // An optional field is an Option, empty until assigned.
     const init: Expr | undefined = m.init !== undefined ? cloneExpr(m.init) : m.optional ? { id: nextId(tables.ids), kind: "null", start: m.start, end: m.end } : undefined;
     add(d, fieldOf(tables.ids, m.name, m.type !== undefined ? cloneTypeNode(m.type) : undefined, m.optional, init, access, m.modifiers.includes("readonly"), { start: m.start, end: m.end }));
+  }
+  if (d.methods.has(DISPOSE)) {
+    let r = tables.typing.rec(type);
+    r.disposes = true;
+    tables.typing.setRec(type, r);
   }
   if (node.typeParams.length > 0 && !d.shared) {
     let statics = new Map<string, BodyId>();
@@ -743,6 +748,30 @@ function superAt(tables: Ref<Tables>, ctorId: BodyId, preludeLength: usize): usi
 
 function callsSuper(st: Ref<Stmt>): boolean {
   return st.kind === "expr" && st.expr.kind === "call" && st.expr.callee.kind === "super";
+}
+
+// Gives the first class of a chain to declare a disposer the field `LIVE`, once its bases are
+// linked. No constructor assigns it: `new` sets it when the constructor has returned.
+/** @throws {CompileError} */
+export function markLive(tables: Mut<Tables>, classId: ClassId): void {
+  const c = tables.arenas.classOf(classId);
+  const own = c.methods.get(DISPOSE);
+  if (own === undefined) return;
+  // A base whose disposer reaches an abstract member is run as each subclass's copy of it, which a
+  // disposer written in the subclass would replace rather than run before.
+  if (tables.arenas.bodyOf(own).copyOf === undefined) {
+    for (const b of chainFrom(tables.arenas, c.base)) {
+      const theirs = tables.arenas.classOf(b).methods.get(DISPOSE);
+      if (theirs === undefined || tables.arenas.bodyOf(theirs).template !== true) continue;
+      const at = tables.arenas.bodyOf(own);
+      throw new CompileError("E0704", `'${tables.typing.rec(c.type).name}' can't declare a '[Symbol.dispose]' method: the one '${tables.typing.rec(tables.arenas.classOf(b).type).name}' declares reaches an abstract member, so each subclass runs its own copy of it, which this would replace; dispose in the abstract member it calls instead`, at.start, at.end);
+    }
+  }
+  if (c.base !== undefined && tables.typing.disposable(tables.arenas.classOf(c.base).type)) return;
+  const at = { start: c.node.start, end: c.node.end };
+  const field: FieldDecl = { name: LIVE, type: { id: nextId(tables.ids), kind: "ref", name: "boolean", args: [], ...at }, init: undefined, access: "private", readonly: false, ...at };
+  let info = tables.arenas.classMut(classId);
+  info.fields.push(field);
 }
 
 // Links a class to the Map or Set it extends, held in the field `EMBEDDED`. Its constructor's

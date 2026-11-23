@@ -23,7 +23,7 @@ import { Registry, RegistryState, type RegistryHost } from "./registry.fsh";
 import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost } from "./resolve.fsh";
 import { openParam } from "./typefns.fsh";
 import { lowerDefaults, writtenName } from "./defaults.fsh";
-import { idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
+import { DISPOSE, idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
 import { unsupported, unsupportedDeclaration } from "./unsupported.fsh";
 import { hoistLocals } from "./locals.fsh";
 import { localKeys, lowerKeys, lowerKeysWith, numberKey, topKeys } from "./keys.fsh";
@@ -2071,6 +2071,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           for (const f of this.registry().settle(next)) {
             try {
               const definition = this.definition(f);
+              this.disposerMade(next, f, definition);
             this.checkBody(definition);
             } catch (e) {
               if (!(e instanceof CompileError)) throw e;
@@ -2087,6 +2088,17 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.recover(e);
       }
     }
+  }
+
+  // Records a class's own disposer, once it is an instance to compile, for the class's drop to
+  // call. An abstract one and a template are checked and never compiled.
+  private disposerMade(this: Mut<this>, c: ClassId, f: BodyId, made: InstanceId): void {
+    const info = this.tables.arenas.classOf(c);
+    if (info.methods.get(DISPOSE) !== f) return;
+    const body = this.tables.arenas.bodyOf(f);
+    if (body.abstract === true || body.template === true || !this.tables.arenas.instanceOf(made).concrete) return;
+    const type = info.type;
+    this.tables.disposers.set(type, made);
   }
 
   // Reads every body's results once every body is checked, giving the instances to compile and

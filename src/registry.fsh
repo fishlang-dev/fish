@@ -1,4 +1,4 @@
-import { checkOverrideModifiers, checkOverrides, cloneFieldDecl, copySelfTyped, embed, extend, implementAbstracts, type Body, type ClassInfo, type FieldDecl } from "./classes.fsh";
+import { checkOverrideModifiers, checkOverrides, cloneFieldDecl, copySelfTyped, embed, extend, implementAbstracts, markLive, type Body, type ClassInfo, type FieldDecl } from "./classes.fsh";
 import type { Tables } from "./compilation.fsh";
 import { nextId } from "./nodes.fsh";
 import type { BodyId, ClassId } from "./arenas.fsh";
@@ -117,6 +117,7 @@ export class Registry<H extends RegistryHost> {
     if (baseName === undefined) {
       checkOverrideModifiers(this.host.tables.arenas, this.host.tables.typing, this.host.tables.arenas.classOf(c));
       implementAbstracts(this.host.tables, c);
+      markLive(this.host.tables, c);
       this.host.registryState.linked.add(type);
       return;
     }
@@ -125,6 +126,7 @@ export class Registry<H extends RegistryHost> {
       embed(this.host.tables, c, baseName === "Map" ? "Map" : "Set");
       checkOverrideModifiers(this.host.tables.arenas, this.host.tables.typing, this.host.tables.arenas.classOf(c));
       implementAbstracts(this.host.tables, c);
+      markLive(this.host.tables, c);
       this.host.registryState.linked.add(type);
       return;
     }
@@ -157,6 +159,7 @@ export class Registry<H extends RegistryHost> {
     copySelfTyped(this.host.tables, c);
     checkOverrides(this.host.tables.arenas, this.host.tables.typing, this.host.tables.arenas.classOf(c));
     checkOverrideModifiers(this.host.tables.arenas, this.host.tables.typing, this.host.tables.arenas.classOf(c));
+    markLive(this.host.tables, c);
     this.host.registryState.linked.add(type);
   }
 

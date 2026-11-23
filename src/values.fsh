@@ -3967,6 +3967,8 @@ export class Expressions<C extends Context> implements Union<C> {
     if (this.ctx.typing().holdsRef(t)) throw new CompileError("E0509", `'JSON.parse' makes owned values, so '${this.ctx.typing().show(t)}' can't hold references`, written.start, written.end);
     if (this.ctx.tables().typing.holdsPattern(t)) throw unsupported("template literal pattern types in 'JSON.parse'", written);
     if (this.ctx.typing().holdsPart(t, (u) => typeof u !== "string" && this.ctx.typing().kindOf(u) === "fixed")) throw unsupported("fixed-size arrays in 'JSON.parse'", written);
+    // Reading builds an instance without its constructor, so nothing would say it is one to dispose.
+    if (this.ctx.typing().holdsPart(t, (u) => this.ctx.typing().disposable(u))) throw new CompileError("E0509", "a class with a '[Symbol.dispose]' method can't be read from JSON, which would make one without running its constructor; read its fields and make it with 'new'", written.start, written.end);
     const hidden = this.ctx.typing().holdsPart(t, (u) => typeof u !== "string" && this.ctx.typing().kindOf(u) === "class" && this.ctx.typing().rec(u).fields.some((f) => f.name.startsWith("#")));
     if (hidden) throw new CompileError("E0509", "a class with '#private' fields can't be read from JSON, since JSON doesn't hold them", written.start, written.end);
     const s = this.read(e.args[0]!);

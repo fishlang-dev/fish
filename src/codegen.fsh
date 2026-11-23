@@ -14,7 +14,7 @@ import type { ArithmeticOp, AssignOp, BinaryOp, Expr, JsName, ObjectProp, Param,
 import { ARRAY, DYN, atNamesIn, compound, Conversions, llvmOf, nameAt, structNames, textOf, typeDefinitions } from "./layout.fsh";
 import { made, type PatternInfo } from "./match.fsh";
 import { STD_BASE } from "./std.fsh";
-import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.fsh";
+import { EMBEDDED, LIVE, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.fsh";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.fsh";
 import { partEnd, partStart, type Tables } from "./compilation.fsh";
 import { allWords } from "./sizes.fsh";
@@ -5611,7 +5611,15 @@ class Codegen implements PrintHost, ComptimeHost {
     if (r.kind === "array" || r.kind === "map" || r.kind === "shared" || r.kind === "block" || r.kind === "dyn" || r.kind === "recursive") return true;
     if (r.kind === "fixed") return r.size > 0 && this.needsDrop(r.element);
     if (r.kind === "interior" && !isLock(r)) return this.needsDrop(r.of);
+    // An instance with a disposer runs it when dropped, whatever its fields own.
+    if (r.kind === "class" && r.disposes === true) return true;
     return this.parts(type).some(([t]) => this.needsDrop(t));
+  }
+
+  // Where an instance with a disposer keeps the marker `new` sets, through any bases, or nothing
+  // for a class without one.
+  liveAt(c: ClassType): usize[] | undefined {
+    return this.tables.typing.disposable(c) ? this.tables.typing.fieldPath(c, LIVE) : undefined;
   }
 
 
@@ -13597,6 +13605,13 @@ class Codegen implements PrintHost, ComptimeHost {
           cg.dispose(unstash2, type);
         } };
         this.invoke(this.callOf(e)!, instance, argValues3, exprKey(e), part5);
+        // Only an instance whose constructor returned is one its disposer may run for.
+        const live = this.liveAt(type);
+        if (live !== undefined) {
+          const marker = this.temp();
+          this.emit(`${marker} = getelementptr ${this.llvm(type)}, ptr ${instance}, i32 0, ${live.map((i) => `i32 ${i}`).join(", ")}`);
+          this.emit(`store i1 true, ptr ${marker}`);
+        }
         const result = this.temp();
         this.emit(`${result} = load ${this.llvm(type)}, ptr ${instance}`);
         return result;
