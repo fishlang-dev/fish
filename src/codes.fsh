@@ -447,7 +447,7 @@ async function save(n: i64): Promise<void> throws Refused {
   if (n > 1) throw new Refused("too many");
 }
 async function main() throws Refused {
-  const ns = [1, 2];
+  const ns = [0, 1];
   await taskGroup(async (group) => {
     ns.forEach((n) => group.spawn(save(n)));
   });
@@ -462,7 +462,7 @@ async function save(n: i64): Promise<void> throws Refused {
   if (n > 1) throw new Refused("too many");
 }
 async function main() throws Refused {
-  const ns = [1, 2];
+  const ns = [0, 1];
   await taskGroup(async (group) => {
     for (const n of ns) group.spawn(save(n));
   });

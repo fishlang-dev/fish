@@ -301,6 +301,17 @@ function main() {
     await yieldNow();
   });
 }
+// case: taskgroup_reassigned
+// error: cannot assign to 'group': a task group's closure keeps the group it was called with
+async function main() {
+  const other = await taskGroup(async (group) => {
+    await yieldNow();
+    return group;
+  });
+  await taskGroup(async (group) => {
+    group = other;
+  });
+}
 // case: taskgroup_try_around_spawn
 // error: nothing in this 'try' can throw, so its 'catch' never runs
 class Oops {
