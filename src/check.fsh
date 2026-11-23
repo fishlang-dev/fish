@@ -1210,7 +1210,10 @@ function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<str
     checker.prepare();
     outcome = checker.run();
   } catch (e) {
-    throw e instanceof CompileError ? named(e, copyNames(checker.tables.names)) : e;
+    if (!(e instanceof CompileError)) throw e;
+    let failure = named(e, copyNames(checker.tables.names));
+    if (checker.tables.session.borrows !== undefined) failure.borrows = checker.tables.session.borrows.map((b) => ({ ...b }));
+    throw failure;
   }
   const { instances, warnings } = outcome!;
   let taken = checkerApart(checker);

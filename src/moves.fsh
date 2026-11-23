@@ -3,7 +3,7 @@ import assert from "node:assert";
 import { bodyOf, type Arenas, type InstanceId, type LocalId } from "./arenas.fsh";
 import type { Instance, Local, Origin } from "./check.fsh";
 import type { Body } from "./classes.fsh";
-import { CompileError } from "./diag.fsh";
+import { CompileError, type BorrowEvent } from "./diag.fsh";
 import type { Declarator, Expr, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.fsh";
 import { bindings } from "./match.fsh";
 import { rustClassOf } from "./rust.fsh";
@@ -115,6 +115,8 @@ type Exit = { kind: "raise" | "return" | "jump"; target?: Site; which?: "break" 
 type Frame = { kind: "catch" | "finally"; acc: State; start: usize; end: usize; exits: Exit[] };
 type Site = { id: usize; start: usize; end: usize };
 
+// What the checker logs is declared beside the error that carries a failed check's log out.
+export type { BorrowEvent } from "./diag.fsh";
 
 /** @throws {CompileError} */
 export function checkMoves<T extends Tables, B extends Body, I extends Instance>(tables: Mut<T>, f: Ref<B>, instance: Ref<I>, origins: Origin[]): { captures: Set<LocalId>; consumes: Set<usize>; keeps: boolean } {
@@ -547,6 +549,10 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
           const at2 = this.spot(cx, s.right);
           this.free(cx, place, at2, "lend");
           if (this.state !== null) this.state.loans.set(s.right.start as f64, { place, mutable: false, start: s.right.start, end: s.right.end, holders: new Set(), call: "the loop", loop: true });
+          if (cx.tables.session.borrows !== undefined) {
+            const text = `'${this.pathOf(cx, place)}' is lent to the 'for...of' loop`;
+            this.log(cx, { kind: "lend", start: s.right.start, end: s.right.end, text });
+          }
           if (eachRef && this.state !== null) this.state.loans.set(-(s.start as f64) - 1, { place: `${place}.[]`, mutable: false, start: s.right.start, end: s.right.end, holders: new Set([each]) });
           // An array reached through a reference keeps what that reference borrows lent until
           // the loop ends, and an element that is a reference holds it too.
@@ -1492,6 +1498,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     if (rootId !== undefined && cx.instance.captures !== undefined && cx.instance.captures.has(rootId)) this.movedOut.add(rootId);
     this.consumed.add(e.id);
     const note = this.hinted(cx, type, consume!.replaceAll(PLACE, this.text(cx, e)));
+    if (cx.tables.session.borrows !== undefined) cx.tables.session.borrows.push({ kind: "move", start: e.start, end: e.end, text: note });
     if (this.state !== null) this.state.moves.set(place, { start: e.start, end: e.end, note, passes: copyPasses(this.passes) });
   }
 
@@ -1603,7 +1610,30 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     // A call's receiver and the variable given its result hold one loan between them.
     const had = this.state.loans.get(key);
     if (had !== undefined && had.place === place) for (const h of had.holders) holders.add(h);
+    let logged: LocalId[] = [];
+    if (cx.tables.session.borrows !== undefined) for (const h of holders) logged.push(h);
     this.state.loans.set(key, { place, mutable, start: use.start, end: use.end, holders, call, callAt });
+    if (cx.tables.session.borrows !== undefined) this.logLoan(cx, place, mutable, use, logged, call);
+  }
+
+  // Adds to the session's log, when it keeps one. Nothing the check does reads it back.
+  log(cx: Mut<MoveCx<T, B, I>>, event: BorrowEvent): void {
+    if (cx.tables.session.borrows !== undefined) cx.tables.session.borrows.push(event);
+  }
+
+  // Logs a loan: the place, whom it is lent to, and where the last of the variables holding it
+  // is last used.
+  logLoan(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, place: string, mutable: boolean, use: Ref<Spot>, holders: Ref<LocalId[]>, call: string | undefined): void {
+    let last: f64 = -1;
+    for (const h of holders) last = Math.max(last, this.last.get(h) ?? -1);
+    const to = holders.length > 0 ? ` to ${this.named(cx, holders).join(" and ")}`
+      : call === undefined ? ""
+      : call === NEW_OBJECT || call === NEW_ARRAY ? ` to ${call} while it is built`
+      : ` to ${call} for this call`;
+    let event: BorrowEvent = { kind: "lend", start: use.start, end: use.end, text: `'${this.pathOf(cx, place)}' is lent${mutable ? " mutably" : ""}${to}` };
+    // What `this` keeps is held past the body, which reads as its end.
+    if (last > (use.start as f64)) event.until = last === FOREVER ? cx.f.end : (last as usize);
+    this.log(cx, event);
   }
 
   // A reference variable given a value holds what it borrows: a place lent to it, or what
@@ -2493,7 +2523,9 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       else {
         this.free(cx, c.place, c.at, "move");
         const name = cx.tables.arenas.localOf(c.from!).name;
-        if (this.state !== null) this.state.moves.set(c.place, { start: c.at.start, end: c.at.end, note: `'${name}' moved here into a closure, which holds it now`, passes: copyPasses(this.passes) });
+        const note = `'${name}' moved here into a closure, which holds it now`;
+        if (cx.tables.session.borrows !== undefined) cx.tables.session.borrows.push({ kind: "move", start: c.at.start, end: c.at.end, text: note });
+        if (this.state !== null) this.state.moves.set(c.place, { start: c.at.start, end: c.at.end, note, passes: copyPasses(this.passes) });
         // A closure moving one of this closure's captures into itself moves it out of this one.
         if ((cx.instance.captures !== undefined && cx.instance.captures.has(c.from!))) this.movedOut.add(c.from!);
       }
