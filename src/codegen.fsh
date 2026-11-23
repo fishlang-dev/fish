@@ -2,7 +2,7 @@ import assert from "node:assert";
 import type { Body } from "./classes.fsh";
 import { cloneExpr, cloneStmt } from "./rebuild.fsh";
 import { bodyOf, type Arenas, type InstanceId, type LocalId } from "./arenas.fsh";
-import { selfOf, type Checked, type Instance, type JumpTarget, type Local, type Type } from "./check.fsh";
+import { emptyTables, selfOf, type Checked, type Instance, type JumpTarget, type Local, type Type } from "./check.fsh";
 import { crossed as rustCrossing, dropSymbol, rustClassOf, trusted, type Crossing } from "./rust.fsh";
 import { formatPlan, printStream, integerMethod, MATH_CONSTANTS, MATH_FLOAT, REGEX_FLAGS, regexStringType, type DynTable } from "./values.fsh";
 import { compile as compileRegex, parsePattern, type RegexSyntaxError, type RegexTables } from "./regex.fsh";
@@ -378,6 +378,8 @@ class Codegen implements PrintHost, ComptimeHost {
   refusals: Map<string, usize>;
   harness: boolean;
   leaks: boolean;
+  // Whether the check is kept for the next build, as `fishc watch` keeps it.
+  keepsCheck: boolean;
   debug: boolean;
   failed: string[];
   // Whether an instance that fails is recorded in `failed` and the rest still compiled.
@@ -491,6 +493,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.refusals = new Map<string, usize>();
     this.harness = options.harness ?? false;
     this.leaks = options.leaks ?? false;
+    this.keepsCheck = options.keep === true;
     this.debug = options.debug ?? false;
     this.collecting = options.failed !== undefined;
     const none: string[] = [];
@@ -1033,6 +1036,11 @@ class Codegen implements PrintHost, ComptimeHost {
   // Last, so what the entry and the fillers made is not taken from the last build as well.
   if (prior !== undefined) this.pullKept(prior!);
   partEnd(this.tables.session, "codegen tail", timer);
+  // Every function is emitted, so nothing reads what the check recorded of each expression again,
+  // and putting the module together below is where codegen holds the most. They can't go one
+  // instance at a time: the comptime interpreter walks an emitted function's body by them when a
+  // later function reads a constant or runs a `comptime` block.
+  if (prior === undefined && !this.keepsCheck) this.releaseTables();
   timer = partStart(this.tables.session);
 
 
@@ -1058,6 +1066,26 @@ class Codegen implements PrintHost, ComptimeHost {
   const whole = [...typeDefinitions(this.tables.typing, module), module].join("\n");
   partEnd(this.tables.session, "codegen assembly", timer);
   return whole;
+  }
+
+  // Empties each instance's tables of expressions. `locals` stays: a library's header reads its
+  // exports' parameters from it after codegen. A build that keeps its check keeps them all.
+  releaseTables(this: Mut<this>) {
+    for (let i: usize = 1; i <= this.tables.arenas.instanceCount(); i++) {
+      let fresh = emptyTables();
+      let x = this.tables.arenas.instanceMut(i as InstanceId);
+      x.types = fresh.types;
+      x.calls = fresh.calls;
+      x.setters = fresh.setters;
+      x.coercions = fresh.coercions;
+      x.jumps = fresh.jumps;
+      x.borrowsFrom = fresh.borrowsFrom;
+      x.raises = fresh.raises;
+      x.caught = fresh.caught;
+      x.consumes = fresh.consumes;
+      x.patterns = fresh.patterns;
+      x.copiesOut = fresh.copiesOut;
+    }
   }
 
   loc(id: LocalId): Ref<Local> {
