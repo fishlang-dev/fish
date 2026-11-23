@@ -1625,7 +1625,12 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // is last used.
   logLoan(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, place: string, mutable: boolean, use: Ref<Spot>, holders: Ref<LocalId[]>, call: string | undefined): void {
     let last: f64 = -1;
-    for (const h of holders) last = Math.max(last, this.last.get(h) ?? -1);
+    for (const h of holders) {
+      // A variable given a new value gathers what it will hold under a stand-in nothing uses.
+      const id = cx.tables.arenas.localOf(h).id;
+      const holder = id >= SYNTHETIC * 2 && id < SYNTHETIC * 3 ? (this.byId.get(id - SYNTHETIC * 2) ?? h) : h;
+      last = Math.max(last, this.last.get(holder) ?? -1);
+    }
     const to = holders.length > 0 ? ` to ${this.named(cx, holders).join(" and ")}`
       : call === undefined ? ""
       : call === NEW_OBJECT || call === NEW_ARRAY ? ` to ${call} while it is built`

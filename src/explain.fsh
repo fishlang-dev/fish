@@ -29,10 +29,14 @@ export function explainBorrows(src: string, file: string, events: Ref<BorrowEven
   // the same events again. A receiver is lent shared while its arguments run and then mutably
   // for the call, which the mutable loan alone says.
   let kept: BorrowEvent[] = [];
+  let seen = new Map<string, usize>();
   for (const e of events) {
-    const same = kept.findIndex((k) => k.kind === e.kind && k.start === e.start && k.end === e.end && shared(k.text) === shared(e.text));
-    if (same < 0) kept.push({ ...e });
-    else if (e.text !== shared(e.text)) kept[same as usize] = { ...e };
+    const key = `${e.kind} ${e.start} ${e.end} ${shared(e.text)}`;
+    const same = seen.get(key);
+    if (same === undefined) {
+      seen.set(key, kept.length);
+      kept.push({ ...e });
+    } else if (e.text !== shared(e.text)) kept[same] = { ...e };
   }
   const names: Names = { local: new Set(), madeUp: new Map() };
   let marks: Mark[] = [];

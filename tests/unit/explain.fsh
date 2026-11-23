@@ -24,7 +24,7 @@ function logged(src: string): Logged {
   } catch (e) {
     if (e instanceof CompileError) {
       for (const b of e.borrows) out.events.push({ ...b });
-      out.error = e;
+      out.error = e.clone();
     } else assert(false, `the check failed: ${e.message}`);
   }
   removed(dir);
@@ -40,7 +40,7 @@ const HEAD = `class P { n: i64; constructor(n: i64) { this.n = n; } }
 function take(p: P): void { console.log(p.n); }
 `;
 
-test("a check logging borrows gives each move and each loan with its holder's last use", () => {
+test("a check logging for explain-borrows gives each move and each loan with its holder's last use", () => {
   const src = `${HEAD}function main() {
   const a = new P(1);
   const b = new P(2);
@@ -62,7 +62,7 @@ test("a check logging borrows gives each move and each loan with its holder's la
   assert(loan!.until !== undefined && loan!.until! >= used && loan!.until! <= used + "console.log(r.n)".length, `the loan lasts until ${loan!.until ?? 0}, not r's last use at ${used}`);
 }, { timeout: 30_000 });
 
-test("a check that fails gives what it logged with its error", () => {
+test("a check that fails gives what it logged for explain-borrows with its error", () => {
   const src = `${HEAD}function main() {
   const a = new P(1);
   take(a);
@@ -75,7 +75,7 @@ test("a check that fails gives what it logged with its error", () => {
   assert(events.some((e) => e.kind === "move" && e.start === moved), `no move at 'a': ${listed(events)}`);
 }, { timeout: 30_000 });
 
-test("a check not asked to logs nothing", () => {
+test("a check not asked to logs nothing for explain-borrows", () => {
   const dir = scratch("fish-explain-");
   const src = `${HEAD}function main() { take(new P(1)); const a = new P(2); take(a); }\n`;
   try {
@@ -115,7 +115,7 @@ function shownEvents(): BorrowEvent[] {
   ];
 }
 
-test("events and errors are printed under the lines they are on", () => {
+test("explain-borrows prints events and errors under the lines they are on", () => {
   const error = new CompileError("E0201", "'a' was moved, so it can't be used here", at("    a,", 4), at("    a,", 5), { message: MOVED, start: at("take(a)", 5), end: at("take(a)", 6) });
   same(explainBorrows(SHOWN, "t.fsh", shownEvents(), [error]), ` 1 | function main() {
  2 |   const a = make();
@@ -132,14 +132,14 @@ test("events and errors are printed under the lines they are on", () => {
  7 | }`, "the whole file");
 });
 
-test("a range prints only its lines and what is on them", () => {
+test("explain-borrows prints only a range's lines and what is on them", () => {
   same(explainBorrows(SHOWN, "t.fsh", shownEvents(), [], { start: at("take"), end: at("= b;", 4) }), ` 3 |   take(a); const r = b;
    |        ^ 'a' moved here: passing it to 'take' hands it over
    |                      ^ 'b' is lent to 'r' until line 6`, "one line");
   same(explainBorrows(SHOWN, "t.fsh", shownEvents(), [], { start: 0, end: at("{", 1) }), "nothing moves or is lent in lines 1 to 1 of t.fsh", "a line with nothing on it");
 });
 
-test("a loan ending on its own line says so, and the gutter fits the last line's number", () => {
+test("explain-borrows says when a loan ends on its own line, and fits the gutter to the last line's number", () => {
   const src = `${"//\n".repeat(9)}const r = b; use(r);\n`;
   const b = src.indexOf("= b") as usize + 2;
   const events: BorrowEvent[] = [{ kind: "lend", start: b, end: b + 1, text: "'b' is lent to 'r'", until: src.indexOf("r);") as usize }];
@@ -149,7 +149,7 @@ test("a loan ending on its own line says so, and the gutter fits the last line's
     |           ^ 'b' is lent to 'r' to the end of this line`, "the last lines");
 });
 
-test("a file with nothing to show says so", () => {
+test("explain-borrows says when a file has nothing to show", () => {
   same(explainBorrows(SHOWN, "t.fsh", [], []), "nothing moves or is lent in t.fsh", "no events");
 });
 
@@ -193,9 +193,9 @@ function movedLines(): string {
   5 |   take(a);
     |        ^ ${MOVE_NOTE}
   6 |   console.log(a.n);
-    |               ^ error[E0201]: 'a' was moved, so it can't be used here
-    |                 line 5: ${MOVE_NOTE}
-    |                 ${REST}
+    |               ^^^ error[E0201]: 'a.n' can't be used here because 'a' was moved
+    |                   line 5: ${MOVE_NOTE}
+    |                   ${REST}
   7 | }`;
 }
 
