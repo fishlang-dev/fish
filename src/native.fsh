@@ -5719,6 +5719,16 @@ int32_t fsh_rt_group_wait(fsh_group *g, fsh_task *waiter, void *out, const char 
   return result;
 }
 
+// A group's future is cancelled where it waits: the group no longer wakes its task.
+void fsh_rt_group_leave(fsh_group *g) {
+  if (!g) return;
+  pthread_mutex_lock(&g->lock);
+  fsh_task *waiter = g->waiter;
+  g->waiter = NULL;
+  pthread_mutex_unlock(&g->lock);
+  if (waiter) fsh_task_release(waiter);
+}
+
 // 'process.shutdown': a signal the first SIGINT or SIGTERM aborts. Its handlers are installed the
 // first time a program asks for it, so one that never does dies at Ctrl-C as usual. A handler
 // only writes the signal's number to a nonblocking pipe, as async-signal-safe code must; a thread

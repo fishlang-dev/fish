@@ -12352,6 +12352,25 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       return;
     }
+    // A group's future: its closure where it waits, while it is still running, and then the
+    // group stops waking this task for its tasks.
+    const grouped = this.tables.typing.groupOf.get(t as FutureType);
+    if (grouped !== undefined) {
+      const [stateAt, bodyAt, scopeAt, state, running, group, yes, after] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.label(), this.label()];
+      this.emit(`${stateAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 0`);
+      this.emit(`${bodyAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 1`);
+      this.emit(`${scopeAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 2`);
+      this.emit(`${state} = load i32, ptr ${stateAt}`);
+      this.emit(`${running} = icmp eq i32 ${state}, 0`);
+      this.emit(`br i1 ${running}, label %${yes}, label %${after}`);
+      this.startBlock(yes);
+      this.cancelAt(bodyAt, grouped.body);
+      this.emit(`br label %${after}`);
+      this.startBlock(after);
+      this.emit(`${group} = load ptr, ptr ${scopeAt}`);
+      this.emit(`call void @fsh_rt_group_leave(ptr ${group})`);
+      return;
+    }
     const instance = this.futureOf.get(t as FutureType);
     if (instance === undefined) return;
     this.cancelled.add(instance);

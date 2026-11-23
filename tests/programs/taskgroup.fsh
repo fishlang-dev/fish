@@ -96,6 +96,27 @@ async function main() {
   }
   console.log("after");
 }
+// case: taskgroup_child_panic
+// expect: sibling cleaned up
+// panic: a task this awaited panicked: index out of bounds: the len is 1 but the index is 3
+async function boom(xs: string[]): Promise<string> {
+  await sleep(20);
+  return xs[3];
+}
+async function sibling(signal: AbortSignal) {
+  try {
+    await sleep(60000, signal);
+  } catch (e) {
+    console.log("sibling cleaned up");
+  }
+}
+async function main() {
+  await taskGroup(async (group) => {
+    group.spawn(sibling(group.signal));
+    group.spawn(boom(["a" + 1]));
+  });
+  console.log("not reached");
+}
 // case: taskgroup_child_reference
 // error: 'spawn' runs this Promise on another thread, so it must own everything it uses
 async function first(xs: Ref<string[]>): Promise<string> {
@@ -121,6 +142,36 @@ async function main() {
     group.spawn(work(2, 20));
   });
   console.log("after group");
+}
+// case: taskgroup_dropped
+// expect: raced 1
+// expect: child saw abort
+async function watcher(signal: AbortSignal, seen: Channel<string>) {
+  let aborted = false;
+  try {
+    await sleep(60000, signal);
+  } catch (e) {
+    aborted = true;
+  }
+  if (aborted) await seen.send("child saw abort");
+}
+async function grouped(seen: Channel<string>): Promise<i64> {
+  await taskGroup(async (group) => {
+    group.spawn(watcher(group.signal, seen.clone()));
+    await sleep(60000);
+  });
+  return 0;
+}
+async function quick(): Promise<i64> {
+  await sleep(30);
+  return 1;
+}
+async function main() {
+  const seen = new Channel<string>(1);
+  const r = await Promise.race([grouped(seen.clone()), quick()]);
+  console.log("raced", r);
+  const said = await seen.receive();
+  console.log(said!);
 }
 // case: taskgroup_empty
 // expect: 7

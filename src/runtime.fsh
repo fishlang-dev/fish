@@ -240,6 +240,7 @@ export const RUNTIME = [
   "declare void @fsh_rt_group_drop(ptr)",
   "declare void @fsh_rt_group_spawn(ptr, ptr, ptr, ptr, ptr, ptr, i64, i64)",
   "declare i32 @fsh_rt_group_wait(ptr, ptr, ptr, ptr, i32)",
+  "declare void @fsh_rt_group_leave(ptr)",
   "declare ptr @fsh_rt_spawn_now(ptr, ptr, ptr, ptr, i64, i64)",
   "declare ptr @fsh_rt_spawn_blocking(ptr, ptr, ptr, ptr, i64, i64)",
   "declare i32 @fsh_rt_run(ptr, ptr, ptr, ptr, i64, i64, ptr)",
