@@ -429,6 +429,7 @@ async function main() {
   },
   E0304: { title: "a shared value or lock used in a way other tasks could see half done" },
   E0305: { title: "invalid use of a Promise, a task or the Promise API" },
+  E0306: { title: "a task that can throw, spawned where its group can't pass the error on" },
 
   E0401: {
     title: "cannot find name",
