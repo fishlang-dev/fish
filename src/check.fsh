@@ -41,7 +41,9 @@ type Func = Declared & { body: Stmt[] };
 
 // A local generic function's name stands for the function it was lifted to, `generic`. `id`
 // numbers it in its check, naming its slot in the IR; `localId` names it in the compilation's arena.
-export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; localId: LocalId; generic?: BodyId };
+// `using` marks one a `using` declaration made: it keeps its value to the end of its scope, so it
+// is never assigned to, moved, or held by a closure.
+export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; localId: LocalId; generic?: BodyId; using?: boolean };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
 // A checked program: the functions to compile, the tables its check filled in, and the
@@ -273,7 +275,8 @@ function unlabeled(r: Ref<Rewrites>, s: Ref<Stmt>): Stmt {
 
 // A `for` loop's initializer, when it is a declaration of several names.
 function severalInit(s: Ref<Stmt>): Stmt | undefined {
-  if (s.kind === "for" && s.init !== undefined && s.init.kind === "let" && s.init.declarations.length > 1) return cloneStmt(s.init);
+  // A `using` stays in its head, where it is refused.
+  if (s.kind === "for" && s.init !== undefined && s.init.kind === "let" && s.init.keyword !== "using" && s.init.declarations.length > 1) return cloneStmt(s.init);
   return undefined;
 }
 
@@ -281,6 +284,12 @@ function severalInit(s: Ref<Stmt>): Stmt | undefined {
 function withoutInit(s: Ref<Stmt>): Stmt {
   if (s.kind === "for") return { ...s, init: undefined };
   return cloneStmt(s);
+}
+
+// A loop's head ends with each pass and never with a block the program wrote, so a `using`
+// there has no scope to be disposed at the end of.
+function usingInHead(s: Ref<Stmt>): CompileError {
+  return new CompileError("E0411", "'using' can't be declared in a 'for' head; declare it in the loop's body, where it is disposed at the end of each pass", s.start, s.start + 5);
 }
 
 // A loop's `let`, which is what its left side is once a loop's pattern is lowered.
@@ -1046,6 +1055,7 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
         top.funcs.push(addBodyTo(tables, block));
         continue;
       }
+      if (s.kind === "let" && s.keyword === "using") throw new CompileError("E0404", "a top-level 'using' has no scope to end, so its value would never be disposed; declare it in the function that uses it", s.start, s.end);
       if (s.kind === "let") throw new CompileError("E0404", "a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
       // Top-level code with side effects belongs in main(); the migration lint moves it there.
       if (s.kind !== "function") throw new CompileError("E0404", "only declarations are allowed at the top level; move this into main()", s.start, s.end);
@@ -4652,6 +4662,28 @@ class BodyChecker implements Context, GuardHost {
     return { type: this.cx.resolver().resolveType(written), what: `'${name}'` };
   }
 
+  // A `using` declaration's own rules, checked before its value is: it binds one plain name, to a
+  // value given where it is declared. `usingBound` holds the rule on that value's type; the move
+  // check (`use` in `src/moves.fsh`), `closure` here and `changesLocal` in `src/values.fsh` keep
+  // the binding where it is.
+  /** @throws {CompileError} */
+  usingDeclared(d: Ref<Declarator>): void {
+    if (d.target.kind !== "ident") throw new CompileError("E0411", "a 'using' declaration binds one name, since its whole value is disposed at the end of the scope; name the value, and read its parts from that name", d.target.start, d.target.end);
+    if (d.init === undefined) throw new CompileError("E0406", `'using ${d.target.name}' needs its value where it is declared, as TypeScript requires`, d.start, d.end);
+  }
+
+  // A `using` binding just declared holds an instance of a class with a disposer, which runs
+  // where the binding's scope ends, and is marked as never leaving that scope.
+  /** @throws {CompileError} */
+  usingBound(this: Mut<this>, s: Ref<Stmt>, name: string, value: Ref<Expr>): void {
+    const local = this.locals().get(s)!;
+    const type = this.cx.localOf(local).type;
+    const shown = this.cx.tables.typing.show(type);
+    if (this.cx.tables.typing.isOption(type)) throw new CompileError("E0411", `'${name}' can't be declared with 'using': its value is a '${shown}', which may be null; handle the null first, then declare the 'using' with the value that is there`, value.start, value.end);
+    if (!this.cx.tables.typing.disposable(type)) throw new CompileError("E0411", `'${name}' can't be declared with 'using': its type '${shown}' has no disposer to run at the end of the scope; declare '[Symbol.dispose]()' in its class, or use 'const'`, value.start, value.end);
+    this.cx.tables.arenas.localMut(local).using = true;
+  }
+
   // `let x: T` declares a variable that holds nothing until assigned; the moves check refuses
   // every use before that, as TypeScript's definite assignment does.
   /** @throws {CompileError} */
@@ -5702,6 +5734,7 @@ class BodyChecker implements Context, GuardHost {
         const first: Ref<Declarator> = s.declarations[0]!;
         const peeked = this.cx.tables.rewrites.rewrittenDeclarator(first);
         const d: Ref<Declarator> = peeked !== undefined ? peeked : first;
+        if (s.keyword === "using") this.usingDeclared(d);
         if (d.init?.kind === "arrow" && d.target.kind === "ident" && s.keyword === "const" && d.init.typeParams.some((p) => !isLifetime(p))) {
           const fn = arrowFunction(this.cx.tables.ids, d.target.name, { ...d.init }, d);
           return this.lift(s, d.target.name, fn);
@@ -5736,7 +5769,9 @@ class BodyChecker implements Context, GuardHost {
         }
         // So does a regex given as a 'RegExp', which keeps its pattern's captures.
         const describes = annotated !== undefined && (this.cx.isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
-        this.declare(d.target.name, annotated !== undefined && !describes ? annotated : widened, s.keyword === "let", false, { ...s });
+        // A `using` binding is lent as a `Mut` and changed through its methods, as a `let` is.
+        this.declare(d.target.name, annotated !== undefined && !describes ? annotated : widened, s.keyword === "let" || s.keyword === "using", false, { ...s });
+        if (s.keyword === "using") this.usingBound(s, d.target.name, d.init);
         const candidate = this.locals().get(s);
         if (s.keyword === "let" && annotated === undefined && type === "i64" && this.exprs().literalOnly(d.init, false)) this.cx.candidates.set(candidate!, cloneStmt(s));
         const number = s.keyword === "const" ? numberKey(d.init) : undefined;
@@ -5823,6 +5858,7 @@ class BodyChecker implements Context, GuardHost {
         return undefined;
       }
       case "for":
+        if (s.init !== undefined && s.init.kind === "let" && s.init.keyword === "using") throw usingInHead(s.init);
         // A name declared in the head is scoped to the loop.
         this.pushScope(new Map<string, LocalId>());
         if (s.init !== undefined) this.statement(s.init);
@@ -5843,6 +5879,7 @@ class BodyChecker implements Context, GuardHost {
           if (this.state.finalizing > 0) throw unsupported("'for await' loops in a 'try' with a 'finally'", s);
         }
         const left: Ref<Stmt | Pattern> = s.left;
+        if (left.kind === "let" && left.keyword === "using") throw usingInHead(left);
         if (left.kind !== "let" || left.keyword === "var") throw unsupported("'for...of' loops over a variable declared outside them", left);
         const d: Ref<Declarator> = left.declarations[0]!;
         if (left.declarations.length === 1 && (d.target.kind === "array" || d.target.kind === "object")) {

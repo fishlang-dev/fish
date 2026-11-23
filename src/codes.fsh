@@ -384,6 +384,36 @@ function main() {
 }`,
     },
   },
+  E0215: {
+    title: "a 'using' binding moved or assigned to",
+    long: {
+      text: `A 'using' declaration ties a value to its scope: the value's '[Symbol.dispose]()' method runs when that scope ends, on every way out. So the value never leaves the binding. Passing it by value, returning it, storing it, or capturing it in a closure that holds it would move it to somewhere that outlives the scope, and assigning to the binding would replace it before the scope ends.
+
+In TypeScript a 'using' binding can't be assigned to either, but a second reference to its value can escape the scope and be used after the value is disposed. Fish refuses the escape.
+
+To fix it, lend the value: take a 'Ref<T>' or a 'Mut<T>' where it is passed. If the value has to outlive the scope, declare it with 'const' or 'let', which let it move.`,
+      example: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log("closed"); }
+}
+function show(c: Conn) { console.log(c.name); }
+function main() {
+  using c = new Conn("db");
+  show(c);
+}`,
+      fixed: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log("closed"); }
+}
+function show(c: Ref<Conn>) { console.log(c.name); }
+function main() {
+  using c = new Conn("db");
+  show(c);
+}`,
+    },
+  },
 
   E0301: {
     title: "async-only code outside an async function",
@@ -546,6 +576,33 @@ To fix it, rename one of them, or remove the one you don't need.`,
   E0408: { title: "invalid parameter list" },
   E0409: { title: "a local declaration that uses what it can't reach" },
   E0410: { title: "invalid overload signatures" },
+  E0411: {
+    title: "an invalid 'using' declaration",
+    long: {
+      text: `A 'using' declaration keeps one value to the end of its scope and runs the value's '[Symbol.dispose]()' method there. So it binds one plain name, its value is an instance of a class that declares '[Symbol.dispose]()', and it sits in a block of a function: a 'for' head ends with each pass of its loop, and with no block the program wrote.
+
+TypeScript asks the same of the value, except that it also takes 'null' and 'undefined', which dispose nothing. Fish refuses those: handle the null first.
+
+To fix it, give the class a '[Symbol.dispose]()' method, or declare the value with 'const' when nothing has to run at the end of the scope.`,
+      example: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+}
+function main() {
+  using c = new Conn("db");
+  console.log(c.name);
+}`,
+      fixed: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log("closed"); }
+}
+function main() {
+  using c = new Conn("db");
+  console.log(c.name);
+}`,
+    },
+  },
 
   E0501: {
     title: "wrong number of arguments",

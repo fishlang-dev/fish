@@ -799,6 +799,8 @@ test("statement shapes", () => table(STATEMENTS, statementsShape, ""));
 const USING: [string, string][] = [
   ["using x = f()", "using x = f()"],
   ["using a = f(), b = g()", "using a = f(), b = g()"],
+  ["using { a } = f()", "using { a: a } = f()"],
+  ["using [a] = f()", "(using[a] = f())"],
   ["using(x)", "using(x)"],
   ["using = 1", "(using = 1)"],
   ["using.y", "using.y"],

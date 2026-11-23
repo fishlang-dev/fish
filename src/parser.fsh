@@ -1012,12 +1012,15 @@ function doWhileStatement(c: Mut<Cursor>): Stmt {
 
 // `using` is contextual: it declares only before a name on its line, so `using(x)`, `using = 1`
 // and `using.y` keep their TypeScript meaning, as does `using` before an operator spelled as a word.
+// `using {` on one line starts no expression, so it declares too, and the checker says what a
+// pattern there needs; `using [` indexes, as in TypeScript.
 /** @throws {CompileError} */
 function atDeclaration(c: Mut<Cursor>): boolean {
   if (c.at("let") || c.at("const") || c.at("var")) return true;
   if (!c.at("using")) return false;
   const next = c.peek(1);
-  return next.kind === "ident" && !next.newlineBefore && !["in", "instanceof", "as", "satisfies", "of"].includes(next.text);
+  if (next.newlineBefore) return false;
+  return isToken(next, "{") || (next.kind === "ident" && !["in", "instanceof", "as", "satisfies", "of"].includes(next.text));
 }
 
 /** @throws {CompileError} */

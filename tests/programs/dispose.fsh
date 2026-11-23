@@ -772,3 +772,174 @@ function f() {
   using: for (;;) {}
   for (using of xs) {}
 }
+// case: using_reverse_order
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function main() {
+  {
+    using a = new Res("a");
+    using b = new Res("b");
+    console.log(`${a.name} ${b.name}`);
+  }
+  console.log("after");
+}
+// expect: a b
+// expect: dispose b
+// expect: dispose a
+// expect: after
+// case: using_several_declarators
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function main() {
+  using a: Res = new Res("a"), b = new Res("b");
+  console.log(`${a.name} ${b.name}`);
+}
+// expect: a b
+// expect: dispose b
+// expect: dispose a
+// case: using_of_a_subclass
+class Base {
+  [Symbol.dispose](this: Mut<this>): void { console.log("dispose base"); }
+}
+class Sub extends Base {
+  constructor() { super(); }
+}
+function main() {
+  using s = new Sub();
+  console.log("body");
+}
+// expect: body
+// expect: dispose base
+// case: using_no_value
+class Res {
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  using r: Res;
+}
+// error: 5:9: error[E0406]: 'using r' needs its value where it is declared, as TypeScript requires
+// case: using_pattern
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  using { name } = new Res("a");
+}
+// error: 7:9: error[E0411]: a 'using' declaration binds one name, since its whole value is disposed at the end of the scope; name the value, and read its parts from that name
+// case: using_no_disposer
+class Plain {
+  name: string;
+  constructor(name: string) { this.name = name; }
+}
+function main() {
+  using p = new Plain("a");
+}
+// error: 6:13: error[E0411]: 'p' can't be declared with 'using': its type 'Plain' has no disposer to run at the end of the scope; declare '[Symbol.dispose]()' in its class, or use 'const'
+// case: using_a_reference
+class Res {
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function borrow(r: Ref<Res>) {
+  using again = r;
+}
+function main() {
+  const r = new Res();
+  borrow(r);
+}
+// error: error[E0411]: 'again' can't be declared with 'using': its type 'Ref<Res>' has no disposer
+// case: using_option
+class Res {
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function find(there: boolean): Res | null {
+  return there ? new Res() : null;
+}
+function main() {
+  using r = find(true);
+}
+// error: 8:13: error[E0411]: 'r' can't be declared with 'using': its value is a 'Res | null', which may be null; handle the null first, then declare the 'using' with the value that is there
+// case: using_null
+function main() {
+  using r = null;
+}
+// error: error[E0411]: 'r' can't be declared with 'using': its type 'null' has no disposer
+// case: using_top_level
+class Res {
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+using r = new Res();
+function main() {}
+// error: 4:1: error[E0404]: a top-level 'using' has no scope to end, so its value would never be disposed; declare it in the function that uses it
+// case: using_for_head
+class Res {
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  for (using r = new Res(); ;) {
+    break;
+  }
+}
+// error: 5:8: error[E0411]: 'using' can't be declared in a 'for' head; declare it in the loop's body, where it is disposed at the end of each pass
+// case: using_for_head_several
+class Res {
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  for (using a = new Res(), b = new Res(); ;) {
+    break;
+  }
+}
+// error: 5:8: error[E0411]: 'using' can't be declared in a 'for' head
+// case: using_for_of_head
+class Res {
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  const all = [new Res()];
+  for (using r of all) {}
+}
+// error: 6:8: error[E0411]: 'using' can't be declared in a 'for' head
+// case: using_assigned
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  using r = new Res("a");
+  r = new Res("b");
+}
+// error: 8:3: error[E0215]: cannot assign to 'r': it is declared with 'using', which keeps its value until its scope ends; declare another 'using' for another value
+// case: using_assigned_in_a_closure
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  using r = new Res("a");
+  const swap = () => {
+    r = new Res("b");
+  };
+  swap();
+}
+// error: error[E0215]: cannot assign to 'r': it is declared with 'using'
+// case: using_field_changed
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function main() {
+  using r = new Res("a");
+  r.name = "renamed";
+}
+// expect: dispose renamed

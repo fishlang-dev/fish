@@ -11141,6 +11141,10 @@ export class Expressions<C extends Context> implements Union<C> {
   // reference. A closure changing what it captures changes the variable where it was made.
   /** @throws {CompileError} */
   changesLocal(this: Mut<this>, id: LocalId, path: string, action: string, target: Ref<Expr>, throughMut: boolean): void {
+    // A `using` binding changes through its fields and methods, and never holds another value.
+    if (path === "" && action === "assign to" && this.lc(id).using === true) {
+      throw new CompileError("E0215", `cannot assign to '${this.lc(id).name}': it is declared with 'using', which keeps its value until its scope ends; declare another 'using' for another value`, target.start, target.end);
+    }
     this.ctx.changesPath(id, path, action, target);
     if (this.ctx.captured(id)) {
       this.ctx.changesCapture(id, path, action, target, throughMut);
