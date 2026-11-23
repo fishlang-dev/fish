@@ -655,6 +655,36 @@ function main() {
   E0707: { title: "invalid enum" },
   E0708: { title: "'this' or 'super' where there is none" },
   E0709: { title: "a private or protected member used from outside" },
+  E0710: {
+    title: "a '[Symbol.dispose]' method that can't be a disposer, or one called by hand",
+    long: {
+      text: `A class's '[Symbol.dispose]' method is its disposer: Fish runs it exactly once, when an instance is dropped, before the instance's fields are. That is at the end of the scope that owns it, when it is overwritten, when what holds it is dropped, and when a panic unwinds past it.
+
+Nothing calls a disposer with arguments or reads what it gives, so it takes no parameters and no type parameters, returns nothing, and can't be static, async or a generator. A drop has nowhere to send an error, so it declares no 'throws'. It borrows the instance, as 'this: Mut<this>' or read-only, and never takes it over with 'Own<this>', since the drop goes on to free the fields.
+
+Calling it by hand, as in 'x[Symbol.dispose]()', is an error too: the drop would run it a second time. In TypeScript the call is how a value is disposed early; in Fish, end the value instead, by letting it go out of scope or moving it into a function.`,
+      example: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log("closed " + this.name); }
+}
+function main() {
+  const c = new Conn("db");
+  c[Symbol.dispose]();
+}`,
+      fixed: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log("closed " + this.name); }
+}
+function end(c: Conn) {}
+function main() {
+  const c = new Conn("db");
+  end(c);
+  console.log("after");
+}`,
+    },
+  },
 
   E0801: {
     title: "a form Fish doesn't support yet",

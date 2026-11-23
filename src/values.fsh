@@ -12,11 +12,11 @@ import type { AssignOp, BinaryOp, Expr, Func, Id, Interface, MatchArm, ObjectPro
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.fsh";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.fsh";
 import { infer } from "./generics.fsh";
-import { EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, integerInfo, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.fsh";
+import { DISPOSE, EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, integerInfo, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.fsh";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.fsh";
 import type { EnumInfo, EnumInstance } from "./enums.fsh";
 import { EXPRESSION_FORMS, IMPORT_META_MEMBERS, unsupported } from "./unsupported.fsh";
-import { isIteratorKey, keyParts, leafOf, unknownKey } from "./keys.fsh";
+import { isDisposeKey, isIteratorKey, keyParts, leafOf, unknownKey } from "./keys.fsh";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.fsh";
 import { BUFFER_ENCODINGS, BUFFER_READS, BUFFER_REFUSED, BUFFER_STATICS, JSON_VALUE_NAME, STD_BASE } from "./std.fsh";
 import { parseArgsArgs } from "./parseargs.fsh";
@@ -1694,6 +1694,8 @@ export class Expressions<C extends Context> implements Union<C> {
   private callee(this: Mut<this>, given: Ref<Call>): { type: Type; what: string } {
     // `c[Symbol.iterator]()` calls the method that key names.
     const now = this.ctx.tables().rewrites.rewritten(given.callee);
+    if (now !== undefined) notByHand(now);
+    else notByHand(given.callee);
     const keyed = now !== undefined ? this.iteratorCallee(given, now) : this.iteratorCallee(given, given.callee);
     if (keyed !== undefined && keyed.kind === "call") return this.calleeKeyed(keyed);
     return this.calleeKeyed(given);
@@ -3674,7 +3676,9 @@ export class Expressions<C extends Context> implements Union<C> {
     const shaped = (k: string | undefined) => k === "object" || k === "class";
     // A type parameter, an object-typed parameter's included, reads its fields as a member does.
     if (!shaped(r?.kind) && r?.kind !== "param" && !(r?.kind === "union" && r.members.every((m) => shaped(this.kindOf(m))))) return false;
+    notByHand(e);
     const name = this.knownKey(e.index);
+    if (name === DISPOSE) throw disposedByHand(e);
     if (name.startsWith("#")) throw new CompileError("E0502", `'${name}' names no field: a private field is read as '${this.placeText(e.object)}.${name}'`, e.index.start, e.index.end);
     if (e.optional) throw unsupported("optional index expressions", e);
     const parts = { ...e };
@@ -11703,6 +11707,16 @@ function rawProp(prop: Ref<ObjectProp>): string[] | undefined {
 }
 
 // A path as a message shows it, the collection a class extending Map or Set embeds left unsaid.
+// A disposer is the drop's to run, once: a call written out would be a second run.
+function disposedByHand(at: Ref<Expr>): CompileError {
+  return new CompileError("E0710", "a '[Symbol.dispose]' method runs when its value is dropped, so it can't be called by hand, which would dispose the value twice; let the value go out of scope, or move it to where it should end", at.start, at.end);
+}
+
+/** @throws {CompileError} */
+function notByHand(e: Ref<Expr>): void {
+  if (e.kind === "index" && isDisposeKey(e.index)) throw disposedByHand(e);
+}
+
 const shownPath = (path: string) => path.replaceAll(`.${EMBEDDED}`, "");
 
 // How an index reads in a message: a name or a number as written, anything else as `...`.

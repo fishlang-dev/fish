@@ -373,6 +373,10 @@ export type RecordOf<T> = T extends ObjectType ? ObjectRecord
 // The name a `[Symbol.iterator]` method takes, which no identifier or member read can spell.
 export const ITERATOR = "[Symbol.iterator]";
 
+// The name a class's `[Symbol.dispose]` method takes, its disposer, which runs when an instance is
+// dropped and which no call can name.
+export const DISPOSE = "[Symbol.dispose]";
+
 // The field a class extending Map or Set holds its collection in: a private name no source can
 // spell, so printing and JSON leave it out.
 export const EMBEDDED = "#embedded base";

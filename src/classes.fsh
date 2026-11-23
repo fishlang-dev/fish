@@ -4,7 +4,7 @@ import { CompileError } from "./diag.fsh";
 import type { RustName } from "./rust.fsh";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Modifier, Param, Pattern, Span, Stmt, TypeNode, TypeParam } from "./parser.fsh";
 import { cloneClassNode, cloneExpr, cloneJsName, cloneParam, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltParam, rebuiltStmts, rebuiltTypeNode } from "./rebuild.fsh";
-import { EMBEDDED, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.fsh";
+import { DISPOSE, EMBEDDED, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.fsh";
 import { unsupported } from "./unsupported.fsh";
 import { symbolKey } from "./keys.fsh";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.fsh";
@@ -404,6 +404,8 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
   const first = firstParam(m.params);
   const receiver = first !== undefined && first.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
   if (receiver !== undefined && isStatic) throw new CompileError("E0706", "a static method has no 'this'", receiver.start, receiver.end);
+  const rustName = tables.rust.names.get(m);
+  if (name === DISPOSE) disposerShape(m, receiver, rustName !== undefined);
   let params: Param[] = [];
   for (let i: usize = receiver !== undefined ? 1 : 0; i < m.params.length; i++) params.push(cloneParam(m.params[i]!));
   if (!isStatic) {
@@ -415,7 +417,8 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
     params = rebuilt;
   }
   if (isStatic) classParamIn(node, m);
-  const rustName = tables.rust.names.get(m);
+  // A disposer gives nothing, written or not, so its body can't return a value a drop would lose.
+  const nothing: TypeNode | undefined = name === DISPOSE ? { id: nextId(tables.ids), kind: "ref", name: "void", args: [], start: m.start, end: m.end } : undefined;
   const body = tables.arenas.addBody({
     id: nextId(tables.ids),
     // A static method has its own symbol, since an instance method may share its name.
@@ -423,7 +426,7 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
     scope: isStatic ? new Map<string, Type>() : copyScope(d.scope),
     params,
     body: m.body.map((s) => cloneStmt(s)),
-    returnType: m.returnType !== undefined ? cloneTypeNode(m.returnType) : undefined,
+    returnType: m.returnType !== undefined ? cloneTypeNode(m.returnType) : nothing,
     typeParams: m.typeParams.map((p) => cloneTypeParam(p)),
     self: isStatic ? undefined : { type: d.type, constructor: false, mutable: receiver !== undefined ? mutates(receiver) : false, owned: receiver !== undefined ? owns(receiver) : false },
     owner: d.type,
@@ -449,6 +452,36 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
   if (isStatic) d.statics.set(name, made);
   else d.methods.set(name, made);
   return made;
+}
+
+// A disposer runs when its instance is dropped: nothing calls it, so it takes nothing but the
+// instance it borrows, gives nothing, and has nowhere to send an error.
+/** @throws {CompileError} */
+function disposerShape(m: Ref<Extract<ClassMember, { kind: "method" }>>, receiver: Ref<Param> | undefined, foreign: boolean): void {
+  const extra = m.params.length > (receiver !== undefined ? 1 : 0);
+  const gives = m.returnType !== undefined && !(m.returnType.kind === "ref" && m.returnType.name === "void" && m.returnType.args.length === 0);
+  let wrong: string | undefined = undefined;
+  let at: Span = { start: m.start, end: m.end };
+  if (m.modifiers.includes("static")) wrong = "can't be static, since it disposes one instance";
+  else if (m.modifiers.includes("async")) wrong = "can't be async, since a drop doesn't wait";
+  else if (m.generator) wrong = "can't be a generator";
+  else if (foreign) wrong = "can't be a Rust method, since Rust's own Drop runs for a Rust type";
+  else if (m.typeParams.length > 0) wrong = "takes no type parameters, since nothing calls it with any";
+  else if (extra) {
+    wrong = "takes no parameters, since nothing calls it with any";
+    const last = m.params.length - 1;
+    at = { start: m.params[last]!.start, end: m.params[last]!.end };
+  } else if (m.throws !== undefined) {
+    wrong = "can't throw, since a drop has nowhere to send an error; handle it inside";
+    at = { start: m.throws.start, end: m.throws.end };
+  } else if (receiver !== undefined && owns(receiver)) {
+    wrong = "borrows the instance being dropped, so it can't take 'this: Own<this>'";
+    at = { start: receiver.start, end: receiver.end };
+  } else if (gives) {
+    wrong = "returns nothing";
+    at = { start: m.returnType!.start, end: m.returnType!.end };
+  }
+  if (wrong !== undefined) throw new CompileError("E0710", `a '[Symbol.dispose]' method ${wrong}; write it as '[Symbol.dispose](this: Mut<this>): void { ... }'`, at.start, at.end);
 }
 
 // As in TypeScript, a static member can't name the class's type parameters, only its own.
