@@ -3767,7 +3767,8 @@ class BodyChecker implements Context, GuardHost {
     } else if (this.f().returnType !== undefined) {
       const written = cloneTypeNode(this.f().returnType!);
       const resolved = this.cx.resolver().resolveType(written);
-      this.state.declared = this.cx.tables.typing.stored(resolved);
+      // An async closure's `Promise<T>` describes its own result, as a declared function's does.
+      this.state.declared = this.f().async === true ? resolved : this.cx.tables.typing.stored(resolved);
     } else this.state.declared = given !== undefined && isNumeric(given) ? given : undefined;
     if (this.f().generator === true && this.instance().generator === undefined) {
       const symbol = this.instance().symbol;
