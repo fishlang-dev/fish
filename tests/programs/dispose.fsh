@@ -759,3 +759,16 @@ function main() {
 // expect: show local
 // expect: show local
 // expect: dispose local
+// case: using_parses
+// mode: parse
+function f() {
+  using x = open();
+  using a: Res = open(), b = open();
+  using(x);
+  using = 1;
+  using.y;
+  using
+  x = 2;
+  using: for (;;) {}
+  for (using of xs) {}
+}

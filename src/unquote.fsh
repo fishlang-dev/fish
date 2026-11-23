@@ -1400,12 +1400,13 @@ function word6(v: Ref<Value>): AssignOp {
 }
 
 /** @throws {Error} */
-function word7(v: Ref<Value>): "let" | "const" | "var" {
+function word7(v: Ref<Value>): "let" | "const" | "var" | "using" {
   const s = text(v);
   if (s === "let") return "let";
   if (s === "const") return "const";
   if (s === "var") return "var";
-  throw new Error(`internal error: '${s}' where an Ast value names one of 'let', 'const', 'var'`);
+  if (s === "using") return "using";
+  throw new Error(`internal error: '${s}' where an Ast value names one of 'let', 'const', 'var', 'using'`);
 }
 
 /** @throws {Error} */

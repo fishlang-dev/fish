@@ -299,7 +299,7 @@ function arrayPatternOf(id: usize, at: Ref<Span>): Extract<Pattern, { kind: "arr
   return { id, kind: "array", elements: [], rest: undefined, start: at.start, end: at.end };
 }
 // A declaration of one name.
-function letOf(id: usize, keyword: "let" | "const" | "var", declarator: Declarator, at: Ref<Span>): Stmt {
+function letOf(id: usize, keyword: "let" | "const" | "var" | "using", declarator: Declarator, at: Ref<Span>): Stmt {
   let made: Extract<Stmt, { kind: "let" }> = { id, kind: "let", keyword, declarations: [], start: at.start, end: at.end };
   made.declarations.push(declarator);
   return made;

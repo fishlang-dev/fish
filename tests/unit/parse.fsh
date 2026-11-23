@@ -795,6 +795,23 @@ const STATEMENTS: [string, string][] = [
 
 test("statement shapes", () => table(STATEMENTS, statementsShape, ""));
 
+// `using` declares only before a name on its line.
+const USING: [string, string][] = [
+  ["using x = f()", "using x = f()"],
+  ["using a = f(), b = g()", "using a = f(), b = g()"],
+  ["using(x)", "using(x)"],
+  ["using = 1", "(using = 1)"],
+  ["using.y", "using.y"],
+  ["using\n  x = f()", "using; (x = f())"],
+  ["using in xs", "(using in xs)"],
+  ["for (using x of xs) {}", "for (using x of xs)"],
+  ["for (using x = f(); ;) {}", "for (using x = f(); ; )"],
+  ["for (using of xs) {}", "for (using of xs)"],
+  ["using: for (;;) {}", "using: for (; ; )"],
+];
+
+test("using declarations, and 'using' as a name", () => table(USING, statementsShape, ""));
+
 test("function overloads", () => {
   const got = statementsShape("function f(x: string): void\n  function f(x: i64): void;\n  function f(x) {}");
   assert(got === "function f(x: string);; function f(x: i64);; function f(x) { 0 }", got);
