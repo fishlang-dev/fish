@@ -6,10 +6,10 @@ import { parseArgs } from "node:util";
 import { bodyOf, type Arenas } from "./arenas.fsh";
 import { C_KEYWORDS } from "./check.fsh";
 import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.fsh";
-import { formatMemory, formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, type Compilation, type Reading, type Session, type Tables } from "./compilation.fsh";
+import { formatMemory, formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Reading, type Session, type Tables } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { cachedSession } from "./stdcache.fsh";
-import { CompileError, copyNames, formatError, movedOffset, type Source } from "./diag.fsh";
+import { CompileError, copyNames, formatError, movedOffset, type Names, type Source } from "./diag.fsh";
 import { load, type Loaded, type RustCrate } from "./modules.fsh";
 import { resolvePackages } from "./dependencies.fsh";
 import { pack, prepare, submit, unsafeDependencies } from "./publish.fsh";
@@ -107,6 +107,19 @@ function compiledIn(compilation: Compilation, src: string, file: string, release
   return generated(made.checked, made.loaded, { src, file, release, panic, library, sources, leaks, debug, failed });
 }
 
+// `codegenChecked`, its errors given the program's files. A function of its own so that what
+// codegen made is returned straight from the call: unwrapped from a local after the `try`, the
+// checked program and its IR would be copied whole while the originals stayed alive.
+/** @throws {CompileError | Error | IoError | JsonError} */
+function codegenSourced(checked: Checked, options: Options, names: Names, sources: Ref<Source[]>): { ir: string; checked: Checked; emitted: Emitted | undefined } {
+  try {
+    return codegenChecked(checked, options);
+  } catch (e) {
+    if (e instanceof CompileError) throw sourced(e, names, sources);
+    throw e;
+  }
+}
+
 // The IR of a checked program, timed as the codegen stage, with its packages bundled in and, in a
 // debug build, its debug info added.
 /** @throws {CompileError | Error | IoError | JsonError} */
@@ -115,19 +128,13 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   const { src, file, release } = options;
   const debug = options.debug === true;
   const started = stageStart(checked.tables.session);
-  let made: { ir: string; checked: Checked; emitted: Emitted | undefined } | undefined = undefined;
-  try {
-    made = codegenChecked(checked, options);
-  } catch (e) {
-    if (e instanceof CompileError) throw sourced(e, names, loaded.sources);
-    throw e;
-  }
-  let done = made!;
+  let done = codegenSourced(checked, options, names, loaded.sources);
   const bundling = partStart(done.checked.tables.session);
   let ir = bundled(done.ir, loaded);
   if (debug) ir = withDebugInfo(ir, src, file, [...loaded.sources], release);
   partEnd(done.checked.tables.session, "codegen bundle", bundling);
   stageEnd(done.checked.tables.session, "codegen", started);
+  stopAfter(done.checked.tables.session, "codegen");
   return { ir, checked: done.checked, loaded, emitted: done.emitted };
 }
 
@@ -273,8 +280,32 @@ export function build(session: BuildSession, file: string, out: string, release 
 // files the program was read from, or looked for, even when it doesn't build.
 /** @throws {CompileError | Error | IoError | JsonError} */
 function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>): { warnings: CompileError[]; session: BuildSession } {
-  let made = builtKept(session, file, out, release, panic, links, target, leaks, debug, looked, undefined, undefined, false);
-  return { warnings: made.warnings, session: made.session };
+  let { core, caches } = apart(session);
+  let ready = readied(core, caches, file, release, panic, leaks, debug, looked, target);
+  let known = new Map<string, string[]>();
+  linked(ready.building, ready.ir, ready.split, out, release, links, ready.shim, target, leaks, debug, known);
+  return { warnings: ready.warnings, session: ready.building };
+}
+
+// A build up to its IR and how clang takes it, which is all linking reads. A function of its own
+// so the checked program and the loaded files, which only `fishc watch` keeps for its next build,
+// are dropped as it returns: clang then compiles with nothing of them held beside it.
+/** @throws {CompileError | Error | IoError | JsonError} */
+function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>): { ir: string; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession } {
+  let made = compiledKept(core, file, release, panic, leaks, debug, looked, undefined, undefined, false);
+  const instrumenting = stageStart(made.kept.checked.tables.session);
+  const ir = instrumented(made.ir, target);
+  const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
+  if (shim !== undefined) refuseForeignRust(target);
+  stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
+  const splitting = stageStart(made.kept.checked.tables.session);
+  const split = parts(ir, made.kept.checked, release, target, debug);
+  stageEnd(made.kept.checked.tables.session, "split", splitting);
+  if (made.kept.checked.tables.session.timings !== undefined) for (const [name, ms] of split.times) made.kept.checked.tables.session.timings!.ms.set(name, ms);
+  let { checked } = made.kept;
+  let { tables } = checked;
+  const building = together(tables.session, caches);
+  return { ir, split, shim, warnings: made.warnings, building };
 }
 
 // `built` for `fishc watch`, from what its last build kept: a program whose files all read as they
@@ -846,10 +877,14 @@ function sessionWith(locked: boolean, timed: boolean, checking = false): BuildSe
   made.locking.locked = locked;
   // FISH_MEM=1 records what the process holds as each stage ends, as stages are timed.
   const memory = process.env.FISH_MEM === "1";
-  if (timed || memory) {
+  // FISH_MEM_STOP=<stage> ends the process as that stage ends, with the same readings.
+  const stop = process.env.FISH_MEM_STOP;
+  if (stop !== undefined && !STOP_STAGES.includes(stop!)) fail(`fishc: FISH_MEM_STOP names '${stop!}', which is no stage to stop after; give ${STOP_STAGES.join(", ")}`);
+  if (timed || memory || stop !== undefined) {
     let timings = newTimings();
     timings.report = timed;
-    if (memory) timings.memory = new Map<string, Reading>();
+    if (memory || stop !== undefined) timings.memory = new Map<string, Reading>();
+    if (stop !== undefined) timings.stop = stop!;
     made.timings = timings;
   }
   if (checking) made.checkCache = false;

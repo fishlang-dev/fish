@@ -1,6 +1,6 @@
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId } from "./arenas.fsh";
 import { emptyTables, holdsNode, type Instance } from "./check.fsh";
-import { cloneBody, cloneSignature, declareClass, inherited, isApart, isLifetime, type Body, type ClassInfo } from "./classes.fsh";
+import { cloneSignature, declareClass, inherited, isApart, isLifetime, type Body, type ClassInfo } from "./classes.fsh";
 import { CompileError } from "./diag.fsh";
 import type { Declarations, Tables } from "./compilation.fsh";
 import { literalValue } from "./narrow.fsh";
@@ -775,7 +775,9 @@ export class Instancing<H extends InstancingHost> {
   /** @throws {CompileError} */
   instanceOf(this: Mut<this>, f: Ref<Body>, given?: Map<string, Type>): Ref<Instance> {
     const bindings = given !== undefined ? given : scopeCopy(f);
-    const key = [...bindings.values()].map((t) => this.host.tables.typing.keyOf(t)).join(",");
+    let parts: string[] = [];
+    for (const t of bindings.values()) parts.push(this.host.tables.typing.keyId(t));
+    const key = parts.join(",");
     if (!this.host.instancingState.instances.has(f.bodyId)) this.host.instancingState.instances.set(f.bodyId, new Map<string, InstanceId>());
     let byKey = this.host.instancingState.instances.get(f.bodyId)!;
     const known = byKey.get(key);
@@ -789,9 +791,8 @@ export class Instancing<H extends InstancingHost> {
     const complete = typeParamsOf(f).every((p) => bindings.has(p.name)) && [...this.implicitOf(f.bodyId).keys()].every((i) => bindings.has(`#${i}`)) && f.params.every((p) => !p.comptime || bindings.has(comptimeName(p)));
     const isConcrete = complete && [...bindings].every(([name, t]) => isApart(name) || this.host.instancingState.concreteness.concrete(this.host.tables.typing, t));
     const generic = bindings.size > 0;
-    // From the arena, where an earlier check of the body rebuilt it, since `f` may be a copy taken
-    // before that.
-    const body = this.host.tables.arenas.addBody(cloneBody(this.host.tables.arenas.bodyOf(f.bodyId))).bodyId;
+    // The arena's own body, by its id: `f` may be a copy taken before an earlier check rebuilt it.
+    const body = f.bodyId;
     const symbol = generic && isConcrete ? instanceSymbol(this.host, f.name, bindings, byKey) : f.name;
     const checking = this.host.checking();
     const depth = generic && checking !== undefined ? this.host.tables.arenas.instanceOf(checking).depth + 1 : 0;
@@ -1450,7 +1451,7 @@ export class GenericClasses<H extends GenericClassesHost> {
     }
     if (!this.host.genericClassesState.instancesOf.has(template.id)) this.host.genericClassesState.instancesOf.set(template.id, new Map<string, ClassId>());
     let keys: string[] = [];
-    for (const t of args) keys.push(this.host.tables.typing.keyOf(t));
+    for (const t of args) keys.push(this.host.tables.typing.keyId(t));
     const key = keys.join(",");
     const found = this.host.genericClassesState.instancesOf.get(template.id)!.get(key);
     if (found !== undefined) return found;
@@ -1471,7 +1472,10 @@ export class GenericClasses<H extends GenericClassesHost> {
     byKey.set(key, id);
     this.host.genericClassesState.instancesOf.set(template.id, byKey);
     const type = this.host.tables.arenas.classOf(id).type;
-    this.host.tables.typing.noteClassInstance(template.name, key, type);
+    // The type model finds a class's instance by its type arguments' own keys, written out.
+    let spelled: string[] = [];
+    for (const t of args) spelled.push(this.host.tables.typing.keyOf(t));
+    this.host.tables.typing.noteClassInstance(template.name, spelled.join(","), type);
     let shapeSet = this.host.genericClassesState.shapesOf.get(template.id)!;
     shapeSet.add(shape);
     this.host.genericClassesState.shapesOf.set(template.id, shapeSet);
