@@ -1434,8 +1434,12 @@ function __routerEmpty(): Response {
   return new Response(null, { status: 204 });
 }
 
+// The value is written here, not handed on to Response.json: a second generic function would
+// write it as the type's layout, an empty optional field as null where the type leaves it out.
 function __routerJson<T>(data: Ref<T>): Response {
-  return Response.json(data);
+  let res = new Response(JSON.stringify(data));
+  res.headers.set("content-type", "application/json");
+  return res;
 }
 
 // The response Router.static gives a request: the file below root its path names past the
