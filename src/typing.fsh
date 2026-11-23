@@ -1001,6 +1001,15 @@ export class Typing {
     return false;
   }
 
+  // Whether a value of the type holds one that only ever moves, a Rust handle or an instance with
+  // a disposer: the compiler makes no copy of either.
+  holdsMoveOnly(t: Type): boolean {
+    return this.holdsPart(t, (u) => {
+      const r = this.recOf(u);
+      return r !== undefined && r.kind === "class" && (r.rust !== undefined || this.disposable(u));
+    });
+  }
+
   isCopy(t: Type): boolean {
     if (typeof t === "string") return true;
     const r = this.rec(t);

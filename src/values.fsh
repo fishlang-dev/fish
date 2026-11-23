@@ -6769,6 +6769,9 @@ export class Expressions<C extends Context> implements Union<C> {
     if (rust !== undefined) {
       throw new CompileError("E1004", `'${e.name}' holds a Rust '${rust.name}', which a shared value gives only inside 'update', as in 's.update((v) => v.${e.name}...)'`, e.start, e.end);
     }
+    if (this.ctx.typing().holdsPart(found.type, (u) => this.ctx.typing().disposable(u))) {
+      throw new CompileError("E0214", `'${e.name}' holds a value with a '[Symbol.dispose]' method, which reading it out of a shared value would copy; use it inside 'update', as in 's.update((v) => v.${e.name}...)'`, e.start, e.end);
+    }
     if (!this.ctx.typing().interiorMutable(found.type)) this.ctx.copiesOut().add(cloneExpr(e));
     return found.type;
   }
@@ -7286,6 +7289,14 @@ export class Expressions<C extends Context> implements Union<C> {
       const name = rustClassOf(this.ctx.tables().typing, rust)!.name;
       if (this.cls(rust).methods.has("clone")) throw cloneRefused(`can't clone a value holding a Rust '${name}' as a whole; clone each '${name}' with its 'clone()'`, at, by);
       throw cloneRefused(`can't clone a Rust '${name}'${rustClassOf(this.ctx.tables().typing, behind) !== undefined ? "" : ", or a value holding one,"} unless its class declares 'clone(): ${name}', which calls its Clone`, at, by);
+    }
+    // An instance with a disposer is copied only as its class says, or two would be disposed.
+    let disposed: ClassType | undefined = undefined;
+    for (const u of reached) if (disposed === undefined && this.ctx.typing().disposable(u) && this.isClassType(u)) disposed = u;
+    if (disposed !== undefined) {
+      const name = this.ctx.typing().rec(disposed).name;
+      if (this.cls(disposed).methods.has("clone")) throw cloneRefused(`can't clone a value holding a '${name}' as a whole, since a '${name}' has a '[Symbol.dispose]' method and is copied only by its own 'clone()'; clone each '${name}' with its 'clone()'`, at, by);
+      throw cloneRefused(`can't clone a '${name}'${behind === disposed ? "" : ", or a value holding one"}: it has a '[Symbol.dispose]' method, which would then run for the copy too; declare 'clone(): ${name}' on the class to say what a copy is`, at, by);
     }
     // An array method's copy of a Dyn may panic, which unwinds as a Dyn's own copy does; only
     // `clone()` written on a value holding one asks for its Dyns to be cloned one by one.
@@ -10666,6 +10677,8 @@ export class Expressions<C extends Context> implements Union<C> {
       return rust !== undefined;
     });
     if (holdsRust) throw new CompileError("E1004", `a Rust '${rust!.name}' can't become a '${this.ctx.typing().show(to)}' yet; call its methods on it, or take it as a generic parameter`, e.start, e.end);
+    // A Dyn's copy is the compiler's, which an instance with a disposer never gets.
+    if (this.ctx.typing().holdsPart(held, (u) => this.ctx.typing().disposable(u))) throw unsupported("values with a '[Symbol.dispose]' method held in a Dyn", e);
     const reason = this.ctx.typing().callableOf.has(this.ctx.typing().rec(to).of) ? undefined : unsatisfied(type, this.ctx.typing().rec(to).of, this.ctx.members(), { start: e.start, end: e.end });
     if (reason !== undefined) throw new CompileError("E0101", `${message}: ${reason}`, e.start, e.end);
     const blocker = this.unsent(held);

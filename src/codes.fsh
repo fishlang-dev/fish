@@ -354,6 +354,36 @@ function main() {
   E0211: { title: "not possible through a Dyn" },
   E0212: { title: "a change that would only reach a temporary copy" },
   E0213: { title: "a value that can't be cloned" },
+  E0214: {
+    title: "a value with a '[Symbol.dispose]' method taken apart or copied",
+    long: {
+      text: `A class's '[Symbol.dispose]' method runs once, on the whole instance, when it is dropped. So an instance of such a class is only ever moved as a whole: a field can't be moved out of it, which would leave the disposer a value with a hole in it, and nothing may copy it behind its back.
+
+Rust has the same rule for a type that implements Drop (its E0509). TypeScript has no moves, so the question never comes up there.
+
+To fix it, clone the field you need, as in 'c.log.clone()', or give the class a method that hands out what you want and leaves the instance whole.`,
+      example: `class Conn {
+  log: string[];
+  constructor() { this.log = ["opened"]; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(this.log.length); }
+}
+function keep(log: string[]) {}
+function main() {
+  const c = new Conn();
+  keep(c.log);
+}`,
+      fixed: `class Conn {
+  log: string[];
+  constructor() { this.log = ["opened"]; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(this.log.length); }
+}
+function keep(log: string[]) {}
+function main() {
+  const c = new Conn();
+  keep(c.log.clone());
+}`,
+    },
+  },
 
   E0301: {
     title: "async-only code outside an async function",

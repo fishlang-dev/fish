@@ -1146,9 +1146,9 @@ class Codegen implements PrintHost, ComptimeHost {
   return r.kind === "ref" ? r.to : t;
 }
 
-  // Whether a value of the type holds a Rust handle, which only moves.
-  holdsRust(t: Type): boolean {
-    return this.tables.typing.holdsPart(t, (u) => rustClassOf(this.tables.typing, u) !== undefined);
+  // Whether a value of the type holds a Rust handle or an instance with a disposer, which only move.
+  moveOnly(t: Type): boolean {
+    return this.tables.typing.holdsMoveOnly(t);
   }
 
   localAt(n: Ref<Expr | Stmt | Param | ObjectProp>): LocalId | undefined {
@@ -5640,7 +5640,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // A copy of a value, holding its own reference to each string in it.
   copied(this: Mut<this>, v: string, type: Type): string {
-    if (this.holdsRust(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle, which is moved, never copied`);
+    if (this.moveOnly(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle or an instance with a disposer, which is moved, never copied`);
     const r = this.recOf(type);
     if (r?.kind === "interior" && !isLock(r)) return this.copied(v, r.of);
     if (!this.needsDrop(type)) return v;
@@ -5767,7 +5767,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // type holding itself calls it.
   helper(this: Mut<this>, kind: "drop" | "copy", type: Exclude<Type, string>): string {
     const r = this.tables.typing.rec(type);
-    if (kind === "copy" && this.holdsRust(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle, which is moved, never copied`);
+    if (kind === "copy" && this.moveOnly(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle or an instance with a disposer, which is moved, never copied`);
     const made = kind === "copy" ? this.glue.copy.get(type) : this.glue.drop.get(type);
     if ((made !== undefined && made !== "")) return made;
     const described2 = this.tables.typing.described(type);
@@ -9289,9 +9289,9 @@ class Codegen implements PrintHost, ComptimeHost {
     const whole = to === undefined || this.keepsAll(this.cur().types.get(e)!, to);
     // A Rust handle is never copied: one made here, or moved out of its place, is taken whole.
     const get2 = this.cur().types.get(e)!;
-    const rust = this.holdsRust(get2);
+    const rust = this.moveOnly(get2);
     if ((whole || rust) && this.fresh(e)) return this.value(e, true);
-    if (!rust && !this.needsDrop(this.cur().types.get(e)!) && this.holdsRust(this.valueType(e))) return this.value(e);
+    if (!rust && !this.needsDrop(this.cur().types.get(e)!) && this.moveOnly(this.valueType(e))) return this.value(e);
     // A value owning nothing meets a recursive type's blocks only as the blocks just made for it.
     if (to !== undefined && !this.needsDrop(this.referent(this.cur().types.get(e)!)) && this.tables.typing.holdsPart(to, (t) => this.kindOf(t) === "recursive")) return this.value(e, true);
     const v = this.value(e);
@@ -9440,7 +9440,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   kept(this: Mut<this>, e: Ref<Expr>, v: string, written: boolean): string {
     const type = this.valueType(e);
-    if (!this.needsDrop(type) || this.fresh(e) || e.kind === "string" || !written || this.holdsRust(type)) return v;
+    if (!this.needsDrop(type) || this.fresh(e) || e.kind === "string" || !written || this.moveOnly(type)) return v;
     const copy = this.copied(v, type);
     this.pending.push({ v: copy, type });
     return copy;
@@ -13165,7 +13165,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const type = this.llvm(get5);
     const spilled = this.alloca(type);
     // A Rust handle made for the call moves into it, the call taking it over.
-    if (owns && this.holdsRust(this.cur().types.get(object)!)) {
+    if (owns && this.moveOnly(this.cur().types.get(object)!)) {
       if (!this.fresh(object)) assert(false, "internal error: a Rust handle taken over by a method is read from a place nothing empties");
       const line3 = `store ${type} ${this.value(object, true)}, ptr ${spilled}`;
       this.emit(line3);
@@ -13987,7 +13987,7 @@ class Codegen implements PrintHost, ComptimeHost {
     // A shorthand lent to a reference field points at its variable.
     if (this.isRef(to) && !this.isRef(this.loc(local).type)) return [p.name, this.slot(local)];
     const part3 = this.loc(local).type;
-    if (this.holdsRust(part3) || (this.cur().consumes.has(p.id) && this.keepsAll(part3, to))) {
+    if (this.moveOnly(part3) || (this.cur().consumes.has(p.id) && this.keepsAll(part3, to))) {
       const shorthand2 = this.shorthand(p, local);
       const part = this.loc(local).type;
       return [p.name, this.convert(shorthand2, part, to)];
@@ -14011,7 +14011,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(line);
     const part3 = this.loc(local).type;
     if (!this.cur().consumes.has(p.id)) {
-      if (this.holdsRust(part3)) assert(false, "internal error: a Rust value in a shorthand property isn't moved");
+      if (this.moveOnly(part3)) assert(false, "internal error: a Rust value in a shorthand property isn't moved");
       return this.copied(read, part3);
     }
     const part4 = this.loc(local).type;
@@ -14029,7 +14029,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (setter !== undefined && target.kind === "member") {
       const type = this.cur().types.get(target)!;
       // A Rust value goes to the setter alone: the checker refuses such an assignment's value.
-      if (this.holdsRust(type)) {
+      if (this.moveOnly(type)) {
         const thisPointer2 = this.thisPointer(setter, target.object);
         this.invoke(setter, thisPointer2, [`${this.llvm(type)} ${result}`]);
         return result;
@@ -14207,7 +14207,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const option = this.valueType(e.left) as UnionType;
     const type = this.cur().types.get(e)!;
     // A Rust value is moved out of the left side, which is left empty, never copied.
-    const rust = this.holdsRust(option);
+    const rust = this.moveOnly(option);
     const v = rust && this.fresh(e.left) ? this.value(e.left, true) : this.value(e.left);
     if (rust && !this.fresh(e.left)) {
       if (!this.cur().consumes.has(e.left.id) || !this.lendable(e.left)) assert(false, "internal error: a Rust value on the left of '??' isn't moved");

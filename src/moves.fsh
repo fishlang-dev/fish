@@ -934,7 +934,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       }
       case "binary": {
         // `a ?? b` hands over whichever it gives; a Rust value, which is never copied, always.
-        const given = e.op === "??" ? (consume ?? (cx.tables.typing.holdsPart(cx.instance.types.get(e)!, (u) => rustClassOf(cx.tables.typing, u) !== undefined) ? `'${PLACE}' moved here: '??' hands over the Rust value it holds` : undefined)) : undefined;
+        const given = e.op === "??" ? (consume ?? (cx.tables.typing.holdsPart(cx.instance.types.get(e)!, (u) => rustClassOf(cx.tables.typing, u) !== undefined) ? `'${PLACE}' moved here: '??' hands over the Rust value it holds` : cx.tables.typing.holdsMoveOnly(cx.instance.types.get(e)!) ? `'${PLACE}' moved here: '??' hands over the value it holds, which has a '[Symbol.dispose]' method and is never copied` : undefined)) : undefined;
         if (e.op === "??") this.outOfBorrow(cx, e.left, e, consume);
         this.expr(cx, e.left, given);
         // The right side of `&&`, `||` and `??` may not run.
@@ -2261,6 +2261,12 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     }
     if (p.id !== e.id && this.isRef(cx, cx.instance.types.get(p)!)) {
       throw new CompileError("E0202", this.hinted(cx, type, `'${this.text(cx, e)}' can't be moved out of '${this.text(cx, p)}', which only borrows it; use '${this.text(cx, e)}.clone()'`), e.start, e.end);
+    }
+    // Nor out of an instance with a disposer, which runs on the whole of it.
+    const whole = holder?.kind === "ref" ? holder.to : cx.instance.types.get(p.object);
+    if (whole !== undefined && cx.tables.typing.disposable(whole)) {
+      const name = cx.tables.typing.show(whole);
+      throw new CompileError("E0214", `'${this.text(cx, e)}' can't be moved out of '${this.text(cx, p.object)}': '${name}' has a '[Symbol.dispose]' method, which runs on the whole value when it is dropped; use '${this.text(cx, e)}.clone()', or have a method of '${name}' give it`, e.start, e.end);
     }
     this.movedThrough(cx, e, p.object, type);
   }

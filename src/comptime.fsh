@@ -1086,6 +1086,7 @@ class Interpreter<H extends ComptimeHost> {
 
   /** @throws {CompileError | Jump | Stop | Thrown} */
   private construct(this: Mut<this>, f: usize, e: Ref<Extract<Expr, { kind: "new" }>>, type: Type): Value {
+    if (this.host.tables.typing.disposable(type)) throw new Stop("a class with a '[Symbol.dispose]' method can't be made while compiling yet, since comptime code runs no drops; make it at run time", span(e), false);
     const kind = kindOf(this.host.tables.typing, type);
     let which: string | undefined = undefined;
     let isSet = false;
