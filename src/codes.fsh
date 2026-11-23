@@ -429,7 +429,46 @@ async function main() {
   },
   E0304: { title: "a shared value or lock used in a way other tasks could see half done" },
   E0305: { title: "invalid use of a Promise, a task or the Promise API" },
-  E0306: { title: "a task that can throw, spawned where its group can't pass the error on" },
+  E0306: {
+    title: "a task that can throw, spawned where its group can't pass the error on",
+    long: {
+      text: `A task spawned with 'group.spawn' can throw, but it is spawned somewhere other than the body of the closure given to 'taskGroup': inside a nested closure, or through a group handed to another function. A task's error surfaces where the group is awaited, as part of what the group's closure throws, and only that closure's own body, spawning into its own group, can say so.
+
+TypeScript has no task groups; 'Promise.all' rejects with the first error whichever function built its list.
+
+To fix it, spawn the task in the body of the closure given to 'taskGroup' (a loop or a branch there is fine), or catch the error inside the task with try/catch so it throws nothing.`,
+      example: `class Refused {
+  why: string;
+  constructor(why: string) {
+    this.why = why;
+  }
+}
+async function save(n: i64): Promise<void> throws Refused {
+  if (n > 1) throw new Refused("too many");
+}
+async function main() throws Refused {
+  const ns = [1, 2];
+  await taskGroup(async (group) => {
+    ns.forEach((n) => group.spawn(save(n)));
+  });
+}`,
+      fixed: `class Refused {
+  why: string;
+  constructor(why: string) {
+    this.why = why;
+  }
+}
+async function save(n: i64): Promise<void> throws Refused {
+  if (n > 1) throw new Refused("too many");
+}
+async function main() throws Refused {
+  const ns = [1, 2];
+  await taskGroup(async (group) => {
+    for (const n of ns) group.spawn(save(n));
+  });
+}`,
+    },
+  },
 
   E0401: {
     title: "cannot find name",
