@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 240" fill="none" role="img" aria-label="Fish — TypeScript syntax, Rust ownership, native binaries">
+  <defs>
+    <pattern id="grid-light" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#CBD5E1" stroke-opacity="0.45" stroke-width="1"/>
+    </pattern>
+    <radialGradient id="hero-glow-light" cx="22%" cy="50%" r="48%">
+      <stop offset="0%" stop-color="#156BF9" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#F8FAFC" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="coral-glow-light" cx="85%" cy="20%" r="38%">
+      <stop offset="0%" stop-color="#EC4B26" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#F8FAFC" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="1" y="1" width="958" height="238" rx="18" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="2"/>
+  <rect x="2" y="2" width="956" height="236" rx="17" fill="url(#grid-light)"/>
+  <rect x="2" y="2" width="956" height="236" rx="17" fill="url(#hero-glow-light)"/>
+  <rect x="2" y="2" width="956" height="236" rx="17" fill="url(#coral-glow-light)"/>
+  <g transform="translate(52, 22) scale(0.272222)" shape-rendering="geometricPrecision">
+    <path id="dorsal_peak" d="M 235.0 53.5 L 336.0 126.5 L 229.0 175.5 L 217.0 128.5 C 228.0 103.5 234.0 77.5 235.0 53.5 Z" fill="#EC4B26" stroke="#EC4B26" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="dorsal_lead_light" d="M 217.0 128.5 L 229.0 175.5 L 191.0 196.5 L 90.0 248.5 C 121.0 207.5 169.0 165.5 217.0 128.5 Z" fill="#F77942" stroke="#F77942" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="dorsal_inner_mid" d="M 336.0 126.5 L 229.0 175.5 L 191.0 196.5 L 269.0 159.5 Z" fill="#D9441E" stroke="#D9441E" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="dorsal_lower_rust" d="M 90.0 248.5 L 191.0 196.5 C 147.0 225.5 111.0 259.5 87.0 297.5 C 73.0 320.5 64.0 343.5 59.0 365.5 C 60.0 323.5 70.0 281.5 90.0 248.5 Z" fill="#B93612" stroke="#B93612" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="back_top_navy" d="M 337.0 135.5 L 312.0 211.5 L 225.0 198.5 L 277.0 166.5 Z" fill="#083680" stroke="#083680" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="back_mid_navy" d="M 312.0 211.5 L 132.0 290.5 L 149.0 244.5 L 225.0 198.5 Z" fill="#062866" stroke="#062866" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="back_left_dark" d="M 149.0 244.5 L 132.0 290.5 L 92.0 371.5 L 75.0 435.5 L 62.0 375.5 L 93.0 297.5 Z" fill="#041E50" stroke="#041E50" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="core_ice_left" d="M 162.0 282.5 L 312.0 220.5 L 336.0 275.5 Z" fill="#7BC7FA" stroke="#7BC7FA" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="core_ice_bright" d="M 321.0 216.5 L 403.0 195.5 L 343.0 276.5 Z" fill="#BAE7FE" stroke="#BAE7FE" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="core_ice_right" d="M 403.0 195.5 L 429.0 208.5 L 446.0 224.5 L 343.0 276.5 Z" fill="#7BC7FA" stroke="#7BC7FA" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="core_ice_snout" d="M 429.0 208.5 L 452.0 188.5 L 518.0 174.5 L 446.0 224.5 Z" fill="#88CFFB" stroke="#88CFFB" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="head_forehead" d="M 345.0 134.5 L 450.0 162.5 L 403.0 195.5 L 321.0 216.5 Z" fill="#156BF9" stroke="#156BF9" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="head_eye_dark" d="M 403.0 195.5 L 450.0 162.5 L 452.0 188.5 L 429.0 208.5 Z" fill="#041E50" stroke="#041E50" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="bill_upper" d="M 450.0 162.5 L 661.0 122.5 L 528.0 188.5 L 518.0 174.5 L 452.0 188.5 Z" fill="#062560" stroke="#062560" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="bill_throat_dark" d="M 518.0 174.5 L 528.0 188.5 L 493.0 219.5 L 446.0 224.5 Z" fill="#031A48" stroke="#031A48" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="cheek_cobalt" d="M 343.0 276.5 L 446.0 224.5 L 419.0 263.5 L 396.0 310.5 Z" fill="#156BF9" stroke="#156BF9" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="jaw_upper_bright" d="M 446.0 232.5 L 539.0 224.5 L 485.0 253.5 L 419.0 263.5 Z" fill="#1770FC" stroke="#1770FC" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="jaw_lower_royal" d="M 419.0 263.5 L 485.0 253.5 L 539.0 224.5 L 396.0 310.5 Z" fill="#0B45AE" stroke="#0B45AE" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="belly_under_core" d="M 157.0 293.5 L 337.0 283.5 L 285.0 325.5 Z" fill="#06245C" stroke="#06245C" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="belly_right_royal" d="M 337.0 283.5 L 387.0 312.5 L 324.0 337.5 L 285.0 325.5 Z" fill="#0B45AE" stroke="#0B45AE" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="flank_bright_cobalt" d="M 132.0 290.5 L 285.0 325.5 L 155.0 376.5 L 92.0 371.5 Z" fill="#156BF9" stroke="#156BF9" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="flank_mid_royal" d="M 285.0 325.5 L 324.0 337.5 L 205.0 386.5 L 155.0 376.5 Z" fill="#0B45AE" stroke="#0B45AE" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="flank_lower_royal" d="M 92.0 371.5 L 155.0 376.5 L 121.0 488.5 L 75.0 435.5 Z" fill="#0B45AE" stroke="#0B45AE" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="flank_lower_navy" d="M 155.0 376.5 L 205.0 386.5 L 156.0 438.5 L 121.0 488.5 Z" fill="#062866" stroke="#062866" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="pectoral_fin" d="M 356.0 323.5 L 326.0 376.5 L 281.0 422.5 L 297.0 343.5 Z" fill="#041E50" stroke="#041E50" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="tail_inner_cobalt" d="M 189.0 397.5 L 267.0 487.5 L 170.0 432.5 Z" fill="#156BF9" stroke="#156BF9" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="tail_stem_navy" d="M 156.0 438.5 L 327.0 537.5 L 255.0 529.5 L 121.0 488.5 Z" fill="#062359" stroke="#062359" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="tail_top_light" d="M 267.0 495.5 L 417.0 390.5 L 304.0 517.5 Z" fill="#F77942" stroke="#F77942" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="tail_top_dark" d="M 304.0 517.5 L 417.0 390.5 L 330.0 532.5 Z" fill="#B93612" stroke="#B93612" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="tail_bottom_dark" d="M 255.0 532.5 L 311.0 537.5 L 379.0 666.5 Z" fill="#B93612" stroke="#B93612" stroke-width="0.4" stroke-linejoin="round"/>
+    <path id="tail_bottom_bright" d="M 311.0 537.5 L 329.0 538.5 L 379.0 666.5 Z" fill="#EC4B26" stroke="#EC4B26" stroke-width="0.4" stroke-linejoin="round"/>
+  </g>
+  <text x="276" y="114" fill="#0B1120" font-family="'Space Grotesk', 'Inter', -apple-system, sans-serif" font-size="72" font-weight="700" letter-spacing="-2.8">Fish</text>
+  <rect x="444" y="68" width="76" height="36" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
+  <text x="482" y="92" text-anchor="middle" fill="#156BF9" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="18" font-weight="600">.fsh</text>
+  <text x="278" y="154" fill="#475569" font-family="'Inter', -apple-system, sans-serif" font-size="22" font-weight="500">TypeScript syntax. Rust ownership. Native binaries.</text>
+  <g transform="translate(278, 174)">
+    <rect x="0" y="0" width="142" height="30" rx="6" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+    <circle cx="16" cy="15" r="4" fill="#156BF9"/>
+    <text x="28" y="20" fill="#0B1120" font-family="'JetBrains Mono', monospace" font-size="13" font-weight="500">Zero GC</text>
+    <rect x="154" y="0" width="168" height="30" rx="6" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+    <circle cx="170" cy="15" r="4" fill="#EC4B26"/>
+    <text x="182" y="20" fill="#0B1120" font-family="'JetBrains Mono', monospace" font-size="13" font-weight="500">Memory Safe</text>
+    <rect x="334" y="0" width="166" height="30" rx="6" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.2"/>
+    <circle cx="350" cy="15" r="4" fill="#7BC7FA"/>
+    <text x="362" y="20" fill="#0B1120" font-family="'JetBrains Mono', monospace" font-size="13" font-weight="500">LLVM Native</text>
+  </g>
+</svg>

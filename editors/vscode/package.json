@@ -3,7 +3,12 @@
   "displayName": "Fish Lang",
   "description": "Fish Lang (.fsh): highlighting, the fishc language server, and build, run and check tasks",
   "publisher": "fishlang",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "icon": "icons/icon.png",
+  "galleryBanner": {
+    "color": "#090E1A",
+    "theme": "dark"
+  },
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
@@ -28,7 +33,11 @@
         "extensions": [
           ".fsh"
         ],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/fish-file-light.svg",
+          "dark": "./icons/fish-file-dark.svg"
+        }
       }
     ],
     "grammars": [
