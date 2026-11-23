@@ -1485,6 +1485,11 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     if (!moving || this.state === null) return;
     const rootId = this.rootLocal(cx, e);
     const root = rootId !== undefined ? cx.tables.arenas.localOf(rootId) : undefined;
+    // A `using` binding's value stays in its scope, whose end disposes it.
+    if (root !== undefined && root.using === true && place === String(root.id)) {
+      const held = cx.tables.typing.show(root.type);
+      throw new CompileError("E0215", `'${root.name}' can't be moved: it is declared with 'using', so its value belongs to its scope, which disposes it; lend it instead, as a 'Ref<${held}>' or a 'Mut<${held}>'`, e.start, e.end);
+    }
     if (root !== undefined && (this.isRef(cx, root.type) || cx.tables.typing.optionRef(root.type) !== undefined)) {
       const name = root.name;
       throw new CompileError("E0202", this.hinted(cx, type, `'${this.text(cx, e)}' can't be moved out of '${name}', which only borrows it; use '${this.text(cx, e)}.clone()'`), e.start, e.end);

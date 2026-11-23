@@ -5516,6 +5516,14 @@ class BodyChecker implements Context, GuardHost {
     }
     // A nested function runs whenever it is called, so it can't take over what it uses.
     const nested = this.cx.tables.nestedFunctions.get(e);
+    // A `using` binding stays in its scope, which a closure holding it may outlive.
+    const kept = captured.find(([alias, from]) => from !== "this" && from.using === true && (e.move || owning || moved.some((m) => m.localId === alias.localId)));
+    if (kept !== undefined) {
+      const at = this.captureSpan(innerId, kept[0].localId, e);
+      const who = nested !== undefined ? `the nested function '${nested}'` : "this closure";
+      const held = this.cx.tables.typing.show(kept[0].type);
+      throw new CompileError("E0215", `'${kept[0].name}' can't be held by ${who}: it is declared with 'using', so its value belongs to its scope, which disposes it; call a closure that borrows it where it is made, or lend '${kept[0].name}' to a function as a 'Ref<${held}>' or a 'Mut<${held}>'`, at.start, at.end);
+    }
     if (nested !== undefined) {
       const self = captured.find(([, from]) => from === "this");
       if (self !== undefined) throw new CompileError("E0708", `'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, this.captureSpan(innerId, self[0].localId, e).start, this.captureSpan(innerId, self[0].localId, e).end);

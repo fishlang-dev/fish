@@ -943,3 +943,276 @@ function main() {
   r.name = "renamed";
 }
 // expect: dispose renamed
+// case: using_passed_by_value
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function consume(r: Res): void {}
+function main() {
+  using r = new Res("a");
+  consume(r);
+}
+// error: 9:11: error[E0215]: 'r' can't be moved: it is declared with 'using', so its value belongs to its scope, which disposes it; lend it instead, as a 'Ref<Res>' or a 'Mut<Res>'
+// case: using_returned
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function make(): Res {
+  using r = new Res("a");
+  return r;
+}
+function main() {
+  const r = make();
+}
+// error: 8:10: error[E0215]: 'r' can't be moved: it is declared with 'using', so its value belongs to its scope
+// case: using_stored_in_a_variable
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  using r = new Res("a");
+  const kept = r;
+}
+// error: 8:16: error[E0215]: 'r' can't be moved: it is declared with 'using', so its value belongs to its scope
+// case: using_stored_in_an_array
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  let all: Res[] = [];
+  using r = new Res("a");
+  all.push(r);
+}
+// error: 9:12: error[E0215]: 'r' can't be moved: it is declared with 'using', so its value belongs to its scope
+// case: using_stored_in_a_field
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+class Holder {
+  res: Res;
+  constructor(res: Res) { this.res = res; }
+}
+function main() {
+  let h = new Holder(new Res("first"));
+  using r = new Res("a");
+  h.res = r;
+}
+// error: 13:11: error[E0215]: 'r' can't be moved: it is declared with 'using', so its value belongs to its scope
+// case: using_held_by_a_move_closure
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  using r = new Res("a");
+  const show = move () => console.log(r.name);
+  show();
+}
+// error: error[E0215]: 'r' can't be held by this closure: it is declared with 'using', so its value belongs to its scope, which disposes it; call a closure that borrows it where it is made, or lend 'r' to a function as a 'Ref<Res>' or a 'Mut<Res>'
+// case: using_held_by_a_returned_closure
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function make(): () => void {
+  using r = new Res("a");
+  return () => console.log(r.name);
+}
+function main() {
+  make()();
+}
+// error: error[E0215]: 'r' can't be held by this closure: it is declared with 'using'
+// case: using_moved_inside_a_closure
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function consume(r: Res): void {}
+function main() {
+  using r = new Res("a");
+  const once = () => consume(r);
+  once();
+}
+// error: error[E0215]: 'r' can't be held by this closure: it is declared with 'using'
+// case: using_held_by_an_async_closure
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+async function main() {
+  using r = new Res("a");
+  const work = async () => console.log(r.name);
+  await work();
+}
+// error: error[E0215]: 'r' can't be held by this closure: it is declared with 'using'
+// case: using_lent
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  rename(this: Mut<this>, name: string): void { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function show(r: Ref<Res>): void { console.log(`show ${r.name}`); }
+function change(r: Mut<Res>): void { r.rename("changed"); }
+function main() {
+  using r = new Res("a");
+  show(r);
+  change(r);
+  show(r);
+  r.rename("renamed");
+  console.log(r.name);
+}
+// expect: show a
+// expect: show changed
+// expect: renamed
+// expect: dispose renamed
+// case: using_borrowed_by_a_closure
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function main() {
+  using r = new Res("local");
+  const show = () => console.log(`show ${r.name}`);
+  show();
+  show();
+  [1, 2].forEach((n) => console.log(`${n} ${r.name}`));
+}
+// expect: show local
+// expect: show local
+// expect: 1 local
+// expect: 2 local
+// expect: dispose local
+// case: using_early_return
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function run(early: boolean): i64 {
+  using a = new Res("a");
+  {
+    using b = new Res("b");
+    if (early) {
+      console.log("early");
+      return 1;
+    }
+    console.log("late");
+  }
+  return 2;
+}
+function main() {
+  console.log(run(true));
+  console.log(run(false));
+}
+// expect: early
+// expect: dispose b
+// expect: dispose a
+// expect: 1
+// expect: late
+// expect: dispose b
+// expect: dispose a
+// expect: 2
+// case: using_break_and_continue
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function main() {
+  for (let i = 0; i < 4; i++) {
+    using r = new Res(`r${i}`);
+    if (i === 0) continue;
+    if (i === 2) break;
+    console.log(`end ${i}`);
+  }
+  console.log("after");
+}
+// expect: dispose r0
+// expect: end 1
+// expect: dispose r1
+// expect: dispose r2
+// expect: after
+// case: using_throw_caught_outside
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function risky(fail: boolean): void throws Error {
+  using r = new Res(fail ? "failing" : "fine");
+  if (fail) throw new Error("failed");
+  console.log("no throw");
+}
+function main() {
+  try {
+    risky(false);
+    risky(true);
+    console.log("not reached");
+  } catch (e) {
+    console.log(`caught ${e.message}`);
+  }
+}
+// expect: no throw
+// expect: dispose fine
+// expect: dispose failing
+// expect: caught failed
+// case: using_panic
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+function main() {
+  using outer = new Res("outer");
+  {
+    using inner = new Res("inner");
+    const xs: i64[] = [];
+    console.log(xs[3]!);
+  }
+}
+// expect: dispose inner
+// expect: dispose outer
+// panic: index out of bounds
+// case: using_across_await
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.name}`); }
+}
+async function open(name: string): Promise<Res> {
+  await sleep(1);
+  return new Res(name);
+}
+async function work(): Promise<i64> {
+  using first = new Res("first");
+  using second = await open("second");
+  await sleep(1);
+  console.log(`${first.name} ${second.name}`);
+  return 1;
+}
+async function main() {
+  const n = await work();
+  console.log(n);
+  console.log("done");
+}
+// expect: first second
+// expect: dispose second
+// expect: dispose first
+// expect: 1
+// expect: done
