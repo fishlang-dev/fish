@@ -280,8 +280,32 @@ export function build(session: BuildSession, file: string, out: string, release 
 // files the program was read from, or looked for, even when it doesn't build.
 /** @throws {CompileError | Error | IoError | JsonError} */
 function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>): { warnings: CompileError[]; session: BuildSession } {
-  let made = builtKept(session, file, out, release, panic, links, target, leaks, debug, looked, undefined, undefined, false);
-  return { warnings: made.warnings, session: made.session };
+  let { core, caches } = apart(session);
+  let ready = readied(core, caches, file, release, panic, leaks, debug, looked, target);
+  let known = new Map<string, string[]>();
+  linked(ready.building, ready.ir, ready.split, out, release, links, ready.shim, target, leaks, debug, known);
+  return { warnings: ready.warnings, session: ready.building };
+}
+
+// A build up to its IR and how clang takes it, which is all linking reads. A function of its own
+// so the checked program and the loaded files, which only `fishc watch` keeps for its next build,
+// are dropped as it returns: clang then compiles with nothing of them held beside it.
+/** @throws {CompileError | Error | IoError | JsonError} */
+function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>): { ir: string; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession } {
+  let made = compiledKept(core, file, release, panic, leaks, debug, looked, undefined, undefined, false);
+  const instrumenting = stageStart(made.kept.checked.tables.session);
+  const ir = instrumented(made.ir, target);
+  const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
+  if (shim !== undefined) refuseForeignRust(target);
+  stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
+  const splitting = stageStart(made.kept.checked.tables.session);
+  const split = parts(ir, made.kept.checked, release, target, debug);
+  stageEnd(made.kept.checked.tables.session, "split", splitting);
+  if (made.kept.checked.tables.session.timings !== undefined) for (const [name, ms] of split.times) made.kept.checked.tables.session.timings!.ms.set(name, ms);
+  let { checked } = made.kept;
+  let { tables } = checked;
+  const building = together(tables.session, caches);
+  return { ir, split, shim, warnings: made.warnings, building };
 }
 
 // `built` for `fishc watch`, from what its last build kept: a program whose files all read as they
