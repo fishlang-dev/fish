@@ -14,6 +14,9 @@
 
 "throws" @keyword.exception
 
+(using_declaration
+  kind: "using" @keyword)
+
 "|>" @operator
 
 (topic) @variable.builtin
