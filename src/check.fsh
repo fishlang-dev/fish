@@ -152,6 +152,8 @@ export type Instance = {
   envs?: NodeMap<Expr, { of: InstanceId; env: LocalId[] }>;
   // What each value boxed into a Dyn runs for the interface's members.
   dyns?: NodeMap<Expr, DynTable>;
+  // The closures checked inside it, in the order they were made, a discarded pass's included.
+  inner?: InstanceId[];
   // Each closure owning what it captures that holds nested functions as made where it is, and
   // this body's bindings for what each of those uses, which the closure borrows.
   made?: NodeMap<Expr, { of: InstanceId; env: LocalId[] }[]>;
@@ -3296,6 +3298,31 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (written !== id && !this.inProgress.has(written)) this.checkBody(written);
   }
 
+  // A plain build compiles concrete instances only, and nothing reads the tables of another
+  // once its own check and move check have ended. They are emptied here, with those of the
+  // closures checked inside it, where they would otherwise be held to the end of codegen.
+  shed(this: Mut<this>, id: InstanceId): void {
+    if (this.tables.session.plain !== true) return;
+    const checked = this.tables.arenas.instanceOf(id);
+    if (checked.concrete || bodyOf(this.tables.arenas, checked).closure !== undefined) return;
+    let waiting: InstanceId[] = [id];
+    while (waiting.length > 0) {
+      let x = this.tables.arenas.instanceMut(waiting.pop()!);
+      if (x.inner !== undefined) for (const c of x.inner!) waiting.push(c);
+      let fresh = emptyTables();
+      x.types = fresh.types;
+      x.locals = fresh.locals;
+      x.calls = fresh.calls;
+      x.setters = fresh.setters;
+      x.coercions = fresh.coercions;
+      x.jumps = fresh.jumps;
+      x.borrowsFrom = fresh.borrowsFrom;
+      x.raises = fresh.raises;
+      x.caught = fresh.caught;
+      x.patterns = fresh.patterns;
+    }
+  }
+
   // Checks an instance with its type arguments in scope.
   /** @throws {CompileError} */
   checkBody(this: Mut<this>, id: InstanceId): void {
@@ -3334,7 +3361,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
             throw thrown;
           }
         }
-        if (this.demanded === 0) return;
+        if (this.demanded === 0) {
+          this.shed(id);
+          return;
+        }
         this.forget(id);
       }
     } finally {
@@ -5428,6 +5458,9 @@ class BodyChecker implements Context, GuardHost {
     // Read where it is used, as the checker changes the arena it is kept in.
     const innerId = added.id;
     this.cx.closures.push(innerId);
+    let host = this.cx.tables.arenas.instanceMut(parent);
+    if (host.inner !== undefined) host.inner!.push(innerId);
+    else host.inner = [innerId];
     const outerSight = this.cx.resolver().enterSight(this.state.sight);
     try {
       this.cx.checkInstance(innerId, this.state, this.st, this.exprsState);

@@ -70,6 +70,13 @@ function together(core: Session, caches: Caches): BuildSession {
   return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, checkCache: core.checkCache, clang: caches.clang, digests: caches.digests, mathUnits: caches.mathUnits };
 }
 
+// `session` for a build that keeps nothing of its check once its program is emitted.
+function plain(session: Session): Session {
+  let made = session;
+  made.plain = true;
+  return made;
+}
+
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
 /** @throws {CompileError | Error | IoError | JsonError} */
 export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false, debug = false): string {
@@ -346,7 +353,9 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   let before: f64 = 0;
   if (session.timings !== undefined) for (const name of FRONT_END) before += session.timings!.ms.get(name) ?? 0;
   let queries = new Queries(file, manifest, new Map<string, string>());
-  let start = queries.checked(session, looked, kept);
+  let given = session;
+  if (!keep) given.plain = true;
+  let start = queries.checked(given, looked, kept);
   if (start.checked.tables.session.timings !== undefined) {
     let after: f64 = 0;
     for (const name of FRONT_END) after += start.checked.tables.session.timings!.ms.get(name) ?? 0;
@@ -1453,7 +1462,7 @@ async function main(): Promise<void> {
     if (llvm) {
       const start = performance.now();
       let looked: string[] = [];
-      const made = compiledIn(newCompilation(sessionFor()), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked);
+      const made = compiledIn(newCompilation(plain(sessionFor())), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked);
       reportTimings(made.checked.tables.session, [...FRONT_END, "codegen"], start);
       process.stdout.write(made.ir);
     } else {

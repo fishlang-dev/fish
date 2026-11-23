@@ -64,6 +64,9 @@ export type Session = {
   timings?: Timings;
   failed?: string[];
   checkCache?: boolean;
+  // A build that reads nothing of its check once the program is emitted, so the checker empties
+  // the tables of instances that are never compiled as each one's check ends.
+  plain?: boolean;
 };
 
 export function newSession(): Session {
