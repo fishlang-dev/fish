@@ -205,6 +205,11 @@ export class ResolverState {
   // The alias each written alias resolves first, worked out once from the declarations.
   aliasRoots = new Map<string, string>();
   aliasRootsMade = false;
+  // The aliases other aliases are rooted at, and each alias of such a group by the type it
+  // resolved to: a field of one of those types, written inside its own group, leads back to the
+  // type holding it, so it is stored behind a pointer.
+  groupRoots = new Set<string>();
+  groupTypes = new TypeMap<Type, string>();
   // Where an alias instance leads back to itself, by its key, and the alias each is made from.
   recursives = new Map<string, RecursiveType>();
   recursiveAliases = new TypeMap<RecursiveType, string>();
@@ -1617,6 +1622,7 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       if (!this.host.resolverState.aliasRootsMade) {
         this.host.resolverState.aliasRoots = aliasRoots(this.host.decls.aliases);
         this.host.resolverState.aliasRootsMade = true;
+        for (const rooted of this.host.resolverState.aliasRoots.values()) this.host.resolverState.groupRoots.add(rooted);
       }
       const root = this.host.resolverState.aliasRoots.get(a.name);
       const rootKey = root !== undefined ? `${root}<>` : "";
@@ -1684,7 +1690,55 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       this.remakeLowered(back, args);
     }
     this.host.resolverState.resolved.set(key, type);
+    if (args.length === 0 && (this.host.resolverState.aliasRoots.has(a.name) || this.host.resolverState.groupRoots.has(a.name))) this.host.resolverState.groupTypes.set(type, a.name);
     return type;
+  }
+
+  // A field written as an alias of the group of aliases being resolved, alone or beside `undefined`
+  // or `null`: the pointer it is stored behind, a recursive type standing for the alias, and
+  // whether it was written beside an empty member. An alias still being made is that already, and
+  // one met here after it was made would otherwise sit in the field whole, as large as its largest
+  // member, although its own fields lead back to the type holding this one. Arrays, tuples and a
+  // union's own members are left as they are, and so is an alias that is no object or union of
+  // objects.
+  /** @throws {CompileError} */
+  private boxedField(this: Mut<this>, written: Ref<TypeNode>): { type: Type; empty: boolean } | undefined {
+    if (this.host.resolverState.resolving.size === 0) return undefined;
+    let named: TypeNode | undefined = undefined;
+    let empty = false;
+    if (written.kind === "ref") named = cloneTypeNode(written);
+    else if (written.kind === "union" && written.types.length === 2) {
+      for (const u of written.types) {
+        if ((u.kind === "ref" && u.args.length === 0 && (u.name === "undefined" || u.name === "null")) || (u.kind === "literal" && u.value.kind === "null")) empty = true;
+        else if (u.kind === "ref") named = cloneTypeNode(u);
+      }
+      if (!empty) return undefined;
+    }
+    if (named === undefined || named.kind !== "ref" || named.args.length !== 0) return undefined;
+    const written1 = this.host.decls.aliases.get(named.name);
+    if (written1 === undefined) return undefined;
+    const root = this.host.resolverState.aliasRoots.get(named.name) ?? named.name;
+    if (!this.host.resolverState.groupRoots.has(root) || !this.host.resolverState.resolving.has(`${root}<>`)) return undefined;
+    // The alias as any reference to it resolves, which also makes it when this is the first.
+    const plain = this.resolveType(named);
+    if (this.host.resolverState.groupTypes.get(plain) !== named.name) return undefined;
+    // Only a group's nodes, an object or a union of objects. A union holding a primitive or
+    // another alias's pointer is small as it stands, and `typeof` and a nested pattern read such
+    // a field by the union it is written as.
+    const shape = this.recOf(plain);
+    const node = shape?.kind === "object" ? shape.tuple !== true : shape?.kind === "union" && shape.members.every((member) => this.host.tables.typing.kindOf(member) === "object");
+    if (!node) return undefined;
+    const key = `${named.name}<>`;
+    let back = this.host.resolverState.recursives.get(key);
+    if (back === undefined) {
+      const made = this.host.tables.typing.recursiveType(written1.shown ?? written1.name, []);
+      this.host.resolverState.recursives.set(key, made);
+      this.host.tables.typing.standsFor(made, plain);
+      this.host.resolverState.recursiveAliases.set(made, named.name);
+      this.host.tables.typing.noteRecursiveInstance(named.name, key, made);
+      back = made;
+    }
+    return { type: back!, empty };
   }
 
   // `{ [K in C as N]: X }`: a field for each key C names, its type X with K bound to the key. Over
@@ -1980,11 +2034,13 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     // An object may leave out an optional property, which is then empty; one spelled
     // `T | undefined` may be left out too, and printing and JSON leave it out while empty.
     let f: Field;
+    const boxed = this.boxedField(m.type!);
+    const held: Type | undefined = boxed === undefined ? undefined : boxed.empty ? this.host.tables.typing.unionType([boxed.type, "null"]) : boxed.type;
     if (m.optional) {
-      const member = this.unionMember(m.type!);
+      const member = held !== undefined ? held : this.unionMember(m.type!);
       f = this.host.tables.typing.optionalField(m.name, member);
-    } else if (spellsUndefined(m.type)) f = { name: m.name, type: this.resolveType(m.type!), optional: "undefined" };
-    else f = { name: m.name, type: this.resolveType(m.type!) };
+    } else if (spellsUndefined(m.type)) f = { name: m.name, type: held !== undefined ? held : this.resolveType(m.type!), optional: "undefined" };
+    else f = { name: m.name, type: held !== undefined ? held : this.resolveType(m.type!) };
     let out = copyField(f);
     out.type = storable(this.host.tables.typing, f.type, m);
     if (m.readonly) out.readonly = true;
