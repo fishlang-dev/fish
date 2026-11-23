@@ -52,6 +52,7 @@ function equivalents(): Map<string, Equivalent> {
   m.set("express-rate-limit", PLANNED("Rate-limiting middleware"));
   add(m, ["cookie", "cookie-parser"], IN_STD("req.cookies and res.cookies"));
   add(m, ["serve-static", "@fastify/static", "koa-static", "sirv"], IN_STD("Router.static"));
+  add(m, ["swagger-jsdoc", "@fastify/swagger", "@hono/zod-openapi", "hono-openapi", "@asteasolutions/zod-to-openapi", "tsoa"], IN_STD("fishc openapi, from Router handlers that say their types"));
   add(m, ["marked", "markdown-it"], PLANNED("Markdown to HTML"));
   add(m, ["sanitize-html", "dompurify"], PLANNED("HTML sanitization"));
   add(m, ["csv-parse", "papaparse"], PLANNED("CSV reading and writing"));
