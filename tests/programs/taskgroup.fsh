@@ -1,3 +1,65 @@
+// case: taskgroup_body_error
+// expect: child stopped
+// expect: caught bad input
+class Invalid {
+  why: string;
+  constructor(why: string) {
+    this.why = why;
+  }
+}
+async function waits(signal: AbortSignal) {
+  try {
+    await sleep(60000, signal);
+    console.log("child slept");
+  } catch (e) {
+    console.log("child stopped");
+  }
+}
+async function main() {
+  try {
+    await taskGroup(async (group) => {
+      group.spawn(waits(group.signal));
+      await sleep(30);
+      throw new Invalid("bad " + "input");
+    });
+    console.log("not reached");
+  } catch (e) {
+    console.log("caught", e.why);
+  }
+}
+// case: taskgroup_both_fail
+// expect: caught the task's: early
+class Early {
+  why: string;
+  constructor(why: string) {
+    this.why = why;
+  }
+}
+class Late {
+  why: string;
+  constructor(why: string) {
+    this.why = why;
+  }
+}
+async function fails(): Promise<void> throws Early {
+  await yieldNow();
+  throw new Early("ear" + "ly");
+}
+async function main() {
+  try {
+    await taskGroup(async (group) => {
+      group.spawn(fails());
+      try {
+        await sleep(60000, group.signal);
+      } catch (e) {
+        throw new Late("la" + "te");
+      }
+    });
+  } catch (e) {
+    if (e instanceof Early) console.log("caught the task's:", e.why);
+    else console.log("caught the closure's:", e.why);
+  }
+}
 // case: taskgroup_child_error
 // expect: sibling stopped
 // expect: caught users/7 404
@@ -212,4 +274,21 @@ async function main() {
   } catch (e) {
     console.log(e.why);
   }
+}
+// case: taskgroup_value
+// expect: child done
+// expect: built report 3
+async function work(done: shared<{ n: Atomic<i64> }>) {
+  await sleep(30);
+  done.n.add(3);
+  console.log("child done");
+}
+async function main() {
+  const done = shared({ n: new Atomic(0) });
+  const counted = done.clone();
+  const text = await taskGroup(async (group) => {
+    group.spawn(work(counted.clone()));
+    return "built " + "report";
+  });
+  console.log(text, done.n.load());
 }
