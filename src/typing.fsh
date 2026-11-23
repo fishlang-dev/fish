@@ -2093,6 +2093,7 @@ export class Typing {
     return out;
   }
   private keys = new TypeMap<Exclude<Type, string>, string>();
+  private keyIds = new Map<string, usize>();
   private declared = 0;
 
   // A new type: its record kept in the arena, and interned under `key` when it has one.
@@ -3111,6 +3112,21 @@ export class Typing {
   // A string that is the same exactly when two types are, for keying instances.
   keyOf(t: Type): string {
     return typeof t === "string" ? t : `{${this.keys.get(t) ?? ""}}`;
+  }
+
+  // A short string that is the same exactly when `keyOf` is: a number for each distinct key, in
+  // the order they are first asked for. A key spells a type's whole structure out, tens of
+  // kilobytes for a union of objects, so a key made of several types' keys, held once for every
+  // instance found by it, is made of these. Two types may share a key and not an id, as a type
+  // parameter made twice does, so it numbers keys and not types. Never part of what is emitted.
+  keyId(this: Mut<this>, t: Type): string {
+    if (typeof t === "string") return t;
+    const key = this.keys.get(t) ?? "";
+    const known = this.keyIds.get(key);
+    if (known !== undefined) return `#${known}`;
+    const made = this.keyIds.size + 1;
+    this.keyIds.set(key, made);
+    return `#${made}`;
   }
 
   // `[A, B]`: laid out as an object of fields `0` and `1`, but a type of its own.

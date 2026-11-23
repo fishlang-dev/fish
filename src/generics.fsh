@@ -775,7 +775,9 @@ export class Instancing<H extends InstancingHost> {
   /** @throws {CompileError} */
   instanceOf(this: Mut<this>, f: Ref<Body>, given?: Map<string, Type>): Ref<Instance> {
     const bindings = given !== undefined ? given : scopeCopy(f);
-    const key = [...bindings.values()].map((t) => this.host.tables.typing.keyOf(t)).join(",");
+    let parts: string[] = [];
+    for (const t of bindings.values()) parts.push(this.host.tables.typing.keyId(t));
+    const key = parts.join(",");
     if (!this.host.instancingState.instances.has(f.bodyId)) this.host.instancingState.instances.set(f.bodyId, new Map<string, InstanceId>());
     let byKey = this.host.instancingState.instances.get(f.bodyId)!;
     const known = byKey.get(key);
@@ -1449,7 +1451,7 @@ export class GenericClasses<H extends GenericClassesHost> {
     }
     if (!this.host.genericClassesState.instancesOf.has(template.id)) this.host.genericClassesState.instancesOf.set(template.id, new Map<string, ClassId>());
     let keys: string[] = [];
-    for (const t of args) keys.push(this.host.tables.typing.keyOf(t));
+    for (const t of args) keys.push(this.host.tables.typing.keyId(t));
     const key = keys.join(",");
     const found = this.host.genericClassesState.instancesOf.get(template.id)!.get(key);
     if (found !== undefined) return found;
@@ -1470,7 +1472,10 @@ export class GenericClasses<H extends GenericClassesHost> {
     byKey.set(key, id);
     this.host.genericClassesState.instancesOf.set(template.id, byKey);
     const type = this.host.tables.arenas.classOf(id).type;
-    this.host.tables.typing.noteClassInstance(template.name, key, type);
+    // The type model finds a class's instance by its type arguments' own keys, written out.
+    let spelled: string[] = [];
+    for (const t of args) spelled.push(this.host.tables.typing.keyOf(t));
+    this.host.tables.typing.noteClassInstance(template.name, spelled.join(","), type);
     let shapeSet = this.host.genericClassesState.shapesOf.get(template.id)!;
     shapeSet.add(shape);
     this.host.genericClassesState.shapesOf.set(template.id, shapeSet);
