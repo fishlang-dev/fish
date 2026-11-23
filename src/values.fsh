@@ -41,9 +41,9 @@ const I64_MAX = (1n << 63n) - 1n;
 // The methods of std's Router that add a route for one path and one handler.
 const ROUTE_METHODS = ["get", "post", "put", "patch", "delete", "all"];
 // What a route's handler says beyond a plain one: how many parameters it takes, the type it reads
-// the request's body as, written as `body` when the handler is an arrow, what it gives when that
-// isn't a Response, whether its call is awaited, and whether it says it throws.
-type RouteHandler = { params: usize; body?: TypeNode; reads?: Type; gives?: Type; awaits: boolean; throws: boolean };
+// the request's body as, what it gives when that isn't a Response, each as the handler wrote it
+// when it is an arrow, whether its call is awaited, and whether it says it throws.
+type RouteHandler = { params: usize; body?: TypeNode; reads?: Type; answer?: TypeNode; gives?: Type; awaits: boolean; throws: boolean };
 const ROUTE_THROWS = "a route's handler that says its types can't throw yet; catch the error inside the handler and give back a 'Response' for it, as in 'return new Response(e.message, { status: 422 })'";
 // Stands in for an argument's mismatch message until an error needs the real one.
 const ARGUMENT_MISMATCH = "\u0000argument mismatch\u0000";
@@ -5704,22 +5704,26 @@ export class Expressions<C extends Context> implements Union<C> {
     const count = typed.params;
     const run = `${typed.awaits ? "await " : ""}%(${count === 0 ? "" : count === 1 ? "req" : "req, body"})`;
     const read = typed.reads === undefined ? "" : "let body: fsh_body; try { body = await req.json<fsh_body>(); } catch (e) { return fsh_refused(e.message); } ";
-    const answer = typed.gives === undefined ? `return ${run};` : typed.gives === "void" ? `${run}; return fsh_empty();` : `const out = ${run}; return fsh_json(out);`;
+    const answer = typed.gives === undefined ? `return ${run};` : typed.gives === "void" ? `${run}; return fsh_empty();` : `const out: fsh_out = ${run}; return fsh_json(out);`;
     const text = `fsh_handler |> (async (${count === 0 ? "_req" : "req"}) => { ${read}${answer} })`;
     const tb = this.ctx.tables();
     const parsed = respanExpr(parseExpression(text, tb.ids), at);
     let slots: TypeNode[] = [];
     let names: Expr[] = [];
     walk({ of: "expr", node: parsed }, (n) => {
-      if (n.of === "typeNode" && n.node.kind === "ref" && n.node.name === "fsh_body") slots.push(cloneTypeNode(n.node));
+      if (n.of === "typeNode" && n.node.kind === "ref" && n.node.name.startsWith("fsh_")) slots.push(cloneTypeNode(n.node));
       else if (n.of === "expr" && n.node.kind === "ident" && n.node.name.startsWith("fsh_")) names.push(cloneExpr(n.node));
     });
-    // An arrow's body type is read as it wrote it; a named function's is its declaration's.
+    // An arrow's types are read as it wrote them; a named function's are its declaration's. What
+    // the handler gives is held as that type, so a field written `name?: T` is left out while empty.
     let rewrites = new Rewrites();
     for (const slot of slots) {
       if (slot.kind !== "ref") continue;
-      if (typed.body !== undefined) rewrites.replaceTypeNode(slot, cloneTypeNode(typed.body!));
-      else this.ctx.tables().presetTypes.set(cloneTypeNode(slot), typed.reads!);
+      if (slot.name === "fsh_body") {
+        if (typed.body !== undefined) rewrites.replaceTypeNode(slot, cloneTypeNode(typed.body!));
+        else this.ctx.tables().presetTypes.set(cloneTypeNode(slot), typed.reads!);
+      } else if (typed.answer !== undefined) rewrites.replaceTypeNode(slot, cloneTypeNode(typed.answer!));
+      else this.ctx.tables().presetTypes.set(cloneTypeNode(slot), typed.gives!);
     }
     for (const name of names) {
       if (name.kind !== "ident") continue;
@@ -5765,9 +5769,10 @@ export class Expressions<C extends Context> implements Union<C> {
       given = cloneTypeNode(returns.args[0]!);
       awaits = true;
     } else if (returns !== undefined && !async) given = cloneTypeNode(returns);
-    const gives = given === undefined ? undefined : this.ctx.resolveType(given);
+    const gives = given === undefined ? undefined : this.ctx.resolveType(cloneTypeNode(given!));
     const response = this.ctx.view().arenas.classOf(this.ctx.classes().get("Response")!).type;
     const answers = gives !== response ? gives : undefined;
+    const answer = named === undefined && answers !== undefined ? given : undefined;
     let body: TypeNode | undefined = undefined;
     let reads: Type | undefined = undefined;
     if (params.length > 1 && named !== undefined) {
@@ -5778,7 +5783,7 @@ export class Expressions<C extends Context> implements Union<C> {
       reads = this.ctx.resolveType(cloneTypeNode(params[1]!.type!));
     }
     if (reads === undefined && answers === undefined) return undefined;
-    return { params: params.length, body, reads, gives: answers, awaits, throws };
+    return { params: params.length, body, reads, answer, gives: answers, awaits, throws };
   }
 
   // `Promise.resolve(v)` and `Promise.reject(e)`, rewritten as the prelude's async functions

@@ -67,12 +67,14 @@ async function main() {
 // expect: done 3
 async function main() {
   const f = async (n: i64): Promise<i64> => n + 1;
-  console.log(await f(41));
+  const a = await f(41);
+  console.log(a);
   const g = async (label: string): Promise<string> => {
     await yieldNow();
     return label + " 3";
   };
-  console.log(await g("done"));
+  const b = await g("done");
+  console.log(b);
 }
 // case: async_arrow_spawn_drops
 // expect: 1
@@ -87,7 +89,8 @@ async function main() {
 // error: an async function's return type is 'Promise<T>', the type of what it gives once awaited
 async function main() {
   const f = async (n: i64): i64 => n + 1;
-  console.log(await f(41));
+  const a = await f(41);
+  console.log(a);
 }
 // case: async_arrows
 // expect: 7 hello world

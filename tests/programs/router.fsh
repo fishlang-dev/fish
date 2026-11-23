@@ -570,15 +570,16 @@ async function main(): Promise<void> {
   for (const p of ["/users/1/2", "/e", "/s"]) await show(app, "GET", p, false);
 }
 // case: router_typed_body
-// expect: 200 application/json [{"id":4,"name":"ann"}]
-// expect: 200 application/json [{"id":4,"name":"bob"}]
+// expect: 200 application/json [{"id":4,"name":"ann POST"}]
+// expect: 200 application/json [{"id":4,"name":"bob POST"}]
 // expect: 400 text/plain;charset=UTF-8 [Unexpected end of JSON input]
 // expect: 400 text/plain;charset=UTF-8 [missing field 'name' at $]
 // expect: 200 text/plain;charset=UTF-8 [plain POST]
 // A handler taking its body as a type has it read from JSON and answers with what it gives as
-// JSON; a body that isn't that type is answered 400 with why, and the handler never runs.
+// JSON, an optional field left out while empty; a body that isn't that type is answered 400 with
+// why, and the handler never runs.
 type NewUser = { name: string; age?: i64 };
-type User = { id: i64; name: string };
+type User = { id: i64; name: string; nick?: string };
 async function show(app: Ref<Router>, method: string, path: string, body: string): Promise<void> {
   const res = await app.handle(new Request("http://h" + path, { method, body }));
   const type = res.headers.get("content-type") ?? "none";
@@ -587,7 +588,7 @@ async function show(app: Ref<Router>, method: string, path: string, body: string
 }
 async function main(): Promise<void> {
   let app = new Router();
-  app.post("/users", async (req, body: NewUser): Promise<User> => ({ id: req.method.length, name: body.name }));
+  app.post("/users", async (req, body: NewUser): Promise<User> => ({ id: 4, name: body.name + " " + req.method }));
   app.post("/plain", async (req) => new Response("plain " + req.method));
   await show(app, "POST", "/users", "{\"name\":\"ann\"}");
   await show(app, "POST", "/users", "{\"name\":\"bob\",\"age\":3}");
@@ -616,7 +617,7 @@ async function show(app: Ref<Router>, method: string, path: string): Promise<voi
 async function main(): Promise<void> {
   let app = new Router();
   const hits = shared({ n: new Atomic(0) });
-  app.get("/users/:id", async (req): Promise<User> => ({ id: req.method.length, name: req.path }));
+  app.get("/users/:id", async (req): Promise<User> => ({ id: 3, name: req.path }));
   app.get("/list", async (): Promise<i64[]> => [1, 2, 3]);
   app.get("/sync", (_req): string => "sync");
   app.delete("/users/:id", async (req: Request): Promise<void> => {
@@ -644,7 +645,7 @@ async function create(_req: Request, body: NewUser): Promise<User> {
   return { id: 7, name: body.name };
 }
 function describe(req: Request): User {
-  return { id: req.method.length, name: req.method };
+  return { id: 3, name: req.method };
 }
 async function show(app: Ref<Router>, method: string, path: string, body: string): Promise<void> {
   const res = await app.handle(new Request("http://h" + path, { method, body }));
