@@ -3,13 +3,13 @@
 # anew. Once stage 0 is a release, bootstrap.sh downloads its tarball and checks it against
 # [tarballs]; `chain` rebuilds it from source instead, its first commit built from TypeScript by
 # Bun and each later one by the one before. Changed by scripts/promote.fsh.
-commit = "4563e8be61a8a7a54082b79e37577e7e6e1ba1ef"
-release = "v0.1.2"
+commit = "5cabd5e861fb031b02b366d6b4bfa2ae5bfd3d6f"
+release = "v0.1.3"
 releases = "https://github.com/fishlang-dev/fish/releases/download"
-chain = ["4368baa1d284111ff1df43dbcfe41d5caa74c9ec", "19fa9b25ea4fe8ca29bdc7a6a18d773d70367495", "19fd9438657a07bb8696b22f835065dbc27b585f", "4563e8be61a8a7a54082b79e37577e7e6e1ba1ef"]
+chain = ["4368baa1d284111ff1df43dbcfe41d5caa74c9ec", "19fa9b25ea4fe8ca29bdc7a6a18d773d70367495", "19fd9438657a07bb8696b22f835065dbc27b585f", "4563e8be61a8a7a54082b79e37577e7e6e1ba1ef", "5cabd5e861fb031b02b366d6b4bfa2ae5bfd3d6f"]
 
 [digests]
-"arm64-darwin" = "604367e51d3ea0ac5d6fc9676b6126b73760e2f2c0a770cf212099c1f44f0785"
+"arm64-darwin" = "d3080bfa65d44752d1b6fc5fcf189ca8128b5b27c88e784ac2054e677779464e"
 
 [tarballs]
-"arm64-darwin" = "776dd95801eeb5c277726e52da7be283aeea7b55167d25094761be1e36bc7c17"
+"arm64-darwin" = "b372455f79d4d320429ebd2e7e7f699391a5d4842e4237501ba0cf41ae65332d"
