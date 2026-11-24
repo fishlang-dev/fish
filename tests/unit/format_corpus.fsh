@@ -54,6 +54,7 @@ const SOURCES: string[] = [
   "src/edits.fsh",
   "src/doc.fsh",
   "src/enums.fsh",
+  "src/explain.fsh",
   "src/expressions.fsh",
   "src/flow.fsh",
   "src/fmt.fsh",
@@ -81,6 +82,7 @@ const SOURCES: string[] = [
   "src/native.fsh",
   "src/navigate.fsh",
   "src/nodes.fsh",
+  "src/openapi.fsh",
   "src/operators.fsh",
   "src/overloads.fsh",
   "src/parseargs.fsh",
@@ -332,6 +334,7 @@ test("src/diag.fsh formats keeping its comments, parses back to the same tree an
 test("src/edits.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/edits.fsh"));
 test("src/doc.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/doc.fsh"));
 test("src/enums.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/enums.fsh"));
+test("src/explain.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/explain.fsh"));
 test("src/expressions.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/expressions.fsh"));
 test("src/flow.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/flow.fsh"));
 test("src/fmt.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/fmt.fsh"));
@@ -359,6 +362,7 @@ test("src/narrow.fsh formats keeping its comments, parses back to the same tree 
 test("src/native.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/native.fsh"));
 test("src/navigate.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/navigate.fsh"));
 test("src/nodes.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/nodes.fsh"));
+test("src/openapi.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/openapi.fsh"));
 test("src/operators.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/operators.fsh"));
 test("src/overloads.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/overloads.fsh"));
 test("src/parseargs.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/parseargs.fsh"));

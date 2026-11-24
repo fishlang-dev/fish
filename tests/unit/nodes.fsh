@@ -302,7 +302,7 @@ function inPlace(): string[] {
     // hoisted, statements added after the one being checked, and the same edits given to a later
     // copy of a list; and, before checking, a local declaration hoisted out and an export a library
     // lists, each where the list is read next;
-    "check.fsh: list.splice(", "check.fsh: list[i] = block;", "check.fsh: while (added.length > 0) list.splice(", "check.fsh: while (parts.length > 0) list.splice(", "check.fsh: let removed = list.splice(", "locals.fsh: stmts[stmts.indexOf(local)] =",
+    "check.fsh: list.splice(", "check.fsh: list[i] = block;", "check.fsh: while (added.length > 0) list.splice(", "check.fsh: const rest = list.splice(", "check.fsh: while (made.length > 0) list.splice(", "check.fsh: while (parts.length > 0) list.splice(", "check.fsh: let removed = list.splice(", "locals.fsh: stmts[stmts.indexOf(local)] =",
     "check.fsh: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.fsh: if (inserted !== undefined && inserted.length > 0",
     "modules.fsh: let removed = l.body.splice(at, 1);", "modules.fsh: l.body.splice(at, 0, {", "macros.fsh: statements.splice(", "modules.fsh: if (startsMain(statements[i]!)) statements.splice(",
     // a kept check's class node given a member's body read again, so a generic class's later
