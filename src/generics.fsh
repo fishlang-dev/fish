@@ -799,7 +799,7 @@ export class Instancing<H extends InstancingHost> {
     const found = this.host.tables.arenas.addInstance({
       body, symbol, bindings, concrete: isConcrete,
       depth, returns: "void",
-      ...emptyTables(),
+      ...emptyTables(this.host.tables.session.plain === true),
     });
     byKey.set(key, found.id);
     this.host.instancingState.instances.set(f.bodyId, byKey);

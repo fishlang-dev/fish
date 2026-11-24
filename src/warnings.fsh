@@ -27,7 +27,7 @@ export function warnings(tables: Ref<Tables>, compiled: Ref<InstanceId[]>, requi
   let used = new Set<LocalId>();
   for (const id of compiled) {
     const i = tables.arenas.instanceOf(id);
-    for (const [node, l] of i.locals) if (!tables.declarations.has(node.id)) used.add(l);
+    for (const at of i.locals.ids()) if (!tables.declarations.has(at)) used.add(i.locals.getById(at)!);
     if (i.captures !== undefined) for (const from of i.captures.values()) if (from !== "this") used.add(from);
     if (i.envs !== undefined) for (const e of i.envs.values()) for (const l of e.env) used.add(l);
     if (i.made !== undefined) {
