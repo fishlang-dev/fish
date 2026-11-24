@@ -2629,8 +2629,8 @@ const TRACE = String.raw`
 declare function fsh_rt_trace_get(out: MutPtr<i64>): void;
 declare function fsh_rt_trace_set(words: Ptr<i64>): void;
 declare function fsh_rt_unix_nanos(): i64;
-declare function fsh_rt_random_fill(at: MutPtr<u8>, count: usize): void;
-declare function fsh_rt_getenv(name: Ptr<u8>): Ptr<u8>;
+declare function fsh_rt_trace_ids(out: MutPtr<i64>, count: i64): void;
+declare function fsh_rt_trace_env(name: Ptr<u8>): Ptr<u8>;
 
 type __traceAttribute = { key: string; value: string | i64 | boolean };
 // A span as it is exported: its trace id's two halves, its own id and its parent's, 0 for a
@@ -2664,12 +2664,12 @@ function __traceNow(): i64 {
 
 function __traceFresh(): i64[] {
   let fresh: i64[] = [0, 0, 0];
-  unsafe { fsh_rt_random_fill(mutPtrOf(fresh[0]) as MutPtr<u8>, 24) };
+  unsafe { fsh_rt_trace_ids(mutPtrOf(fresh[0]), 3) };
   return fresh;
 }
 
 function __traceEnv(name: string): string {
-  const value = unsafe { fsh_rt_getenv(cString(name)) };
+  const value = unsafe { fsh_rt_trace_env(cString(name)) };
   if (unsafe { value.isNull() }) return "";
   return unsafe { fromCString(value) };
 }
@@ -8296,7 +8296,8 @@ export function configureTracing(options: TracingOptions): void {
   __traceConfigure(options.endpoint, options.serviceName, options.batchDelay);
 }
 
-// Sends the spans that have ended so far, without waiting for their batch's timer.
+// Sends the spans that have ended so far, without waiting for their batch's timer. A program
+// about to return awaits this, or it runs on until the timer has sent them.
 export async function flushTraces(): Promise<void> {
   await __traceSend();
 }

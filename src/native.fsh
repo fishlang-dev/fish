@@ -4611,6 +4611,16 @@ void fsh_rt_trace_set(const int64_t *words) {
   memcpy(fsh_current ? fsh_current->trace : fsh_trace_root, words, sizeof fsh_trace_root);
 }
 
+// The environment and the random source under names only std's tracing declares: a std module
+// declares the C functions it calls, and one name declared by both would be declared twice.
+const char *fsh_rt_trace_env(const char *name) {
+  return getenv(name);
+}
+
+void fsh_rt_trace_ids(int64_t *out, int64_t count) {
+  fsh_rt_random_fill((uint8_t *)out, count * 8);
+}
+
 // Awaits a spawned task: when it is done, its poll result is copied to out, which then owns
 // it, and its outcome given; until then the awaiting task is woken when it finishes. A task that
 // panicked gives 3 and its reason through why, for 'join()'; awaited plainly, with why null, its

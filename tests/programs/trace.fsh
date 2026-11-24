@@ -423,3 +423,13 @@ function main() {
   using s = span("startup");
   console.log("main returns");
 }
+// case: trace_beside_std_modules
+// expect: 200 unset true
+// A program with the HTTP library has std's tracing too, beside std modules that declare the C
+// functions they call: the environment's and the random source's among them.
+import { randomUUID } from "node:crypto";
+
+async function main(): Promise<void> {
+  const r = new Response("x");
+  console.log(r.status, process.env.FISH_GOLDEN_UNSET ?? "unset", randomUUID().length === 36);
+}
