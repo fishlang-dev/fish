@@ -7001,8 +7001,8 @@ function rowMessage(message: string, json: string): string {
 }
 
 // A connection to one database, running one statement at a time. Each call runs on the blocking
-// pool, so a slow statement holds no worker. The connection closes when the Database is dropped, or at
-// close().
+// pool, so a slow statement holds no worker. Clones share the connection, which closes when the
+// last of them is dropped, or at close().
 export class Database {
   private handle: i64;
 
@@ -7049,11 +7049,16 @@ export class Database {
     return made;
   }
 
-  // Closes the connection; a call on it after this throws.
+  // Closes the connection for every clone; a call on any of them after this throws.
   async close(this: Ref<this>): Promise<void> {
     const db = this.handle;
     unsafe { fsh_rt_sqlite_retain(db) };
     await spawnBlocking(() => disconnect(db));
+  }
+
+  clone(): Database {
+    unsafe { fsh_rt_sqlite_retain(this.handle) };
+    return new Database(this.handle);
   }
 
   [Symbol.dispose](this: Mut<this>): void {

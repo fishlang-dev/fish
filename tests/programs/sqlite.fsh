@@ -213,8 +213,9 @@ async function main(): Promise<void> throws SqliteError | RowError {
 // expect: SqliteError 21 the database is closed; open it again with Database.open
 // expect: SqliteError 21 the database is closed; open it again with Database.open
 // expect: SqliteError 21 the database is closed; open it again with Database.open
+// expect: SqliteError 21 the database is closed; open it again with Database.open
 // close() may be called twice, on a statement and on a database, and what is closed throws when
-// used. Closing a database closes it for its statements.
+// used. Closing a database closes it for its clones and its statements.
 import { Database, RowError, SqliteError } from "sqlite";
 
 async function main(): Promise<void> throws SqliteError | RowError {
@@ -232,6 +233,7 @@ async function main(): Promise<void> throws SqliteError | RowError {
   }
   const rows = await kept.all<{ n: i64 }>();
   console.log(rows);
+  const other = db.clone();
   await db.close();
   await db.close();
   try {
@@ -240,12 +242,17 @@ async function main(): Promise<void> throws SqliteError | RowError {
     console.log(e.name, e.code, e.message);
   }
   try {
+    await other.query<{ n: i64 }>("select n from t");
+  } catch (e) {
+    if (e instanceof SqliteError) console.log(e.name, e.code, e.message);
+  }
+  try {
     await kept.all<{ n: i64 }>();
   } catch (e) {
     if (e instanceof SqliteError) console.log(e.name, e.code, e.message);
   }
   try {
-    const _late = await db.prepare("select 1");
+    const _late = await other.prepare("select 1");
   } catch (e) {
     console.log(e.name, e.code, e.message);
   }
@@ -256,8 +263,8 @@ async function main(): Promise<void> throws SqliteError | RowError {
 // expect: [ { word: 'still' }, { word: 'here' }, { word: 'again' } ]
 // expect: false
 // Nothing here is closed by hand. The first connection holds its file's lock for as long as it
-// is open, so the second reads the file only because dropping the first and its statement
-// closed it; a statement may outlive its database, and 'using' ends a scope the same.
+// is open, so the second reads the file only because dropping the first, its clone and its
+// statement closed it; a statement may outlive its database, and 'using' ends a scope the same.
 import { Database, RowError, SqliteError, Statement } from "sqlite";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -265,6 +272,7 @@ import { join } from "node:path";
 
 async function write(path: string): Promise<void> throws SqliteError {
   const db = await Database.open(path);
+  const _shared = db.clone();
   await db.run("pragma locking_mode = exclusive");
   await db.run("create table kept (word text)");
   const insert = await db.prepare("insert into kept values (?)");
@@ -297,4 +305,58 @@ async function main(): Promise<void> throws SqliteError | RowError | IoError {
   console.log(words);
   rmSync(dir, { recursive: true });
   console.log(existsSync(path));
+}
+// case: sqlite_concurrent
+// expect: 50 { n: 50, tasks: 50 }
+// Fifty tasks each hold a clone of one Database: their statements run one at a time on the
+// connection they share, and every insert lands.
+import { Database, RowError, SqliteError } from "sqlite";
+
+async function add(db: Database, task: i64): Promise<i64> {
+  try {
+    const r = await db.run("insert into hits (task) values (?)", [task]);
+    return r.changes;
+  } catch (e) {
+    console.log("task", task, e.message);
+    return 0;
+  }
+}
+
+async function main(): Promise<void> throws SqliteError | RowError {
+  const db = await Database.open(":memory:");
+  await db.run("create table hits (task integer)");
+  let tasks: JoinHandle<i64>[] = [];
+  for (let i: i64 = 0; i < 50; i++) tasks.push(spawn(add(db.clone(), i)));
+  let changed: i64 = 0;
+  while (true) {
+    const t = tasks.pop();
+    if (t === null) break;
+    const one = await t;
+    changed += one;
+  }
+  const counted = await db.queryOne<{ n: i64; tasks: i64 }>("select count(*) as n, count(distinct task) as tasks from hits");
+  console.log(changed, counted);
+}
+// case: sqlite_caller_stops_waiting
+// expect: gave up
+// expect: [ { n: 1 } ]
+// A caller that stops waiting leaves its statement running to its end: the job holds the
+// connection open under it, and the next statement takes its turn after.
+import { Database, RowError, SqliteError } from "sqlite";
+
+async function slow(db: Database): Promise<i64> {
+  try {
+    const row = await db.queryOne<{ n: i64 }>("with recursive c(x) as (select 1 union all select x + 1 from c where x < 3000000) select count(*) as n from c");
+    return row === null ? 0 : row.n;
+  } catch (e) {
+    return -1;
+  }
+}
+
+async function main(): Promise<void> throws SqliteError | RowError {
+  const db = await Database.open(":memory:");
+  const raced = await Promise.race([slow(db.clone()), sleep(10)]);
+  console.log(raced === null ? "gave up" : "finished first");
+  const rows = await db.query<{ n: i64 }>("select 1 as n");
+  console.log(rows);
 }

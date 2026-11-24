@@ -246,7 +246,7 @@ const BUILTINS = new Map<string, Equivalent>([
   ["timers/promises", STD("sleep")],
   // `fetch` and `serve` are the client and the server, but importing `http` itself needs its shim.
   ["http", PLANNED("node:http server shim")], ["console", PLANNED("The rest of console")],
-  ["test", PLANNED("Jest-style test API")], ["sqlite", PLANNED("SQLite binding")],
+  ["test", PLANNED("Jest-style test API")], ["sqlite", STD("the sqlite module's Database, each call awaited")],
   ["fs/promises", STD("fs/promises, for readFile, writeFile, open, access, utimes, lutimes, chmod, symlink, link, readlink, realpath and watch")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync and lstatSync with throwIfNoEntry, readdirSync with withFileTypes, realpathSync, mkdtempSync, rmSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, chmodSync, symlinkSync, linkSync, readlinkSync, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync and constants with the open flags")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative, normalize, isAbsolute, parse and format")], ["crypto", STD("crypto, for createHash, createHmac, randomBytes, randomUUID, getRandomValues and hash")],
   // fetch and serve speak HTTPS, but importing `https` needs the same shim as `http`, and `tls`
   // Node's own connect and its sockets with events.

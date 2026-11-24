@@ -723,6 +723,26 @@ test("pg and postgres are replaced by std's postgres module", () => {
   done(dir);
 });
 
+test("better-sqlite3 and sqlite3 are replaced by std's sqlite module", () => {
+  const dir = project([["package.json", '{"dependencies":{"better-sqlite3":"11","sqlite3":"5"}}'], ["a.ts", "const x = 1;\n"]]);
+  const d = depsOf(dir);
+  same(countsOf(d), "std 2, planned 0, native 0, pure 0, unknown 0", "the counts");
+  list(equivalents(d), ["the sqlite module's Database false", "the sqlite module's Database false"], "the equivalents");
+  done(dir);
+});
+
+// Node's own sqlite is synchronous and names its classes otherwise, so an import of it is found
+// as a member std lacks, and the report says where std's is.
+test("node:sqlite is answered by std's sqlite module, bun:sqlite still waits", () => {
+  const dir = project([
+    ["a.ts", 'import { DatabaseSync } from "node:sqlite";\n'],
+    ["b.ts", 'import { Database } from "bun:sqlite";\n'],
+  ]);
+  same(features(dir), `[["Node built-ins"],["Bun's own modules"]]`, "the features");
+  list(builtinsOf(survey(dir)), ["sqlite 1 the sqlite module's Database, each call awaited false"], "the built-ins");
+  done(dir);
+});
+
 test("ws and the frameworks' WebSocket helpers are replaced by Router.ws", () => {
   const dir = project([["package.json", '{"dependencies":{"ws":"8","express-ws":"5","@hono/node-ws":"1"}}'], ["a.ts", "const x = 1;\n"]]);
   const d = depsOf(dir);
