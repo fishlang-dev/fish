@@ -126,7 +126,7 @@ async function main(): Promise<void> {
     console.log("async end");
   }, 15);
   setTimeout(() => { console.log("after async"); }, 20);
-  setTimeout(slow, 50, "slow");
+  setTimeout(slow, 200, "slow");
 }
 // case: timeout_too_many_arguments
 // error: 'setTimeout' passes at most two arguments on to its function so far

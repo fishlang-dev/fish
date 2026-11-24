@@ -75,7 +75,8 @@ async function main(): Promise<void> throws IoError | TarError {
   spawnSync("env", ["COPYFILE_DISABLE=1", "tar", "-czf", join(dir, "z.tgz"), "-C", dir, "z.txt"]);
   let bytes = readFileSync(join(dir, "x.tar"));
   let corrupt = bytes.clone();
-  corrupt[3] = 120;
+  // Whatever the first header's name is, as tar writes a pax header first only for some files.
+  corrupt[3] = corrupt[3]! === 120 ? 121 : 120;
   const checksumSaid = await attempt("checksum", corrupt, {});
   console.log(checksumSaid);
   const entriesSaid = await attempt("entries", bytes.clone(), { maxEntries: 1 });

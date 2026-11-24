@@ -461,7 +461,7 @@ async function main() {
 async function* ticks(): AsyncGenerator<i64> {
   for (let i = 0; i < 3; i++) {
     await yieldNow();
-    await sleep(30);
+    await sleep(200);
     yield i;
   }
 }
