@@ -45,6 +45,11 @@ export function written(text: string, names: Ref<Names>): string {
 // A second location an error refers to, like where a value was moved.
 export type Note = { message: string; start: usize; end: usize };
 
+// A move or a loan the move checker made, for a run that asked its session to log them: the
+// span of what moved or was lent, what happened as a message says it, and for a loan a variable
+// holds, where its holder is last used. Offsets are the program's, as an error's are.
+export type BorrowEvent = { kind: "move" | "lend"; start: usize; end: usize; text: string; until?: usize };
+
 // A file of a program other than the one an error is rendered against, from `base` on. `moves`
 // is set once `fishc watch` checks it again from what it kept: the nodes it kept hold their
 // first positions, and each stretch of those, as its start, its end and its start in `src` now,
@@ -72,6 +77,9 @@ export class CompileError extends Error {
   names: Names = { local: new Set(), madeUp: new Map() };
   // The errors a group from one build stands for, in source order; none for a single error.
   errors: CompileError[] = [];
+  // The moves and loans logged before the check failed, when its session logs them: the session
+  // is dropped with the check, so its log leaves with the error.
+  borrows: BorrowEvent[] = [];
 
   constructor(code: string, message: string, start: usize, end: usize = start + 1, note?: Note) {
     super(message);
@@ -94,6 +102,7 @@ export class CompileError extends Error {
     out.sources = sources;
     out.names = { local: new Set([...this.names.local]), madeUp: new Map([...this.names.madeUp]) };
     out.errors = this.errors.map((e) => e.clone());
+    out.borrows = this.borrows.map((b) => ({ ...b }));
     return out;
   }
 }

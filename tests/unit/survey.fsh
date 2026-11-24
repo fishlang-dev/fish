@@ -120,6 +120,18 @@ test("fetch counts as available", () => {
   countsAre('async function f(): Promise<string> {\n  const res = await fetch("http://localhost/");\n  return await res.text();\n}\n', []);
 });
 
+test("G12 counts disposal beyond a class's own disposers, which 'using' and 'await using' run", () => {
+  countsAre("class C {\n  [Symbol.dispose]() {}\n}\n", []);
+  countsAre("class C {\n  async [Symbol.asyncDispose]() {}\n}\n", []);
+  countsAre("class C {\n  [Symbol.asyncDispose]() {}\n}\n", ["G12: 1"]);
+  countsAre("class C {\n  [Symbol.dispose]() {}\n}\nconst k = Symbol.asyncDispose;\nconst s = new DisposableStack();\n", ["G12: 2"]);
+});
+
+test("using declarations over a class with a disposer parse, so their file isn't counted as unparsed", () => {
+  countsAre("class C {\n  [Symbol.dispose]() {}\n}\nfunction f() {\n  using c = new C();\n}\n", []);
+  countsAre("class C {\n  async [Symbol.asyncDispose]() {}\n}\nasync function f() {\n  await using c = new C();\n}\n", []);
+});
+
 test("the reject rules are counted through the migration detector, R5 to R7 too", () => {
   countsAre('function f() {\n  eval("1");\n  const g = new Function("x");\n  A.prototype.m = g;\n  Object.defineProperty(o, "k", {});\n  delete o.k;\n}\n', ["R1: 2", "R2: 2", "R3: 1"]);
   countsAre('function f() {\n  return arguments.length;\n}\nconst s = Symbol("s");\n', ["R5: 1", "R6: 1"]);
@@ -708,6 +720,35 @@ test("pg and postgres are replaced by std's postgres module", () => {
   const d = depsOf(dir);
   same(countsOf(d), "std 2, planned 0, native 0, pure 0, unknown 0", "the counts");
   list(equivalents(d), ["the postgres module's Pool false", "the postgres module's Pool false"], "the equivalents");
+  done(dir);
+});
+
+test("better-sqlite3 and sqlite3 are replaced by std's sqlite module", () => {
+  const dir = project([["package.json", '{"dependencies":{"better-sqlite3":"11","sqlite3":"5"}}'], ["a.ts", "const x = 1;\n"]]);
+  const d = depsOf(dir);
+  same(countsOf(d), "std 2, planned 0, native 0, pure 0, unknown 0", "the counts");
+  list(equivalents(d), ["the sqlite module's Database false", "the sqlite module's Database false"], "the equivalents");
+  done(dir);
+});
+
+test("the OpenTelemetry packages are replaced by std's fish:trace module", () => {
+  const dir = project([["package.json", '{"dependencies":{"@opentelemetry/api":"1","@opentelemetry/sdk-node":"0.57","@opentelemetry/exporter-trace-otlp-http":"0.57"}}'], ["a.ts", "const x = 1;\n"]]);
+  const d = depsOf(dir);
+  same(countsOf(d), "std 3, planned 0, native 0, pure 0, unknown 0", "the counts");
+  const tracing = "the fish:trace module false";
+  list(equivalents(d), [tracing, tracing, tracing], "the equivalents");
+  done(dir);
+});
+
+// Node's own sqlite is synchronous and names its classes otherwise, so an import of it is found
+// as a member std lacks, and the report says where std's is.
+test("node:sqlite is answered by std's sqlite module, bun:sqlite still waits", () => {
+  const dir = project([
+    ["a.ts", 'import { DatabaseSync } from "node:sqlite";\n'],
+    ["b.ts", 'import { Database } from "bun:sqlite";\n'],
+  ]);
+  same(features(dir), `[["Node built-ins"],["Bun's own modules"]]`, "the features");
+  list(builtinsOf(survey(dir)), ["sqlite 1 the sqlite module's Database, each call awaited false"], "the built-ins");
   done(dir);
 });
 

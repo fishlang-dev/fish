@@ -50,6 +50,7 @@ const RULES: Rule[] = [
   { id: "G9", action: "guided", title: ".call, .apply and .bind: pass the receiver explicitly or use a closure" },
   { id: "G10", action: "guided", title: "an async callback passed to forEach: use for...of with await, or spawned tasks" },
   { id: "G11", action: "guided", title: "a value aliased and changed from two names: Rc<T> in one thread, shared<T> across tasks, a .clone(), or restructuring" },
+  { id: "G12", action: "guided", title: "DisposableStack, and Symbol.dispose and Symbol.asyncDispose beyond a class's methods: give a class a [Symbol.dispose]() method, which runs when an instance is dropped, or an async [Symbol.asyncDispose]() one for 'await using'" },
   { id: "A1", action: "auto", title: "var: const or let" },
   { id: "A2", action: "auto", title: "null, undefined and ?: Option" },
   { id: "A3", action: "auto", title: "== and !=: === and !==" },
@@ -245,7 +246,7 @@ const BUILTINS = new Map<string, Equivalent>([
   ["timers/promises", STD("sleep")],
   // `fetch` and `serve` are the client and the server, but importing `http` itself needs its shim.
   ["http", PLANNED("node:http server shim")], ["console", PLANNED("The rest of console")],
-  ["test", PLANNED("Jest-style test API")], ["sqlite", PLANNED("SQLite binding")],
+  ["test", PLANNED("Jest-style test API")], ["sqlite", STD("the sqlite module's Database, each call awaited")],
   ["fs/promises", STD("fs/promises, for readFile, writeFile, open, access, utimes, lutimes, chmod, symlink, link, readlink, realpath and watch")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync and lstatSync with throwIfNoEntry, readdirSync with withFileTypes, realpathSync, mkdtempSync, rmSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, chmodSync, symlinkSync, linkSync, readlinkSync, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync and constants with the open flags")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative, normalize, isAbsolute, parse and format")], ["crypto", STD("crypto, for createHash, createHmac, randomBytes, randomUUID, getRandomValues and hash")],
   // fetch and serve speak HTTPS, but importing `https` needs the same shim as `http`, and `tls`
   // Node's own connect and its sockets with events.

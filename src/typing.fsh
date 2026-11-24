@@ -79,9 +79,10 @@ export type ObjectType = Brand<usize, "object">;
 // A class is nominal: one per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
 // An instance of a generic class also records the class it came from and its type arguments.
+// `disposes`: the class declares a disposer, a `[Symbol.dispose]` method.
 // `rust`: the Rust type a class a Rust module declares stands for. An abstract class only ever
 // exists embedded in a concrete one, so it is never a value's type.
-export type ClassRecord = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true };
+export type ClassRecord = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true; disposes?: true };
 export type ClassType = Brand<usize, "class">;
 
 // An interface is a trait: fields and method signatures that any value with those members
@@ -373,6 +374,19 @@ export type RecordOf<T> = T extends ObjectType ? ObjectRecord
 // The name a `[Symbol.iterator]` method takes, which no identifier or member read can spell.
 export const ITERATOR = "[Symbol.iterator]";
 
+// The name a class's `[Symbol.dispose]` method takes, its disposer, which runs when an instance is
+// dropped and which no call can name.
+export const DISPOSE = "[Symbol.dispose]";
+
+// The name a class's `[Symbol.asyncDispose]` method takes, its async disposer, which an
+// `await using` declaration awaits where its scope ends and which no call can name.
+export const ASYNC_DISPOSE = "[Symbol.asyncDispose]";
+
+// The field an instance with a disposer keeps its liveness in: `new` sets it once the constructor
+// returns, and the drop clears it as it calls the disposer, so an instance never finished, or
+// moved away, is not disposed. A private name no source can spell, as `EMBEDDED` is.
+export const LIVE = "#not disposed";
+
 // The field a class extending Map or Set holds its collection in: a private name no source can
 // spell, so printing and JSON leave it out.
 export const EMBEDDED = "#embedded base";
@@ -534,7 +548,9 @@ export type DynType = Brand<usize, "dyn">;
 // A FileJob is a file read or write handed to the runtime's blocking pool.
 // A JsValue is a value of the JS engine, which Fish holds without knowing its type.
 // A FileDescriptor is an open file's descriptor, closed when its last count goes.
-export type BlockRecord = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket" | "FileJob" | "JsValue" | "FileDescriptor"; of: Type; fields: Field[] };
+// A TaskGroup is the handle a `taskGroup` closure spawns through, and a TaskScope the awaiter's
+// handle to the same block, whose drop before the group is over aborts the group's signal.
+export type BlockRecord = { kind: "block"; which: "Semaphore" | "Permit" | "Channel" | "AbortController" | "AbortSignal" | "TcpListener" | "TcpStream" | "UnixListener" | "UnixStream" | "UdpSocket" | "FileJob" | "JsValue" | "FileDescriptor" | "TaskGroup" | "TaskScope"; of: Type; fields: Field[] };
 export type BlockType = Brand<usize, "block">;
 
 // The futures a Semaphore's and a Channel's methods give, and a `sleep` given a signal, polled by
@@ -975,6 +991,27 @@ export class Typing {
       x = this.rec(x).base;
     }
     return false;
+  }
+
+  // Whether a type is a class with a disposer, its own or a base's: an instance is moved, and
+  // never copied or taken apart, so the disposer runs once on the whole of it.
+  disposable(t: Type): boolean {
+    let x: ClassType | undefined = this.kindOf(t) === "class" ? (t as ClassType) : undefined;
+    while (x !== undefined) {
+      const r = this.rec(x);
+      if (r.disposes === true) return true;
+      x = r.base;
+    }
+    return false;
+  }
+
+  // Whether a value of the type holds one that only ever moves, a Rust handle or an instance with
+  // a disposer: the compiler makes no copy of either.
+  holdsMoveOnly(t: Type): boolean {
+    return this.holdsPart(t, (u) => {
+      const r = this.recOf(u);
+      return r !== undefined && r.kind === "class" && (r.rust !== undefined || this.disposable(u));
+    });
   }
 
   isCopy(t: Type): boolean {
@@ -1844,6 +1881,30 @@ export class Typing {
     return this.makeCombinedFuture(combined, gives, aggregate, frame);
   }
 
+  // Each `taskGroup` future, by its closure's future; and for each, that future and where the
+  // call is written.
+  private groups = new TypeMap<FutureType, FutureType>();
+  groupOf = new TypeMap<FutureType, { body: FutureType; at: { start: usize; end: usize } }>();
+
+  // A `taskGroup` call's future: its closure's future, the awaiter's handle to the group, then
+  // what the closure gave or threw, kept until every task of the group is done. It gives and
+  // throws what the closure's future does, which a child's error is converted to.
+  groupFuture(this: Mut<this>, body: FutureType, at: { start: usize; end: usize }): FutureType {
+    const known = this.groups.get(body);
+    if (known !== undefined) return known;
+    const r = this.rec(body);
+    const { gives, throws, concrete } = r;
+    let params: Field[] = [];
+    for (const p of r.params) params.push({ ...p });
+    const scope = this.blockType("TaskScope");
+    const frame: Field[] = [{ name: "state", type: "i32" }, { name: "body", type: body }, { name: "scope", type: scope }, { name: "value", type: gives === "void" ? "null" : gives }, { name: "error", type: throws ?? "null" }];
+    const id = this.declared++;
+    const t = this.made<FutureType>({ kind: "future", name: "taskGroup", gives, throws, fields: [], params, frame, concrete }, `future ${id}`);
+    this.groups.set(body, t);
+    this.groupOf.set(t, { body, at });
+    return t;
+  }
+
   private promises = new Map<string, InterfaceType>();
   private promised = new TypeMap<InterfaceType, Type>();
 
@@ -2657,6 +2718,8 @@ export class Typing {
   sharedCallbacks = new TypeSet<FunctionType>();
   // Those of an Rc's `update` and `read`, which only this thread runs.
   rcCallbacks = new TypeSet<FunctionType>();
+  // The signature a `taskGroup` closure is given as: its body may spawn children that throw.
+  groupCallbacks = new TypeSet<FunctionType>();
 
   // A type parameter as an instance sees it: standing for `concrete`, which has no type
   // parameter in it.

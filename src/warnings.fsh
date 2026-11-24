@@ -45,6 +45,8 @@ export function warnings(tables: Ref<Tables>, compiled: Ref<InstanceId[]>, requi
     for (const [node, lid] of i.locals) {
       if (!tables.declarations.has(node.id)) continue;
       const l = tables.arenas.localOf(lid);
+      // A `using` binding holds its value to the end of its scope, which is its use.
+      if (l.using === true) continue;
       // A parameter with a default is bound by the body's first statements, under its name.
       const param = l.param || tables.prologues.hasId(node.id);
       if (param && required(b)) continue;

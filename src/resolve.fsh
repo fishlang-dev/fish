@@ -2103,6 +2103,7 @@ function blockNamed(name: string): BlockRecord["which"] | undefined {
   if (name === "Permit") return "Permit";
   if (name === "AbortController") return "AbortController";
   if (name === "AbortSignal") return "AbortSignal";
+  if (name === "TaskGroup") return "TaskGroup";
   if (name === "TcpListener") return "TcpListener";
   if (name === "TcpStream") return "TcpStream";
   if (name === "UnixListener") return "UnixListener";
@@ -2429,7 +2430,7 @@ export function collection(typing: Mut<Typing>, key: Type, value: Type, set: boo
 const ITERATORS = ["Iterator", "IterableIterator", "Iterable"];
 
 const INTEGER_NAMES = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize"];
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...INTEGER_NAMES, "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined", "unknown"]);
+const BUILT_IN_TYPES = new Set(["Map", "Set", ...INTEGER_NAMES, "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TaskGroup", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined", "unknown"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = new Map<string, string>([
