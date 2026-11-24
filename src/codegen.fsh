@@ -1074,7 +1074,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // exports' parameters from it after codegen. A build that keeps its check keeps them all.
   releaseTables(this: Mut<this>) {
     for (let i: usize = 1; i <= this.tables.arenas.instanceCount(); i++) {
-      let fresh = emptyTables();
+      let fresh = emptyTables(this.tables.session.plain === true);
       let x = this.tables.arenas.instanceMut(i as InstanceId);
       x.types = fresh.types;
       x.calls = fresh.calls;

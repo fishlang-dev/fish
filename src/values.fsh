@@ -2704,7 +2704,8 @@ export class Expressions<C extends Context> implements Union<C> {
       if ((local === undefined)) return undefined;
       held = local.type;
       const localKey = local.localId;
-      this.ctx.locals().set(cloneExpr(callee), localKey);
+      if (this.ctx.tables().session.plain === true) this.ctx.locals().setId(callee.id, localKey);
+      else this.ctx.locals().set(cloneExpr(callee), localKey);
     } else if (callee.kind === "member" && this.pure(callee) && receiver !== undefined && (this.kindOf(receiver) === "class" || this.kindOf(receiver) === "object")) {
       if (this.kindOf(receiver) === "class" && (this.inheritedOf(receiver as ClassType as ClassType, "methods", callee.name) !== undefined)) return undefined;
       held = this.ctx.typing().field(receiver as ObjectType | ClassType as ClassType | ObjectType, callee.name)?.type;
@@ -7996,7 +7997,8 @@ export class Expressions<C extends Context> implements Union<C> {
     if (!this.ctx.reachable(localId)) {
       throw new CompileError("E0403", `'${e.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, e.start, e.end);
     }
-    this.ctx.locals().set(cloneExpr(e), localId);
+    if (this.ctx.tables().session.plain === true) this.ctx.locals().setId(e.id, localId);
+    else this.ctx.locals().set(cloneExpr(e), localId);
     const type = this.lc(localId).type;
     const param = this.lc(localId).param;
     const lr = this.recOf(type);
@@ -10048,7 +10050,8 @@ export class Expressions<C extends Context> implements Union<C> {
     if (!this.ctx.reachable(localId)) {
       throw new CompileError("E0403", `'${p.name}' is declared in another case of this switch, which jumping straight here skips; declare it before the switch`, p.start, p.end);
     }
-    this.ctx.locals().set({ ...p }, localId);
+    if (this.ctx.tables().session.plain === true) this.ctx.locals().setId(p.id, localId);
+    else this.ctx.locals().set({ ...p }, localId);
     const narrowed = this.ctx.narrowed(localId);
     const js = this.ctx.typing().jsRead(localType, narrowed);
     if (js === "one") {

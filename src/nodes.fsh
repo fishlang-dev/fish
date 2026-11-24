@@ -513,12 +513,15 @@ function idOf(node: Ref<Id>): usize {
 }
 
 // A `Map` from nodes, keyed by their ids, holding each node as a `Map` holds its keys. Iterating
-// gives each node as it was first stored, not a replacement lowering made for it since.
+// gives each node as it was first stored, not a replacement lowering made for it since. A value
+// stored by `setId` has no node: `keys`, `entries`, `forEach` and iteration pass it over, and
+// every read by node or id finds it.
 export class NodeMap<K extends Id, V> {
   // Each node and its value under the node's id, apart so a value can change while the node
-  // stored for it stays.
-  private nodes = new Map<usize, K>();
-  private nodeValues = new Map<usize, V>();
+  // stored for it stays. Each map is made on its first write: an instance holds many of these
+  // tables and fills few.
+  private nodes: Map<usize, K> | undefined = undefined;
+  private nodeValues: Map<usize, V> | undefined = undefined;
 
   constructor(entries?: [K, V][]) {
     if (entries !== undefined) {
@@ -531,62 +534,69 @@ export class NodeMap<K extends Id, V> {
   }
 
   get size(): usize {
-    return this.nodes.size;
+    return this.nodeValues !== undefined ? this.nodeValues.size : 0;
   }
 
   get(node: Ref<K>): V | undefined {
-    return this.nodeValues.get(idOf(node));
+    return this.nodeValues !== undefined ? this.nodeValues.get(idOf(node)) : undefined;
   }
 
   has(node: Ref<K>): boolean {
-    return this.nodes.has(idOf(node));
+    return this.nodeValues !== undefined && this.nodeValues.has(idOf(node));
   }
 
   // The value for a node by its id, for a reader holding a node of a wider type than `K`.
   getById(id: usize): V | undefined {
-    return this.nodeValues.get(id);
+    return this.nodeValues !== undefined ? this.nodeValues.get(id) : undefined;
   }
 
   set(this: Mut<this>, node: K, value: V): Mut<this> {
     const id = idOf(node);
-    this.nodes.set(id, node);
-    this.nodeValues.set(id, value);
+    if (this.nodes === undefined) this.nodes = new Map<usize, K>();
+    if (this.nodes !== undefined) this.nodes.set(id, node);
+    this.setId(id, value);
     return this;
   }
 
-  // The ids of the nodes held, in the order they were first stored.
+  // A value under a node's id, with no copy of the node kept.
+  setId(this: Mut<this>, id: usize, value: V): void {
+    if (this.nodeValues === undefined) this.nodeValues = new Map<usize, V>();
+    if (this.nodeValues !== undefined) this.nodeValues.set(id, value);
+  }
+
+  // The ids held, in the order they were first stored.
   ids(): usize[] {
     let out: usize[] = [];
-    for (const id of this.nodes.keys()) out.push(id);
+    if (this.nodeValues !== undefined) for (const id of this.nodeValues.keys()) out.push(id);
     return out;
   }
 
-  // Gives the node of id `id`, if one is held, a new value, keeping the node stored for it.
+  // Gives the id `id`, if it is held, a new value, keeping the node stored for it.
   setValueById(this: Mut<this>, id: usize, value: V): void {
-    if (this.nodes.has(id)) this.nodeValues.set(id, value);
+    if (this.nodeValues !== undefined && this.nodeValues.has(id)) this.nodeValues.set(id, value);
   }
 
   delete(this: Mut<this>, node: Ref<K>): boolean {
     const id = idOf(node);
-    this.nodeValues.delete(id);
-    return this.nodes.delete(id);
+    if (this.nodes !== undefined) this.nodes.delete(id);
+    return this.nodeValues !== undefined ? this.nodeValues.delete(id) : false;
   }
 
   clear(this: Mut<this>): void {
-    this.nodes.clear();
-    this.nodeValues.clear();
+    this.nodes = undefined;
+    this.nodeValues = undefined;
   }
 
   *keys(): IterableIterator<K> {
-    for (const k of this.nodes.keys()) yield this.nodes.get(k)!;
+    if (this.nodes !== undefined) for (const k of this.nodes.keys()) yield this.nodes.get(k)!;
   }
 
   *values(): IterableIterator<V> {
-    for (const k of this.nodes.keys()) yield this.nodeValues.get(k)!;
+    if (this.nodeValues !== undefined) for (const k of this.nodeValues.keys()) yield this.nodeValues.get(k)!;
   }
 
   *entries(): IterableIterator<[K, V]> {
-    for (const k of this.nodes.keys()) yield [this.nodes.get(k)!, this.nodeValues.get(k)!];
+    if (this.nodes !== undefined) for (const k of this.nodes.keys()) yield [this.nodes.get(k)!, this.nodeValues!.get(k)!];
   }
 
   [Symbol.iterator](): IterableIterator<[K, V]> {
@@ -594,14 +604,14 @@ export class NodeMap<K extends Id, V> {
   }
 
   forEach(each: (value: V, node: K) => void): void {
-    for (const k of this.nodes.keys()) each(this.nodeValues.get(k)!, this.nodes.get(k)!);
+    if (this.nodes !== undefined) for (const k of this.nodes.keys()) each(this.nodeValues!.get(k)!, this.nodes.get(k)!);
   }
 
   copy(): NodeMap<K, V> {
     // The pairs are gathered by hand: spreading this class's own generator here isn't compiled
     // natively yet.
     let pairs: [K, V][] = [];
-    for (const k of this.nodes.keys()) pairs.push([this.nodes.get(k)!, this.nodeValues.get(k)!]);
+    if (this.nodes !== undefined) for (const k of this.nodes.keys()) pairs.push([this.nodes.get(k)!, this.nodeValues!.get(k)!]);
     return new NodeMap<K, V>(pairs);
   }
 }
@@ -1178,74 +1188,114 @@ export function siteOf(e: Ref<Expr>): Site {
   return s;
 }
 
+// Whether a pass of a build that keeps nothing for a later reader looks at this expression's
+// site: a comparison of values, for the `equals` it runs, and `super`, which a closure may not hold.
+function siteRead(e: Ref<Expr>): boolean {
+  if (e.kind === "super") return true;
+  return e.kind === "binary" && (e.op === "===" || e.op === "!==" || e.op === "==" || e.op === "!=");
+}
+
+// What a `SiteTable` keeps beside each value: the expression's site; a site only where `siteRead`
+// says a reader looks; or only where the expression is written.
+export type SitesKept = "all" | "read" | "spans";
+
 // Each expression's value by its id, beside the expression's site: an instance's `types`, `calls`
-// and `coercions`.
+// and `coercions`. A site is the largest thing an entry holds, so a build that keeps nothing for
+// a later reader keeps fewer: `keys`, `entries` and iteration give the entries that hold one.
 export class SiteTable<V> {
-  private sites = new Map<usize, Site>();
-  private siteValues = new Map<usize, V>();
+  // Each map is made on its first write.
+  private sites: Map<usize, Site> | undefined = undefined;
+  private siteValues: Map<usize, V> | undefined = undefined;
+  private spans: Map<usize, Span> | undefined = undefined;
+  private keep: SitesKept;
+
+  constructor(keep: SitesKept = "all") {
+    this.keep = keep;
+  }
 
   get size(): usize {
-    return this.sites.size;
+    return this.siteValues !== undefined ? this.siteValues.size : 0;
   }
 
   get(node: Ref<Expr>): V | undefined {
-    return this.siteValues.get(node.id);
+    return this.siteValues !== undefined ? this.siteValues.get(node.id) : undefined;
   }
 
   has(node: Ref<Expr>): boolean {
-    return this.sites.has(node.id);
+    return this.siteValues !== undefined && this.siteValues.has(node.id);
   }
 
   getById(id: usize): V | undefined {
-    return this.siteValues.get(id);
+    return this.siteValues !== undefined ? this.siteValues.get(id) : undefined;
+  }
+
+  // Where the expression of id `id` is written, in a table keeping every site or spans.
+  spanById(id: usize): Span | undefined {
+    const site = this.sites !== undefined ? this.sites.get(id) : undefined;
+    if (site !== undefined) return { start: site.start, end: site.end };
+    return this.spans !== undefined ? this.spans.get(id) : undefined;
   }
 
   set(this: Mut<this>, node: Ref<Expr>, value: V): Mut<this> {
     const id = node.id;
-    if (!this.sites.has(id)) this.sites.set(id, siteOf(node));
-    this.siteValues.set(id, value);
+    if (this.keep === "all" || (this.keep === "read" && siteRead(node))) {
+      if (this.sites === undefined) this.sites = new Map<usize, Site>();
+      if (this.sites !== undefined && !this.sites.has(id)) this.sites.set(id, siteOf(node));
+    } else if (this.keep === "spans") {
+      if (this.spans === undefined) this.spans = new Map<usize, Span>();
+      if (this.spans !== undefined && !this.spans.has(id)) this.spans.set(id, { start: node.start, end: node.end });
+    }
+    this.put(id, value);
     return this;
   }
 
   // A value for an expression known by its site, as when a table is rewritten from another.
   setSite(this: Mut<this>, site: Site, value: V): Mut<this> {
     const id = site.id;
-    if (!this.sites.has(id)) this.sites.set(id, site);
-    this.siteValues.set(id, value);
+    if (this.sites === undefined) this.sites = new Map<usize, Site>();
+    if (this.sites !== undefined && !this.sites.has(id)) this.sites.set(id, site);
+    this.put(id, value);
     return this;
+  }
+
+  private put(this: Mut<this>, id: usize, value: V): void {
+    if (this.siteValues === undefined) this.siteValues = new Map<usize, V>();
+    if (this.siteValues !== undefined) this.siteValues.set(id, value);
   }
 
   ids(): usize[] {
     let out: usize[] = [];
-    for (const id of this.sites.keys()) out.push(id);
+    if (this.siteValues !== undefined) for (const id of this.siteValues.keys()) out.push(id);
     return out;
   }
 
   setValueById(this: Mut<this>, id: usize, value: V): void {
-    if (this.sites.has(id)) this.siteValues.set(id, value);
+    if (this.siteValues !== undefined && this.siteValues.has(id)) this.siteValues.set(id, value);
   }
 
   delete(this: Mut<this>, node: Ref<Expr>): boolean {
     const id = node.id;
-    this.siteValues.delete(id);
-    return this.sites.delete(id);
+    if (this.sites !== undefined) this.sites.delete(id);
+    if (this.spans !== undefined) this.spans.delete(id);
+    return this.siteValues !== undefined ? this.siteValues.delete(id) : false;
   }
 
   clear(this: Mut<this>): void {
-    this.sites.clear();
-    this.siteValues.clear();
+    this.sites = undefined;
+    this.siteValues = undefined;
+    this.spans = undefined;
   }
 
   *keys(): IterableIterator<Site> {
-    for (const k of this.sites.keys()) yield this.sites.get(k)!;
+    if (this.sites !== undefined) for (const k of this.sites.keys()) yield this.sites.get(k)!;
   }
 
   *values(): IterableIterator<V> {
-    for (const k of this.sites.keys()) yield this.siteValues.get(k)!;
+    if (this.siteValues !== undefined) for (const k of this.siteValues.keys()) yield this.siteValues.get(k)!;
   }
 
   *entries(): IterableIterator<[Site, V]> {
-    for (const k of this.sites.keys()) yield [this.sites.get(k)!, this.siteValues.get(k)!];
+    if (this.sites !== undefined) for (const k of this.sites.keys()) yield [this.sites.get(k)!, this.siteValues!.get(k)!];
   }
 
   [Symbol.iterator](): IterableIterator<[Site, V]> {
