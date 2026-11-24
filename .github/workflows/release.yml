@@ -1,52 +1,110 @@
-# Publishes a release when its tag is pushed: the tagged commit's fishc packed for each target fishc
-# runs on, attached with their sha256s, and the tag's CHANGELOG.md section as the notes. The tag and
-# its release commit come from `fishc run scripts/release.fsh -- <version>`.
+# Releases the version a release branch is named for, once its pull request into main is merged.
+# It runs on main as merged, each step only once those before it passed: the release is cut, with
+# the version bumped, the changelog written and a release commit and tag pushed to main; it is
+# packed and published; and last it is promoted to stage 0, the pin pushed to main too.
+# The branch was built and tested by the self-hosting workflow on its pull request; this runs no
+# tests of its own. A run made again takes up where the last one stopped: what is already tagged,
+# published or pinned is left as it is. Run by hand with a version, it does the same on main as it
+# stands, for a release whose merge started no run or whose run can't be made again.
 name: release
 on:
-  push:
-    tags: ["v*"]
+  pull_request:
+    branches: [main]
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to release from main, as in 0.1.4
+        type: string
+        required: true
 permissions:
   contents: write
+concurrency:
+  group: release
+  cancel-in-progress: false
 jobs:
-  pack:
-    strategy:
-      matrix:
-        os: [macos-latest, macos-15-intel, ubuntu-24.04, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.os }}
+  release:
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && startsWith(github.head_ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository)
+    # The one target stage0.toml has a released stage 0 for. Another joins once it has its own:
+    # its tarball packed here, and its digest and tarball in stage0.toml.
+    runs-on: macos-latest
+    timeout-minutes: 300
+    env:
+      HEAD_REF: ${{ github.head_ref }}
+      GIVEN: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
       - uses: actions/cache@v4
         with:
           path: ~/.cache/fish/stage0
           key: stage0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('stage0.toml') }}
-      - name: Bootstrap
-        id: bootstrap
+      # How far this version's release has got, which decides what is left to do.
+      - name: Version
+        id: state
         run: |
-          arch=$(uname -m); case "$arch" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; esac
-          host="$arch-$(uname -s | tr '[:upper:]' '[:lower:]')"
-          echo "host=$host" >> "$GITHUB_OUTPUT"
-          if grep -q "^\"$host\" = " stage0.toml; then sh scripts/bootstrap.sh; else sh scripts/bootstrap.sh --record; fi
-      - run: build/fishc run scripts/release.fsh -- --pack "${GITHUB_REF_NAME#v}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: fishc-${{ steps.bootstrap.outputs.host }}
-          path: dist/*.tar.gz*
-  publish:
-    needs: pack
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Publish
+          version="${GIVEN:-${HEAD_REF#release/v}}"
+          if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "a version is <major.minor.patch>, from a branch named release/v<version>, and this is '$version'" >&2
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then cut=yes; else cut=no; fi
+          if gh release view "v$version" >/dev/null 2>&1; then published=yes; else published=no; fi
+          if grep -q "^release = \"v$version\"$" stage0.toml; then promoted=yes; else promoted=no; fi
+          {
+            echo "version=$version"
+            echo "cut=$cut"
+            echo "published=$published"
+            echo "promoted=$promoted"
+          } >> "$GITHUB_OUTPUT"
+          echo "v$version: cut $cut, published $published, promoted $promoted"
+      # The fishc that runs the release scripts.
+      - name: Build
+        if: steps.state.outputs.promoted == 'no'
+        run: sh scripts/bootstrap.sh
+      # Only the merge itself is cut: a main that has moved past it holds what no pull request's
+      # tests ran on. Run by hand, it is main as it stands.
+      - name: Cut
+        if: steps.state.outputs.cut == 'no'
         env:
-          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.state.outputs.version }}
+          MERGED: ${{ github.event.pull_request.merge_commit_sha }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          awk -v v="$version" '$0 ~ "^## " v " " {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.tar.gz.sha256 --title "fishc $version" --notes-file notes.md
+          if [ -n "$MERGED" ] && [ "$(git rev-parse HEAD)" != "$MERGED" ]; then
+            echo "main has moved past $MERGED, the merge of $HEAD_REF, so v$VERSION isn't cut from it" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          build/fishc run scripts/release.fsh -- "$VERSION"
+          git push origin HEAD:refs/heads/main
+          git push origin "v$VERSION"
+      - name: Pack
+        if: steps.state.outputs.published == 'no'
+        env:
+          VERSION: ${{ steps.state.outputs.version }}
+        run: build/fishc run scripts/release.fsh -- --pack "$VERSION"
+      - name: Publish
+        if: steps.state.outputs.published == 'no'
+        env:
+          VERSION: ${{ steps.state.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '$0 ~ "^## " v " " {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          gh release create "v$VERSION" dist/*.tar.gz dist/*.tar.gz.sha256 --title "fishc $VERSION" --notes-file notes.md
+          rm notes.md
+      # Last, and only for a release that is out: the published tarball's fishc must be the very
+      # binary this runner builds from the tag, and reach the bootstrap fixpoint.
+      - name: Promote to stage 0
+        if: steps.state.outputs.promoted == 'no'
+        env:
+          VERSION: ${{ steps.state.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          build/fishc run scripts/promote.fsh -- "$VERSION"
+          git add stage0.toml
+          git commit -q -m "build: pin the v$VERSION release as stage 0"
+          git push origin HEAD:refs/heads/main

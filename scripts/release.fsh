@@ -1,7 +1,8 @@
 // Cuts a release: fish.toml's version bumped, a CHANGELOG.md section from the conventional commits
-// since the last tag, a release commit and an annotated `v<version>` tag. Nothing is pushed; pushing
-// the tag runs the release workflow, which packs and publishes it, so every release tarball is built
-// on CI. `--nightly` builds and packs a tarball of HEAD named for today's date, with no commit or tag,
+// since the last tag, a release commit and an annotated `v<version>` tag. Nothing is pushed. The
+// release workflow runs this on a runner, on main, once a release branch's pull request into it is
+// merged, then pushes, packs, publishes and promotes, so every release tarball is built on CI.
+// `--nightly` builds and packs a tarball of HEAD named for today's date, with no commit or tag,
 // and `--pack <version>` packs the tarball of a release already tagged, under dist/ with its sha256.
 // The tarball's fishc is built from the commit's own tree at /tmp/fish-stage0/<commit>, the fixed
 // path stage 0 is built at, since a fishc holds the path it was built at: any machine building the
@@ -137,5 +138,5 @@ async function main(): Promise<void> throws IoError {
   run("git", ["add", "fish.toml", "CHANGELOG.md"]);
   run("git", ["commit", "-q", "-m", `chore: release ${version}`]);
   run("git", ["tag", "-a", tag, "-m", `fishc ${version}`]);
-  console.log(`committed and tagged ${tag}; nothing was pushed\npush the commit and then the tag, and the release workflow publishes it:\n  git push origin HEAD && git push origin ${tag}`);
+  console.log(`committed and tagged ${tag}; nothing was pushed`);
 }

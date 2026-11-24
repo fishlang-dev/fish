@@ -1,4 +1,5 @@
-# Builds a nightly fishc tarball for each target fishc runs on and keeps them as the run's artifacts.
+# Builds a nightly fishc tarball for each target stage0.toml has a released stage 0 for and keeps
+# them as the run's artifacts.
 name: nightly
 on:
   schedule:
@@ -9,26 +10,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, macos-15-intel, ubuntu-24.04, ubuntu-24.04-arm]
+        os: [macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
       - uses: actions/cache@v4
         with:
           path: ~/.cache/fish/stage0
           key: stage0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('stage0.toml') }}
-      - name: Bootstrap
-        id: bootstrap
+      - name: Build
+        run: sh scripts/bootstrap.sh
+      - id: host
         run: |
           arch=$(uname -m); case "$arch" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; esac
-          host="$arch-$(uname -s | tr '[:upper:]' '[:lower:]')"
-          echo "host=$host" >> "$GITHUB_OUTPUT"
-          if grep -q "^\"$host\" = " stage0.toml; then sh scripts/bootstrap.sh; else sh scripts/bootstrap.sh --record; fi
+          echo "host=$arch-$(uname -s | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
       - run: build/fishc run scripts/release.fsh -- --nightly
       - uses: actions/upload-artifact@v4
         with:
-          name: fishc-nightly-${{ steps.bootstrap.outputs.host }}
+          name: fishc-nightly-${{ steps.host.outputs.host }}
           path: dist/*.tar.gz*
