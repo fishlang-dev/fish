@@ -92,7 +92,7 @@ function body(arenas: Mut<Arenas>, name: string, owner?: ClassType): BodyId {
 
 // An instance of `of` named `symbol`, with empty tables.
 function instance(arenas: Mut<Arenas>, of: BodyId, symbol: string): InstanceId {
-  return arenas.addInstance({ body: of, symbol, bindings: new Map<string, Type>(), concrete: true, depth: 0, returns: "void", ...emptyTables() }).id;
+  return arenas.addInstance({ body: of, symbol, bindings: new Map<string, Type>(), concrete: true, depth: 0, returns: "void", ...emptyTables(false) }).id;
 }
 
 // An instance named `symbol` of a body named `m`.
@@ -149,7 +149,7 @@ test("a comparison can't reach an equals that isn't compiled", () => {
   const right: Expr = { id: 2, kind: "ident", name: "b", start: 10, end: 20 };
   const compare: Expr = { id: 3, kind: "binary", op: "===", left: left.clone(), right: right.clone(), start: 10, end: 20 };
   const held = typing.objectType([{ name: "s", type: shape }]);
-  let tables = emptyTables();
+  let tables = emptyTables(false);
   tables.types.set(left, held);
   tables.types.set(right, held);
   tables.types.set(compare, "boolean");

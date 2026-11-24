@@ -804,3 +804,29 @@ function main() {
   made.entries.set("neg", ["neg", "minus"]);
   console.log(made.entries.size);
 }
+// case: recursive_narrowed_optional_field_lent
+// expect: esm:2 esm:2 none
+// expect: esm:2
+// An optional field whose type leads back to its holder lives in a block. Narrowed and lent by
+// reference, the reference is to the block, not to the place holding the pointer to it.
+type Meta = { module: string; pkg: usize; overloads?: Item[] };
+type Item = { name: string; kids: Item[]; meta?: Meta };
+function show(m: Ref<Meta>): string {
+  return `${m.module}:${m.pkg}`;
+}
+function narrowed(n: Ref<Item>): string {
+  if (n.meta !== undefined) return show(n.meta);
+  return "none";
+}
+function unwrapped(n: Ref<Item>): string {
+  return n.meta !== undefined ? show(n.meta!) : "none";
+}
+function owned(n: Item): string {
+  return n.meta !== undefined ? show(n.meta!) : "none";
+}
+function main() {
+  const n: Item = { name: "a", kids: [], meta: { module: "esm", pkg: 2 } };
+  const bare: Item = { name: "b", kids: [] };
+  console.log(narrowed(n), unwrapped(n), narrowed(bare));
+  console.log(owned(n));
+}

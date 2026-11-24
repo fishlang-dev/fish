@@ -72,6 +72,13 @@ function together(core: Session, caches: Caches): BuildSession {
   return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, checkCache: core.checkCache, clang: caches.clang, digests: caches.digests, mathUnits: caches.mathUnits };
 }
 
+// `session` for a build that keeps nothing of its check once its program is emitted.
+function plain(session: Session): Session {
+  let made = session;
+  made.plain = true;
+  return made;
+}
+
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
 /** @throws {CompileError | Error | IoError | JsonError} */
 export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false, debug = false): string {
@@ -348,7 +355,9 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   let before: f64 = 0;
   if (session.timings !== undefined) for (const name of FRONT_END) before += session.timings!.ms.get(name) ?? 0;
   let queries = new Queries(file, manifest, new Map<string, string>());
-  let start = queries.checked(session, looked, kept);
+  let given = session;
+  if (!keep) given.plain = true;
+  let start = queries.checked(given, looked, kept);
   if (start.checked.tables.session.timings !== undefined) {
     let after: f64 = 0;
     for (const name of FRONT_END) after += start.checked.tables.session.timings!.ms.get(name) ?? 0;
@@ -450,13 +459,18 @@ function refuseForeignRust(target: Ref<Target>) {
   if (target.compile.includes("-target")) throw new Error(`fishc build: Rust crates can't be built for ${target.triple} yet; build on a ${target.triple} machine, or without --target`);
 }
 
+// The length of IR up to which a release build is one module. Clang optimizing a module holds
+// about 40 bytes for each byte of it, 24 GB for the compiler's own 570 MB, so a larger program
+// is compiled a file at a time, as a dev build is, and clang holds one file's code at once.
+const RELEASE_MODULE_LENGTH: usize = 64 * 1024 * 1024;
+
 // A build's IR as clang is given it: a release build's as one module, so `-O2` inlines across std
-// and the program, and a dev build's as the program's part, with std's part and each of the
-// program's files a unit of its own that the cache keeps by its text, so a rebuild compiles only
-// the files whose code changed. A `-g` build keeps its files in the program's part, which holds
-// the debug metadata their functions refer to.
+// and the program, unless it is over `RELEASE_MODULE_LENGTH`, and a dev build's as the program's
+// part, with std's part and each of the program's files a unit of its own that the cache keeps by
+// its text, so a rebuild compiles only the files whose code changed. A `-g` build keeps its files
+// in the program's part, which holds the debug metadata their functions refer to.
 function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<Target>, debug = false): { cached: Unit[]; program: string; times: [string, f64][] } {
-  if (release) return { cached: [], program: ir, times: [] };
+  if (release && ir.length < RELEASE_MODULE_LENGTH) return { cached: [], program: ir, times: [] };
   const naming = performance.now();
   const arenas: Ref<Arenas> = checked.tables.arenas;
   const names = symbolNames(arenas);
@@ -484,7 +498,7 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
   }
   const named = performance.now() - naming;
   const halves = split(ir, std, own, byFile);
-  const args = [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"];
+  const args = [...target.compile, "-x", "ir", "-", optimization(release, target), "-funwind-tables"];
   let cached: Unit[] = [{ name: "std", args: [...args], stdin: halves.std, inputs: [] }];
   for (const [file, text] of halves.groups) cached.push({ name: `file-${file.replace(/[^\w.-]/g, "_")}`, args: [...args], stdin: text, inputs: [] });
   return { cached, program: halves.program, times: [["split names", named], ...halves.times] };
@@ -1567,7 +1581,7 @@ async function main(): Promise<void> {
     if (llvm) {
       const start = performance.now();
       let looked: string[] = [];
-      const made = compiledIn(newCompilation(sessionFor()), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked);
+      const made = compiledIn(newCompilation(plain(sessionFor())), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked);
       reportTimings(made.checked.tables.session, [...FRONT_END, "codegen"], start);
       process.stdout.write(made.ir);
     } else {

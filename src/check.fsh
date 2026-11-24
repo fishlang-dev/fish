@@ -1,5 +1,5 @@
 import { memberKey, type Replaced } from "./edits.fsh";
-import { cloneSignature, declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.fsh";
+import { cloneBody, cloneSignature, declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.fsh";
 import { crossingOf, rustClassOf } from "./rust.fsh";
 import { newDeclarations, newTables, timingEnd, timingStart, type Compilation, type Declarations, type Tables } from "./compilation.fsh";
 import { copyNames, CompileError, compileErrors, named } from "./diag.fsh";
@@ -55,22 +55,28 @@ export type Checked = { instances: InstanceId[]; tables: Tables; warnings: Compi
 // the statement would hold its whole body once for every `break` in it.
 export type JumpTarget = Span & { id: usize };
 
+// The error a call or `throw` raises, and the error type it becomes where it goes, wrapped first by
+// a class's static `from` when that type doesn't take it.
+export type Raise = { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId };
+
 // The instances a checked program compiles, read from its arena.
 // What stands in an instance's place in the arena while it is lent out: what it is, and what reads
 // of it by id need meanwhile, whether it keeps what it is lent and what it captures.
 function instanceStandIn(held: Ref<Instance>): Instance {
-  let out: Instance = { id: held.id, body: held.body, symbol: held.symbol, bindings: new Map([...held.bindings]), concrete: held.concrete, depth: held.depth, returns: held.returns, ...emptyTables() };
+  let out: Instance = { id: held.id, body: held.body, symbol: held.symbol, bindings: new Map([...held.bindings]), concrete: held.concrete, depth: held.depth, returns: held.returns, ...emptyTables(true) };
   if (held.keeps !== undefined) out.keeps = held.keeps;
   if (held.captures !== undefined) out.captures = new Map<LocalId, LocalId | "this">([...held.captures]);
   return out;
 }
 
 // The tables a new instance starts with, each empty.
-export function emptyTables(): Pick<Instance, "types" | "locals" | "calls" | "setters" | "coercions" | "jumps" | "borrowsFrom" | "raises" | "caught" | "consumes" | "patterns" | "copiesOut"> {
+// `plain` says the build keeps nothing for a later reader, so `types` keeps only the sites its
+// own passes look at, and `coercions` only where each is written.
+export function emptyTables(plain: boolean): Pick<Instance, "types" | "locals" | "calls" | "setters" | "coercions" | "jumps" | "borrowsFrom" | "raises" | "caught" | "consumes" | "patterns" | "copiesOut"> {
   return {
-    types: new SiteTable<Type>(), locals: new NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>(), calls: new SiteTable<InstanceId>(), setters: new NodeMap<Expr, InstanceId>(),
-    coercions: new SiteTable<Type>(), jumps: new NodeMap<Stmt, JumpTarget>(), borrowsFrom: new NodeMap<Expr, Expr[]>(),
-    raises: new NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>(), caught: new NodeMap<Stmt, Type>(),
+    types: new SiteTable<Type>(plain ? "read" : "all"), locals: new NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>(), calls: new SiteTable<InstanceId>(), setters: new NodeMap<Expr, InstanceId>(),
+    coercions: new SiteTable<Type>(plain ? "spans" : "all"), jumps: new NodeMap<Stmt, JumpTarget>(), borrowsFrom: new NodeMap<Expr, Expr[]>(),
+    raises: new NodeMap<Expr | Stmt, Raise>(), caught: new NodeMap<Stmt, Type>(),
     consumes: new Set<usize>(), patterns: new NodeMap<Pattern, PatternInfo>(), copiesOut: new NodeSet<Expr>(),
   };
 }
@@ -117,7 +123,9 @@ export type Instance = {
   // Each fallible call and `throw`, the error it raises, and the error type that error
   // becomes where it goes: the function's own, which returns it.
   // An error the function's type doesn't take is first wrapped by a class's static `from`.
-  raises: NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>;
+  raises: NodeMap<Expr | Stmt, Raise>;
+  // Where the first of them is written.
+  raisedAt?: Span;
   // The type of what each `try` catches.
   caught: NodeMap<Stmt, Type>;
   // Each place whose value is handed over rather than copied, which leaves it empty, by node id.
@@ -154,6 +162,11 @@ export type Instance = {
   envs?: NodeMap<Expr, { of: InstanceId; env: LocalId[] }>;
   // What each value boxed into a Dyn runs for the interface's members.
   dyns?: NodeMap<Expr, DynTable>;
+  // The closures checked inside it, in the order they were made, a discarded pass's included.
+  inner?: InstanceId[];
+  // Where the arena keeps its body as its own check lowered it, when the body had been lowered
+  // before and this check replaced more: every other instance reads the body's own tree.
+  lowered?: usize;
   // Each closure owning what it captures that holds nested functions as made where it is, and
   // this body's bindings for what each of those uses, which the closure borrows.
   made?: NodeMap<Expr, { of: InstanceId; env: LocalId[] }[]>;
@@ -796,10 +809,8 @@ function tableCounts(checked: Ref<Checked>): string {
   for (let i: usize = 1; i <= arenas.instanceCount(); i++) {
     const x = arenas.instanceOf(i as InstanceId);
     types.entries += x.types.size;
-    for (const [k] of x.locals.entries()) {
-      locals.entries++;
-      locals.keys += k.end - k.start;
-    }
+    locals.entries += x.locals.size;
+    for (const [k] of x.locals.entries()) locals.keys += k.end - k.start;
     for (const [k] of x.calls.entries()) {
       calls.entries++;
       calls.keys += k.end - k.start;
@@ -808,24 +819,18 @@ function tableCounts(checked: Ref<Checked>): string {
       setters.entries++;
       setters.keys += k.end - k.start;
     }
-    for (const [k] of x.coercions.entries()) {
-      coercions.entries++;
-      coercions.keys += k.end - k.start;
-    }
-    for (const [k, v] of x.jumps.entries()) {
-      jumps.entries++;
-      jumps.keys += k.end - k.start;
-      jumps.values += v.end - v.start;
-    }
+    coercions.entries += x.coercions.size;
+    for (const [k] of x.coercions.entries()) coercions.keys += k.end - k.start;
+    jumps.entries += x.jumps.size;
+    for (const [k] of x.jumps.entries()) jumps.keys += k.end - k.start;
+    for (const v of x.jumps.values()) jumps.values += v.end - v.start;
     for (const [k, v] of x.borrowsFrom.entries()) {
       borrowsFrom.entries++;
       borrowsFrom.keys += k.end - k.start;
       for (const e of v) borrowsFrom.values += e.end - e.start;
     }
-    for (const [k] of x.raises.entries()) {
-      raises.entries++;
-      raises.keys += k.end - k.start;
-    }
+    raises.entries += x.raises.size;
+    for (const [k] of x.raises.entries()) raises.keys += k.end - k.start;
     for (const [k] of x.caught.entries()) {
       caught.entries++;
       caught.keys += k.end - k.start;
@@ -841,7 +846,7 @@ function tableCounts(checked: Ref<Checked>): string {
   }
   const mb = (n: usize) => `${((n as f64) / 1048576).toFixed(1)} MB`.padStart(12);
   const row = (name: string, c: Ref<Counted>) => `${name.padEnd(12)}${`${c.entries}`.padStart(12)}${mb(c.keys)}${mb(c.values)}\n`;
-  let out = `${arenas.instanceCount()} instances, ${arenas.bodyCount()} bodies, ${arenas.classCount()} classes\n`;
+  let out = `${arenas.instanceCount()} instances, ${checked.tables.counts.checks} checks, ${arenas.bodyCount()} bodies, ${arenas.loweredCount()} lowered apart, ${arenas.classCount()} classes\n`;
   out += `${"table".padEnd(12)}${"entries".padStart(12)}${"key spans".padStart(12)}${"value spans".padStart(12)}\n`;
   out += row("types", types) + row("locals", locals) + row("calls", calls) + row("setters", setters) + row("coercions", coercions) + row("jumps", jumps);
   out += row("borrowsFrom", borrowsFrom) + row("raises", raises) + row("caught", caught) + row("patterns", patterns) + row("copiesOut", copiesOut);
@@ -2118,13 +2123,26 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           this.settling = undefined;
         } else {
           const pending = this.instancingState.pending.shift()!;
-          this.checkBody(pending);
+          if (!this.onlyAsked(pending)) this.checkBody(pending);
         }
       } catch (e) {
         if (!(e instanceof CompileError)) throw e;
         this.recover(e);
       }
     }
+  }
+
+  // Whether an instance is checked only when a caller asks for what its body alone tells, its
+  // inferred return type or whether it keeps what it is lent: one made with placeholder types for
+  // a call inside another definition. Nothing compiles it, and its body is the one its function's
+  // definition was checked with, seen through the same bounds. A function taking a comptime
+  // parameter is checked for each value it is given, which the definition doesn't know.
+  private onlyAsked(id: InstanceId): boolean {
+    const instance = this.tables.arenas.instanceOf(id);
+    if (instance.concrete) return false;
+    const definition = this.instancingState.definitions.get(instance.body);
+    if (definition === undefined || definition === id) return false;
+    return !this.tables.arenas.bodyOf(instance.body).params.some((p) => p.comptime === true);
   }
 
   // Records a class's own disposer, once it is an instance to compile, for the class's drop to
@@ -2214,7 +2232,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     for (const g of this.tables.jsGiven.values()) jsGiven.add(g.id);
     for (const id of compiledIds) {
       const i = this.tables.arenas.instanceOf(id);
-      for (const [x, t] of i.coercions) if (!jsGiven.has(x.id)) given.push({ start: x.start, end: x.end, from: i.types.getById(x.id) ?? "void", to: t });
+      for (const k of i.coercions.ids()) {
+        if (jsGiven.has(k)) continue;
+        const at = i.coercions.spanById(k)!;
+        given.push({ start: at.start, end: at.end, from: i.types.getById(k) ?? "void", to: i.coercions.getById(k)! });
+      }
     }
     let crossing: { start: usize; end: usize } | undefined = undefined;
     for (const g of given) if (this.intoJs(g.from, g.to) && (crossing === undefined || g.start < crossing.start)) crossing = { start: g.start, end: g.end };
@@ -2293,11 +2315,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   /** @throws {CompileError} */
   private swapTypes(this: Mut<this>, id: InstanceId, swap: Ref<TypeMap<Type, Type>>): void {
-    let types: [Site, Type][] = [];
-    for (const [e, t] of this.tables.arenas.instanceOf(id).types) types.push([{ ...e }, t]);
+    let types: [usize, Type][] = [];
+    for (const k of this.tables.arenas.instanceOf(id).types.ids()) types.push([k, this.tables.arenas.instanceOf(id).types.getById(k)!]);
     for (let i: usize = 0; i < types.length; i++) types[i]![1] = this.replaced(types[i]![1], swap);
-    let coercions: [Site, Type][] = [];
-    for (const [e, t] of this.tables.arenas.instanceOf(id).coercions) coercions.push([{ ...e }, t]);
+    let coercions: [usize, Type][] = [];
+    for (const k of this.tables.arenas.instanceOf(id).coercions.ids()) coercions.push([k, this.tables.arenas.instanceOf(id).coercions.getById(k)!]);
     for (let i: usize = 0; i < coercions.length; i++) coercions[i]![1] = this.replaced(coercions[i]![1], swap);
     let locals: LocalId[] = [];
     for (const l of this.tables.arenas.instanceOf(id).locals.values()) locals.push(l);
@@ -2310,14 +2332,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const returned = this.tables.arenas.instanceOf(id).returns;
     const returns = this.replaced(returned, swap);
     let instance = this.tables.arenas.instanceMut(id);
-    while (types.length > 0) {
-      const [e, t] = types.shift()!;
-      instance.types.setSite(e, t);
-    }
-    while (coercions.length > 0) {
-      const [e, t] = coercions.shift()!;
-      instance.coercions.setSite(e, t);
-    }
+    for (const [k, t] of types) instance.types.setValueById(k, t);
+    for (const [k, t] of coercions) instance.coercions.setValueById(k, t);
     instance.returns = returns;
   }
 
@@ -2802,24 +2818,16 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       const into = this.tables.arenas.instanceOf(to).generator;
       if (from !== undefined && into !== undefined && from !== into) made.set(from, into);
     }
-    let types: [Site, Type][] = [];
-    const typesOf = this.tables.arenas.instanceOf(id).types;
-    for (const [e, t] of typesOf) types.push([{ ...e }, t]);
+    let types: [usize, Type][] = [];
+    for (const k of this.tables.arenas.instanceOf(id).types.ids()) types.push([k, this.tables.arenas.instanceOf(id).types.getById(k)!]);
     for (let i: usize = 0; i < types.length; i++) types[i]![1] = this.lowerMade(types[i]![1], made);
-    let coercions: [Site, Type][] = [];
-    const coercionsOf = this.tables.arenas.instanceOf(id).coercions;
-    for (const [e, t] of coercionsOf) coercions.push([{ ...e }, t]);
+    let coercions: [usize, Type][] = [];
+    for (const k of this.tables.arenas.instanceOf(id).coercions.ids()) coercions.push([k, this.tables.arenas.instanceOf(id).coercions.getById(k)!]);
     for (let i: usize = 0; i < coercions.length; i++) coercions[i]![1] = this.lowerMade(coercions[i]![1], made);
     {
       let instance = this.tables.arenas.instanceMut(id);
-      while (types.length > 0) {
-        const [e, t] = types.shift()!;
-        instance.types.setSite(e, t);
-      }
-      while (coercions.length > 0) {
-        const [e, t] = coercions.shift()!;
-        instance.coercions.setSite(e, t);
-      }
+      for (const [k, t] of types) instance.types.setValueById(k, t);
+      for (const [k, t] of coercions) instance.coercions.setValueById(k, t);
     }
     // A pipe's topic written in as a field read would run a getter once for each `%`.
     for (const e of this.tables.substituted.values()) {
@@ -3348,6 +3356,34 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (written !== id && !this.inProgress.has(written)) this.checkBody(written);
   }
 
+  // A plain build compiles concrete instances only, and nothing reads the tables of another
+  // once its own check and move check have ended. They are emptied here, with those of the
+  // closures checked inside it, where they would otherwise be held to the end of codegen.
+  shed(this: Mut<this>, id: InstanceId): void {
+    if (this.tables.session.plain !== true) return;
+    const checked = this.tables.arenas.instanceOf(id);
+    if (checked.concrete || bodyOf(this.tables.arenas, checked).closure !== undefined) return;
+    let waiting: InstanceId[] = [id];
+    let apart: usize[] = [];
+    while (waiting.length > 0) {
+      let emptied = this.tables.arenas.instanceMut(waiting.pop()!);
+      if (emptied.inner !== undefined) for (const c of emptied.inner!) waiting.push(c);
+      if (emptied.lowered !== undefined) apart.push(emptied.lowered!);
+      let fresh = emptyTables(this.tables.session.plain === true);
+      emptied.types = fresh.types;
+      emptied.locals = fresh.locals;
+      emptied.calls = fresh.calls;
+      emptied.setters = fresh.setters;
+      emptied.coercions = fresh.coercions;
+      emptied.jumps = fresh.jumps;
+      emptied.borrowsFrom = fresh.borrowsFrom;
+      emptied.raises = fresh.raises;
+      emptied.caught = fresh.caught;
+      emptied.patterns = fresh.patterns;
+    }
+    for (const at of apart) this.tables.arenas.dropLowered(at);
+  }
+
   // Checks an instance with its type arguments in scope.
   /** @throws {CompileError} */
   checkBody(this: Mut<this>, id: InstanceId): void {
@@ -3365,7 +3401,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           const outerSight = this.resolver().enterSight(undefined);
           const scope = this.instancing().scopeOf(id);
           const outerScope = this.resolver().enterScope(scope);
-          this.tables.rewrites.startCheck();
+          this.tables.rewrites.startCheck(this.tables.arenas.instanceOf(id).body);
           try {
             this.checkInstance(id, undefined, undefined, undefined);
           } finally {
@@ -3386,7 +3422,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
             throw thrown;
           }
         }
-        if (this.demanded === 0) return;
+        if (this.demanded === 0) {
+          this.shed(id);
+          return;
+        }
         this.forget(id);
       }
     } finally {
@@ -3407,12 +3446,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     instance.jumps.clear();
     instance.borrowsFrom.clear();
     instance.raises.clear();
+    instance.raisedAt = undefined;
     instance.caught.clear();
     instance.consumes.clear();
     instance.patterns.clear();
     instance.copiesOut.clear();
     instance.returns = "void";
     instance.throws = undefined;
+    const apart = instance.lowered;
+    instance.lowered = undefined;
     instance.envs = undefined;
     instance.dyns = undefined;
     instance.made = undefined;
@@ -3431,6 +3473,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     this.closures = kept;
     for (const c of retired) this.tables.arenas.instanceMut(c).retired = true;
+    if (apart !== undefined) this.tables.arenas.dropLowered(apart);
     this.views.delete(id);
     this.done.delete(id);
     this.inProgress.delete(id);
@@ -4269,7 +4312,7 @@ class BodyChecker implements Context, GuardHost {
       this.state.errorType = errorType;
       while (inferring.length > 0) {
         const [at, from] = inferring.shift()!;
-        this.instance().raises.set(at, { from, to: errorType });
+        this.raised(at, { from, to: errorType });
       }
       this.instance().throws = errorType;
     }
@@ -4332,17 +4375,22 @@ class BodyChecker implements Context, GuardHost {
       const at = this.returnSpan();
       throw new CompileError("E0601", "not all code paths return a value", at.start, at.end);
     }
-    // From here on the body is read as a plain tree, its replacements in place.
+    // From here on the body is read as a plain tree, its replacements in place. They are put in
+    // place once, by the first check of the body to finish; an instance whose check replaces
+    // more after that reads a copy of its own, and the body's tree is never written again.
     const bodyId = this.f().bodyId;
-    const edited = this.cx.tables.rewrites.listIn(bodyId, this.f().id, "body");
-    let body = this.cx.tables.arenas.bodyMut(bodyId);
-    if (edited !== undefined) body.body = edited;
-    let written = body.params.splice(0);
-    while (written.length > 0) body.params.push(rebuiltParam(written.shift()!, this.cx.tables.rewrites));
-    this.cx.tables.rewrites.startRebuild(bodyId);
-    rebuiltStmts(body.body, this.cx.tables.rewrites);
-    this.cx.tables.rewrites.refresh(body.body);
-    this.cx.tables.rewrites.endRebuild();
+    if (this.cx.tables.rewrites.lowered(bodyId)) this.lowerApart(bodyId);
+    else {
+      const edited = this.cx.tables.rewrites.listIn(bodyId, this.f().id, "body");
+      let body = this.cx.tables.arenas.bodyMut(bodyId);
+      if (edited !== undefined) body.body = edited;
+      let written = body.params.splice(0);
+      while (written.length > 0) body.params.push(rebuiltParam(written.shift()!, this.cx.tables.rewrites));
+      this.cx.tables.rewrites.startRebuild(bodyId);
+      rebuiltStmts(body.body, this.cx.tables.rewrites);
+      this.cx.tables.rewrites.refresh(body.body);
+      this.cx.tables.rewrites.endRebuild();
+    }
     // A method this body calls on an object holding references is checked first, so the move
     // check knows whether it keeps what it is lent.
     const caller = this.instance().id;
@@ -5639,7 +5687,7 @@ class BodyChecker implements Context, GuardHost {
     const bindings = new Map<string, Type>([...this.instance().bindings]);
     const concrete = this.instance().concrete;
     const depth = this.instance().depth;
-    let added = this.cx.tables.arenas.addInstance({ body: bodyId, symbol, bindings, concrete, depth, returns: "void", ...emptyTables() });
+    let added = this.cx.tables.arenas.addInstance({ body: bodyId, symbol, bindings, concrete, depth, returns: "void", ...emptyTables(this.cx.tables.session.plain === true) });
     added.captures = new Map<LocalId, LocalId | "this">();
     added.captureUses = new Map<LocalId, Expr>();
     added.changed = new Set<LocalId>();
@@ -5647,6 +5695,9 @@ class BodyChecker implements Context, GuardHost {
     // Read where it is used, as the checker changes the arena it is kept in.
     const innerId = added.id;
     this.cx.closures.push(innerId);
+    let host = this.cx.tables.arenas.instanceMut(parent);
+    if (host.inner !== undefined) host.inner!.push(innerId);
+    else host.inner = [innerId];
     const outerSight = this.cx.resolver().enterSight(this.state.sight);
     try {
       this.cx.checkInstance(innerId, this.state, this.st, this.exprsState);
@@ -5674,12 +5725,14 @@ class BodyChecker implements Context, GuardHost {
           if (changedAliases.includes(alias)) this.exprs().changesLocal(mine, "", "change", at, false);
           env.push(mine);
         }
+        const plain = this.cx.tables.session.plain === true;
         let held = this.instance();
         const before = held.made !== undefined ? held.made.get(e) : undefined;
         let made: { of: InstanceId; env: LocalId[] }[] = before !== undefined ? before : [];
         made.push({ of, env });
         if (held.made === undefined) held.made = new NodeMap<Expr, { of: InstanceId; env: LocalId[] }[]>();
-        if (held.made !== undefined) held.made.set(cloneExpr(e), made);
+        if (held.made !== undefined && plain) held.made.setId(e.id, made);
+        else if (held.made !== undefined) held.made.set(cloneExpr(e), made);
       }
     }
     // A nested function runs whenever it is called, so it can't take over what it uses.
@@ -5766,8 +5819,8 @@ class BodyChecker implements Context, GuardHost {
     // An async one's future throws, which a function type giving a Promise can't say yet.
     const failing = futureOf !== undefined ? this.cx.tables.typing.rec(futureOf).throws : undefined;
     if (expected !== undefined && givenReturns !== undefined && failing !== undefined && !this.cx.tables.typing.openThrows.has(expected) && this.cx.tables.typing.promiseElement(givenReturns) !== undefined) {
-      const raised = [...this.cx.tables.arenas.instanceOf(innerId).raises.keys()];
-      const at = e.throws !== undefined ? { start: e.throws.start, end: e.throws.end } : raised.length > 0 ? { start: raised[0]!.start, end: raised[0]!.end } : { start: e.start, end: e.end };
+      const raised = this.cx.tables.arenas.instanceOf(innerId).raisedAt;
+      const at = e.throws !== undefined ? { start: e.throws.start, end: e.throws.end } : raised !== undefined ? { start: raised.start, end: raised.end } : { start: e.start, end: e.end };
       throw new CompileError("E0602", `this async closure throws '${this.cx.tables.typing.show(failing)}', but it is given as '${this.cx.tables.typing.show(expected)}', whose Promise throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
     }
     // Each call's future works on its own copy of the captures, so a change would be lost.
@@ -6291,7 +6344,8 @@ class BodyChecker implements Context, GuardHost {
         if (this.state.floors.length > 0 && this.state.targets.findIndex((t) => t.stmt.id === target.id) < (this.state.floors.at(-1)! as i64)) {
           throw new CompileError("E1102", `'${s.kind}' can't leave a comptime block, which runs while compiling, before the program does`, s.start, s.end);
         }
-        this.jumps().set(cloneStmt(s), { id: target.id, start: target.start, end: target.end });
+        if (this.cx.tables.session.plain === true) this.jumps().setId(s.id, { id: target.id, start: target.start, end: target.end });
+        else this.jumps().set(cloneStmt(s), { id: target.id, start: target.start, end: target.end });
         if (s.kind === "break") this.cx.broken.add(target);
         else this.cx.continued.add(target);
         return undefined;
@@ -6340,7 +6394,7 @@ class BodyChecker implements Context, GuardHost {
           const span = { start: at.start, end: at.end };
           const throwing = at.kind === "throw";
           if (passing) this.raiseAt(at, span, from, "this", throwing);
-          else this.instance().raises.set(at, { from, to: caught });
+          else this.raised(at, { from, to: caught });
         }
         this.instance().caught.set(cloneStmt(s), caught);
         this.pushScope(new Map<string, LocalId>());
@@ -6367,7 +6421,8 @@ class BodyChecker implements Context, GuardHost {
           const armId = this.state.targets[armAt as usize]!.stmt.id;
           const armStart = this.state.targets[armAt as usize]!.stmt.start;
           const armEnd = this.state.targets[armAt as usize]!.stmt.end;
-          this.jumps().set(cloneStmt(s), { id: armId, start: armStart, end: armEnd });
+          if (this.cx.tables.session.plain === true) this.jumps().setId(s.id, { id: armId, start: armStart, end: armEnd });
+          else this.jumps().set(cloneStmt(s), { id: armId, start: armStart, end: armEnd });
           if (wanted && s.value === undefined) throw new CompileError("E0605", "this match gives a value, so a 'return' in its arm needs one", s.start, s.end);
           // In TypeScript this would leave the function, which a return in an arm never does.
           if (!wanted && s.value !== undefined) {
@@ -6746,6 +6801,17 @@ class BodyChecker implements Context, GuardHost {
     this.raiseAt(at, span, raised, "'throw'", true);
   }
 
+  // Records what `at` raises and what that becomes. A build that keeps nothing for a later reader
+  // stores it by id: nothing there reads the node but the error that points at a closure's first
+  // raise, which `raisedAt` keeps.
+  raised(this: Mut<this>, at: Expr | Stmt, raise: Raise): void {
+    const plain = this.cx.tables.session.plain === true;
+    let instance = this.instance();
+    if (instance.raisedAt === undefined) instance.raisedAt = { start: at.start, end: at.end };
+    if (plain) instance.raises.setId(at.id, raise);
+    else instance.raises.set(at, raise);
+  }
+
   // An error raised by a call or a `throw` goes to the function's caller, which needs a
   // `throws` clause it fits.
   /** @throws {CompileError} */
@@ -6767,7 +6833,7 @@ class BodyChecker implements Context, GuardHost {
       const declared = errorType !== undefined ? `'${this.cx.tables.typing.show(errorType)}'` : "nothing";
       throw new CompileError("E0602", `this task can throw '${this.cx.tables.typing.show(type)}', but the group's closure declares it throws ${declared}; declare the task's error too, or leave the 'throws' clause out so it is inferred`, at.start, at.end);
     }
-    this.instance().raises.set(cloneExpr(at), { from: type, to: errorType });
+    this.raised(cloneExpr(at), { from: type, to: errorType });
   }
 
   // `site` raises the error, written at `span`; `throwing` when it is a `throw`.
@@ -6795,7 +6861,7 @@ class BodyChecker implements Context, GuardHost {
     }
     const errorType = this.state.errorType!;
     if (this.cx.tables.typing.fits(type, errorType)) {
-      this.instance().raises.set(at, { from: type, to: errorType });
+      this.raised(at, { from: type, to: errorType });
       return;
     }
     // An error the declared type doesn't take may be wrapped by a class of it that
@@ -6821,7 +6887,26 @@ class BodyChecker implements Context, GuardHost {
     if (wrappers.length > 1) {
       throw new CompileError("E0602", `${does}, which ${wrappers.map((w) => `'${this.cx.tables.typing.rec(w.wrapper).name}'`).join(" and ")} both wrap; throw one of them yourself`, span.start, span.end);
     }
-    this.instance().raises.set(at, { from: type, to: errorType, ...wrappers[0]! });
+    this.raised(at, { from: type, to: errorType, ...wrappers[0]! });
+  }
+
+  // The body as this check read it, kept apart, when the check read or made a replacement the
+  // body's tree doesn't hold: its own, another instance's since the tree was rebuilt, or one
+  // left by a check that stopped part way. The tree holds the first lowering and stays as it
+  // is, and this instance is compiled from what its tables were filled against. Nothing to do
+  // when the check read the tree as it stands.
+  private lowerApart(this: Mut<this>, bodyId: BodyId): void {
+    if (!this.cx.tables.rewrites.sawLate()) return;
+    let own = cloneBody(this.cx.tables.arenas.bodyOf(bodyId));
+    const edited = this.cx.tables.rewrites.listIn(bodyId, this.f().id, "body");
+    if (edited !== undefined) own.body = edited;
+    let written = own.params.splice(0);
+    while (written.length > 0) own.params.push(rebuiltParam(written.shift()!, this.cx.tables.rewrites));
+    this.cx.tables.rewrites.startRebuild(bodyId);
+    rebuiltStmts(own.body, this.cx.tables.rewrites);
+    this.cx.tables.rewrites.endApart();
+    const at = this.cx.tables.arenas.addLowered(own);
+    this.cx.tables.arenas.instanceMut(this.state.instanceId).lowered = at;
   }
 
   // The move check of this body. It changes the tables the body and its instance are kept in, so
@@ -6834,12 +6919,14 @@ class BodyChecker implements Context, GuardHost {
     const bodyId = this.f().bodyId;
     const standIn = instanceStandIn(this.instance());
     const signature = cloneSignature(this.f());
+    const apart = this.instance().lowered;
     const instance = this.cx.tables.arenas.swapInstance(instanceId, standIn);
-    const body = this.cx.tables.arenas.swapBody(bodyId, signature);
+    const body = apart !== undefined ? this.cx.tables.arenas.swapLowered(apart, signature) : this.cx.tables.arenas.swapBody(bodyId, signature);
     try {
       return checkMoves(this.cx.tables, body, instance, origins);
     } finally {
-      this.cx.tables.arenas.swapBody(bodyId, body);
+      if (apart !== undefined) this.cx.tables.arenas.swapLowered(apart, body);
+      else this.cx.tables.arenas.swapBody(bodyId, body);
       this.cx.tables.arenas.swapInstance(instanceId, instance);
       timingEnd(this.cx.tables, "moves", mark);
     }

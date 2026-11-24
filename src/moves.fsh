@@ -178,13 +178,14 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   constructor(cx: Mut<MoveCx<T, B, I>>, origins: Origin[]) {
     const instance = cx.instance;
     let coercions = new Map<usize, Type>();
-    for (const [e, to] of instance.coercions) {
+    for (const at of instance.coercions.ids()) {
+      const to = instance.coercions.getById(at)!;
       const ref = cx.tables.typing.optionRef(to);
-      const from = instance.types.getById(e.id);
+      const from = instance.types.getById(at);
       const fromRef = from !== undefined && typeof from !== "string" && cx.tables.typing.kindOf(from) === "ref";
       let given: Type = to;
       if (ref !== undefined && from !== undefined && from !== "null" && cx.tables.typing.optionRef(from) === undefined && !fromRef) given = ref;
-      coercions.set(e.id, given);
+      coercions.set(at, given);
     }
     const f = cx.f;
     let last = lastUses(cx.tables, f.body, instance);

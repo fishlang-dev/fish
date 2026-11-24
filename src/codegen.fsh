@@ -729,7 +729,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
   bodyAt(id: InstanceId): Ref<Body> {
-    return this.tables.arenas.bodyOf(this.tables.arenas.instanceOf(id)!.body)!;
+    return bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(id)!);
   }
 
   cur(): Ref<Instance> {
@@ -768,7 +768,14 @@ class Codegen implements PrintHost, ComptimeHost {
   // The current function's parameters taken as a closure's address and code, by their slots.
   this.pairs = new Map<LocalId, string>();
 
+  // Where the lines of the function being emitted begin.
+  let mark = this.out.length;
+
   for (const instance of [...this.instances]) {
+    if (prior === undefined) {
+      this.pack(mark);
+      mark = this.out.length;
+    }
     if (this.bodyAt(instance).comptime !== undefined) continue;
     try {
       // A copy compiled as another instance of its function has no code of its own.
@@ -942,11 +949,13 @@ class Codegen implements PrintHost, ComptimeHost {
       // The statements are taken out of the body while they are lowered, so reading them doesn't
       // hold the generator they change.
       const bodyId = this.inst(instance).body;
-      const statements = this.tables.arenas.bodyMut(bodyId).body.splice(0);
+      const apart = this.inst(instance).lowered;
+      const statements = apart !== undefined ? this.tables.arenas.loweredMut(apart).body.splice(0) : this.tables.arenas.bodyMut(bodyId).body.splice(0);
       try {
         for (const each of statements) this.statement(each);
       } finally {
-        this.tables.arenas.bodyMut(bodyId).body = statements;
+        if (apart !== undefined) this.tables.arenas.loweredMut(apart).body = statements;
+        else this.tables.arenas.bodyMut(bodyId).body = statements;
       }
       this.raise();
       // Falling off the end drops what the body holds there, at its closing brace.
@@ -1014,6 +1023,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
   }
 
+  if (prior === undefined) this.pack(mark);
   partEnd(this.tables.session, "codegen functions", timer);
   timer = partStart(this.tables.session);
   this.framingOn = false;
@@ -1067,18 +1077,36 @@ class Codegen implements PrintHost, ComptimeHost {
     ...this.start,
     ...this.filled,
     "",
-  ].join("\n");
-  // Each named struct the module uses, defined once ahead of everything.
-  const whole = [...typeDefinitions(this.tables.typing, module), module].join("\n");
+  ];
+  // Each named struct the module uses, defined once ahead of everything. The names are read from
+  // the pieces and the text is joined once: joined twice, a large module was held three times.
+  const whole = [...typeDefinitions(this.tables.typing, module), ...module].join("\n");
+  this.out = [];
   partEnd(this.tables.session, "codegen assembly", timer);
   return whole;
+  }
+
+  // Joins the lines emitted since `from` into one string for each function among them, as
+  // `byName` divides them. A module's text is millions of lines, and each held as a string of its
+  // own takes about as much again as the text.
+  pack(this: Mut<this>, from: usize): void {
+    const lines = this.out.splice(from as i64);
+    let chunk: string[] = [];
+    for (const line of lines) {
+      if (chunk.length > 0 && (line.startsWith("define ") || line.startsWith("declare "))) {
+        this.out.push(chunk.join("\n"));
+        chunk = [];
+      }
+      chunk.push(line);
+    }
+    if (chunk.length > 0) this.out.push(chunk.join("\n"));
   }
 
   // Empties each instance's tables of expressions. `locals` stays: a library's header reads its
   // exports' parameters from it after codegen. A build that keeps its check keeps them all.
   releaseTables(this: Mut<this>) {
     for (let i: usize = 1; i <= this.tables.arenas.instanceCount(); i++) {
-      let fresh = emptyTables();
+      let fresh = emptyTables(this.tables.session.plain === true);
       let x = this.tables.arenas.instanceMut(i as InstanceId);
       x.types = fresh.types;
       x.calls = fresh.calls;
@@ -14096,7 +14124,15 @@ class Codegen implements PrintHost, ComptimeHost {
       const of = this.recOf(block.of);
       return block.of === want || (of?.kind === "union" && of.members.includes(want));
     });
-    return holder !== undefined ? this.narrowedPlace(payload, holder, want) : payload;
+    if (holder !== undefined) return this.narrowedPlace(payload, holder, want);
+    // A narrowed read is typed by records lowered afresh, laid out as the member's block is and
+    // not the same records: the value is in that block all the same, not in the payload, which
+    // holds the pointer to it.
+    const lowered = r.members.find((m) => {
+      const block = this.recOf(m);
+      return block?.kind === "recursive" && this.conversions().alike(block.of, want, new Map<string, boolean>());
+    });
+    return lowered !== undefined ? this.narrowedPlace(payload, lowered, want) : payload;
   }
 
 
