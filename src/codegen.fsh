@@ -762,7 +762,14 @@ class Codegen implements PrintHost, ComptimeHost {
   // The current function's parameters taken as a closure's address and code, by their slots.
   this.pairs = new Map<LocalId, string>();
 
+  // Where the lines of the function being emitted begin.
+  let mark = this.out.length;
+
   for (const instance of [...this.instances]) {
+    if (prior === undefined) {
+      this.pack(mark);
+      mark = this.out.length;
+    }
     if (this.bodyAt(instance).comptime !== undefined) continue;
     try {
       // A copy compiled as another instance of its function has no code of its own.
@@ -1010,6 +1017,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
   }
 
+  if (prior === undefined) this.pack(mark);
   partEnd(this.tables.session, "codegen functions", timer);
   timer = partStart(this.tables.session);
   this.framingOn = false;
@@ -1063,11 +1071,29 @@ class Codegen implements PrintHost, ComptimeHost {
     ...this.start,
     ...this.filled,
     "",
-  ].join("\n");
-  // Each named struct the module uses, defined once ahead of everything.
-  const whole = [...typeDefinitions(this.tables.typing, module), module].join("\n");
+  ];
+  // Each named struct the module uses, defined once ahead of everything. The names are read from
+  // the pieces and the text is joined once: joined twice, a large module was held three times.
+  const whole = [...typeDefinitions(this.tables.typing, module), ...module].join("\n");
+  this.out = [];
   partEnd(this.tables.session, "codegen assembly", timer);
   return whole;
+  }
+
+  // Joins the lines emitted since `from` into one string for each function among them, as
+  // `byName` divides them. A module's text is millions of lines, and each held as a string of its
+  // own takes about as much again as the text.
+  pack(this: Mut<this>, from: usize): void {
+    const lines = this.out.splice(from as i64);
+    let chunk: string[] = [];
+    for (const line of lines) {
+      if (chunk.length > 0 && (line.startsWith("define ") || line.startsWith("declare "))) {
+        this.out.push(chunk.join("\n"));
+        chunk = [];
+      }
+      chunk.push(line);
+    }
+    if (chunk.length > 0) this.out.push(chunk.join("\n"));
   }
 
   // Empties each instance's tables of expressions. `locals` stays: a library's header reads its
