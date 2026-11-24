@@ -12,7 +12,7 @@ import type { AssignOp, BinaryOp, Expr, Func, Id, Interface, MatchArm, ObjectPro
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.fsh";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.fsh";
 import { infer } from "./generics.fsh";
-import { ASYNC_DISPOSE, DISPOSE, EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, integerInfo, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.fsh";
+import { ASYNC_DISPOSE, DISPOSE, EMBEDDED, ITERATOR, LIVE, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, integerInfo, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.fsh";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.fsh";
 import type { EnumInfo, EnumInstance } from "./enums.fsh";
 import { EXPRESSION_FORMS, IMPORT_META_MEMBERS, unsupported } from "./unsupported.fsh";
@@ -7987,8 +7987,9 @@ export class Expressions<C extends Context> implements Union<C> {
   // a protected one also from the classes that embed it.
   /** @throws {CompileError} */
   private visible(this: Mut<this>, access: Access | undefined, declaring: ClassType, name: string, at: Ref<Span>): void {
-    // Only delegation reads the embedded collection, from wherever the class is used.
-    if (name === EMBEDDED || this.accessible(access, declaring, name)) return;
+    // Only delegation reads the embedded collection, from wherever the class is used, and only an
+    // 'await using' declaration's scope writes the liveness marker.
+    if (name === EMBEDDED || name === LIVE || this.accessible(access, declaring, name)) return;
     const message = name.startsWith("#")
       ? `property '${shownName(name)}' is not accessible outside class '${this.ctx.typing().rec(declaring).name}' because it has a private identifier`
       : `property '${name}' is ${access!} and only accessible within class '${this.ctx.typing().rec(declaring).name}'${access === "protected" ? " and its subclasses" : ""}`;

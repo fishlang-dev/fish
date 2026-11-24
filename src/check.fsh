@@ -23,7 +23,7 @@ import { Registry, RegistryState, type RegistryHost } from "./registry.fsh";
 import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost } from "./resolve.fsh";
 import { openParam } from "./typefns.fsh";
 import { lowerDefaults, writtenName } from "./defaults.fsh";
-import { ASYNC_DISPOSE, DISPOSE, idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
+import { ASYNC_DISPOSE, DISPOSE, LIVE, idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
 import { unsupported, unsupportedDeclaration } from "./unsupported.fsh";
 import { hoistLocals } from "./locals.fsh";
 import { localKeys, lowerKeys, lowerKeysWith, numberKey, topKeys } from "./keys.fsh";
@@ -192,8 +192,10 @@ type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: s
 type Destructured = { reads: Stmt[]; writes: Stmt[] };
 
 // An `await using` binding whose scope encloses the code being checked: its name and local, where
-// it is declared, and how many targets were open there, which says what a jump leaves.
-type Awaited = { name: string; local: LocalId; targets: usize; start: usize; end: usize };
+// it is declared, and how many targets and `finally` blocks were open there, which say what a
+// jump leaves and whether it does so from a place nothing can be awaited. `clears`: its class
+// has a disposer too, which an awaited async one stands in for.
+type Awaited = { name: string; local: LocalId; clears: boolean; targets: usize; finalizing: usize; start: usize; end: usize };
 
 // The variable saying whether an `await using` binding's disposer has been started, under a name
 // no source can write.
@@ -209,9 +211,12 @@ function endsAwaited(s: Ref<Stmt>): boolean {
   return s.kind === "if" && s.cond.kind === "unary" && s.cond.op === "!" && s.cond.operand.kind === "ident" && s.cond.operand.name.startsWith(startedName(""));
 }
 
-// Whether a statement awaits an `await using` binding's disposer, which only the checker writes.
+// Whether a statement awaits an `await using` binding's disposer, or clears the binding's liveness
+// marker after it, which only the checker writes.
 function awaitsDisposer(s: Ref<Stmt>): boolean {
-  if (s.kind !== "expr" || s.expr.kind !== "unary" || s.expr.op !== "await") return false;
+  if (s.kind !== "expr") return false;
+  if (s.expr.kind === "assign") return s.expr.target.kind === "member" && s.expr.target.name === LIVE;
+  if (s.expr.kind !== "unary" || s.expr.op !== "await") return false;
   const call: Ref<Expr> = s.expr.operand;
   return call.kind === "call" && call.callee.kind === "member" && call.callee.name === ASYNC_DISPOSE;
 }
@@ -5078,7 +5083,9 @@ class BodyChecker implements Context, GuardHost {
     const d: Ref<Declarator> = s.declarations[0]!;
     const local = this.locals().get(s);
     if (local === undefined || d.target.kind !== "ident") return;
-    const bound: Awaited = { name: d.target.name, local, targets: this.state.targets.length, start: s.start, end: s.end };
+    const held = this.cx.localOf(local).type;
+    const clears = this.cx.tables.typing.disposable(held);
+    const bound: Awaited = { name: d.target.name, local, clears, targets: this.state.targets.length, finalizing: this.state.finalizing, start: s.start, end: s.end };
     const at = { start: s.start, end: s.end };
     this.state.awaited.push({ ...bound });
     // A list checked again holds what its first check added.
@@ -5103,14 +5110,23 @@ class BodyChecker implements Context, GuardHost {
   }
 
   // What awaits an `await using` binding's disposer: the variable saying it has been started is
-  // set first, so nothing awaits it a second time when it throws.
+  // set first, so nothing awaits it a second time when it throws. Once it has completed, a class
+  // with a disposer too has its liveness marker cleared, so dropping the value doesn't also run
+  // that one; a panic or a dropped future before then leaves the marker, and the drop runs it.
   private disposal(this: Mut<this>, a: Ref<Awaited>, at: Ref<Span>): Stmt[] {
     const yes: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: true, start: at.start, end: at.end };
     const set: Expr = { id: nextId(this.cx.tables.ids), kind: "assign", op: "=", target: this.partIdent(startedName(a.name), at), value: yes, start: at.start, end: at.end };
     const callee: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: this.partIdent(a.name, at), name: ASYNC_DISPOSE, optional: false, start: at.start, end: at.end };
     const call: Expr = { id: nextId(this.cx.tables.ids), kind: "call", callee, typeArgs: [], args: [], optional: false, start: at.start, end: at.end };
     const awaited: Expr = { id: nextId(this.cx.tables.ids), kind: "unary", op: "await", operand: call, start: at.start, end: at.end };
-    return [{ id: nextId(this.cx.tables.ids), kind: "expr", expr: set, start: at.start, end: at.end }, { id: nextId(this.cx.tables.ids), kind: "expr", expr: awaited, start: at.start, end: at.end }];
+    let out: Stmt[] = [{ id: nextId(this.cx.tables.ids), kind: "expr", expr: set, start: at.start, end: at.end }, { id: nextId(this.cx.tables.ids), kind: "expr", expr: awaited, start: at.start, end: at.end }];
+    if (a.clears) {
+      const marker: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: this.partIdent(a.name, at), name: LIVE, optional: false, start: at.start, end: at.end };
+      const no: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: false, start: at.start, end: at.end };
+      const clear: Expr = { id: nextId(this.cx.tables.ids), kind: "assign", op: "=", target: marker, value: no, start: at.start, end: at.end };
+      out.push({ id: nextId(this.cx.tables.ids), kind: "expr", expr: clear, start: at.start, end: at.end });
+    }
+    return out;
   }
 
   // A `return`, `break` or `continue` at `i` in a list, before it is checked: one that leaves the
@@ -5134,6 +5150,12 @@ class BodyChecker implements Context, GuardHost {
     } else if (!this.state.targets.some((t) => t.kind === "arm")) from = 0;
     if (from === this.state.awaited.length) return;
     const at = { start: s.start, end: s.end };
+    for (let k = from; k < this.state.awaited.length; k++) {
+      const a: Awaited = { ...this.state.awaited[k]! };
+      const leaves = `this '${s.kind}' leaves the scope of 'await using ${a.name}'`;
+      if (this.state.finalizing > a.finalizing) throw new CompileError("E0412", `${leaves} from inside a 'try' with a 'finally', where its disposer can't be awaited yet; leave the scope after the 'try', as by setting a variable in it and testing that after it`, at.start, at.end);
+      if (this.peek(a.name) !== a.local) throw new CompileError("E0412", `${leaves} where another '${a.name}' hides it, so its disposer can't be awaited here; give the inner '${a.name}' another name`, at.start, at.end);
+    }
     let made: Stmt[] = [];
     let exit: Stmt;
     if (s.kind === "break" || s.kind === "continue") exit = { id: nextId(this.cx.tables.ids), kind: s.kind, label: s.label, start: at.start, end: at.end };
@@ -6203,6 +6225,11 @@ class BodyChecker implements Context, GuardHost {
         // The case bodies share one scope, as in JavaScript, but any case may be entered
         // directly, skipping the bodies before it, so a binding one case declares is usable
         // only in that case.
+        // A switch's cases share one scope, which no case's statements end.
+        for (const c of s.cases) {
+          const direct = c.body.find((x) => x.kind === "let" && x.keyword === "await using");
+          if (direct !== undefined) throw new CompileError("E0411", "'await using' can't be declared straight in a 'switch' case, whose scope is the whole 'switch' and not the case, as in TypeScript; put the case's statements in a block", direct.start, direct.start + 11);
+        }
         this.pushScope(new Map<string, LocalId>());
         this.enterTarget({ stmt: standIn(s), kind: "switch" as const });
         // A case narrows a union for its body, and so do the cases that fall through into it.
@@ -6249,6 +6276,10 @@ class BodyChecker implements Context, GuardHost {
         }
         let body: Ref<Stmt> = s.body;
         while (body.kind === "labeled") body = labeledOf(body);
+        // A jump straight after a label is in no list, so nothing could be put before it.
+        if (this.state.awaited.length > 0 && (body.kind === "return" || body.kind === "break" || body.kind === "continue")) {
+          throw new CompileError("E0412", `this '${body.kind}' is written straight after a label, where the disposer of 'await using ${this.state.awaited.at(-1)!.name}' can't be awaited before it; put it in a block, as in '${s.label}: { ... }'`, body.start, body.end);
+        }
         const loop = ["while", "doWhile", "for", "forIn", "forOf"].includes(body.kind) ? standIn(body) : undefined;
         this.enterTarget({ stmt: standIn(s), kind: "label" as const, label: s.label, loop });
         this.statement(s.body);

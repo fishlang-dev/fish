@@ -1228,7 +1228,6 @@ async function f() {
   await using.y;
   await using
   x = 2;
-  for (await using of xs) {}
 }
 // case: async_dispose_with_a_parameter
 class Res {
@@ -2122,3 +2121,380 @@ async function main() {
 // expect: still open
 // expect: closed a
 // expect: -1
+// case: await_using_both_disposers
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](): void { console.log(`dropped ${this.name}`); }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {
+    await sleep(1);
+    console.log(`closed ${this.name}`);
+  }
+}
+async function work(early: boolean): Promise<i64> {
+  await using c = new Conn(early ? "early" : "late");
+  if (early) return 1;
+  console.log("working");
+  return 2;
+}
+async function main() {
+  const a = await work(true);
+  console.log(a);
+  const b = await work(false);
+  console.log(b);
+  for (let i = 0; i < 2; i++) {
+    await using each = new Conn(`each ${i}`);
+    if (i === 0) continue;
+    console.log("last pass");
+  }
+}
+// expect: closed early
+// expect: 1
+// expect: working
+// expect: closed late
+// expect: 2
+// expect: closed each 0
+// expect: last pass
+// expect: closed each 1
+// case: await_using_both_disposers_thrown_past
+class Boom extends Error {}
+class Conn {
+  [Symbol.dispose](): void { console.log("dropped"); }
+  async [Symbol.asyncDispose](): Promise<void> { console.log("closed"); }
+}
+async function work(): Promise<void> throws Boom {
+  await using c = new Conn();
+  throw new Boom("failed");
+}
+async function main() {
+  try {
+    await work();
+  } catch (e) {
+    console.log(`caught ${e.message}`);
+  }
+}
+// expect: closed
+// expect: caught failed
+// case: await_using_both_disposers_panic
+class Conn {
+  [Symbol.dispose](): void { console.log("dropped"); }
+  async [Symbol.asyncDispose](): Promise<void> { console.log("closed"); }
+}
+async function main() {
+  await using c = new Conn();
+  const xs: i64[] = [];
+  console.log(xs[3]!);
+}
+// expect: dropped
+// panic: index out of bounds
+// case: await_using_async_disposer_panic
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> { console.log("closed"); }
+}
+async function main() {
+  await using c = new Conn();
+  const xs: i64[] = [];
+  console.log(xs[3]!);
+}
+// panic: index out of bounds
+// case: await_using_both_disposers_async_throws
+class Boom extends Error {}
+class Conn {
+  [Symbol.dispose](): void { console.log("dropped"); }
+  async [Symbol.asyncDispose](): Promise<void> throws Boom {
+    console.log("closing");
+    throw new Boom("close failed");
+  }
+}
+async function work(): Promise<void> throws Boom {
+  await using c = new Conn();
+  console.log("working");
+}
+async function main() {
+  try {
+    await work();
+  } catch (e) {
+    console.log(`caught ${e.message}`);
+  }
+}
+// expect: working
+// expect: closing
+// expect: dropped
+// expect: caught close failed
+// case: await_using_both_disposers_declared_other_ways
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](): void { console.log(`dropped ${this.name}`); }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function main() {
+  using a = new Conn("using");
+  const b = new Conn("const");
+  await using c = new Conn("await using");
+  console.log("working");
+}
+// expect: working
+// expect: closed await using
+// expect: dropped const
+// expect: dropped using
+// case: await_using_both_disposers_of_a_subclass
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](): void { console.log(`dropped ${this.name}`); }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+class Pooled extends Conn {
+  constructor() { super("pooled"); }
+}
+async function main() {
+  await using c = new Pooled();
+  console.log("working");
+}
+// expect: working
+// expect: closed pooled
+// case: await_using_in_a_match_arm
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> {}
+}
+async function main() {
+  const n: i64 = 1;
+  match (n) {
+    case 1 => {
+      await using c = new Conn();
+      console.log("one");
+    },
+    case _ => console.log("other"),
+  }
+}
+// error: 8:7: error[E0411]: 'await using' can't be declared inside a match arm, where nothing can be awaited yet; declare it before the 'match'
+// case: await_using_in_a_try_with_finally
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> {}
+}
+async function main() {
+  try {
+    await using c = new Conn();
+    console.log("working");
+  } finally {
+    console.log("done");
+  }
+}
+// error: 6:5: error[E0411]: 'await using' can't be declared in a 'try' with a 'finally', where nothing can be awaited yet; declare it before the 'try'
+// case: await_using_in_a_switch_case
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> {}
+}
+async function main() {
+  const n: i64 = 1;
+  switch (n) {
+    case 1:
+      await using c = new Conn();
+      console.log("one");
+      break;
+    default:
+      console.log("other");
+  }
+}
+// error: 8:7: error[E0411]: 'await using' can't be declared straight in a 'switch' case, whose scope is the whole 'switch' and not the case, as in TypeScript; put the case's statements in a block
+// case: await_using_return_in_a_try_with_finally
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> {}
+}
+async function work(): Promise<i64> {
+  await using c = new Conn();
+  try {
+    return 1;
+  } finally {
+    console.log("done");
+  }
+}
+async function main() {
+  const n = await work();
+  console.log(n);
+}
+// error: 7:5: error[E0412]: this 'return' leaves the scope of 'await using c' from inside a 'try' with a 'finally', where its disposer can't be awaited yet; leave the scope after the 'try', as by setting a variable in it and testing that after it
+// case: await_using_break_in_a_try_with_finally
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> {}
+}
+async function main() {
+  for (let i = 0; i < 2; i++) {
+    await using c = new Conn();
+    try {
+      break;
+    } finally {
+      console.log("done");
+    }
+  }
+}
+// error: 8:7: error[E0412]: this 'break' leaves the scope of 'await using c' from inside a 'try' with a 'finally'
+// case: await_using_jump_inside_a_try_with_finally
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> { console.log("closed"); }
+}
+async function main() {
+  await using c = new Conn();
+  try {
+    for (let i = 0; i < 3; i++) {
+      if (i === 1) break;
+      console.log(`pass ${i}`);
+    }
+  } finally {
+    console.log("done");
+  }
+}
+// expect: pass 0
+// expect: done
+// expect: closed
+// case: await_using_hidden_at_a_return
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> {}
+}
+async function work(): Promise<i64> {
+  await using c = new Conn();
+  {
+    const c = 5;
+    return c;
+  }
+}
+async function main() {
+  const n = await work();
+  console.log(n);
+}
+// error: 8:5: error[E0412]: this 'return' leaves the scope of 'await using c' where another 'c' hides it, so its disposer can't be awaited here; give the inner 'c' another name
+// case: await_using_labeled_jump
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> {}
+}
+async function main() {
+  for (let i = 0; i < 2; i++) {
+    await using c = new Conn();
+    if (i === 0) skip: continue;
+  }
+}
+// error: error[E0412]: this 'continue' is written straight after a label, where the disposer of 'await using c' can't be awaited before it; put it in a block, as in 'skip: { ... }'
+// case: await_using_match_inside
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> { console.log("closed"); }
+}
+async function work(n: i64): Promise<string> {
+  await using c = new Conn();
+  const name = match (n) {
+    case 1 => {
+      return "one";
+    },
+    case _ => "other",
+  };
+  console.log(`matched ${name}`);
+  return name;
+}
+async function main() {
+  const s = await work(1);
+  console.log(s);
+}
+// expect: matched one
+// expect: closed
+// expect: one
+// case: await_using_throw_through_a_finally
+class Boom extends Error {}
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> { console.log("closed"); }
+}
+async function work(): Promise<void> throws Boom {
+  await using c = new Conn();
+  try {
+    throw new Boom("failed");
+  } finally {
+    console.log("finally");
+  }
+}
+async function main() {
+  try {
+    await work();
+  } catch (e) {
+    console.log(`caught ${e.message}`);
+  }
+}
+// expect: finally
+// expect: closed
+// expect: caught failed
+// case: await_using_error_wrapped_on_the_way_out
+class DbError {
+  constructor(public code: i64) {}
+}
+class ApiError implements From<DbError> {
+  constructor(public status: i64) {}
+  static from(e: DbError): ApiError {
+    return new ApiError(500 + e.code);
+  }
+}
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> { console.log("closed"); }
+}
+function query(n: i64): i64 throws DbError {
+  if (n < 0) throw new DbError(7);
+  return n;
+}
+async function handler(n: i64): Promise<i64> throws ApiError {
+  await using c = new Conn();
+  return query(n) * 2;
+}
+async function main() {
+  try {
+    const a = await handler(4);
+    console.log(a);
+    const b = await handler(-1);
+    console.log(b);
+  } catch (e) {
+    console.log(`api ${e.status}`);
+  }
+}
+// expect: closed
+// expect: 8
+// expect: closed
+// expect: api 507
+// case: await_using_error_undeclared_where_it_is_raised
+class Boom extends Error {}
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> {}
+}
+function risky(n: i64): i64 throws Boom {
+  if (n > 1) throw new Boom("too big");
+  return n;
+}
+async function work(n: i64): Promise<i64> {
+  await using c = new Conn();
+  return risky(n);
+}
+async function main() {
+  const n = await work(1);
+  console.log(n);
+}
+// error: 11:10: error[E0602]: 'work' must declare 'throws Boom' after its return type since this can throw 'Boom', or catch it with try/catch
+// case: await_using_both_disposers_future_dropped
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](): void { console.log(`dropped ${this.name}`); }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function slow(): Promise<i64> {
+  await using c = new Conn("slow");
+  await sleep(50);
+  console.log("slow done");
+  return 1;
+}
+async function fast(): Promise<i64> {
+  await using c = new Conn("fast");
+  await sleep(1);
+  return 2;
+}
+async function main() {
+  const n = await Promise.race([slow(), fast()]);
+  console.log(n);
+}
+// expect: closed fast
+// expect: dropped slow
+// expect: 2
