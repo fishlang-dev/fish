@@ -3314,20 +3314,20 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     let waiting: InstanceId[] = [id];
     let apart: usize[] = [];
     while (waiting.length > 0) {
-      let x = this.tables.arenas.instanceMut(waiting.pop()!);
-      if (x.inner !== undefined) for (const c of x.inner!) waiting.push(c);
-      if (x.lowered !== undefined) apart.push(x.lowered!);
+      let emptied = this.tables.arenas.instanceMut(waiting.pop()!);
+      if (emptied.inner !== undefined) for (const c of emptied.inner!) waiting.push(c);
+      if (emptied.lowered !== undefined) apart.push(emptied.lowered!);
       let fresh = emptyTables(this.tables.session.plain === true);
-      x.types = fresh.types;
-      x.locals = fresh.locals;
-      x.calls = fresh.calls;
-      x.setters = fresh.setters;
-      x.coercions = fresh.coercions;
-      x.jumps = fresh.jumps;
-      x.borrowsFrom = fresh.borrowsFrom;
-      x.raises = fresh.raises;
-      x.caught = fresh.caught;
-      x.patterns = fresh.patterns;
+      emptied.types = fresh.types;
+      emptied.locals = fresh.locals;
+      emptied.calls = fresh.calls;
+      emptied.setters = fresh.setters;
+      emptied.coercions = fresh.coercions;
+      emptied.jumps = fresh.jumps;
+      emptied.borrowsFrom = fresh.borrowsFrom;
+      emptied.raises = fresh.raises;
+      emptied.caught = fresh.caught;
+      emptied.patterns = fresh.patterns;
     }
     for (const at of apart) this.tables.arenas.dropLowered(at);
   }
