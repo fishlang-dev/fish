@@ -191,6 +191,21 @@ type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: s
 // The statements a destructuring assignment becomes: every part read, then every target written.
 type Destructured = { reads: Stmt[]; writes: Stmt[] };
 
+// An `await using` binding whose scope encloses the code being checked: its name and local, where
+// it is declared, and how many targets were open there, which says what a jump leaves.
+type Awaited = { name: string; local: LocalId; targets: usize; start: usize; end: usize };
+
+// The variable saying whether an `await using` binding's disposer has been started, under a name
+// no source can write.
+const startedName = (name: string): string => `disposal of ${name}`;
+
+// Whether a statement awaits an `await using` binding's disposer, which only the checker writes.
+function awaitsDisposer(s: Ref<Stmt>): boolean {
+  if (s.kind !== "expr" || s.expr.kind !== "unary" || s.expr.op !== "await") return false;
+  const call: Ref<Expr> = s.expr.operand;
+  return call.kind === "call" && call.callee.kind === "member" && call.callee.name === ASYNC_DISPOSE;
+}
+
 // A statement's stand-in as a jump's target: its id and span.
 function standIn(s: Ref<Stmt>): Stmt {
   return { id: s.id, kind: "empty", start: s.start, end: s.end };
@@ -3577,6 +3592,8 @@ class BodyState {
   // How many statements with a `finally` enclose the code being checked: a generator dropped
   // at a `yield` there would never run the `finally`.
   finalizing: usize;
+  // The `await using` bindings whose scopes enclose the code being checked, innermost last.
+  awaited: Awaited[];
   // This body's sight in the resolver's state, which holds the scopes its bindings are declared in.
   sight: usize;
   targets: Target[];
@@ -3653,6 +3670,7 @@ class BodyState {
     this.family = undefined;
     this.inferred = undefined;
     this.finalizing = 0;
+    this.awaited = [];
     this.sight = 0;
     this.targets = [];
     this.facts = [];
@@ -3844,6 +3862,7 @@ class BodyChecker implements Context, GuardHost {
     this.st.awaitable = new NodeSet<Expr>();
     this.st.yieldable = new NodeSet<Expr>();
     this.state.finalizing = 0;
+    this.state.awaited = [];
     const outerSight = this.state.outer !== undefined ? this.state.outer.sight : undefined;
     const sightOf = this.f().bodyId;
     this.state.sight = this.cx.resolver().openSight(sightOf, outerSight);
@@ -4997,7 +5016,9 @@ class BodyChecker implements Context, GuardHost {
     this.hoist(list);
     const before = this.state.facts.length;
     const writes = this.state.written.length;
+    const open = this.state.awaited.length;
     for (let i = 0; i < list.length; i++) {
+      if (this.state.awaited.length > 0) this.disposedBefore(list, i);
       const inserted = this.cx.tables.insertedAfter.get(list[i]!);
       if (inserted !== undefined && inserted.length > 0 && (i + 1 < list.length ? list[i + 1]!.id : undefined) !== inserted[0]!.id) for (let k: usize = 0; k < inserted.length; k++) list.splice((i + 1 + k) as i64, 0, cloneStmt(inserted[k]!));
       const s: Ref<Stmt> = list[i]!;
@@ -5014,7 +5035,9 @@ class BodyChecker implements Context, GuardHost {
       let at = i + 1;
       while (added.length > 0) list.splice(at++ as i64, 0, added.shift()!);
       if (after !== undefined) this.state.facts.push(this.current(after, mark));
+      this.awaitedFrom(list, i);
     }
+    this.state.awaited.splice(open as i64);
     if (list.length !== given.length || list.some((x, i) => x.id !== given[i as usize]!.id)) this.cx.tables.rewrites.replaceList(bodyId, owner, field, list);
     let ends: Facts = new Map<string, Type>();
     for (const { local } of this.state.written.slice(writes as i64)) {
@@ -5033,6 +5056,86 @@ class BodyChecker implements Context, GuardHost {
     return ends;
   }
 
+  // An `await using` declaration just checked, at `i` in its list, opens its binding's scope: the
+  // rest of the list, which goes in a block of its own. A variable before the block says whether
+  // the disposer has been started, and after the block the disposer is awaited unless a way out
+  // of it did that, as `disposedBefore` makes each do.
+  /** @throws {CompileError} */
+  private awaitedFrom(this: Mut<this>, list: Mut<Stmt[]>, i: usize): void {
+    const s: Ref<Stmt> = list[i]!;
+    if (s.kind !== "let" || s.keyword !== "await using") return;
+    const d: Ref<Declarator> = s.declarations[0]!;
+    const local = this.locals().get(s);
+    if (local === undefined || d.target.kind !== "ident") return;
+    const bound: Awaited = { name: d.target.name, local, targets: this.state.targets.length, start: s.start, end: s.end };
+    const at = { start: s.start, end: s.end };
+    this.state.awaited.push({ ...bound });
+    // A list checked again holds what its first check added.
+    if (i + 1 < list.length && declaredNames(list[i + 1]!).includes(startedName(bound.name))) return;
+    const flag: Pattern = { id: nextId(this.cx.tables.ids), kind: "ident", name: startedName(bound.name), start: at.start, end: at.end };
+    const unset: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: false, start: at.start, end: at.end };
+    const started = letOf(nextId(this.cx.tables.ids), "let", { id: nextId(this.cx.tables.ids), target: flag, type: undefined, init: unset, start: at.start, end: at.end }, at);
+    const pending: Expr = { id: nextId(this.cx.tables.ids), kind: "unary", op: "!", operand: this.partIdent(startedName(bound.name), at), start: at.start, end: at.end };
+    const last: Stmt = { id: nextId(this.cx.tables.ids), kind: "if", cond: pending, then: this.disposal(bound), else: undefined, start: at.start, end: at.end };
+    const rest = list.splice((i + 1) as i64);
+    list.push(started);
+    list.push({ id: nextId(this.cx.tables.ids), kind: "block", body: rest, start: at.start, end: at.end });
+    list.push(last);
+  }
+
+  // What awaits an `await using` binding's disposer: the variable saying it has been started is
+  // set first, so nothing awaits it a second time when it throws.
+  private disposal(this: Mut<this>, a: Ref<Awaited>): Stmt[] {
+    const at = { start: a.start, end: a.end };
+    const yes: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: true, start: at.start, end: at.end };
+    const set: Expr = { id: nextId(this.cx.tables.ids), kind: "assign", op: "=", target: this.partIdent(startedName(a.name), at), value: yes, start: at.start, end: at.end };
+    const callee: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: this.partIdent(a.name, at), name: ASYNC_DISPOSE, optional: false, start: at.start, end: at.end };
+    const call: Expr = { id: nextId(this.cx.tables.ids), kind: "call", callee, typeArgs: [], args: [], optional: false, start: at.start, end: at.end };
+    const awaited: Expr = { id: nextId(this.cx.tables.ids), kind: "unary", op: "await", operand: call, start: at.start, end: at.end };
+    return [{ id: nextId(this.cx.tables.ids), kind: "expr", expr: set, start: at.start, end: at.end }, { id: nextId(this.cx.tables.ids), kind: "expr", expr: awaited, start: at.start, end: at.end }];
+  }
+
+  // A `return`, `break` or `continue` at `i` in a list, before it is checked: one that leaves the
+  // scope of `await using` bindings first awaits their disposers, innermost first, a returned
+  // value computed before them and held in a variable. The statements go before it in the list,
+  // so the list still ends with the jump.
+  /** @throws {CompileError} */
+  private disposedBefore(this: Mut<this>, list: Mut<Stmt[]>, i: usize): void {
+    const peeked = this.cx.tables.rewrites.getStmt(list[i]!.id);
+    const s: Ref<Stmt> = peeked !== undefined ? peeked : list[i]!;
+    if (s.kind !== "return" && s.kind !== "break" && s.kind !== "continue") return;
+    // A list checked again holds what its first check added.
+    if (i > 0 && awaitsDisposer(list[i - 1]!)) return;
+    // A jump leaves the bindings declared inside its target, and a `return` all of them, unless
+    // it is in a match arm, which it gives a value and never leaves.
+    let from = this.state.awaited.length;
+    if (s.kind === "break" || s.kind === "continue") {
+      const target = this.jumpTarget(s);
+      const depth = this.state.targets.findIndex((t) => t.stmt.id === target.id);
+      while (from > 0 && (this.state.awaited[from - 1]!.targets as i64) > depth) from--;
+    } else if (!this.state.targets.some((t) => t.kind === "arm")) from = 0;
+    if (from === this.state.awaited.length) return;
+    const at = { start: s.start, end: s.end };
+    let made: Stmt[] = [];
+    let exit: Stmt;
+    if (s.kind === "break" || s.kind === "continue") exit = { id: nextId(this.cx.tables.ids), kind: s.kind, label: s.label, start: at.start, end: at.end };
+    else if (s.kind === "return" && s.value !== undefined) {
+      const name = `returned ${s.start}`;
+      const target: Pattern = { id: nextId(this.cx.tables.ids), kind: "ident", name, start: at.start, end: at.end };
+      made.push(letOf(nextId(this.cx.tables.ids), "const", { id: nextId(this.cx.tables.ids), target, type: undefined, init: cloneExpr(s.value), start: at.start, end: at.end }, at));
+      exit = { id: nextId(this.cx.tables.ids), kind: "return", value: this.partIdent(name, at), start: at.start, end: at.end };
+    } else exit = { id: nextId(this.cx.tables.ids), kind: "return", value: undefined, start: at.start, end: at.end };
+    for (let k = this.state.awaited.length; k > from; k--) {
+      const leaving: Awaited = { ...this.state.awaited[k - 1]! };
+      let awaits = this.disposal(leaving);
+      while (awaits.length > 0) made.push(awaits.shift()!);
+    }
+    made.push(exit);
+    list.splice(i as i64, 1);
+    let to = i;
+    while (made.length > 0) list.splice(to++ as i64, 0, made.shift()!);
+  }
+
   // A declaration's type: as written, or as a later use demanded, or as the target its
   // destructured part goes to.
   /** @throws {CompileError} */
@@ -5041,6 +5144,8 @@ class BodyChecker implements Context, GuardHost {
       const resolved = this.cx.resolver().resolveType(d.type);
       return this.cx.tables.typing.stored(resolved);
     }
+    // A value held for a `return` while disposers are awaited is the function's result.
+    if (d.target.kind === "ident" && d.target.name.startsWith("returned ")) return this.state.declared;
     const demanded = this.cx.demands.get(s);
     return demanded !== undefined ? demanded : this.partType(s);
   }

@@ -1437,3 +1437,413 @@ async function main() {
   show();
 }
 // error: error[E0215]: 'r' can't be held by this closure: it is declared with 'using'
+// case: await_using_block_end
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {
+    await sleep(1);
+    console.log(`closed ${this.name}`);
+  }
+}
+async function main() {
+  await using c = new Conn("db");
+  console.log(`using ${c.name}`);
+  {
+    await using inner = new Conn("inner");
+    console.log("in block");
+  }
+  console.log("after block");
+}
+// expect: using db
+// expect: in block
+// expect: closed inner
+// expect: after block
+// expect: closed db
+// case: await_using_awaited_value
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function connect(name: string): Promise<Conn> {
+  await sleep(1);
+  console.log(`opened ${name}`);
+  return new Conn(name);
+}
+async function main() {
+  await using c = await connect("db");
+  console.log("working");
+}
+// expect: opened db
+// expect: working
+// expect: closed db
+// case: await_using_return_value
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {
+    await sleep(1);
+    console.log(`closed ${this.name}`);
+  }
+}
+function describe(c: Ref<Conn>): string {
+  console.log(`describing ${c.name}`);
+  return `conn ${c.name}`;
+}
+async function work(early: boolean): Promise<string> {
+  await using c = new Conn("a");
+  if (early) return describe(c);
+  console.log("working");
+  return "late";
+}
+async function main() {
+  const first = await work(true);
+  console.log(first);
+  const second = await work(false);
+  console.log(second);
+}
+// expect: describing a
+// expect: closed a
+// expect: conn a
+// expect: working
+// expect: closed a
+// expect: late
+// case: await_using_return_nothing
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function work(early: boolean): Promise<void> {
+  await using c = new Conn("a");
+  if (early) {
+    console.log("leaving");
+    return;
+  }
+  console.log("staying");
+}
+async function main() {
+  await work(true);
+  await work(false);
+}
+// expect: leaving
+// expect: closed a
+// expect: staying
+// expect: closed a
+// case: await_using_return_awaited
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function query(c: Ref<Conn>): Promise<i64> {
+  await sleep(1);
+  console.log(`queried ${c.name}`);
+  return 42;
+}
+async function work(): Promise<i64> {
+  await using c = new Conn("a");
+  return await query(c);
+}
+async function main() {
+  const n = await work();
+  console.log(n);
+}
+// expect: queried a
+// expect: closed a
+// expect: 42
+// case: await_using_return_typed_as_declared
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> { console.log("closed"); }
+}
+async function small(): Promise<i32> {
+  await using c = new Conn();
+  return 7;
+}
+async function none(): Promise<string | null> {
+  await using c = new Conn();
+  return null;
+}
+async function list(): Promise<string[]> {
+  await using c = new Conn();
+  return [];
+}
+async function main() {
+  const n: i32 = await small();
+  console.log(n);
+  const s = await none();
+  console.log(s === null);
+  const xs = await list();
+  console.log(xs.length);
+}
+// expect: closed
+// expect: 7
+// expect: closed
+// expect: true
+// expect: closed
+// expect: 0
+// case: await_using_break_and_continue
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {
+    await sleep(1);
+    console.log(`closed ${this.name}`);
+  }
+}
+async function main() {
+  for (let i = 0; i < 4; i++) {
+    await using c = new Conn(`${i}`);
+    if (i === 1) continue;
+    if (i === 3) break;
+    console.log(`pass ${c.name}`);
+  }
+  console.log("done");
+}
+// expect: pass 0
+// expect: closed 0
+// expect: closed 1
+// expect: pass 2
+// expect: closed 2
+// expect: closed 3
+// expect: done
+// case: await_using_break_past_it
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function main() {
+  await using outer = new Conn("outer");
+  let n = 0;
+  while (true) {
+    n++;
+    if (n === 2) break;
+    console.log(`pass ${n}`);
+  }
+  console.log("after the loop");
+}
+// expect: pass 1
+// expect: after the loop
+// expect: closed outer
+// case: await_using_labeled_break
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function main() {
+  outer: for (let i = 0; i < 2; i++) {
+    await using a = new Conn(`a${i}`);
+    for (let j = 0; j < 2; j++) {
+      await using b = new Conn(`b${i}${j}`);
+      if (j === 1) continue outer;
+      if (i === 1) break outer;
+      console.log(`pass ${i} ${j}`);
+    }
+  }
+  console.log("done");
+}
+// expect: pass 0 0
+// expect: closed b00
+// expect: closed b01
+// expect: closed a0
+// expect: closed b10
+// expect: closed a1
+// expect: done
+// case: await_using_two_in_one_block
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {
+    await sleep(1);
+    console.log(`closed ${this.name}`);
+  }
+}
+async function work(early: boolean): Promise<i64> {
+  await using first = new Conn("first"), second = new Conn("second");
+  if (early) return 1;
+  await using third = new Conn("third");
+  console.log(`${first.name} ${second.name} ${third.name}`);
+  return 2;
+}
+async function main() {
+  const a = await work(true);
+  console.log(a);
+  const b = await work(false);
+  console.log(b);
+}
+// expect: closed second
+// expect: closed first
+// expect: 1
+// expect: first second third
+// expect: closed third
+// expect: closed second
+// expect: closed first
+// expect: 2
+// case: await_using_return_from_nested_scopes
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function find(want: i64): Promise<i64> {
+  await using outer = new Conn("outer");
+  for (let i = 0; i < 3; i++) {
+    await using each = new Conn(`each ${i}`);
+    if (i === want) {
+      await using found = new Conn("found");
+      return i * 10;
+    }
+  }
+  return -1;
+}
+async function main() {
+  const hit = await find(1);
+  console.log(hit);
+  const miss = await find(9);
+  console.log(miss);
+}
+// expect: closed each 0
+// expect: closed found
+// expect: closed each 1
+// expect: closed outer
+// expect: 10
+// expect: closed each 0
+// expect: closed each 1
+// expect: closed each 2
+// expect: closed outer
+// expect: -1
+// case: await_using_with_using
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+class Guard {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](): void { console.log(`released ${this.name}`); }
+}
+async function main() {
+  using before = new Guard("before");
+  await using c = new Conn("conn");
+  using after = new Guard("after");
+  console.log("working");
+}
+// expect: working
+// expect: released after
+// expect: closed conn
+// expect: released before
+// case: await_using_lent_and_changed
+class Counter {
+  n: i64;
+  constructor() { this.n = 0; }
+  bump(this: Mut<this>): void { this.n++; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed at ${this.n}`); }
+}
+function twice(c: Mut<Counter>): void {
+  c.bump();
+  c.bump();
+}
+function read(c: Ref<Counter>): i64 {
+  return c.n;
+}
+async function main() {
+  await using c = new Counter();
+  c.bump();
+  twice(c);
+  console.log(read(c));
+}
+// expect: 3
+// expect: closed at 3
+// case: await_using_of_a_subclass
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+class Pooled extends Conn {
+  constructor() { super("pooled"); }
+}
+async function main() {
+  await using c = new Pooled();
+  console.log("working");
+}
+// expect: working
+// expect: closed pooled
+// case: await_using_in_an_async_closure
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function main() {
+  const work = async (name: string): Promise<i64> => {
+    await using c = new Conn(name);
+    if (name === "short") return 1;
+    console.log(`working with ${c.name}`);
+    return 2;
+  };
+  const a = await work("short");
+  console.log(a);
+  const b = await work("long");
+  console.log(b);
+}
+// expect: closed short
+// expect: 1
+// expect: working with long
+// expect: closed long
+// expect: 2
+// case: await_using_in_a_method
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+class Pool {
+  prefix: string;
+  constructor(prefix: string) { this.prefix = prefix; }
+  async run(this: Mut<this>, job: string): Promise<string> {
+    await using c = new Conn(`${this.prefix}-${job}`);
+    return `ran ${c.name}`;
+  }
+}
+async function main() {
+  let pool = new Pool("p");
+  const out = await pool.run("one");
+  console.log(out);
+}
+// expect: closed p-one
+// expect: ran p-one
+// case: await_using_in_a_switch_case_block
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function pick(n: i64): Promise<void> {
+  await using outer = new Conn("outer");
+  switch (n) {
+    case 1: {
+      await using one = new Conn("one");
+      console.log("in one");
+      break;
+    }
+    default:
+      console.log("in default");
+  }
+  console.log("after the switch");
+}
+async function main() {
+  await pick(1);
+  await pick(2);
+}
+// expect: in one
+// expect: closed one
+// expect: after the switch
+// expect: closed outer
+// expect: in default
+// expect: after the switch
+// expect: closed outer
