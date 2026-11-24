@@ -2525,3 +2525,35 @@ async function main() {
 // warning: unused variable 'spare'
 // expect: working
 // expect: closed
+// case: await_using_disposer_error_caught_inside
+class Boom extends Error {}
+class Conn {
+  [Symbol.dispose](): void { console.log("dropped"); }
+  async [Symbol.asyncDispose](): Promise<void> throws Boom {
+    console.log("closing");
+    throw new Boom("close failed");
+  }
+}
+async function work(): Promise<i64> throws Boom {
+  await using c = new Conn();
+  try {
+    return 1;
+  } catch (e) {
+    console.log(`inner caught ${e.message}`);
+  }
+  console.log("after");
+  return 2;
+}
+async function main() {
+  try {
+    const n = await work();
+    console.log(n);
+  } catch (e) {
+    console.log(`outer caught ${e.message}`);
+  }
+}
+// expect: closing
+// expect: inner caught close failed
+// expect: after
+// expect: dropped
+// expect: 2

@@ -205,20 +205,11 @@ const startedName = (name: string): string => `disposal of ${name}`;
 // name no source can write.
 const thrownName = (name: string): string => `error past ${name}`;
 
-// Whether a statement is the one after an `await using` binding's scope, which awaits the
-// disposer unless a way out of the scope already has.
+// Whether a statement awaits an `await using` binding's disposer unless it has been started,
+// which only the checker writes: after the binding's scope, in the scope's handler, and before
+// each way out of it.
 function endsAwaited(s: Ref<Stmt>): boolean {
   return s.kind === "if" && s.cond.kind === "unary" && s.cond.op === "!" && s.cond.operand.kind === "ident" && s.cond.operand.name.startsWith(startedName(""));
-}
-
-// Whether a statement awaits an `await using` binding's disposer, or clears the binding's liveness
-// marker after it, which only the checker writes.
-function awaitsDisposer(s: Ref<Stmt>): boolean {
-  if (s.kind !== "expr") return false;
-  if (s.expr.kind === "assign") return s.expr.target.kind === "member" && s.expr.target.name === LIVE;
-  if (s.expr.kind !== "unary" || s.expr.op !== "await") return false;
-  const call: Ref<Expr> = s.expr.operand;
-  return call.kind === "call" && call.callee.kind === "member" && call.callee.name === ASYNC_DISPOSE;
 }
 
 // A statement's stand-in as a jump's target: its id and span.
@@ -5095,16 +5086,16 @@ class BodyChecker implements Context, GuardHost {
     const started = letOf(nextId(this.cx.tables.ids), "let", { id: nextId(this.cx.tables.ids), target: flag, type: undefined, init: unset, start: at.start, end: at.end }, at);
     const caught: Pattern = { id: nextId(this.cx.tables.ids), kind: "ident", name: thrownName(bound.name), start: at.start, end: at.end };
     const again: Stmt = { id: nextId(this.cx.tables.ids), kind: "throw", value: this.partIdent(thrownName(bound.name), at), start: at.start, end: at.end };
-    const handler: Stmt[] = [this.unlessStarted(bound), again];
+    const handler: Stmt[] = [this.unlessStarted(bound, at), again];
     const rest = list.splice((i + 1) as i64);
     list.push(started);
     list.push({ id: nextId(this.cx.tables.ids), kind: "try", block: rest, param: caught, paramType: undefined, handler, finalizer: undefined, start: at.start, end: at.end });
-    list.push(this.unlessStarted(bound));
+    list.push(this.unlessStarted(bound, at));
   }
 
-  // Awaits an `await using` binding's disposer unless a way out of its scope already has.
-  private unlessStarted(this: Mut<this>, a: Ref<Awaited>): Stmt {
-    const at = { start: a.start, end: a.end };
+  // Awaits an `await using` binding's disposer unless a way out of its scope already has, as one
+  // whose disposer threw into a `catch` inside the scope has.
+  private unlessStarted(this: Mut<this>, a: Ref<Awaited>, at: Ref<Span>): Stmt {
     const pending: Expr = { id: nextId(this.cx.tables.ids), kind: "unary", op: "!", operand: this.partIdent(startedName(a.name), at), start: at.start, end: at.end };
     return { id: nextId(this.cx.tables.ids), kind: "if", cond: pending, then: this.disposal(a, at), else: undefined, start: at.start, end: at.end };
   }
@@ -5139,7 +5130,7 @@ class BodyChecker implements Context, GuardHost {
     const s: Ref<Stmt> = peeked !== undefined ? peeked : list[i]!;
     if (s.kind !== "return" && s.kind !== "break" && s.kind !== "continue") return;
     // A list checked again holds what its first check added.
-    if (i > 0 && awaitsDisposer(list[i - 1]!)) return;
+    if (i > 0 && endsAwaited(list[i - 1]!)) return;
     // A jump leaves the bindings declared inside its target, and a `return` all of them, unless
     // it is in a match arm, which it gives a value and never leaves.
     let from = this.state.awaited.length;
@@ -5167,8 +5158,7 @@ class BodyChecker implements Context, GuardHost {
     } else exit = { id: nextId(this.cx.tables.ids), kind: "return", value: undefined, start: at.start, end: at.end };
     for (let k = this.state.awaited.length; k > from; k--) {
       const leaving: Awaited = { ...this.state.awaited[k - 1]! };
-      let awaits = this.disposal(leaving, at);
-      while (awaits.length > 0) made.push(awaits.shift()!);
+      made.push(this.unlessStarted(leaving, at));
     }
     made.push(exit);
     list.splice(i as i64, 1);
