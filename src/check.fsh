@@ -810,7 +810,7 @@ function tableCounts(checked: Ref<Checked>): string {
   }
   const mb = (n: usize) => `${((n as f64) / 1048576).toFixed(1)} MB`.padStart(12);
   const row = (name: string, c: Ref<Counted>) => `${name.padEnd(12)}${`${c.entries}`.padStart(12)}${mb(c.keys)}${mb(c.values)}\n`;
-  let out = `${arenas.instanceCount()} instances, ${arenas.bodyCount()} bodies, ${arenas.loweredCount()} lowered apart, ${arenas.classCount()} classes\n`;
+  let out = `${arenas.instanceCount()} instances, ${checked.tables.counts.checks} checks, ${arenas.bodyCount()} bodies, ${arenas.loweredCount()} lowered apart, ${arenas.classCount()} classes\n`;
   out += `${"table".padEnd(12)}${"entries".padStart(12)}${"key spans".padStart(12)}${"value spans".padStart(12)}\n`;
   out += row("types", types) + row("locals", locals) + row("calls", calls) + row("setters", setters) + row("coercions", coercions) + row("jumps", jumps);
   out += row("borrowsFrom", borrowsFrom) + row("raises", raises) + row("caught", caught) + row("patterns", patterns) + row("copiesOut", copiesOut);
@@ -2082,13 +2082,26 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           this.settling = undefined;
         } else {
           const pending = this.instancingState.pending.shift()!;
-          this.checkBody(pending);
+          if (!this.onlyAsked(pending)) this.checkBody(pending);
         }
       } catch (e) {
         if (!(e instanceof CompileError)) throw e;
         this.recover(e);
       }
     }
+  }
+
+  // Whether an instance is checked only when a caller asks for what its body alone tells, its
+  // inferred return type or whether it keeps what it is lent: one made with placeholder types for
+  // a call inside another definition. Nothing compiles it, and its body is the one its function's
+  // definition was checked with, seen through the same bounds. A function taking a comptime
+  // parameter is checked for each value it is given, which the definition doesn't know.
+  private onlyAsked(id: InstanceId): boolean {
+    const instance = this.tables.arenas.instanceOf(id);
+    if (instance.concrete) return false;
+    const definition = this.instancingState.definitions.get(instance.body);
+    if (definition === undefined || definition === id) return false;
+    return !this.tables.arenas.bodyOf(instance.body).params.some((p) => p.comptime === true);
   }
 
   // Reads every body's results once every body is checked, giving the instances to compile and
