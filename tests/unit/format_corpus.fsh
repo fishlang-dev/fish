@@ -79,6 +79,7 @@ const SOURCES: string[] = [
   "src/moves.fsh",
   "src/narrow.fsh",
   "src/native.fsh",
+  "src/navigate.fsh",
   "src/nodes.fsh",
   "src/operators.fsh",
   "src/overloads.fsh",
@@ -356,6 +357,7 @@ test("src/modules.fsh formats keeping its comments, parses back to the same tree
 test("src/moves.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/moves.fsh"));
 test("src/narrow.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/narrow.fsh"));
 test("src/native.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/native.fsh"));
+test("src/navigate.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/navigate.fsh"));
 test("src/nodes.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/nodes.fsh"));
 test("src/operators.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/operators.fsh"));
 test("src/overloads.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/overloads.fsh"));
