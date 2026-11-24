@@ -303,7 +303,7 @@ const shutdown = s.request("shutdown");
 facts.shutdown = canon((await s.next((m) => m.id === shutdown)).result);
 s.notify("exit");
 facts.exit = await s.proc.exited;`);
-  same(fact(r, "init"), `{"capabilities":{"inlayHintProvider":true,"textDocumentSync":1},"serverInfo":{"name":"fishc"}}`, "initialize's result");
+  same(fact(r, "init"), `{"capabilities":{"codeLensProvider":{"resolveProvider":false},"completionProvider":{"triggerCharacters":["."]},"definitionProvider":true,"documentFormattingProvider":true,"hoverProvider":true,"inlayHintProvider":true,"referencesProvider":true,"textDocumentSync":1},"serverInfo":{"name":"fishc"}}`, "initialize's result");
   same(fact(r, "unknown"), "-32601", "an unknown request's error code");
   same(fact(r, "log"), "1", "the logged message's type");
   same(fact(r, "parse"), "-32700", "unreadable JSON's error code");
