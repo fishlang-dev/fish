@@ -11,7 +11,8 @@ export type ClassId = Brand<usize, "class">;
 
 // The body an instance checks, from its compilation's arena.
 export function bodyOf<A extends Lifetime>(arenas: Ref<Arenas, A>, instance: Ref<Instance>): Ref<Body, A> {
-  return arenas.bodyOf(instance.body);
+  const apart = instance.lowered;
+  return apart !== undefined ? arenas.loweredOf(apart) : arenas.bodyOf(instance.body);
 }
 
 // A compilation's instances, bodies, locals and classes, each kept where it is made and named by
@@ -19,6 +20,7 @@ export function bodyOf<A extends Lifetime>(arenas: Ref<Arenas, A>, instance: Ref
 export class Arenas {
   private instances: Instance[] = [];
   private bodies: Body[] = [];
+  private lowered: Body[] = [];
   private locals: Local[] = [];
   private classes: ClassInfo[] = [];
 
@@ -57,6 +59,35 @@ export class Arenas {
   swapBody(this: Mut<this>, id: BodyId, by: Body): Body {
     let out = this.bodies.splice((id - 1) as i64, 1, by);
     return out.pop()!;
+  }
+
+  // A body as one instance's check lowered it, kept apart from the body every other instance
+  // reads: where it is kept, counted from 1. It carries the body's own ids.
+  addLowered(this: Mut<this>, body: Body): usize {
+    this.lowered.push(body);
+    return this.lowered.length;
+  }
+
+  loweredOf(at: usize): Ref<Body> {
+    return this.lowered[at - 1]!;
+  }
+
+  loweredMut(this: Mut<this>, at: usize): Mut<Body> {
+    return this.lowered[at - 1]!;
+  }
+
+  loweredCount(): usize {
+    return this.lowered.length;
+  }
+
+  swapLowered(this: Mut<this>, at: usize, by: Body): Body {
+    let out = this.lowered.splice((at - 1) as i64, 1, by);
+    return out.pop()!;
+  }
+
+  // Empties one, when its instance is checked again or is never compiled.
+  dropLowered(this: Mut<this>, at: usize): void {
+    this.lowered[at - 1]!.body = [];
   }
 
   // An instance, a body, a local or a class to change in place.

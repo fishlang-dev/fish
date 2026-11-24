@@ -723,7 +723,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
   bodyAt(id: InstanceId): Ref<Body> {
-    return this.tables.arenas.bodyOf(this.tables.arenas.instanceOf(id)!.body)!;
+    return bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(id)!);
   }
 
   cur(): Ref<Instance> {
@@ -936,11 +936,13 @@ class Codegen implements PrintHost, ComptimeHost {
       // The statements are taken out of the body while they are lowered, so reading them doesn't
       // hold the generator they change.
       const bodyId = this.inst(instance).body;
-      const statements = this.tables.arenas.bodyMut(bodyId).body.splice(0);
+      const apart = this.inst(instance).lowered;
+      const statements = apart !== undefined ? this.tables.arenas.loweredMut(apart).body.splice(0) : this.tables.arenas.bodyMut(bodyId).body.splice(0);
       try {
         for (const each of statements) this.statement(each);
       } finally {
-        this.tables.arenas.bodyMut(bodyId).body = statements;
+        if (apart !== undefined) this.tables.arenas.loweredMut(apart).body = statements;
+        else this.tables.arenas.bodyMut(bodyId).body = statements;
       }
       this.raise();
       // Falling off the end drops what the body holds there, at its closing brace.
