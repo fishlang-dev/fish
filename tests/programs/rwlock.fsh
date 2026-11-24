@@ -168,6 +168,9 @@ async function reader(s: shared<S>): Promise<void> {
     });
     if (!same) s.torn.add(1);
     s.reads.add(1);
+    // Nothing takes a task's thread from it, so on a machine with no more cores than readers the
+    // writer would never get to run.
+    await yieldNow();
   }
 }
 async function writer(s: shared<S>): Promise<void> {
