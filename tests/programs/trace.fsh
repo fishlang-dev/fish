@@ -305,3 +305,121 @@ async function main(): Promise<void> throws IoError | AbortError {
   await flushTraces();
   console.log("batches from a server with trace: false:", got.posts.update((p) => p.length));
 }
+// case: trace_using
+// expect: 1
+// expect: caught: no such user
+// expect: true true
+// expect: early <- nothing
+// expect:   stopped: bool true
+// expect: failing <- nothing
+// expect: inner <- outer
+// expect: again <- outer
+// expect: outer <- nothing
+// A span bound with 'using' ends where its scope does, however the scope is left: at an early
+// return, at a throw, and at a block's end, the span around it current again.
+import { span, configureTracing, flushTraces } from "fish:trace";
+
+type Sent = { resourceSpans: { scopeSpans: { spans: { spanId: string; parentSpanId?: string; name: string; attributes: { key: string; value: { boolValue?: boolean } }[] }[] }[] }[] };
+
+function early(stop: boolean): i64 {
+  using s = span("early");
+  s.set("stopped", stop);
+  if (stop) return 1;
+  return 2;
+}
+
+function failing(): void throws Error {
+  using s = span("failing");
+  throw new Error("no such user");
+}
+
+async function nested(): Promise<void> {
+  using outer = span("outer");
+  await sleep(1);
+  let inside = false;
+  {
+    using inner = span("inner");
+    inside = inner.parentSpanId === outer.spanId;
+  }
+  using again = span("again");
+  console.log(inside, again.parentSpanId === outer.spanId);
+}
+
+async function collect(got: shared<{ port: Atomic<i64> }>): Promise<void> throws IoError {
+  const seen = got.clone();
+  await serve({ port: 0, hostname: "127.0.0.1", trace: false, onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    const body = await req.text();
+    let out = "";
+    try {
+      const sent = JSON.parse<Sent>(body);
+      for (const r of sent.resourceSpans) {
+        for (const scope of r.scopeSpans) {
+          for (const s of scope.spans) {
+            let parent = s.parentSpanId === null ? "nothing" : "a span not in the batch";
+            for (const other of scope.spans) if (s.parentSpanId === other.spanId) parent = other.name;
+            out += s.name + " <- " + parent + "\n";
+            for (const a of s.attributes) out += "  " + a.key + ": bool " + String(a.value.boolValue ?? false) + "\n";
+          }
+        }
+      }
+    } catch (e) {
+      out = "not the JSON expected: " + body;
+    }
+    console.log(out.trimEnd());
+    return new Response("{}");
+  });
+}
+
+async function main(): Promise<void> {
+  const got = shared({ port: new Atomic(0) });
+  spawn(collect(got.clone()));
+  while (got.port.load() === 0) await sleep(1);
+  configureTracing({ endpoint: "http://127.0.0.1:" + String(got.port.load()), serviceName: "golden", batchDelay: 5000 });
+  console.log(early(true));
+  try {
+    failing();
+  } catch (e) {
+    console.log("caught:", e.message);
+  }
+  await nested();
+  await flushTraces();
+}
+// case: trace_sync_main
+// expect: main returns
+// expect: startup <- nothing
+// A program that traces runs on the async runtime, as one that sets timers does, so a main that
+// isn't async can still end a span: the batch goes out after main returns. Main can't await the
+// stand-in collector, so it polls for it.
+import { span, configureTracing } from "fish:trace";
+
+type Sent = { resourceSpans: { scopeSpans: { spans: { parentSpanId?: string; name: string }[] }[] }[] };
+
+declare function usleep(microseconds: u32): i32;
+
+async function collect(got: shared<{ port: Atomic<i64> }>): Promise<void> throws IoError {
+  const seen = got.clone();
+  await serve({ port: 0, hostname: "127.0.0.1", trace: false, onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (req: Request) => {
+    const body = await req.text();
+    try {
+      const sent = JSON.parse<Sent>(body);
+      for (const s of sent.resourceSpans[0].scopeSpans[0].spans) console.log(s.name + " <- " + (s.parentSpanId === null ? "nothing" : "a span"));
+    } catch (e) {
+      console.log("not the JSON expected: " + body);
+    }
+    return new Response("{}");
+  });
+}
+
+function main() {
+  const got = shared({ port: new Atomic(0) });
+  spawn(collect(got.clone()));
+  // The collector listens on another worker thread; five seconds is far more than it needs.
+  for (let i = 0; i < 5000 && got.port.load() === 0; i++) unsafe { usleep(1000) };
+  if (got.port.load() === 0) {
+    console.log("the collector never listened");
+    return;
+  }
+  configureTracing({ endpoint: "http://127.0.0.1:" + String(got.port.load()), serviceName: "golden", batchDelay: 10 });
+  using s = span("startup");
+  console.log("main returns");
+}

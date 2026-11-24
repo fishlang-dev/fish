@@ -8277,6 +8277,10 @@ export class Span {
     this.#open = false;
     __traceEnd(this.#record.clone(), this.#prior);
   }
+
+  [Symbol.dispose](this: Mut<this>): void {
+    this.end();
+  }
 }
 
 // Begins a span under the current one, a new trace when there is none, and makes it current

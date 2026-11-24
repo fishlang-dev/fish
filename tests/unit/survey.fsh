@@ -731,6 +731,15 @@ test("better-sqlite3 and sqlite3 are replaced by std's sqlite module", () => {
   done(dir);
 });
 
+test("the OpenTelemetry packages are replaced by std's fish:trace module", () => {
+  const dir = project([["package.json", '{"dependencies":{"@opentelemetry/api":"1","@opentelemetry/sdk-node":"0.57","@opentelemetry/exporter-trace-otlp-http":"0.57"}}'], ["a.ts", "const x = 1;\n"]]);
+  const d = depsOf(dir);
+  same(countsOf(d), "std 3, planned 0, native 0, pure 0, unknown 0", "the counts");
+  const tracing = "the fish:trace module false";
+  list(equivalents(d), [tracing, tracing, tracing], "the equivalents");
+  done(dir);
+});
+
 // Node's own sqlite is synchronous and names its classes otherwise, so an import of it is found
 // as a member std lacks, and the report says where std's is.
 test("node:sqlite is answered by std's sqlite module, bun:sqlite still waits", () => {
