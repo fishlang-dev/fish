@@ -48,7 +48,9 @@ async function main() throws IoError {
   let seen: string[] = [];
   let renames = 0;
   for await (const e of watch(dir, { signal: c.signal })) {
-    if (e.eventType === "rename") renames++;
+    // inotify also reports the write that fills a new file, as a change; kqueue doesn't.
+    if (e.eventType !== "rename") continue;
+    renames++;
     const line = e.eventType + " " + (e.filename ?? "null");
     if (!seen.includes(line)) seen.push(line);
   }
@@ -111,6 +113,8 @@ async function main() throws IoError {
   const p = spawn(poke(dir, c.clone()));
   let seen: string[] = [];
   for await (const e of watch(dir, { signal: c.signal })) {
+    // inotify also reports the write that fills a new file, as a change; kqueue doesn't.
+    if (e.eventType !== "rename") continue;
     const line = e.eventType + " " + (e.filename ?? "null");
     if (!seen.includes(line)) seen.push(line);
   }

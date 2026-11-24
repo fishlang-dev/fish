@@ -1946,6 +1946,24 @@ void fsh_rt_json_raw(fsh_json_out *w, const char *p, int64_t n) {
   w->length += n;
 }
 
+#ifdef __linux__
+// A checked 128-bit multiply, which LLVM calls for and libgcc doesn't have: the product, wrapped,
+// and whether it overflowed. Weak, so compiler-rt's own is the one used where that is linked.
+__attribute__((weak)) __int128 __muloti4(__int128 a, __int128 b, int *overflow) {
+  const __int128 lowest = (__int128)((unsigned __int128)1 << 127);
+  const __int128 highest = ~lowest;
+  __int128 product = (__int128)((unsigned __int128)a * (unsigned __int128)b);
+  *overflow = 0;
+  if (a == lowest) { *overflow = b != 0 && b != 1; return product; }
+  if (b == lowest) { *overflow = a != 0 && a != 1; return product; }
+  __int128 x = a < 0 ? -a : a;
+  __int128 y = b < 0 ? -b : b;
+  if (x < 2 || y < 2) return product;
+  *overflow = (a < 0) == (b < 0) ? x > highest / y : x > lowest / -y;
+  return product;
+}
+#endif
+
 // A 128-bit integer's decimal digits, which printf can't write: its length in out, which holds 41.
 static int fsh_digits128(unsigned __int128 magnitude, int negative, char *out) {
   char reversed[40];

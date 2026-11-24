@@ -498,7 +498,7 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
   }
   const named = performance.now() - naming;
   const halves = split(ir, std, own, byFile);
-  const args = [...target.compile, "-x", "ir", "-", optimization(release, target), "-funwind-tables"];
+  const args = [...target.compile, "-x", "ir", "-", ...optimization(release, target), "-funwind-tables"];
   let cached: Unit[] = [{ name: "std", args: [...args], stdin: halves.std, inputs: [] }];
   for (const [file, text] of halves.groups) cached.push({ name: `file-${file.replace(/[^\w.-]/g, "_")}`, args: [...args], stdin: text, inputs: [] });
   return { cached, program: halves.program, times: [["split names", named], ...halves.times] };
@@ -529,7 +529,7 @@ function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ cached: Un
   try {
     const object = join(dir, "program.o");
     const compiling = stageStart(session);
-    clang(["clang", ...target.compile, "-c", "-x", "ir", "-", "-o", object, "-funwind-tables", optimization(release, target), ...g], halves.program);
+    clang(["clang", ...target.compile, "-c", "-x", "ir", "-", "-o", object, "-funwind-tables", ...optimization(release, target), ...g], halves.program);
     stageEnd(session, "compile", compiling);
     const linking = stageStart(session);
     clang([...clangArgs(out, release, links, objects, shim, copyTarget(target), [object]), ...tls, ...g]);
@@ -1073,7 +1073,7 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
   const js = callsEngine(ir);
   const openssl = callsTls(ir) ? findOpenSsl(target) : undefined;
   const none: string[] = [];
-  const flags = [...target.compile, "-funwind-tables", "-pthread", optimization(release, target), ...(pic ? ["-fPIC"] : none), ...(js ? ["-I", engineDir()] : none)];
+  const flags = [...target.compile, "-funwind-tables", "-pthread", ...optimization(release, target), ...(pic ? ["-fPIC"] : none), ...(js ? ["-I", engineDir()] : none)];
   const tls = openssl === undefined ? "" : "missing" in openssl ? "-tls-missing" : "-tls";
   const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}`;
   const source = [NATIVE, ...(js ? [JS_NATIVE] : none), ...(openssl === undefined ? none : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
@@ -1088,15 +1088,20 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
 // A build's optimization level. A sanitized dev build is optimized a little, as clang advises for
 // its sanitizers: at -O0, clang for AArch64 misreads large aggregates passed by value to an
 // address-sanitized function, so the program would quietly do something else.
-function optimization(release: boolean, target: Ref<Target>): string {
-  return release ? "-O2" : target.sanitize !== undefined ? "-O1" : "-O0";
+function optimization(release: boolean, target: Ref<Target>): string[] {
+  if (release) return ["-O2"];
+  if (target.sanitize !== undefined) return ["-O1"];
+  // Unoptimized AArch64 code off macOS is selected by GlobalISel, which in clang 18 crashes on a
+  // load of an empty aggregate, as a field of a literal type is; those builds go without it.
+  const arm64Linux = target.triple === "" ? process.platform === "linux" && process.arch === "arm64" : target.triple.startsWith("aarch64-unknown-linux");
+  return arm64Linux ? ["-O0", "-fno-global-isel"] : ["-O0"];
 }
 
 // Clang's command line for a program, its IR read from stdin unless `program` names it compiled
 // already, linked with `objects`.
 function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = hostTarget(), program: string[] = ["-x", "ir", "-"]): string[] {
   const none: string[] = [];
-  return ["clang", ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)];
+  return ["clang", ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, ...optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)];
 }
 
 function fail(message: string): never {
