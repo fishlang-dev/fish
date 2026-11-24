@@ -569,3 +569,152 @@ async function main(): Promise<void> {
   await show(app, "OPTIONS", "/admin/secret", true);
   for (const p of ["/users/1/2", "/e", "/s"]) await show(app, "GET", p, false);
 }
+// case: router_typed_body
+// expect: 200 application/json [{"id":4,"name":"ann POST"}]
+// expect: 200 application/json [{"id":4,"name":"bob POST"}]
+// expect: 400 text/plain;charset=UTF-8 [Unexpected end of JSON input]
+// expect: 400 text/plain;charset=UTF-8 [missing field 'name' at $]
+// expect: 200 text/plain;charset=UTF-8 [plain POST]
+// A handler taking its body as a type has it read from JSON and answers with what it gives as
+// JSON, an optional field left out while empty; a body that isn't that type is answered 400 with
+// why, and the handler never runs.
+type NewUser = { name: string; age?: i64 };
+type User = { id: i64; name: string; nick?: string };
+async function show(app: Ref<Router>, method: string, path: string, body: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method, body }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (req, body: NewUser): Promise<User> => ({ id: 4, name: body.name + " " + req.method }));
+  app.post("/plain", async (req) => new Response("plain " + req.method));
+  await show(app, "POST", "/users", "{\"name\":\"ann\"}");
+  await show(app, "POST", "/users", "{\"name\":\"bob\",\"age\":3}");
+  await show(app, "POST", "/users", "{\"name\":");
+  await show(app, "POST", "/users", "{\"age\":3}");
+  await show(app, "POST", "/plain", "{\"name\":");
+}
+// case: router_typed_response
+// expect: 200 application/json [{"id":3,"name":"/users/7"}]
+// expect: 200 application/json [[1,2,3]]
+// expect: 200 application/json ["sync"]
+// expect: gone /users/7
+// expect: 204 none []
+// expect: 200 application/json [{"hits":1}]
+// expect: 200 application/json [{"hits":2}]
+// A handler's written return type is what it answers with as JSON, a handler giving nothing
+// answers 204, and a handler keeps what it captures.
+type User = { id: i64; name: string };
+type Hits = { hits: i64 };
+async function show(app: Ref<Router>, method: string, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  const hits = shared({ n: new Atomic(0) });
+  app.get("/users/:id", async (req): Promise<User> => ({ id: 3, name: req.path }));
+  app.get("/list", async (): Promise<i64[]> => [1, 2, 3]);
+  app.get("/sync", (_req): string => "sync");
+  app.delete("/users/:id", async (req: Request): Promise<void> => {
+    console.log("gone", req.path);
+  });
+  app.get("/hits", async (_req): Promise<Hits> => ({ hits: hits.n.add(1) + 1 }));
+  await show(app, "GET", "/users/7");
+  await show(app, "GET", "/list");
+  await show(app, "GET", "/sync");
+  await show(app, "DELETE", "/users/7");
+  await show(app, "GET", "/hits");
+  await show(app, "GET", "/hits");
+}
+// case: router_typed_named
+// expect: 200 application/json [{"id":7,"name":"cy"}]
+// expect: 400 text/plain;charset=UTF-8 [missing field 'name' at $]
+// expect: 200 application/json [{"id":3,"name":"PUT"}]
+// expect: 200 application/json [{"id":1,"name":"di"}]
+// expect: 200 application/json [{"id":7,"name":"ed"}]
+// A function named as a handler is typed by its declaration, and 'route' takes a handler that
+// says its types as the methods named for a verb do.
+type NewUser = { name: string };
+type User = { id: i64; name: string };
+async function create(_req: Request, body: NewUser): Promise<User> {
+  return { id: 7, name: body.name };
+}
+function describe(req: Request): User {
+  return { id: 3, name: req.method };
+}
+async function show(app: Ref<Router>, method: string, path: string, body: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method, body }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", create);
+  app.put("/users", describe);
+  app.route("POST", "/things", async (_req, body: NewUser): Promise<User> => ({ id: 1, name: body.name }));
+  app.route("patch", "/users", create);
+  await show(app, "POST", "/users", "{\"name\":\"cy\"}");
+  await show(app, "POST", "/users", "{}");
+  await show(app, "PUT", "/users", "");
+  await show(app, "POST", "/things", "{\"name\":\"di\"}");
+  await show(app, "PATCH", "/users", "{\"name\":\"ed\"}");
+}
+// case: router_typed_body_not_json
+// error: values of type 'Set<string>' can't be read from JSON: a Set has no JSON form; use an array of its members
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/tags", async (_req, body: Set<string>) => new Response("" + body.size));
+}
+// case: router_typed_answer_not_json
+// error: values of type 'Point' can't be written as JSON: a class is written as JSON when it has '@derive(Json)', which 'Point' doesn't
+class Point {
+  x: i64;
+  constructor(x: i64) { this.x = x; }
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/point", async (_req): Promise<Point> => new Point(1));
+}
+// case: router_typed_throws
+// error: a route's handler that says its types can't throw yet; catch the error inside the handler and give back a 'Response' for it
+type NewUser = { name: string };
+class Taken extends Error {}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (_req, body: NewUser): Promise<NewUser> => {
+    if (body.name === "root") throw new Taken("taken");
+    return body;
+  });
+}
+// case: router_typed_named_throws
+// error: a route's handler that says its types can't throw yet; catch the error inside the handler and give back a 'Response' for it
+type NewUser = { name: string };
+class Taken extends Error {}
+async function create(_req: Request, body: NewUser): Promise<NewUser> throws Taken {
+  if (body.name === "root") throw new Taken("taken");
+  return body;
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", create);
+}
+// case: router_typed_three_parameters
+// error: a route's handler takes the request and, to have its body read as JSON, a second parameter of the body's type, not 3 parameters
+type NewUser = { name: string };
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (_req: Request, body: NewUser, _extra: i64): Promise<NewUser> => body);
+}
+// case: router_typed_get_body
+// error: a GET request carries no body, so its handler can't take one as a second parameter
+type Query = { q: string };
+async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/search", async (_req, body: Query): Promise<Query> => body);
+}

@@ -1,4 +1,10 @@
-# Fish
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/readme-header-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/readme-header-light.svg">
+    <img alt="Fish — TypeScript syntax. Rust ownership. Native binaries." src="assets/readme-header-light.svg" width="100%">
+  </picture>
+</p>
 
 Fish (`.fsh`) is a memory-safe language that compiles to native binaries. Its syntax is
 TypeScript's, and its semantics are Rust's: ownership and borrowing, no garbage collector, no

@@ -24,6 +24,9 @@ function equivalents(): Map<string, Equivalent> {
   // async-mutex holds its lock across `await`, which a Semaphore's permit can and a Lock can't.
   m.set("async-mutex", IN_STD("Semaphore"));
   m.set("p-limit", IN_STD("Semaphore"));
+  // Both run a list of tasks and reject with the first to fail; a `concurrency` option still
+  // wants a Semaphore beside the group.
+  add(m, ["p-all", "p-map"], IN_STD("taskGroup, where no concurrency limit is asked for"));
   m.set("abort-controller", IN_STD("AbortController"));
   add(m, ["url-parse", "whatwg-url", "query-string", "querystringify"], IN_STD("URL and URLSearchParams"));
   add(m, ["node-fetch", "axios", "undici", "got", "cross-fetch", "superagent", "ky"], IN_STD("fetch"));
@@ -35,11 +38,12 @@ function equivalents(): Map<string, Equivalent> {
   m.set("nanoid", IN_STD("crypto.getRandomValues, to build IDs from"));
   add(m, ["dayjs", "date-fns", "moment", "luxon"], PLANNED("Date parsing and formatting"));
   add(m, ["pino", "winston", "bunyan"], PLANNED("Structured logging"));
+  add(m, ["@opentelemetry/api", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/sdk-trace-base", "@opentelemetry/exporter-trace-otlp-http"], IN_STD("the fish:trace module"));
   add(m, ["pg", "postgres"], IN_STD("the postgres module's Pool"));
+  add(m, ["better-sqlite3", "sqlite3"], IN_STD("the sqlite module's Database"));
   add(m, ["tar", "tar-stream", "tar-fs"], IN_STD("the fish:tar module"));
   add(m, ["adm-zip", "jszip", "yauzl", "yazl", "unzipper", "extract-zip"], IN_STD("the fish:zip module"));
   m.set("archiver", IN_STD("the fish:zip and fish:tar modules"));
-  add(m, ["better-sqlite3", "sqlite3"], PLANNED("SQLite binding"));
   add(m, ["ioredis", "redis"], PLANNED("Redis client"));
   add(m, ["glob", "fast-glob", "globby"], PLANNED("Glob"));
   m.set("fs-extra", PLANNED("Directory operations"));
@@ -52,6 +56,7 @@ function equivalents(): Map<string, Equivalent> {
   m.set("express-rate-limit", PLANNED("Rate-limiting middleware"));
   add(m, ["cookie", "cookie-parser"], IN_STD("req.cookies and res.cookies"));
   add(m, ["serve-static", "@fastify/static", "koa-static", "sirv"], IN_STD("Router.static"));
+  add(m, ["swagger-jsdoc", "@fastify/swagger", "@hono/zod-openapi", "hono-openapi", "@asteasolutions/zod-to-openapi", "tsoa"], IN_STD("fishc openapi, from Router handlers that say their types"));
   add(m, ["marked", "markdown-it"], PLANNED("Markdown to HTML"));
   add(m, ["sanitize-html", "dompurify"], PLANNED("HTML sanitization"));
   add(m, ["csv-parse", "papaparse"], PLANNED("CSV reading and writing"));

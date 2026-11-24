@@ -4,7 +4,7 @@ import { CompileError } from "./diag.fsh";
 import type { RustName } from "./rust.fsh";
 import type { ClassMember, ClassNode, Expr, Id, JsName, Modifier, Param, Pattern, Span, Stmt, TypeNode, TypeParam } from "./parser.fsh";
 import { cloneClassNode, cloneExpr, cloneJsName, cloneParam, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltParam, rebuiltStmts, rebuiltTypeNode } from "./rebuild.fsh";
-import { EMBEDDED, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.fsh";
+import { ASYNC_DISPOSE, DISPOSE, EMBEDDED, LIVE, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.fsh";
 import { unsupported } from "./unsupported.fsh";
 import { symbolKey } from "./keys.fsh";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.fsh";
@@ -202,6 +202,11 @@ export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: 
     // An optional field is an Option, empty until assigned.
     const init: Expr | undefined = m.init !== undefined ? cloneExpr(m.init) : m.optional ? { id: nextId(tables.ids), kind: "null", start: m.start, end: m.end } : undefined;
     add(d, fieldOf(tables.ids, m.name, m.type !== undefined ? cloneTypeNode(m.type) : undefined, m.optional, init, access, m.modifiers.includes("readonly"), { start: m.start, end: m.end }));
+  }
+  if (d.methods.has(DISPOSE)) {
+    let r = tables.typing.rec(type);
+    r.disposes = true;
+    tables.typing.setRec(type, r);
   }
   if (node.typeParams.length > 0 && !d.shared) {
     let statics = new Map<string, BodyId>();
@@ -404,6 +409,8 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
   const first = firstParam(m.params);
   const receiver = first !== undefined && first.pattern.kind === "ident" && first.pattern.name === "this" ? first : undefined;
   if (receiver !== undefined && isStatic) throw new CompileError("E0706", "a static method has no 'this'", receiver.start, receiver.end);
+  const rustName = tables.rust.names.get(m);
+  if (name === DISPOSE || name === ASYNC_DISPOSE) disposerShape(m, receiver, rustName !== undefined, name === ASYNC_DISPOSE);
   let params: Param[] = [];
   for (let i: usize = receiver !== undefined ? 1 : 0; i < m.params.length; i++) params.push(cloneParam(m.params[i]!));
   if (!isStatic) {
@@ -415,7 +422,8 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
     params = rebuilt;
   }
   if (isStatic) classParamIn(node, m);
-  const rustName = tables.rust.names.get(m);
+  // A disposer gives nothing, written or not, so its body can't return a value a drop would lose.
+  const nothing: TypeNode | undefined = name === DISPOSE ? { id: nextId(tables.ids), kind: "ref", name: "void", args: [], start: m.start, end: m.end } : name === ASYNC_DISPOSE ? { id: nextId(tables.ids), kind: "ref", name: "Promise", args: [{ id: nextId(tables.ids), kind: "ref", name: "void", args: [], start: m.start, end: m.end }], start: m.start, end: m.end } : undefined;
   const body = tables.arenas.addBody({
     id: nextId(tables.ids),
     // A static method has its own symbol, since an instance method may share its name.
@@ -423,7 +431,7 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
     scope: isStatic ? new Map<string, Type>() : copyScope(d.scope),
     params,
     body: m.body.map((s) => cloneStmt(s)),
-    returnType: m.returnType !== undefined ? cloneTypeNode(m.returnType) : undefined,
+    returnType: m.returnType !== undefined ? cloneTypeNode(m.returnType) : nothing,
     typeParams: m.typeParams.map((p) => cloneTypeParam(p)),
     self: isStatic ? undefined : { type: d.type, constructor: false, mutable: receiver !== undefined ? mutates(receiver) : false, owned: receiver !== undefined ? owns(receiver) : false },
     owner: d.type,
@@ -449,6 +457,43 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
   if (isStatic) d.statics.set(name, made);
   else d.methods.set(name, made);
   return made;
+}
+
+const isVoid = (t: Ref<TypeNode>): boolean => t.kind === "ref" && t.name === "void" && t.args.length === 0;
+
+// A disposer runs when its instance is dropped: nothing calls it, so it takes nothing but the
+// instance it borrows, gives nothing, and has nowhere to send an error. An async one, `awaited`,
+// is awaited where an `await using` declaration's scope ends, which is where its error goes.
+/** @throws {CompileError} */
+function disposerShape(m: Ref<Extract<ClassMember, { kind: "method" }>>, receiver: Ref<Param> | undefined, foreign: boolean, awaited: boolean): void {
+  const extra = m.params.length > (receiver !== undefined ? 1 : 0);
+  const promised = m.returnType !== undefined && m.returnType.kind === "ref" && m.returnType.name === "Promise" && m.returnType.args.length === 1 && isVoid(m.returnType.args[0]!);
+  const gives = m.returnType !== undefined && !(awaited ? promised : isVoid(m.returnType));
+  let wrong: string | undefined = undefined;
+  let at: Span = { start: m.start, end: m.end };
+  if (m.modifiers.includes("static")) wrong = "can't be static, since it disposes one instance";
+  else if (!awaited && m.modifiers.includes("async")) wrong = "can't be async, since a drop doesn't wait";
+  else if (awaited && !m.modifiers.includes("async")) wrong = "is async, since 'await using' awaits it";
+  else if (m.generator) wrong = "can't be a generator";
+  else if (foreign) wrong = awaited ? "can't be a Rust method" : "can't be a Rust method, since Rust's own Drop runs for a Rust type";
+  else if (m.typeParams.length > 0) wrong = "takes no type parameters, since nothing calls it with any";
+  else if (extra) {
+    wrong = "takes no parameters, since nothing calls it with any";
+    const last = m.params.length - 1;
+    at = { start: m.params[last]!.start, end: m.params[last]!.end };
+  } else if (!awaited && m.throws !== undefined) {
+    wrong = "can't throw, since a drop has nowhere to send an error; handle it inside";
+    at = { start: m.throws.start, end: m.throws.end };
+  } else if (receiver !== undefined && owns(receiver)) {
+    wrong = awaited ? "borrows the instance, which its scope still holds, so it can't take 'this: Own<this>'" : "borrows the instance being dropped, so it can't take 'this: Own<this>'";
+    at = { start: receiver.start, end: receiver.end };
+  } else if (gives) {
+    wrong = awaited ? "returns 'Promise<void>'" : "returns nothing";
+    at = { start: m.returnType!.start, end: m.returnType!.end };
+  }
+  if (wrong === undefined) return;
+  const shape = awaited ? "'async [Symbol.asyncDispose](this: Mut<this>): Promise<void> { ... }'" : "'[Symbol.dispose](this: Mut<this>): void { ... }'";
+  throw new CompileError("E0710", `a '${awaited ? ASYNC_DISPOSE : DISPOSE}' method ${wrong}; write it as ${shape}`, at.start, at.end);
 }
 
 // As in TypeScript, a static member can't name the class's type parameters, only its own.
@@ -710,6 +755,30 @@ function superAt(tables: Ref<Tables>, ctorId: BodyId, preludeLength: usize): usi
 
 function callsSuper(st: Ref<Stmt>): boolean {
   return st.kind === "expr" && st.expr.kind === "call" && st.expr.callee.kind === "super";
+}
+
+// Gives the first class of a chain to declare a disposer the field `LIVE`, once its bases are
+// linked. No constructor assigns it: `new` sets it when the constructor has returned.
+/** @throws {CompileError} */
+export function markLive(tables: Mut<Tables>, classId: ClassId): void {
+  const c = tables.arenas.classOf(classId);
+  const own = c.methods.get(DISPOSE);
+  if (own === undefined) return;
+  // A base whose disposer reaches an abstract member is run as each subclass's copy of it, which a
+  // disposer written in the subclass would replace rather than run before.
+  if (tables.arenas.bodyOf(own).copyOf === undefined) {
+    for (const b of chainFrom(tables.arenas, c.base)) {
+      const theirs = tables.arenas.classOf(b).methods.get(DISPOSE);
+      if (theirs === undefined || tables.arenas.bodyOf(theirs).template !== true) continue;
+      const at = tables.arenas.bodyOf(own);
+      throw new CompileError("E0704", `'${tables.typing.rec(c.type).name}' can't declare a '[Symbol.dispose]' method: the one '${tables.typing.rec(tables.arenas.classOf(b).type).name}' declares reaches an abstract member, so each subclass runs its own copy of it, which this would replace; dispose in the abstract member it calls instead`, at.start, at.end);
+    }
+  }
+  if (c.base !== undefined && tables.typing.disposable(tables.arenas.classOf(c.base).type)) return;
+  const at = { start: c.node.start, end: c.node.end };
+  const field: FieldDecl = { name: LIVE, type: { id: nextId(tables.ids), kind: "ref", name: "boolean", args: [], ...at }, init: undefined, access: "private", readonly: false, ...at };
+  let info = tables.arenas.classMut(classId);
+  info.fields.push(field);
 }
 
 // Links a class to the Map or Set it extends, held in the field `EMBEDDED`. Its constructor's

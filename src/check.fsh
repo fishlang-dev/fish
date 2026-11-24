@@ -1,5 +1,5 @@
 import { memberKey, type Replaced } from "./edits.fsh";
-import { cloneSignature, declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.fsh";
+import { cloneBody, cloneSignature, declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.fsh";
 import { crossingOf, rustClassOf } from "./rust.fsh";
 import { newDeclarations, newTables, timingEnd, timingStart, type Compilation, type Declarations, type Tables } from "./compilation.fsh";
 import { copyNames, CompileError, compileErrors, named } from "./diag.fsh";
@@ -23,7 +23,7 @@ import { Registry, RegistryState, type RegistryHost } from "./registry.fsh";
 import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost } from "./resolve.fsh";
 import { openParam } from "./typefns.fsh";
 import { lowerDefaults, writtenName } from "./defaults.fsh";
-import { idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
+import { ASYNC_DISPOSE, DISPOSE, LIVE, idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
 import { unsupported, unsupportedDeclaration } from "./unsupported.fsh";
 import { hoistLocals } from "./locals.fsh";
 import { localKeys, lowerKeys, lowerKeysWith, numberKey, topKeys } from "./keys.fsh";
@@ -41,7 +41,9 @@ type Func = Declared & { body: Stmt[] };
 
 // A local generic function's name stands for the function it was lifted to, `generic`. `id`
 // numbers it in its check, naming its slot in the IR; `localId` names it in the compilation's arena.
-export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; localId: LocalId; generic?: BodyId };
+// `using` marks one a `using` declaration made: it keeps its value to the end of its scope, so it
+// is never assigned to, moved, or held by a closure.
+export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; localId: LocalId; generic?: BodyId; using?: boolean };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
 // A checked program: the functions to compile, the tables its check filled in, and the
@@ -53,22 +55,28 @@ export type Checked = { instances: InstanceId[]; tables: Tables; warnings: Compi
 // the statement would hold its whole body once for every `break` in it.
 export type JumpTarget = Span & { id: usize };
 
+// The error a call or `throw` raises, and the error type it becomes where it goes, wrapped first by
+// a class's static `from` when that type doesn't take it.
+export type Raise = { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId };
+
 // The instances a checked program compiles, read from its arena.
 // What stands in an instance's place in the arena while it is lent out: what it is, and what reads
 // of it by id need meanwhile, whether it keeps what it is lent and what it captures.
 function instanceStandIn(held: Ref<Instance>): Instance {
-  let out: Instance = { id: held.id, body: held.body, symbol: held.symbol, bindings: new Map([...held.bindings]), concrete: held.concrete, depth: held.depth, returns: held.returns, ...emptyTables() };
+  let out: Instance = { id: held.id, body: held.body, symbol: held.symbol, bindings: new Map([...held.bindings]), concrete: held.concrete, depth: held.depth, returns: held.returns, ...emptyTables(true) };
   if (held.keeps !== undefined) out.keeps = held.keeps;
   if (held.captures !== undefined) out.captures = new Map<LocalId, LocalId | "this">([...held.captures]);
   return out;
 }
 
 // The tables a new instance starts with, each empty.
-export function emptyTables(): Pick<Instance, "types" | "locals" | "calls" | "setters" | "coercions" | "jumps" | "borrowsFrom" | "raises" | "caught" | "consumes" | "patterns" | "copiesOut"> {
+// `plain` says the build keeps nothing for a later reader, so `types` keeps only the sites its
+// own passes look at, and `coercions` only where each is written.
+export function emptyTables(plain: boolean): Pick<Instance, "types" | "locals" | "calls" | "setters" | "coercions" | "jumps" | "borrowsFrom" | "raises" | "caught" | "consumes" | "patterns" | "copiesOut"> {
   return {
-    types: new SiteTable<Type>(), locals: new NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>(), calls: new SiteTable<InstanceId>(), setters: new NodeMap<Expr, InstanceId>(),
-    coercions: new SiteTable<Type>(), jumps: new NodeMap<Stmt, JumpTarget>(), borrowsFrom: new NodeMap<Expr, Expr[]>(),
-    raises: new NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>(), caught: new NodeMap<Stmt, Type>(),
+    types: new SiteTable<Type>(plain ? "read" : "all"), locals: new NodeMap<Expr | Stmt | Param | ObjectProp, LocalId>(), calls: new SiteTable<InstanceId>(), setters: new NodeMap<Expr, InstanceId>(),
+    coercions: new SiteTable<Type>(plain ? "spans" : "all"), jumps: new NodeMap<Stmt, JumpTarget>(), borrowsFrom: new NodeMap<Expr, Expr[]>(),
+    raises: new NodeMap<Expr | Stmt, Raise>(), caught: new NodeMap<Stmt, Type>(),
     consumes: new Set<usize>(), patterns: new NodeMap<Pattern, PatternInfo>(), copiesOut: new NodeSet<Expr>(),
   };
 }
@@ -115,7 +123,9 @@ export type Instance = {
   // Each fallible call and `throw`, the error it raises, and the error type that error
   // becomes where it goes: the function's own, which returns it.
   // An error the function's type doesn't take is first wrapped by a class's static `from`.
-  raises: NodeMap<Expr | Stmt, { from: Type; to: Type; wrapper?: ClassType; param?: Type; via?: InstanceId }>;
+  raises: NodeMap<Expr | Stmt, Raise>;
+  // Where the first of them is written.
+  raisedAt?: Span;
   // The type of what each `try` catches.
   caught: NodeMap<Stmt, Type>;
   // Each place whose value is handed over rather than copied, which leaves it empty, by node id.
@@ -152,6 +162,11 @@ export type Instance = {
   envs?: NodeMap<Expr, { of: InstanceId; env: LocalId[] }>;
   // What each value boxed into a Dyn runs for the interface's members.
   dyns?: NodeMap<Expr, DynTable>;
+  // The closures checked inside it, in the order they were made, a discarded pass's included.
+  inner?: InstanceId[];
+  // Where the arena keeps its body as its own check lowered it, when the body had been lowered
+  // before and this check replaced more: every other instance reads the body's own tree.
+  lowered?: usize;
   // Each closure owning what it captures that holds nested functions as made where it is, and
   // this body's bindings for what each of those uses, which the closure borrows.
   made?: NodeMap<Expr, { of: InstanceId; env: LocalId[] }[]>;
@@ -188,6 +203,27 @@ type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: s
 
 // The statements a destructuring assignment becomes: every part read, then every target written.
 type Destructured = { reads: Stmt[]; writes: Stmt[] };
+
+// An `await using` binding whose scope encloses the code being checked: its name and local, where
+// it is declared, and how many targets and `finally` blocks were open there, which say what a
+// jump leaves and whether it does so from a place nothing can be awaited. `clears`: its class
+// has a disposer too, which an awaited async one stands in for.
+type Awaited = { name: string; local: LocalId; clears: boolean; targets: usize; finalizing: usize; start: usize; end: usize };
+
+// The variable saying whether an `await using` binding's disposer has been started, under a name
+// no source can write.
+const startedName = (name: string): string => `disposal of ${name}`;
+
+// The variable an error thrown through an `await using` binding's scope is caught in, under a
+// name no source can write.
+const thrownName = (name: string): string => `error past ${name}`;
+
+// Whether a statement awaits an `await using` binding's disposer unless it has been started,
+// which only the checker writes: after the binding's scope, in the scope's handler, and before
+// each way out of it.
+function endsAwaited(s: Ref<Stmt>): boolean {
+  return s.kind === "if" && s.cond.kind === "unary" && s.cond.op === "!" && s.cond.operand.kind === "ident" && s.cond.operand.name.startsWith(startedName(""));
+}
 
 // A statement's stand-in as a jump's target: its id and span.
 function standIn(s: Ref<Stmt>): Stmt {
@@ -273,7 +309,8 @@ function unlabeled(r: Ref<Rewrites>, s: Ref<Stmt>): Stmt {
 
 // A `for` loop's initializer, when it is a declaration of several names.
 function severalInit(s: Ref<Stmt>): Stmt | undefined {
-  if (s.kind === "for" && s.init !== undefined && s.init.kind === "let" && s.init.declarations.length > 1) return cloneStmt(s.init);
+  // A `using` stays in its head, where it is refused.
+  if (s.kind === "for" && s.init !== undefined && s.init.kind === "let" && !isUsing(s.init.keyword) && s.init.declarations.length > 1) return cloneStmt(s.init);
   return undefined;
 }
 
@@ -281,6 +318,16 @@ function severalInit(s: Ref<Stmt>): Stmt | undefined {
 function withoutInit(s: Ref<Stmt>): Stmt {
   if (s.kind === "for") return { ...s, init: undefined };
   return cloneStmt(s);
+}
+
+// Whether a declaration's keyword is `using` or `await using`, whose binding keeps its value to
+// the end of its scope.
+const isUsing = (keyword: string): boolean => keyword === "using" || keyword === "await using";
+
+// A loop's head ends with each pass and never with a block the program wrote, so a `using`
+// there has no scope to be disposed at the end of.
+function usingInHead(s: Ref<Extract<Stmt, { kind: "let" }>>): CompileError {
+  return new CompileError("E0411", `'${s.keyword}' can't be declared in a 'for' head; declare it in the loop's body, where it is disposed at the end of each pass`, s.start, s.start + s.keyword.length);
 }
 
 // A loop's `let`, which is what its left side is once a loop's pattern is lowered.
@@ -299,7 +346,7 @@ function arrayPatternOf(id: usize, at: Ref<Span>): Extract<Pattern, { kind: "arr
   return { id, kind: "array", elements: [], rest: undefined, start: at.start, end: at.end };
 }
 // A declaration of one name.
-function letOf(id: usize, keyword: "let" | "const" | "var", declarator: Declarator, at: Ref<Span>): Stmt {
+function letOf(id: usize, keyword: "let" | "const" | "var" | "using" | "await using", declarator: Declarator, at: Ref<Span>): Stmt {
   let made: Extract<Stmt, { kind: "let" }> = { id, kind: "let", keyword, declarations: [], start: at.start, end: at.end };
   made.declarations.push(declarator);
   return made;
@@ -613,7 +660,9 @@ function timersRunAsync(ids: Mut<Ids>, written: Mut<Stmt[]>, timerMains: Mut<Tab
   timerMains.add(rewrites.replaceFunc(main, { ...main, async: true, returnType }));
   rebuiltStmts(written, rewrites);
 }
-const TIMER_GLOBALS = new Set(["setTimeout", "setInterval"]);
+// A span's batch is sent by a timer std sets, so what begins one counts as setting a timer: the
+// fish:trace module's code calls it.
+const TIMER_GLOBALS = new Set(["setTimeout", "setInterval", "__traceBegin"]);
 
 // Whether a piece of syntax holds a node `found` picks out.
 // A node shared by several parents is tried once.
@@ -760,10 +809,8 @@ function tableCounts(checked: Ref<Checked>): string {
   for (let i: usize = 1; i <= arenas.instanceCount(); i++) {
     const x = arenas.instanceOf(i as InstanceId);
     types.entries += x.types.size;
-    for (const [k] of x.locals.entries()) {
-      locals.entries++;
-      locals.keys += k.end - k.start;
-    }
+    locals.entries += x.locals.size;
+    for (const [k] of x.locals.entries()) locals.keys += k.end - k.start;
     for (const [k] of x.calls.entries()) {
       calls.entries++;
       calls.keys += k.end - k.start;
@@ -772,24 +819,18 @@ function tableCounts(checked: Ref<Checked>): string {
       setters.entries++;
       setters.keys += k.end - k.start;
     }
-    for (const [k] of x.coercions.entries()) {
-      coercions.entries++;
-      coercions.keys += k.end - k.start;
-    }
-    for (const [k, v] of x.jumps.entries()) {
-      jumps.entries++;
-      jumps.keys += k.end - k.start;
-      jumps.values += v.end - v.start;
-    }
+    coercions.entries += x.coercions.size;
+    for (const [k] of x.coercions.entries()) coercions.keys += k.end - k.start;
+    jumps.entries += x.jumps.size;
+    for (const [k] of x.jumps.entries()) jumps.keys += k.end - k.start;
+    for (const v of x.jumps.values()) jumps.values += v.end - v.start;
     for (const [k, v] of x.borrowsFrom.entries()) {
       borrowsFrom.entries++;
       borrowsFrom.keys += k.end - k.start;
       for (const e of v) borrowsFrom.values += e.end - e.start;
     }
-    for (const [k] of x.raises.entries()) {
-      raises.entries++;
-      raises.keys += k.end - k.start;
-    }
+    raises.entries += x.raises.size;
+    for (const [k] of x.raises.entries()) raises.keys += k.end - k.start;
     for (const [k] of x.caught.entries()) {
       caught.entries++;
       caught.keys += k.end - k.start;
@@ -805,7 +846,7 @@ function tableCounts(checked: Ref<Checked>): string {
   }
   const mb = (n: usize) => `${((n as f64) / 1048576).toFixed(1)} MB`.padStart(12);
   const row = (name: string, c: Ref<Counted>) => `${name.padEnd(12)}${`${c.entries}`.padStart(12)}${mb(c.keys)}${mb(c.values)}\n`;
-  let out = `${arenas.instanceCount()} instances, ${arenas.bodyCount()} bodies, ${arenas.classCount()} classes\n`;
+  let out = `${arenas.instanceCount()} instances, ${checked.tables.counts.checks} checks, ${arenas.bodyCount()} bodies, ${arenas.loweredCount()} lowered apart, ${arenas.classCount()} classes\n`;
   out += `${"table".padEnd(12)}${"entries".padStart(12)}${"key spans".padStart(12)}${"value spans".padStart(12)}\n`;
   out += row("types", types) + row("locals", locals) + row("calls", calls) + row("setters", setters) + row("coercions", coercions) + row("jumps", jumps);
   out += row("borrowsFrom", borrowsFrom) + row("raises", raises) + row("caught", caught) + row("patterns", patterns) + row("copiesOut", copiesOut);
@@ -1046,6 +1087,7 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
         top.funcs.push(addBodyTo(tables, block));
         continue;
       }
+      if (s.kind === "let" && isUsing(s.keyword)) throw new CompileError("E0404", `a top-level '${s.keyword}' has no scope to end, so its value would never be disposed; declare it in the function that uses it`, s.start, s.end);
       if (s.kind === "let") throw new CompileError("E0404", "a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
       // Top-level code with side effects belongs in main(); the migration lint moves it there.
       if (s.kind !== "function") throw new CompileError("E0404", "only declarations are allowed at the top level; move this into main()", s.start, s.end);
@@ -1210,7 +1252,10 @@ function checkAll(compilation: Compilation, written: Stmt[], exportsToC: Set<str
     checker.prepare();
     outcome = checker.run();
   } catch (e) {
-    throw e instanceof CompileError ? named(e, copyNames(checker.tables.names)) : e;
+    if (!(e instanceof CompileError)) throw e;
+    let failure = named(e, copyNames(checker.tables.names));
+    if (checker.tables.session.borrows !== undefined) failure.borrows = checker.tables.session.borrows.map((b) => ({ ...b }));
+    throw failure;
   }
   const { instances, warnings } = outcome!;
   let taken = checkerApart(checker);
@@ -2068,6 +2113,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           for (const f of this.registry().settle(next)) {
             try {
               const definition = this.definition(f);
+              this.disposerMade(next, f, definition);
             this.checkBody(definition);
             } catch (e) {
               if (!(e instanceof CompileError)) throw e;
@@ -2077,13 +2123,37 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           this.settling = undefined;
         } else {
           const pending = this.instancingState.pending.shift()!;
-          this.checkBody(pending);
+          if (!this.onlyAsked(pending)) this.checkBody(pending);
         }
       } catch (e) {
         if (!(e instanceof CompileError)) throw e;
         this.recover(e);
       }
     }
+  }
+
+  // Whether an instance is checked only when a caller asks for what its body alone tells, its
+  // inferred return type or whether it keeps what it is lent: one made with placeholder types for
+  // a call inside another definition. Nothing compiles it, and its body is the one its function's
+  // definition was checked with, seen through the same bounds. A function taking a comptime
+  // parameter is checked for each value it is given, which the definition doesn't know.
+  private onlyAsked(id: InstanceId): boolean {
+    const instance = this.tables.arenas.instanceOf(id);
+    if (instance.concrete) return false;
+    const definition = this.instancingState.definitions.get(instance.body);
+    if (definition === undefined || definition === id) return false;
+    return !this.tables.arenas.bodyOf(instance.body).params.some((p) => p.comptime === true);
+  }
+
+  // Records a class's own disposer, once it is an instance to compile, for the class's drop to
+  // call. An abstract one and a template are checked and never compiled.
+  private disposerMade(this: Mut<this>, c: ClassId, f: BodyId, made: InstanceId): void {
+    const info = this.tables.arenas.classOf(c);
+    if (info.methods.get(DISPOSE) !== f) return;
+    const body = this.tables.arenas.bodyOf(f);
+    if (body.abstract === true || body.template === true || !this.tables.arenas.instanceOf(made).concrete) return;
+    const type = info.type;
+    this.tables.disposers.set(type, made);
   }
 
   // Reads every body's results once every body is checked, giving the instances to compile and
@@ -2162,7 +2232,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     for (const g of this.tables.jsGiven.values()) jsGiven.add(g.id);
     for (const id of compiledIds) {
       const i = this.tables.arenas.instanceOf(id);
-      for (const [x, t] of i.coercions) if (!jsGiven.has(x.id)) given.push({ start: x.start, end: x.end, from: i.types.getById(x.id) ?? "void", to: t });
+      for (const k of i.coercions.ids()) {
+        if (jsGiven.has(k)) continue;
+        const at = i.coercions.spanById(k)!;
+        given.push({ start: at.start, end: at.end, from: i.types.getById(k) ?? "void", to: i.coercions.getById(k)! });
+      }
     }
     let crossing: { start: usize; end: usize } | undefined = undefined;
     for (const g of given) if (this.intoJs(g.from, g.to) && (crossing === undefined || g.start < crossing.start)) crossing = { start: g.start, end: g.end };
@@ -2241,11 +2315,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   /** @throws {CompileError} */
   private swapTypes(this: Mut<this>, id: InstanceId, swap: Ref<TypeMap<Type, Type>>): void {
-    let types: [Site, Type][] = [];
-    for (const [e, t] of this.tables.arenas.instanceOf(id).types) types.push([{ ...e }, t]);
+    let types: [usize, Type][] = [];
+    for (const k of this.tables.arenas.instanceOf(id).types.ids()) types.push([k, this.tables.arenas.instanceOf(id).types.getById(k)!]);
     for (let i: usize = 0; i < types.length; i++) types[i]![1] = this.replaced(types[i]![1], swap);
-    let coercions: [Site, Type][] = [];
-    for (const [e, t] of this.tables.arenas.instanceOf(id).coercions) coercions.push([{ ...e }, t]);
+    let coercions: [usize, Type][] = [];
+    for (const k of this.tables.arenas.instanceOf(id).coercions.ids()) coercions.push([k, this.tables.arenas.instanceOf(id).coercions.getById(k)!]);
     for (let i: usize = 0; i < coercions.length; i++) coercions[i]![1] = this.replaced(coercions[i]![1], swap);
     let locals: LocalId[] = [];
     for (const l of this.tables.arenas.instanceOf(id).locals.values()) locals.push(l);
@@ -2258,14 +2332,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const returned = this.tables.arenas.instanceOf(id).returns;
     const returns = this.replaced(returned, swap);
     let instance = this.tables.arenas.instanceMut(id);
-    while (types.length > 0) {
-      const [e, t] = types.shift()!;
-      instance.types.setSite(e, t);
-    }
-    while (coercions.length > 0) {
-      const [e, t] = coercions.shift()!;
-      instance.coercions.setSite(e, t);
-    }
+    for (const [k, t] of types) instance.types.setValueById(k, t);
+    for (const [k, t] of coercions) instance.coercions.setValueById(k, t);
     instance.returns = returns;
   }
 
@@ -2750,24 +2818,16 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       const into = this.tables.arenas.instanceOf(to).generator;
       if (from !== undefined && into !== undefined && from !== into) made.set(from, into);
     }
-    let types: [Site, Type][] = [];
-    const typesOf = this.tables.arenas.instanceOf(id).types;
-    for (const [e, t] of typesOf) types.push([{ ...e }, t]);
+    let types: [usize, Type][] = [];
+    for (const k of this.tables.arenas.instanceOf(id).types.ids()) types.push([k, this.tables.arenas.instanceOf(id).types.getById(k)!]);
     for (let i: usize = 0; i < types.length; i++) types[i]![1] = this.lowerMade(types[i]![1], made);
-    let coercions: [Site, Type][] = [];
-    const coercionsOf = this.tables.arenas.instanceOf(id).coercions;
-    for (const [e, t] of coercionsOf) coercions.push([{ ...e }, t]);
+    let coercions: [usize, Type][] = [];
+    for (const k of this.tables.arenas.instanceOf(id).coercions.ids()) coercions.push([k, this.tables.arenas.instanceOf(id).coercions.getById(k)!]);
     for (let i: usize = 0; i < coercions.length; i++) coercions[i]![1] = this.lowerMade(coercions[i]![1], made);
     {
       let instance = this.tables.arenas.instanceMut(id);
-      while (types.length > 0) {
-        const [e, t] = types.shift()!;
-        instance.types.setSite(e, t);
-      }
-      while (coercions.length > 0) {
-        const [e, t] = coercions.shift()!;
-        instance.coercions.setSite(e, t);
-      }
+      for (const [k, t] of types) instance.types.setValueById(k, t);
+      for (const [k, t] of coercions) instance.coercions.setValueById(k, t);
     }
     // A pipe's topic written in as a field read would run a getter once for each `%`.
     for (const e of this.tables.substituted.values()) {
@@ -3296,6 +3356,34 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     if (written !== id && !this.inProgress.has(written)) this.checkBody(written);
   }
 
+  // A plain build compiles concrete instances only, and nothing reads the tables of another
+  // once its own check and move check have ended. They are emptied here, with those of the
+  // closures checked inside it, where they would otherwise be held to the end of codegen.
+  shed(this: Mut<this>, id: InstanceId): void {
+    if (this.tables.session.plain !== true) return;
+    const checked = this.tables.arenas.instanceOf(id);
+    if (checked.concrete || bodyOf(this.tables.arenas, checked).closure !== undefined) return;
+    let waiting: InstanceId[] = [id];
+    let apart: usize[] = [];
+    while (waiting.length > 0) {
+      let emptied = this.tables.arenas.instanceMut(waiting.pop()!);
+      if (emptied.inner !== undefined) for (const c of emptied.inner!) waiting.push(c);
+      if (emptied.lowered !== undefined) apart.push(emptied.lowered!);
+      let fresh = emptyTables(this.tables.session.plain === true);
+      emptied.types = fresh.types;
+      emptied.locals = fresh.locals;
+      emptied.calls = fresh.calls;
+      emptied.setters = fresh.setters;
+      emptied.coercions = fresh.coercions;
+      emptied.jumps = fresh.jumps;
+      emptied.borrowsFrom = fresh.borrowsFrom;
+      emptied.raises = fresh.raises;
+      emptied.caught = fresh.caught;
+      emptied.patterns = fresh.patterns;
+    }
+    for (const at of apart) this.tables.arenas.dropLowered(at);
+  }
+
   // Checks an instance with its type arguments in scope.
   /** @throws {CompileError} */
   checkBody(this: Mut<this>, id: InstanceId): void {
@@ -3313,7 +3401,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           const outerSight = this.resolver().enterSight(undefined);
           const scope = this.instancing().scopeOf(id);
           const outerScope = this.resolver().enterScope(scope);
-          this.tables.rewrites.startCheck();
+          this.tables.rewrites.startCheck(this.tables.arenas.instanceOf(id).body);
           try {
             this.checkInstance(id, undefined, undefined, undefined);
           } finally {
@@ -3334,7 +3422,10 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
             throw thrown;
           }
         }
-        if (this.demanded === 0) return;
+        if (this.demanded === 0) {
+          this.shed(id);
+          return;
+        }
         this.forget(id);
       }
     } finally {
@@ -3355,12 +3446,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     instance.jumps.clear();
     instance.borrowsFrom.clear();
     instance.raises.clear();
+    instance.raisedAt = undefined;
     instance.caught.clear();
     instance.consumes.clear();
     instance.patterns.clear();
     instance.copiesOut.clear();
     instance.returns = "void";
     instance.throws = undefined;
+    const apart = instance.lowered;
+    instance.lowered = undefined;
     instance.envs = undefined;
     instance.dyns = undefined;
     instance.made = undefined;
@@ -3379,6 +3473,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     this.closures = kept;
     for (const c of retired) this.tables.arenas.instanceMut(c).retired = true;
+    if (apart !== undefined) this.tables.arenas.dropLowered(apart);
     this.views.delete(id);
     this.done.delete(id);
     this.inProgress.delete(id);
@@ -3548,6 +3643,8 @@ class BodyState {
   // How many statements with a `finally` enclose the code being checked: a generator dropped
   // at a `yield` there would never run the `finally`.
   finalizing: usize;
+  // The `await using` bindings whose scopes enclose the code being checked, innermost last.
+  awaited: Awaited[];
   // This body's sight in the resolver's state, which holds the scopes its bindings are declared in.
   sight: usize;
   targets: Target[];
@@ -3624,6 +3721,7 @@ class BodyState {
     this.family = undefined;
     this.inferred = undefined;
     this.finalizing = 0;
+    this.awaited = [];
     this.sight = 0;
     this.targets = [];
     this.facts = [];
@@ -3764,7 +3862,8 @@ class BodyChecker implements Context, GuardHost {
     } else if (this.f().returnType !== undefined) {
       const written = cloneTypeNode(this.f().returnType!);
       const resolved = this.cx.resolver().resolveType(written);
-      this.state.declared = this.cx.tables.typing.stored(resolved);
+      // An async closure's `Promise<T>` describes its own result, as a declared function's does.
+      this.state.declared = this.f().async === true ? resolved : this.cx.tables.typing.stored(resolved);
     } else this.state.declared = given !== undefined && isNumeric(given) ? given : undefined;
     if (this.f().generator === true && this.instance().generator === undefined) {
       const symbol = this.instance().symbol;
@@ -3814,6 +3913,7 @@ class BodyChecker implements Context, GuardHost {
     this.st.awaitable = new NodeSet<Expr>();
     this.st.yieldable = new NodeSet<Expr>();
     this.state.finalizing = 0;
+    this.state.awaited = [];
     const outerSight = this.state.outer !== undefined ? this.state.outer.sight : undefined;
     const sightOf = this.f().bodyId;
     this.state.sight = this.cx.resolver().openSight(sightOf, outerSight);
@@ -3872,6 +3972,7 @@ class BodyChecker implements Context, GuardHost {
     this.st.locked = this.f().closure?.expected === undefined ? undefined : this.cx.tables.typing.lockCallbacks.get(this.f().closure!.expected!);
     this.st.sharing = this.f().closure?.expected !== undefined && this.cx.tables.typing.sharedCallbacks.has(this.f().closure!.expected!);
     this.st.counting = this.f().closure?.expected !== undefined && this.cx.tables.typing.rcCallbacks.has(this.f().closure!.expected!);
+    this.st.grouping = this.f().closure?.expected !== undefined && this.cx.tables.typing.groupCallbacks.has(this.f().closure!.expected!);
     this.st.async = this.f().async === true;
     this.st.unsafe = this.f().closure?.unsafe === true;
     this.exprsState.unsafeDepth = this.st.unsafe ? 1 : 0;
@@ -3907,7 +4008,9 @@ class BodyChecker implements Context, GuardHost {
     for (let i: usize = 0; i < count; i++) {
       const p = cloneParam(this.f().params[i]!);
       const type = this.state.params[i]!;
-      this.declare(paramName(p), type, !this.cx.tables.typing.holdsRef(type), true, { ...p });
+      // A group closure's group stays the one it was called with: its tasks' errors are laid
+      // out as that group's await throws them.
+      this.declare(paramName(p), type, !this.cx.tables.typing.holdsRef(type) && !this.st.grouping, true, { ...p });
       if (assignsOwn(this.f().body, paramName(p))) {
         const id = this.locals().get(p)!;
         this.state.assignedParams.add(id);
@@ -4209,7 +4312,7 @@ class BodyChecker implements Context, GuardHost {
       this.state.errorType = errorType;
       while (inferring.length > 0) {
         const [at, from] = inferring.shift()!;
-        this.instance().raises.set(at, { from, to: errorType });
+        this.raised(at, { from, to: errorType });
       }
       this.instance().throws = errorType;
     }
@@ -4272,17 +4375,22 @@ class BodyChecker implements Context, GuardHost {
       const at = this.returnSpan();
       throw new CompileError("E0601", "not all code paths return a value", at.start, at.end);
     }
-    // From here on the body is read as a plain tree, its replacements in place.
+    // From here on the body is read as a plain tree, its replacements in place. They are put in
+    // place once, by the first check of the body to finish; an instance whose check replaces
+    // more after that reads a copy of its own, and the body's tree is never written again.
     const bodyId = this.f().bodyId;
-    const edited = this.cx.tables.rewrites.listIn(bodyId, this.f().id, "body");
-    let body = this.cx.tables.arenas.bodyMut(bodyId);
-    if (edited !== undefined) body.body = edited;
-    let written = body.params.splice(0);
-    while (written.length > 0) body.params.push(rebuiltParam(written.shift()!, this.cx.tables.rewrites));
-    this.cx.tables.rewrites.startRebuild(bodyId);
-    rebuiltStmts(body.body, this.cx.tables.rewrites);
-    this.cx.tables.rewrites.refresh(body.body);
-    this.cx.tables.rewrites.endRebuild();
+    if (this.cx.tables.rewrites.lowered(bodyId)) this.lowerApart(bodyId);
+    else {
+      const edited = this.cx.tables.rewrites.listIn(bodyId, this.f().id, "body");
+      let body = this.cx.tables.arenas.bodyMut(bodyId);
+      if (edited !== undefined) body.body = edited;
+      let written = body.params.splice(0);
+      while (written.length > 0) body.params.push(rebuiltParam(written.shift()!, this.cx.tables.rewrites));
+      this.cx.tables.rewrites.startRebuild(bodyId);
+      rebuiltStmts(body.body, this.cx.tables.rewrites);
+      this.cx.tables.rewrites.refresh(body.body);
+      this.cx.tables.rewrites.endRebuild();
+    }
     // A method this body calls on an object holding references is checked first, so the move
     // check knows whether it keeps what it is lent.
     const caller = this.instance().id;
@@ -4633,6 +4741,55 @@ class BodyChecker implements Context, GuardHost {
     return { type: this.cx.resolver().resolveType(written), what: `'${name}'` };
   }
 
+  // A `using` declaration's own rules, checked before its value is: it binds one plain name, to a
+  // value given where it is declared. `usingBound` holds the rule on that value's type; the move
+  // check (`use` in `src/moves.fsh`), `closure` here and `changesLocal` in `src/values.fsh` keep
+  // the binding where it is.
+  /** @throws {CompileError} */
+  usingDeclared(s: Ref<Extract<Stmt, { kind: "let" }>>, d: Ref<Declarator>): void {
+    if (s.keyword === "await using") this.awaitedHere(s);
+    if (d.target.kind !== "ident") throw new CompileError("E0411", `a '${s.keyword}' declaration binds one name, since its whole value is disposed at the end of the scope; name the value, and read its parts from that name`, d.target.start, d.target.end);
+    if (d.init === undefined) throw new CompileError("E0406", `'${s.keyword} ${d.target.name}' needs its value where it is declared, as TypeScript requires`, d.start, d.end);
+  }
+
+  // An `await using` declaration awaits its value's disposer on each way out of its scope, so it
+  // sits where an `await` written at each of them could.
+  /** @throws {CompileError} */
+  private awaitedHere(s: Ref<Stmt>): void {
+    const at = { start: s.start, end: s.start + 11 };
+    if (this.f().async !== true || this.cx.tables.timerMains.hasId(this.f().id)) throw new CompileError("E0301", "'await using' can only be used inside an 'async' function", at.start, at.end);
+    let where: string | undefined = undefined;
+    if (this.state.generatorType !== undefined) where = "in a generator, which may be dropped at a 'yield' before the scope ends; declare it in the async function that reads the generator";
+    else if (this.state.targets.some((t) => t.kind === "arm")) where = "inside a match arm, where nothing can be awaited yet; declare it before the 'match'";
+    else if (this.state.finalizing > 0) where = "in a 'try' with a 'finally', where nothing can be awaited yet; declare it before the 'try'";
+    if (where !== undefined) throw new CompileError("E0411", `'await using' can't be declared ${where}`, at.start, at.end);
+  }
+
+  // A `using` binding just declared holds an instance of a class with a disposer, which runs
+  // where the binding's scope ends, and is marked as never leaving that scope.
+  /** @throws {CompileError} */
+  usingBound(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "let" }>>, name: string, value: Ref<Expr>): void {
+    const local = this.locals().get(s)!;
+    const type = this.cx.localOf(local).type;
+    const shown = this.cx.tables.typing.show(type);
+    if (this.cx.tables.typing.isOption(type)) throw new CompileError("E0411", `'${name}' can't be declared with '${s.keyword}': its value is a '${shown}', which may be null; handle the null first, then declare the '${s.keyword}' with the value that is there`, value.start, value.end);
+    if (s.keyword === "await using") {
+      if (!this.asyncDisposable(type)) throw new CompileError("E0411", `'${name}' can't be declared with 'await using': its type '${shown}' has no async disposer to await at the end of the scope; declare 'async [Symbol.asyncDispose]()' in its class${this.cx.tables.typing.disposable(type) ? ", or declare it with 'using', which runs its '[Symbol.dispose]()'" : ""}`, value.start, value.end);
+    } else if (!this.cx.tables.typing.disposable(type)) throw new CompileError("E0411", `'${name}' can't be declared with 'using': its type '${shown}' has no disposer to run at the end of the scope; declare '[Symbol.dispose]()' in its class, or use 'const'`, value.start, value.end);
+    this.cx.tables.arenas.localMut(local).using = true;
+  }
+
+  // Whether a type is a class with an async disposer, its own or a base's.
+  /** @throws {CompileError} */
+  private asyncDisposable(this: Mut<this>, t: Type): boolean {
+    let c: ClassType | undefined = this.cx.kindOf(t) === "class" ? (t as ClassType) : undefined;
+    while (c !== undefined) {
+      if (this.cx.registry().classOf(c).methods.has(ASYNC_DISPOSE)) return true;
+      c = this.cx.tables.typing.rec(c).base;
+    }
+    return false;
+  }
+
   // `let x: T` declares a variable that holds nothing until assigned; the moves check refuses
   // every use before that, as TypeScript's definite assignment does.
   /** @throws {CompileError} */
@@ -4915,7 +5072,9 @@ class BodyChecker implements Context, GuardHost {
     this.hoist(list);
     const before = this.state.facts.length;
     const writes = this.state.written.length;
+    const open = this.state.awaited.length;
     for (let i = 0; i < list.length; i++) {
+      if (this.state.awaited.length > 0) this.disposedBefore(list, i);
       const inserted = this.cx.tables.insertedAfter.get(list[i]!);
       if (inserted !== undefined && inserted.length > 0 && (i + 1 < list.length ? list[i + 1]!.id : undefined) !== inserted[0]!.id) for (let k: usize = 0; k < inserted.length; k++) list.splice((i + 1 + k) as i64, 0, cloneStmt(inserted[k]!));
       const s: Ref<Stmt> = list[i]!;
@@ -4932,7 +5091,9 @@ class BodyChecker implements Context, GuardHost {
       let at = i + 1;
       while (added.length > 0) list.splice(at++ as i64, 0, added.shift()!);
       if (after !== undefined) this.state.facts.push(this.current(after, mark));
+      this.awaitedFrom(list, i);
     }
+    this.state.awaited.splice(open as i64);
     if (list.length !== given.length || list.some((x, i) => x.id !== given[i as usize]!.id)) this.cx.tables.rewrites.replaceList(bodyId, owner, field, list);
     let ends: Facts = new Map<string, Type>();
     for (const { local } of this.state.written.slice(writes as i64)) {
@@ -4951,6 +5112,110 @@ class BodyChecker implements Context, GuardHost {
     return ends;
   }
 
+  // An `await using` declaration just checked, at `i` in its list, opens its binding's scope: the
+  // rest of the list, which goes in a `try` of its own. A variable before it says whether the
+  // disposer has been started. An error thrown through the scope is caught, the disposer awaited,
+  // and the error thrown again; after the `try` the disposer is awaited unless a way out of the
+  // scope did that, as `disposedBefore` makes each do.
+  /** @throws {CompileError} */
+  private awaitedFrom(this: Mut<this>, list: Mut<Stmt[]>, i: usize): void {
+    const s: Ref<Stmt> = list[i]!;
+    if (s.kind !== "let" || s.keyword !== "await using") return;
+    const d: Ref<Declarator> = s.declarations[0]!;
+    const local = this.locals().get(s);
+    if (local === undefined || d.target.kind !== "ident") return;
+    const held = this.cx.localOf(local).type;
+    const clears = this.cx.tables.typing.disposable(held);
+    const bound: Awaited = { name: d.target.name, local, clears, targets: this.state.targets.length, finalizing: this.state.finalizing, start: s.start, end: s.end };
+    const at = { start: s.start, end: s.end };
+    this.state.awaited.push({ ...bound });
+    // A list checked again holds what its first check added.
+    if (i + 1 < list.length && declaredNames(list[i + 1]!).includes(startedName(bound.name))) return;
+    const flag: Pattern = { id: nextId(this.cx.tables.ids), kind: "ident", name: startedName(bound.name), start: at.start, end: at.end };
+    const unset: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: false, start: at.start, end: at.end };
+    const started = letOf(nextId(this.cx.tables.ids), "let", { id: nextId(this.cx.tables.ids), target: flag, type: undefined, init: unset, start: at.start, end: at.end }, at);
+    const caught: Pattern = { id: nextId(this.cx.tables.ids), kind: "ident", name: thrownName(bound.name), start: at.start, end: at.end };
+    const again: Stmt = { id: nextId(this.cx.tables.ids), kind: "throw", value: this.partIdent(thrownName(bound.name), at), start: at.start, end: at.end };
+    const handler: Stmt[] = [this.unlessStarted(bound, at), again];
+    const rest = list.splice((i + 1) as i64);
+    list.push(started);
+    list.push({ id: nextId(this.cx.tables.ids), kind: "try", block: rest, param: caught, paramType: undefined, handler, finalizer: undefined, start: at.start, end: at.end });
+    list.push(this.unlessStarted(bound, at));
+  }
+
+  // Awaits an `await using` binding's disposer unless a way out of its scope already has, as one
+  // whose disposer threw into a `catch` inside the scope has.
+  private unlessStarted(this: Mut<this>, a: Ref<Awaited>, at: Ref<Span>): Stmt {
+    const pending: Expr = { id: nextId(this.cx.tables.ids), kind: "unary", op: "!", operand: this.partIdent(startedName(a.name), at), start: at.start, end: at.end };
+    return { id: nextId(this.cx.tables.ids), kind: "if", cond: pending, then: this.disposal(a, at), else: undefined, start: at.start, end: at.end };
+  }
+
+  // What awaits an `await using` binding's disposer: the variable saying it has been started is
+  // set first, so nothing awaits it a second time when it throws. Once it has completed, a class
+  // with a disposer too has its liveness marker cleared, so dropping the value doesn't also run
+  // that one; a panic or a dropped future before then leaves the marker, and the drop runs it.
+  private disposal(this: Mut<this>, a: Ref<Awaited>, at: Ref<Span>): Stmt[] {
+    const yes: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: true, start: at.start, end: at.end };
+    const set: Expr = { id: nextId(this.cx.tables.ids), kind: "assign", op: "=", target: this.partIdent(startedName(a.name), at), value: yes, start: at.start, end: at.end };
+    const callee: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: this.partIdent(a.name, at), name: ASYNC_DISPOSE, optional: false, start: at.start, end: at.end };
+    const call: Expr = { id: nextId(this.cx.tables.ids), kind: "call", callee, typeArgs: [], args: [], optional: false, start: at.start, end: at.end };
+    const awaited: Expr = { id: nextId(this.cx.tables.ids), kind: "unary", op: "await", operand: call, start: at.start, end: at.end };
+    let out: Stmt[] = [{ id: nextId(this.cx.tables.ids), kind: "expr", expr: set, start: at.start, end: at.end }, { id: nextId(this.cx.tables.ids), kind: "expr", expr: awaited, start: at.start, end: at.end }];
+    if (a.clears) {
+      const marker: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: this.partIdent(a.name, at), name: LIVE, optional: false, start: at.start, end: at.end };
+      const no: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: false, start: at.start, end: at.end };
+      const clear: Expr = { id: nextId(this.cx.tables.ids), kind: "assign", op: "=", target: marker, value: no, start: at.start, end: at.end };
+      out.push({ id: nextId(this.cx.tables.ids), kind: "expr", expr: clear, start: at.start, end: at.end });
+    }
+    return out;
+  }
+
+  // A `return`, `break` or `continue` at `i` in a list, before it is checked: one that leaves the
+  // scope of `await using` bindings first awaits their disposers, innermost first, a returned
+  // value computed before them and held in a variable. The statements go before it in the list,
+  // so the list still ends with the jump.
+  /** @throws {CompileError} */
+  private disposedBefore(this: Mut<this>, list: Mut<Stmt[]>, i: usize): void {
+    const peeked = this.cx.tables.rewrites.getStmt(list[i]!.id);
+    const s: Ref<Stmt> = peeked !== undefined ? peeked : list[i]!;
+    if (s.kind !== "return" && s.kind !== "break" && s.kind !== "continue") return;
+    // A list checked again holds what its first check added.
+    if (i > 0 && endsAwaited(list[i - 1]!)) return;
+    // A jump leaves the bindings declared inside its target, and a `return` all of them, unless
+    // it is in a match arm, which it gives a value and never leaves.
+    let from = this.state.awaited.length;
+    if (s.kind === "break" || s.kind === "continue") {
+      const target = this.jumpTarget(s);
+      const depth = this.state.targets.findIndex((t) => t.stmt.id === target.id);
+      while (from > 0 && (this.state.awaited[from - 1]!.targets as i64) > depth) from--;
+    } else if (!this.state.targets.some((t) => t.kind === "arm")) from = 0;
+    if (from === this.state.awaited.length) return;
+    const at = { start: s.start, end: s.end };
+    for (let k = from; k < this.state.awaited.length; k++) {
+      const a: Awaited = { ...this.state.awaited[k]! };
+      const leaves = `this '${s.kind}' leaves the scope of 'await using ${a.name}'`;
+      if (this.state.finalizing > a.finalizing) throw new CompileError("E0412", `${leaves} from inside a 'try' with a 'finally', where its disposer can't be awaited yet; leave the scope after the 'try', as by setting a variable in it and testing that after it`, at.start, at.end);
+      if (this.peek(a.name) !== a.local) throw new CompileError("E0412", `${leaves} where another '${a.name}' hides it, so its disposer can't be awaited here; give the inner '${a.name}' another name`, at.start, at.end);
+    }
+    let made: Stmt[] = [];
+    let exit: Stmt;
+    if (s.kind === "break" || s.kind === "continue") exit = { id: nextId(this.cx.tables.ids), kind: s.kind, label: s.label, start: at.start, end: at.end };
+    else if (s.kind === "return" && s.value !== undefined) {
+      const name = `returned ${s.start}`;
+      const target: Pattern = { id: nextId(this.cx.tables.ids), kind: "ident", name, start: at.start, end: at.end };
+      made.push(letOf(nextId(this.cx.tables.ids), "const", { id: nextId(this.cx.tables.ids), target, type: undefined, init: cloneExpr(s.value), start: at.start, end: at.end }, at));
+      exit = { id: nextId(this.cx.tables.ids), kind: "return", value: this.partIdent(name, at), start: at.start, end: at.end };
+    } else exit = { id: nextId(this.cx.tables.ids), kind: "return", value: undefined, start: at.start, end: at.end };
+    for (let k = this.state.awaited.length; k > from; k--) {
+      const leaving: Awaited = { ...this.state.awaited[k - 1]! };
+      made.push(this.unlessStarted(leaving, at));
+    }
+    made.push(exit);
+    list.splice(i as i64, 1);
+    let to = i;
+    while (made.length > 0) list.splice(to++ as i64, 0, made.shift()!);
+  }
+
   // A declaration's type: as written, or as a later use demanded, or as the target its
   // destructured part goes to.
   /** @throws {CompileError} */
@@ -4959,6 +5224,8 @@ class BodyChecker implements Context, GuardHost {
       const resolved = this.cx.resolver().resolveType(d.type);
       return this.cx.tables.typing.stored(resolved);
     }
+    // A value held for a `return` while disposers are awaited is the function's result.
+    if (d.target.kind === "ident" && d.target.name.startsWith("returned ")) return this.state.declared;
     const demanded = this.cx.demands.get(s);
     return demanded !== undefined ? demanded : this.partType(s);
   }
@@ -5420,7 +5687,7 @@ class BodyChecker implements Context, GuardHost {
     const bindings = new Map<string, Type>([...this.instance().bindings]);
     const concrete = this.instance().concrete;
     const depth = this.instance().depth;
-    let added = this.cx.tables.arenas.addInstance({ body: bodyId, symbol, bindings, concrete, depth, returns: "void", ...emptyTables() });
+    let added = this.cx.tables.arenas.addInstance({ body: bodyId, symbol, bindings, concrete, depth, returns: "void", ...emptyTables(this.cx.tables.session.plain === true) });
     added.captures = new Map<LocalId, LocalId | "this">();
     added.captureUses = new Map<LocalId, Expr>();
     added.changed = new Set<LocalId>();
@@ -5428,6 +5695,9 @@ class BodyChecker implements Context, GuardHost {
     // Read where it is used, as the checker changes the arena it is kept in.
     const innerId = added.id;
     this.cx.closures.push(innerId);
+    let host = this.cx.tables.arenas.instanceMut(parent);
+    if (host.inner !== undefined) host.inner!.push(innerId);
+    else host.inner = [innerId];
     const outerSight = this.cx.resolver().enterSight(this.state.sight);
     try {
       this.cx.checkInstance(innerId, this.state, this.st, this.exprsState);
@@ -5455,16 +5725,33 @@ class BodyChecker implements Context, GuardHost {
           if (changedAliases.includes(alias)) this.exprs().changesLocal(mine, "", "change", at, false);
           env.push(mine);
         }
+        const plain = this.cx.tables.session.plain === true;
         let held = this.instance();
         const before = held.made !== undefined ? held.made.get(e) : undefined;
         let made: { of: InstanceId; env: LocalId[] }[] = before !== undefined ? before : [];
         made.push({ of, env });
         if (held.made === undefined) held.made = new NodeMap<Expr, { of: InstanceId; env: LocalId[] }[]>();
-        if (held.made !== undefined) held.made.set(cloneExpr(e), made);
+        if (held.made !== undefined && plain) held.made.setId(e.id, made);
+        else if (held.made !== undefined) held.made.set(cloneExpr(e), made);
       }
     }
     // A nested function runs whenever it is called, so it can't take over what it uses.
     const nested = this.cx.tables.nestedFunctions.get(e);
+    // A `using` binding stays in its scope, which a closure holding it may outlive.
+    const kept = captured.find(([alias, from]) => from !== "this" && from.using === true && (e.move || owning || moved.some((m) => m.localId === alias.localId)));
+    if (kept !== undefined) {
+      const at = this.captureSpan(innerId, kept[0].localId, e);
+      const who = nested !== undefined ? `the nested function '${nested}'` : "this closure";
+      const held = this.cx.tables.typing.show(kept[0].type);
+      throw new CompileError("E0215", `'${kept[0].name}' can't be held by ${who}: it is declared with 'using', so its value belongs to its scope, which disposes it; call a closure that borrows it where it is made, or lend '${kept[0].name}' to a function as a 'Ref<${held}>' or a 'Mut<${held}>'`, at.start, at.end);
+    }
+    // An async closure's future starts with its own copy of what the closure holds, and a value
+    // that only moves has no copy to give it.
+    const copiedIn = e.async ? captured.find(([alias, from]) => from !== "this" && this.cx.tables.typing.holdsMoveOnly(alias.type)) : undefined;
+    if (copiedIn !== undefined) {
+      const what = this.cx.tables.typing.holdsPart(copiedIn[0].type, (u) => this.cx.tables.typing.disposable(u)) ? "a value with a '[Symbol.dispose]' method" : "a Rust value";
+      throw unsupported(`async closures holding ${what}, as this one holds '${copiedIn[0].name}',`, this.captureSpan(innerId, copiedIn[0].localId, e));
+    }
     if (nested !== undefined) {
       const self = captured.find(([, from]) => from === "this");
       if (self !== undefined) throw new CompileError("E0708", `'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, this.captureSpan(innerId, self[0].localId, e).start, this.captureSpan(innerId, self[0].localId, e).end);
@@ -5532,8 +5819,8 @@ class BodyChecker implements Context, GuardHost {
     // An async one's future throws, which a function type giving a Promise can't say yet.
     const failing = futureOf !== undefined ? this.cx.tables.typing.rec(futureOf).throws : undefined;
     if (expected !== undefined && givenReturns !== undefined && failing !== undefined && !this.cx.tables.typing.openThrows.has(expected) && this.cx.tables.typing.promiseElement(givenReturns) !== undefined) {
-      const raised = [...this.cx.tables.arenas.instanceOf(innerId).raises.keys()];
-      const at = e.throws !== undefined ? { start: e.throws.start, end: e.throws.end } : raised.length > 0 ? { start: raised[0]!.start, end: raised[0]!.end } : { start: e.start, end: e.end };
+      const raised = this.cx.tables.arenas.instanceOf(innerId).raisedAt;
+      const at = e.throws !== undefined ? { start: e.throws.start, end: e.throws.end } : raised !== undefined ? { start: raised.start, end: raised.end } : { start: e.start, end: e.end };
       throw new CompileError("E0602", `this async closure throws '${this.cx.tables.typing.show(failing)}', but it is given as '${this.cx.tables.typing.show(expected)}', whose Promise throws nothing; catch it inside the closure with try/catch`, at.start, at.end);
     }
     // Each call's future works on its own copy of the captures, so a change would be lost.
@@ -5683,6 +5970,7 @@ class BodyChecker implements Context, GuardHost {
         const first: Ref<Declarator> = s.declarations[0]!;
         const peeked = this.cx.tables.rewrites.rewrittenDeclarator(first);
         const d: Ref<Declarator> = peeked !== undefined ? peeked : first;
+        if (isUsing(s.keyword)) this.usingDeclared(s, d);
         if (d.init?.kind === "arrow" && d.target.kind === "ident" && s.keyword === "const" && d.init.typeParams.some((p) => !isLifetime(p))) {
           const fn = arrowFunction(this.cx.tables.ids, d.target.name, { ...d.init }, d);
           return this.lift(s, d.target.name, fn);
@@ -5717,7 +6005,9 @@ class BodyChecker implements Context, GuardHost {
         }
         // So does a regex given as a 'RegExp', which keeps its pattern's captures.
         const describes = annotated !== undefined && (this.cx.isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
-        this.declare(d.target.name, annotated !== undefined && !describes ? annotated : widened, s.keyword === "let", false, { ...s });
+        // A `using` binding is lent as a `Mut` and changed through its methods, as a `let` is.
+        this.declare(d.target.name, annotated !== undefined && !describes ? annotated : widened, s.keyword === "let" || isUsing(s.keyword), false, { ...s });
+        if (isUsing(s.keyword)) this.usingBound(s, d.target.name, d.init);
         const candidate = this.locals().get(s);
         if (s.keyword === "let" && annotated === undefined && type === "i64" && this.exprs().literalOnly(d.init, false)) this.cx.candidates.set(candidate!, cloneStmt(s));
         const number = s.keyword === "const" ? numberKey(d.init) : undefined;
@@ -5804,6 +6094,7 @@ class BodyChecker implements Context, GuardHost {
         return undefined;
       }
       case "for":
+        if (s.init !== undefined && s.init.kind === "let" && isUsing(s.init.keyword)) throw usingInHead(s.init);
         // A name declared in the head is scoped to the loop.
         this.pushScope(new Map<string, LocalId>());
         if (s.init !== undefined) this.statement(s.init);
@@ -5824,6 +6115,7 @@ class BodyChecker implements Context, GuardHost {
           if (this.state.finalizing > 0) throw unsupported("'for await' loops in a 'try' with a 'finally'", s);
         }
         const left: Ref<Stmt | Pattern> = s.left;
+        if (left.kind === "let" && isUsing(left.keyword)) throw usingInHead(left);
         if (left.kind !== "let" || left.keyword === "var") throw unsupported("'for...of' loops over a variable declared outside them", left);
         const d: Ref<Declarator> = left.declarations[0]!;
         if (left.declarations.length === 1 && (d.target.kind === "array" || d.target.kind === "object")) {
@@ -5985,6 +6277,11 @@ class BodyChecker implements Context, GuardHost {
         // The case bodies share one scope, as in JavaScript, but any case may be entered
         // directly, skipping the bodies before it, so a binding one case declares is usable
         // only in that case.
+        // A switch's cases share one scope, which no case's statements end.
+        for (const c of s.cases) {
+          const direct = c.body.find((x) => x.kind === "let" && x.keyword === "await using");
+          if (direct !== undefined) throw new CompileError("E0411", "'await using' can't be declared straight in a 'switch' case, whose scope is the whole 'switch' and not the case, as in TypeScript; put the case's statements in a block", direct.start, direct.start + 11);
+        }
         this.pushScope(new Map<string, LocalId>());
         this.enterTarget({ stmt: standIn(s), kind: "switch" as const });
         // A case narrows a union for its body, and so do the cases that fall through into it.
@@ -6031,6 +6328,10 @@ class BodyChecker implements Context, GuardHost {
         }
         let body: Ref<Stmt> = s.body;
         while (body.kind === "labeled") body = labeledOf(body);
+        // A jump straight after a label is in no list, so nothing could be put before it.
+        if (this.state.awaited.length > 0 && (body.kind === "return" || body.kind === "break" || body.kind === "continue")) {
+          throw new CompileError("E0412", `this '${body.kind}' is written straight after a label, where the disposer of 'await using ${this.state.awaited.at(-1)!.name}' can't be awaited before it; put it in a block, as in '${s.label}: { ... }'`, body.start, body.end);
+        }
         const loop = ["while", "doWhile", "for", "forIn", "forOf"].includes(body.kind) ? standIn(body) : undefined;
         this.enterTarget({ stmt: standIn(s), kind: "label" as const, label: s.label, loop });
         this.statement(s.body);
@@ -6043,7 +6344,8 @@ class BodyChecker implements Context, GuardHost {
         if (this.state.floors.length > 0 && this.state.targets.findIndex((t) => t.stmt.id === target.id) < (this.state.floors.at(-1)! as i64)) {
           throw new CompileError("E1102", `'${s.kind}' can't leave a comptime block, which runs while compiling, before the program does`, s.start, s.end);
         }
-        this.jumps().set(cloneStmt(s), { id: target.id, start: target.start, end: target.end });
+        if (this.cx.tables.session.plain === true) this.jumps().setId(s.id, { id: target.id, start: target.start, end: target.end });
+        else this.jumps().set(cloneStmt(s), { id: target.id, start: target.start, end: target.end });
         if (s.kind === "break") this.cx.broken.add(target);
         else this.cx.continued.add(target);
         return undefined;
@@ -6066,6 +6368,16 @@ class BodyChecker implements Context, GuardHost {
         this.state.handlers.push([]);
         this.scoped(s.id, "block", s.block);
         let sites = this.state.handlers.pop()!;
+        const awaited = s.param !== undefined && s.param.kind === "ident" && s.param.name.startsWith(thrownName(""));
+        // The scope of an `await using` binding with nothing in it to throw needs no handler, and
+        // is the block it would have been.
+        if (sites.length === 0 && awaited) {
+          const bodyId = this.f().bodyId;
+          const edited = this.cx.tables.rewrites.listIn(bodyId, s.id, "block");
+          this.cx.tables.rewrites.replaceStmt(s, { id: 0, kind: "block", body: s.block.map((x) => cloneStmt(x)), start: s.start, end: s.end });
+          if (edited !== undefined) this.cx.tables.rewrites.replaceList(bodyId, s.id, "body", edited.slice());
+          return undefined;
+        }
         if (sites.length === 0) {
           const never = new CompileError("E0603", "nothing in this 'try' can throw, so its 'catch' never runs; remove the try/catch", s.start, s.start + 3);
           let callees: BodyId[] = [];
@@ -6073,10 +6385,16 @@ class BodyChecker implements Context, GuardHost {
           this.cx.tryCallees.push([never.clone(), callees]);
           throw never;
         }
-        const caught = this.cx.tables.typing.unionType(sites.map(([, t]) => t));
+        // Such a scope only passes an error on, so where the function itself is what takes it, each
+        // error is checked and converted where it is raised, as it would be with no scope there.
+        const passing = awaited && this.state.handlers.length === 0 && this.state.inferring === undefined && this.f().comptime === undefined && this.state.comptimeDepth === 0;
+        const caught = passing && this.state.errorType !== undefined ? this.state.errorType : this.cx.tables.typing.unionType(sites.map(([, t]) => t));
         while (sites.length > 0) {
           const [at, from] = sites.shift()!;
-          this.instance().raises.set(at, { from, to: caught });
+          const span = { start: at.start, end: at.end };
+          const throwing = at.kind === "throw";
+          if (passing) this.raiseAt(at, span, from, "this", throwing);
+          else this.raised(at, { from, to: caught });
         }
         this.instance().caught.set(cloneStmt(s), caught);
         this.pushScope(new Map<string, LocalId>());
@@ -6103,7 +6421,8 @@ class BodyChecker implements Context, GuardHost {
           const armId = this.state.targets[armAt as usize]!.stmt.id;
           const armStart = this.state.targets[armAt as usize]!.stmt.start;
           const armEnd = this.state.targets[armAt as usize]!.stmt.end;
-          this.jumps().set(cloneStmt(s), { id: armId, start: armStart, end: armEnd });
+          if (this.cx.tables.session.plain === true) this.jumps().setId(s.id, { id: armId, start: armStart, end: armEnd });
+          else this.jumps().set(cloneStmt(s), { id: armId, start: armStart, end: armEnd });
           if (wanted && s.value === undefined) throw new CompileError("E0605", "this match gives a value, so a 'return' in its arm needs one", s.start, s.end);
           // In TypeScript this would leave the function, which a return in an arm never does.
           if (!wanted && s.value !== undefined) {
@@ -6287,7 +6606,12 @@ class BodyChecker implements Context, GuardHost {
 
   leaves(stmts: Ref<Stmt[]>): boolean {
     const last = stmts.at(-1);
-    return alwaysReturns(stmts, this.cx.broken, this.cx.continued) || last?.kind === "break" || last?.kind === "continue";
+    if (alwaysReturns(stmts, this.cx.broken, this.cx.continued) || last?.kind === "break" || last?.kind === "continue") return true;
+    // A list checked before ends with the scope an `await using` declaration opened, and what
+    // awaits its disposer after it: it leaves when the scope's own statements do.
+    if (stmts.length < 2 || last === undefined || !endsAwaited(last)) return false;
+    const scope: Ref<Stmt> = stmts[stmts.length - 2]!;
+    return scope.kind === "try" ? this.leaves(scope.block) : scope.kind === "block" && this.leaves(scope.body);
   }
 
   /** @throws {CompileError} */
@@ -6477,11 +6801,39 @@ class BodyChecker implements Context, GuardHost {
     this.raiseAt(at, span, raised, "'throw'", true);
   }
 
+  // Records what `at` raises and what that becomes. A build that keeps nothing for a later reader
+  // stores it by id: nothing there reads the node but the error that points at a closure's first
+  // raise, which `raisedAt` keeps.
+  raised(this: Mut<this>, at: Expr | Stmt, raise: Raise): void {
+    const plain = this.cx.tables.session.plain === true;
+    let instance = this.instance();
+    if (instance.raisedAt === undefined) instance.raisedAt = { start: at.start, end: at.end };
+    if (plain) instance.raises.setId(at.id, raise);
+    else instance.raises.set(at, raise);
+  }
+
   // An error raised by a call or a `throw` goes to the function's caller, which needs a
   // `throws` clause it fits.
   /** @throws {CompileError} */
   raise(this: Mut<this>, at: Ref<Expr>, type: Type, what: string): void {
     this.raiseAt(cloneExpr(at), { start: at.start, end: at.end }, type, what, at.kind === "throw");
+  }
+
+  // A task group's child fails where the group is awaited, not where it is spawned, so its
+  // error goes to what the group's closure throws whatever `try` the spawn is in.
+  /** @throws {CompileError} */
+  raisePast(this: Mut<this>, at: Ref<Expr>, type: Type): void {
+    if (this.cx.tables.typing.holdsRef(type)) throw unsupported("errors holding references", at);
+    if (this.state.inferring !== undefined) {
+      this.state.inferring!.push([cloneExpr(at), type]);
+      return;
+    }
+    const errorType = this.state.errorType;
+    if (errorType === undefined || !this.cx.tables.typing.fits(type, errorType)) {
+      const declared = errorType !== undefined ? `'${this.cx.tables.typing.show(errorType)}'` : "nothing";
+      throw new CompileError("E0602", `this task can throw '${this.cx.tables.typing.show(type)}', but the group's closure declares it throws ${declared}; declare the task's error too, or leave the 'throws' clause out so it is inferred`, at.start, at.end);
+    }
+    this.raised(cloneExpr(at), { from: type, to: errorType });
   }
 
   // `site` raises the error, written at `span`; `throwing` when it is a `throw`.
@@ -6509,7 +6861,7 @@ class BodyChecker implements Context, GuardHost {
     }
     const errorType = this.state.errorType!;
     if (this.cx.tables.typing.fits(type, errorType)) {
-      this.instance().raises.set(at, { from: type, to: errorType });
+      this.raised(at, { from: type, to: errorType });
       return;
     }
     // An error the declared type doesn't take may be wrapped by a class of it that
@@ -6535,7 +6887,26 @@ class BodyChecker implements Context, GuardHost {
     if (wrappers.length > 1) {
       throw new CompileError("E0602", `${does}, which ${wrappers.map((w) => `'${this.cx.tables.typing.rec(w.wrapper).name}'`).join(" and ")} both wrap; throw one of them yourself`, span.start, span.end);
     }
-    this.instance().raises.set(at, { from: type, to: errorType, ...wrappers[0]! });
+    this.raised(at, { from: type, to: errorType, ...wrappers[0]! });
+  }
+
+  // The body as this check read it, kept apart, when the check read or made a replacement the
+  // body's tree doesn't hold: its own, another instance's since the tree was rebuilt, or one
+  // left by a check that stopped part way. The tree holds the first lowering and stays as it
+  // is, and this instance is compiled from what its tables were filled against. Nothing to do
+  // when the check read the tree as it stands.
+  private lowerApart(this: Mut<this>, bodyId: BodyId): void {
+    if (!this.cx.tables.rewrites.sawLate()) return;
+    let own = cloneBody(this.cx.tables.arenas.bodyOf(bodyId));
+    const edited = this.cx.tables.rewrites.listIn(bodyId, this.f().id, "body");
+    if (edited !== undefined) own.body = edited;
+    let written = own.params.splice(0);
+    while (written.length > 0) own.params.push(rebuiltParam(written.shift()!, this.cx.tables.rewrites));
+    this.cx.tables.rewrites.startRebuild(bodyId);
+    rebuiltStmts(own.body, this.cx.tables.rewrites);
+    this.cx.tables.rewrites.endApart();
+    const at = this.cx.tables.arenas.addLowered(own);
+    this.cx.tables.arenas.instanceMut(this.state.instanceId).lowered = at;
   }
 
   // The move check of this body. It changes the tables the body and its instance are kept in, so
@@ -6548,12 +6919,14 @@ class BodyChecker implements Context, GuardHost {
     const bodyId = this.f().bodyId;
     const standIn = instanceStandIn(this.instance());
     const signature = cloneSignature(this.f());
+    const apart = this.instance().lowered;
     const instance = this.cx.tables.arenas.swapInstance(instanceId, standIn);
-    const body = this.cx.tables.arenas.swapBody(bodyId, signature);
+    const body = apart !== undefined ? this.cx.tables.arenas.swapLowered(apart, signature) : this.cx.tables.arenas.swapBody(bodyId, signature);
     try {
       return checkMoves(this.cx.tables, body, instance, origins);
     } finally {
-      this.cx.tables.arenas.swapBody(bodyId, body);
+      if (apart !== undefined) this.cx.tables.arenas.swapLowered(apart, body);
+      else this.cx.tables.arenas.swapBody(bodyId, body);
       this.cx.tables.arenas.swapInstance(instanceId, instance);
       timingEnd(this.cx.tables, "moves", mark);
     }

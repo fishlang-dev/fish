@@ -7,7 +7,7 @@ import type { ClassInfo } from "./classes.fsh";
 import type { Module } from "./modules.fsh";
 import type { Callee, Site } from "./nodes.fsh";
 import type { Expr, Stmt } from "./parser.fsh";
-import type { ClassType, Type, Typing } from "./typing.fsh";
+import { TypeMap, type ClassType, type Type, type Typing } from "./typing.fsh";
 
 // A declaration, by where its name is written.
 export type Declared = { start: usize; end: usize };
@@ -33,7 +33,7 @@ export class Index {
   // they are what the source says, `T` included.
   read(this: Mut<this>, checked: Ref<Checked>, modules: Ref<Module[]>) {
     const arenas: Ref<Arenas> = checked.tables.arenas;
-    let classes = new Map<ClassType, ClassId>();
+    let classes = new TypeMap<ClassType, ClassId>();
     for (let c: usize = 1; c <= arenas.classCount(); c++) classes.set(arenas.classOf(c as ClassId).type, c as ClassId);
     let typedAt = new Map<usize, [usize, boolean]>();
     let localDecls = new Map<usize, Declared>();
@@ -198,7 +198,7 @@ function calleeOf(modules: Ref<Module[]>, e: Ref<Expr>, name: string): Declared 
 
 // The class field `name` a value of type `t` reads, by its declaration, through references and
 // the classes it extends.
-function fieldOf(checked: Ref<Checked>, classes: Ref<Map<ClassType, ClassId>>, t: Type, name: string): Declared | undefined {
+function fieldOf(checked: Ref<Checked>, classes: Ref<TypeMap<ClassType, ClassId>>, t: Type, name: string): Declared | undefined {
   const typing: Ref<Typing> = checked.tables.typing;
   let at: Type = t;
   const r = typing.recOf(at);

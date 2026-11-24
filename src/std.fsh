@@ -907,11 +907,12 @@ function __sseLine(value: string): string {
 type ServeInfo = { hostname: string; port: i64 };
 // Body sizes are in bytes and timeouts in milliseconds; a timeout of 0 is none.
 // unix is a socket path to serve on in place of a port, removed when serve stops. tls has the
-// server speak HTTPS with a PEM certificate chain and its private key, as Bun's does.
-type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64 };
+// server speak HTTPS with a PEM certificate chain and its private key, as Bun's does. trace: false
+// keeps the server's requests out of the program's traces, when tracing is on.
+type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64; trace?: boolean };
 type ServeHandler = (req: Request) => Promise<Response>;
 // What serve's options settle for each connection, under a name no program can write.
-type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64; secure: boolean };
+type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64; secure: boolean; trace: boolean };
 // A router's internal names take forms no program can write, so a program's own never hides
 // the HTTP library.
 type __routerNext = (req: Request) => Promise<Response>;
@@ -938,6 +939,7 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     headerTimeout: Http1.option(options.headerTimeout, 60000, "headerTimeout", "milliseconds, or 0 for no timeout"),
     idleTimeout: Http1.option(options.idleTimeout, 10000, "idleTimeout", "milliseconds, or 0 for no timeout"),
     secure: options.tls !== null,
+    trace: options.trace !== false,
   };
   // With no signal of its own, the server stops at the first SIGINT or SIGTERM.
   const given = options.signal;
@@ -976,6 +978,8 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   if (unix !== null) unixUnlink(unix);
   // ponytail: polls until the last connection ends; a wait group would wake at once.
   while (live.count.load() > 0) await sleep(10);
+  // The last requests' spans go out before serve returns, since the program may end right after.
+  if (limits.trace && __traceOn()) await __traceSend();
 }
 
 // What a request's head says: its request line and headers.
@@ -1056,17 +1060,34 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       // The body is set after, not passed in init, which would copy it.
       let req = new Request((limits.secure ? "https://" : "http://") + authority + head.target, { method: method, headers: head.headers, signal: signal.clone() });
       req.__setBody(body);
+      // The request's span is current only while the handler's task is made, which so starts
+      // under it: this task goes on to the connection's next request.
+      let traced: __traceRecord[] = [];
+      let outer: i64[] = [];
+      if (limits.trace && __traceOn()) {
+        outer = __traceWords();
+        traced.push(__traceRequest(req));
+      }
       // The handler runs as a task of its own, so a panic in it ends only that task: its client
       // gets a bare 500 and the connection closes, and the server goes on serving.
       let res: Response;
       try {
-        res = await spawn(Http1.handle(handler.clone(), req)).join();
+        const running = spawn(Http1.handle(handler.clone(), req));
+        if (traced.length > 0) __traceEnter(outer);
+        res = await running.join();
       } catch (e) {
+        __traceServed(traced, 500);
         done.abort();
         await watching;
         await Http1.send(conn, new Response("", { status: 500 }), false, true, version);
         return;
       }
+      // The span ends here, before the response is written, so one place ends it however the
+      // response goes out: its status is the handler's, or the 500 an unsendable one becomes.
+      // ponytail: a streamed body's time isn't in the span, and an upgrade refused for its HTTP
+      // version is recorded as the handler's 101; end the span where each response is written if
+      // either matters.
+      if (traced.length > 0) __traceServed(traced, Http1.sendable(res) ? res.status : 500);
       // A WebSocket route's 101 hands the connection to its session, which keeps it to the end.
       // Bytes the client sent past the request go to the session, though it shouldn't send any
       // before the 101.
@@ -1421,6 +1442,25 @@ class Router {
     }
     return params;
   }
+}
+
+// What the checker writes around a route's handler that says its types: a 400 saying why the
+// body isn't the JSON its type reads, a 204 for a handler giving nothing, and what a handler
+// gives as JSON.
+function __routerRefused(message: string): Response {
+  return new Response(message, { status: 400 });
+}
+
+function __routerEmpty(): Response {
+  return new Response(null, { status: 204 });
+}
+
+// The value is written here, not handed on to Response.json: a second generic function would
+// write it as the type's layout, an empty optional field as null where the type leaves it out.
+function __routerJson<T>(data: Ref<T>): Response {
+  let res = new Response(JSON.stringify(data));
+  res.headers.set("content-type", "application/json");
+  return res;
 }
 
 // The response Router.static gives a request: the file below root its path names past the
@@ -2578,6 +2618,252 @@ class Http1 {
       case _ => "",
     };
   }
+}
+`;
+
+// Tracing, which comes with the HTTP library: serve opens a span for each request, and spans
+// are sent to their collector over HTTP.
+const TRACE = String.raw`
+// Tracing: the spans serve and the fish:trace module record, and their export to an OTLP
+// collector. Every name here is one no program writes; the module holds the public ones.
+declare function fsh_rt_trace_get(out: MutPtr<i64>): void;
+declare function fsh_rt_trace_set(words: Ptr<i64>): void;
+declare function fsh_rt_unix_nanos(): i64;
+declare function fsh_rt_trace_ids(out: MutPtr<i64>, count: i64): void;
+declare function fsh_rt_trace_env(name: Ptr<u8>): Ptr<u8>;
+
+type __traceAttribute = { key: string; value: string | i64 | boolean };
+// A span as it is exported: its trace id's two halves, its own id and its parent's, 0 for a
+// root, and flags whose low bit says the trace is sampled. Times are Unix nanoseconds.
+type __traceRecord = { name: string; hi: i64; lo: i64; id: i64; parent: i64; flags: i64; kind: i64; start: i64; end: i64; attributes: __traceAttribute[] };
+type __traceSettings = { endpoint: string; service: string; delay: i64; armed: boolean; timer: i64; spans: __traceRecord[] };
+// Where an endpoint's spans are posted.
+type __traceTarget = { host: string; port: i64; authority: string; path: string };
+
+// 0 until the settings are first read, then 1 while tracing is off and 2 while it is on, so a
+// span site in a program that doesn't trace costs one load.
+const __traceMode = new Atomic(0);
+// The delay is the OpenTelemetry batch processor's default, five seconds.
+const __traceHeld = new Lock<__traceSettings>({ endpoint: "", service: "", delay: 5000, armed: false, timer: 0, spans: [] });
+
+// The current context: a trace id's halves, the current span's id and its flags, all 0 outside
+// any span. It belongs to the task, so it follows one through its awaits.
+function __traceWords(): i64[] {
+  let words: i64[] = [0, 0, 0, 0];
+  unsafe { fsh_rt_trace_get(mutPtrOf(words[0])) };
+  return words;
+}
+
+function __traceEnter(words: Ref<i64[]>): void {
+  unsafe { fsh_rt_trace_set(ptrOf(words[0])) };
+}
+
+function __traceNow(): i64 {
+  return unsafe { fsh_rt_unix_nanos() };
+}
+
+function __traceFresh(): i64[] {
+  let fresh: i64[] = [0, 0, 0];
+  unsafe { fsh_rt_trace_ids(mutPtrOf(fresh[0]), 3) };
+  return fresh;
+}
+
+function __traceEnv(name: string): string {
+  const value = unsafe { fsh_rt_trace_env(cString(name)) };
+  if (unsafe { value.isNull() }) return "";
+  return unsafe { fromCString(value) };
+}
+
+// Each word as sixteen lowercase hex digits, as OTLP and traceparent write ids.
+function __traceHex(words: Ref<i64[]>): string {
+  const digits = new TextEncoder().encode("0123456789abcdef");
+  let out: u8[] = [];
+  for (const w of words) for (let shift: i64 = 60; shift >= 0; shift -= 4) out.push(digits[((w >> shift) & 15) as usize]);
+  return new TextDecoder().decode(out);
+}
+
+// The context a W3C traceparent header carries, "00-<trace id>-<parent id>-<flags>" in
+// lowercase hex, or null for anything else, an all-zero id included.
+function __traceParent(header: string): i64[] | null {
+  if (header.length !== 55) return null;
+  // The trace id's halves, the parent id, the flags and the version.
+  let words: i64[] = [0, 0, 0, 0, 0];
+  for (let i: usize = 0; i < 55; i++) {
+    const c = header.charCodeAt(i) as i64;
+    if (i === 2 || i === 35 || i === 52) {
+      if (c !== 45) return null;
+      continue;
+    }
+    const d = c >= 48 && c <= 57 ? c - 48 : c >= 97 && c <= 102 ? c - 87 : -1;
+    if (d < 0) return null;
+    const at: usize = i < 2 ? 4 : i < 19 ? 0 : i < 35 ? 1 : i < 52 ? 2 : 3;
+    words[at] = (words[at] << 4) | d;
+  }
+  if (words[4] === 255 || (words[0] === 0 && words[1] === 0) || words[2] === 0) return null;
+  return [words[0], words[1], words[2], words[3] & 1];
+}
+
+// Where an endpoint's spans go: "<endpoint>/v1/traces" over plain HTTP, or null for an
+// endpoint that isn't an http:// URL of a host, an optional port and an optional path.
+function __traceTargetOf(endpoint: string): __traceTarget | null {
+  if (!endpoint.startsWith("http://")) return null;
+  const rest = endpoint.slice(7);
+  const slash = rest.indexOf("/");
+  const authority = slash < 0 ? rest : rest.slice(0, slash);
+  let base = slash < 0 ? "" : rest.slice(slash);
+  while (base.endsWith("/")) base = base.slice(0, (base.length as i64) - 1);
+  for (let i = 0; i < base.length; i++) {
+    const c = base.charCodeAt(i) as i64;
+    if (c <= 32 || c === 35 || c === 63 || c >= 127) return null;
+  }
+  if (!Http1.isHost(authority)) return null;
+  let host = authority;
+  let port: i64 = 80;
+  const colon = authority.lastIndexOf(":");
+  if (colon > authority.lastIndexOf("]")) {
+    host = authority.slice(0, colon);
+    port = Http1.digits(authority.slice(colon + 1));
+    if (port < 0 || port > 65535) return null;
+  }
+  // An IPv6 host connects without the brackets it has in a URL.
+  if (host.startsWith("[")) host = host.slice(1, (host.length as i64) - 1);
+  return { host: host, port: port, authority: authority, path: base + "/v1/traces" };
+}
+
+// Takes the settings, tracing on when they name an endpoint spans can be posted to. The first
+// read of the environment gives way to a configureTracing that got there before it.
+function __traceApply(endpoint: string, service: string, delay: i64, first: boolean): void {
+  const usable = endpoint.length === 0 || __traceTargetOf(endpoint) !== null;
+  if (!usable) console.error("tracing is off: its endpoint '" + endpoint + "' isn't an http:// URL of a collector; give one like 'http://localhost:4318' in OTEL_EXPORTER_OTLP_ENDPOINT or configureTracing's 'endpoint'");
+  __traceHeld.update((s) => {
+    if (first && __traceMode.load() !== 0) return;
+    s.endpoint = usable ? endpoint : "";
+    s.service = service;
+    if (delay >= 0) s.delay = delay;
+    __traceMode.store(s.endpoint.length > 0 ? 2 : 1);
+  });
+}
+
+function __traceConfigure(endpoint: string | null, service: string | null, delay: i64 | null): void {
+  __traceApply(endpoint ?? __traceEnv("OTEL_EXPORTER_OTLP_ENDPOINT"), service ?? __traceEnv("OTEL_SERVICE_NAME"), delay ?? -1, false);
+}
+
+// Whether tracing is on. The environment is read once, the first time anything asks.
+function __traceOn(): boolean {
+  const mode = __traceMode.load();
+  if (mode !== 0) return mode === 2;
+  __traceApply(__traceEnv("OTEL_EXPORTER_OTLP_ENDPOINT"), __traceEnv("OTEL_SERVICE_NAME"), -1, true);
+  return __traceMode.load() === 2;
+}
+
+// Begins a span under a parent context, a new trace when that names no span, and makes it the
+// current one.
+function __traceBegin(name: string, kind: i64, parent: Ref<i64[]>): __traceRecord {
+  const fresh = __traceFresh();
+  const root = parent[2] === 0;
+  // An id of 0 stands for no span.
+  const id = fresh[2] === 0 ? 1 : fresh[2];
+  const record: __traceRecord = { name: name, hi: root ? fresh[0] : parent[0], lo: root ? fresh[1] : parent[1], id: id, parent: parent[2], flags: root ? 1 : parent[3], kind: kind, start: __traceNow(), end: 0, attributes: [] };
+  __traceEnter([record.hi, record.lo, record.id, record.flags]);
+  return record;
+}
+
+// Ends a span: it joins the batch, and a timer is set to send the batch when none is waiting.
+// A span of a trace its caller didn't sample is not exported.
+function __traceFinish(record: __traceRecord): void {
+  if ((record.flags & 1) === 0) return;
+  let done = record;
+  done.end = __traceNow();
+  const delay = __traceHeld.update((s) => {
+    // ponytail: a batch holds 2048 spans, the OpenTelemetry queue's default, and drops the rest;
+    // send early when it fills if a busy server loses spans between timers.
+    if (s.spans.length >= 2048) return -1;
+    s.spans.push(done);
+    if (s.armed) return -1;
+    s.armed = true;
+    return s.delay;
+  });
+  if (delay < 0) return;
+  const timer = setTimeout(async () => { await __traceSend(); }, delay);
+  __traceHeld.update((s) => { s.timer = timer; });
+}
+
+// Ends a span opened by the fish:trace module, whose parent becomes current again unless
+// another span has taken its place since.
+function __traceEnd(record: __traceRecord, prior: Ref<i64[]>): void {
+  const now = __traceWords();
+  if (now[2] === record.id && now[0] === record.hi && now[1] === record.lo) __traceEnter(prior);
+  __traceFinish(record);
+}
+
+// A request's server span, current so the handler's task inherits it: under the caller's span
+// when a traceparent header names one, a new trace otherwise.
+function __traceRequest(req: Ref<Request>): __traceRecord {
+  const given = req.headers.get("traceparent");
+  const remote = given !== null ? __traceParent(given) : null;
+  let record = __traceBegin(req.method, 2, remote ?? [0, 0, 0, 0]);
+  record.attributes.push({ key: "http.request.method", value: req.method });
+  record.attributes.push({ key: "url.path", value: req.path });
+  return record;
+}
+
+// Ends a request's span, if it has one, with the status its response goes out with.
+function __traceServed(open: Mut<__traceRecord[]>, status: i64): void {
+  const record = open.pop();
+  if (record === null) return;
+  let done = record;
+  done.attributes.push({ key: "http.response.status_code", value: status });
+  __traceFinish(done);
+}
+
+// A batch as OTLP's JSON: ids in hex, times as decimal strings, each attribute by its type.
+function __traceJson(spans: Ref<__traceRecord[]>, service: string): string {
+  let out = '{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":' + JSON.stringify(service.length > 0 ? service : "unknown_service") + '}}]},"scopeSpans":[{"scope":{"name":"fish"},"spans":[';
+  for (let i = 0; i < spans.length; i++) {
+    const s: Ref<__traceRecord> = spans[i];
+    if (i > 0) out += ",";
+    out += '{"traceId":"' + __traceHex([s.hi, s.lo]) + '","spanId":"' + __traceHex([s.id]) + '",';
+    if (s.parent !== 0) out += '"parentSpanId":"' + __traceHex([s.parent]) + '",';
+    out += '"name":' + JSON.stringify(s.name) + ',"kind":' + String(s.kind) + ',"startTimeUnixNano":"' + String(s.start) + '","endTimeUnixNano":"' + String(s.end) + '","attributes":[';
+    for (let j = 0; j < s.attributes.length; j++) {
+      const a: Ref<__traceAttribute> = s.attributes[j];
+      const v = a.value;
+      if (j > 0) out += ",";
+      out += '{"key":' + JSON.stringify(a.key) + ',"value":';
+      if (typeof v === "string") out += '{"stringValue":' + JSON.stringify(v) + "}}";
+      else if (typeof v === "boolean") out += '{"boolValue":' + (v ? "true" : "false") + "}}";
+      else out += '{"intValue":"' + String(v) + '"}}';
+    }
+    out += "]}";
+  }
+  return out + "]}]}]}";
+}
+
+// Posts a batch to the collector over HTTP/1.1, giving up after ten seconds.
+async function __tracePost(to: __traceTarget, body: string): Promise<void> throws IoError | AbortError {
+  const bytes = new TextEncoder().encode(body);
+  let sent = new TextEncoder().encode("POST " + to.path + " HTTP/1.1\r\nhost: " + to.authority + "\r\ncontent-type: application/json\r\ncontent-length: " + String(bytes.length) + "\r\nconnection: close\r\n\r\n");
+  for (const b of bytes) sent.push(b);
+  const signal = AbortSignal.timeout(10000);
+  const conn = await TcpStream.connect(to.host, to.port, signal.clone());
+  await conn.write(sent, signal.clone());
+  await Http1.receive(conn, false, signal);
+}
+
+// Sends what is buffered now, as the batch timer does when it fires. A batch that can't be
+// delivered is dropped: a collector that is down mustn't make the program hold its spans.
+async function __traceSend(): Promise<void> {
+  const batch = __traceHeld.update((s) => {
+    s.armed = false;
+    return { spans: s.spans.splice(0), endpoint: s.endpoint, service: s.service, timer: s.timer };
+  });
+  // A timer still waiting has nothing left to send, and would keep the program running.
+  clearTimeout(batch.timer);
+  const to = __traceTargetOf(batch.endpoint);
+  if (batch.spans.length === 0 || to === null) return;
+  try {
+    await __tracePost(to, __traceJson(batch.spans, batch.service));
+  } catch (_e) {}
 }
 `;
 
@@ -6760,6 +7046,334 @@ export class Pool {
   }
 }
 `,
+  // SQLite through the system's library, which links into a program only when it imports this:
+  // statements with parameters bound apart from their text, and rows read by column name into a
+  // type, as the postgres module reads them.
+  sqlite: String.raw`
+declare function fsh_rt_sqlite_database(): i64;
+declare function fsh_rt_sqlite_open(db: i64, path: Ptr<u8>): i64;
+declare function fsh_rt_sqlite_error(db: i64): Ptr<u8>;
+declare function fsh_rt_sqlite_retain(db: i64): void;
+declare function fsh_rt_sqlite_release(db: i64): void;
+declare function fsh_rt_sqlite_close(db: i64): void;
+declare function fsh_rt_sqlite_statement(db: i64): i64;
+declare function fsh_rt_sqlite_statement_retain(statement: i64): void;
+declare function fsh_rt_sqlite_statement_release(statement: i64): void;
+declare function fsh_rt_sqlite_finalize(statement: i64): void;
+declare function fsh_rt_sqlite_lock(statement: i64): i64;
+declare function fsh_rt_sqlite_unlock(statement: i64, finalize: i64): void;
+declare function fsh_rt_sqlite_prepare(statement: i64, sql: Ptr<u8>, length: i64): i64;
+declare function fsh_rt_sqlite_reset(statement: i64): i64;
+declare function fsh_rt_sqlite_parameters(statement: i64): i64;
+declare function fsh_rt_sqlite_bind_null(statement: i64, at: i64): i64;
+declare function fsh_rt_sqlite_bind_integer(statement: i64, at: i64, value: i64): i64;
+declare function fsh_rt_sqlite_bind_double(statement: i64, at: i64, value: f64): i64;
+declare function fsh_rt_sqlite_bind_text(statement: i64, at: i64, text: Ptr<u8>, length: i64): i64;
+declare function fsh_rt_sqlite_bind_blob(statement: i64, at: i64, data: Ptr<u8>, length: i64): i64;
+declare function fsh_rt_sqlite_step(statement: i64): i64;
+declare function fsh_rt_sqlite_row(statement: i64): Ptr<u8>;
+declare function fsh_rt_sqlite_changes(statement: i64): i64;
+declare function fsh_rt_sqlite_last_insert_rowid(statement: i64): i64;
+
+// A value a statement's ?, ?1 or :name can take: a boolean is bound as 0 or 1, bytes as a BLOB.
+export type SqlValue = null | boolean | i64 | f64 | string | u8[];
+
+// What SQLite said went wrong, with its primary result code: 1 for bad SQL, 19 for a constraint.
+export class SqliteError extends Error {
+  code: i64;
+  constructor(message: string, code: i64) {
+    super(message);
+    this.name = "SqliteError";
+    this.code = code;
+  }
+}
+
+// A row that can't be read as the type asked for: a column it needs is missing, null where the
+// field can't be, or of another type.
+export class RowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RowError";
+  }
+}
+
+// What a statement that reads no rows did: how many rows it inserted, updated or deleted, and the
+// rowid of the connection's last insert.
+export type RunResult = { changes: i64; lastInsertRowid: i64 };
+
+// A run's rows, each as the JSON the runtime wrote it as, and its counts.
+type Outcome = { rows: string[]; changes: i64; lastInsertRowid: i64 };
+
+// The handles a Statement is made from. A class of this module's own, so that only prepare can
+// make a Statement: a number passed for a handle would be read as an address.
+class Prepared {
+  db: i64;
+  statement: i64;
+  constructor(db: i64, statement: i64) {
+    this.db = db;
+    this.statement = statement;
+  }
+}
+
+function failure(db: i64, code: i64): SqliteError {
+  return new SqliteError(unsafe { fromCString(fsh_rt_sqlite_error(db)) }, code);
+}
+
+// Text as bytes with a NUL after them, so a pointer can be taken to empty text too.
+function terminated(text: string): u8[] {
+  let bytes = new TextEncoder().encode(text);
+  bytes.push(0);
+  return bytes;
+}
+
+function bind(statement: i64, at: i64, p: Ref<SqlValue>): i64 {
+  if (p === null) return unsafe { fsh_rt_sqlite_bind_null(statement, at) };
+  if (typeof p === "boolean") return unsafe { fsh_rt_sqlite_bind_integer(statement, at, p ? 1 : 0) };
+  if (typeof p === "string") {
+    const bytes = terminated(p);
+    return unsafe { fsh_rt_sqlite_bind_text(statement, at, ptrOf(bytes[0]), (bytes.length as i64) - 1) };
+  }
+  if (typeof p === "number") {
+    // A union says whether it holds an i64 or an f64 only by comparing equal to one, so the
+    // number's text is read back as an i64: a float is never equal to it.
+    const text = JSON.stringify(p);
+    const whole = parseInt(text);
+    if (whole !== null && p === whole) return unsafe { fsh_rt_sqlite_bind_integer(statement, at, whole) };
+    const real = parseFloat(text);
+    if (real !== null) return unsafe { fsh_rt_sqlite_bind_double(statement, at, real) };
+    // JSON has no text for an infinity or NaN; SQLite stores NaN as NULL.
+    const infinity: f64 = 1e300 * 1e300;
+    if (p === infinity) return unsafe { fsh_rt_sqlite_bind_double(statement, at, infinity) };
+    if (p === -infinity) return unsafe { fsh_rt_sqlite_bind_double(statement, at, -infinity) };
+    return unsafe { fsh_rt_sqlite_bind_null(statement, at) };
+  }
+  const none: u8[] = [0 as u8];
+  return p.length === 0
+    ? unsafe { fsh_rt_sqlite_bind_blob(statement, at, ptrOf(none[0]), 0) }
+    : unsafe { fsh_rt_sqlite_bind_blob(statement, at, ptrOf(p[0]), p.length as i64) };
+}
+
+// Binds params and steps the statement to its end, or to its first row when one is wanted,
+// keeping the rows wanted: -1 for all, 0 for none. It holds the connection's lock, so it gives
+// its failure back rather than throwing past the unlock.
+function stepped(db: i64, statement: i64, params: Ref<SqlValue[]>, wanted: i64, out: Mut<Outcome>): SqliteError | null {
+  const takes = unsafe { fsh_rt_sqlite_parameters(statement) };
+  const given = params.length as i64;
+  if (takes !== given) return new SqliteError("the statement takes " + String(takes) + (takes === 1 ? " parameter" : " parameters") + ", but " + String(given) + (given === 1 ? " was" : " were") + " given", 25);
+  let at: i64 = 1;
+  for (const p of params) {
+    const code = bind(statement, at, p);
+    if (code !== 0) return failure(db, code);
+    at += 1;
+  }
+  while (true) {
+    const code = unsafe { fsh_rt_sqlite_step(statement) };
+    if (code === 101) break;
+    if (code !== 100) return failure(db, code);
+    if (wanted === 0) continue;
+    out.rows.push(unsafe { fromCString(fsh_rt_sqlite_row(statement)) });
+    if (wanted === 1) break;
+  }
+  out.changes = unsafe { fsh_rt_sqlite_changes(statement) };
+  out.lastInsertRowid = unsafe { fsh_rt_sqlite_last_insert_rowid(statement) };
+  return null;
+}
+
+// One run, on the blocking pool: the statement is compiled from sql first, and finalized after,
+// when it is given, and otherwise is one prepared before. The job holds a count of the statement,
+// released here, so a caller that stops waiting can't close the connection under it.
+function work(db: i64, statement: i64, sql: string | null, params: Ref<SqlValue[]>, wanted: i64): Outcome throws SqliteError {
+  let out: Outcome = { rows: [], changes: 0, lastInsertRowid: 0 };
+  let code = unsafe { fsh_rt_sqlite_lock(statement) };
+  if (code === 0) {
+    if (sql === null) code = unsafe { fsh_rt_sqlite_reset(statement) };
+    else {
+      const text = terminated(sql);
+      code = unsafe { fsh_rt_sqlite_prepare(statement, ptrOf(text[0]), (text.length as i64) - 1) };
+    }
+  }
+  const failed = code !== 0 ? failure(db, code) : stepped(db, statement, params, wanted, out);
+  unsafe { fsh_rt_sqlite_unlock(statement, sql === null ? 0 : 1) };
+  unsafe { fsh_rt_sqlite_statement_release(statement) };
+  if (failed !== null) throw failed;
+  return out;
+}
+
+function compile(db: i64, statement: i64, sql: string): void throws SqliteError {
+  let code = unsafe { fsh_rt_sqlite_lock(statement) };
+  if (code === 0) {
+    const text = terminated(sql);
+    code = unsafe { fsh_rt_sqlite_prepare(statement, ptrOf(text[0]), (text.length as i64) - 1) };
+  }
+  const failed = code !== 0 ? failure(db, code) : null;
+  unsafe { fsh_rt_sqlite_unlock(statement, 0) };
+  unsafe { fsh_rt_sqlite_statement_release(statement) };
+  if (failed !== null) throw failed;
+}
+
+function connect(db: i64, path: string): void throws SqliteError {
+  const name = terminated(path);
+  const code = unsafe { fsh_rt_sqlite_open(db, ptrOf(name[0])) };
+  const failed = code !== 0 ? failure(db, code) : null;
+  unsafe { fsh_rt_sqlite_release(db) };
+  if (failed !== null) throw failed;
+}
+
+function disconnect(db: i64): void {
+  unsafe { fsh_rt_sqlite_close(db) };
+  unsafe { fsh_rt_sqlite_release(db) };
+}
+
+function finalize(statement: i64): void {
+  unsafe { fsh_rt_sqlite_finalize(statement) };
+  unsafe { fsh_rt_sqlite_statement_release(statement) };
+}
+
+// Runs sql once, on a statement of its own that the job finalizes and frees.
+async function once(db: i64, sql: string, params: SqlValue[], wanted: i64): Promise<Outcome> throws SqliteError {
+  const statement = unsafe { fsh_rt_sqlite_statement(db) };
+  return await spawnBlocking(() => work(db, statement, sql, params, wanted));
+}
+
+// Runs a prepared statement again, the job holding a count of it while it runs.
+async function again(db: i64, statement: i64, params: SqlValue[], wanted: i64): Promise<Outcome> throws SqliteError {
+  unsafe { fsh_rt_sqlite_statement_retain(statement) };
+  return await spawnBlocking(() => work(db, statement, null, params, wanted));
+}
+
+function rowsAs<T>(rows: Ref<string[]>): T[] throws RowError {
+  let out: T[] = [];
+  for (const json of rows) {
+    try {
+      out.push(JSON.parse<T>(json));
+    } catch (e) {
+      throw new RowError(rowMessage(e.message, json));
+    }
+  }
+  return out;
+}
+
+// A JSON reading error put in terms of columns: "missing field 'x' at $" is column x missing,
+// and "... at $.x" is about column x, which may be a null its field can't hold.
+function rowMessage(message: string, json: string): string {
+  if (message.startsWith("missing field ")) {
+    const end = message.lastIndexOf(" at ");
+    return "the row has no column " + message.slice("missing field ".length as i64, end) + ", which the type reads";
+  }
+  const at = message.indexOf(" at $.");
+  if (at < 0) return "the row can't be read: " + message;
+  const column = message.slice(at + 6);
+  if (json.includes(JSON.stringify(column) + ":null")) return "column '" + column + "' is null, which its field can't hold; type it 'T | null'";
+  return "column '" + column + "': " + message.slice(0, at);
+}
+
+// A connection to one database, running one statement at a time. Each call runs on the blocking
+// pool, so a slow statement holds no worker. Clones share the connection, which closes when the
+// last of them is dropped, or at close().
+export class Database {
+  private handle: i64;
+
+  private constructor(handle: i64) {
+    this.handle = handle;
+  }
+
+  // The database in the file at path, made when it isn't there, or one in memory for ":memory:".
+  static async open(path: string): Promise<Database> throws SqliteError {
+    if (path.includes("\0")) throw new SqliteError("a database's path can't hold a NUL character", 14);
+    const handle = unsafe { fsh_rt_sqlite_database() };
+    const db = new Database(handle);
+    unsafe { fsh_rt_sqlite_retain(handle) };
+    await spawnBlocking(() => connect(handle, path));
+    return db;
+  }
+
+  // The rows sql gives, each read by column name into a T.
+  async query<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T[]> throws SqliteError | RowError {
+    const out = await once(this.handle, sql, params, -1);
+    return rowsAs<T>(out.rows);
+  }
+
+  // The first row sql gives as a T, or null when it gives none.
+  async queryOne<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T | null> throws SqliteError | RowError {
+    const out = await once(this.handle, sql, params, 1);
+    let rows = rowsAs<T>(out.rows);
+    return rows.pop();
+  }
+
+  // Runs sql for what it changes; rows it gives are dropped.
+  async run(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<RunResult> throws SqliteError {
+    const out = await once(this.handle, sql, params, 0);
+    return { changes: out.changes, lastInsertRowid: out.lastInsertRowid };
+  }
+
+  // sql compiled once, to run many times with new parameters.
+  async prepare(this: Ref<this>, sql: string): Promise<Statement> throws SqliteError {
+    const db = this.handle;
+    const statement = unsafe { fsh_rt_sqlite_statement(db) };
+    const made = new Statement(new Prepared(db, statement));
+    unsafe { fsh_rt_sqlite_statement_retain(statement) };
+    await spawnBlocking(() => compile(db, statement, sql));
+    return made;
+  }
+
+  // Closes the connection for every clone; a call on any of them after this throws.
+  async close(this: Ref<this>): Promise<void> {
+    const db = this.handle;
+    unsafe { fsh_rt_sqlite_retain(db) };
+    await spawnBlocking(() => disconnect(db));
+  }
+
+  clone(): Database {
+    unsafe { fsh_rt_sqlite_retain(this.handle) };
+    return new Database(this.handle);
+  }
+
+  [Symbol.dispose](this: Mut<this>): void {
+    unsafe { fsh_rt_sqlite_release(this.handle) };
+  }
+}
+
+// A statement compiled by prepare, run with all, get or run as often as wanted.
+export class Statement {
+  private db: i64;
+  private handle: i64;
+
+  constructor(from: Prepared) {
+    this.db = from.db;
+    this.handle = from.statement;
+  }
+
+  // Every row the statement gives with params, each read by column name into a T.
+  async all<T>(this: Ref<this>, params: SqlValue[] = []): Promise<T[]> throws SqliteError | RowError {
+    const out = await again(this.db, this.handle, params, -1);
+    return rowsAs<T>(out.rows);
+  }
+
+  // The first row the statement gives with params as a T, or null when it gives none.
+  async get<T>(this: Ref<this>, params: SqlValue[] = []): Promise<T | null> throws SqliteError | RowError {
+    const out = await again(this.db, this.handle, params, 1);
+    let rows = rowsAs<T>(out.rows);
+    return rows.pop();
+  }
+
+  // Runs the statement with params for what it changes; rows it gives are dropped.
+  async run(this: Ref<this>, params: SqlValue[] = []): Promise<RunResult> throws SqliteError {
+    const out = await again(this.db, this.handle, params, 0);
+    return { changes: out.changes, lastInsertRowid: out.lastInsertRowid };
+  }
+
+  // Frees the compiled statement; a call on it after this throws.
+  async close(this: Ref<this>): Promise<void> {
+    const statement = this.handle;
+    unsafe { fsh_rt_sqlite_statement_retain(statement) };
+    await spawnBlocking(() => finalize(statement));
+  }
+
+  [Symbol.dispose](this: Mut<this>): void {
+    unsafe { fsh_rt_sqlite_statement_release(this.handle) };
+  }
+}
+`,
   // Tar archives, read an entry at a time and written from files, imported as fish:tar.
   "fish:tar": String.raw`
 import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "fs";
@@ -7613,6 +8227,79 @@ export async function create(file: string, paths: string[], options: ZipPackOpti
     const _n = await out.write(chunk);
   }
   await out.close();
+}
+`,
+  // Spans in a program's own code, imported as fish:trace. Their state is std's own, which serve
+  // shares, so what is here only wraps it.
+  "fish:trace": String.raw`
+// endpoint is the collector's base URL, as OTEL_EXPORTER_OTLP_ENDPOINT is, and "" turns tracing
+// off whatever the environment says; serviceName is the service the spans are from; batchDelay
+// is the milliseconds finished spans wait to be sent together. What isn't given is read from
+// the environment, or left as it is for batchDelay.
+export type TracingOptions = { endpoint?: string; serviceName?: string; batchDelay?: i64 };
+
+// One timed piece of work in a trace. It ends at end(), or where its scope does when it is
+// bound with 'using', and is then sent to the collector with the batch it joins.
+export class Span {
+  #record: __traceRecord;
+  // The context this span took over, to put back when it ends.
+  #prior: i64[];
+  #open: boolean;
+
+  constructor(record: __traceRecord, prior: i64[], open: boolean) {
+    this.#record = record;
+    this.#prior = prior;
+    this.#open = open;
+  }
+
+  // The ids as OTLP writes them, in lowercase hex, or "" where there is none: every id of a
+  // span made while tracing is off, and a root span's parent.
+  get traceId(): string {
+    return this.#record.id === 0 ? "" : __traceHex([this.#record.hi, this.#record.lo]);
+  }
+
+  get spanId(): string {
+    return this.#record.id === 0 ? "" : __traceHex([this.#record.id]);
+  }
+
+  get parentSpanId(): string {
+    return this.#record.parent === 0 ? "" : __traceHex([this.#record.parent]);
+  }
+
+  // Adds an attribute; one set after the span ended is dropped.
+  set(this: Mut<this>, key: string, value: string | i64 | boolean): void {
+    if (this.#open) this.#record.attributes.push({ key: key, value: value });
+  }
+
+  // Ends the span, once: its parent is the current span again.
+  end(this: Mut<this>): void {
+    if (!this.#open) return;
+    this.#open = false;
+    __traceEnd(this.#record.clone(), this.#prior);
+  }
+
+  [Symbol.dispose](this: Mut<this>): void {
+    this.end();
+  }
+}
+
+// Begins a span under the current one, a new trace when there is none, and makes it current
+// for this task and the tasks it spawns. With tracing off it records nothing.
+export function span(name: string): Span {
+  if (!__traceOn()) return new Span({ name: "", hi: 0, lo: 0, id: 0, parent: 0, flags: 0, kind: 0, start: 0, end: 0, attributes: [] }, [], false);
+  const prior = __traceWords();
+  return new Span(__traceBegin(name, 1, prior), prior, true);
+}
+
+// Sets where spans go, in place of what the environment says.
+export function configureTracing(options: TracingOptions): void {
+  __traceConfigure(options.endpoint, options.serviceName, options.batchDelay);
+}
+
+// Sends the spans that have ended so far, without waiting for their batch's timer. A program
+// about to return awaits this, or it runs on until the timer has sent them.
+export async function flushTraces(): Promise<void> {
+  await __traceSend();
 }
 `,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
@@ -8729,7 +9416,7 @@ async function* __streamPulled<T>(start: ((controller: ReadableStreamDefaultCont
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS;
+export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -8747,13 +9434,14 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS]) {
+  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
   }
   let prelude = sections.shift()!;
   let http = sections.shift()!;
+  let tracing = sections.shift()!;
   let fetching = sections.shift()!;
   let served = sections.shift()!;
   let core = sections.shift()!;
@@ -8784,7 +9472,8 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const own = new Set(HIDDEN_NAMES.filter((n) => declared.has(n)));
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
-  const httpUsed = uses(written, http, HTTP_NAMES);
+  // The fish:trace module's code names __traceOn, and what it wraps is sent through Http1.
+  const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn"]);
   const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
   const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentionsName(written, "Request"));
   // The libraries a program gets by naming them; JsError also comes with any package.
@@ -8807,7 +9496,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const typing = (dataViewUsed && dataView.length > 0) || mentionsTypedArray(written);
   let chosen: Stmt[] = prelude;
   if (dated) chosen = chosen.concat(dates);
-  if (httpUsed) chosen = chosen.concat(http);
+  if (httpUsed) chosen = chosen.concat(http).concat(tracing);
   if (fetchUsed) chosen = chosen.concat(fetching);
   if (httpUsed && !urlWanted) chosen = chosen.concat(served);
   if (httpUsed || urlWanted) chosen = chosen.concat(core);

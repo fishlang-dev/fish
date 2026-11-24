@@ -9,7 +9,7 @@ import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type O
 import { formatMemory, formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Reading, type Session, type Tables } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { cachedSession } from "./stdcache.fsh";
-import { CompileError, copyNames, formatError, movedOffset, type Names, type Source } from "./diag.fsh";
+import { CompileError, copyNames, formatError, movedOffset, type BorrowEvent, type Names, type Source } from "./diag.fsh";
 import { load, type Loaded, type RustCrate } from "./modules.fsh";
 import { resolvePackages } from "./dependencies.fsh";
 import { pack, prepare, submit, unsafeDependencies } from "./publish.fsh";
@@ -20,7 +20,7 @@ import { parse, parseWithComments, type Stmt } from "./parser.fsh";
 import type { Ids } from "./nodes.fsh";
 import { bundle } from "./bundle.fsh";
 import { JS_NATIVE } from "./js_native.fsh";
-import { NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
+import { NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
 import { cachedObject, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
 import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.fsh";
@@ -31,6 +31,8 @@ import { hideMains, harnessImports, harnessMain, liftTests, runDefaults, runTest
 import { formatRanking, rank, readPlan, type Plan } from "./rank.fsh";
 import { compare, formatComparison, formatReport, readReport, sources, survey, type Report as SurveyReport } from "./survey.fsh";
 import { explain } from "./codes.fsh";
+import { explainBorrows, functionsIn } from "./explain.fsh";
+import { openapiOf } from "./openapi.fsh";
 import type { Checked, Instance } from "./check.fsh";
 import type { Type, Typing } from "./typing.fsh";
 import { rustShim, type Shim } from "./rustshim.fsh";
@@ -68,6 +70,13 @@ function apart(session: BuildSession): { core: Session; caches: Caches } {
 
 function together(core: Session, caches: Caches): BuildSession {
   return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, checkCache: core.checkCache, clang: caches.clang, digests: caches.digests, mathUnits: caches.mathUnits };
+}
+
+// `session` for a build that keeps nothing of its check once its program is emitted.
+function plain(session: Session): Session {
+  let made = session;
+  made.plain = true;
+  return made;
 }
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
@@ -346,7 +355,9 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   let before: f64 = 0;
   if (session.timings !== undefined) for (const name of FRONT_END) before += session.timings!.ms.get(name) ?? 0;
   let queries = new Queries(file, manifest, new Map<string, string>());
-  let start = queries.checked(session, looked, kept);
+  let given = session;
+  if (!keep) given.plain = true;
+  let start = queries.checked(given, looked, kept);
   if (start.checked.tables.session.timings !== undefined) {
     let after: f64 = 0;
     for (const name of FRONT_END) after += start.checked.tables.session.timings!.ms.get(name) ?? 0;
@@ -448,13 +459,18 @@ function refuseForeignRust(target: Ref<Target>) {
   if (target.compile.includes("-target")) throw new Error(`fishc build: Rust crates can't be built for ${target.triple} yet; build on a ${target.triple} machine, or without --target`);
 }
 
+// The length of IR up to which a release build is one module. Clang optimizing a module holds
+// about 40 bytes for each byte of it, 24 GB for the compiler's own 570 MB, so a larger program
+// is compiled a file at a time, as a dev build is, and clang holds one file's code at once.
+const RELEASE_MODULE_LENGTH: usize = 64 * 1024 * 1024;
+
 // A build's IR as clang is given it: a release build's as one module, so `-O2` inlines across std
-// and the program, and a dev build's as the program's part, with std's part and each of the
-// program's files a unit of its own that the cache keeps by its text, so a rebuild compiles only
-// the files whose code changed. A `-g` build keeps its files in the program's part, which holds
-// the debug metadata their functions refer to.
+// and the program, unless it is over `RELEASE_MODULE_LENGTH`, and a dev build's as the program's
+// part, with std's part and each of the program's files a unit of its own that the cache keeps by
+// its text, so a rebuild compiles only the files whose code changed. A `-g` build keeps its files
+// in the program's part, which holds the debug metadata their functions refer to.
 function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<Target>, debug = false): { cached: Unit[]; program: string; times: [string, f64][] } {
-  if (release) return { cached: [], program: ir, times: [] };
+  if (release && ir.length < RELEASE_MODULE_LENGTH) return { cached: [], program: ir, times: [] };
   const naming = performance.now();
   const arenas: Ref<Arenas> = checked.tables.arenas;
   const names = symbolNames(arenas);
@@ -482,7 +498,7 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
   }
   const named = performance.now() - naming;
   const halves = split(ir, std, own, byFile);
-  const args = [...target.compile, "-x", "ir", "-", optimization(false, target), "-funwind-tables"];
+  const args = [...target.compile, "-x", "ir", "-", optimization(release, target), "-funwind-tables"];
   let cached: Unit[] = [{ name: "std", args: [...args], stdin: halves.std, inputs: [] }];
   for (const [file, text] of halves.groups) cached.push({ name: `file-${file.replace(/[^\w.-]/g, "_")}`, args: [...args], stdin: text, inputs: [] });
   return { cached, program: halves.program, times: [["split names", named], ...halves.times] };
@@ -1032,18 +1048,24 @@ export const callsTls = (ir: string) => [...linesWith(ir, "fsh_rt_tls_"), ...lin
 // Whether the IR calls into the zlib half of the runtime, as the zlib module does.
 export const callsZlib = (ir: string) => linesWith(ir, "fsh_rt_zlib_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_zlib_/.test(l));
 
+// Whether the IR calls into the SQLite half of the runtime, as the sqlite module does.
+export const callsSqlite = (ir: string) => linesWith(ir, "fsh_rt_sqlite_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_sqlite_/.test(l));
+
 // What links OpenSSL into a program calling the TLS runtime, when it was found, without which the
-// runtime's TLS calls say how to install it, and zlib into one calling the zlib runtime.
+// runtime's TLS calls say how to install it, zlib into one calling the zlib runtime, and the
+// system's SQLite into one calling the SQLite runtime.
 export function runtimeLinks(ir: string, target: Ref<Target>): string[] {
-  const zlib: string[] = callsZlib(ir) ? ["-lz"] : [];
-  if (!callsTls(ir)) return zlib;
+  let libraries: string[] = [];
+  if (callsZlib(ir)) libraries.push("-lz");
+  if (callsSqlite(ir)) libraries.push("-lsqlite3");
+  if (!callsTls(ir)) return libraries;
   const openssl = findOpenSsl(target);
   const none: string[] = [];
-  return [...("link" in openssl ? openssl.link : none), ...zlib];
+  return [...("link" in openssl ? openssl.link : none), ...libraries];
 }
 
 // The C half of the runtime as cached objects, with the engine's glue and sources when the
-// program's IR calls the engine, and the TLS and zlib halves when it calls those. They are built with unwind tables so a panic can unwind through
+// program's IR calls the engine, and the TLS, zlib and SQLite halves when it calls those. They are built with unwind tables so a panic can unwind through
 // them, and position-independent when `pic`, for a library. A `--leaks` build's runtime records
 // each block's site, so it is an object of its own.
 /** @throws {IoError} */
@@ -1059,7 +1081,8 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
   const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none)], stdin: source, inputs: js ? files(engineDir()) : none };
   const engine: Unit[] = js ? engineSources().map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(engineDir()) })) : [];
   const zlib: Unit[] = callsZlib(ir) ? [{ name: "zlib", args: ["-x", "c", "-", ...flags], stdin: ZLIB_NATIVE, inputs: [] }] : [];
-  return [runtime, ...engine, ...zlib];
+  const sqlite: Unit[] = callsSqlite(ir) ? [{ name: "sqlite", args: ["-x", "c", "-", ...flags], stdin: SQLITE_NATIVE, inputs: [] }] : [];
+  return [runtime, ...engine, ...zlib, ...sqlite];
 }
 
 // A build's optimization level. A sanitized dev build is optimized a little, as clang advises for
@@ -1079,6 +1102,102 @@ function clangArgs(out: string, release: boolean, links: string[], objects: stri
 function fail(message: string): never {
   console.error(message);
   return process.exit(2);
+}
+
+// The errors that are what `fishc explain-borrows` shows rather than what stops it.
+const OWNERSHIP = new Set(["E0201", "E0202", "E0203", "E0204", "E0205"]);
+
+// `fishc explain-borrows`: prints `file` with its moves, loans and ownership errors under the
+// lines they are on, or just the function `only` names. Any other error is printed as
+// `fishc check` prints it.
+/** @throws {Error | IoError} */
+function explainFile(file: string, only: string | undefined): never {
+  let src = "";
+  let range: { start: usize; end: usize } | undefined = undefined;
+  try {
+    src = readFileSync(file, "utf8");
+    if (only !== undefined) {
+      const functions = functionsIn(parse(src, { last: 0 }));
+      const found = functions.find((f) => f.name === only);
+      if (found === undefined) fail(`fishc explain-borrows: '${file}' has no function '${only}'; it has ${functions.length === 0 ? "none" : functions.map((f) => f.name).join(", ")}`);
+      else range = { start: found.start, end: found.end };
+    }
+  } catch (e) {
+    if (!(e instanceof CompileError)) fail(`fishc explain-borrows: can't read '${file}': ${(e as { message: string }).message}`);
+    else console.error(painted(e, file, src));
+    process.exit(1);
+  }
+  // A check read back from the cache would log nothing.
+  let session = sessionWith(false, false, true);
+  session.borrows = [];
+  // Only this file's are kept: another file's offsets start past any this file's text reaches.
+  let events: BorrowEvent[] = [];
+  let errors: CompileError[] = [];
+  try {
+    const made = checkedFile(session, file);
+    if (made.session.borrows !== undefined) for (const b of made.session.borrows) if (b.end <= src.length) events.push({ ...b });
+  } catch (e) {
+    if (!(e instanceof CompileError)) {
+      console.error((e as { message: string }).message);
+      process.exit(1);
+    } else {
+      if (e.errors.length > 0) for (const x of e.errors) errors.push(x.clone());
+      else errors.push(e.clone());
+      if (errors.some((x) => !OWNERSHIP.has(x.code) || x.end > src.length)) {
+        console.error(painted(e, file, src));
+        process.exit(1);
+      }
+      for (const b of e.borrows) if (b.end <= src.length) events.push({ ...b });
+    }
+  }
+  console.log(explainBorrows(src, file, events, errors, range));
+  return process.exit(0);
+}
+
+// `fishc openapi`: prints the OpenAPI document of the routes `file`'s program adds to std's
+// routers, or writes it to `out`, and names on stderr each route the document leaves out. Its
+// title and version are the package's, or the file's name and 0.0.0 for a file in no package.
+/** @throws {Error | IoError} */
+function openapiFile(file: string, out: string | undefined): never {
+  let src = "";
+  try {
+    src = readFileSync(file, "utf8");
+  } catch (e) {
+    fail(`fishc openapi: can't read '${file}': ${(e as { message: string }).message}`);
+  }
+  let title = basename(file);
+  let version = "0.0.0";
+  const manifest = findManifest(dirname(resolve(file)));
+  if (manifest !== undefined) {
+    try {
+      const pkg = loadManifest(manifest!);
+      title = pkg.name;
+      version = pkg.version;
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw e;
+      console.error(painted(e, relative(process.cwd(), manifest!), readFileSync(manifest!, "utf8")));
+      process.exit(1);
+    }
+  }
+  try {
+    let looked: string[] = [];
+    let queries = new Queries(file, undefined, new Map<string, string>());
+    // A check read back from the cache would hold no routes.
+    const kept = queries.checked(sessionWith(false, false, true), looked, undefined);
+    const made = openapiOf(kept.checked.tables, title, version);
+    for (const l of made.left) {
+      const skipped = sourced(new CompileError("W0003", `this route is left out of the document: ${l.why}`, l.start, l.end), undefined, kept.loaded.sources);
+      console.error(painted(skipped, file, src, "warning"));
+    }
+    const text = indented(made.document);
+    if (out === undefined) console.log(text);
+    else writeFileSync(out!, `${text}\n`);
+  } catch (e) {
+    if (e instanceof CompileError) console.error(painted(e, file, src));
+    else console.error((e as { message: string }).message);
+    process.exit(1);
+  }
+  return process.exit(0);
 }
 
 // The time each of a build's `stages` took, printed when the build was timed.
@@ -1145,6 +1264,7 @@ async function main(): Promise<void> {
           sanitize: { type: "string", multiple: true },
           timeout: { type: "string" },
           jobs: { type: "string" },
+          fn: { type: "string" },
         },
       });
     } catch (e) {
@@ -1185,6 +1305,14 @@ async function main(): Promise<void> {
     if (text === undefined) fail(`fishc explain: '${named ?? ""}' isn't an error code; a code looks like E0201 or W0001, as an error shows it`);
     console.log(text);
     process.exit(0);
+  }
+  if (command === "explain-borrows") {
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "fn")) fail("usage: fishc explain-borrows <file.fsh> [--fn <name>]");
+    explainFile(named!, values.fn);
+  }
+  if (command === "openapi") {
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "out")) fail("usage: fishc openapi <file.fsh> [-o <out>]");
+    openapiFile(named!, values.out);
   }
   if (command === "survey") {
     const dirs = positionals.slice(1);
@@ -1437,7 +1565,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
@@ -1453,7 +1581,7 @@ async function main(): Promise<void> {
     if (llvm) {
       const start = performance.now();
       let looked: string[] = [];
-      const made = compiledIn(newCompilation(sessionFor()), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked);
+      const made = compiledIn(newCompilation(plain(sessionFor())), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked);
       reportTimings(made.checked.tables.session, [...FRONT_END, "codegen"], start);
       process.stdout.write(made.ir);
     } else {

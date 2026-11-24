@@ -149,7 +149,8 @@ function limit(name: string): i64 {
 
 function environment(extra: string): { [name: string]: string } {
   let env: { [name: string]: string } = {};
-  for (const [k, v] of Object.entries(process.env)) env[k] = v;
+  // A program that serves would trace to whatever collector the runner's own environment names.
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("OTEL_")) env[k] = v;
   env[extra] = "1";
   return env;
 }

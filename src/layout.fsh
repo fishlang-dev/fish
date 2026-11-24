@@ -504,7 +504,7 @@ export function firstNameIn(text: string): string | undefined {
   return undefined;
 }
 
-export function typeDefinitions(typing: Ref<Typing>, text: string): string[] {
+export function typeDefinitions(typing: Ref<Typing>, texts: Ref<string[]>): string[] {
   const used = (s: string): string[] => typeNamesIn(s);
   // The first type given each name, and every later one, which must be laid out as the first is.
   let byName = new Map<string, Type>();
@@ -515,7 +515,8 @@ export function typeDefinitions(typing: Ref<Typing>, text: string): string[] {
     if (byName.has(n)) again.push([n, t]);
     else byName.set(n, t);
   }
-  let wanted = used(text);
+  let wanted: string[] = [];
+  for (const text of texts) for (const n of used(text)) wanted.push(n);
   let defs = new Map<string, string>();
   while (wanted.length > 0) {
     const n = wanted.pop()!;
