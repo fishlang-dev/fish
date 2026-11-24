@@ -907,11 +907,12 @@ function __sseLine(value: string): string {
 type ServeInfo = { hostname: string; port: i64 };
 // Body sizes are in bytes and timeouts in milliseconds; a timeout of 0 is none.
 // unix is a socket path to serve on in place of a port, removed when serve stops. tls has the
-// server speak HTTPS with a PEM certificate chain and its private key, as Bun's does.
-type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64 };
+// server speak HTTPS with a PEM certificate chain and its private key, as Bun's does. trace: false
+// keeps the server's requests out of the program's traces, when tracing is on.
+type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64; trace?: boolean };
 type ServeHandler = (req: Request) => Promise<Response>;
 // What serve's options settle for each connection, under a name no program can write.
-type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64; secure: boolean };
+type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64; secure: boolean; trace: boolean };
 // A router's internal names take forms no program can write, so a program's own never hides
 // the HTTP library.
 type __routerNext = (req: Request) => Promise<Response>;
@@ -938,6 +939,7 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     headerTimeout: Http1.option(options.headerTimeout, 60000, "headerTimeout", "milliseconds, or 0 for no timeout"),
     idleTimeout: Http1.option(options.idleTimeout, 10000, "idleTimeout", "milliseconds, or 0 for no timeout"),
     secure: options.tls !== null,
+    trace: options.trace !== false,
   };
   // With no signal of its own, the server stops at the first SIGINT or SIGTERM.
   const given = options.signal;
@@ -976,6 +978,8 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   if (unix !== null) unixUnlink(unix);
   // ponytail: polls until the last connection ends; a wait group would wake at once.
   while (live.count.load() > 0) await sleep(10);
+  // The last requests' spans go out before serve returns, since the program may end right after.
+  if (limits.trace && __traceOn()) await __traceSend();
 }
 
 // What a request's head says: its request line and headers.
@@ -1056,17 +1060,34 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
       // The body is set after, not passed in init, which would copy it.
       let req = new Request((limits.secure ? "https://" : "http://") + authority + head.target, { method: method, headers: head.headers, signal: signal.clone() });
       req.__setBody(body);
+      // The request's span is current only while the handler's task is made, which so starts
+      // under it: this task goes on to the connection's next request.
+      let traced: __traceRecord[] = [];
+      let outer: i64[] = [];
+      if (limits.trace && __traceOn()) {
+        outer = __traceWords();
+        traced.push(__traceRequest(req));
+      }
       // The handler runs as a task of its own, so a panic in it ends only that task: its client
       // gets a bare 500 and the connection closes, and the server goes on serving.
       let res: Response;
       try {
-        res = await spawn(Http1.handle(handler.clone(), req)).join();
+        const running = spawn(Http1.handle(handler.clone(), req));
+        if (traced.length > 0) __traceEnter(outer);
+        res = await running.join();
       } catch (e) {
+        __traceServed(traced, 500);
         done.abort();
         await watching;
         await Http1.send(conn, new Response("", { status: 500 }), false, true, version);
         return;
       }
+      // The span ends here, before the response is written, so one place ends it however the
+      // response goes out: its status is the handler's, or the 500 an unsendable one becomes.
+      // ponytail: a streamed body's time isn't in the span, and an upgrade refused for its HTTP
+      // version is recorded as the handler's 101; end the span where each response is written if
+      // either matters.
+      if (traced.length > 0) __traceServed(traced, Http1.sendable(res) ? res.status : 500);
       // A WebSocket route's 101 hands the connection to its session, which keeps it to the end.
       // Bytes the client sent past the request go to the session, though it shouldn't send any
       // before the 101.
@@ -2661,6 +2682,27 @@ function __traceHex(words: Ref<i64[]>): string {
   return new TextDecoder().decode(out);
 }
 
+// The context a W3C traceparent header carries, "00-<trace id>-<parent id>-<flags>" in
+// lowercase hex, or null for anything else, an all-zero id included.
+function __traceParent(header: string): i64[] | null {
+  if (header.length !== 55) return null;
+  // The trace id's halves, the parent id, the flags and the version.
+  let words: i64[] = [0, 0, 0, 0, 0];
+  for (let i: usize = 0; i < 55; i++) {
+    const c = header.charCodeAt(i) as i64;
+    if (i === 2 || i === 35 || i === 52) {
+      if (c !== 45) return null;
+      continue;
+    }
+    const d = c >= 48 && c <= 57 ? c - 48 : c >= 97 && c <= 102 ? c - 87 : -1;
+    if (d < 0) return null;
+    const at: usize = i < 2 ? 4 : i < 19 ? 0 : i < 35 ? 1 : i < 52 ? 2 : 3;
+    words[at] = (words[at] << 4) | d;
+  }
+  if (words[4] === 255 || (words[0] === 0 && words[1] === 0) || words[2] === 0) return null;
+  return [words[0], words[1], words[2], words[3] & 1];
+}
+
 // Where an endpoint's spans go: "<endpoint>/v1/traces" over plain HTTP, or null for an
 // endpoint that isn't an http:// URL of a host, an optional port and an optional path.
 function __traceTargetOf(endpoint: string): __traceTarget | null {
@@ -2752,6 +2794,26 @@ function __traceEnd(record: __traceRecord, prior: Ref<i64[]>): void {
   const now = __traceWords();
   if (now[2] === record.id && now[0] === record.hi && now[1] === record.lo) __traceEnter(prior);
   __traceFinish(record);
+}
+
+// A request's server span, current so the handler's task inherits it: under the caller's span
+// when a traceparent header names one, a new trace otherwise.
+function __traceRequest(req: Ref<Request>): __traceRecord {
+  const given = req.headers.get("traceparent");
+  const remote = given !== null ? __traceParent(given) : null;
+  let record = __traceBegin(req.method, 2, remote ?? [0, 0, 0, 0]);
+  record.attributes.push({ key: "http.request.method", value: req.method });
+  record.attributes.push({ key: "url.path", value: req.path });
+  return record;
+}
+
+// Ends a request's span, if it has one, with the status its response goes out with.
+function __traceServed(open: Mut<__traceRecord[]>, status: i64): void {
+  const record = open.pop();
+  if (record === null) return;
+  let done = record;
+  done.attributes.push({ key: "http.response.status_code", value: status });
+  __traceFinish(done);
 }
 
 // A batch as OTLP's JSON: ids in hex, times as decimal strings, each attribute by its type.
