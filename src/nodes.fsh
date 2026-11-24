@@ -717,34 +717,72 @@ export class Rewrites implements Replacements {
   // type has no `id` field of its own, as a union of nodes has none.
   replaceAt(this: Mut<this>, id: usize, by: Expr): Expr {
     this.hasChanges = true;
-    this.made++;
-    this.madeAt.set(id, this.made);
+    this.stamp(id);
     this.exprs.set(id, withIdExpr(by, id, 0));
     return this.exprs.get(id)!;
   }
 
-  // Instances may share a body, each checking and rebuilding it. Its replacements are in place
-  // after the first rebuild and keep their nodes' ids, so a later one puts back only those its own
-  // check made: another copy's, made since under the same ids, would replace them.
+  // Instances may share a body. Its tree is rebuilt once, by the first check of it to finish,
+  // and holds what had been replaced by then; nothing writes to it after. A replacement made
+  // later is in this table alone, where every later check of the body reads it, and an instance
+  // whose check read one is compiled from a copy of the body rebuilt as that check read it.
+  // How many replacements have been made, how many when each node and each list was last
+  // replaced, and how many when each body's tree was rebuilt.
   private made: usize = 0;
   private madeAt = new Map<usize, usize>();
-  private rebuilt = new Set<usize>();
-  // How many replacements were made before the check of each body being checked began.
-  private checks: usize[] = [];
-  private from: usize = 0;
+  private listAt = new Map<string, usize>();
+  private loweredAt = new Map<usize, usize>();
+  // The body each check in progress is of, innermost last, and whether that check has read or
+  // made a replacement its body's tree doesn't hold. A closure's check is part of the check of
+  // the body it is written in. An atomic, since reading a replacement changes nothing else.
+  private checking: usize[] = [];
+  private late = new Atomic<i64>(0);
+  private lates: i64[] = [];
 
-  startCheck(this: Mut<this>): void {
-    this.checks.push(this.made);
+  startCheck(this: Mut<this>, body: usize): void {
+    this.checking.push(body);
+    this.lates.push(this.late.load());
+    this.late.store(0);
   }
 
   endCheck(this: Mut<this>): void {
-    this.checks.pop();
+    this.checking.pop();
+    this.late.store(this.lates.pop() ?? 0);
   }
 
+  // Whether `body`'s tree has been rebuilt, after which nothing writes to it.
+  lowered(body: usize): boolean {
+    return this.loweredAt.has(body);
+  }
+
+  // Whether the check in progress read its body other than as the body's tree holds it.
+  sawLate(): boolean {
+    return this.late.load() === 1;
+  }
+
+  // Notes a replacement the check in progress read or made that its body's tree doesn't hold.
+  private seen(id: usize): void {
+    if (this.checking.length === 0) return;
+    const at = this.loweredAt.get(this.checking[this.checking.length - 1]!);
+    if (at !== undefined && (this.madeAt.get(id) ?? 0) > at) this.late.store(1);
+  }
+
+  private stamp(this: Mut<this>, id: usize): void {
+    this.made++;
+    this.madeAt.set(id, this.made);
+    this.seen(id);
+  }
+
+  // Starts a rebuild: of a body's own tree, by the first check of it to finish, or of the copy
+  // of it one instance is compiled from. Either takes every replacement the table holds, which
+  // is how a check reads them.
   startRebuild(this: Mut<this>, body: usize): void {
     this.rebuilding = body;
-    this.from = this.rebuilt.has(body) && this.checks.length > 0 ? this.checks[this.checks.length - 1]! + 1 : 0;
-    this.rebuilt.add(body);
+  }
+
+  // Ends the rebuild of an instance's copy, which leaves the table and the body's tree as they are.
+  endApart(this: Mut<this>): void {
+    this.rebuilding = undefined;
   }
 
   // Each replacement as it stands in a rebuilt body: a later check of the body reads replacements
@@ -805,27 +843,33 @@ export class Rewrites implements Replacements {
       rebuiltStmts(list, this);
       this.lists.set(k, list);
     }
+    if (this.rebuilding !== undefined && !this.loweredAt.has(this.rebuilding)) this.loweredAt.set(this.rebuilding, this.made);
     this.rebuilding = undefined;
-    this.from = 0;
   }
 
   current(node: Expr): Expr {
     if (this.exprs.size === 0) return node;
     const id = idOfExpr(node);
-    if (this.from > 0 && (this.madeAt.get(id) ?? 0) < this.from) return node;
-    return this.exprs.get(id) ?? node;
+    const now = this.exprs.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   // The node replacing `node`, if one does; for a caller holding `node` by reference, which keeps
   // reading `node` itself when this gives nothing.
   rewritten(node: Ref<Expr>): Expr | undefined {
     if (this.exprs.size === 0) return undefined;
-    return this.exprs.get(idOfExpr(node));
+    const id = idOfExpr(node);
+    const now = this.exprs.get(id);
+    if (now !== undefined) this.seen(id);
+    return now;
   }
 
   replaceStmt(this: Mut<this>, node: Ref<Stmt>, by: Stmt): Stmt {
     this.hasChanges = true;
     const id = idOfStmt(node);
+    this.stamp(id);
     const [s, copy] = dup(withIdStmt(by, id, 0));
     this.stmts.set(id, s);
     if (copy.kind === "function") this.funcs.set(id, copy);
@@ -836,18 +880,31 @@ export class Rewrites implements Replacements {
 
   currentStmt(node: Stmt): Stmt {
     if (this.stmts.size === 0) return node;
-    return this.stmts.get(idOfStmt(node)) ?? node;
+    const id = idOfStmt(node);
+    const now = this.stmts.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   // Records the list `owner` holds in `field`, in the body `body`, once checking has edited it.
   replaceList(this: Mut<this>, body: usize, owner: usize, field: string, list: Stmt[]): void {
     this.hasChanges = true;
-    this.lists.set(`${body} ${owner} ${field}`, list);
+    const key = `${body} ${owner} ${field}`;
+    this.made++;
+    this.listAt.set(key, this.made);
+    if (this.checking.length > 0 && this.loweredAt.has(body)) this.late.store(1);
+    this.lists.set(key, list);
   }
 
   listIn(body: usize, owner: usize, field: string): Stmt[] | undefined {
     if (this.lists.size === 0) return undefined;
-    return this.lists.get(`${body} ${owner} ${field}`);
+    const key = `${body} ${owner} ${field}`;
+    const now = this.lists.get(key);
+    if (now === undefined) return undefined;
+    const at = this.loweredAt.get(body);
+    if (this.checking.length > 0 && at !== undefined && (this.listAt.get(key) ?? 0) > at) this.late.store(1);
+    return now;
   }
 
   currentList(owner: usize, field: string): Stmt[] | undefined {
@@ -857,6 +914,7 @@ export class Rewrites implements Replacements {
   replaceFunc(this: Mut<this>, node: Ref<Id>, by: Func): Func {
     this.hasChanges = true;
     const id = node.id;
+    this.stamp(id);
     const [f, copy] = dup(withIdFunc(by, id, 0));
     this.funcs.set(id, f);
     this.stmts.set(id, copy);
@@ -866,103 +924,145 @@ export class Rewrites implements Replacements {
   replaceDeclarator(this: Mut<this>, node: Ref<Id>, by: Declarator): Declarator {
     this.hasChanges = true;
     const id = node.id;
+    this.stamp(id);
     this.declarators.set(id, withIdDeclarator(by, id, 0));
     return this.declarators.get(id)!;
   }
 
   currentDeclarator(node: Declarator): Declarator {
     if (this.declarators.size === 0) return node;
-    return this.declarators.get(node.id) ?? node;
+    const id = node.id;
+    const now = this.declarators.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   // The declarator replacing `node`, if one does, for a caller holding `node` by reference.
   rewrittenDeclarator(node: Ref<Declarator>): Declarator | undefined {
     if (this.declarators.size === 0) return undefined;
-    return this.declarators.get(node.id);
+    const now = this.declarators.get(node.id);
+    if (now !== undefined) this.seen(node.id);
+    return now;
   }
 
   replaceParam(this: Mut<this>, node: Ref<Id>, by: Param): Param {
     this.hasChanges = true;
     const id = node.id;
+    this.stamp(id);
     this.params.set(id, withIdParam(by, id, 0));
     return this.params.get(id)!;
   }
 
   currentParam(node: Param): Param {
     if (this.params.size === 0) return node;
-    return this.params.get(node.id) ?? node;
+    const id = node.id;
+    const now = this.params.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   replacePattern(this: Mut<this>, node: Ref<Id>, by: Pattern): Pattern {
     this.hasChanges = true;
     const id = node.id;
+    this.stamp(id);
     this.patterns.set(id, withIdPattern(by, id, 0));
     return this.patterns.get(id)!;
   }
 
   currentPattern(node: Pattern): Pattern {
     if (this.patterns.size === 0) return node;
-    return this.patterns.get(idOfPattern(node)) ?? node;
+    const id = idOfPattern(node);
+    const now = this.patterns.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   replaceTypeNode(this: Mut<this>, node: Ref<Id>, by: TypeNode): TypeNode {
     this.hasChanges = true;
     const id = node.id;
+    this.stamp(id);
     this.typeNodes.set(id, withIdTypeNode(by, id, 0));
     return this.typeNodes.get(id)!;
   }
 
   currentTypeNode(node: TypeNode): TypeNode {
     if (this.typeNodes.size === 0) return node;
-    return this.typeNodes.get(idOfTypeNode(node)) ?? node;
+    const id = idOfTypeNode(node);
+    const now = this.typeNodes.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   replaceObjectProp(this: Mut<this>, node: Ref<Id>, by: ObjectProp): ObjectProp {
     this.hasChanges = true;
     const id = node.id;
+    this.stamp(id);
     this.objectProps.set(id, withIdObjectProp(by, id, 0));
     return this.objectProps.get(id)!;
   }
 
   currentObjectProp(node: ObjectProp): ObjectProp {
     if (this.objectProps.size === 0) return node;
-    return this.objectProps.get(idOfObjectProp(node)) ?? node;
+    const id = idOfObjectProp(node);
+    const now = this.objectProps.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   replaceClassMember(this: Mut<this>, node: Ref<Id>, by: ClassMember): ClassMember {
     this.hasChanges = true;
     const id = node.id;
+    this.stamp(id);
     this.classMembers.set(id, withIdClassMember(by, id, 0));
     return this.classMembers.get(id)!;
   }
 
   currentClassMember(node: ClassMember): ClassMember {
     if (this.classMembers.size === 0) return node;
-    return this.classMembers.get(idOfClassMember(node)) ?? node;
+    const id = idOfClassMember(node);
+    const now = this.classMembers.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   replaceTypeMember(this: Mut<this>, node: Ref<Id>, by: TypeMember): TypeMember {
     this.hasChanges = true;
     const id = node.id;
+    this.stamp(id);
     this.typeMembers.set(id, withIdTypeMember(by, id, 0));
     return this.typeMembers.get(id)!;
   }
 
   currentTypeMember(node: TypeMember): TypeMember {
     if (this.typeMembers.size === 0) return node;
-    return this.typeMembers.get(idOfTypeMember(node)) ?? node;
+    const id = idOfTypeMember(node);
+    const now = this.typeMembers.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   replacePatternProp(this: Mut<this>, node: Ref<Id>, by: PatternProp): PatternProp {
     this.hasChanges = true;
     const id = node.id;
+    this.stamp(id);
     this.patternProps.set(id, withIdPatternProp(by, id, 0));
     return this.patternProps.get(id)!;
   }
 
   currentPatternProp(node: PatternProp): PatternProp {
     if (this.patternProps.size === 0) return node;
-    return this.patternProps.get(node.id) ?? node;
+    const id = node.id;
+    const now = this.patternProps.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   currentTupleElement(node: TupleElement): TupleElement {
@@ -995,17 +1095,29 @@ export class Rewrites implements Replacements {
 
   currentTypeAlias(node: TypeAlias): TypeAlias {
     if (this.typeAliases.size === 0) return node;
-    return this.typeAliases.get(node.id) ?? node;
+    const id = node.id;
+    const now = this.typeAliases.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   currentInterface(node: Interface): Interface {
     if (this.interfaces.size === 0) return node;
-    return this.interfaces.get(node.id) ?? node;
+    const id = node.id;
+    const now = this.interfaces.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   currentFunc(node: Func): Func {
     if (this.funcs.size === 0) return node;
-    return this.funcs.get(node.id) ?? node;
+    const id = node.id;
+    const now = this.funcs.get(id);
+    if (now === undefined) return node;
+    this.seen(id);
+    return now;
   }
 
   evictStmt(this: Mut<this>, id: usize, by: Stmt): void {
