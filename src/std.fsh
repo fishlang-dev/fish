@@ -2726,11 +2726,82 @@ function __traceBegin(name: string, kind: i64, parent: Ref<i64[]>): __traceRecor
   return record;
 }
 
+// Ends a span: it joins the batch, and a timer is set to send the batch when none is waiting.
+// A span of a trace its caller didn't sample is not exported.
+function __traceFinish(record: __traceRecord): void {
+  if ((record.flags & 1) === 0) return;
+  let done = record;
+  done.end = __traceNow();
+  const delay = __traceHeld.update((s) => {
+    // ponytail: a batch holds 2048 spans, the OpenTelemetry queue's default, and drops the rest;
+    // send early when it fills if a busy server loses spans between timers.
+    if (s.spans.length >= 2048) return -1;
+    s.spans.push(done);
+    if (s.armed) return -1;
+    s.armed = true;
+    return s.delay;
+  });
+  if (delay < 0) return;
+  const timer = setTimeout(async () => { await __traceSend(); }, delay);
+  __traceHeld.update((s) => { s.timer = timer; });
+}
+
 // Ends a span opened by the fish:trace module, whose parent becomes current again unless
 // another span has taken its place since.
 function __traceEnd(record: __traceRecord, prior: Ref<i64[]>): void {
   const now = __traceWords();
   if (now[2] === record.id && now[0] === record.hi && now[1] === record.lo) __traceEnter(prior);
+  __traceFinish(record);
+}
+
+// A batch as OTLP's JSON: ids in hex, times as decimal strings, each attribute by its type.
+function __traceJson(spans: Ref<__traceRecord[]>, service: string): string {
+  let out = '{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":' + JSON.stringify(service.length > 0 ? service : "unknown_service") + '}}]},"scopeSpans":[{"scope":{"name":"fish"},"spans":[';
+  for (let i = 0; i < spans.length; i++) {
+    const s: Ref<__traceRecord> = spans[i];
+    if (i > 0) out += ",";
+    out += '{"traceId":"' + __traceHex([s.hi, s.lo]) + '","spanId":"' + __traceHex([s.id]) + '",';
+    if (s.parent !== 0) out += '"parentSpanId":"' + __traceHex([s.parent]) + '",';
+    out += '"name":' + JSON.stringify(s.name) + ',"kind":' + String(s.kind) + ',"startTimeUnixNano":"' + String(s.start) + '","endTimeUnixNano":"' + String(s.end) + '","attributes":[';
+    for (let j = 0; j < s.attributes.length; j++) {
+      const a: Ref<__traceAttribute> = s.attributes[j];
+      const v = a.value;
+      if (j > 0) out += ",";
+      out += '{"key":' + JSON.stringify(a.key) + ',"value":';
+      if (typeof v === "string") out += '{"stringValue":' + JSON.stringify(v) + "}}";
+      else if (typeof v === "boolean") out += '{"boolValue":' + (v ? "true" : "false") + "}}";
+      else out += '{"intValue":"' + String(v) + '"}}';
+    }
+    out += "]}";
+  }
+  return out + "]}]}]}";
+}
+
+// Posts a batch to the collector over HTTP/1.1, giving up after ten seconds.
+async function __tracePost(to: __traceTarget, body: string): Promise<void> throws IoError | AbortError {
+  const bytes = new TextEncoder().encode(body);
+  let sent = new TextEncoder().encode("POST " + to.path + " HTTP/1.1\r\nhost: " + to.authority + "\r\ncontent-type: application/json\r\ncontent-length: " + String(bytes.length) + "\r\nconnection: close\r\n\r\n");
+  for (const b of bytes) sent.push(b);
+  const signal = AbortSignal.timeout(10000);
+  const conn = await TcpStream.connect(to.host, to.port, signal.clone());
+  await conn.write(sent, signal.clone());
+  await Http1.receive(conn, false, signal);
+}
+
+// Sends what is buffered now, as the batch timer does when it fires. A batch that can't be
+// delivered is dropped: a collector that is down mustn't make the program hold its spans.
+async function __traceSend(): Promise<void> {
+  const batch = __traceHeld.update((s) => {
+    s.armed = false;
+    return { spans: s.spans.splice(0), endpoint: s.endpoint, service: s.service, timer: s.timer };
+  });
+  // A timer still waiting has nothing left to send, and would keep the program running.
+  clearTimeout(batch.timer);
+  const to = __traceTargetOf(batch.endpoint);
+  if (batch.spans.length === 0 || to === null) return;
+  try {
+    await __tracePost(to, __traceJson(batch.spans, batch.service));
+  } catch (_e) {}
 }
 `;
 
@@ -8106,7 +8177,7 @@ export async function create(file: string, paths: string[], options: ZipPackOpti
 export type TracingOptions = { endpoint?: string; serviceName?: string; batchDelay?: i64 };
 
 // One timed piece of work in a trace. It ends at end(), or where its scope does when it is
-// bound with 'using'.
+// bound with 'using', and is then sent to the collector with the batch it joins.
 export class Span {
   #record: __traceRecord;
   // The context this span took over, to put back when it ends.
@@ -8157,6 +8228,11 @@ export function span(name: string): Span {
 // Sets where spans go, in place of what the environment says.
 export function configureTracing(options: TracingOptions): void {
   __traceConfigure(options.endpoint, options.serviceName, options.batchDelay);
+}
+
+// Sends the spans that have ended so far, without waiting for their batch's timer.
+export async function flushTraces(): Promise<void> {
+  await __traceSend();
 }
 `,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
