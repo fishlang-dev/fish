@@ -6788,11 +6788,15 @@ declare function fsh_rt_sqlite_open(db: i64, path: Ptr<u8>): i64;
 declare function fsh_rt_sqlite_error(db: i64): Ptr<u8>;
 declare function fsh_rt_sqlite_retain(db: i64): void;
 declare function fsh_rt_sqlite_release(db: i64): void;
+declare function fsh_rt_sqlite_close(db: i64): void;
 declare function fsh_rt_sqlite_statement(db: i64): i64;
+declare function fsh_rt_sqlite_statement_retain(statement: i64): void;
 declare function fsh_rt_sqlite_statement_release(statement: i64): void;
+declare function fsh_rt_sqlite_finalize(statement: i64): void;
 declare function fsh_rt_sqlite_lock(statement: i64): i64;
 declare function fsh_rt_sqlite_unlock(statement: i64, finalize: i64): void;
 declare function fsh_rt_sqlite_prepare(statement: i64, sql: Ptr<u8>, length: i64): i64;
+declare function fsh_rt_sqlite_reset(statement: i64): i64;
 declare function fsh_rt_sqlite_parameters(statement: i64): i64;
 declare function fsh_rt_sqlite_bind_null(statement: i64, at: i64): i64;
 declare function fsh_rt_sqlite_bind_integer(statement: i64, at: i64, value: i64): i64;
@@ -6832,6 +6836,17 @@ export type RunResult = { changes: i64; lastInsertRowid: i64 };
 
 // A run's rows, each as the JSON the runtime wrote it as, and its counts.
 type Outcome = { rows: string[]; changes: i64; lastInsertRowid: i64 };
+
+// The handles a Statement is made from. A class of this module's own, so that only prepare can
+// make a Statement: a number passed for a handle would be read as an address.
+class Prepared {
+  db: i64;
+  statement: i64;
+  constructor(db: i64, statement: i64) {
+    this.db = db;
+    this.statement = statement;
+  }
+}
 
 function failure(db: i64, code: i64): SqliteError {
   return new SqliteError(unsafe { fromCString(fsh_rt_sqlite_error(db)) }, code);
@@ -6897,20 +6912,36 @@ function stepped(db: i64, statement: i64, params: Ref<SqlValue[]>, wanted: i64, 
   return null;
 }
 
-// One run, on the blocking pool: the statement is compiled from sql first and finalized after.
-// The job holds the statement's one count, released here, and through it one of the connection.
-function work(db: i64, statement: i64, sql: string, params: Ref<SqlValue[]>, wanted: i64): Outcome throws SqliteError {
+// One run, on the blocking pool: the statement is compiled from sql first, and finalized after,
+// when it is given, and otherwise is one prepared before. The job holds a count of the statement,
+// released here, so a caller that stops waiting can't close the connection under it.
+function work(db: i64, statement: i64, sql: string | null, params: Ref<SqlValue[]>, wanted: i64): Outcome throws SqliteError {
   let out: Outcome = { rows: [], changes: 0, lastInsertRowid: 0 };
+  let code = unsafe { fsh_rt_sqlite_lock(statement) };
+  if (code === 0) {
+    if (sql === null) code = unsafe { fsh_rt_sqlite_reset(statement) };
+    else {
+      const text = terminated(sql);
+      code = unsafe { fsh_rt_sqlite_prepare(statement, ptrOf(text[0]), (text.length as i64) - 1) };
+    }
+  }
+  const failed = code !== 0 ? failure(db, code) : stepped(db, statement, params, wanted, out);
+  unsafe { fsh_rt_sqlite_unlock(statement, sql === null ? 0 : 1) };
+  unsafe { fsh_rt_sqlite_statement_release(statement) };
+  if (failed !== null) throw failed;
+  return out;
+}
+
+function compile(db: i64, statement: i64, sql: string): void throws SqliteError {
   let code = unsafe { fsh_rt_sqlite_lock(statement) };
   if (code === 0) {
     const text = terminated(sql);
     code = unsafe { fsh_rt_sqlite_prepare(statement, ptrOf(text[0]), (text.length as i64) - 1) };
   }
-  const failed = code !== 0 ? failure(db, code) : stepped(db, statement, params, wanted, out);
-  unsafe { fsh_rt_sqlite_unlock(statement, 1) };
+  const failed = code !== 0 ? failure(db, code) : null;
+  unsafe { fsh_rt_sqlite_unlock(statement, 0) };
   unsafe { fsh_rt_sqlite_statement_release(statement) };
   if (failed !== null) throw failed;
-  return out;
 }
 
 function connect(db: i64, path: string): void throws SqliteError {
@@ -6921,10 +6952,26 @@ function connect(db: i64, path: string): void throws SqliteError {
   if (failed !== null) throw failed;
 }
 
+function disconnect(db: i64): void {
+  unsafe { fsh_rt_sqlite_close(db) };
+  unsafe { fsh_rt_sqlite_release(db) };
+}
+
+function finalize(statement: i64): void {
+  unsafe { fsh_rt_sqlite_finalize(statement) };
+  unsafe { fsh_rt_sqlite_statement_release(statement) };
+}
+
 // Runs sql once, on a statement of its own that the job finalizes and frees.
 async function once(db: i64, sql: string, params: SqlValue[], wanted: i64): Promise<Outcome> throws SqliteError {
   const statement = unsafe { fsh_rt_sqlite_statement(db) };
   return await spawnBlocking(() => work(db, statement, sql, params, wanted));
+}
+
+// Runs a prepared statement again, the job holding a count of it while it runs.
+async function again(db: i64, statement: i64, params: SqlValue[], wanted: i64): Promise<Outcome> throws SqliteError {
+  unsafe { fsh_rt_sqlite_statement_retain(statement) };
+  return await spawnBlocking(() => work(db, statement, null, params, wanted));
 }
 
 function rowsAs<T>(rows: Ref<string[]>): T[] throws RowError {
@@ -6954,7 +7001,8 @@ function rowMessage(message: string, json: string): string {
 }
 
 // A connection to one database, running one statement at a time. Each call runs on the blocking
-// pool, so a slow statement holds no worker.
+// pool, so a slow statement holds no worker. The connection closes when the Database is dropped, or at
+// close().
 export class Database {
   private handle: i64;
 
@@ -6989,6 +7037,68 @@ export class Database {
   async run(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<RunResult> throws SqliteError {
     const out = await once(this.handle, sql, params, 0);
     return { changes: out.changes, lastInsertRowid: out.lastInsertRowid };
+  }
+
+  // sql compiled once, to run many times with new parameters.
+  async prepare(this: Ref<this>, sql: string): Promise<Statement> throws SqliteError {
+    const db = this.handle;
+    const statement = unsafe { fsh_rt_sqlite_statement(db) };
+    const made = new Statement(new Prepared(db, statement));
+    unsafe { fsh_rt_sqlite_statement_retain(statement) };
+    await spawnBlocking(() => compile(db, statement, sql));
+    return made;
+  }
+
+  // Closes the connection; a call on it after this throws.
+  async close(this: Ref<this>): Promise<void> {
+    const db = this.handle;
+    unsafe { fsh_rt_sqlite_retain(db) };
+    await spawnBlocking(() => disconnect(db));
+  }
+
+  [Symbol.dispose](this: Mut<this>): void {
+    unsafe { fsh_rt_sqlite_release(this.handle) };
+  }
+}
+
+// A statement compiled by prepare, run with all, get or run as often as wanted.
+export class Statement {
+  private db: i64;
+  private handle: i64;
+
+  constructor(from: Prepared) {
+    this.db = from.db;
+    this.handle = from.statement;
+  }
+
+  // Every row the statement gives with params, each read by column name into a T.
+  async all<T>(this: Ref<this>, params: SqlValue[] = []): Promise<T[]> throws SqliteError | RowError {
+    const out = await again(this.db, this.handle, params, -1);
+    return rowsAs<T>(out.rows);
+  }
+
+  // The first row the statement gives with params as a T, or null when it gives none.
+  async get<T>(this: Ref<this>, params: SqlValue[] = []): Promise<T | null> throws SqliteError | RowError {
+    const out = await again(this.db, this.handle, params, 1);
+    let rows = rowsAs<T>(out.rows);
+    return rows.pop();
+  }
+
+  // Runs the statement with params for what it changes; rows it gives are dropped.
+  async run(this: Ref<this>, params: SqlValue[] = []): Promise<RunResult> throws SqliteError {
+    const out = await again(this.db, this.handle, params, 0);
+    return { changes: out.changes, lastInsertRowid: out.lastInsertRowid };
+  }
+
+  // Frees the compiled statement; a call on it after this throws.
+  async close(this: Ref<this>): Promise<void> {
+    const statement = this.handle;
+    unsafe { fsh_rt_sqlite_statement_retain(statement) };
+    await spawnBlocking(() => finalize(statement));
+  }
+
+  [Symbol.dispose](this: Mut<this>): void {
+    unsafe { fsh_rt_sqlite_statement_release(this.handle) };
   }
 }
 `,

@@ -154,3 +154,147 @@ async function main(): Promise<void> throws SqliteError {
   const id: i32 = 3;
   await db.run("delete from t where id = ?", [id]);
 }
+// case: sqlite_statement_not_made_by_hand
+// error: only a class can be constructed with 'new'
+// A Statement comes from prepare alone: what it is made from isn't a program's to write.
+import { Database, Statement } from "sqlite";
+
+function main() {
+  const s = new Statement(new Prepared(0, 0));
+}
+// case: sqlite_prepared
+// expect: 1 1
+// expect: 1 2
+// expect: 1 3
+// expect: 1 4
+// expect: 1 5
+// expect: 15 9 0
+// expect: [ { label: 'row 4' }, { label: 'row 5' } ]
+// expect: { label: 'row 1' }
+// expect: null
+// expect: 5
+// One statement is compiled once and run again with new parameters: for what it changes, for
+// every row, or for its first.
+import { Database, RowError, SqliteError, Statement } from "sqlite";
+
+async function total(sum: Ref<Statement>, least: i64): Promise<i64> throws SqliteError | RowError {
+  const row = await sum.get<{ total: i64 | null }>([least]);
+  if (row === null) return -1;
+  return row.total ?? 0;
+}
+
+async function main(): Promise<void> throws SqliteError | RowError {
+  const db = await Database.open(":memory:");
+  await db.run("create table t (n integer, label text)");
+  const insert = await db.prepare("insert into t (n, label) values (?, ?)");
+  for (let i: i64 = 1; i <= 5; i++) {
+    const r = await insert.run([i, "row " + String(i)]);
+    console.log(r.changes, r.lastInsertRowid);
+  }
+  const sum = await db.prepare("select sum(n) as total from t where n >= ?");
+  const all = await total(sum, 1);
+  const top = await total(sum, 4);
+  const past = await total(sum, 9);
+  console.log(all, top, past);
+  const labels = await db.prepare("select label from t where n > ? order by n");
+  const some = await labels.all<{ label: string }>([3]);
+  console.log(some);
+  const first = await labels.get<{ label: string }>([0]);
+  console.log(first);
+  const none = await labels.get<{ label: string }>([5]);
+  console.log(none);
+  const emptied = await db.prepare("delete from t");
+  const gone = await emptied.run();
+  console.log(gone.changes);
+}
+// case: sqlite_close
+// expect: SqliteError 21 the statement is closed; prepare it again
+// expect: [ { n: 1 } ]
+// expect: SqliteError 21 the database is closed; open it again with Database.open
+// expect: SqliteError 21 the database is closed; open it again with Database.open
+// expect: SqliteError 21 the database is closed; open it again with Database.open
+// close() may be called twice, on a statement and on a database, and what is closed throws when
+// used. Closing a database closes it for its statements.
+import { Database, RowError, SqliteError } from "sqlite";
+
+async function main(): Promise<void> throws SqliteError | RowError {
+  const db = await Database.open(":memory:");
+  await db.run("create table t (n integer)");
+  await db.run("insert into t values (1)");
+  const read = await db.prepare("select n from t");
+  const kept = await db.prepare("select n from t");
+  await read.close();
+  await read.close();
+  try {
+    await read.all<{ n: i64 }>();
+  } catch (e) {
+    if (e instanceof SqliteError) console.log(e.name, e.code, e.message);
+  }
+  const rows = await kept.all<{ n: i64 }>();
+  console.log(rows);
+  await db.close();
+  await db.close();
+  try {
+    await db.run("insert into t values (2)");
+  } catch (e) {
+    console.log(e.name, e.code, e.message);
+  }
+  try {
+    await kept.all<{ n: i64 }>();
+  } catch (e) {
+    if (e instanceof SqliteError) console.log(e.name, e.code, e.message);
+  }
+  try {
+    const _late = await db.prepare("select 1");
+  } catch (e) {
+    console.log(e.name, e.code, e.message);
+  }
+}
+// case: sqlite_file_and_drop
+// expect: wrote 2
+// expect: [ { word: 'still' }, { word: 'here' } ]
+// expect: [ { word: 'still' }, { word: 'here' }, { word: 'again' } ]
+// expect: false
+// Nothing here is closed by hand. The first connection holds its file's lock for as long as it
+// is open, so the second reads the file only because dropping the first and its statement
+// closed it; a statement may outlive its database, and 'using' ends a scope the same.
+import { Database, RowError, SqliteError, Statement } from "sqlite";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function write(path: string): Promise<void> throws SqliteError {
+  const db = await Database.open(path);
+  await db.run("pragma locking_mode = exclusive");
+  await db.run("create table kept (word text)");
+  const insert = await db.prepare("insert into kept values (?)");
+  await insert.run(["still"]);
+  const last = await insert.run(["here"]);
+  console.log("wrote", last.lastInsertRowid);
+}
+
+async function reader(path: string): Promise<Statement> throws SqliteError {
+  const db = await Database.open(path);
+  return await db.prepare("select word from kept order by rowid");
+}
+
+async function main(): Promise<void> throws SqliteError | RowError | IoError {
+  const dir = mkdtempSync(join(tmpdir(), "fish-sqlite-"));
+  const path = join(dir, "kept.db");
+  await write(path);
+  {
+    const read = await reader(path);
+    const words = await read.all<{ word: string }>();
+    console.log(words);
+  }
+  {
+    using db = await Database.open(path);
+    await db.run("pragma locking_mode = exclusive");
+    await db.run("insert into kept values ('again')");
+  }
+  const db = await Database.open(path);
+  const words = await db.query<{ word: string }>("select word from kept order by rowid");
+  console.log(words);
+  rmSync(dir, { recursive: true });
+  console.log(existsSync(path));
+}
