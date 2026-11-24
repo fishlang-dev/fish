@@ -2599,3 +2599,23 @@ async function main() {
   await task;
   console.log("after");
 }
+// case: dispose_in_a_stored_async_arrow
+// expect: dispose held
+// expect: 2
+// An async arrow kept as a function value gives a boxed future, which may hold a disposable
+// value across an await as any other future does.
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](): void { console.log(`dispose ${this.name}`); }
+}
+type Work = (n: i64) => Promise<i64>;
+async function main() {
+  const work: Work = async (n: i64) => {
+    using r = new Res("held");
+    await sleep(1);
+    return n + 1;
+  };
+  const v = await work(1);
+  console.log(v);
+}

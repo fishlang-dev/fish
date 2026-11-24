@@ -2987,6 +2987,13 @@ int64_t fsh_rt_date_now(void) {
   return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
+// The wall clock's nanoseconds since the Unix epoch, as OTLP writes a span's times.
+int64_t fsh_rt_unix_nanos(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_REALTIME, &t);
+  return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
+}
+
 // Fills count bytes from the OS's secure random source: arc4random_buf on macOS, which can't fail,
 // and getrandom(2) on Linux, which blocks only until the pool is first seeded at boot.
 void fsh_rt_random_fill(uint8_t *at, int64_t count) {
@@ -4338,6 +4345,9 @@ struct fsh_task {
   // error it threw out of its output into the group, as the type the group's await throws.
   struct fsh_group *group;
   void (*fail)(void *output, void *error);
+  // Its trace context: the two halves of a trace id, the current span's id and the trace's
+  // flags, all zero outside any span. A task starts with a copy of its spawner's.
+  int64_t trace[4];
   char memory[];
 };
 
@@ -4368,6 +4378,14 @@ static fsh_task *fsh_alive = NULL;
 static pthread_cond_t fsh_finished = PTHREAD_COND_INITIALIZER;
 static int32_t fsh_panicked = 0;
 static fsh_task *fsh_main_task = NULL;
+// The task this thread is polling, whose trace context is the current one; code that runs
+// outside any task, as a program with no async main does, has the thread's own.
+static _Thread_local fsh_task *fsh_current = NULL;
+static _Thread_local int64_t fsh_trace_root[4];
+// Set by the claim that starts the timer task, for the task its thread makes next: the timer
+// task has no context, so a timer's callback starts a trace of its own, whichever span was
+// current when the first timer was set.
+static _Thread_local int32_t fsh_timeouts_starting = 0;
 // The task running timers' callbacks, once one is set.
 static fsh_task *fsh_timeouts_task = NULL;
 // Blocking tasks not yet done, which the runtime's end can't drop while a pool thread may poll one.
@@ -4455,11 +4473,14 @@ static void fsh_run(fsh_task *t) {
   // its frames behind for this reset to drop.
   fsh_frame *frames = fsh_rt_frames;
   const char *spawned = fsh_spawned_at;
+  fsh_task *current = fsh_current;
   fsh_rt_frames = NULL;
   fsh_spawned_at = t->spawned;
+  fsh_current = t;
   int32_t result = t->poll(t, t->memory);
   fsh_rt_frames = frames;
   fsh_spawned_at = spawned;
+  fsh_current = current;
   if (result == 3 && (t == fsh_main_task || t == fsh_timeouts_task)) {
     pthread_mutex_lock(&fsh_alive_lock);
     fsh_panic_began = 1;
@@ -4543,6 +4564,9 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   t->fail = NULL;
   t->state = FSH_QUEUED;
   t->spawned = fsh_rt_frames ? fsh_rt_frames->site : fsh_spawned_at;
+  if (fsh_timeouts_starting) memset(t->trace, 0, sizeof t->trace);
+  else memcpy(t->trace, fsh_current ? fsh_current->trace : fsh_trace_root, sizeof t->trace);
+  fsh_timeouts_starting = 0;
   pthread_mutex_lock(&fsh_alive_lock);
   t->prev = NULL;
   t->next = fsh_alive;
@@ -4575,6 +4599,26 @@ fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_
   fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
   fsh_run(t);
   return t;
+}
+
+// The current trace context, read and replaced whole. It is the polled task's, so only the
+// thread polling that task touches it.
+void fsh_rt_trace_get(int64_t *out) {
+  memcpy(out, fsh_current ? fsh_current->trace : fsh_trace_root, sizeof fsh_trace_root);
+}
+
+void fsh_rt_trace_set(const int64_t *words) {
+  memcpy(fsh_current ? fsh_current->trace : fsh_trace_root, words, sizeof fsh_trace_root);
+}
+
+// The environment and the random source under names only std's tracing declares: a std module
+// declares the C functions it calls, and one name declared by both would be declared twice.
+const char *fsh_rt_trace_env(const char *name) {
+  return getenv(name);
+}
+
+void fsh_rt_trace_ids(int64_t *out, int64_t count) {
+  fsh_rt_random_fill((uint8_t *)out, count * 8);
 }
 
 // Awaits a spawned task: when it is done, its poll result is copied to out, which then owns
@@ -4793,7 +4837,8 @@ static void fsh_timeouts_wake(fsh_task *waiter) {
 
 // Whether this call is the one to start the timer task, which then registers it.
 int32_t fsh_rt_timeouts_claim(void) {
-  return __atomic_exchange_n(&fsh_timeouts_claimed, 1, __ATOMIC_ACQ_REL) == 0;
+  fsh_timeouts_starting = __atomic_exchange_n(&fsh_timeouts_claimed, 1, __ATOMIC_ACQ_REL) == 0;
+  return fsh_timeouts_starting;
 }
 
 // Registered under the tasks' lock, where its end is announced, and announced itself, for a
