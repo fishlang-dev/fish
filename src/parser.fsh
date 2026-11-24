@@ -103,7 +103,7 @@ export type Expr = Span & Id & (
 
 export type Stmt = Span & Id & (
   | { kind: "expr"; expr: Expr }
-  | { kind: "let"; keyword: "let" | "const" | "var" | "using"; declarations: Declarator[] }
+  | { kind: "let"; keyword: "let" | "const" | "var" | "using" | "await using"; declarations: Declarator[] }
   | { kind: "return"; value: Expr | undefined }
   | { kind: "if"; cond: Expr; then: Stmt[]; else: Stmt[] | undefined }
   | { kind: "while"; cond: Expr; body: Stmt[] }
@@ -1013,12 +1013,14 @@ function doWhileStatement(c: Mut<Cursor>): Stmt {
 // `using` is contextual: it declares only before a name on its line, so `using(x)`, `using = 1`
 // and `using.y` keep their TypeScript meaning, as does `using` before an operator spelled as a word.
 // `using {` on one line starts no expression, so it declares too, and the checker says what a
-// pattern there needs; `using [` indexes, as in TypeScript.
+// pattern there needs; `using [` indexes, as in TypeScript. `await using` declares where `using`
+// alone would; anywhere else it awaits a value named `using`.
 /** @throws {CompileError} */
 function atDeclaration(c: Mut<Cursor>): boolean {
   if (c.at("let") || c.at("const") || c.at("var")) return true;
-  if (!c.at("using")) return false;
-  const next = c.peek(1);
+  const awaited: usize = c.at("await") && isToken(c.peek(1), "using") && !c.peek(1).newlineBefore ? 1 : 0;
+  if (awaited === 0 && !c.at("using")) return false;
+  const next = c.peek(awaited + 1);
   if (next.newlineBefore) return false;
   return isToken(next, "{") || (next.kind === "ident" && !["in", "instanceof", "as", "satisfies", "of"].includes(next.text));
 }
@@ -1027,7 +1029,8 @@ function atDeclaration(c: Mut<Cursor>): boolean {
 function declaration(c: Mut<Cursor>): Stmt {
   const start = c.peek().start;
   const word = c.next().text;
-  const keyword: "let" | "const" | "var" | "using" = word === "let" ? "let" : word === "const" ? "const" : word === "using" ? "using" : "var";
+  if (word === "await") c.next();
+  const keyword: "let" | "const" | "var" | "using" | "await using" = word === "let" ? "let" : word === "const" ? "const" : word === "using" ? "using" : word === "await" ? "await using" : "var";
   let declarations: Declarator[] = [];
   do declarations.push(declarator(c));
   while (c.eat(","));

@@ -1216,3 +1216,224 @@ async function main() {
 // expect: dispose first
 // expect: 1
 // expect: done
+// case: async_dispose_parses
+// mode: parse
+class Res {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+async function f() {
+  await using x = open();
+  await using a: Res = open(), b = open();
+  await using;
+  await using.y;
+  await using
+  x = 2;
+  for (await using of xs) {}
+}
+// case: async_dispose_with_a_parameter
+class Res {
+  async [Symbol.asyncDispose](this: Mut<this>, hard: boolean): Promise<void> {}
+}
+function main() {}
+// error: 2:48: error[E0710]: a '[Symbol.asyncDispose]' method takes no parameters, since nothing calls it with any; write it as 'async [Symbol.asyncDispose](this: Mut<this>): Promise<void> { ... }'
+// case: async_dispose_not_async
+class Res {
+  [Symbol.asyncDispose](): void {}
+}
+function main() {}
+// error: error[E0710]: a '[Symbol.asyncDispose]' method is async, since 'await using' awaits it
+// case: async_dispose_gives_a_value
+class Res {
+  async [Symbol.asyncDispose](): Promise<i64> { return 1; }
+}
+function main() {}
+// error: error[E0710]: a '[Symbol.asyncDispose]' method returns 'Promise<void>'
+// case: async_dispose_returns_a_value_unwritten
+class Res {
+  async [Symbol.asyncDispose]() { return 1; }
+}
+async function main() {
+  await using r = new Res();
+}
+// error: is not assignable to return type 'void'
+// case: async_dispose_static
+class Res {
+  static async [Symbol.asyncDispose](): Promise<void> {}
+}
+function main() {}
+// error: error[E0710]: a '[Symbol.asyncDispose]' method can't be static, since it disposes one instance
+// case: async_dispose_owning
+class Res {
+  async [Symbol.asyncDispose](this: Own<this>): Promise<void> {}
+}
+function main() {}
+// error: error[E0710]: a '[Symbol.asyncDispose]' method borrows the instance, which its scope still holds, so it can't take 'this: Own<this>'
+// case: async_dispose_by_hand
+class Res {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+async function main() {
+  let r = new Res();
+  await r[Symbol.asyncDispose]();
+}
+// error: error[E0710]: a '[Symbol.asyncDispose]' method is awaited where an 'await using' declaration's scope ends, so it can't be called by hand
+// case: async_dispose_on_an_interface
+interface Closing {
+  [Symbol.asyncDispose](): Promise<void>;
+}
+function main() {}
+// error: '[Symbol.asyncDispose]' members other than a class's method, which an 'await using' declaration awaits, are not supported yet
+// case: async_dispose_quoted_name
+class Res {
+  async "[Symbol.asyncDispose]"(): Promise<void> {}
+}
+function main() {}
+// error: error[E0120]: '[Symbol.asyncDispose]' as a quoted name would name a '[Symbol.asyncDispose]' method
+// case: await_using_outside_async
+class Res {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+function main() {
+  await using r = new Res();
+}
+// error: 5:3: error[E0301]: 'await using' can only be used inside an 'async' function
+// case: await_using_no_async_disposer
+class Plain {
+  name: string;
+  constructor(name: string) { this.name = name; }
+}
+async function main() {
+  await using p = new Plain("a");
+}
+// error: 6:19: error[E0411]: 'p' can't be declared with 'await using': its type 'Plain' has no async disposer to await at the end of the scope; declare 'async [Symbol.asyncDispose]()' in its class
+// case: await_using_sync_disposer_only
+class Res {
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+async function main() {
+  await using r = new Res();
+}
+// error: error[E0411]: 'r' can't be declared with 'await using': its type 'Res' has no async disposer to await at the end of the scope; declare 'async [Symbol.asyncDispose]()' in its class, or declare it with 'using', which runs its '[Symbol.dispose]()'
+// case: using_async_disposer_only
+class Res {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+async function main() {
+  using r = new Res();
+}
+// error: error[E0411]: 'r' can't be declared with 'using': its type 'Res' has no disposer to run at the end of the scope
+// case: await_using_option
+class Res {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+function find(there: boolean): Res | null {
+  return there ? new Res() : null;
+}
+async function main() {
+  await using r = find(true);
+}
+// error: error[E0411]: 'r' can't be declared with 'await using': its value is a 'null | Res', which may be null; handle the null first, then declare the 'await using' with the value that is there
+// case: await_using_no_value
+class Res {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+async function main() {
+  await using r: Res;
+}
+// error: error[E0406]: 'await using r' needs its value where it is declared, as TypeScript requires
+// case: await_using_pattern
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+async function main() {
+  await using { name } = new Res("a");
+}
+// error: error[E0411]: a 'await using' declaration binds one name, since its whole value is disposed at the end of the scope
+// case: await_using_top_level
+class Res {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+await using r = new Res();
+async function main() {}
+// error: 4:1: error[E0404]: a top-level 'await using' has no scope to end, so its value would never be disposed; declare it in the function that uses it
+// case: await_using_for_head
+class Res {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+async function main() {
+  for (await using r = new Res(); ;) {
+    break;
+  }
+}
+// error: 5:8: error[E0411]: 'await using' can't be declared in a 'for' head; declare it in the loop's body, where it is disposed at the end of each pass
+// case: await_using_for_of_head
+class Res {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+async function main() {
+  const all = [new Res()];
+  for (await using r of all) {}
+}
+// error: 6:8: error[E0411]: 'await using' can't be declared in a 'for' head
+// case: await_using_in_a_generator
+class Res {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+async function* each(): AsyncGenerator<i64> {
+  await using r = new Res();
+  yield 1;
+}
+async function main() {}
+// error: 5:3: error[E0411]: 'await using' can't be declared in a generator, which may be dropped at a 'yield' before the scope ends; declare it in the async function that reads the generator
+// case: await_using_passed_by_value
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+function consume(r: Res): void {}
+async function main() {
+  await using r = new Res("a");
+  consume(r);
+}
+// error: 9:11: error[E0215]: 'r' can't be moved: it is declared with 'using', so its value belongs to its scope, which disposes it; lend it instead, as a 'Ref<Res>' or a 'Mut<Res>'
+// case: await_using_returned
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+async function make(): Promise<Res> {
+  await using r = new Res("a");
+  return r;
+}
+async function main() {
+  const r = await make();
+  console.log(r.name);
+}
+// error: error[E0215]: 'r' can't be moved: it is declared with 'using'
+// case: await_using_assigned
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+async function main() {
+  await using r = new Res("a");
+  r = new Res("b");
+}
+// error: error[E0215]: cannot assign to 'r': it is declared with 'using', which keeps its value until its scope ends
+// case: await_using_held_by_a_move_closure
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
+}
+async function main() {
+  await using r = new Res("a");
+  const show = move () => console.log(r.name);
+  show();
+}
+// error: error[E0215]: 'r' can't be held by this closure: it is declared with 'using'

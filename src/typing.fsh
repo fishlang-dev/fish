@@ -378,6 +378,10 @@ export const ITERATOR = "[Symbol.iterator]";
 // dropped and which no call can name.
 export const DISPOSE = "[Symbol.dispose]";
 
+// The name a class's `[Symbol.asyncDispose]` method takes, its async disposer, which an
+// `await using` declaration awaits where its scope ends and which no call can name.
+export const ASYNC_DISPOSE = "[Symbol.asyncDispose]";
+
 // The field an instance with a disposer keeps its liveness in: `new` sets it once the constructor
 // returns, and the drop clears it as it calls the disposer, so an instance never finished, or
 // moved away, is not disposed. A private name no source can spell, as `EMBEDDED` is.

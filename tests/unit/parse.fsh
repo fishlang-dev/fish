@@ -810,9 +810,16 @@ const USING: [string, string][] = [
   ["for (using x = f(); ;) {}", "for (using x = f(); ; )"],
   ["for (using of xs) {}", "for (using of xs)"],
   ["using: for (;;) {}", "using: for (; ; )"],
+  ["await using x = f()", "await using x = f()"],
+  ["await using a = f(), b = g()", "await using a = f(), b = g()"],
+  ["await using", "(await using)"],
+  ["await using.y", "(await using.y)"],
+  ["await using\n  x = f()", "(await using); (x = f())"],
+  ["await using in xs", "((await using) in xs)"],
+  ["for (await using x of xs) {}", "for (await using x of xs)"],
 ];
 
-test("using declarations, and 'using' as a name", () => table(USING, statementsShape, ""));
+test("using and await using declarations, and 'using' as a name", () => table(USING, statementsShape, ""));
 
 test("function overloads", () => {
   const got = statementsShape("function f(x: string): void\n  function f(x: i64): void;\n  function f(x) {}");

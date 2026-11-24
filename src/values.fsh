@@ -12,11 +12,11 @@ import type { AssignOp, BinaryOp, Expr, Func, Id, Interface, MatchArm, ObjectPro
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.fsh";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.fsh";
 import { infer } from "./generics.fsh";
-import { DISPOSE, EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, integerInfo, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.fsh";
+import { ASYNC_DISPOSE, DISPOSE, EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, integerInfo, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.fsh";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.fsh";
 import type { EnumInfo, EnumInstance } from "./enums.fsh";
 import { EXPRESSION_FORMS, IMPORT_META_MEMBERS, unsupported } from "./unsupported.fsh";
-import { isDisposeKey, isIteratorKey, keyParts, leafOf, unknownKey } from "./keys.fsh";
+import { isAsyncDisposeKey, isDisposeKey, isIteratorKey, keyParts, leafOf, unknownKey } from "./keys.fsh";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.fsh";
 import { BUFFER_ENCODINGS, BUFFER_READS, BUFFER_REFUSED, BUFFER_STATICS, JSON_VALUE_NAME, STD_BASE } from "./std.fsh";
 import { parseArgsArgs } from "./parseargs.fsh";
@@ -3678,7 +3678,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (!shaped(r?.kind) && r?.kind !== "param" && !(r?.kind === "union" && r.members.every((m) => shaped(this.kindOf(m))))) return false;
     notByHand(e);
     const name = this.knownKey(e.index);
-    if (name === DISPOSE) throw disposedByHand(e);
+    if (name === DISPOSE || name === ASYNC_DISPOSE) throw disposedByHand(e, name === ASYNC_DISPOSE);
     if (name.startsWith("#")) throw new CompileError("E0502", `'${name}' names no field: a private field is read as '${this.placeText(e.object)}.${name}'`, e.index.start, e.index.end);
     if (e.optional) throw unsupported("optional index expressions", e);
     const parts = { ...e };
@@ -11727,14 +11727,16 @@ function rawProp(prop: Ref<ObjectProp>): string[] | undefined {
   return strings;
 }
 
-// A disposer is the drop's to run, once: a call written out would be a second run.
-function disposedByHand(at: Ref<Expr>): CompileError {
+// A disposer is the drop's to run, once: a call written out would be a second run. An async
+// one, `awaited`, is the 'await using' declaration's to await.
+function disposedByHand(at: Ref<Expr>, awaited: boolean): CompileError {
+  if (awaited) return new CompileError("E0710", "a '[Symbol.asyncDispose]' method is awaited where an 'await using' declaration's scope ends, so it can't be called by hand, which would dispose the value twice; declare the value with 'await using'", at.start, at.end);
   return new CompileError("E0710", "a '[Symbol.dispose]' method runs when its value is dropped, so it can't be called by hand, which would dispose the value twice; let the value go out of scope, or move it to where it should end", at.start, at.end);
 }
 
 /** @throws {CompileError} */
 function notByHand(e: Ref<Expr>): void {
-  if (e.kind === "index" && isDisposeKey(e.index)) throw disposedByHand(e);
+  if (e.kind === "index" && (isDisposeKey(e.index) || isAsyncDisposeKey(e.index))) throw disposedByHand(e, isAsyncDisposeKey(e.index));
 }
 
 // A path as a message shows it, the collection a class extending Map or Set embeds left unsaid.

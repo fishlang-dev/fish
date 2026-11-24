@@ -65,7 +65,7 @@ type AstExpr =
   | { start: i64; end: i64; kind: "assertion"; type: AstType; expr: AstExpr };
 type AstStmt =
   | { start: i64; end: i64; kind: "expr"; expr: AstExpr }
-  | { start: i64; end: i64; kind: "let"; keyword: "let" | "const" | "var" | "using"; declarations: AstDeclarator[] }
+  | { start: i64; end: i64; kind: "let"; keyword: "let" | "const" | "var" | "using" | "await using"; declarations: AstDeclarator[] }
   | { start: i64; end: i64; kind: "return"; value: AstExpr | null }
   | { start: i64; end: i64; kind: "if"; cond: AstExpr; then: AstStmt[]; else: AstStmt[] | null }
   | { start: i64; end: i64; kind: "while"; cond: AstExpr; body: AstStmt[] }
