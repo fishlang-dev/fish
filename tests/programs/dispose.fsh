@@ -1847,3 +1847,278 @@ async function main() {
 // expect: in default
 // expect: after the switch
 // expect: closed outer
+// case: await_using_throw_caught_outside
+class Boom extends Error {}
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {
+    await sleep(1);
+    console.log(`closed ${this.name}`);
+  }
+}
+function risky(n: i64): i64 throws Boom {
+  if (n > 1) throw new Boom("too big");
+  return n;
+}
+async function work(n: i64): Promise<i64> throws Boom {
+  await using c = new Conn(`conn ${n}`);
+  const got = risky(n);
+  console.log(`got ${got}`);
+  return got;
+}
+async function main() {
+  try {
+    const a = await work(1);
+    console.log(a);
+    const b = await work(5);
+    console.log(b);
+  } catch (e) {
+    console.log(`caught ${e.message}`);
+  }
+}
+// expect: got 1
+// expect: closed conn 1
+// expect: 1
+// expect: closed conn 5
+// expect: caught too big
+// case: await_using_throw_statement
+class Boom extends Error {}
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function work(fail: boolean): Promise<void> throws Boom {
+  await using first = new Conn("first");
+  {
+    await using second = new Conn("second");
+    if (fail) throw new Boom("failed");
+    console.log("inner done");
+  }
+  console.log("outer done");
+}
+async function main() {
+  try {
+    await work(false);
+    await work(true);
+  } catch (e) {
+    console.log(`caught ${e.message}`);
+  }
+}
+// expect: inner done
+// expect: closed second
+// expect: outer done
+// expect: closed first
+// expect: closed second
+// expect: closed first
+// expect: caught failed
+// case: await_using_nothing_to_throw
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+async function work(n: i64): Promise<i64> {
+  await using c = new Conn("a");
+  let total = 0;
+  for (let i = 0; i < n; i++) total += i;
+  if (total > 5) return total;
+  console.log("small");
+  return 0;
+}
+async function main() {
+  const a = await work(5);
+  console.log(a);
+  const b = await work(2);
+  console.log(b);
+}
+// expect: closed a
+// expect: 10
+// expect: small
+// expect: closed a
+// expect: 0
+// case: await_using_throwing_disposer
+class Boom extends Error {}
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> throws Boom {
+    console.log("closing");
+    throw new Boom("close failed");
+  }
+}
+async function atEnd(): Promise<void> throws Boom {
+  await using c = new Conn();
+  console.log("working");
+}
+async function atReturn(): Promise<i64> throws Boom {
+  await using c = new Conn();
+  return 1;
+}
+async function main() {
+  try {
+    await atEnd();
+  } catch (e) {
+    console.log(`caught ${e.message}`);
+  }
+  try {
+    const n = await atReturn();
+    console.log(n);
+  } catch (e) {
+    console.log(`caught ${e.message}`);
+  }
+}
+// expect: working
+// expect: closing
+// expect: caught close failed
+// expect: closing
+// expect: caught close failed
+// case: await_using_disposer_error_replaces_the_first
+class Boom extends Error {}
+class CloseFailed extends Error {}
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> throws CloseFailed {
+    console.log("closing");
+    throw new CloseFailed("close failed");
+  }
+}
+async function work(): Promise<void> throws Boom | CloseFailed {
+  await using c = new Conn();
+  throw new Boom("work failed");
+}
+async function main() {
+  try {
+    await work();
+  } catch (e) {
+    console.log(`caught ${e.message}`);
+  }
+}
+// expect: closing
+// expect: caught close failed
+// case: await_using_disposer_error_undeclared
+class Boom extends Error {}
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> throws Boom { throw new Boom("close failed"); }
+}
+async function work(): Promise<void> {
+  await using c = new Conn();
+  console.log("working");
+}
+async function main() {
+  await work();
+}
+// error: error[E0602]: 'work' must declare 'throws Boom' after its return type
+// case: await_using_disposer_error_inferred
+class Boom extends Error {}
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> throws Boom {
+    console.log("closing");
+    throw new Boom("close failed");
+  }
+}
+async function main() {
+  const work = async () => {
+    await using c = new Conn();
+    console.log("working");
+  };
+  try {
+    await work();
+  } catch (e) {
+    console.log(`caught ${e.message}`);
+  }
+}
+// expect: working
+// expect: closing
+// expect: caught close failed
+// case: await_using_throw_past_two
+class Boom extends Error {}
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {
+    await sleep(1);
+    console.log(`closed ${this.name}`);
+  }
+}
+async function fail(): Promise<i64> throws Boom {
+  await sleep(1);
+  throw new Boom("failed");
+}
+async function work(): Promise<i64> throws Boom {
+  await using first = new Conn("first");
+  await using second = new Conn("second");
+  const n = await fail();
+  return n;
+}
+async function main() {
+  try {
+    const n = await work();
+    console.log(n);
+  } catch (e) {
+    console.log(`caught ${e.message}`);
+  }
+}
+// expect: closed second
+// expect: closed first
+// expect: caught failed
+// case: await_using_throw_in_a_loop
+class Boom extends Error {}
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+function check(i: i64): void throws Boom {
+  if (i === 2) throw new Boom(`bad ${i}`);
+}
+async function main() {
+  for (let i = 0; i < 4; i++) {
+    try {
+      await using c = new Conn(`${i}`);
+      check(i);
+      console.log(`ok ${i}`);
+    } catch (e) {
+      console.log(`caught ${e.message}`);
+    }
+  }
+}
+// expect: ok 0
+// expect: closed 0
+// expect: ok 1
+// expect: closed 1
+// expect: closed 2
+// expect: caught bad 2
+// expect: ok 3
+// expect: closed 3
+// case: await_using_inner_try_catch
+class Boom extends Error {}
+class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  async [Symbol.asyncDispose](): Promise<void> { console.log(`closed ${this.name}`); }
+}
+function risky(n: i64): i64 throws Boom {
+  if (n > 1) throw new Boom("too big");
+  return n;
+}
+async function work(n: i64): Promise<i64> {
+  await using c = new Conn("a");
+  try {
+    return risky(n);
+  } catch (e) {
+    console.log(`handled ${e.message}`);
+  }
+  console.log("still open");
+  return -1;
+}
+async function main() {
+  const a = await work(1);
+  console.log(a);
+  const b = await work(5);
+  console.log(b);
+}
+// expect: closed a
+// expect: 1
+// expect: handled too big
+// expect: still open
+// expect: closed a
+// expect: -1

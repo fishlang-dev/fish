@@ -199,6 +199,16 @@ type Awaited = { name: string; local: LocalId; targets: usize; start: usize; end
 // no source can write.
 const startedName = (name: string): string => `disposal of ${name}`;
 
+// The variable an error thrown through an `await using` binding's scope is caught in, under a
+// name no source can write.
+const thrownName = (name: string): string => `error past ${name}`;
+
+// Whether a statement is the one after an `await using` binding's scope, which awaits the
+// disposer unless a way out of the scope already has.
+function endsAwaited(s: Ref<Stmt>): boolean {
+  return s.kind === "if" && s.cond.kind === "unary" && s.cond.op === "!" && s.cond.operand.kind === "ident" && s.cond.operand.name.startsWith(startedName(""));
+}
+
 // Whether a statement awaits an `await using` binding's disposer, which only the checker writes.
 function awaitsDisposer(s: Ref<Stmt>): boolean {
   if (s.kind !== "expr" || s.expr.kind !== "unary" || s.expr.op !== "await") return false;
@@ -5057,9 +5067,10 @@ class BodyChecker implements Context, GuardHost {
   }
 
   // An `await using` declaration just checked, at `i` in its list, opens its binding's scope: the
-  // rest of the list, which goes in a block of its own. A variable before the block says whether
-  // the disposer has been started, and after the block the disposer is awaited unless a way out
-  // of it did that, as `disposedBefore` makes each do.
+  // rest of the list, which goes in a `try` of its own. A variable before it says whether the
+  // disposer has been started. An error thrown through the scope is caught, the disposer awaited,
+  // and the error thrown again; after the `try` the disposer is awaited unless a way out of the
+  // scope did that, as `disposedBefore` makes each do.
   /** @throws {CompileError} */
   private awaitedFrom(this: Mut<this>, list: Mut<Stmt[]>, i: usize): void {
     const s: Ref<Stmt> = list[i]!;
@@ -5075,18 +5086,25 @@ class BodyChecker implements Context, GuardHost {
     const flag: Pattern = { id: nextId(this.cx.tables.ids), kind: "ident", name: startedName(bound.name), start: at.start, end: at.end };
     const unset: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: false, start: at.start, end: at.end };
     const started = letOf(nextId(this.cx.tables.ids), "let", { id: nextId(this.cx.tables.ids), target: flag, type: undefined, init: unset, start: at.start, end: at.end }, at);
-    const pending: Expr = { id: nextId(this.cx.tables.ids), kind: "unary", op: "!", operand: this.partIdent(startedName(bound.name), at), start: at.start, end: at.end };
-    const last: Stmt = { id: nextId(this.cx.tables.ids), kind: "if", cond: pending, then: this.disposal(bound), else: undefined, start: at.start, end: at.end };
+    const caught: Pattern = { id: nextId(this.cx.tables.ids), kind: "ident", name: thrownName(bound.name), start: at.start, end: at.end };
+    const again: Stmt = { id: nextId(this.cx.tables.ids), kind: "throw", value: this.partIdent(thrownName(bound.name), at), start: at.start, end: at.end };
+    const handler: Stmt[] = [this.unlessStarted(bound), again];
     const rest = list.splice((i + 1) as i64);
     list.push(started);
-    list.push({ id: nextId(this.cx.tables.ids), kind: "block", body: rest, start: at.start, end: at.end });
-    list.push(last);
+    list.push({ id: nextId(this.cx.tables.ids), kind: "try", block: rest, param: caught, paramType: undefined, handler, finalizer: undefined, start: at.start, end: at.end });
+    list.push(this.unlessStarted(bound));
+  }
+
+  // Awaits an `await using` binding's disposer unless a way out of its scope already has.
+  private unlessStarted(this: Mut<this>, a: Ref<Awaited>): Stmt {
+    const at = { start: a.start, end: a.end };
+    const pending: Expr = { id: nextId(this.cx.tables.ids), kind: "unary", op: "!", operand: this.partIdent(startedName(a.name), at), start: at.start, end: at.end };
+    return { id: nextId(this.cx.tables.ids), kind: "if", cond: pending, then: this.disposal(a, at), else: undefined, start: at.start, end: at.end };
   }
 
   // What awaits an `await using` binding's disposer: the variable saying it has been started is
   // set first, so nothing awaits it a second time when it throws.
-  private disposal(this: Mut<this>, a: Ref<Awaited>): Stmt[] {
-    const at = { start: a.start, end: a.end };
+  private disposal(this: Mut<this>, a: Ref<Awaited>, at: Ref<Span>): Stmt[] {
     const yes: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: true, start: at.start, end: at.end };
     const set: Expr = { id: nextId(this.cx.tables.ids), kind: "assign", op: "=", target: this.partIdent(startedName(a.name), at), value: yes, start: at.start, end: at.end };
     const callee: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: this.partIdent(a.name, at), name: ASYNC_DISPOSE, optional: false, start: at.start, end: at.end };
@@ -5127,7 +5145,7 @@ class BodyChecker implements Context, GuardHost {
     } else exit = { id: nextId(this.cx.tables.ids), kind: "return", value: undefined, start: at.start, end: at.end };
     for (let k = this.state.awaited.length; k > from; k--) {
       const leaving: Awaited = { ...this.state.awaited[k - 1]! };
-      let awaits = this.disposal(leaving);
+      let awaits = this.disposal(leaving, at);
       while (awaits.length > 0) made.push(awaits.shift()!);
     }
     made.push(exit);
@@ -6266,6 +6284,16 @@ class BodyChecker implements Context, GuardHost {
         this.state.handlers.push([]);
         this.scoped(s.id, "block", s.block);
         let sites = this.state.handlers.pop()!;
+        const awaited = s.param !== undefined && s.param.kind === "ident" && s.param.name.startsWith(thrownName(""));
+        // The scope of an `await using` binding with nothing in it to throw needs no handler, and
+        // is the block it would have been.
+        if (sites.length === 0 && awaited) {
+          const bodyId = this.f().bodyId;
+          const edited = this.cx.tables.rewrites.listIn(bodyId, s.id, "block");
+          this.cx.tables.rewrites.replaceStmt(s, { id: 0, kind: "block", body: s.block.map((x) => cloneStmt(x)), start: s.start, end: s.end });
+          if (edited !== undefined) this.cx.tables.rewrites.replaceList(bodyId, s.id, "body", edited.slice());
+          return undefined;
+        }
         if (sites.length === 0) {
           const never = new CompileError("E0603", "nothing in this 'try' can throw, so its 'catch' never runs; remove the try/catch", s.start, s.start + 3);
           let callees: BodyId[] = [];
@@ -6273,10 +6301,16 @@ class BodyChecker implements Context, GuardHost {
           this.cx.tryCallees.push([never.clone(), callees]);
           throw never;
         }
-        const caught = this.cx.tables.typing.unionType(sites.map(([, t]) => t));
+        // Such a scope only passes an error on, so where the function itself is what takes it, each
+        // error is checked and converted where it is raised, as it would be with no scope there.
+        const passing = awaited && this.state.handlers.length === 0 && this.state.inferring === undefined && this.f().comptime === undefined && this.state.comptimeDepth === 0;
+        const caught = passing && this.state.errorType !== undefined ? this.state.errorType : this.cx.tables.typing.unionType(sites.map(([, t]) => t));
         while (sites.length > 0) {
           const [at, from] = sites.shift()!;
-          this.instance().raises.set(at, { from, to: caught });
+          const span = { start: at.start, end: at.end };
+          const throwing = at.kind === "throw";
+          if (passing) this.raiseAt(at, span, from, "this", throwing);
+          else this.instance().raises.set(at, { from, to: caught });
         }
         this.instance().caught.set(cloneStmt(s), caught);
         this.pushScope(new Map<string, LocalId>());
@@ -6487,7 +6521,12 @@ class BodyChecker implements Context, GuardHost {
 
   leaves(stmts: Ref<Stmt[]>): boolean {
     const last = stmts.at(-1);
-    return alwaysReturns(stmts, this.cx.broken, this.cx.continued) || last?.kind === "break" || last?.kind === "continue";
+    if (alwaysReturns(stmts, this.cx.broken, this.cx.continued) || last?.kind === "break" || last?.kind === "continue") return true;
+    // A list checked before ends with the scope an `await using` declaration opened, and what
+    // awaits its disposer after it: it leaves when the scope's own statements do.
+    if (stmts.length < 2 || last === undefined || !endsAwaited(last)) return false;
+    const scope: Ref<Stmt> = stmts[stmts.length - 2]!;
+    return scope.kind === "try" ? this.leaves(scope.block) : scope.kind === "block" && this.leaves(scope.body);
   }
 
   /** @throws {CompileError} */
