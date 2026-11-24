@@ -62,6 +62,20 @@ async function main() {
   const v = await p;
   console.log(v, n);
 }
+// case: async_arrow_return_type
+// expect: 42
+// expect: done 3
+async function main() {
+  const f = async (n: i64): Promise<i64> => n + 1;
+  const a = await f(41);
+  console.log(a);
+  const g = async (label: string): Promise<string> => {
+    await yieldNow();
+    return label + " 3";
+  };
+  const b = await g("done");
+  console.log(b);
+}
 // case: async_arrow_spawn_drops
 // expect: 1
 async function main() {
@@ -70,6 +84,13 @@ async function main() {
   const t = spawn(f());
   const got = await t;
   console.log(got);
+}
+// case: async_arrow_wrong_return_type
+// error: an async function's return type is 'Promise<T>', the type of what it gives once awaited
+async function main() {
+  const f = async (n: i64): i64 => n + 1;
+  const a = await f(41);
+  console.log(a);
 }
 // case: async_arrows
 // expect: 7 hello world

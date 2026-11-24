@@ -12,21 +12,22 @@ import type { AssignOp, BinaryOp, Expr, Func, Id, Interface, MatchArm, ObjectPro
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.fsh";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.fsh";
 import { infer } from "./generics.fsh";
-import { EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, integerInfo, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.fsh";
+import { ASYNC_DISPOSE, DISPOSE, EMBEDDED, ITERATOR, LIVE, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, integerInfo, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.fsh";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.fsh";
 import type { EnumInfo, EnumInstance } from "./enums.fsh";
 import { EXPRESSION_FORMS, IMPORT_META_MEMBERS, unsupported } from "./unsupported.fsh";
-import { isIteratorKey, keyParts, leafOf, unknownKey } from "./keys.fsh";
+import { isAsyncDisposeKey, isDisposeKey, isIteratorKey, keyParts, leafOf, unknownKey } from "./keys.fsh";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.fsh";
 import { BUFFER_ENCODINGS, BUFFER_READS, BUFFER_REFUSED, BUFFER_STATICS, JSON_VALUE_NAME, STD_BASE } from "./std.fsh";
 import { parseArgsArgs } from "./parseargs.fsh";
+import { parseExpression } from "./parser.fsh";
 import { holesOf, quoted, type Category } from "./quote.fsh";
 import { holdsNull } from "./defaults.fsh";
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.fsh";
 import type { Instance, Local } from "./check.fsh";
 import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./narrow.fsh";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, applyShape, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.fsh";
-import { forEachChild, nextId, NodeMap, NodeSet, reborrowNode, renumberExpr, respanExpr, someNode, walk, walkWhile, type AnyNode, type Ids, type Rewrites, type SiteTable } from "./nodes.fsh";
+import { forEachChild, nextId, NodeMap, NodeSet, reborrowNode, renumberExpr, respanExpr, Rewrites, someNode, walk, walkWhile, type AnyNode, type Ids, type SiteTable } from "./nodes.fsh";
 import { cloneExpr, cloneJsName, cloneObjectProp, cloneParam, clonePattern, cloneTypeMember, cloneTypeNode, idOfExpr, idOfObjectProp, rebuiltExpr, withIdExpr } from "./rebuild.fsh";
 import { typedNamed } from "./typing.fsh";
 
@@ -37,6 +38,13 @@ type Call = Extract<Expr, { kind: "call" }>;
 type Elements = Extract<Expr, { kind: "array" }>["elements"];
 
 const I64_MAX = (1n << 63n) - 1n;
+// The methods of std's Router that add a route for one path and one handler.
+const ROUTE_METHODS = ["get", "post", "put", "patch", "delete", "all"];
+// What a route's handler says beyond a plain one: how many parameters it takes, the type it reads
+// the request's body as, what it gives when that isn't a Response, each as the handler wrote it
+// when it is an arrow, whether its call is awaited, and whether it says it throws.
+type RouteHandler = { params: usize; body?: TypeNode; reads?: Type; answer?: TypeNode; gives?: Type; awaits: boolean; throws: boolean };
+const ROUTE_THROWS = "a route's handler that says its types can't throw yet; catch the error inside the handler and give back a 'Response' for it, as in 'return new Response(e.message, { status: 422 })'";
 // Stands in for an argument's mismatch message until an error needs the real one.
 const ARGUMENT_MISMATCH = "\u0000argument mismatch\u0000";
 
@@ -148,6 +156,7 @@ function blockArity(which: string, name: string, std: boolean): usize | undefine
   if (which === "Channel") return name === "send" || (name === "settle" && std) ? 1 : name === "receive" || name === "close" ? 0 : undefined;
   if (which === "AbortController") return name === "abort" ? 0 : undefined;
   if (which === "AbortSignal") return name === "throwIfAborted" ? 0 : undefined;
+  if (which === "TaskGroup") return name === "spawn" ? 1 : undefined;
   if (which === "TcpListener" || which === "UnixListener") return name === "accept" ? 0 : name === "listenTls" && std ? 2 : undefined;
   if (which === "TcpStream" || which === "UnixStream") return name === "read" || name === "write" ? 1 : name === "startTls" && std ? 2 : undefined;
   return undefined;
@@ -187,6 +196,8 @@ export class ContextState {
   sharing: boolean = false;
   // Whether that value is an Rc's, which only this thread reaches.
   counting: boolean = false;
+  // Whether the body is a `taskGroup` closure's, whose group takes children that throw.
+  grouping: boolean = false;
   // Whether the body is an async function's, and the awaits written where it can stop at them.
   async: boolean = false;
   awaitable: NodeSet<Expr> = new NodeSet<Expr>();
@@ -316,6 +327,9 @@ export interface Context {
   // Records an error a call raises, and what the instance called may throw.
   /** @throws {CompileError} */
   raise(this: Mut<this>, at: Ref<Expr>, type: Type, what: string): void;
+  // Records an error a task group's child gives the group, past any `try` around its spawn.
+  /** @throws {CompileError} */
+  raisePast(this: Mut<this>, at: Ref<Expr>, type: Type): void;
   // Checks comptime code, which may throw any error: one it doesn't catch is a compile error.
   enterComptime(this: Mut<this>): void;
   leaveComptime(this: Mut<this>): void;
@@ -1680,6 +1694,8 @@ export class Expressions<C extends Context> implements Union<C> {
   private callee(this: Mut<this>, given: Ref<Call>): { type: Type; what: string } {
     // `c[Symbol.iterator]()` calls the method that key names.
     const now = this.ctx.tables().rewrites.rewritten(given.callee);
+    if (now !== undefined) notByHand(now);
+    else notByHand(given.callee);
     const keyed = now !== undefined ? this.iteratorCallee(given, now) : this.iteratorCallee(given, given.callee);
     if (keyed !== undefined && keyed.kind === "call") return this.calleeKeyed(keyed);
     return this.calleeKeyed(given);
@@ -2067,6 +2083,9 @@ export class Expressions<C extends Context> implements Union<C> {
       }
       return this.spawnOf(e, spawning);
     }
+    if (callee.kind === "ident" && callee.name === "taskGroup" && !this.ctx.byName().has("taskGroup") && (this.ctx.lookup("taskGroup", undefined) === undefined)) return this.taskGroup(e);
+    // The group a `taskGroup` call hands its closure.
+    if (callee.kind === "ident" && callee.name === "task group") return { type: this.ctx.tables().typing.blockType("TaskGroup"), what: "'taskGroup'" };
     // `sleep(ms)`: a future done once that many milliseconds have passed, holding no thread.
     if (callee.kind === "ident" && callee.name === "sleep" && (!this.ctx.byName().has("sleep") || inStd)) {
       if (e.args.length !== 1 && e.args.length !== 2) throw new CompileError("E0504", "'sleep' takes how many milliseconds to wait, like 'sleep(250)', and may take an AbortSignal", e.start, e.end);
@@ -2205,7 +2224,24 @@ export class Expressions<C extends Context> implements Union<C> {
     if (foundId === undefined && callee.kind === "ident") {
       const named = this.bodyNamed(callee.name);
       if (named !== undefined) foundId = named.bodyId;
-    } else if (foundId === undefined && callee.kind === "member") foundId = this.method(callee, receiver).bodyId;
+    } else if (foundId === undefined && callee.kind === "member") {
+      foundId = this.method(callee, receiver).bodyId;
+      const routed = this.routeArgs(e, foundId);
+      if (routed !== undefined) {
+        const at: Span = { start: routed[routed.length - 1]!.start, end: routed[routed.length - 1]!.end };
+        const tb = this.ctx.tables();
+        const made = tb.rewrites.replace(e, withArgs(e, routed));
+        if (made.kind === "call") {
+          try {
+            return this.calleeFound(made, foundId);
+          } catch (err) {
+            // The arrow written around the handler spans it, and throws only what the handler does.
+            if (err instanceof CompileError && err.code === "E0602" && err.start === at.start && err.end === at.end) throw new CompileError("E0511", ROUTE_THROWS, at.start, at.end);
+            throw err;
+          }
+        }
+      }
+    }
     return this.calleeFound(e, foundId);
   }
 
@@ -3640,7 +3676,9 @@ export class Expressions<C extends Context> implements Union<C> {
     const shaped = (k: string | undefined) => k === "object" || k === "class";
     // A type parameter, an object-typed parameter's included, reads its fields as a member does.
     if (!shaped(r?.kind) && r?.kind !== "param" && !(r?.kind === "union" && r.members.every((m) => shaped(this.kindOf(m))))) return false;
+    notByHand(e);
     const name = this.knownKey(e.index);
+    if (name === DISPOSE || name === ASYNC_DISPOSE) throw disposedByHand(e, name === ASYNC_DISPOSE);
     if (name.startsWith("#")) throw new CompileError("E0502", `'${name}' names no field: a private field is read as '${this.placeText(e.object)}.${name}'`, e.index.start, e.index.end);
     if (e.optional) throw unsupported("optional index expressions", e);
     const parts = { ...e };
@@ -3929,6 +3967,8 @@ export class Expressions<C extends Context> implements Union<C> {
     if (this.ctx.typing().holdsRef(t)) throw new CompileError("E0509", `'JSON.parse' makes owned values, so '${this.ctx.typing().show(t)}' can't hold references`, written.start, written.end);
     if (this.ctx.tables().typing.holdsPattern(t)) throw unsupported("template literal pattern types in 'JSON.parse'", written);
     if (this.ctx.typing().holdsPart(t, (u) => typeof u !== "string" && this.ctx.typing().kindOf(u) === "fixed")) throw unsupported("fixed-size arrays in 'JSON.parse'", written);
+    // Reading builds an instance without its constructor, so nothing would say it is one to dispose.
+    if (this.ctx.typing().holdsPart(t, (u) => this.ctx.typing().disposable(u))) throw new CompileError("E0509", "a class with a '[Symbol.dispose]' method can't be read from JSON, which would make one without running its constructor; read its fields and make it with 'new'", written.start, written.end);
     const hidden = this.ctx.typing().holdsPart(t, (u) => typeof u !== "string" && this.ctx.typing().kindOf(u) === "class" && this.ctx.typing().rec(u).fields.some((f) => f.name.startsWith("#")));
     if (hidden) throw new CompileError("E0509", "a class with '#private' fields can't be read from JSON, since JSON doesn't hold them", written.start, written.end);
     const s = this.read(e.args[0]!);
@@ -5150,13 +5190,14 @@ export class Expressions<C extends Context> implements Union<C> {
     const which = this.ctx.typing().rec(t).which;
     if (which === "JsValue") return this.jsMethodCall(e, callee, t);
     if (which === "UdpSocket") return this.udpCall(e, callee);
+    if (which === "TaskGroup" && callee.name === "spawn") return this.groupSpawn(e, callee);
     // A wait may also take an AbortSignal, as its last argument.
     const sockets = callee.name === "accept" || callee.name === "read" || callee.name === "write";
     const waits = callee.name === "acquire" || callee.name === "send" || callee.name === "receive" || sockets;
     const count = blockArity(which, callee.name, e.start >= STD_BASE);
     if (count === undefined) {
       const has = which === "Semaphore" ? "it has 'acquire' and 'available'" : which === "Channel" ? "it has 'send', 'receive', 'close' and 'clone'"
-        : which === "AbortController" ? "it has 'abort' and 'signal'" : which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'"
+        : which === "AbortController" ? "it has 'abort' and 'signal'" : which === "AbortSignal" ? "it has 'throwIfAborted' and 'aborted'" : which === "TaskGroup" ? "it has 'spawn' and 'signal'"
         : which === "TcpListener" ? "it has 'accept' and 'port'" : which === "UnixListener" ? "it has 'accept', and dropping it stops listening but leaves its socket file" : which === "TcpStream" || which === "UnixStream" ? "it has 'read', 'write' and 'clone', and dropping it closes it" : "dropping it gives its slot back";
       throw new CompileError("E0502", `'${this.ctx.typing().show(t)}' has no method '${callee.name}'; ${has}`, callee.start, callee.end);
     }
@@ -5326,6 +5367,64 @@ export class Expressions<C extends Context> implements Union<C> {
       throw new CompileError("E0303", `'${spawning}' runs this ${spawning === "spawn" ? "Promise" : "function"} on another thread, so it must own everything it uses; it holds a '${this.ctx.typing().show(blocker)}', which ${typeof blocker !== "string" && this.ctx.typing().kindOf(blocker) === "pointer" ? "is a raw pointer no thread can vouch for; pass an owned value, or a clone" : typeof blocker !== "string" && this.ctx.typing().kindOf(blocker) === "interior" ? "changes without a lock, so only one thread may use it; use an 'Atomic' or a 'Lock' instead" : typeof blocker !== "string" && this.ctx.typing().kindOf(blocker) === "shared" ? COUNTED_UNLOCKED : "borrows from this function; pass an owned value, or a clone"}`, e.args[0]!.start, e.args[0]!.end);
     }
     return { type: this.ctx.tables().typing.handleType(r.gives, r.throws), what: "'spawn'" };
+  }
+
+  // `taskGroup(async (group) => ...)`: the closure's call with a new group, whose future is done
+  // once the closure and every task spawned into the group are. It is awaited where it is made,
+  // as a combined future is.
+  /** @throws {CompileError} */
+  private taskGroup(this: Mut<this>, e: Ref<Call>): { type: Type; what: string } {
+    const example = "as in 'await taskGroup(async (group) => { group.spawn(work()); })'";
+    if (!this.ctx.st.async) throw new CompileError("E0301", "'taskGroup' can only be used inside an 'async' function, where the runtime is running", e.callee.start, e.callee.end);
+    if (!this.ctx.view().awaitedNow.has(e)) throw new CompileError("E0305", `'taskGroup' is awaited where it is called, ${example}`, e.start, e.end);
+    if (e.args.length !== 1) throw new CompileError("E0305", `'taskGroup' takes one async arrow function, ${example}`, e.start, e.end);
+    const given: Ref<Expr> = e.args[0]!;
+    if (given.kind !== "arrow" || !given.async || given.params.length !== 1) throw new CompileError("E0305", `'taskGroup' takes an async arrow function written in place, which takes the group, ${example}`, given.start, given.end);
+    const group = this.ctx.tables().typing.blockType("TaskGroup");
+    const signature = this.ctx.tables().typing.functionType(["group"], [group], "void");
+    this.ctx.tables().typing.groupCallbacks.add(signature);
+    this.ctx.tables().typing.openThrows.add(signature);
+    const made: Expr = { id: nextId(this.ctx.tables().ids), kind: "ident", name: "task group", start: given.start, end: given.start };
+    const fresh: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: made, typeArgs: [], args: [], optional: false, start: given.start, end: given.start };
+    const run: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: cloneExpr(given), typeArgs: [], args: [fresh], optional: false, start: given.start, end: given.end };
+    this.expect(given, signature);
+    const later = this.ctx.tables();
+    const replaced = later.rewrites.replace(e, { ...e, args: [run] });
+    const t = replaced.kind === "call" ? this.value(replaced.args[0]!) : "void";
+    const r = this.recOf(t);
+    if (r?.kind !== "future") throw new CompileError("E0305", `'taskGroup' takes an async arrow function written in place, which takes the group, ${example}`, given.start, given.end);
+    this.ctx.tables().groupCalls.add(cloneExpr(replaced));
+    return { type: this.ctx.tables().typing.groupFuture(t as FutureType, { start: e.start, end: e.end }), what: "'taskGroup'" };
+  }
+
+  // `group.spawn(p)`: the Promise runs as a task the group waits for. What it throws surfaces
+  // where the group is awaited, so it joins what the group's closure throws; only that closure's
+  // own body, spawning into its own group, can say so.
+  /** @throws {CompileError} */
+  private groupSpawn(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>): { type: Type; what: string } {
+    if (this.linked(callee)) throw unsupported("optional chains calling 'TaskGroup' methods", callee);
+    if (e.args.length !== 1) throw new CompileError("E0305", "'spawn' takes the Promise to run, like 'group.spawn(save(user))'", e.start, e.end);
+    const given: Ref<Expr> = e.args[0]!;
+    if (given.kind === "arrow" && given.async && given.params.length === 0) {
+      const run: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: cloneExpr(given), typeArgs: [], args: [], optional: false, start: given.start, end: given.end };
+      const then = this.ctx.tables();
+      const made = then.rewrites.replace(e, { ...e, args: [run] });
+      if (made.kind === "call") return this.groupSpawned(made, callee);
+    }
+    return this.groupSpawned(e, callee);
+  }
+
+  /** @throws {CompileError} */
+  private groupSpawned(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>): { type: Type; what: string } {
+    const handle = this.spawnOf(e, "spawn").type as HandleType;
+    const throws = this.ctx.typing().rec(handle).throws;
+    if (throws !== undefined) {
+      const local = callee.object.kind === "ident" ? this.ctx.held().locals.getById(callee.object.id) : undefined;
+      const own = this.ctx.st.grouping && local !== undefined && this.ctx.view().arenas.localOf(local).param;
+      if (!own) throw new CompileError("E0306", `this task can throw '${this.ctx.typing().show(throws)}', which only the group's own closure can pass to its 'await taskGroup'; spawn it in that closure's body, or catch the error inside the task with try/catch`, e.args[0]!.start, e.args[0]!.end);
+      this.ctx.raisePast(e, throws);
+    }
+    return { type: "void", what: "'spawn'" };
   }
 
   /** @throws {CompileError} */
@@ -5646,6 +5745,130 @@ export class Expressions<C extends Context> implements Union<C> {
     const made = this.ctx.tables().rewrites.replace(e, cloneExpr(call));
     if (made.kind === "call") return made;
     return call;
+  }
+
+  // The arguments of a route added to std's Router whose handler says its body's type or what it
+  // answers with: the handler becomes a plain one, `handler |> (async (req) => ...)`, whose arrow
+  // reads the body as JSON, answers 400 with why when it isn't that, calls the handler and answers
+  // with what it gives as JSON. As the pipe's value the handler keeps what it captures, so the
+  // arrow captures nothing of its own. Its helpers are std's, under names no program can write.
+  /** @throws {CompileError} */
+  private routeArgs(this: Mut<this>, e: Ref<Call>, found: BodyId): Expr[] | undefined {
+    const callee: Ref<Expr> = e.callee;
+    if (callee.kind !== "member" || e.start >= STD_BASE) return undefined;
+    const added = ROUTE_METHODS.includes(callee.name) && e.args.length === 2;
+    const mounted = callee.name === "route" && e.args.length === 2;
+    if (!added && !mounted && (callee.name !== "route" || e.args.length !== 3)) return undefined;
+    const method = this.ctx.view().arenas.bodyOf(found);
+    const owner = method.start >= STD_BASE ? method.owner : undefined;
+    if (owner === undefined || this.ctx.typing().rec(owner).name !== "Router") return undefined;
+    // Each call is recorded once, as written: checked again, its handler is the one made here.
+    const record = !this.ctx.view().routes.has(e);
+    const router = callee.object.kind === "ident" ? this.ctx.lookup(callee.object.name, undefined) : undefined;
+    const first: Ref<Expr> = e.args[0]!;
+    const handler: Ref<Expr> = e.args[e.args.length - 1]!;
+    if (mounted) {
+      const child = handler.kind === "ident" ? this.ctx.lookup(handler.name, undefined) : undefined;
+      if (record) this.ctx.tables().routes.set(cloneExpr(e), { mount: true, path: first.kind === "string" ? first.value : undefined, router, child });
+      return undefined;
+    }
+    const typed = this.typedHandler(handler);
+    const verb = added ? callee.name : first.kind === "string" ? first.value.toLowerCase() : undefined;
+    const where: Ref<Expr> = e.args[e.args.length - 2]!;
+    if (record) this.ctx.tables().routes.set(cloneExpr(e), { mount: false, method: verb === undefined ? undefined : verb.toUpperCase(), path: where.kind === "string" ? where.value : undefined, router, body: typed?.reads, response: typed?.gives });
+    if (typed === undefined) return undefined;
+    const at: Span = { start: handler.start, end: handler.end };
+    if (typed.params > 2) throw new CompileError("E0511", `a route's handler takes the request and, to have its body read as JSON, a second parameter of the body's type, not ${typed.params} parameters`, at.start, at.end);
+    if (typed.reads !== undefined && verb === "get") throw new CompileError("E0511", "a GET request carries no body, so its handler can't take one as a second parameter; take the request alone, or add the route with 'post', 'put' or 'patch'", at.start, at.end);
+    if (typed.throws) throw new CompileError("E0511", ROUTE_THROWS, at.start, at.end);
+    if (typed.reads !== undefined) this.jsonable(typed.reads, at, "read from");
+    if (typed.gives !== undefined && typed.gives !== "void") this.jsonable(typed.gives, at, "written as");
+    const request = this.ctx.view().arenas.classOf(this.ctx.classes().get("Request")!).type;
+    // As a pipe's value the handler meets no function type to take its request's type from.
+    if (handler.kind === "arrow" && handler.params.length > 0 && handler.params[0]!.type === undefined) this.ctx.tables().presetParams.set(cloneParam(handler.params[0]!), request);
+    const count = typed.params;
+    const run = `${typed.awaits ? "await " : ""}%(${count === 0 ? "" : count === 1 ? "req" : "req, body"})`;
+    const read = typed.reads === undefined ? "" : "let body: fsh_body; try { body = await req.json<fsh_body>(); } catch (e) { return fsh_refused(e.message); } ";
+    const answer = typed.gives === undefined ? `return ${run};` : typed.gives === "void" ? `${run}; return fsh_empty();` : `const out: fsh_out = ${run}; return fsh_json(out);`;
+    const text = `fsh_handler |> (async (${count === 0 ? "_req" : "req"}) => { ${read}${answer} })`;
+    const tb = this.ctx.tables();
+    const parsed = respanExpr(parseExpression(text, tb.ids), at);
+    let slots: TypeNode[] = [];
+    let names: Expr[] = [];
+    walk({ of: "expr", node: parsed }, (n) => {
+      if (n.of === "typeNode" && n.node.kind === "ref" && n.node.name.startsWith("fsh_")) slots.push(cloneTypeNode(n.node));
+      else if (n.of === "expr" && n.node.kind === "ident" && n.node.name.startsWith("fsh_")) names.push(cloneExpr(n.node));
+    });
+    // An arrow's types are read as it wrote them; a named function's are its declaration's. What
+    // the handler gives is held as that type, so a field written `name?: T` is left out while empty.
+    let rewrites = new Rewrites();
+    for (const slot of slots) {
+      if (slot.kind !== "ref") continue;
+      if (slot.name === "fsh_body") {
+        if (typed.body !== undefined) rewrites.replaceTypeNode(slot, cloneTypeNode(typed.body!));
+        else this.ctx.tables().presetTypes.set(cloneTypeNode(slot), typed.reads!);
+      } else if (typed.answer !== undefined) rewrites.replaceTypeNode(slot, cloneTypeNode(typed.answer!));
+      else this.ctx.tables().presetTypes.set(cloneTypeNode(slot), typed.gives!);
+    }
+    for (const name of names) {
+      if (name.kind !== "ident") continue;
+      if (name.name === "fsh_handler") rewrites.replace(name, cloneExpr(handler));
+      else rewrites.replace(name, { ...name, name: `router ${name.name.slice(4)}` });
+    }
+    const wrapped = rebuiltExpr(parsed, rewrites);
+    if (wrapped.kind === "pipe" && wrapped.body.kind === "arrow") {
+      this.ctx.tables().presetParams.set(cloneParam(wrapped.body.params[0]!), request);
+      this.ctx.tables().madeArrows.add(cloneExpr(wrapped.body));
+    }
+    let args: Expr[] = [];
+    for (let i: usize = 0; i + 1 < e.args.length; i++) args.push(cloneExpr(e.args[i]!));
+    args.push(wrapped);
+    return args;
+  }
+
+  // What a route's handler says beyond a plain one, if anything, for an arrow written in place
+  // or a function named there.
+  /** @throws {CompileError} */
+  private typedHandler(this: Mut<this>, handler: Ref<Expr>): RouteHandler | undefined {
+    if (handler.kind === "arrow") {
+      if (handler.typeParams.length > 0) return undefined;
+      const returns = handler.returnType === undefined ? undefined : cloneTypeNode(handler.returnType);
+      return this.handlerTypes(handler.params, returns, handler.async, handler.throws !== undefined, undefined);
+    }
+    if (handler.kind !== "ident" || this.ctx.lookup(handler.name, undefined) !== undefined) return undefined;
+    const id = this.ctx.byName().get(handler.name);
+    if (id === undefined || genericIn(this.ctx.view().arenas.bodyOf(id))) return undefined;
+    const f = cloneSignature(this.ctx.view().arenas.bodyOf(id));
+    if (f.foreign === true || f.js !== undefined) return undefined;
+    const returns = f.returnType === undefined ? undefined : cloneTypeNode(f.returnType);
+    return this.handlerTypes(f.params, returns, f.async === true, f.throws !== undefined, id);
+  }
+
+  // A second parameter is the body's type, and a written return type that isn't a Response is
+  // what the handler answers with. A function `named` is typed where it is declared.
+  /** @throws {CompileError} */
+  private handlerTypes(this: Mut<this>, params: Ref<Param[]>, returns: TypeNode | undefined, async: boolean, throws: boolean, named: BodyId | undefined): RouteHandler | undefined {
+    let awaits = async;
+    let given: TypeNode | undefined = undefined;
+    if (returns !== undefined && returns.kind === "ref" && returns.name === "Promise" && returns.args.length === 1) {
+      given = cloneTypeNode(returns.args[0]!);
+      awaits = true;
+    } else if (returns !== undefined && !async) given = cloneTypeNode(returns);
+    const gives = given === undefined ? undefined : this.ctx.resolveType(cloneTypeNode(given!));
+    const response = this.ctx.view().arenas.classOf(this.ctx.classes().get("Response")!).type;
+    const answers = gives !== response ? gives : undefined;
+    const answer = named === undefined && answers !== undefined ? given : undefined;
+    let body: TypeNode | undefined = undefined;
+    let reads: Type | undefined = undefined;
+    if (params.length > 1 && named !== undefined) {
+      const declared = this.ctx.instanceOf(named, undefined);
+      reads = this.ctx.paramTypes(declared)[1]!;
+    } else if (params.length > 1 && params[1]!.type !== undefined) {
+      body = cloneTypeNode(params[1]!.type!);
+      reads = this.ctx.resolveType(cloneTypeNode(params[1]!.type!));
+    }
+    if (reads === undefined && answers === undefined) return undefined;
+    return { params: params.length, body, reads, answer, gives: answers, awaits, throws };
   }
 
   // `Promise.resolve(v)` and `Promise.reject(e)`, rewritten as the prelude's async functions
@@ -6377,6 +6600,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (this.ctx.typing().rec(t).which === "JsValue") return this.jsProperty(e, t);
     if (this.ctx.typing().rec(t).which === "AbortController" && e.name === "signal") return this.ctx.tables().typing.blockType("AbortSignal");
     if (this.ctx.typing().rec(t).which === "AbortSignal" && e.name === "aborted") return "boolean";
+    if (this.ctx.typing().rec(t).which === "TaskGroup" && e.name === "signal") return this.ctx.tables().typing.blockType("AbortSignal");
     if ((this.ctx.typing().rec(t).which === "TcpListener" || this.ctx.typing().rec(t).which === "UdpSocket") && e.name === "port") return "i64";
     throw new CompileError("E0502", `property '${shownName(e.name)}' does not exist on type '${this.ctx.typing().show(t)}'`, e.start, e.end);
   }
@@ -6544,6 +6768,9 @@ export class Expressions<C extends Context> implements Union<C> {
     for (const u of parts) if (rust === undefined) rust = rustClassOf(this.ctx.typing(), u);
     if (rust !== undefined) {
       throw new CompileError("E1004", `'${e.name}' holds a Rust '${rust.name}', which a shared value gives only inside 'update', as in 's.update((v) => v.${e.name}...)'`, e.start, e.end);
+    }
+    if (this.ctx.typing().holdsPart(found.type, (u) => this.ctx.typing().disposable(u))) {
+      throw new CompileError("E0214", `'${e.name}' holds a value with a '[Symbol.dispose]' method, which reading it out of a shared value would copy; use it inside 'update', as in 's.update((v) => v.${e.name}...)'`, e.start, e.end);
     }
     if (!this.ctx.typing().interiorMutable(found.type)) this.ctx.copiesOut().add(cloneExpr(e));
     return found.type;
@@ -7062,6 +7289,14 @@ export class Expressions<C extends Context> implements Union<C> {
       const name = rustClassOf(this.ctx.tables().typing, rust)!.name;
       if (this.cls(rust).methods.has("clone")) throw cloneRefused(`can't clone a value holding a Rust '${name}' as a whole; clone each '${name}' with its 'clone()'`, at, by);
       throw cloneRefused(`can't clone a Rust '${name}'${rustClassOf(this.ctx.tables().typing, behind) !== undefined ? "" : ", or a value holding one,"} unless its class declares 'clone(): ${name}', which calls its Clone`, at, by);
+    }
+    // An instance with a disposer is copied only as its class says, or two would be disposed.
+    let disposed: ClassType | undefined = undefined;
+    for (const u of reached) if (disposed === undefined && this.ctx.typing().disposable(u) && this.isClassType(u)) disposed = u;
+    if (disposed !== undefined) {
+      const name = this.ctx.typing().rec(disposed).name;
+      if (this.cls(disposed).methods.has("clone")) throw cloneRefused(`can't clone a value holding a '${name}' as a whole, since a '${name}' has a '[Symbol.dispose]' method and is copied only by its own 'clone()'; clone each '${name}' with its 'clone()'`, at, by);
+      throw cloneRefused(`can't clone a '${name}'${behind === disposed ? "" : ", or a value holding one"}: it has a '[Symbol.dispose]' method, which would then run for the copy too; declare 'clone(): ${name}' on the class to say what a copy is`, at, by);
     }
     // An array method's copy of a Dyn may panic, which unwinds as a Dyn's own copy does; only
     // `clone()` written on a value holding one asks for its Dyns to be cloned one by one.
@@ -7752,8 +7987,9 @@ export class Expressions<C extends Context> implements Union<C> {
   // a protected one also from the classes that embed it.
   /** @throws {CompileError} */
   private visible(this: Mut<this>, access: Access | undefined, declaring: ClassType, name: string, at: Ref<Span>): void {
-    // Only delegation reads the embedded collection, from wherever the class is used.
-    if (name === EMBEDDED || this.accessible(access, declaring, name)) return;
+    // Only delegation reads the embedded collection, from wherever the class is used, and only an
+    // 'await using' declaration's scope writes the liveness marker.
+    if (name === EMBEDDED || name === LIVE || this.accessible(access, declaring, name)) return;
     const message = name.startsWith("#")
       ? `property '${shownName(name)}' is not accessible outside class '${this.ctx.typing().rec(declaring).name}' because it has a private identifier`
       : `property '${name}' is ${access!} and only accessible within class '${this.ctx.typing().rec(declaring).name}'${access === "protected" ? " and its subclasses" : ""}`;
@@ -10442,6 +10678,10 @@ export class Expressions<C extends Context> implements Union<C> {
       return rust !== undefined;
     });
     if (holdsRust) throw new CompileError("E1004", `a Rust '${rust!.name}' can't become a '${this.ctx.typing().show(to)}' yet; call its methods on it, or take it as a generic parameter`, e.start, e.end);
+    // A Dyn's copy is the compiler's, which an instance with a disposer never gets.
+    if (this.ctx.typing().holdsPart(held, (u) => this.ctx.typing().disposable(u))) {
+      throw unsupported(this.ctx.typing().callableOf.has(this.ctx.typing().rec(to).of) ? "closures holding a value with a '[Symbol.dispose]' method, when stored or passed on as function values," : "values with a '[Symbol.dispose]' method held in a Dyn", e);
+    }
     const reason = this.ctx.typing().callableOf.has(this.ctx.typing().rec(to).of) ? undefined : unsatisfied(type, this.ctx.typing().rec(to).of, this.ctx.members(), { start: e.start, end: e.end });
     if (reason !== undefined) throw new CompileError("E0101", `${message}: ${reason}`, e.start, e.end);
     const blocker = this.unsent(held);
@@ -10902,6 +11142,10 @@ export class Expressions<C extends Context> implements Union<C> {
   // reference. A closure changing what it captures changes the variable where it was made.
   /** @throws {CompileError} */
   changesLocal(this: Mut<this>, id: LocalId, path: string, action: string, target: Ref<Expr>, throughMut: boolean): void {
+    // A `using` binding changes through its fields and methods, and never holds another value.
+    if (path === "" && action === "assign to" && this.lc(id).using === true) {
+      throw new CompileError("E0215", `cannot assign to '${this.lc(id).name}': it is declared with 'using', which keeps its value until its scope ends; declare another 'using' for another value`, target.start, target.end);
+    }
     this.ctx.changesPath(id, path, action, target);
     if (this.ctx.captured(id)) {
       this.ctx.changesCapture(id, path, action, target, throughMut);
@@ -10920,6 +11164,8 @@ export class Expressions<C extends Context> implements Union<C> {
     if (local.param && local.mutable) this.ctx.st.changedParams.add(id);
     if (local.param && !local.mutable) {
       if (lr?.kind === "ref") throw new CompileError("E0206", `cannot point the reference parameter '${local.name}' elsewhere; it borrows what the caller passed, so declare a 'let' for another reference`, target.start, target.end);
+      // A group closure's group, which its tasks' errors go to.
+      if (lr?.kind === "block" && lr.which === "TaskGroup") throw new CompileError("E0207", `cannot ${action} '${local.name}': a task group's closure keeps the group it was called with; declare a 'let' for another group`, target.start, target.end);
       const what = action === "assign to" ? "assigning to" : action === "mutably borrow" ? "mutably borrowing" : "calling a mutating method on";
       throw new CompileError("E0801", `${what} a parameter holding a reference is not supported yet; copy it into a 'let'`, target.start, target.end);
     }
@@ -11480,6 +11726,18 @@ function rawProp(prop: Ref<ObjectProp>): string[] | undefined {
     strings.push(p.value);
   }
   return strings;
+}
+
+// A disposer is the drop's to run, once: a call written out would be a second run. An async
+// one, `awaited`, is the 'await using' declaration's to await.
+function disposedByHand(at: Ref<Expr>, awaited: boolean): CompileError {
+  if (awaited) return new CompileError("E0710", "a '[Symbol.asyncDispose]' method is awaited where an 'await using' declaration's scope ends, so it can't be called by hand, which would dispose the value twice; declare the value with 'await using'", at.start, at.end);
+  return new CompileError("E0710", "a '[Symbol.dispose]' method runs when its value is dropped, so it can't be called by hand, which would dispose the value twice; let the value go out of scope, or move it to where it should end", at.start, at.end);
+}
+
+/** @throws {CompileError} */
+function notByHand(e: Ref<Expr>): void {
+  if (e.kind === "index" && (isDisposeKey(e.index) || isAsyncDisposeKey(e.index))) throw disposedByHand(e, isAsyncDisposeKey(e.index));
 }
 
 // A path as a message shows it, the collection a class extending Map or Set embeds left unsaid.

@@ -13,3 +13,10 @@ const s = "match (x) { comptime }";
 
 interface Point { x: number; y: number }
 // <--------- storage.type.interface.ts
+
+function read(path: string): void {
+  using file = open(path);
+//^^^^^ storage.type.ts
+  using(file);
+//^^^^^ - storage.type.ts
+}

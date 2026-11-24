@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.fsh";
 import type { Value } from "./comptime.fsh";
-import { copyNames, type CompileError, type Names } from "./diag.fsh";
+import { copyNames, type BorrowEvent, type CompileError, type Names } from "./diag.fsh";
 import type { Kind, Verdict } from "./narrow.fsh";
 import { Rewrites, NodeMap, NodeSet, type Id, type Ids } from "./nodes.fsh";
 import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Interface, JsName, ObjectProp, Param, Span, Stmt, TypeAlias, TypeNode, TypeParam } from "./parser.fsh";
@@ -56,6 +56,8 @@ export type Counts = { enums: usize; expansions: usize; constants: usize; checks
 // `failed`: when present, codegen goes on past a function it fails on, declaring it in place of
 // its code and adding `symbol: message` here, so one build lists every failure.
 // `checkCache`: false where a run must check rather than read a check from the cache directory.
+// `borrows`: when present, the move checker adds each move and loan it makes here, for a run
+// that shows them; no check reads it.
 
 export type Session = {
   locking: Locking;
@@ -64,6 +66,7 @@ export type Session = {
   timings?: Timings;
   failed?: string[];
   checkCache?: boolean;
+  borrows?: BorrowEvent[];
 };
 
 export function newSession(): Session {
@@ -108,6 +111,13 @@ export function macroCompilation(c: Ref<Compilation>): Compilation {
     looked: [...c.looked],
   };
 }
+
+// A call on one of std's routers that adds a route or, when `mount`, mounts the router `child`
+// under `path`. `method` is in upper case, `ALL` for every method; `router` and `child` are the
+// locals holding the routers; `body` and `response` are what a handler that says its types reads
+// the request's body as and answers with. What a call doesn't write as a string, or holds in
+// something other than a local, is left out.
+export type Route = { mount: boolean; method?: string; path?: string; router?: LocalId; child?: LocalId; body?: Type; response?: Type };
 
 // The tables one check of a program fills in, by node and by type, for the rest of that check
 // and for the passes after it: moves, comptime and codegen. `check` makes a fresh set, and every
@@ -222,6 +232,8 @@ export type Tables = {
   timerNames: NodeMap<Expr, string>;
   // `Promise.all`, `race`, `allSettled` and `any` calls, each its own combined future.
   combinedCalls: NodeSet<Expr>;
+  // `taskGroup` calls, each a group's future over its closure's call.
+  groupCalls: NodeSet<Expr>;
   // The operands of an `await`, while they are checked.
   awaitedNow: NodeSet<Expr>;
   // node:util's `inspect` calls.
@@ -232,6 +244,9 @@ export type Tables = {
   blockingRuns: NodeSet<Expr>;
   // The `parseArgs` calls whose config has been turned into the arguments std's port takes.
   parsedArgs: NodeSet<Expr>;
+  // The calls that add a route to one of std's routers or mount one router in another, which
+  // nothing in codegen reads.
+  routes: NodeMap<Expr, Route>;
   // The values printed as Node's util.inspect prints them, whose types as written say how their
   // fields were spelled.
   printed: NodeSet<Expr>;
@@ -259,6 +274,8 @@ export type Tables = {
   tagCalls: NodeSet<Expr>;
   // The `equals` each class's `===` calls.
   equalities: TypeMap<ClassType, InstanceId>;
+  // Each class's own disposer, its `[Symbol.dispose]` method, which a drop of an instance runs.
+  disposers: TypeMap<ClassType, InstanceId>;
   // Each quote, by the Ast types it was checked with, for comptime to build its value from.
   quotes: NodeMap<Expr, Categories>;
   // The array literals that became tuples, as objects of fields `0`, `1` and on, which a generic
@@ -432,11 +449,13 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     timerWrappers: new NodeSet<Expr>(),
     timerNames: new NodeMap<Expr, string>(),
     combinedCalls: new NodeSet<Expr>(),
+    groupCalls: new NodeSet<Expr>(),
     awaitedNow: new NodeSet<Expr>(),
     inspectCalls: new NodeSet<Expr>(),
     deepEqualities: new NodeSet<Expr>(),
     blockingRuns: new NodeSet<Expr>(),
     parsedArgs: new NodeSet<Expr>(),
+    routes: new NodeMap<Expr, Route>(),
     printed: new NodeSet<Expr>(),
     clocks: new NodeMap<Expr, "Date.now" | "performance.now" | "Math.random">(),
     jsonCalls: new NodeMap<Expr, "stringify" | "parse">(),
@@ -450,6 +469,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     integerCalls: new NodeSet<Expr>(),
     tagCalls: new NodeSet<Expr>(),
     equalities: new TypeMap<ClassType, InstanceId>(),
+    disposers: new TypeMap<ClassType, InstanceId>(),
     quotes: new NodeMap<Expr, Categories>(),
     tupleLiterals: new NodeSet<Expr>(),
     restStarts: new NodeMap<Expr, usize>(),

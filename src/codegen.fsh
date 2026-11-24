@@ -14,7 +14,7 @@ import type { ArithmeticOp, AssignOp, BinaryOp, Expr, JsName, ObjectProp, Param,
 import { ARRAY, DYN, atNamesIn, compound, Conversions, llvmOf, nameAt, structNames, textOf, typeDefinitions } from "./layout.fsh";
 import { made, type PatternInfo } from "./match.fsh";
 import { STD_BASE } from "./std.fsh";
-import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.fsh";
+import { EMBEDDED, LIVE, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.fsh";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.fsh";
 import { partEnd, partStart, type Tables } from "./compilation.fsh";
 import { allWords } from "./sizes.fsh";
@@ -185,7 +185,7 @@ function innerOf<A extends Lifetime>(e: Ref<Expr, A>): Ref<Expr, A> {
 }
 
 // The runtime function releasing each kind of handle block.
-const RELEASES = new Map<string, string>([["Semaphore", "fsh_rt_semaphore_release"], ["Permit", "fsh_rt_permit_drop"], ["Channel", "fsh_rt_channel_release"], ["AbortController", "fsh_rt_signal_release"], ["AbortSignal", "fsh_rt_signal_release"], ["TcpListener", "fsh_rt_socket_release"], ["TcpStream", "fsh_rt_socket_release"], ["UnixListener", "fsh_rt_socket_release"], ["UnixStream", "fsh_rt_socket_release"], ["UdpSocket", "fsh_rt_socket_release"], ["FileJob", "fsh_rt_file_job_release"], ["JsValue", "fsh_rt_js_release"], ["FileDescriptor", "fsh_rt_fd_release"]]);
+const RELEASES = new Map<string, string>([["Semaphore", "fsh_rt_semaphore_release"], ["Permit", "fsh_rt_permit_drop"], ["Channel", "fsh_rt_channel_release"], ["AbortController", "fsh_rt_signal_release"], ["AbortSignal", "fsh_rt_signal_release"], ["TcpListener", "fsh_rt_socket_release"], ["TcpStream", "fsh_rt_socket_release"], ["UnixListener", "fsh_rt_socket_release"], ["UnixStream", "fsh_rt_socket_release"], ["UdpSocket", "fsh_rt_socket_release"], ["FileJob", "fsh_rt_file_job_release"], ["JsValue", "fsh_rt_js_release"], ["FileDescriptor", "fsh_rt_fd_release"], ["TaskGroup", "fsh_rt_group_release"], ["TaskScope", "fsh_rt_group_drop"]]);
 
 // What a Rust call's argument leaves to give up once the call returns: an owned value dropped,
 // an owned array given up, or an Option's array given up when there is one.
@@ -448,6 +448,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // so are emitted again rather than taken.
   stale: Set<string>;
   combinePolls: TypeMap<FutureType, string>;
+  groupPolls: TypeMap<FutureType, string>;
+  groupFails: Map<string, string>;
   cancelled: Set<InstanceId>;
   stringers: TypeMap<Type, string>;
   constantGlobals: Map<InstanceId, string>;
@@ -642,6 +644,10 @@ class Codegen implements PrintHost, ComptimeHost {
     // The poll functions of `Promise.all` and `Promise.race` futures, and the async instances a
     // cancel function is wanted for.
     this.combinePolls = new TypeMap<FutureType, string>();
+    // The poll functions of `taskGroup` futures, and the glue each kind of task of a group is
+    // spawned with, by its future and the error type it gives the group.
+    this.groupPolls = new TypeMap<FutureType, string>();
+    this.groupFails = new Map<string, string>();
 
     this.cancelled = new Set<InstanceId>();
 
@@ -1140,9 +1146,9 @@ class Codegen implements PrintHost, ComptimeHost {
   return r.kind === "ref" ? r.to : t;
 }
 
-  // Whether a value of the type holds a Rust handle, which only moves.
-  holdsRust(t: Type): boolean {
-    return this.tables.typing.holdsPart(t, (u) => rustClassOf(this.tables.typing, u) !== undefined);
+  // Whether a value of the type holds a Rust handle or an instance with a disposer, which only move.
+  moveOnly(t: Type): boolean {
+    return this.tables.typing.holdsMoveOnly(t);
   }
 
   localAt(n: Ref<Expr | Stmt | Param | ObjectProp>): LocalId | undefined {
@@ -2142,6 +2148,12 @@ class Codegen implements PrintHost, ComptimeHost {
     if (this.isRef(holder)) {
       const line = `${handle} = load ptr, ptr ${this.value(e.object)}`;
       this.emit(line);
+    }
+    // A group's signal is a block of its own, which the group hands out counted.
+    if (e.name === "signal" && this.tables.typing.rec(this.referent(holder) as BlockType).which === "TaskGroup") {
+      const made = this.temp();
+      this.emit(`${made} = call ptr @fsh_rt_group_signal(ptr ${handle})`);
+      return made;
     }
     if (e.name === "signal") {
       const get2 = this.cur().types.get(e)!;
@@ -3475,6 +3487,19 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${has} = icmp ne i32 ${made}, 0`);
       return has;
     }
+    // `group.spawn(p)`: the future's frame moves into a new task of the group, with the glue
+    // that gives the group the error it throws.
+    if (callee.name === "spawn" && this.tables.typing.rec(t).which === "TaskGroup") {
+      const future = this.valueType(e.args[0]!) as FutureType;
+      const [poll, drop, dropOutput] = this.taskGlue(future);
+      const frame = this.alloca(this.llvm(future));
+      const line6 = `store ${this.llvm(future)} ${this.owned(e.args[0]!)}, ptr ${frame}`;
+      this.emit(line6);
+      const raised = this.cur().raises.get(e);
+      const fail = raised !== undefined ? this.groupFail(future, raised.from, raised.to) : "null";
+      this.unwinding(`call void @fsh_rt_group_spawn(ptr ${handle}, ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${fail}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))})`);
+      return undefined;
+    }
     if (callee.name === "abort") {
       this.emit(`call void @fsh_rt_signal_abort(ptr ${handle})`);
       return undefined;
@@ -3607,7 +3632,8 @@ class Codegen implements PrintHost, ComptimeHost {
       const own = table.clone !== undefined && table.clone !== "copy";
       slots = [this.dynRelease(type, n), "@fsh_rt_dyn_retain", own === true ? this.dynClone(type, n, table, true) : "@fsh_rt_dyn_retain"];
     } else {
-      // A Rust value is never copied, so a Dyn holding one panics if it ever is.
+      // A Rust value is never copied, nor an instance with a disposer, so a Dyn holding one, as a
+      // boxed future whose frame does, panics if it ever is.
       let rust: string | undefined = undefined;
       this.tables.typing.holdsPart(type, (u) => {
         if (rust === undefined) rust = rustClassOf(this.tables.typing, u)?.name;
@@ -3622,7 +3648,7 @@ class Codegen implements PrintHost, ComptimeHost {
       });
       const copies = !pinned || this.tables.typing.promiseElement(this.tables.typing.rec(to).of) !== undefined;
       // The compiler's copy is made only for a slot that holds it, so no helper goes unused.
-      const copied = copies || table.clone === "copy" ? (rust !== undefined ? this.dynUncopyable(rust!) : this.dynCopy(type, n)) : "";
+      const copied = copies || table.clone === "copy" ? (rust !== undefined ? this.dynUncopyable(rust!) : this.moveOnly(type) ? this.dynUncopyable() : this.dynCopy(type, n)) : "";
       const cloned = table.clone === "copy" ? copied : this.dynClone(type, n, table);
       const copy = copies ? copied : table.clone !== undefined ? cloned : this.dynUncopyable();
       slots = [this.dynDrop(type, n), copy, cloned];
@@ -5586,7 +5612,15 @@ class Codegen implements PrintHost, ComptimeHost {
     if (r.kind === "array" || r.kind === "map" || r.kind === "shared" || r.kind === "block" || r.kind === "dyn" || r.kind === "recursive") return true;
     if (r.kind === "fixed") return r.size > 0 && this.needsDrop(r.element);
     if (r.kind === "interior" && !isLock(r)) return this.needsDrop(r.of);
+    // An instance with a disposer runs it when dropped, whatever its fields own.
+    if (r.kind === "class" && r.disposes === true) return true;
     return this.parts(type).some(([t]) => this.needsDrop(t));
+  }
+
+  // Where an instance with a disposer keeps the marker `new` sets, through any bases, or nothing
+  // for a class without one.
+  liveAt(c: ClassType): usize[] | undefined {
+    return this.tables.typing.disposable(c) ? this.tables.typing.fieldPath(c, LIVE) : undefined;
   }
 
 
@@ -5607,7 +5641,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // A copy of a value, holding its own reference to each string in it.
   copied(this: Mut<this>, v: string, type: Type): string {
-    if (this.holdsRust(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle, which is moved, never copied`);
+    if (this.moveOnly(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle or an instance with a disposer, which is moved, never copied`);
     const r = this.recOf(type);
     if (r?.kind === "interior" && !isLock(r)) return this.copied(v, r.of);
     if (!this.needsDrop(type)) return v;
@@ -5668,19 +5702,81 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // The disposers a drop of an instance runs, the class's own first, then each base's.
+  disposerNames(this: Mut<this>, type: ClassType): string {
+    let out = "";
+    let c: ClassType | undefined = type;
+    while (c !== undefined) {
+      const own = this.tables.disposers.get(c);
+      if (own !== undefined) out += ` ${this.symbol(own)}`;
+      c = this.tables.typing.rec(c).base;
+    }
+    return out;
+  }
+
+  // In a drop's helper, runs the disposers of the instance `%v`, when `new` finished making it and
+  // nothing has disposed it: its class's own, then each base's, each on the part it belongs to.
+  // Gives the instance as they left it, whose fields the drop goes on to free. The marker is
+  // cleared first, so a disposer that panics isn't run again, and its panic still frees the fields.
+  disposed(this: Mut<this>, type: ClassType): string {
+    const live = this.liveAt(type);
+    if (live === undefined) return "%v";
+    const t = this.llvm(type);
+    const [slot, marker, set, run, done, left] = [this.alloca(t), this.temp(), this.temp(), this.label(), this.label(), this.temp()];
+    this.emit(`store ${t} %v, ptr ${slot}`);
+    this.emit(`${marker} = getelementptr ${t}, ptr ${slot}, i32 0, ${live.map((i) => `i32 ${i}`).join(", ")}`);
+    this.emit(`${set} = load i1, ptr ${marker}`);
+    this.emit(`br i1 ${set}, label %${run}, label %${done}`);
+    this.startBlock(run);
+    this.emit(`store i1 false, ptr ${marker}`);
+    let part = slot;
+    let c: ClassType | undefined = type;
+    while (c !== undefined) {
+      const own = this.tables.disposers.get(c);
+      if (own !== undefined) {
+        const hooks = { unwound: (cg: Mut<Codegen>) => {
+          const v = cg.temp();
+          cg.emit(`${v} = load ${t}, ptr ${slot}`);
+          cg.dropParts(v, type);
+        } };
+        const none: string[] = [];
+        this.invoke(own, part, none, undefined, hooks);
+      }
+      const base = this.tables.typing.rec(c).base;
+      if (base !== undefined) part = this.upcast(part, c, base);
+      c = base;
+    }
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
+    this.emit(`${left} = load ${t}, ptr ${slot}`);
+    return left;
+  }
+
+  // Drops each part of an aggregate that owns something.
+  dropParts(this: Mut<this>, v: string, type: Exclude<Type, string>): void {
+    const t = this.llvm(type);
+    for (const [part, i] of this.parts(type)) {
+      if (!this.needsDrop(part)) continue;
+      const x = this.temp();
+      this.emit(`${x} = extractvalue ${t} ${v}, ${i}`);
+      this.dispose(x, part);
+    }
+  }
+
   // The function that drops what a value of an aggregate type owns, or returns a copy of it,
   // part by part, or for a union, in the member it holds. It is named before it is made, so a
   // type holding itself calls it.
   helper(this: Mut<this>, kind: "drop" | "copy", type: Exclude<Type, string>): string {
     const r = this.tables.typing.rec(type);
-    if (kind === "copy" && this.holdsRust(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle, which is moved, never copied`);
+    if (kind === "copy" && this.moveOnly(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle or an instance with a disposer, which is moved, never copied`);
     const made = kind === "copy" ? this.glue.copy.get(type) : this.glue.drop.get(type);
     if ((made !== undefined && made !== "")) return made;
     const described2 = this.tables.typing.described(type);
     const t = this.llvm(type);
     // Types described alike and laid out alike are dropped and copied alike, so they share one
-    // helper, named by what they are rather than by which of them came first.
-    const shape = `${kind} ${described2} ${t}`;
+    // helper, named by what they are rather than by which of them came first. A drop that runs
+    // disposers is told apart by which it runs.
+    const shape = `${kind} ${described2} ${t}${kind === "drop" && r.kind === "class" ? this.disposerNames(type as ClassType) : ""}`;
     const shared = this.glueByShape.get(shape);
     if (shared !== undefined) {
       if (kind === "copy") this.glue.copy.set(type, shared);
@@ -5799,10 +5895,11 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`${result} = load ${t}, ptr ${copy}`);
       }
     } else {
+      const whole = kind === "drop" && r.kind === "class" ? this.disposed(type as ClassType) : "%v";
       for (const [part, i] of this.parts(type)) {
         if (!this.needsDrop(part)) continue;
         const v = this.temp();
-        this.emit(`${v} = extractvalue ${t} %v, ${i}`);
+        this.emit(`${v} = extractvalue ${t} ${whole}, ${i}`);
         const made = each(this, v, part);
         if (kind === "drop") continue;
         const next = this.temp();
@@ -9192,10 +9289,12 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     const whole = to === undefined || this.keepsAll(this.cur().types.get(e)!, to);
     // A Rust handle is never copied: one made here, or moved out of its place, is taken whole.
+    // So is an instance with a disposer, unless the conversion leaves it behind: then what it
+    // keeps is a copy, and the instance is dropped whole where it is.
     const get2 = this.cur().types.get(e)!;
-    const rust = this.holdsRust(get2);
+    const rust = this.moveOnly(get2) && (whole || this.moveOnly(to!));
     if ((whole || rust) && this.fresh(e)) return this.value(e, true);
-    if (!rust && !this.needsDrop(this.cur().types.get(e)!) && this.holdsRust(this.valueType(e))) return this.value(e);
+    if (!rust && !this.needsDrop(this.cur().types.get(e)!) && this.moveOnly(this.valueType(e))) return this.value(e);
     // A value owning nothing meets a recursive type's blocks only as the blocks just made for it.
     if (to !== undefined && !this.needsDrop(this.referent(this.cur().types.get(e)!)) && this.tables.typing.holdsPart(to, (t) => this.kindOf(t) === "recursive")) return this.value(e, true);
     const v = this.value(e);
@@ -9344,7 +9443,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   kept(this: Mut<this>, e: Ref<Expr>, v: string, written: boolean): string {
     const type = this.valueType(e);
-    if (!this.needsDrop(type) || this.fresh(e) || e.kind === "string" || !written || this.holdsRust(type)) return v;
+    if (!this.needsDrop(type) || this.fresh(e) || e.kind === "string" || !written || this.moveOnly(type)) return v;
     const copy = this.copied(v, type);
     this.pending.push({ v: copy, type });
     return copy;
@@ -9934,6 +10033,28 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit("unreachable");
         this.startBlock(ok);
         return n;
+      }
+      // The group a `taskGroup` call hands its closure.
+      if (e.callee.kind === "ident" && e.callee.name === "task group") {
+        const made = this.temp();
+        this.emit(`${made} = call ptr @fsh_rt_group_new()`);
+        return made;
+      }
+      // `taskGroup(...)`: its closure's future moves into the group's, with the awaiter's handle
+      // to the group the closure was called with, which its frame holds first after its captures.
+      if (this.tables.groupCalls.has(e)) {
+        const t = this.cur().types.get(e) as FutureType;
+        const body = this.tables.typing.groupOf.get(t)!.body;
+        const thrown = this.tables.typing.rec(t).throws;
+        const held = this.owned(e.args[0]!);
+        const [group, moved, made] = [this.temp(), this.temp(), this.temp()];
+        this.emit(`${group} = extractvalue ${this.llvm(body)} ${held}, 2`);
+        const room = thrown !== undefined ? this.sizeOf(this.llvm(thrown)) : "-1";
+        const dropError = thrown !== undefined && this.needsDrop(thrown) ? this.elementDrop(thrown) : "null";
+        this.emit(`call void @fsh_rt_group_scope(ptr ${group}, i64 ${room}, ptr ${dropError})`);
+        this.emit(`${moved} = insertvalue ${this.llvm(t)} zeroinitializer, ${this.llvm(body)} ${held}, 1`);
+        this.emit(`${made} = insertvalue ${this.llvm(t)} ${moved}, ptr ${group}, 2`);
+        return made;
       }
       // `spawn(p)`: the future's frame moves into a new task, whose handle this gives.
       if (e.callee.kind === "ident" && (e.callee.name === "spawn" || e.callee.name === "timer spawn" || e.callee.name === "blocking spawn")) {
@@ -11837,6 +11958,158 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // A group future's poll. While its closure runs, the closure's future is polled, and a task's
+  // failure ends the group once every task is done, the closure cancelled where it waits and
+  // dropped. Once the closure is done, what it gave or threw waits in the frame for the tasks;
+  // then the group fails with the first error a task threw, or else gives or throws the
+  // closure's own. A task that panicked panics the awaiter in the runtime's wait.
+  groupPoll(this: Mut<this>, t: FutureType): string {
+    const known = this.groupPolls.get(t);
+    if ((known !== undefined && known !== "")) return known;
+    const { body, at } = this.tables.typing.groupOf.get(t)!;
+    // Named by where in its function the group's call is, as a combined future's poll is.
+    const line = `${this.tables.typing.described(t)} ${this.siteName({ start: at.start, end: at.end })}`;
+    const name = `@fsh.group.${this.stableId("group", line, typeOwner(t))}`;
+    this.groupPolls.set(t, name);
+    const gives = this.tables.typing.rec(t).gives;
+    const thrown = this.tables.typing.rec(t).throws;
+    const saved = this.setAside();
+    const field = (cg: Mut<Codegen>, i: usize) => {
+      const p = cg.temp();
+      cg.emit(`${p} = getelementptr ${cg.llvm(t)}, ptr %frame, i32 0, i32 ${i}`);
+      return p;
+    };
+    const kept = (cg: Mut<Codegen>, i: usize) => cg.tables.typing.rec(t).frame[i]!.type;
+    const finishWith = (cg: Mut<Codegen>, tag: u8, v?: string, error?: string) => {
+      const line2 = `ret ${cg.pollType(t)} ${cg.polled(t, tag, v, error)}`;
+      cg.emit(line2);
+    };
+    // What a frame's slot holds moves out of it, leaving it empty for the frame's drop.
+    const taken = (cg: Mut<Codegen>, slot: string, type: Type): string => {
+      const old = cg.temp();
+      cg.emit(`${old} = load ${cg.llvm(type)}, ptr ${slot}`);
+      cg.emit(`store ${cg.llvm(type)} zeroinitializer, ptr ${slot}`);
+      return old;
+    };
+    const [stateAt, bodyAt, scopeAt, valueAt, errorAt] = [field(this, 0), field(this, 1), field(this, 2), field(this, 3), field(this, 4)];
+    const out = thrown !== undefined ? this.alloca(this.llvm(thrown)) : "null";
+    const [group, state, running, run, wait] = [this.temp(), this.temp(), this.temp(), this.label(), this.label()];
+    this.emit(`${group} = load ptr, ptr ${scopeAt}`);
+    const waited = (cg: Mut<Codegen>, closureRuns: boolean): string => {
+      const outcome = cg.temp();
+      const line3 = `call i32 @fsh_rt_group_wait(ptr ${group}, ptr %cx, ptr ${out}, ptr ${cg.panicAt({ start: at.start, end: at.end })}, i32 ${closureRuns ? 1 : 0})`;
+      cg.unwinding(line3, outcome);
+      return outcome;
+    };
+    // The first error a task threw, which the runtime's wait moved out of the group.
+    const taskFailed = (cg: Mut<Codegen>) => {
+      if (thrown === undefined) {
+        cg.emit("unreachable");
+        return;
+      }
+      const error = cg.temp();
+      cg.emit(`${error} = load ${cg.llvm(thrown)}, ptr ${out}`);
+      finishWith(cg, 2, undefined, error);
+    };
+    this.emit(`${state} = load i32, ptr ${stateAt}`);
+    this.emit(`${running} = icmp eq i32 ${state}, 0`);
+    this.emit(`br i1 ${running}, label %${run}, label %${wait}`);
+    this.startBlock(run);
+    const step = this.pollStep(body, bodyAt, { start: at.start, end: at.end });
+    this.startBlock(step.waiting);
+    const [early, failedEarly, stop, pending] = [waited(this, true), this.temp(), this.label(), this.label()];
+    this.emit(`${failedEarly} = icmp eq i32 ${early}, 2`);
+    this.emit(`br i1 ${failedEarly}, label %${stop}, label %${pending}`);
+    this.startBlock(pending);
+    finishWith(this, 0);
+    this.startBlock(stop);
+    this.cancelAt(bodyAt, body);
+    const stopped = taken(this, bodyAt, body);
+    this.dispose(stopped, body);
+    taskFailed(this);
+    this.startBlock(step.ready);
+    const v = step.value(this);
+    if (gives !== "void" && v !== undefined) this.emit(`store ${this.llvm(gives)} ${v}, ptr ${valueAt}`);
+    const returned = taken(this, bodyAt, body);
+    this.dispose(returned, body);
+    this.emit(`store i32 1, ptr ${stateAt}`);
+    this.emit(`br label %${wait}`);
+    this.startBlock(step.failed);
+    if (thrown !== undefined) {
+      const error = step.error(this);
+      this.emit(`store ${this.llvm(thrown)} ${error}, ptr ${errorAt}`);
+      const threw = taken(this, bodyAt, body);
+      this.dispose(threw, body);
+      this.emit(`store i32 2, ptr ${stateAt}`);
+      this.emit(`call void @fsh_rt_group_abort(ptr ${group})`);
+      this.emit(`br label %${wait}`);
+    } else this.emit("unreachable");
+    this.startBlock(wait);
+    const [late, waiting, done, failed] = [waited(this, false), this.label(), this.label(), this.label()];
+    this.emit(`switch i32 ${late}, label %${waiting} [ i32 1, label %${done} i32 2, label %${failed} ]`);
+    this.startBlock(waiting);
+    finishWith(this, 0);
+    // A task's error comes first: what the closure gave or threw is dropped.
+    this.startBlock(failed);
+    const [valueKept, errorKept] = [kept(this, 3), kept(this, 4)];
+    const unread = taken(this, valueAt, valueKept);
+    this.dispose(unread, valueKept);
+    const unthrown = taken(this, errorAt, errorKept);
+    this.dispose(unthrown, errorKept);
+    taskFailed(this);
+    this.startBlock(done);
+    const [ended, threwOwn, gave, threwAt] = [this.temp(), this.temp(), this.label(), this.label()];
+    this.emit(`${ended} = load i32, ptr ${stateAt}`);
+    this.emit(`${threwOwn} = icmp eq i32 ${ended}, 2`);
+    this.emit(`br i1 ${threwOwn}, label %${threwAt}, label %${gave}`);
+    this.startBlock(gave);
+    if (gives !== "void") {
+      const value = taken(this, valueAt, gives);
+      finishWith(this, 1, value);
+    } else finishWith(this, 1);
+    this.startBlock(threwAt);
+    if (thrown !== undefined) {
+      const own = taken(this, errorAt, thrown);
+      finishWith(this, 2, undefined, own);
+    } else this.emit("unreachable");
+    this.out.push(`define internal ${this.pollType(t)} ${name}(ptr %frame, ptr %cx) ${this.unwinds} {`);
+    this.out.push("entry:");
+    for (const pushed of this.allocas) this.out.push(pushed);
+    for (const pushed of this.body) this.out.push(pushed);
+    this.out.push("}");
+    this.out.push("");
+    this.takeUp(saved);
+    return name;
+  }
+
+
+  // The glue a task of a group is spawned with: the error in its output moves into the group's
+  // room for one, as the type the group's await throws.
+  groupFail(this: Mut<this>, future: FutureType, from: Type, to: Type): string {
+    const key = `${typeOwner(future)} ${typeOwner(to)}`;
+    const made = this.groupFails.get(key);
+    if ((made !== undefined && made !== "")) return made;
+    const line = `${this.tables.typing.described(future)} ${this.tables.typing.described(to)}`;
+    const name = `@fsh.group.fail.${this.stableId("group.fail", line, key)}`;
+    this.groupFails.set(key, name);
+    const saved = this.setAsideBody();
+    const [result, error] = [this.temp(), this.temp()];
+    this.emit(`${result} = load ${this.pollType(future)}, ptr %out`);
+    this.emit(`${error} = extractvalue ${this.pollType(future)} ${result}, 2`);
+    const line2 = `store ${this.llvm(to)} ${this.convert(error, from, to)}, ptr %into`;
+    this.emit(line2);
+    this.emit("ret void");
+    this.out.push(`define internal void ${name}(ptr %out, ptr %into) ${this.unwinds} {`);
+    this.out.push("entry:");
+    for (const pushed of this.allocas) this.out.push(pushed);
+    for (const pushed of this.body) this.out.push(pushed);
+    this.out.push("}");
+    this.out.push("");
+    this.takeUpBody(saved);
+    return name;
+  }
+
+
   // `combinePoll` over an array of `Promise<T>` values. Its first poll makes the values array and
   // a flag per future, every one zero.
   combineArray(this: Mut<this>, t: FutureType, name: string, kind: "all" | "race" | "allSettled" | "any", array: ArrayType, at: Ref<Span>): string {
@@ -12151,6 +12424,25 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`${futureAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 ${1 + 3 * j}`);
         this.whileWaiting(doneAt, (cg) => cg.cancelAt(futureAt, f));
       }
+      return;
+    }
+    // A group's future: its closure where it waits, while it is still running, and then the
+    // group stops waking this task for its tasks.
+    const grouped = this.tables.typing.groupOf.get(t as FutureType);
+    if (grouped !== undefined) {
+      const [stateAt, bodyAt, scopeAt, state, running, group, yes, after] = [this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.temp(), this.label(), this.label()];
+      this.emit(`${stateAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 0`);
+      this.emit(`${bodyAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 1`);
+      this.emit(`${scopeAt} = getelementptr ${this.llvm(t)}, ptr ${at}, i32 0, i32 2`);
+      this.emit(`${state} = load i32, ptr ${stateAt}`);
+      this.emit(`${running} = icmp eq i32 ${state}, 0`);
+      this.emit(`br i1 ${running}, label %${yes}, label %${after}`);
+      this.startBlock(yes);
+      this.cancelAt(bodyAt, grouped.body);
+      this.emit(`br label %${after}`);
+      this.startBlock(after);
+      this.emit(`${group} = load ptr, ptr ${scopeAt}`);
+      this.emit(`call void @fsh_rt_group_leave(ptr ${group})`);
       return;
     }
     const instance = this.futureOf.get(t as FutureType);
@@ -12473,7 +12765,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${tag} = extractvalue ${this.pollType(shape)} ${result}, 0`);
       this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} ]`);
     } else {
-      const fn = this.tables.typing.combinedOf.has(inner as FutureType) ? this.combinePoll(inner as FutureType) : this.symbol(this.futureOf.get(inner as FutureType)!);
+      const fn = this.tables.typing.combinedOf.has(inner as FutureType) ? this.combinePoll(inner as FutureType) : this.tables.typing.groupOf.has(inner as FutureType) ? this.groupPoll(inner as FutureType) : this.symbol(this.futureOf.get(inner as FutureType)!);
       this.unwinding(`call ${this.pollType(shape)} ${fn}(ptr ${at}, ptr %cx)`, result);
       this.emit(`${tag} = extractvalue ${this.pollType(shape)} ${result}, 0`);
       this.emit(`switch i8 ${tag}, label %${waiting} [ i8 1, label %${ready} i8 2, label %${failed} ]`);
@@ -12876,7 +13168,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const type = this.llvm(get5);
     const spilled = this.alloca(type);
     // A Rust handle made for the call moves into it, the call taking it over.
-    if (owns && this.holdsRust(this.cur().types.get(object)!)) {
+    if (owns && this.moveOnly(this.cur().types.get(object)!)) {
       if (!this.fresh(object)) assert(false, "internal error: a Rust handle taken over by a method is read from a place nothing empties");
       const line3 = `store ${type} ${this.value(object, true)}, ptr ${spilled}`;
       this.emit(line3);
@@ -13379,6 +13671,13 @@ class Codegen implements PrintHost, ComptimeHost {
           cg.dispose(unstash2, type);
         } };
         this.invoke(this.callOf(e)!, instance, argValues3, exprKey(e), part5);
+        // Only an instance whose constructor returned is one its disposer may run for.
+        const live = this.liveAt(type);
+        if (live !== undefined) {
+          const marker = this.temp();
+          this.emit(`${marker} = getelementptr ${this.llvm(type)}, ptr ${instance}, i32 0, ${live.map((i) => `i32 ${i}`).join(", ")}`);
+          this.emit(`store i1 true, ptr ${marker}`);
+        }
         const result = this.temp();
         this.emit(`${result} = load ${this.llvm(type)}, ptr ${instance}`);
         return result;
@@ -13691,7 +13990,7 @@ class Codegen implements PrintHost, ComptimeHost {
     // A shorthand lent to a reference field points at its variable.
     if (this.isRef(to) && !this.isRef(this.loc(local).type)) return [p.name, this.slot(local)];
     const part3 = this.loc(local).type;
-    if (this.holdsRust(part3) || (this.cur().consumes.has(p.id) && this.keepsAll(part3, to))) {
+    if (this.moveOnly(part3) || (this.cur().consumes.has(p.id) && this.keepsAll(part3, to))) {
       const shorthand2 = this.shorthand(p, local);
       const part = this.loc(local).type;
       return [p.name, this.convert(shorthand2, part, to)];
@@ -13715,7 +14014,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(line);
     const part3 = this.loc(local).type;
     if (!this.cur().consumes.has(p.id)) {
-      if (this.holdsRust(part3)) assert(false, "internal error: a Rust value in a shorthand property isn't moved");
+      if (this.moveOnly(part3)) assert(false, "internal error: a Rust value in a shorthand property isn't moved");
       return this.copied(read, part3);
     }
     const part4 = this.loc(local).type;
@@ -13733,7 +14032,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (setter !== undefined && target.kind === "member") {
       const type = this.cur().types.get(target)!;
       // A Rust value goes to the setter alone: the checker refuses such an assignment's value.
-      if (this.holdsRust(type)) {
+      if (this.moveOnly(type)) {
         const thisPointer2 = this.thisPointer(setter, target.object);
         this.invoke(setter, thisPointer2, [`${this.llvm(type)} ${result}`]);
         return result;
@@ -13911,7 +14210,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const option = this.valueType(e.left) as UnionType;
     const type = this.cur().types.get(e)!;
     // A Rust value is moved out of the left side, which is left empty, never copied.
-    const rust = this.holdsRust(option);
+    const rust = this.moveOnly(option);
     const v = rust && this.fresh(e.left) ? this.value(e.left, true) : this.value(e.left);
     if (rust && !this.fresh(e.left)) {
       if (!this.cur().consumes.has(e.left.id) || !this.lendable(e.left)) assert(false, "internal error: a Rust value on the left of '??' isn't moved");

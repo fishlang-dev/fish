@@ -2987,6 +2987,13 @@ int64_t fsh_rt_date_now(void) {
   return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
+// The wall clock's nanoseconds since the Unix epoch, as OTLP writes a span's times.
+int64_t fsh_rt_unix_nanos(void) {
+  struct timespec t;
+  clock_gettime(CLOCK_REALTIME, &t);
+  return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
+}
+
 // Fills count bytes from the OS's secure random source: arc4random_buf on macOS, which can't fail,
 // and getrandom(2) on Linux, which blocks only until the pool is first seeded at boot.
 void fsh_rt_random_fill(uint8_t *at, int64_t count) {
@@ -4334,6 +4341,13 @@ struct fsh_task {
   // In a debug build, the call that spawned it, which its backtraces end with: for a task std
   // spawned with none of the program's frames below, the call that spawned the task doing so.
   const char *spawned;
+  // The task group it was spawned into, which it holds a count on, and the glue that moves the
+  // error it threw out of its output into the group, as the type the group's await throws.
+  struct fsh_group *group;
+  void (*fail)(void *output, void *error);
+  // Its trace context: the two halves of a trace id, the current span's id and the trace's
+  // flags, all zero outside any span. A task starts with a copy of its spawner's.
+  int64_t trace[4];
   char memory[];
 };
 
@@ -4364,6 +4378,14 @@ static fsh_task *fsh_alive = NULL;
 static pthread_cond_t fsh_finished = PTHREAD_COND_INITIALIZER;
 static int32_t fsh_panicked = 0;
 static fsh_task *fsh_main_task = NULL;
+// The task this thread is polling, whose trace context is the current one; code that runs
+// outside any task, as a program with no async main does, has the thread's own.
+static _Thread_local fsh_task *fsh_current = NULL;
+static _Thread_local int64_t fsh_trace_root[4];
+// Set by the claim that starts the timer task, for the task its thread makes next: the timer
+// task has no context, so a timer's callback starts a trace of its own, whichever span was
+// current when the first timer was set.
+static _Thread_local int32_t fsh_timeouts_starting = 0;
 // The task running timers' callbacks, once one is set.
 static fsh_task *fsh_timeouts_task = NULL;
 // Blocking tasks not yet done, which the runtime's end can't drop while a pool thread may poll one.
@@ -4410,10 +4432,15 @@ static void fsh_schedule(fsh_task *t) {
   pthread_mutex_unlock(&fsh_park);
 }
 
+struct fsh_group;
+static void fsh_group_done(struct fsh_group *g, fsh_task *t, int32_t result);
+void fsh_rt_group_release(struct fsh_group *g);
+
 void fsh_task_release(fsh_task *t) {
   if (__atomic_sub_fetch(&t->refs, 1, __ATOMIC_ACQ_REL) > 0) return;
   if (t->outcome == 1 || t->outcome == 2) t->drop_output(fsh_output(t));
   fsh_rt_str_release(t->panic);
+  fsh_rt_group_release(t->group);
   fsh_rt_free(t);
 }
 
@@ -4446,11 +4473,14 @@ static void fsh_run(fsh_task *t) {
   // its frames behind for this reset to drop.
   fsh_frame *frames = fsh_rt_frames;
   const char *spawned = fsh_spawned_at;
+  fsh_task *current = fsh_current;
   fsh_rt_frames = NULL;
   fsh_spawned_at = t->spawned;
+  fsh_current = t;
   int32_t result = t->poll(t, t->memory);
   fsh_rt_frames = frames;
   fsh_spawned_at = spawned;
+  fsh_current = current;
   if (result == 3 && (t == fsh_main_task || t == fsh_timeouts_task)) {
     pthread_mutex_lock(&fsh_alive_lock);
     fsh_panic_began = 1;
@@ -4479,6 +4509,7 @@ static void fsh_run(fsh_task *t) {
   pthread_mutex_unlock(&fsh_alive_lock);
   // Before the joiner wakes, so a main that ends once it is woken sees this one done.
   if (t->blocking) __atomic_sub_fetch(&fsh_blocking_live, 1, __ATOMIC_RELEASE);
+  if (t->group) fsh_group_done(t->group, t, result);
   if (joiner) {
     fsh_rt_wake(joiner);
     fsh_task_release(joiner);
@@ -4529,8 +4560,13 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   t->refs = 2;
   t->joiner = NULL;
   t->panic = NULL;
+  t->group = NULL;
+  t->fail = NULL;
   t->state = FSH_QUEUED;
   t->spawned = fsh_rt_frames ? fsh_rt_frames->site : fsh_spawned_at;
+  if (fsh_timeouts_starting) memset(t->trace, 0, sizeof t->trace);
+  else memcpy(t->trace, fsh_current ? fsh_current->trace : fsh_trace_root, sizeof t->trace);
+  fsh_timeouts_starting = 0;
   pthread_mutex_lock(&fsh_alive_lock);
   t->prev = NULL;
   t->next = fsh_alive;
@@ -4563,6 +4599,26 @@ fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_
   fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
   fsh_run(t);
   return t;
+}
+
+// The current trace context, read and replaced whole. It is the polled task's, so only the
+// thread polling that task touches it.
+void fsh_rt_trace_get(int64_t *out) {
+  memcpy(out, fsh_current ? fsh_current->trace : fsh_trace_root, sizeof fsh_trace_root);
+}
+
+void fsh_rt_trace_set(const int64_t *words) {
+  memcpy(fsh_current ? fsh_current->trace : fsh_trace_root, words, sizeof fsh_trace_root);
+}
+
+// The environment and the random source under names only std's tracing declares: a std module
+// declares the C functions it calls, and one name declared by both would be declared twice.
+const char *fsh_rt_trace_env(const char *name) {
+  return getenv(name);
+}
+
+void fsh_rt_trace_ids(int64_t *out, int64_t count) {
+  fsh_rt_random_fill((uint8_t *)out, count * 8);
 }
 
 // Awaits a spawned task: when it is done, its poll result is copied to out, which then owns
@@ -4781,7 +4837,8 @@ static void fsh_timeouts_wake(fsh_task *waiter) {
 
 // Whether this call is the one to start the timer task, which then registers it.
 int32_t fsh_rt_timeouts_claim(void) {
-  return __atomic_exchange_n(&fsh_timeouts_claimed, 1, __ATOMIC_ACQ_REL) == 0;
+  fsh_timeouts_starting = __atomic_exchange_n(&fsh_timeouts_claimed, 1, __ATOMIC_ACQ_REL) == 0;
+  return fsh_timeouts_starting;
 }
 
 // Registered under the tasks' lock, where its end is announced, and announced itself, for a
@@ -5545,6 +5602,176 @@ void fsh_rt_signal_abort(fsh_signal *s) {
     fsh_rt_signal_release(s);
   }
   fsh_rt_free(todo.at);
+}
+
+// A task group's block, shared by the 'taskGroup' call awaiting it, the handle its closure spawns
+// through, and every task spawned into it: its count, its lock, how many of its tasks aren't
+// done, the task awaiting them, its signal, the first error a task threw, kept as the type the
+// await throws until the awaiter takes it, the first panic's reason, and whether the await is
+// over, after which dropping the awaiter's handle aborts nothing.
+//
+// Lock order: a group's lock is the innermost there is. Nothing else is locked and nothing is
+// called while it is held: fsh_run gives fsh_alive_lock back before a task's end takes it, and
+// the signal is aborted, the awaiter woken and every count released only once it is given back.
+typedef struct fsh_group {
+  int64_t count; pthread_mutex_t lock; int64_t live; fsh_task *waiter; fsh_signal *signal;
+  int32_t errored, over; fsh_str *panic; void *error; int64_t error_size; fsh_drop_fn drop_error;
+} fsh_group;
+
+// A new group with one count, its closure's.
+fsh_group *fsh_rt_group_new(void) {
+  fsh_group *g = fsh_rt_alloc(sizeof(fsh_group));
+  g->count = 1;
+  pthread_mutex_init(&g->lock, NULL);
+  g->live = 0;
+  g->waiter = NULL;
+  g->signal = fsh_rt_signal_new();
+  g->errored = g->over = 0;
+  g->panic = NULL;
+  g->error = NULL;
+  g->error_size = 0;
+  g->drop_error = NULL;
+  return g;
+}
+
+// The awaiter's count on a group just made, before anything runs: with it, room for an error of
+// the type the await throws, when it throws one, and the function dropping one never taken.
+void fsh_rt_group_scope(fsh_group *g, int64_t error_size, fsh_drop_fn drop_error) {
+  __atomic_fetch_add(&g->count, 1, __ATOMIC_RELAXED);
+  if (error_size < 0) return;
+  g->error = fsh_rt_alloc(error_size > 0 ? error_size : 1);
+  g->error_size = error_size;
+  g->drop_error = drop_error;
+}
+
+// Another handle to the group's signal.
+fsh_signal *fsh_rt_group_signal(fsh_group *g) {
+  __atomic_fetch_add(&g->signal->count, 1, __ATOMIC_RELAXED);
+  return g->signal;
+}
+
+// The group's closure threw: its tasks are told to stop.
+void fsh_rt_group_abort(fsh_group *g) {
+  fsh_rt_signal_abort(g->signal);
+}
+
+void fsh_rt_group_release(fsh_group *g) {
+  if (!g || __atomic_sub_fetch(&g->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  if (g->errored && g->drop_error) g->drop_error(g->error);
+  fsh_rt_free(g->error);
+  fsh_rt_str_release(g->panic);
+  if (g->waiter) fsh_task_release(g->waiter);
+  fsh_rt_signal_release(g->signal);
+  pthread_mutex_destroy(&g->lock);
+  fsh_rt_free(g);
+}
+
+// Drops the awaiter's handle. Before the await is over, its future was dropped where it waited:
+// the group's signal is aborted, and its tasks finish on their own, waking nobody.
+void fsh_rt_group_drop(fsh_group *g) {
+  if (!g) return;
+  pthread_mutex_lock(&g->lock);
+  int32_t over = g->over;
+  fsh_task *waiter = g->waiter;
+  g->waiter = NULL;
+  pthread_mutex_unlock(&g->lock);
+  if (waiter) fsh_task_release(waiter);
+  if (!over) fsh_rt_signal_abort(g->signal);
+  fsh_rt_group_release(g);
+}
+
+// Starts a future as a task of the group, which waits for it and gives no handle to it: the
+// runtime's reference is the task's only one, and the task holds a count on the group.
+void fsh_rt_group_spawn(fsh_group *g, fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void (*fail)(void *, void *), void *frame, int64_t frame_size, int64_t output_size) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+  t->refs = 1;
+  __atomic_fetch_add(&g->count, 1, __ATOMIC_RELAXED);
+  t->group = g;
+  t->fail = fail;
+  pthread_mutex_lock(&g->lock);
+  g->live++;
+  pthread_mutex_unlock(&g->lock);
+  fsh_schedule(t);
+}
+
+// A task of a group is done. The first to throw gives the group its error and the first to
+// panic its reason, and either aborts the group's signal; then the task is no longer live, and
+// the last one wakes the awaiter. The error is moved outside the lock: only the task that
+// claimed the group's room for it writes there, and it is read once no task is live.
+static void fsh_group_done(fsh_group *g, fsh_task *t, int32_t result) {
+  if (result >= 2) {
+    fsh_str *reason = result == 3 ? t->panic : NULL;
+    int32_t claimed = 0;
+    fsh_rt_str_retain(reason);
+    pthread_mutex_lock(&g->lock);
+    if (result == 2 && t->fail && g->error && !g->errored) g->errored = claimed = 1;
+    if (reason && !g->panic) {
+      g->panic = reason;
+      reason = NULL;
+    }
+    pthread_mutex_unlock(&g->lock);
+    fsh_rt_str_release(reason);
+    if (claimed) {
+      t->fail(fsh_output(t), g->error);
+      t->outcome = 0;
+    }
+    fsh_rt_signal_abort(g->signal);
+  }
+  pthread_mutex_lock(&g->lock);
+  fsh_task *waiter = --g->live == 0 ? g->waiter : NULL;
+  if (waiter) g->waiter = NULL;
+  pthread_mutex_unlock(&g->lock);
+  fsh_wake_waiter(waiter);
+}
+
+// Awaits a group's tasks. While any is live, the awaiting task is noted for the last of them to
+// wake, and this gives 0; so it does while the group's closure is still running and no task has
+// failed. Once none is live, it gives 1, or 2 with the first error a task threw moved to out; if
+// a task panicked, the awaiter panics at at instead, as one awaiting that task would.
+int32_t fsh_rt_group_wait(fsh_group *g, fsh_task *waiter, void *out, const char *at, int32_t running) {
+  fsh_task *old = NULL;
+  fsh_str *panic = NULL;
+  int32_t result = 0;
+  pthread_mutex_lock(&g->lock);
+  if (g->live > 0) {
+    if (g->waiter != waiter) {
+      old = g->waiter;
+      __atomic_fetch_add(&waiter->refs, 1, __ATOMIC_RELAXED);
+      g->waiter = waiter;
+    }
+  } else if (!running || g->errored || g->panic) {
+    g->over = 1;
+    panic = g->panic;
+    g->panic = NULL;
+    result = 1;
+    if (!panic && g->errored) {
+      memcpy(out, g->error, g->error_size);
+      g->errored = 0;
+      result = 2;
+    }
+  }
+  pthread_mutex_unlock(&g->lock);
+  if (old) fsh_task_release(old);
+  if (panic) {
+    char reason[1100];
+    int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)panic->length, panic->bytes);
+    fsh_rt_str_release(panic);
+    fsh_panic_at(at);
+    fputs(reason, stderr);
+    fsh_panic_reason(reason, n < (int)sizeof reason ? (size_t)n : sizeof reason - 1);
+    fsh_rt_panic("\ncatch what can fail inside the group's tasks, or 'spawn' one and await 'handle.join()' to catch its panic\n");
+  }
+  return result;
+}
+
+// A group's future is cancelled where it waits: the group no longer wakes its task.
+void fsh_rt_group_leave(fsh_group *g) {
+  if (!g) return;
+  pthread_mutex_lock(&g->lock);
+  fsh_task *waiter = g->waiter;
+  g->waiter = NULL;
+  pthread_mutex_unlock(&g->lock);
+  if (waiter) fsh_task_release(waiter);
 }
 
 // 'process.shutdown': a signal the first SIGINT or SIGTERM aborts. Its handlers are installed the
@@ -9353,5 +9580,315 @@ void fsh_rt_zlib_take(fsh_zlib_run *r, uint8_t *out) {
   if (r->length > 0) memcpy(out, r->data, (size_t)r->length);
   free(r->data);
   free(r);
+}
+`;
+
+// The SQLite half of the runtime, a unit of its own compiled into a program, with -lsqlite3
+// linked, only when its IR calls it. Std's sqlite module runs every call here on the blocking
+// pool, a statement at a time for each connection.
+export const SQLITE_NATIVE = String.raw`
+#include <limits.h>
+#include <pthread.h>
+#include <sqlite3.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// A connection, counted: each Database sharing it, each statement made from it and each job
+// running on it holds a count, and the last release closes it. db is NULL once close() has run.
+// lock is held for a whole statement's run, so tasks sharing a connection take turns at it.
+// error is the runtime's own message for the last failure, or NULL when SQLite holds it. before
+// is the connection's total changes as a run began.
+typedef struct {
+  sqlite3 *db;
+  pthread_mutex_t lock;
+  int64_t refs;
+  const char *error;
+  int before;
+} fsh_sqlite_db;
+
+// A statement, counted like its connection, which it holds a count of, and the JSON of a row.
+typedef struct {
+  fsh_sqlite_db *db;
+  sqlite3_stmt *stmt;
+  int64_t refs;
+  char *row;
+  size_t length, cap;
+} fsh_sqlite_stmt;
+
+// Handles cross to Fish as integers: a blocking task may hold a number, never a raw pointer.
+static fsh_sqlite_db *fsh_sqlite_db_of(int64_t handle) { return (fsh_sqlite_db *)(intptr_t)handle; }
+static fsh_sqlite_stmt *fsh_sqlite_stmt_of(int64_t handle) { return (fsh_sqlite_stmt *)(intptr_t)handle; }
+
+static void *fsh_sqlite_grow(void *p, size_t n) {
+  void *q = realloc(p, n ? n : 1);
+  if (!q) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return q;
+}
+
+// A connection not yet opened, so its owner exists before the blocking task that opens it.
+int64_t fsh_rt_sqlite_database(void) {
+  fsh_sqlite_db *d = fsh_sqlite_grow(NULL, sizeof *d);
+  d->db = NULL;
+  d->refs = 1;
+  d->error = NULL;
+  d->before = 0;
+  pthread_mutex_init(&d->lock, NULL);
+  return (int64_t)(intptr_t)d;
+}
+
+// Opens the file at path, made if it isn't there, or a database in memory for ":memory:". A
+// connection another holds waits up to five seconds for it rather than failing at once.
+int64_t fsh_rt_sqlite_open(int64_t handle, const char *path) {
+  fsh_sqlite_db *d = fsh_sqlite_db_of(handle);
+  int rc = sqlite3_open_v2(path, &d->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL);
+  if (rc == SQLITE_OK) sqlite3_busy_timeout(d->db, 5000);
+  return rc & 0xff;
+}
+
+// The last failure's message, read before the connection's lock is given back.
+const char *fsh_rt_sqlite_error(int64_t handle) {
+  fsh_sqlite_db *d = fsh_sqlite_db_of(handle);
+  return d->error ? d->error : sqlite3_errmsg(d->db);
+}
+
+void fsh_rt_sqlite_retain(int64_t handle) {
+  __atomic_add_fetch(&fsh_sqlite_db_of(handle)->refs, 1, __ATOMIC_RELAXED);
+}
+
+void fsh_rt_sqlite_release(int64_t handle) {
+  fsh_sqlite_db *d = fsh_sqlite_db_of(handle);
+  if (__atomic_sub_fetch(&d->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+  sqlite3_close_v2(d->db);
+  pthread_mutex_destroy(&d->lock);
+  free(d);
+}
+
+// Closes the connection for every holder. Statements still open keep SQLite's half alive until
+// they are finalized, as sqlite3_close_v2 arranges, but run nothing more.
+void fsh_rt_sqlite_close(int64_t handle) {
+  fsh_sqlite_db *d = fsh_sqlite_db_of(handle);
+  pthread_mutex_lock(&d->lock);
+  sqlite3_close_v2(d->db);
+  d->db = NULL;
+  pthread_mutex_unlock(&d->lock);
+}
+
+int64_t fsh_rt_sqlite_statement(int64_t handle) {
+  fsh_sqlite_stmt *s = fsh_sqlite_grow(NULL, sizeof *s);
+  s->db = fsh_sqlite_db_of(handle);
+  s->stmt = NULL;
+  s->refs = 1;
+  s->row = NULL;
+  s->length = 0;
+  s->cap = 0;
+  fsh_rt_sqlite_retain(handle);
+  return (int64_t)(intptr_t)s;
+}
+
+void fsh_rt_sqlite_statement_retain(int64_t handle) {
+  __atomic_add_fetch(&fsh_sqlite_stmt_of(handle)->refs, 1, __ATOMIC_RELAXED);
+}
+
+void fsh_rt_sqlite_finalize(int64_t handle) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  pthread_mutex_lock(&s->db->lock);
+  sqlite3_finalize(s->stmt);
+  s->stmt = NULL;
+  pthread_mutex_unlock(&s->db->lock);
+}
+
+void fsh_rt_sqlite_statement_release(int64_t handle) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  if (__atomic_sub_fetch(&s->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+  // ponytail: a statement dropped unclosed while another task's statement runs on its connection
+  // waits for that run on the thread dropping it; hand the finalize to the running job if a
+  // program ever stalls there. One closed, or made for a single run, never waits.
+  if (s->stmt) fsh_rt_sqlite_finalize(handle);
+  free(s->row);
+  fsh_rt_sqlite_release((int64_t)(intptr_t)s->db);
+  free(s);
+}
+
+// Takes the connection for one statement's run, which fsh_rt_sqlite_unlock ends whether or not
+// this refused it.
+int64_t fsh_rt_sqlite_lock(int64_t handle) {
+  fsh_sqlite_db *d = fsh_sqlite_stmt_of(handle)->db;
+  pthread_mutex_lock(&d->lock);
+  d->error = NULL;
+  if (!d->db) {
+    d->error = "the database is closed; open it again with Database.open";
+    return SQLITE_MISUSE;
+  }
+  d->before = sqlite3_total_changes(d->db);
+  return SQLITE_OK;
+}
+
+// Ends a run: a statement made for it alone is finalized, and any other reset, so that one
+// stopped at its first row holds no lock on the database's file.
+void fsh_rt_sqlite_unlock(int64_t handle, int64_t finalize) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  if (finalize) {
+    sqlite3_finalize(s->stmt);
+    s->stmt = NULL;
+  } else if (s->stmt) sqlite3_reset(s->stmt);
+  pthread_mutex_unlock(&s->db->lock);
+}
+
+int64_t fsh_rt_sqlite_prepare(int64_t handle, const char *sql, int64_t length) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  fsh_sqlite_db *d = s->db;
+  if (length > INT_MAX) {
+    d->error = "the SQL is longer than SQLite reads";
+    return SQLITE_TOOBIG;
+  }
+  const char *tail = NULL;
+  int rc = sqlite3_prepare_v2(d->db, sql, (int)length, &s->stmt, &tail);
+  if (rc != SQLITE_OK) return rc & 0xff;
+  if (!s->stmt) {
+    d->error = "the SQL holds no statement";
+    return SQLITE_ERROR;
+  }
+  // SQLite compiles the first statement and stops, so a second would be dropped unsaid. One that
+  // doesn't compile is a second all the same: it may name a table the first has yet to make.
+  sqlite3_stmt *second = NULL;
+  rc = sqlite3_prepare_v2(d->db, tail, (int)(sql + length - tail), &second, NULL);
+  if (rc == SQLITE_OK && !second) return SQLITE_OK;
+  d->error = "the SQL holds more than one statement; run each with a call of its own";
+  sqlite3_finalize(second);
+  sqlite3_finalize(s->stmt);
+  s->stmt = NULL;
+  return SQLITE_ERROR;
+}
+
+// Readies a statement kept from an earlier run for another, its parameters all NULL again.
+int64_t fsh_rt_sqlite_reset(int64_t handle) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  if (!s->stmt) {
+    s->db->error = "the statement is closed; prepare it again";
+    return SQLITE_MISUSE;
+  }
+  sqlite3_reset(s->stmt);
+  sqlite3_clear_bindings(s->stmt);
+  return SQLITE_OK;
+}
+
+int64_t fsh_rt_sqlite_parameters(int64_t handle) {
+  return sqlite3_bind_parameter_count(fsh_sqlite_stmt_of(handle)->stmt);
+}
+
+int64_t fsh_rt_sqlite_bind_null(int64_t handle, int64_t at) {
+  return sqlite3_bind_null(fsh_sqlite_stmt_of(handle)->stmt, (int)at) & 0xff;
+}
+
+int64_t fsh_rt_sqlite_bind_integer(int64_t handle, int64_t at, int64_t value) {
+  return sqlite3_bind_int64(fsh_sqlite_stmt_of(handle)->stmt, (int)at, value) & 0xff;
+}
+
+int64_t fsh_rt_sqlite_bind_double(int64_t handle, int64_t at, double value) {
+  return sqlite3_bind_double(fsh_sqlite_stmt_of(handle)->stmt, (int)at, value) & 0xff;
+}
+
+// SQLite copies the bytes, as the caller's last only as long as the call.
+int64_t fsh_rt_sqlite_bind_text(int64_t handle, int64_t at, const char *text, int64_t length) {
+  return sqlite3_bind_text64(fsh_sqlite_stmt_of(handle)->stmt, (int)at, text, (sqlite3_uint64)length, SQLITE_TRANSIENT, SQLITE_UTF8) & 0xff;
+}
+
+int64_t fsh_rt_sqlite_bind_blob(int64_t handle, int64_t at, const uint8_t *data, int64_t length) {
+  return sqlite3_bind_blob64(fsh_sqlite_stmt_of(handle)->stmt, (int)at, data, (sqlite3_uint64)length, SQLITE_TRANSIENT) & 0xff;
+}
+
+// SQLITE_ROW at a row, SQLITE_DONE past the last, or what went wrong.
+int64_t fsh_rt_sqlite_step(int64_t handle) {
+  return sqlite3_step(fsh_sqlite_stmt_of(handle)->stmt) & 0xff;
+}
+
+static void fsh_sqlite_put(fsh_sqlite_stmt *s, const char *bytes, size_t n) {
+  if (s->length + n > s->cap) {
+    s->cap = (s->length + n) * 2;
+    s->row = fsh_sqlite_grow(s->row, s->cap);
+  }
+  memcpy(s->row + s->length, bytes, n);
+  s->length += n;
+}
+
+static void fsh_sqlite_put_text(fsh_sqlite_stmt *s, const unsigned char *text, size_t n) {
+  fsh_sqlite_put(s, "\"", 1);
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = text[i];
+    char escaped[8];
+    if (c == '"' || c == '\\') {
+      escaped[0] = '\\';
+      escaped[1] = (char)c;
+      fsh_sqlite_put(s, escaped, 2);
+    } else if (c < 0x20) fsh_sqlite_put(s, escaped, (size_t)snprintf(escaped, sizeof escaped, "\\u%04x", c));
+    else fsh_sqlite_put(s, (const char *)&c, 1);
+  }
+  fsh_sqlite_put(s, "\"", 1);
+}
+
+// The row the statement is at as a JSON object keyed by column name: an INTEGER and a REAL as
+// numbers, TEXT as a string, a BLOB as an array of its bytes and NULL as null. The text is the
+// statement's, good until its next row.
+const char *fsh_rt_sqlite_row(int64_t handle) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  char number[32];
+  s->length = 0;
+  fsh_sqlite_put(s, "{", 1);
+  int columns = sqlite3_column_count(s->stmt);
+  for (int i = 0; i < columns; i++) {
+    if (i > 0) fsh_sqlite_put(s, ",", 1);
+    const char *name = sqlite3_column_name(s->stmt, i);
+    if (!name) name = "";
+    fsh_sqlite_put_text(s, (const unsigned char *)name, strlen(name));
+    fsh_sqlite_put(s, ":", 1);
+    switch (sqlite3_column_type(s->stmt, i)) {
+      case SQLITE_INTEGER:
+        fsh_sqlite_put(s, number, (size_t)snprintf(number, sizeof number, "%lld", (long long)sqlite3_column_int64(s->stmt, i)));
+        break;
+      case SQLITE_FLOAT: {
+        double value = sqlite3_column_double(s->stmt, i);
+        // JSON has no infinity, so one is written as a number past any f64, which reads back as it.
+        if (value - value != 0) fsh_sqlite_put(s, value > 0 ? "1e999" : "-1e999", value > 0 ? 5 : 6);
+        else fsh_sqlite_put(s, number, (size_t)snprintf(number, sizeof number, "%.17g", value));
+        break;
+      }
+      case SQLITE_TEXT: {
+        const unsigned char *text = sqlite3_column_text(s->stmt, i);
+        fsh_sqlite_put_text(s, text, (size_t)sqlite3_column_bytes(s->stmt, i));
+        break;
+      }
+      case SQLITE_BLOB: {
+        const uint8_t *data = sqlite3_column_blob(s->stmt, i);
+        int length = sqlite3_column_bytes(s->stmt, i);
+        fsh_sqlite_put(s, "[", 1);
+        for (int b = 0; b < length; b++) fsh_sqlite_put(s, number, (size_t)snprintf(number, sizeof number, b > 0 ? ",%d" : "%d", data[b]));
+        fsh_sqlite_put(s, "]", 1);
+        break;
+      }
+      default:
+        fsh_sqlite_put(s, "null", 4);
+    }
+  }
+  // The NUL after the brace goes in with it, as Fish reads the row as a C string.
+  fsh_sqlite_put(s, "}", 2);
+  return s->row;
+}
+
+// How many rows the run inserted, updated or deleted: SQLite keeps the last such statement's
+// count, so a run that changed nothing is told apart by the connection's total.
+// ponytail: SQLite's int counts, which wrap past 2^31 rows; sqlite3_changes64 once every
+// system SQLite is 3.37 or newer.
+int64_t fsh_rt_sqlite_changes(int64_t handle) {
+  fsh_sqlite_db *d = fsh_sqlite_stmt_of(handle)->db;
+  return sqlite3_total_changes(d->db) == d->before ? 0 : sqlite3_changes(d->db);
+}
+
+int64_t fsh_rt_sqlite_last_insert_rowid(int64_t handle) {
+  return sqlite3_last_insert_rowid(fsh_sqlite_stmt_of(handle)->db->db);
 }
 `;
