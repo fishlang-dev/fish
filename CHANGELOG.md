@@ -2,6 +2,10 @@
 
 Each release's changes, newest first, from its conventional commits.
 
+## 0.1.3 - 2026-11-24
+
+Nothing a user would notice changed.
+
 ## 0.1.2 - 2026-11-24
 
 ### Added
