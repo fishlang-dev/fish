@@ -9708,15 +9708,16 @@ int64_t fsh_rt_sqlite_prepare(int64_t handle, const char *sql, int64_t length) {
     d->error = "the SQL holds no statement";
     return SQLITE_ERROR;
   }
-  // SQLite compiles the first statement and stops, so a second would be dropped unsaid.
+  // SQLite compiles the first statement and stops, so a second would be dropped unsaid. One that
+  // doesn't compile is a second all the same: it may name a table the first has yet to make.
   sqlite3_stmt *second = NULL;
   rc = sqlite3_prepare_v2(d->db, tail, (int)(sql + length - tail), &second, NULL);
   if (rc == SQLITE_OK && !second) return SQLITE_OK;
-  if (second) d->error = "the SQL holds more than one statement; run each with a call of its own";
+  d->error = "the SQL holds more than one statement; run each with a call of its own";
   sqlite3_finalize(second);
   sqlite3_finalize(s->stmt);
   s->stmt = NULL;
-  return rc == SQLITE_OK ? SQLITE_ERROR : rc & 0xff;
+  return SQLITE_ERROR;
 }
 
 // Readies a statement kept from an earlier run for another, its parameters all NULL again.

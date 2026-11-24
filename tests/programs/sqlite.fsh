@@ -63,6 +63,7 @@ async function main(): Promise<void> throws SqliteError | RowError {
 // expect: SqliteError 25 the statement takes 2 parameters, but 1 was given
 // expect: SqliteError 25 the statement takes 1 parameter, but 0 were given
 // expect: SqliteError 1 the SQL holds more than one statement; run each with a call of its own
+// expect: SqliteError 1 the SQL holds more than one statement; run each with a call of its own
 // expect: SqliteError 1 the SQL holds no statement
 // expect: SqliteError 14 unable to open database file
 // expect: SqliteError 14 a database's path can't hold a NUL character
@@ -101,6 +102,7 @@ async function main(): Promise<void> throws SqliteError {
   await attempt(db, "insert into t values (?, ?)", [2]);
   await attempt(db, "insert into t (name) values (?)", []);
   await attempt(db, "insert into t values (2, 'b'); insert into t values (3, 'c')", []);
+  await attempt(db, "create table u (x); insert into u values (1)", []);
   await attempt(db, "  -- nothing to run\n", []);
   await opening("/nowhere/at/all/fish.db");
   await opening("a\0b");
