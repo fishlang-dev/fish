@@ -3632,7 +3632,8 @@ class Codegen implements PrintHost, ComptimeHost {
       const own = table.clone !== undefined && table.clone !== "copy";
       slots = [this.dynRelease(type, n), "@fsh_rt_dyn_retain", own === true ? this.dynClone(type, n, table, true) : "@fsh_rt_dyn_retain"];
     } else {
-      // A Rust value is never copied, so a Dyn holding one panics if it ever is.
+      // A Rust value is never copied, nor an instance with a disposer, so a Dyn holding one, as a
+      // boxed future whose frame does, panics if it ever is.
       let rust: string | undefined = undefined;
       this.tables.typing.holdsPart(type, (u) => {
         if (rust === undefined) rust = rustClassOf(this.tables.typing, u)?.name;
@@ -3647,7 +3648,7 @@ class Codegen implements PrintHost, ComptimeHost {
       });
       const copies = !pinned || this.tables.typing.promiseElement(this.tables.typing.rec(to).of) !== undefined;
       // The compiler's copy is made only for a slot that holds it, so no helper goes unused.
-      const copied = copies || table.clone === "copy" ? (rust !== undefined ? this.dynUncopyable(rust!) : this.dynCopy(type, n)) : "";
+      const copied = copies || table.clone === "copy" ? (rust !== undefined ? this.dynUncopyable(rust!) : this.moveOnly(type) ? this.dynUncopyable() : this.dynCopy(type, n)) : "";
       const cloned = table.clone === "copy" ? copied : this.dynClone(type, n, table);
       const copy = copies ? copied : table.clone !== undefined ? cloned : this.dynUncopyable();
       slots = [this.dynDrop(type, n), copy, cloned];
