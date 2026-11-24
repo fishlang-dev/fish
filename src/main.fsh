@@ -20,7 +20,7 @@ import { parse, parseWithComments, type Stmt } from "./parser.fsh";
 import type { Ids } from "./nodes.fsh";
 import { bundle } from "./bundle.fsh";
 import { JS_NATIVE } from "./js_native.fsh";
-import { NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
+import { NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
 import { cachedObject, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
 import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.fsh";
@@ -1034,18 +1034,24 @@ export const callsTls = (ir: string) => [...linesWith(ir, "fsh_rt_tls_"), ...lin
 // Whether the IR calls into the zlib half of the runtime, as the zlib module does.
 export const callsZlib = (ir: string) => linesWith(ir, "fsh_rt_zlib_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_zlib_/.test(l));
 
+// Whether the IR calls into the SQLite half of the runtime, as the sqlite module does.
+export const callsSqlite = (ir: string) => linesWith(ir, "fsh_rt_sqlite_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_sqlite_/.test(l));
+
 // What links OpenSSL into a program calling the TLS runtime, when it was found, without which the
-// runtime's TLS calls say how to install it, and zlib into one calling the zlib runtime.
+// runtime's TLS calls say how to install it, zlib into one calling the zlib runtime, and the
+// system's SQLite into one calling the SQLite runtime.
 export function runtimeLinks(ir: string, target: Ref<Target>): string[] {
-  const zlib: string[] = callsZlib(ir) ? ["-lz"] : [];
-  if (!callsTls(ir)) return zlib;
+  let libraries: string[] = [];
+  if (callsZlib(ir)) libraries.push("-lz");
+  if (callsSqlite(ir)) libraries.push("-lsqlite3");
+  if (!callsTls(ir)) return libraries;
   const openssl = findOpenSsl(target);
   const none: string[] = [];
-  return [...("link" in openssl ? openssl.link : none), ...zlib];
+  return [...("link" in openssl ? openssl.link : none), ...libraries];
 }
 
 // The C half of the runtime as cached objects, with the engine's glue and sources when the
-// program's IR calls the engine, and the TLS and zlib halves when it calls those. They are built with unwind tables so a panic can unwind through
+// program's IR calls the engine, and the TLS, zlib and SQLite halves when it calls those. They are built with unwind tables so a panic can unwind through
 // them, and position-independent when `pic`, for a library. A `--leaks` build's runtime records
 // each block's site, so it is an object of its own.
 /** @throws {IoError} */
@@ -1061,7 +1067,8 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
   const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none)], stdin: source, inputs: js ? files(engineDir()) : none };
   const engine: Unit[] = js ? engineSources().map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(engineDir()) })) : [];
   const zlib: Unit[] = callsZlib(ir) ? [{ name: "zlib", args: ["-x", "c", "-", ...flags], stdin: ZLIB_NATIVE, inputs: [] }] : [];
-  return [runtime, ...engine, ...zlib];
+  const sqlite: Unit[] = callsSqlite(ir) ? [{ name: "sqlite", args: ["-x", "c", "-", ...flags], stdin: SQLITE_NATIVE, inputs: [] }] : [];
+  return [runtime, ...engine, ...zlib, ...sqlite];
 }
 
 // A build's optimization level. A sanitized dev build is optimized a little, as clang advises for

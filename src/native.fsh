@@ -9537,3 +9537,313 @@ void fsh_rt_zlib_take(fsh_zlib_run *r, uint8_t *out) {
   free(r);
 }
 `;
+
+// The SQLite half of the runtime, a unit of its own compiled into a program, with -lsqlite3
+// linked, only when its IR calls it. Std's sqlite module runs every call here on the blocking
+// pool, a statement at a time for each connection.
+export const SQLITE_NATIVE = String.raw`
+#include <limits.h>
+#include <pthread.h>
+#include <sqlite3.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// A connection, counted: each Database sharing it, each statement made from it and each job
+// running on it holds a count, and the last release closes it. db is NULL once close() has run.
+// lock is held for a whole statement's run, so tasks sharing a connection take turns at it.
+// error is the runtime's own message for the last failure, or NULL when SQLite holds it. before
+// is the connection's total changes as a run began.
+typedef struct {
+  sqlite3 *db;
+  pthread_mutex_t lock;
+  int64_t refs;
+  const char *error;
+  int before;
+} fsh_sqlite_db;
+
+// A statement, counted like its connection, which it holds a count of, and the JSON of a row.
+typedef struct {
+  fsh_sqlite_db *db;
+  sqlite3_stmt *stmt;
+  int64_t refs;
+  char *row;
+  size_t length, cap;
+} fsh_sqlite_stmt;
+
+// Handles cross to Fish as integers: a blocking task may hold a number, never a raw pointer.
+static fsh_sqlite_db *fsh_sqlite_db_of(int64_t handle) { return (fsh_sqlite_db *)(intptr_t)handle; }
+static fsh_sqlite_stmt *fsh_sqlite_stmt_of(int64_t handle) { return (fsh_sqlite_stmt *)(intptr_t)handle; }
+
+static void *fsh_sqlite_grow(void *p, size_t n) {
+  void *q = realloc(p, n ? n : 1);
+  if (!q) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return q;
+}
+
+// A connection not yet opened, so its owner exists before the blocking task that opens it.
+int64_t fsh_rt_sqlite_database(void) {
+  fsh_sqlite_db *d = fsh_sqlite_grow(NULL, sizeof *d);
+  d->db = NULL;
+  d->refs = 1;
+  d->error = NULL;
+  d->before = 0;
+  pthread_mutex_init(&d->lock, NULL);
+  return (int64_t)(intptr_t)d;
+}
+
+// Opens the file at path, made if it isn't there, or a database in memory for ":memory:". A
+// connection another holds waits up to five seconds for it rather than failing at once.
+int64_t fsh_rt_sqlite_open(int64_t handle, const char *path) {
+  fsh_sqlite_db *d = fsh_sqlite_db_of(handle);
+  int rc = sqlite3_open_v2(path, &d->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, NULL);
+  if (rc == SQLITE_OK) sqlite3_busy_timeout(d->db, 5000);
+  return rc & 0xff;
+}
+
+// The last failure's message, read before the connection's lock is given back.
+const char *fsh_rt_sqlite_error(int64_t handle) {
+  fsh_sqlite_db *d = fsh_sqlite_db_of(handle);
+  return d->error ? d->error : sqlite3_errmsg(d->db);
+}
+
+void fsh_rt_sqlite_retain(int64_t handle) {
+  __atomic_add_fetch(&fsh_sqlite_db_of(handle)->refs, 1, __ATOMIC_RELAXED);
+}
+
+void fsh_rt_sqlite_release(int64_t handle) {
+  fsh_sqlite_db *d = fsh_sqlite_db_of(handle);
+  if (__atomic_sub_fetch(&d->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+  sqlite3_close_v2(d->db);
+  pthread_mutex_destroy(&d->lock);
+  free(d);
+}
+
+// Closes the connection for every holder. Statements still open keep SQLite's half alive until
+// they are finalized, as sqlite3_close_v2 arranges, but run nothing more.
+void fsh_rt_sqlite_close(int64_t handle) {
+  fsh_sqlite_db *d = fsh_sqlite_db_of(handle);
+  pthread_mutex_lock(&d->lock);
+  sqlite3_close_v2(d->db);
+  d->db = NULL;
+  pthread_mutex_unlock(&d->lock);
+}
+
+int64_t fsh_rt_sqlite_statement(int64_t handle) {
+  fsh_sqlite_stmt *s = fsh_sqlite_grow(NULL, sizeof *s);
+  s->db = fsh_sqlite_db_of(handle);
+  s->stmt = NULL;
+  s->refs = 1;
+  s->row = NULL;
+  s->length = 0;
+  s->cap = 0;
+  fsh_rt_sqlite_retain(handle);
+  return (int64_t)(intptr_t)s;
+}
+
+void fsh_rt_sqlite_statement_retain(int64_t handle) {
+  __atomic_add_fetch(&fsh_sqlite_stmt_of(handle)->refs, 1, __ATOMIC_RELAXED);
+}
+
+void fsh_rt_sqlite_finalize(int64_t handle) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  pthread_mutex_lock(&s->db->lock);
+  sqlite3_finalize(s->stmt);
+  s->stmt = NULL;
+  pthread_mutex_unlock(&s->db->lock);
+}
+
+void fsh_rt_sqlite_statement_release(int64_t handle) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  if (__atomic_sub_fetch(&s->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+  // ponytail: a statement dropped unclosed while another task's statement runs on its connection
+  // waits for that run on the thread dropping it; hand the finalize to the running job if a
+  // program ever stalls there. One closed, or made for a single run, never waits.
+  if (s->stmt) fsh_rt_sqlite_finalize(handle);
+  free(s->row);
+  fsh_rt_sqlite_release((int64_t)(intptr_t)s->db);
+  free(s);
+}
+
+// Takes the connection for one statement's run, which fsh_rt_sqlite_unlock ends whether or not
+// this refused it.
+int64_t fsh_rt_sqlite_lock(int64_t handle) {
+  fsh_sqlite_db *d = fsh_sqlite_stmt_of(handle)->db;
+  pthread_mutex_lock(&d->lock);
+  d->error = NULL;
+  if (!d->db) {
+    d->error = "the database is closed; open it again with Database.open";
+    return SQLITE_MISUSE;
+  }
+  d->before = sqlite3_total_changes(d->db);
+  return SQLITE_OK;
+}
+
+// Ends a run: a statement made for it alone is finalized, and any other reset, so that one
+// stopped at its first row holds no lock on the database's file.
+void fsh_rt_sqlite_unlock(int64_t handle, int64_t finalize) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  if (finalize) {
+    sqlite3_finalize(s->stmt);
+    s->stmt = NULL;
+  } else if (s->stmt) sqlite3_reset(s->stmt);
+  pthread_mutex_unlock(&s->db->lock);
+}
+
+int64_t fsh_rt_sqlite_prepare(int64_t handle, const char *sql, int64_t length) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  fsh_sqlite_db *d = s->db;
+  if (length > INT_MAX) {
+    d->error = "the SQL is longer than SQLite reads";
+    return SQLITE_TOOBIG;
+  }
+  const char *tail = NULL;
+  int rc = sqlite3_prepare_v2(d->db, sql, (int)length, &s->stmt, &tail);
+  if (rc != SQLITE_OK) return rc & 0xff;
+  if (!s->stmt) {
+    d->error = "the SQL holds no statement";
+    return SQLITE_ERROR;
+  }
+  // SQLite compiles the first statement and stops, so a second would be dropped unsaid. One that
+  // doesn't compile is a second all the same: it may name a table the first has yet to make.
+  sqlite3_stmt *second = NULL;
+  rc = sqlite3_prepare_v2(d->db, tail, (int)(sql + length - tail), &second, NULL);
+  if (rc == SQLITE_OK && !second) return SQLITE_OK;
+  d->error = "the SQL holds more than one statement; run each with a call of its own";
+  sqlite3_finalize(second);
+  sqlite3_finalize(s->stmt);
+  s->stmt = NULL;
+  return SQLITE_ERROR;
+}
+
+// Readies a statement kept from an earlier run for another, its parameters all NULL again.
+int64_t fsh_rt_sqlite_reset(int64_t handle) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  if (!s->stmt) {
+    s->db->error = "the statement is closed; prepare it again";
+    return SQLITE_MISUSE;
+  }
+  sqlite3_reset(s->stmt);
+  sqlite3_clear_bindings(s->stmt);
+  return SQLITE_OK;
+}
+
+int64_t fsh_rt_sqlite_parameters(int64_t handle) {
+  return sqlite3_bind_parameter_count(fsh_sqlite_stmt_of(handle)->stmt);
+}
+
+int64_t fsh_rt_sqlite_bind_null(int64_t handle, int64_t at) {
+  return sqlite3_bind_null(fsh_sqlite_stmt_of(handle)->stmt, (int)at) & 0xff;
+}
+
+int64_t fsh_rt_sqlite_bind_integer(int64_t handle, int64_t at, int64_t value) {
+  return sqlite3_bind_int64(fsh_sqlite_stmt_of(handle)->stmt, (int)at, value) & 0xff;
+}
+
+int64_t fsh_rt_sqlite_bind_double(int64_t handle, int64_t at, double value) {
+  return sqlite3_bind_double(fsh_sqlite_stmt_of(handle)->stmt, (int)at, value) & 0xff;
+}
+
+// SQLite copies the bytes, as the caller's last only as long as the call.
+int64_t fsh_rt_sqlite_bind_text(int64_t handle, int64_t at, const char *text, int64_t length) {
+  return sqlite3_bind_text64(fsh_sqlite_stmt_of(handle)->stmt, (int)at, text, (sqlite3_uint64)length, SQLITE_TRANSIENT, SQLITE_UTF8) & 0xff;
+}
+
+int64_t fsh_rt_sqlite_bind_blob(int64_t handle, int64_t at, const uint8_t *data, int64_t length) {
+  return sqlite3_bind_blob64(fsh_sqlite_stmt_of(handle)->stmt, (int)at, data, (sqlite3_uint64)length, SQLITE_TRANSIENT) & 0xff;
+}
+
+// SQLITE_ROW at a row, SQLITE_DONE past the last, or what went wrong.
+int64_t fsh_rt_sqlite_step(int64_t handle) {
+  return sqlite3_step(fsh_sqlite_stmt_of(handle)->stmt) & 0xff;
+}
+
+static void fsh_sqlite_put(fsh_sqlite_stmt *s, const char *bytes, size_t n) {
+  if (s->length + n > s->cap) {
+    s->cap = (s->length + n) * 2;
+    s->row = fsh_sqlite_grow(s->row, s->cap);
+  }
+  memcpy(s->row + s->length, bytes, n);
+  s->length += n;
+}
+
+static void fsh_sqlite_put_text(fsh_sqlite_stmt *s, const unsigned char *text, size_t n) {
+  fsh_sqlite_put(s, "\"", 1);
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = text[i];
+    char escaped[8];
+    if (c == '"' || c == '\\') {
+      escaped[0] = '\\';
+      escaped[1] = (char)c;
+      fsh_sqlite_put(s, escaped, 2);
+    } else if (c < 0x20) fsh_sqlite_put(s, escaped, (size_t)snprintf(escaped, sizeof escaped, "\\u%04x", c));
+    else fsh_sqlite_put(s, (const char *)&c, 1);
+  }
+  fsh_sqlite_put(s, "\"", 1);
+}
+
+// The row the statement is at as a JSON object keyed by column name: an INTEGER and a REAL as
+// numbers, TEXT as a string, a BLOB as an array of its bytes and NULL as null. The text is the
+// statement's, good until its next row.
+const char *fsh_rt_sqlite_row(int64_t handle) {
+  fsh_sqlite_stmt *s = fsh_sqlite_stmt_of(handle);
+  char number[32];
+  s->length = 0;
+  fsh_sqlite_put(s, "{", 1);
+  int columns = sqlite3_column_count(s->stmt);
+  for (int i = 0; i < columns; i++) {
+    if (i > 0) fsh_sqlite_put(s, ",", 1);
+    const char *name = sqlite3_column_name(s->stmt, i);
+    if (!name) name = "";
+    fsh_sqlite_put_text(s, (const unsigned char *)name, strlen(name));
+    fsh_sqlite_put(s, ":", 1);
+    switch (sqlite3_column_type(s->stmt, i)) {
+      case SQLITE_INTEGER:
+        fsh_sqlite_put(s, number, (size_t)snprintf(number, sizeof number, "%lld", (long long)sqlite3_column_int64(s->stmt, i)));
+        break;
+      case SQLITE_FLOAT: {
+        double value = sqlite3_column_double(s->stmt, i);
+        // JSON has no infinity, so one is written as a number past any f64, which reads back as it.
+        if (value - value != 0) fsh_sqlite_put(s, value > 0 ? "1e999" : "-1e999", value > 0 ? 5 : 6);
+        else fsh_sqlite_put(s, number, (size_t)snprintf(number, sizeof number, "%.17g", value));
+        break;
+      }
+      case SQLITE_TEXT: {
+        const unsigned char *text = sqlite3_column_text(s->stmt, i);
+        fsh_sqlite_put_text(s, text, (size_t)sqlite3_column_bytes(s->stmt, i));
+        break;
+      }
+      case SQLITE_BLOB: {
+        const uint8_t *data = sqlite3_column_blob(s->stmt, i);
+        int length = sqlite3_column_bytes(s->stmt, i);
+        fsh_sqlite_put(s, "[", 1);
+        for (int b = 0; b < length; b++) fsh_sqlite_put(s, number, (size_t)snprintf(number, sizeof number, b > 0 ? ",%d" : "%d", data[b]));
+        fsh_sqlite_put(s, "]", 1);
+        break;
+      }
+      default:
+        fsh_sqlite_put(s, "null", 4);
+    }
+  }
+  // The NUL after the brace goes in with it, as Fish reads the row as a C string.
+  fsh_sqlite_put(s, "}", 2);
+  return s->row;
+}
+
+// How many rows the run inserted, updated or deleted: SQLite keeps the last such statement's
+// count, so a run that changed nothing is told apart by the connection's total.
+// ponytail: SQLite's int counts, which wrap past 2^31 rows; sqlite3_changes64 once every
+// system SQLite is 3.37 or newer.
+int64_t fsh_rt_sqlite_changes(int64_t handle) {
+  fsh_sqlite_db *d = fsh_sqlite_stmt_of(handle)->db;
+  return sqlite3_total_changes(d->db) == d->before ? 0 : sqlite3_changes(d->db);
+}
+
+int64_t fsh_rt_sqlite_last_insert_rowid(int64_t handle) {
+  return sqlite3_last_insert_rowid(fsh_sqlite_stmt_of(handle)->db->db);
+}
+`;

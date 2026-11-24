@@ -6779,6 +6779,334 @@ export class Pool {
   }
 }
 `,
+  // SQLite through the system's library, which links into a program only when it imports this:
+  // statements with parameters bound apart from their text, and rows read by column name into a
+  // type, as the postgres module reads them.
+  sqlite: String.raw`
+declare function fsh_rt_sqlite_database(): i64;
+declare function fsh_rt_sqlite_open(db: i64, path: Ptr<u8>): i64;
+declare function fsh_rt_sqlite_error(db: i64): Ptr<u8>;
+declare function fsh_rt_sqlite_retain(db: i64): void;
+declare function fsh_rt_sqlite_release(db: i64): void;
+declare function fsh_rt_sqlite_close(db: i64): void;
+declare function fsh_rt_sqlite_statement(db: i64): i64;
+declare function fsh_rt_sqlite_statement_retain(statement: i64): void;
+declare function fsh_rt_sqlite_statement_release(statement: i64): void;
+declare function fsh_rt_sqlite_finalize(statement: i64): void;
+declare function fsh_rt_sqlite_lock(statement: i64): i64;
+declare function fsh_rt_sqlite_unlock(statement: i64, finalize: i64): void;
+declare function fsh_rt_sqlite_prepare(statement: i64, sql: Ptr<u8>, length: i64): i64;
+declare function fsh_rt_sqlite_reset(statement: i64): i64;
+declare function fsh_rt_sqlite_parameters(statement: i64): i64;
+declare function fsh_rt_sqlite_bind_null(statement: i64, at: i64): i64;
+declare function fsh_rt_sqlite_bind_integer(statement: i64, at: i64, value: i64): i64;
+declare function fsh_rt_sqlite_bind_double(statement: i64, at: i64, value: f64): i64;
+declare function fsh_rt_sqlite_bind_text(statement: i64, at: i64, text: Ptr<u8>, length: i64): i64;
+declare function fsh_rt_sqlite_bind_blob(statement: i64, at: i64, data: Ptr<u8>, length: i64): i64;
+declare function fsh_rt_sqlite_step(statement: i64): i64;
+declare function fsh_rt_sqlite_row(statement: i64): Ptr<u8>;
+declare function fsh_rt_sqlite_changes(statement: i64): i64;
+declare function fsh_rt_sqlite_last_insert_rowid(statement: i64): i64;
+
+// A value a statement's ?, ?1 or :name can take: a boolean is bound as 0 or 1, bytes as a BLOB.
+export type SqlValue = null | boolean | i64 | f64 | string | u8[];
+
+// What SQLite said went wrong, with its primary result code: 1 for bad SQL, 19 for a constraint.
+export class SqliteError extends Error {
+  code: i64;
+  constructor(message: string, code: i64) {
+    super(message);
+    this.name = "SqliteError";
+    this.code = code;
+  }
+}
+
+// A row that can't be read as the type asked for: a column it needs is missing, null where the
+// field can't be, or of another type.
+export class RowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RowError";
+  }
+}
+
+// What a statement that reads no rows did: how many rows it inserted, updated or deleted, and the
+// rowid of the connection's last insert.
+export type RunResult = { changes: i64; lastInsertRowid: i64 };
+
+// A run's rows, each as the JSON the runtime wrote it as, and its counts.
+type Outcome = { rows: string[]; changes: i64; lastInsertRowid: i64 };
+
+// The handles a Statement is made from. A class of this module's own, so that only prepare can
+// make a Statement: a number passed for a handle would be read as an address.
+class Prepared {
+  db: i64;
+  statement: i64;
+  constructor(db: i64, statement: i64) {
+    this.db = db;
+    this.statement = statement;
+  }
+}
+
+function failure(db: i64, code: i64): SqliteError {
+  return new SqliteError(unsafe { fromCString(fsh_rt_sqlite_error(db)) }, code);
+}
+
+// Text as bytes with a NUL after them, so a pointer can be taken to empty text too.
+function terminated(text: string): u8[] {
+  let bytes = new TextEncoder().encode(text);
+  bytes.push(0);
+  return bytes;
+}
+
+function bind(statement: i64, at: i64, p: Ref<SqlValue>): i64 {
+  if (p === null) return unsafe { fsh_rt_sqlite_bind_null(statement, at) };
+  if (typeof p === "boolean") return unsafe { fsh_rt_sqlite_bind_integer(statement, at, p ? 1 : 0) };
+  if (typeof p === "string") {
+    const bytes = terminated(p);
+    return unsafe { fsh_rt_sqlite_bind_text(statement, at, ptrOf(bytes[0]), (bytes.length as i64) - 1) };
+  }
+  if (typeof p === "number") {
+    // A union says whether it holds an i64 or an f64 only by comparing equal to one, so the
+    // number's text is read back as an i64: a float is never equal to it.
+    const text = JSON.stringify(p);
+    const whole = parseInt(text);
+    if (whole !== null && p === whole) return unsafe { fsh_rt_sqlite_bind_integer(statement, at, whole) };
+    const real = parseFloat(text);
+    if (real !== null) return unsafe { fsh_rt_sqlite_bind_double(statement, at, real) };
+    // JSON has no text for an infinity or NaN; SQLite stores NaN as NULL.
+    const infinity: f64 = 1e300 * 1e300;
+    if (p === infinity) return unsafe { fsh_rt_sqlite_bind_double(statement, at, infinity) };
+    if (p === -infinity) return unsafe { fsh_rt_sqlite_bind_double(statement, at, -infinity) };
+    return unsafe { fsh_rt_sqlite_bind_null(statement, at) };
+  }
+  const none: u8[] = [0 as u8];
+  return p.length === 0
+    ? unsafe { fsh_rt_sqlite_bind_blob(statement, at, ptrOf(none[0]), 0) }
+    : unsafe { fsh_rt_sqlite_bind_blob(statement, at, ptrOf(p[0]), p.length as i64) };
+}
+
+// Binds params and steps the statement to its end, or to its first row when one is wanted,
+// keeping the rows wanted: -1 for all, 0 for none. It holds the connection's lock, so it gives
+// its failure back rather than throwing past the unlock.
+function stepped(db: i64, statement: i64, params: Ref<SqlValue[]>, wanted: i64, out: Mut<Outcome>): SqliteError | null {
+  const takes = unsafe { fsh_rt_sqlite_parameters(statement) };
+  const given = params.length as i64;
+  if (takes !== given) return new SqliteError("the statement takes " + String(takes) + (takes === 1 ? " parameter" : " parameters") + ", but " + String(given) + (given === 1 ? " was" : " were") + " given", 25);
+  let at: i64 = 1;
+  for (const p of params) {
+    const code = bind(statement, at, p);
+    if (code !== 0) return failure(db, code);
+    at += 1;
+  }
+  while (true) {
+    const code = unsafe { fsh_rt_sqlite_step(statement) };
+    if (code === 101) break;
+    if (code !== 100) return failure(db, code);
+    if (wanted === 0) continue;
+    out.rows.push(unsafe { fromCString(fsh_rt_sqlite_row(statement)) });
+    if (wanted === 1) break;
+  }
+  out.changes = unsafe { fsh_rt_sqlite_changes(statement) };
+  out.lastInsertRowid = unsafe { fsh_rt_sqlite_last_insert_rowid(statement) };
+  return null;
+}
+
+// One run, on the blocking pool: the statement is compiled from sql first, and finalized after,
+// when it is given, and otherwise is one prepared before. The job holds a count of the statement,
+// released here, so a caller that stops waiting can't close the connection under it.
+function work(db: i64, statement: i64, sql: string | null, params: Ref<SqlValue[]>, wanted: i64): Outcome throws SqliteError {
+  let out: Outcome = { rows: [], changes: 0, lastInsertRowid: 0 };
+  let code = unsafe { fsh_rt_sqlite_lock(statement) };
+  if (code === 0) {
+    if (sql === null) code = unsafe { fsh_rt_sqlite_reset(statement) };
+    else {
+      const text = terminated(sql);
+      code = unsafe { fsh_rt_sqlite_prepare(statement, ptrOf(text[0]), (text.length as i64) - 1) };
+    }
+  }
+  const failed = code !== 0 ? failure(db, code) : stepped(db, statement, params, wanted, out);
+  unsafe { fsh_rt_sqlite_unlock(statement, sql === null ? 0 : 1) };
+  unsafe { fsh_rt_sqlite_statement_release(statement) };
+  if (failed !== null) throw failed;
+  return out;
+}
+
+function compile(db: i64, statement: i64, sql: string): void throws SqliteError {
+  let code = unsafe { fsh_rt_sqlite_lock(statement) };
+  if (code === 0) {
+    const text = terminated(sql);
+    code = unsafe { fsh_rt_sqlite_prepare(statement, ptrOf(text[0]), (text.length as i64) - 1) };
+  }
+  const failed = code !== 0 ? failure(db, code) : null;
+  unsafe { fsh_rt_sqlite_unlock(statement, 0) };
+  unsafe { fsh_rt_sqlite_statement_release(statement) };
+  if (failed !== null) throw failed;
+}
+
+function connect(db: i64, path: string): void throws SqliteError {
+  const name = terminated(path);
+  const code = unsafe { fsh_rt_sqlite_open(db, ptrOf(name[0])) };
+  const failed = code !== 0 ? failure(db, code) : null;
+  unsafe { fsh_rt_sqlite_release(db) };
+  if (failed !== null) throw failed;
+}
+
+function disconnect(db: i64): void {
+  unsafe { fsh_rt_sqlite_close(db) };
+  unsafe { fsh_rt_sqlite_release(db) };
+}
+
+function finalize(statement: i64): void {
+  unsafe { fsh_rt_sqlite_finalize(statement) };
+  unsafe { fsh_rt_sqlite_statement_release(statement) };
+}
+
+// Runs sql once, on a statement of its own that the job finalizes and frees.
+async function once(db: i64, sql: string, params: SqlValue[], wanted: i64): Promise<Outcome> throws SqliteError {
+  const statement = unsafe { fsh_rt_sqlite_statement(db) };
+  return await spawnBlocking(() => work(db, statement, sql, params, wanted));
+}
+
+// Runs a prepared statement again, the job holding a count of it while it runs.
+async function again(db: i64, statement: i64, params: SqlValue[], wanted: i64): Promise<Outcome> throws SqliteError {
+  unsafe { fsh_rt_sqlite_statement_retain(statement) };
+  return await spawnBlocking(() => work(db, statement, null, params, wanted));
+}
+
+function rowsAs<T>(rows: Ref<string[]>): T[] throws RowError {
+  let out: T[] = [];
+  for (const json of rows) {
+    try {
+      out.push(JSON.parse<T>(json));
+    } catch (e) {
+      throw new RowError(rowMessage(e.message, json));
+    }
+  }
+  return out;
+}
+
+// A JSON reading error put in terms of columns: "missing field 'x' at $" is column x missing,
+// and "... at $.x" is about column x, which may be a null its field can't hold.
+function rowMessage(message: string, json: string): string {
+  if (message.startsWith("missing field ")) {
+    const end = message.lastIndexOf(" at ");
+    return "the row has no column " + message.slice("missing field ".length as i64, end) + ", which the type reads";
+  }
+  const at = message.indexOf(" at $.");
+  if (at < 0) return "the row can't be read: " + message;
+  const column = message.slice(at + 6);
+  if (json.includes(JSON.stringify(column) + ":null")) return "column '" + column + "' is null, which its field can't hold; type it 'T | null'";
+  return "column '" + column + "': " + message.slice(0, at);
+}
+
+// A connection to one database, running one statement at a time. Each call runs on the blocking
+// pool, so a slow statement holds no worker. Clones share the connection, which closes when the
+// last of them is dropped, or at close().
+export class Database {
+  private handle: i64;
+
+  private constructor(handle: i64) {
+    this.handle = handle;
+  }
+
+  // The database in the file at path, made when it isn't there, or one in memory for ":memory:".
+  static async open(path: string): Promise<Database> throws SqliteError {
+    if (path.includes("\0")) throw new SqliteError("a database's path can't hold a NUL character", 14);
+    const handle = unsafe { fsh_rt_sqlite_database() };
+    const db = new Database(handle);
+    unsafe { fsh_rt_sqlite_retain(handle) };
+    await spawnBlocking(() => connect(handle, path));
+    return db;
+  }
+
+  // The rows sql gives, each read by column name into a T.
+  async query<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T[]> throws SqliteError | RowError {
+    const out = await once(this.handle, sql, params, -1);
+    return rowsAs<T>(out.rows);
+  }
+
+  // The first row sql gives as a T, or null when it gives none.
+  async queryOne<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T | null> throws SqliteError | RowError {
+    const out = await once(this.handle, sql, params, 1);
+    let rows = rowsAs<T>(out.rows);
+    return rows.pop();
+  }
+
+  // Runs sql for what it changes; rows it gives are dropped.
+  async run(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<RunResult> throws SqliteError {
+    const out = await once(this.handle, sql, params, 0);
+    return { changes: out.changes, lastInsertRowid: out.lastInsertRowid };
+  }
+
+  // sql compiled once, to run many times with new parameters.
+  async prepare(this: Ref<this>, sql: string): Promise<Statement> throws SqliteError {
+    const db = this.handle;
+    const statement = unsafe { fsh_rt_sqlite_statement(db) };
+    const made = new Statement(new Prepared(db, statement));
+    unsafe { fsh_rt_sqlite_statement_retain(statement) };
+    await spawnBlocking(() => compile(db, statement, sql));
+    return made;
+  }
+
+  // Closes the connection for every clone; a call on any of them after this throws.
+  async close(this: Ref<this>): Promise<void> {
+    const db = this.handle;
+    unsafe { fsh_rt_sqlite_retain(db) };
+    await spawnBlocking(() => disconnect(db));
+  }
+
+  clone(): Database {
+    unsafe { fsh_rt_sqlite_retain(this.handle) };
+    return new Database(this.handle);
+  }
+
+  [Symbol.dispose](this: Mut<this>): void {
+    unsafe { fsh_rt_sqlite_release(this.handle) };
+  }
+}
+
+// A statement compiled by prepare, run with all, get or run as often as wanted.
+export class Statement {
+  private db: i64;
+  private handle: i64;
+
+  constructor(from: Prepared) {
+    this.db = from.db;
+    this.handle = from.statement;
+  }
+
+  // Every row the statement gives with params, each read by column name into a T.
+  async all<T>(this: Ref<this>, params: SqlValue[] = []): Promise<T[]> throws SqliteError | RowError {
+    const out = await again(this.db, this.handle, params, -1);
+    return rowsAs<T>(out.rows);
+  }
+
+  // The first row the statement gives with params as a T, or null when it gives none.
+  async get<T>(this: Ref<this>, params: SqlValue[] = []): Promise<T | null> throws SqliteError | RowError {
+    const out = await again(this.db, this.handle, params, 1);
+    let rows = rowsAs<T>(out.rows);
+    return rows.pop();
+  }
+
+  // Runs the statement with params for what it changes; rows it gives are dropped.
+  async run(this: Ref<this>, params: SqlValue[] = []): Promise<RunResult> throws SqliteError {
+    const out = await again(this.db, this.handle, params, 0);
+    return { changes: out.changes, lastInsertRowid: out.lastInsertRowid };
+  }
+
+  // Frees the compiled statement; a call on it after this throws.
+  async close(this: Ref<this>): Promise<void> {
+    const statement = this.handle;
+    unsafe { fsh_rt_sqlite_statement_retain(statement) };
+    await spawnBlocking(() => finalize(statement));
+  }
+
+  [Symbol.dispose](this: Mut<this>): void {
+    unsafe { fsh_rt_sqlite_statement_release(this.handle) };
+  }
+}
+`,
   // Tar archives, read an entry at a time and written from files, imported as fish:tar.
   "fish:tar": String.raw`
 import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "fs";
