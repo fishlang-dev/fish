@@ -2498,3 +2498,30 @@ async function main() {
 // expect: closed fast
 // expect: dropped slow
 // expect: 2
+// case: using_never_read_is_not_unused
+class Guard {
+  [Symbol.dispose](): void { console.log("released"); }
+}
+function acquire(): Guard {
+  return new Guard();
+}
+function main() {
+  using guard = acquire();
+  const spare = 1;
+  console.log("working");
+}
+// warning: unused variable 'spare'
+// expect: working
+// expect: released
+// case: await_using_never_read_is_not_unused
+class Conn {
+  async [Symbol.asyncDispose](): Promise<void> { console.log("closed"); }
+}
+async function main() {
+  await using conn = new Conn();
+  const spare = 1;
+  console.log("working");
+}
+// warning: unused variable 'spare'
+// expect: working
+// expect: closed

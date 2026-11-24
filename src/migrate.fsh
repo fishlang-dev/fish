@@ -54,7 +54,7 @@ export const REJECTS: Record<string, string> = {
   R2: "prototype edits and Object.defineProperty change a type after it is declared, and Fish types have fixed layouts; declare the field or method on the class, or wrap the value",
   R3: "delete removes a field, and Fish objects have fixed layouts; make the field an Option and set it to null, or keep the entries in a dictionary, '{ [k: string]: T }', or a Map",
   R5: "the arguments object isn't in Fish; take the arguments as a rest parameter, as in '...args: T[]'",
-  R6: "Symbol is runtime reflection, which Fish doesn't have beyond a '[Symbol.iterator]' method and a class's '[Symbol.dispose]' method; use a string or an enum for a key, and an interface for a protocol",
+  R6: "Symbol is runtime reflection, which Fish doesn't have beyond a '[Symbol.iterator]' method and a class's '[Symbol.dispose]' and '[Symbol.asyncDispose]' methods; use a string or an enum for a key, and an interface for a protocol",
   R7: "declaration merging and module augmentation reopen a type after it is declared, and Fish types are closed; give everything in one declaration, or a new name",
 };
 
@@ -510,6 +510,7 @@ function itemOf(n: AnyNode): Item {
       it.returnType = idOf(m.returnType);
       it.hasBody = m.body !== undefined;
       it.bodyItems = stmtIds(m.body);
+      it.async = async;
       it.promised = !m.generator && (async || isPromise(m.returnType));
     } else if (m.kind === "constructor") {
       it.params = m.params.map((p) => p.id);
@@ -836,7 +837,8 @@ function identNames(f: Ref<File>, i: usize | undefined, shorthand: boolean): str
 }
 
 // A file's reads of `Symbol.dispose` and `Symbol.asyncDispose`, each with whether it is the key of
-// a class's `[Symbol.dispose]` method, which Fish runs when an instance is dropped.
+// a class's `[Symbol.dispose]` method, which Fish runs when an instance is dropped, or of its
+// `async [Symbol.asyncDispose]` method, which an `await using` declaration awaits.
 function disposals(f: Ref<File>): Map<usize, boolean> {
   let found = new Map<usize, boolean>();
   if (f.bound.has("Symbol")) return found;
@@ -844,7 +846,7 @@ function disposals(f: Ref<File>): Map<usize, boolean> {
     const x: Ref<Item> = f.items[n]!;
     if (x.kind === "member" && (x.name === "dispose" || x.name === "asyncDispose") && named(f, x.object, "Symbol") && !found.has(n)) found.set(n, false);
     const key = x.of === "classMember" && x.kind === "method" ? x.nameExpr : undefined;
-    if (key !== undefined && f.items[key]!.kind === "member" && f.items[key]!.name === "dispose" && named(f, f.items[key]!.object, "Symbol")) found.set(key, true);
+    if (key !== undefined && f.items[key]!.kind === "member" && (f.items[key]!.name === "dispose" || (f.items[key]!.name === "asyncDispose" && x.async)) && named(f, f.items[key]!.object, "Symbol")) found.set(key, true);
   }
   return found;
 }
@@ -1767,7 +1769,7 @@ const GUIDES: Record<string, string> = {
   G9: "'.call', '.apply' and '.bind' choose a function's 'this' at run time; pass the receiver as an argument, or use a closure",
   G10: "'forEach' doesn't wait for an async callback; use 'for...of' with 'await', or spawn a task for each",
   G11: "hold one value, changed through one while the other is still used, which Fish's ownership refuses; share it as 'shared<T>', give one its own '.clone()', or restructure so one name is used at a time",
-  G12: "Fish disposes through a class's '[Symbol.dispose]()' method alone, which it runs when an instance is dropped; 'DisposableStack', '[Symbol.asyncDispose]', a call of the method by hand, and the member on an object literal or an interface aren't in Fish yet, so give a class the method and let its instance go out of scope",
+  G12: "Fish disposes through a class's own methods alone: '[Symbol.dispose]()', which it runs when an instance is dropped, and 'async [Symbol.asyncDispose]()', which an 'await using' declaration awaits; 'DisposableStack', a call of either by hand, and either member on an object literal or an interface aren't in Fish yet, so give a class the method and let its instance go out of scope",
 };
 
 const guideText = (rule: string): string => {

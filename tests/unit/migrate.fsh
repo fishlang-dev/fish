@@ -505,12 +505,14 @@ test("G3 reports a number used as an index or as a counter against .length, and 
   list(startingWith(guidedIn("let i = 0;\nfunction g(xs: string[], i: string) {\n  return xs[0] + i;\n}\n"), "G3"), [], "a string parameter");
 });
 
-test("G12 reports disposal beyond a class's [Symbol.dispose] method, which R6 leaves alone", () => {
-  const src = "class C {\n  [Symbol.dispose]() {}\n}\ninterface I {\n  [Symbol.dispose](): void;\n}\nc[Symbol.dispose]();\nconst o = { [Symbol.dispose]() {} };\nclass D {\n  async [Symbol.asyncDispose]() {}\n}\nconst s = new DisposableStack();\n";
+test("G12 reports disposal beyond a class's own disposers, which 'using' and 'await using' run", () => {
+  const src = "class C {\n  [Symbol.dispose]() {}\n}\ninterface I {\n  [Symbol.dispose](): void;\n}\nc[Symbol.dispose]();\nconst o = { [Symbol.dispose]() {} };\nclass D {\n  [Symbol.asyncDispose]() {}\n}\nconst s = new DisposableStack();\n";
   list(startingWith(guidedIn(src), "G12"), ["G12 Symbol.dispose", "G12 Symbol.dispose", "G12 Symbol.dispose", "G12 Symbol.asyncDispose", "G12 DisposableStack"], "hits");
   list(startingWith(guidedIn("class C {\n  [Symbol.dispose]() {}\n}\n"), "G12"), [], "a class's disposer");
+  list(startingWith(guidedIn("class C {\n  async [Symbol.asyncDispose]() {}\n}\nasync function f() {\n  await using c = new C();\n}\n"), "G12"), [], "a class's async disposer, and an 'await using' declaration");
+  list(startingWith(guidedIn("const o = { async [Symbol.asyncDispose]() {} };\nawait c[Symbol.asyncDispose]();\n"), "G12"), ["G12 Symbol.asyncDispose", "G12 Symbol.asyncDispose"], "an async disposer beyond a class's method");
   list(startingWith(guidedIn('import { Symbol, DisposableStack } from "./own";\nconst o = { [Symbol.dispose]: 1 };\nconst s = new DisposableStack();\n'), "G12"), [], "names the file declares");
-  assert(messageOf(src, "G12").startsWith("Fish disposes through a class's '[Symbol.dispose]()' method alone"), "G12's message");
+  assert(messageOf(src, "G12").startsWith("Fish disposes through a class's own methods alone"), "G12's message");
 });
 
 test("G11 reports an alias changed through one name while the other is still used, naming the three fixes", () => {

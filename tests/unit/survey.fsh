@@ -120,13 +120,16 @@ test("fetch counts as available", () => {
   countsAre('async function f(): Promise<string> {\n  const res = await fetch("http://localhost/");\n  return await res.text();\n}\n', []);
 });
 
-test("G12 counts disposal beyond a class's [Symbol.dispose] method, which R6 leaves alone", () => {
+test("G12 counts disposal beyond a class's own disposers, which 'using' and 'await using' run", () => {
   countsAre("class C {\n  [Symbol.dispose]() {}\n}\n", []);
+  countsAre("class C {\n  async [Symbol.asyncDispose]() {}\n}\n", []);
+  countsAre("class C {\n  [Symbol.asyncDispose]() {}\n}\n", ["G12: 1"]);
   countsAre("class C {\n  [Symbol.dispose]() {}\n}\nconst k = Symbol.asyncDispose;\nconst s = new DisposableStack();\n", ["G12: 2"]);
 });
 
 test("using declarations over a class with a disposer parse, so their file isn't counted as unparsed", () => {
   countsAre("class C {\n  [Symbol.dispose]() {}\n}\nfunction f() {\n  using c = new C();\n}\n", []);
+  countsAre("class C {\n  async [Symbol.asyncDispose]() {}\n}\nasync function f() {\n  await using c = new C();\n}\n", []);
 });
 
 test("the reject rules are counted through the migration detector, R5 to R7 too", () => {

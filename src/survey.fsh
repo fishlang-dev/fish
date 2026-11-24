@@ -50,7 +50,7 @@ const RULES: Rule[] = [
   { id: "G9", action: "guided", title: ".call, .apply and .bind: pass the receiver explicitly or use a closure" },
   { id: "G10", action: "guided", title: "an async callback passed to forEach: use for...of with await, or spawned tasks" },
   { id: "G11", action: "guided", title: "a value aliased and changed from two names: Rc<T> in one thread, shared<T> across tasks, a .clone(), or restructuring" },
-  { id: "G12", action: "guided", title: "DisposableStack, Symbol.asyncDispose, and Symbol.dispose beyond a class's method: give a class a [Symbol.dispose]() method, which runs when an instance is dropped" },
+  { id: "G12", action: "guided", title: "DisposableStack, and Symbol.dispose and Symbol.asyncDispose beyond a class's methods: give a class a [Symbol.dispose]() method, which runs when an instance is dropped, or an async [Symbol.asyncDispose]() one for 'await using'" },
   { id: "A1", action: "auto", title: "var: const or let" },
   { id: "A2", action: "auto", title: "null, undefined and ?: Option" },
   { id: "A3", action: "auto", title: "== and !=: === and !==" },
