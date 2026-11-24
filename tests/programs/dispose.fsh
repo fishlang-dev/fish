@@ -2557,3 +2557,45 @@ async function main() {
 // expect: after
 // expect: dropped
 // expect: 2
+// case: dispose_in_an_async_closure
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](): void { console.log(`dispose ${this.name}`); }
+}
+async function main() {
+  const r = new Res("captured");
+  const show = async () => { console.log(r.name); };
+  await show();
+}
+// error: error[E0801]: async closures holding a value with a '[Symbol.dispose]' method, as this one holds 'r', are not supported yet
+// case: dispose_in_a_task_group_closure
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](): void { console.log(`dispose ${this.name}`); }
+}
+async function use(r: Res): Promise<void> { console.log(`use ${r.name}`); }
+async function main() {
+  const r = new Res("captured");
+  await taskGroup(async (group) => {
+    group.spawn(use(r));
+  });
+}
+// error: error[E0801]: async closures holding a value with a '[Symbol.dispose]' method, as this one holds 'r', are not supported yet
+// case: dispose_moved_into_a_task
+// expect: use spawned
+// expect: dispose spawned
+// expect: after
+class Res {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](): void { console.log(`dispose ${this.name}`); }
+}
+async function use(r: Res): Promise<void> { console.log(`use ${r.name}`); }
+async function main() {
+  const r = new Res("spawned");
+  const task = spawn(use(r));
+  await task;
+  console.log("after");
+}

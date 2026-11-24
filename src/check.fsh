@@ -5690,6 +5690,13 @@ class BodyChecker implements Context, GuardHost {
       const held = this.cx.tables.typing.show(kept[0].type);
       throw new CompileError("E0215", `'${kept[0].name}' can't be held by ${who}: it is declared with 'using', so its value belongs to its scope, which disposes it; call a closure that borrows it where it is made, or lend '${kept[0].name}' to a function as a 'Ref<${held}>' or a 'Mut<${held}>'`, at.start, at.end);
     }
+    // An async closure's future starts with its own copy of what the closure holds, and a value
+    // that only moves has no copy to give it.
+    const copiedIn = e.async ? captured.find(([alias, from]) => from !== "this" && this.cx.tables.typing.holdsMoveOnly(alias.type)) : undefined;
+    if (copiedIn !== undefined) {
+      const what = this.cx.tables.typing.holdsPart(copiedIn[0].type, (u) => this.cx.tables.typing.disposable(u)) ? "a value with a '[Symbol.dispose]' method" : "a Rust value";
+      throw unsupported(`async closures holding ${what}, as this one holds '${copiedIn[0].name}',`, this.captureSpan(innerId, copiedIn[0].localId, e));
+    }
     if (nested !== undefined) {
       const self = captured.find(([, from]) => from === "this");
       if (self !== undefined) throw new CompileError("E0708", `'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, this.captureSpan(innerId, self[0].localId, e).start, this.captureSpan(innerId, self[0].localId, e).end);
