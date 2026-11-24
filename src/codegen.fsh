@@ -13825,7 +13825,15 @@ class Codegen implements PrintHost, ComptimeHost {
       const of = this.recOf(block.of);
       return block.of === want || (of?.kind === "union" && of.members.includes(want));
     });
-    return holder !== undefined ? this.narrowedPlace(payload, holder, want) : payload;
+    if (holder !== undefined) return this.narrowedPlace(payload, holder, want);
+    // A narrowed read is typed by records lowered afresh, laid out as the member's block is and
+    // not the same records: the value is in that block all the same, not in the payload, which
+    // holds the pointer to it.
+    const lowered = r.members.find((m) => {
+      const block = this.recOf(m);
+      return block?.kind === "recursive" && this.conversions().alike(block.of, want, new Map<string, boolean>());
+    });
+    return lowered !== undefined ? this.narrowedPlace(payload, lowered, want) : payload;
   }
 
 
