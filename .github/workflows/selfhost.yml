@@ -24,7 +24,10 @@ jobs:
         with:
           fetch-depth: 0
       # The unit tests still run Bun as a peer: the language server's driver and npm bundling.
+      # Pinned to the Bun std's behaviour is checked against, since a later one prints otherwise.
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
       - uses: actions/cache@v4
         with:
           path: ~/.cache/fish/stage0

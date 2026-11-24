@@ -442,7 +442,13 @@ test("an address-sanitized fetch sends the method, headers and body it was given
 test("the thread sanitizer reports two tasks racing on raw memory", () => {
   if (!can("thread")) return;
   const root = scratch("fish-sanitize-");
-  const src = `async function bump(address: usize): Promise<i64> {
+  // Each task waits for the other to have started before it writes: on a busy machine with few
+  // cores one worker would otherwise run them one after the other, which is no race. The wait is
+  // bounded, so a machine with one thread fails the test rather than hanging it.
+  const src = `type Gate = { started: Atomic<i64> };
+async function bump(address: usize, gate: shared<Gate>): Promise<i64> {
+  gate.started.add(1);
+  for (let waited = 0; waited < 200000000 && gate.started.load() < 2; waited++) {}
   for (let i = 0; i < 100000; i++) {
     unsafe {
       const p = address as MutPtr<i64>;
@@ -455,8 +461,9 @@ test("the thread sanitizer reports two tasks racing on raw memory", () => {
 async function main() {
   let count = 0;
   const address = unsafe { mutPtrOf(count) as usize };
-  const a = spawn(bump(address));
-  const b = spawn(bump(address));
+  const gate = shared<Gate>({ started: new Atomic(0) });
+  const a = spawn(bump(address, gate.clone()));
+  const b = spawn(bump(address, gate.clone()));
   await a;
   await b;
   console.log("done");
@@ -465,7 +472,7 @@ async function main() {
   const got = run(root, "race", src, ["--sanitize", "thread"]);
   assert(got.code !== 0, "the program exited with 0");
   assert(got.err.includes("WARNING: ThreadSanitizer: data race"), `stderr:\n${got.err}`);
-  assert(/#0 fsh\.bump [^\n]*main\.fsh:5/.test(got.err), `no race at main.fsh:5 in:\n${got.err}`);
+  assert(/#0 fsh\.bump [^\n]*main\.fsh:8/.test(got.err), `no race at main.fsh:8 in:\n${got.err}`);
   removed(root);
 }, { timeout: 120_000 });
 

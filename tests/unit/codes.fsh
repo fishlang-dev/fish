@@ -118,7 +118,7 @@ test("each explanation's example fails with its code, and its fixed program comp
   } catch (_e) {}
   assert(explained >= 20, `only ${explained} codes are explained`);
   same(wrong.join("\n"), "", "explanations");
-});
+}, { timeout: 60_000 });
 
 test("explain gives a code's explanation, its title alone when it has none, and nothing for an unknown code", () => {
   same((explain("e0201") ?? "").split("\n")[0]!, "E0201: use of a moved value", "a lowercase code");

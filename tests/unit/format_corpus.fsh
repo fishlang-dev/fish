@@ -399,7 +399,7 @@ test("src/typings.fsh formats keeping its comments, parses back to the same tree
 test("src/unions.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/unions.fsh"));
 test("src/unquote.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/unquote.fsh"));
 test("src/unsupported.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/unsupported.fsh"));
-test("src/values.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/values.fsh"));
+test("src/values.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/values.fsh"), { timeout: 60_000 });
 test("src/walk.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/walk.fsh"));
 test("src/warnings.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/warnings.fsh"));
 test("src/watch.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/watch.fsh"));

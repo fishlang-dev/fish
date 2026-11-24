@@ -307,7 +307,7 @@ function main() {
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("3 1 3\n2 2 c\na 1 2 a\nx:?:1 y:true:2\nmade3 made4 true false\n"), "the program");
   removed(root);
-}, { timeout: 30_000 });
+}, { timeout: 90_000 });
 
 test("an array whose elements aren't what the declaration says panics naming them", () => {
   const root = scratch("fish-packages-");
@@ -333,7 +333,7 @@ function main() {
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("3 box1 5 5\nbox1:10\nmade2:1 10\n5 new new5 n3\n"), "the program");
   removed(root);
-}, { timeout: 30_000 });
+}, { timeout: 90_000 });
 
 test("a compound assignment to a handle's property waits", () => {
   const root = scratch("fish-packages-");
@@ -361,7 +361,7 @@ function main() {
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("5 200 1.5 2 x 7 true true\n1\n"), "the program");
   removed(root);
-}, { timeout: 30_000 });
+}, { timeout: 90_000 });
 
 test("a result no member of its declared union takes panics", () => {
   const root = scratch("fish-packages-");

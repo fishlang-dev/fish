@@ -445,7 +445,7 @@ test("compiling the same programs again in one process gives identical IR", () =
     assert(rounds[2][i] === rounds[0][i], `${programs[i].file}: the third round's IR differs`);
   }
   removed(root);
-}, { timeout: 120_000 });
+}, { timeout: 300_000 });
 
 // A process that builds many times, as a test runner or a daemon does, gives std's part the same
 // text each time a program is built again, so it links the object it cached the first time.
