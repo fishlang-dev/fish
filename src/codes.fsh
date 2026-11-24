@@ -354,6 +354,66 @@ function main() {
   E0211: { title: "not possible through a Dyn" },
   E0212: { title: "a change that would only reach a temporary copy" },
   E0213: { title: "a value that can't be cloned" },
+  E0214: {
+    title: "a value with a '[Symbol.dispose]' method taken apart or copied",
+    long: {
+      text: `A class's '[Symbol.dispose]' method runs once, on the whole instance, when it is dropped. So an instance of such a class is only ever moved as a whole: a field can't be moved out of it, which would leave the disposer a value with a hole in it, and nothing may copy it behind its back.
+
+Rust has the same rule for a type that implements Drop (its E0509). TypeScript has no moves, so the question never comes up there.
+
+To fix it, clone the field you need, as in 'c.log.clone()', or give the class a method that hands out what you want and leaves the instance whole.`,
+      example: `class Conn {
+  log: string[];
+  constructor() { this.log = ["opened"]; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(this.log.length); }
+}
+function keep(log: string[]) { console.log(log.length); }
+function main() {
+  const c = new Conn();
+  keep(c.log);
+}`,
+      fixed: `class Conn {
+  log: string[];
+  constructor() { this.log = ["opened"]; }
+  [Symbol.dispose](this: Mut<this>): void { console.log(this.log.length); }
+}
+function keep(log: string[]) { console.log(log.length); }
+function main() {
+  const c = new Conn();
+  keep(c.log.clone());
+}`,
+    },
+  },
+  E0215: {
+    title: "a 'using' or 'await using' binding moved or assigned to",
+    long: {
+      text: `A 'using' declaration ties a value to its scope: the value's '[Symbol.dispose]()' method runs when that scope ends, on every way out. An 'await using' declaration does the same with the value's 'async [Symbol.asyncDispose]()' method, which it awaits there. So the value never leaves the binding. Passing it by value, returning it, storing it, or capturing it in a closure that holds it would move it to somewhere that outlives the scope, and assigning to the binding would replace it before the scope ends.
+
+In TypeScript a 'using' binding can't be assigned to either, but a second reference to its value can escape the scope and be used after the value is disposed. Fish refuses the escape.
+
+To fix it, lend the value: take a 'Ref<T>' or a 'Mut<T>' where it is passed. If the value has to outlive the scope, declare it with 'const' or 'let', which let it move.`,
+      example: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log("closed"); }
+}
+function show(c: Conn) { console.log(c.name); }
+function main() {
+  using c = new Conn("db");
+  show(c);
+}`,
+      fixed: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log("closed"); }
+}
+function show(c: Ref<Conn>) { console.log(c.name); }
+function main() {
+  using c = new Conn("db");
+  show(c);
+}`,
+    },
+  },
 
   E0301: {
     title: "async-only code outside an async function",
@@ -516,6 +576,80 @@ To fix it, rename one of them, or remove the one you don't need.`,
   E0408: { title: "invalid parameter list" },
   E0409: { title: "a local declaration that uses what it can't reach" },
   E0410: { title: "invalid overload signatures" },
+  E0411: {
+    title: "an invalid 'using' or 'await using' declaration",
+    long: {
+      text: `A 'using' declaration keeps one value to the end of its scope and runs the value's '[Symbol.dispose]()' method there. So it binds one plain name, its value is an instance of a class that declares '[Symbol.dispose]()', and it sits in a block of a function: a 'for' head ends with each pass of its loop, and with no block the program wrote.
+
+An 'await using' declaration awaits the value's 'async [Symbol.asyncDispose]()' method there instead, so its class declares that one, and it sits where an 'await' at the end of its scope could: in an async function that is no generator, outside a match arm and a 'try' with a 'finally'. Straight in a 'switch' case it is refused as TypeScript refuses it, since a case's statements are no scope of their own.
+
+TypeScript asks the same of the value, except that it also takes 'null' and 'undefined', which dispose nothing, and lets 'await using' fall back to '[Symbol.dispose]()'. Fish refuses those: handle the null first, and declare a value that has only '[Symbol.dispose]()' with 'using'.
+
+To fix it, give the class a '[Symbol.dispose]()' method, or declare the value with 'const' when nothing has to run at the end of the scope.`,
+      example: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+}
+function main() {
+  using c = new Conn("db");
+  console.log(c.name);
+}`,
+      fixed: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log("closed"); }
+}
+function main() {
+  using c = new Conn("db");
+  console.log(c.name);
+}`,
+    },
+  },
+
+  E0412: {
+    title: "a way out of an 'await using' scope where its disposer can't be awaited",
+    long: {
+      text: `An 'await using' declaration awaits its value's 'async [Symbol.asyncDispose]()' method on each ordinary way out of its scope: the scope's end, a 'return', a 'break' or 'continue' that leaves it, and an error thrown through it. Fish writes that 'await' where the way out is, so the way out has to be a place an 'await' can stand.
+
+A 'return', 'break' or 'continue' inside a 'try' that has a 'finally' is no such place yet. Neither is one where another variable of the same name hides the binding, nor one written straight after a label with no block around it.
+
+The ordinary ways out are the only ones that await the disposer. When the task panics, or its Promise is dropped before it finishes, nothing is awaited: the value is dropped like any other, which runs its '[Symbol.dispose]()' method when its class declares one too. A class whose release must not be skipped declares both: the awaited one stands in for the other on an ordinary way out, and the other runs alone on a panic or a drop.
+
+To fix it, leave the scope from outside the 'try': keep what the 'try' worked out in a variable, and return it after the 'try'.`,
+      example: `class Conn {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> { console.log("closed"); }
+}
+async function work(): Promise<i64> {
+  await using c = new Conn();
+  try {
+    return 1;
+  } finally {
+    console.log("done");
+  }
+}
+async function main() {
+  const n = await work();
+  console.log(n);
+}`,
+      fixed: `class Conn {
+  async [Symbol.asyncDispose](this: Mut<this>): Promise<void> { console.log("closed"); }
+}
+async function work(): Promise<i64> {
+  await using c = new Conn();
+  let n = 0;
+  try {
+    n = 1;
+  } finally {
+    console.log("done");
+  }
+  return n;
+}
+async function main() {
+  const n = await work();
+  console.log(n);
+}`,
+    },
+  },
 
   E0501: {
     title: "wrong number of arguments",
@@ -655,6 +789,38 @@ function main() {
   E0707: { title: "invalid enum" },
   E0708: { title: "'this' or 'super' where there is none" },
   E0709: { title: "a private or protected member used from outside" },
+  E0710: {
+    title: "a '[Symbol.dispose]' or '[Symbol.asyncDispose]' method that can't be a disposer, or one called by hand",
+    long: {
+      text: `A class's '[Symbol.dispose]' method is its disposer: Fish runs it exactly once, when an instance is dropped, before the instance's fields are. That is at the end of the scope that owns it, when it is overwritten, when what holds it is dropped, and when a panic unwinds past it.
+
+Nothing calls a disposer with arguments or reads what it gives, so it takes no parameters and no type parameters, returns nothing, and can't be static, async or a generator. A drop has nowhere to send an error, so it declares no 'throws'. It borrows the instance, as 'this: Mut<this>' or read-only, and never takes it over with 'Own<this>', since the drop goes on to free the fields.
+
+Calling it by hand, as in 'x[Symbol.dispose]()', is an error too: the drop would run it a second time. In TypeScript the call is how a value is disposed early; in Fish, end the value instead, by letting it go out of scope or moving it into a function.
+
+A class's 'async [Symbol.asyncDispose]' method is its async disposer, which an 'await using' declaration awaits on each ordinary way out of its scope. It is async and returns 'Promise<void>', takes no parameters or type parameters, borrows the instance, and can't be static or a generator. It may declare 'throws': the function the scope is in takes the error. Nothing but 'await using' awaits it, so a call by hand is an error here too, and a drop never runs it: a panic, or a Promise dropped before it finishes, runs '[Symbol.dispose]()' alone, when the class declares that too.`,
+      example: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log("closed " + this.name); }
+}
+function main() {
+  const c = new Conn("db");
+  c[Symbol.dispose]();
+}`,
+      fixed: `class Conn {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  [Symbol.dispose](this: Mut<this>): void { console.log("closed " + this.name); }
+}
+function end(c: Conn) { console.log("ending " + c.name); }
+function main() {
+  const c = new Conn("db");
+  end(c);
+  console.log("after");
+}`,
+    },
+  },
 
   E0801: {
     title: "a form Fish doesn't support yet",

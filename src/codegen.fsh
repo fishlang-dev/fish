@@ -14,7 +14,7 @@ import type { ArithmeticOp, AssignOp, BinaryOp, Expr, JsName, ObjectProp, Param,
 import { ARRAY, DYN, atNamesIn, compound, Conversions, llvmOf, nameAt, structNames, textOf, typeDefinitions } from "./layout.fsh";
 import { made, type PatternInfo } from "./match.fsh";
 import { STD_BASE } from "./std.fsh";
-import { EMBEDDED, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.fsh";
+import { EMBEDDED, LIVE, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.fsh";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.fsh";
 import { partEnd, partStart, type Tables } from "./compilation.fsh";
 import { allWords } from "./sizes.fsh";
@@ -1146,9 +1146,9 @@ class Codegen implements PrintHost, ComptimeHost {
   return r.kind === "ref" ? r.to : t;
 }
 
-  // Whether a value of the type holds a Rust handle, which only moves.
-  holdsRust(t: Type): boolean {
-    return this.tables.typing.holdsPart(t, (u) => rustClassOf(this.tables.typing, u) !== undefined);
+  // Whether a value of the type holds a Rust handle or an instance with a disposer, which only move.
+  moveOnly(t: Type): boolean {
+    return this.tables.typing.holdsMoveOnly(t);
   }
 
   localAt(n: Ref<Expr | Stmt | Param | ObjectProp>): LocalId | undefined {
@@ -5611,7 +5611,15 @@ class Codegen implements PrintHost, ComptimeHost {
     if (r.kind === "array" || r.kind === "map" || r.kind === "shared" || r.kind === "block" || r.kind === "dyn" || r.kind === "recursive") return true;
     if (r.kind === "fixed") return r.size > 0 && this.needsDrop(r.element);
     if (r.kind === "interior" && !isLock(r)) return this.needsDrop(r.of);
+    // An instance with a disposer runs it when dropped, whatever its fields own.
+    if (r.kind === "class" && r.disposes === true) return true;
     return this.parts(type).some(([t]) => this.needsDrop(t));
+  }
+
+  // Where an instance with a disposer keeps the marker `new` sets, through any bases, or nothing
+  // for a class without one.
+  liveAt(c: ClassType): usize[] | undefined {
+    return this.tables.typing.disposable(c) ? this.tables.typing.fieldPath(c, LIVE) : undefined;
   }
 
 
@@ -5632,7 +5640,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // A copy of a value, holding its own reference to each string in it.
   copied(this: Mut<this>, v: string, type: Type): string {
-    if (this.holdsRust(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle, which is moved, never copied`);
+    if (this.moveOnly(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle or an instance with a disposer, which is moved, never copied`);
     const r = this.recOf(type);
     if (r?.kind === "interior" && !isLock(r)) return this.copied(v, r.of);
     if (!this.needsDrop(type)) return v;
@@ -5693,19 +5701,81 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // The disposers a drop of an instance runs, the class's own first, then each base's.
+  disposerNames(this: Mut<this>, type: ClassType): string {
+    let out = "";
+    let c: ClassType | undefined = type;
+    while (c !== undefined) {
+      const own = this.tables.disposers.get(c);
+      if (own !== undefined) out += ` ${this.symbol(own)}`;
+      c = this.tables.typing.rec(c).base;
+    }
+    return out;
+  }
+
+  // In a drop's helper, runs the disposers of the instance `%v`, when `new` finished making it and
+  // nothing has disposed it: its class's own, then each base's, each on the part it belongs to.
+  // Gives the instance as they left it, whose fields the drop goes on to free. The marker is
+  // cleared first, so a disposer that panics isn't run again, and its panic still frees the fields.
+  disposed(this: Mut<this>, type: ClassType): string {
+    const live = this.liveAt(type);
+    if (live === undefined) return "%v";
+    const t = this.llvm(type);
+    const [slot, marker, set, run, done, left] = [this.alloca(t), this.temp(), this.temp(), this.label(), this.label(), this.temp()];
+    this.emit(`store ${t} %v, ptr ${slot}`);
+    this.emit(`${marker} = getelementptr ${t}, ptr ${slot}, i32 0, ${live.map((i) => `i32 ${i}`).join(", ")}`);
+    this.emit(`${set} = load i1, ptr ${marker}`);
+    this.emit(`br i1 ${set}, label %${run}, label %${done}`);
+    this.startBlock(run);
+    this.emit(`store i1 false, ptr ${marker}`);
+    let part = slot;
+    let c: ClassType | undefined = type;
+    while (c !== undefined) {
+      const own = this.tables.disposers.get(c);
+      if (own !== undefined) {
+        const hooks = { unwound: (cg: Mut<Codegen>) => {
+          const v = cg.temp();
+          cg.emit(`${v} = load ${t}, ptr ${slot}`);
+          cg.dropParts(v, type);
+        } };
+        const none: string[] = [];
+        this.invoke(own, part, none, undefined, hooks);
+      }
+      const base = this.tables.typing.rec(c).base;
+      if (base !== undefined) part = this.upcast(part, c, base);
+      c = base;
+    }
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
+    this.emit(`${left} = load ${t}, ptr ${slot}`);
+    return left;
+  }
+
+  // Drops each part of an aggregate that owns something.
+  dropParts(this: Mut<this>, v: string, type: Exclude<Type, string>): void {
+    const t = this.llvm(type);
+    for (const [part, i] of this.parts(type)) {
+      if (!this.needsDrop(part)) continue;
+      const x = this.temp();
+      this.emit(`${x} = extractvalue ${t} ${v}, ${i}`);
+      this.dispose(x, part);
+    }
+  }
+
   // The function that drops what a value of an aggregate type owns, or returns a copy of it,
   // part by part, or for a union, in the member it holds. It is named before it is made, so a
   // type holding itself calls it.
   helper(this: Mut<this>, kind: "drop" | "copy", type: Exclude<Type, string>): string {
     const r = this.tables.typing.rec(type);
-    if (kind === "copy" && this.holdsRust(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle, which is moved, never copied`);
+    if (kind === "copy" && this.moveOnly(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle or an instance with a disposer, which is moved, never copied`);
     const made = kind === "copy" ? this.glue.copy.get(type) : this.glue.drop.get(type);
     if ((made !== undefined && made !== "")) return made;
     const described2 = this.tables.typing.described(type);
     const t = this.llvm(type);
     // Types described alike and laid out alike are dropped and copied alike, so they share one
-    // helper, named by what they are rather than by which of them came first.
-    const shape = `${kind} ${described2} ${t}`;
+    // helper, named by what they are rather than by which of them came first. A drop that runs
+    // disposers is told apart by which it runs.
+    const shape = `${kind} ${described2} ${t}${kind === "drop" && r.kind === "class" ? this.disposerNames(type as ClassType) : ""}`;
     const shared = this.glueByShape.get(shape);
     if (shared !== undefined) {
       if (kind === "copy") this.glue.copy.set(type, shared);
@@ -5824,10 +5894,11 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(`${result} = load ${t}, ptr ${copy}`);
       }
     } else {
+      const whole = kind === "drop" && r.kind === "class" ? this.disposed(type as ClassType) : "%v";
       for (const [part, i] of this.parts(type)) {
         if (!this.needsDrop(part)) continue;
         const v = this.temp();
-        this.emit(`${v} = extractvalue ${t} %v, ${i}`);
+        this.emit(`${v} = extractvalue ${t} ${whole}, ${i}`);
         const made = each(this, v, part);
         if (kind === "drop") continue;
         const next = this.temp();
@@ -9217,10 +9288,12 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     const whole = to === undefined || this.keepsAll(this.cur().types.get(e)!, to);
     // A Rust handle is never copied: one made here, or moved out of its place, is taken whole.
+    // So is an instance with a disposer, unless the conversion leaves it behind: then what it
+    // keeps is a copy, and the instance is dropped whole where it is.
     const get2 = this.cur().types.get(e)!;
-    const rust = this.holdsRust(get2);
+    const rust = this.moveOnly(get2) && (whole || this.moveOnly(to!));
     if ((whole || rust) && this.fresh(e)) return this.value(e, true);
-    if (!rust && !this.needsDrop(this.cur().types.get(e)!) && this.holdsRust(this.valueType(e))) return this.value(e);
+    if (!rust && !this.needsDrop(this.cur().types.get(e)!) && this.moveOnly(this.valueType(e))) return this.value(e);
     // A value owning nothing meets a recursive type's blocks only as the blocks just made for it.
     if (to !== undefined && !this.needsDrop(this.referent(this.cur().types.get(e)!)) && this.tables.typing.holdsPart(to, (t) => this.kindOf(t) === "recursive")) return this.value(e, true);
     const v = this.value(e);
@@ -9369,7 +9442,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   kept(this: Mut<this>, e: Ref<Expr>, v: string, written: boolean): string {
     const type = this.valueType(e);
-    if (!this.needsDrop(type) || this.fresh(e) || e.kind === "string" || !written || this.holdsRust(type)) return v;
+    if (!this.needsDrop(type) || this.fresh(e) || e.kind === "string" || !written || this.moveOnly(type)) return v;
     const copy = this.copied(v, type);
     this.pending.push({ v: copy, type });
     return copy;
@@ -13094,7 +13167,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const type = this.llvm(get5);
     const spilled = this.alloca(type);
     // A Rust handle made for the call moves into it, the call taking it over.
-    if (owns && this.holdsRust(this.cur().types.get(object)!)) {
+    if (owns && this.moveOnly(this.cur().types.get(object)!)) {
       if (!this.fresh(object)) assert(false, "internal error: a Rust handle taken over by a method is read from a place nothing empties");
       const line3 = `store ${type} ${this.value(object, true)}, ptr ${spilled}`;
       this.emit(line3);
@@ -13597,6 +13670,13 @@ class Codegen implements PrintHost, ComptimeHost {
           cg.dispose(unstash2, type);
         } };
         this.invoke(this.callOf(e)!, instance, argValues3, exprKey(e), part5);
+        // Only an instance whose constructor returned is one its disposer may run for.
+        const live = this.liveAt(type);
+        if (live !== undefined) {
+          const marker = this.temp();
+          this.emit(`${marker} = getelementptr ${this.llvm(type)}, ptr ${instance}, i32 0, ${live.map((i) => `i32 ${i}`).join(", ")}`);
+          this.emit(`store i1 true, ptr ${marker}`);
+        }
         const result = this.temp();
         this.emit(`${result} = load ${this.llvm(type)}, ptr ${instance}`);
         return result;
@@ -13909,7 +13989,7 @@ class Codegen implements PrintHost, ComptimeHost {
     // A shorthand lent to a reference field points at its variable.
     if (this.isRef(to) && !this.isRef(this.loc(local).type)) return [p.name, this.slot(local)];
     const part3 = this.loc(local).type;
-    if (this.holdsRust(part3) || (this.cur().consumes.has(p.id) && this.keepsAll(part3, to))) {
+    if (this.moveOnly(part3) || (this.cur().consumes.has(p.id) && this.keepsAll(part3, to))) {
       const shorthand2 = this.shorthand(p, local);
       const part = this.loc(local).type;
       return [p.name, this.convert(shorthand2, part, to)];
@@ -13933,7 +14013,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(line);
     const part3 = this.loc(local).type;
     if (!this.cur().consumes.has(p.id)) {
-      if (this.holdsRust(part3)) assert(false, "internal error: a Rust value in a shorthand property isn't moved");
+      if (this.moveOnly(part3)) assert(false, "internal error: a Rust value in a shorthand property isn't moved");
       return this.copied(read, part3);
     }
     const part4 = this.loc(local).type;
@@ -13951,7 +14031,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (setter !== undefined && target.kind === "member") {
       const type = this.cur().types.get(target)!;
       // A Rust value goes to the setter alone: the checker refuses such an assignment's value.
-      if (this.holdsRust(type)) {
+      if (this.moveOnly(type)) {
         const thisPointer2 = this.thisPointer(setter, target.object);
         this.invoke(setter, thisPointer2, [`${this.llvm(type)} ${result}`]);
         return result;
@@ -14129,7 +14209,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const option = this.valueType(e.left) as UnionType;
     const type = this.cur().types.get(e)!;
     // A Rust value is moved out of the left side, which is left empty, never copied.
-    const rust = this.holdsRust(option);
+    const rust = this.moveOnly(option);
     const v = rust && this.fresh(e.left) ? this.value(e.left, true) : this.value(e.left);
     if (rust && !this.fresh(e.left)) {
       if (!this.cur().consumes.has(e.left.id) || !this.lendable(e.left)) assert(false, "internal error: a Rust value on the left of '??' isn't moved");

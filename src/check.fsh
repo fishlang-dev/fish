@@ -23,7 +23,7 @@ import { Registry, RegistryState, type RegistryHost } from "./registry.fsh";
 import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost } from "./resolve.fsh";
 import { openParam } from "./typefns.fsh";
 import { lowerDefaults, writtenName } from "./defaults.fsh";
-import { idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
+import { ASYNC_DISPOSE, DISPOSE, LIVE, idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
 import { unsupported, unsupportedDeclaration } from "./unsupported.fsh";
 import { hoistLocals } from "./locals.fsh";
 import { localKeys, lowerKeys, lowerKeysWith, numberKey, topKeys } from "./keys.fsh";
@@ -41,7 +41,9 @@ type Func = Declared & { body: Stmt[] };
 
 // A local generic function's name stands for the function it was lifted to, `generic`. `id`
 // numbers it in its check, naming its slot in the IR; `localId` names it in the compilation's arena.
-export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; localId: LocalId; generic?: BodyId };
+// `using` marks one a `using` declaration made: it keeps its value to the end of its scope, so it
+// is never assigned to, moved, or held by a closure.
+export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; localId: LocalId; generic?: BodyId; using?: boolean };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
 // A checked program: the functions to compile, the tables its check filled in, and the
@@ -189,6 +191,27 @@ type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: s
 // The statements a destructuring assignment becomes: every part read, then every target written.
 type Destructured = { reads: Stmt[]; writes: Stmt[] };
 
+// An `await using` binding whose scope encloses the code being checked: its name and local, where
+// it is declared, and how many targets and `finally` blocks were open there, which say what a
+// jump leaves and whether it does so from a place nothing can be awaited. `clears`: its class
+// has a disposer too, which an awaited async one stands in for.
+type Awaited = { name: string; local: LocalId; clears: boolean; targets: usize; finalizing: usize; start: usize; end: usize };
+
+// The variable saying whether an `await using` binding's disposer has been started, under a name
+// no source can write.
+const startedName = (name: string): string => `disposal of ${name}`;
+
+// The variable an error thrown through an `await using` binding's scope is caught in, under a
+// name no source can write.
+const thrownName = (name: string): string => `error past ${name}`;
+
+// Whether a statement awaits an `await using` binding's disposer unless it has been started,
+// which only the checker writes: after the binding's scope, in the scope's handler, and before
+// each way out of it.
+function endsAwaited(s: Ref<Stmt>): boolean {
+  return s.kind === "if" && s.cond.kind === "unary" && s.cond.op === "!" && s.cond.operand.kind === "ident" && s.cond.operand.name.startsWith(startedName(""));
+}
+
 // A statement's stand-in as a jump's target: its id and span.
 function standIn(s: Ref<Stmt>): Stmt {
   return { id: s.id, kind: "empty", start: s.start, end: s.end };
@@ -273,7 +296,8 @@ function unlabeled(r: Ref<Rewrites>, s: Ref<Stmt>): Stmt {
 
 // A `for` loop's initializer, when it is a declaration of several names.
 function severalInit(s: Ref<Stmt>): Stmt | undefined {
-  if (s.kind === "for" && s.init !== undefined && s.init.kind === "let" && s.init.declarations.length > 1) return cloneStmt(s.init);
+  // A `using` stays in its head, where it is refused.
+  if (s.kind === "for" && s.init !== undefined && s.init.kind === "let" && !isUsing(s.init.keyword) && s.init.declarations.length > 1) return cloneStmt(s.init);
   return undefined;
 }
 
@@ -281,6 +305,16 @@ function severalInit(s: Ref<Stmt>): Stmt | undefined {
 function withoutInit(s: Ref<Stmt>): Stmt {
   if (s.kind === "for") return { ...s, init: undefined };
   return cloneStmt(s);
+}
+
+// Whether a declaration's keyword is `using` or `await using`, whose binding keeps its value to
+// the end of its scope.
+const isUsing = (keyword: string): boolean => keyword === "using" || keyword === "await using";
+
+// A loop's head ends with each pass and never with a block the program wrote, so a `using`
+// there has no scope to be disposed at the end of.
+function usingInHead(s: Ref<Extract<Stmt, { kind: "let" }>>): CompileError {
+  return new CompileError("E0411", `'${s.keyword}' can't be declared in a 'for' head; declare it in the loop's body, where it is disposed at the end of each pass`, s.start, s.start + s.keyword.length);
 }
 
 // A loop's `let`, which is what its left side is once a loop's pattern is lowered.
@@ -299,7 +333,7 @@ function arrayPatternOf(id: usize, at: Ref<Span>): Extract<Pattern, { kind: "arr
   return { id, kind: "array", elements: [], rest: undefined, start: at.start, end: at.end };
 }
 // A declaration of one name.
-function letOf(id: usize, keyword: "let" | "const" | "var", declarator: Declarator, at: Ref<Span>): Stmt {
+function letOf(id: usize, keyword: "let" | "const" | "var" | "using" | "await using", declarator: Declarator, at: Ref<Span>): Stmt {
   let made: Extract<Stmt, { kind: "let" }> = { id, kind: "let", keyword, declarations: [], start: at.start, end: at.end };
   made.declarations.push(declarator);
   return made;
@@ -1046,6 +1080,7 @@ function declareTop(tables: Mut<Tables>, program: Ref<Stmt[]>, decls: Mut<Declar
         top.funcs.push(addBodyTo(tables, block));
         continue;
       }
+      if (s.kind === "let" && isUsing(s.keyword)) throw new CompileError("E0404", `a top-level '${s.keyword}' has no scope to end, so its value would never be disposed; declare it in the function that uses it`, s.start, s.end);
       if (s.kind === "let") throw new CompileError("E0404", "a top-level 'let' would be a global that changes; use 'const', whose value is computed while compiling, or a const holding an Atomic or a Lock", s.start, s.end);
       // Top-level code with side effects belongs in main(); the migration lint moves it there.
       if (s.kind !== "function") throw new CompileError("E0404", "only declarations are allowed at the top level; move this into main()", s.start, s.end);
@@ -2071,6 +2106,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           for (const f of this.registry().settle(next)) {
             try {
               const definition = this.definition(f);
+              this.disposerMade(next, f, definition);
             this.checkBody(definition);
             } catch (e) {
               if (!(e instanceof CompileError)) throw e;
@@ -2087,6 +2123,17 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.recover(e);
       }
     }
+  }
+
+  // Records a class's own disposer, once it is an instance to compile, for the class's drop to
+  // call. An abstract one and a template are checked and never compiled.
+  private disposerMade(this: Mut<this>, c: ClassId, f: BodyId, made: InstanceId): void {
+    const info = this.tables.arenas.classOf(c);
+    if (info.methods.get(DISPOSE) !== f) return;
+    const body = this.tables.arenas.bodyOf(f);
+    if (body.abstract === true || body.template === true || !this.tables.arenas.instanceOf(made).concrete) return;
+    const type = info.type;
+    this.tables.disposers.set(type, made);
   }
 
   // Reads every body's results once every body is checked, giving the instances to compile and
@@ -3551,6 +3598,8 @@ class BodyState {
   // How many statements with a `finally` enclose the code being checked: a generator dropped
   // at a `yield` there would never run the `finally`.
   finalizing: usize;
+  // The `await using` bindings whose scopes enclose the code being checked, innermost last.
+  awaited: Awaited[];
   // This body's sight in the resolver's state, which holds the scopes its bindings are declared in.
   sight: usize;
   targets: Target[];
@@ -3627,6 +3676,7 @@ class BodyState {
     this.family = undefined;
     this.inferred = undefined;
     this.finalizing = 0;
+    this.awaited = [];
     this.sight = 0;
     this.targets = [];
     this.facts = [];
@@ -3818,6 +3868,7 @@ class BodyChecker implements Context, GuardHost {
     this.st.awaitable = new NodeSet<Expr>();
     this.st.yieldable = new NodeSet<Expr>();
     this.state.finalizing = 0;
+    this.state.awaited = [];
     const outerSight = this.state.outer !== undefined ? this.state.outer.sight : undefined;
     const sightOf = this.f().bodyId;
     this.state.sight = this.cx.resolver().openSight(sightOf, outerSight);
@@ -4640,6 +4691,55 @@ class BodyChecker implements Context, GuardHost {
     return { type: this.cx.resolver().resolveType(written), what: `'${name}'` };
   }
 
+  // A `using` declaration's own rules, checked before its value is: it binds one plain name, to a
+  // value given where it is declared. `usingBound` holds the rule on that value's type; the move
+  // check (`use` in `src/moves.fsh`), `closure` here and `changesLocal` in `src/values.fsh` keep
+  // the binding where it is.
+  /** @throws {CompileError} */
+  usingDeclared(s: Ref<Extract<Stmt, { kind: "let" }>>, d: Ref<Declarator>): void {
+    if (s.keyword === "await using") this.awaitedHere(s);
+    if (d.target.kind !== "ident") throw new CompileError("E0411", `a '${s.keyword}' declaration binds one name, since its whole value is disposed at the end of the scope; name the value, and read its parts from that name`, d.target.start, d.target.end);
+    if (d.init === undefined) throw new CompileError("E0406", `'${s.keyword} ${d.target.name}' needs its value where it is declared, as TypeScript requires`, d.start, d.end);
+  }
+
+  // An `await using` declaration awaits its value's disposer on each way out of its scope, so it
+  // sits where an `await` written at each of them could.
+  /** @throws {CompileError} */
+  private awaitedHere(s: Ref<Stmt>): void {
+    const at = { start: s.start, end: s.start + 11 };
+    if (this.f().async !== true || this.cx.tables.timerMains.hasId(this.f().id)) throw new CompileError("E0301", "'await using' can only be used inside an 'async' function", at.start, at.end);
+    let where: string | undefined = undefined;
+    if (this.state.generatorType !== undefined) where = "in a generator, which may be dropped at a 'yield' before the scope ends; declare it in the async function that reads the generator";
+    else if (this.state.targets.some((t) => t.kind === "arm")) where = "inside a match arm, where nothing can be awaited yet; declare it before the 'match'";
+    else if (this.state.finalizing > 0) where = "in a 'try' with a 'finally', where nothing can be awaited yet; declare it before the 'try'";
+    if (where !== undefined) throw new CompileError("E0411", `'await using' can't be declared ${where}`, at.start, at.end);
+  }
+
+  // A `using` binding just declared holds an instance of a class with a disposer, which runs
+  // where the binding's scope ends, and is marked as never leaving that scope.
+  /** @throws {CompileError} */
+  usingBound(this: Mut<this>, s: Ref<Extract<Stmt, { kind: "let" }>>, name: string, value: Ref<Expr>): void {
+    const local = this.locals().get(s)!;
+    const type = this.cx.localOf(local).type;
+    const shown = this.cx.tables.typing.show(type);
+    if (this.cx.tables.typing.isOption(type)) throw new CompileError("E0411", `'${name}' can't be declared with '${s.keyword}': its value is a '${shown}', which may be null; handle the null first, then declare the '${s.keyword}' with the value that is there`, value.start, value.end);
+    if (s.keyword === "await using") {
+      if (!this.asyncDisposable(type)) throw new CompileError("E0411", `'${name}' can't be declared with 'await using': its type '${shown}' has no async disposer to await at the end of the scope; declare 'async [Symbol.asyncDispose]()' in its class${this.cx.tables.typing.disposable(type) ? ", or declare it with 'using', which runs its '[Symbol.dispose]()'" : ""}`, value.start, value.end);
+    } else if (!this.cx.tables.typing.disposable(type)) throw new CompileError("E0411", `'${name}' can't be declared with 'using': its type '${shown}' has no disposer to run at the end of the scope; declare '[Symbol.dispose]()' in its class, or use 'const'`, value.start, value.end);
+    this.cx.tables.arenas.localMut(local).using = true;
+  }
+
+  // Whether a type is a class with an async disposer, its own or a base's.
+  /** @throws {CompileError} */
+  private asyncDisposable(this: Mut<this>, t: Type): boolean {
+    let c: ClassType | undefined = this.cx.kindOf(t) === "class" ? (t as ClassType) : undefined;
+    while (c !== undefined) {
+      if (this.cx.registry().classOf(c).methods.has(ASYNC_DISPOSE)) return true;
+      c = this.cx.tables.typing.rec(c).base;
+    }
+    return false;
+  }
+
   // `let x: T` declares a variable that holds nothing until assigned; the moves check refuses
   // every use before that, as TypeScript's definite assignment does.
   /** @throws {CompileError} */
@@ -4922,7 +5022,9 @@ class BodyChecker implements Context, GuardHost {
     this.hoist(list);
     const before = this.state.facts.length;
     const writes = this.state.written.length;
+    const open = this.state.awaited.length;
     for (let i = 0; i < list.length; i++) {
+      if (this.state.awaited.length > 0) this.disposedBefore(list, i);
       const inserted = this.cx.tables.insertedAfter.get(list[i]!);
       if (inserted !== undefined && inserted.length > 0 && (i + 1 < list.length ? list[i + 1]!.id : undefined) !== inserted[0]!.id) for (let k: usize = 0; k < inserted.length; k++) list.splice((i + 1 + k) as i64, 0, cloneStmt(inserted[k]!));
       const s: Ref<Stmt> = list[i]!;
@@ -4939,7 +5041,9 @@ class BodyChecker implements Context, GuardHost {
       let at = i + 1;
       while (added.length > 0) list.splice(at++ as i64, 0, added.shift()!);
       if (after !== undefined) this.state.facts.push(this.current(after, mark));
+      this.awaitedFrom(list, i);
     }
+    this.state.awaited.splice(open as i64);
     if (list.length !== given.length || list.some((x, i) => x.id !== given[i as usize]!.id)) this.cx.tables.rewrites.replaceList(bodyId, owner, field, list);
     let ends: Facts = new Map<string, Type>();
     for (const { local } of this.state.written.slice(writes as i64)) {
@@ -4958,6 +5062,110 @@ class BodyChecker implements Context, GuardHost {
     return ends;
   }
 
+  // An `await using` declaration just checked, at `i` in its list, opens its binding's scope: the
+  // rest of the list, which goes in a `try` of its own. A variable before it says whether the
+  // disposer has been started. An error thrown through the scope is caught, the disposer awaited,
+  // and the error thrown again; after the `try` the disposer is awaited unless a way out of the
+  // scope did that, as `disposedBefore` makes each do.
+  /** @throws {CompileError} */
+  private awaitedFrom(this: Mut<this>, list: Mut<Stmt[]>, i: usize): void {
+    const s: Ref<Stmt> = list[i]!;
+    if (s.kind !== "let" || s.keyword !== "await using") return;
+    const d: Ref<Declarator> = s.declarations[0]!;
+    const local = this.locals().get(s);
+    if (local === undefined || d.target.kind !== "ident") return;
+    const held = this.cx.localOf(local).type;
+    const clears = this.cx.tables.typing.disposable(held);
+    const bound: Awaited = { name: d.target.name, local, clears, targets: this.state.targets.length, finalizing: this.state.finalizing, start: s.start, end: s.end };
+    const at = { start: s.start, end: s.end };
+    this.state.awaited.push({ ...bound });
+    // A list checked again holds what its first check added.
+    if (i + 1 < list.length && declaredNames(list[i + 1]!).includes(startedName(bound.name))) return;
+    const flag: Pattern = { id: nextId(this.cx.tables.ids), kind: "ident", name: startedName(bound.name), start: at.start, end: at.end };
+    const unset: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: false, start: at.start, end: at.end };
+    const started = letOf(nextId(this.cx.tables.ids), "let", { id: nextId(this.cx.tables.ids), target: flag, type: undefined, init: unset, start: at.start, end: at.end }, at);
+    const caught: Pattern = { id: nextId(this.cx.tables.ids), kind: "ident", name: thrownName(bound.name), start: at.start, end: at.end };
+    const again: Stmt = { id: nextId(this.cx.tables.ids), kind: "throw", value: this.partIdent(thrownName(bound.name), at), start: at.start, end: at.end };
+    const handler: Stmt[] = [this.unlessStarted(bound, at), again];
+    const rest = list.splice((i + 1) as i64);
+    list.push(started);
+    list.push({ id: nextId(this.cx.tables.ids), kind: "try", block: rest, param: caught, paramType: undefined, handler, finalizer: undefined, start: at.start, end: at.end });
+    list.push(this.unlessStarted(bound, at));
+  }
+
+  // Awaits an `await using` binding's disposer unless a way out of its scope already has, as one
+  // whose disposer threw into a `catch` inside the scope has.
+  private unlessStarted(this: Mut<this>, a: Ref<Awaited>, at: Ref<Span>): Stmt {
+    const pending: Expr = { id: nextId(this.cx.tables.ids), kind: "unary", op: "!", operand: this.partIdent(startedName(a.name), at), start: at.start, end: at.end };
+    return { id: nextId(this.cx.tables.ids), kind: "if", cond: pending, then: this.disposal(a, at), else: undefined, start: at.start, end: at.end };
+  }
+
+  // What awaits an `await using` binding's disposer: the variable saying it has been started is
+  // set first, so nothing awaits it a second time when it throws. Once it has completed, a class
+  // with a disposer too has its liveness marker cleared, so dropping the value doesn't also run
+  // that one; a panic or a dropped future before then leaves the marker, and the drop runs it.
+  private disposal(this: Mut<this>, a: Ref<Awaited>, at: Ref<Span>): Stmt[] {
+    const yes: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: true, start: at.start, end: at.end };
+    const set: Expr = { id: nextId(this.cx.tables.ids), kind: "assign", op: "=", target: this.partIdent(startedName(a.name), at), value: yes, start: at.start, end: at.end };
+    const callee: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: this.partIdent(a.name, at), name: ASYNC_DISPOSE, optional: false, start: at.start, end: at.end };
+    const call: Expr = { id: nextId(this.cx.tables.ids), kind: "call", callee, typeArgs: [], args: [], optional: false, start: at.start, end: at.end };
+    const awaited: Expr = { id: nextId(this.cx.tables.ids), kind: "unary", op: "await", operand: call, start: at.start, end: at.end };
+    let out: Stmt[] = [{ id: nextId(this.cx.tables.ids), kind: "expr", expr: set, start: at.start, end: at.end }, { id: nextId(this.cx.tables.ids), kind: "expr", expr: awaited, start: at.start, end: at.end }];
+    if (a.clears) {
+      const marker: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: this.partIdent(a.name, at), name: LIVE, optional: false, start: at.start, end: at.end };
+      const no: Expr = { id: nextId(this.cx.tables.ids), kind: "bool", value: false, start: at.start, end: at.end };
+      const clear: Expr = { id: nextId(this.cx.tables.ids), kind: "assign", op: "=", target: marker, value: no, start: at.start, end: at.end };
+      out.push({ id: nextId(this.cx.tables.ids), kind: "expr", expr: clear, start: at.start, end: at.end });
+    }
+    return out;
+  }
+
+  // A `return`, `break` or `continue` at `i` in a list, before it is checked: one that leaves the
+  // scope of `await using` bindings first awaits their disposers, innermost first, a returned
+  // value computed before them and held in a variable. The statements go before it in the list,
+  // so the list still ends with the jump.
+  /** @throws {CompileError} */
+  private disposedBefore(this: Mut<this>, list: Mut<Stmt[]>, i: usize): void {
+    const peeked = this.cx.tables.rewrites.getStmt(list[i]!.id);
+    const s: Ref<Stmt> = peeked !== undefined ? peeked : list[i]!;
+    if (s.kind !== "return" && s.kind !== "break" && s.kind !== "continue") return;
+    // A list checked again holds what its first check added.
+    if (i > 0 && endsAwaited(list[i - 1]!)) return;
+    // A jump leaves the bindings declared inside its target, and a `return` all of them, unless
+    // it is in a match arm, which it gives a value and never leaves.
+    let from = this.state.awaited.length;
+    if (s.kind === "break" || s.kind === "continue") {
+      const target = this.jumpTarget(s);
+      const depth = this.state.targets.findIndex((t) => t.stmt.id === target.id);
+      while (from > 0 && (this.state.awaited[from - 1]!.targets as i64) > depth) from--;
+    } else if (!this.state.targets.some((t) => t.kind === "arm")) from = 0;
+    if (from === this.state.awaited.length) return;
+    const at = { start: s.start, end: s.end };
+    for (let k = from; k < this.state.awaited.length; k++) {
+      const a: Awaited = { ...this.state.awaited[k]! };
+      const leaves = `this '${s.kind}' leaves the scope of 'await using ${a.name}'`;
+      if (this.state.finalizing > a.finalizing) throw new CompileError("E0412", `${leaves} from inside a 'try' with a 'finally', where its disposer can't be awaited yet; leave the scope after the 'try', as by setting a variable in it and testing that after it`, at.start, at.end);
+      if (this.peek(a.name) !== a.local) throw new CompileError("E0412", `${leaves} where another '${a.name}' hides it, so its disposer can't be awaited here; give the inner '${a.name}' another name`, at.start, at.end);
+    }
+    let made: Stmt[] = [];
+    let exit: Stmt;
+    if (s.kind === "break" || s.kind === "continue") exit = { id: nextId(this.cx.tables.ids), kind: s.kind, label: s.label, start: at.start, end: at.end };
+    else if (s.kind === "return" && s.value !== undefined) {
+      const name = `returned ${s.start}`;
+      const target: Pattern = { id: nextId(this.cx.tables.ids), kind: "ident", name, start: at.start, end: at.end };
+      made.push(letOf(nextId(this.cx.tables.ids), "const", { id: nextId(this.cx.tables.ids), target, type: undefined, init: cloneExpr(s.value), start: at.start, end: at.end }, at));
+      exit = { id: nextId(this.cx.tables.ids), kind: "return", value: this.partIdent(name, at), start: at.start, end: at.end };
+    } else exit = { id: nextId(this.cx.tables.ids), kind: "return", value: undefined, start: at.start, end: at.end };
+    for (let k = this.state.awaited.length; k > from; k--) {
+      const leaving: Awaited = { ...this.state.awaited[k - 1]! };
+      made.push(this.unlessStarted(leaving, at));
+    }
+    made.push(exit);
+    list.splice(i as i64, 1);
+    let to = i;
+    while (made.length > 0) list.splice(to++ as i64, 0, made.shift()!);
+  }
+
   // A declaration's type: as written, or as a later use demanded, or as the target its
   // destructured part goes to.
   /** @throws {CompileError} */
@@ -4966,6 +5174,8 @@ class BodyChecker implements Context, GuardHost {
       const resolved = this.cx.resolver().resolveType(d.type);
       return this.cx.tables.typing.stored(resolved);
     }
+    // A value held for a `return` while disposers are awaited is the function's result.
+    if (d.target.kind === "ident" && d.target.name.startsWith("returned ")) return this.state.declared;
     const demanded = this.cx.demands.get(s);
     return demanded !== undefined ? demanded : this.partType(s);
   }
@@ -5472,6 +5682,14 @@ class BodyChecker implements Context, GuardHost {
     }
     // A nested function runs whenever it is called, so it can't take over what it uses.
     const nested = this.cx.tables.nestedFunctions.get(e);
+    // A `using` binding stays in its scope, which a closure holding it may outlive.
+    const kept = captured.find(([alias, from]) => from !== "this" && from.using === true && (e.move || owning || moved.some((m) => m.localId === alias.localId)));
+    if (kept !== undefined) {
+      const at = this.captureSpan(innerId, kept[0].localId, e);
+      const who = nested !== undefined ? `the nested function '${nested}'` : "this closure";
+      const held = this.cx.tables.typing.show(kept[0].type);
+      throw new CompileError("E0215", `'${kept[0].name}' can't be held by ${who}: it is declared with 'using', so its value belongs to its scope, which disposes it; call a closure that borrows it where it is made, or lend '${kept[0].name}' to a function as a 'Ref<${held}>' or a 'Mut<${held}>'`, at.start, at.end);
+    }
     if (nested !== undefined) {
       const self = captured.find(([, from]) => from === "this");
       if (self !== undefined) throw new CompileError("E0708", `'this' inside the nested function '${nested}' isn't the enclosing method's; pass what it needs as a parameter`, this.captureSpan(innerId, self[0].localId, e).start, this.captureSpan(innerId, self[0].localId, e).end);
@@ -5690,6 +5908,7 @@ class BodyChecker implements Context, GuardHost {
         const first: Ref<Declarator> = s.declarations[0]!;
         const peeked = this.cx.tables.rewrites.rewrittenDeclarator(first);
         const d: Ref<Declarator> = peeked !== undefined ? peeked : first;
+        if (isUsing(s.keyword)) this.usingDeclared(s, d);
         if (d.init?.kind === "arrow" && d.target.kind === "ident" && s.keyword === "const" && d.init.typeParams.some((p) => !isLifetime(p))) {
           const fn = arrowFunction(this.cx.tables.ids, d.target.name, { ...d.init }, d);
           return this.lift(s, d.target.name, fn);
@@ -5724,7 +5943,9 @@ class BodyChecker implements Context, GuardHost {
         }
         // So does a regex given as a 'RegExp', which keeps its pattern's captures.
         const describes = annotated !== undefined && (this.cx.isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
-        this.declare(d.target.name, annotated !== undefined && !describes ? annotated : widened, s.keyword === "let", false, { ...s });
+        // A `using` binding is lent as a `Mut` and changed through its methods, as a `let` is.
+        this.declare(d.target.name, annotated !== undefined && !describes ? annotated : widened, s.keyword === "let" || isUsing(s.keyword), false, { ...s });
+        if (isUsing(s.keyword)) this.usingBound(s, d.target.name, d.init);
         const candidate = this.locals().get(s);
         if (s.keyword === "let" && annotated === undefined && type === "i64" && this.exprs().literalOnly(d.init, false)) this.cx.candidates.set(candidate!, cloneStmt(s));
         const number = s.keyword === "const" ? numberKey(d.init) : undefined;
@@ -5811,6 +6032,7 @@ class BodyChecker implements Context, GuardHost {
         return undefined;
       }
       case "for":
+        if (s.init !== undefined && s.init.kind === "let" && isUsing(s.init.keyword)) throw usingInHead(s.init);
         // A name declared in the head is scoped to the loop.
         this.pushScope(new Map<string, LocalId>());
         if (s.init !== undefined) this.statement(s.init);
@@ -5831,6 +6053,7 @@ class BodyChecker implements Context, GuardHost {
           if (this.state.finalizing > 0) throw unsupported("'for await' loops in a 'try' with a 'finally'", s);
         }
         const left: Ref<Stmt | Pattern> = s.left;
+        if (left.kind === "let" && isUsing(left.keyword)) throw usingInHead(left);
         if (left.kind !== "let" || left.keyword === "var") throw unsupported("'for...of' loops over a variable declared outside them", left);
         const d: Ref<Declarator> = left.declarations[0]!;
         if (left.declarations.length === 1 && (d.target.kind === "array" || d.target.kind === "object")) {
@@ -5992,6 +6215,11 @@ class BodyChecker implements Context, GuardHost {
         // The case bodies share one scope, as in JavaScript, but any case may be entered
         // directly, skipping the bodies before it, so a binding one case declares is usable
         // only in that case.
+        // A switch's cases share one scope, which no case's statements end.
+        for (const c of s.cases) {
+          const direct = c.body.find((x) => x.kind === "let" && x.keyword === "await using");
+          if (direct !== undefined) throw new CompileError("E0411", "'await using' can't be declared straight in a 'switch' case, whose scope is the whole 'switch' and not the case, as in TypeScript; put the case's statements in a block", direct.start, direct.start + 11);
+        }
         this.pushScope(new Map<string, LocalId>());
         this.enterTarget({ stmt: standIn(s), kind: "switch" as const });
         // A case narrows a union for its body, and so do the cases that fall through into it.
@@ -6038,6 +6266,10 @@ class BodyChecker implements Context, GuardHost {
         }
         let body: Ref<Stmt> = s.body;
         while (body.kind === "labeled") body = labeledOf(body);
+        // A jump straight after a label is in no list, so nothing could be put before it.
+        if (this.state.awaited.length > 0 && (body.kind === "return" || body.kind === "break" || body.kind === "continue")) {
+          throw new CompileError("E0412", `this '${body.kind}' is written straight after a label, where the disposer of 'await using ${this.state.awaited.at(-1)!.name}' can't be awaited before it; put it in a block, as in '${s.label}: { ... }'`, body.start, body.end);
+        }
         const loop = ["while", "doWhile", "for", "forIn", "forOf"].includes(body.kind) ? standIn(body) : undefined;
         this.enterTarget({ stmt: standIn(s), kind: "label" as const, label: s.label, loop });
         this.statement(s.body);
@@ -6073,6 +6305,16 @@ class BodyChecker implements Context, GuardHost {
         this.state.handlers.push([]);
         this.scoped(s.id, "block", s.block);
         let sites = this.state.handlers.pop()!;
+        const awaited = s.param !== undefined && s.param.kind === "ident" && s.param.name.startsWith(thrownName(""));
+        // The scope of an `await using` binding with nothing in it to throw needs no handler, and
+        // is the block it would have been.
+        if (sites.length === 0 && awaited) {
+          const bodyId = this.f().bodyId;
+          const edited = this.cx.tables.rewrites.listIn(bodyId, s.id, "block");
+          this.cx.tables.rewrites.replaceStmt(s, { id: 0, kind: "block", body: s.block.map((x) => cloneStmt(x)), start: s.start, end: s.end });
+          if (edited !== undefined) this.cx.tables.rewrites.replaceList(bodyId, s.id, "body", edited.slice());
+          return undefined;
+        }
         if (sites.length === 0) {
           const never = new CompileError("E0603", "nothing in this 'try' can throw, so its 'catch' never runs; remove the try/catch", s.start, s.start + 3);
           let callees: BodyId[] = [];
@@ -6080,10 +6322,16 @@ class BodyChecker implements Context, GuardHost {
           this.cx.tryCallees.push([never.clone(), callees]);
           throw never;
         }
-        const caught = this.cx.tables.typing.unionType(sites.map(([, t]) => t));
+        // Such a scope only passes an error on, so where the function itself is what takes it, each
+        // error is checked and converted where it is raised, as it would be with no scope there.
+        const passing = awaited && this.state.handlers.length === 0 && this.state.inferring === undefined && this.f().comptime === undefined && this.state.comptimeDepth === 0;
+        const caught = passing && this.state.errorType !== undefined ? this.state.errorType : this.cx.tables.typing.unionType(sites.map(([, t]) => t));
         while (sites.length > 0) {
           const [at, from] = sites.shift()!;
-          this.instance().raises.set(at, { from, to: caught });
+          const span = { start: at.start, end: at.end };
+          const throwing = at.kind === "throw";
+          if (passing) this.raiseAt(at, span, from, "this", throwing);
+          else this.instance().raises.set(at, { from, to: caught });
         }
         this.instance().caught.set(cloneStmt(s), caught);
         this.pushScope(new Map<string, LocalId>());
@@ -6294,7 +6542,12 @@ class BodyChecker implements Context, GuardHost {
 
   leaves(stmts: Ref<Stmt[]>): boolean {
     const last = stmts.at(-1);
-    return alwaysReturns(stmts, this.cx.broken, this.cx.continued) || last?.kind === "break" || last?.kind === "continue";
+    if (alwaysReturns(stmts, this.cx.broken, this.cx.continued) || last?.kind === "break" || last?.kind === "continue") return true;
+    // A list checked before ends with the scope an `await using` declaration opened, and what
+    // awaits its disposer after it: it leaves when the scope's own statements do.
+    if (stmts.length < 2 || last === undefined || !endsAwaited(last)) return false;
+    const scope: Ref<Stmt> = stmts[stmts.length - 2]!;
+    return scope.kind === "try" ? this.leaves(scope.block) : scope.kind === "block" && this.leaves(scope.body);
   }
 
   /** @throws {CompileError} */

@@ -12,11 +12,11 @@ import type { AssignOp, BinaryOp, Expr, Func, Id, Interface, MatchArm, ObjectPro
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.fsh";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.fsh";
 import { infer } from "./generics.fsh";
-import { EMBEDDED, ITERATOR, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, integerInfo, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.fsh";
+import { ASYNC_DISPOSE, DISPOSE, EMBEDDED, ITERATOR, LIVE, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, integerInfo, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.fsh";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.fsh";
 import type { EnumInfo, EnumInstance } from "./enums.fsh";
 import { EXPRESSION_FORMS, IMPORT_META_MEMBERS, unsupported } from "./unsupported.fsh";
-import { isIteratorKey, keyParts, leafOf, unknownKey } from "./keys.fsh";
+import { isAsyncDisposeKey, isDisposeKey, isIteratorKey, keyParts, leafOf, unknownKey } from "./keys.fsh";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.fsh";
 import { BUFFER_ENCODINGS, BUFFER_READS, BUFFER_REFUSED, BUFFER_STATICS, JSON_VALUE_NAME, STD_BASE } from "./std.fsh";
 import { parseArgsArgs } from "./parseargs.fsh";
@@ -1694,6 +1694,8 @@ export class Expressions<C extends Context> implements Union<C> {
   private callee(this: Mut<this>, given: Ref<Call>): { type: Type; what: string } {
     // `c[Symbol.iterator]()` calls the method that key names.
     const now = this.ctx.tables().rewrites.rewritten(given.callee);
+    if (now !== undefined) notByHand(now);
+    else notByHand(given.callee);
     const keyed = now !== undefined ? this.iteratorCallee(given, now) : this.iteratorCallee(given, given.callee);
     if (keyed !== undefined && keyed.kind === "call") return this.calleeKeyed(keyed);
     return this.calleeKeyed(given);
@@ -3674,7 +3676,9 @@ export class Expressions<C extends Context> implements Union<C> {
     const shaped = (k: string | undefined) => k === "object" || k === "class";
     // A type parameter, an object-typed parameter's included, reads its fields as a member does.
     if (!shaped(r?.kind) && r?.kind !== "param" && !(r?.kind === "union" && r.members.every((m) => shaped(this.kindOf(m))))) return false;
+    notByHand(e);
     const name = this.knownKey(e.index);
+    if (name === DISPOSE || name === ASYNC_DISPOSE) throw disposedByHand(e, name === ASYNC_DISPOSE);
     if (name.startsWith("#")) throw new CompileError("E0502", `'${name}' names no field: a private field is read as '${this.placeText(e.object)}.${name}'`, e.index.start, e.index.end);
     if (e.optional) throw unsupported("optional index expressions", e);
     const parts = { ...e };
@@ -3963,6 +3967,8 @@ export class Expressions<C extends Context> implements Union<C> {
     if (this.ctx.typing().holdsRef(t)) throw new CompileError("E0509", `'JSON.parse' makes owned values, so '${this.ctx.typing().show(t)}' can't hold references`, written.start, written.end);
     if (this.ctx.tables().typing.holdsPattern(t)) throw unsupported("template literal pattern types in 'JSON.parse'", written);
     if (this.ctx.typing().holdsPart(t, (u) => typeof u !== "string" && this.ctx.typing().kindOf(u) === "fixed")) throw unsupported("fixed-size arrays in 'JSON.parse'", written);
+    // Reading builds an instance without its constructor, so nothing would say it is one to dispose.
+    if (this.ctx.typing().holdsPart(t, (u) => this.ctx.typing().disposable(u))) throw new CompileError("E0509", "a class with a '[Symbol.dispose]' method can't be read from JSON, which would make one without running its constructor; read its fields and make it with 'new'", written.start, written.end);
     const hidden = this.ctx.typing().holdsPart(t, (u) => typeof u !== "string" && this.ctx.typing().kindOf(u) === "class" && this.ctx.typing().rec(u).fields.some((f) => f.name.startsWith("#")));
     if (hidden) throw new CompileError("E0509", "a class with '#private' fields can't be read from JSON, since JSON doesn't hold them", written.start, written.end);
     const s = this.read(e.args[0]!);
@@ -6763,6 +6769,9 @@ export class Expressions<C extends Context> implements Union<C> {
     if (rust !== undefined) {
       throw new CompileError("E1004", `'${e.name}' holds a Rust '${rust.name}', which a shared value gives only inside 'update', as in 's.update((v) => v.${e.name}...)'`, e.start, e.end);
     }
+    if (this.ctx.typing().holdsPart(found.type, (u) => this.ctx.typing().disposable(u))) {
+      throw new CompileError("E0214", `'${e.name}' holds a value with a '[Symbol.dispose]' method, which reading it out of a shared value would copy; use it inside 'update', as in 's.update((v) => v.${e.name}...)'`, e.start, e.end);
+    }
     if (!this.ctx.typing().interiorMutable(found.type)) this.ctx.copiesOut().add(cloneExpr(e));
     return found.type;
   }
@@ -7280,6 +7289,14 @@ export class Expressions<C extends Context> implements Union<C> {
       const name = rustClassOf(this.ctx.tables().typing, rust)!.name;
       if (this.cls(rust).methods.has("clone")) throw cloneRefused(`can't clone a value holding a Rust '${name}' as a whole; clone each '${name}' with its 'clone()'`, at, by);
       throw cloneRefused(`can't clone a Rust '${name}'${rustClassOf(this.ctx.tables().typing, behind) !== undefined ? "" : ", or a value holding one,"} unless its class declares 'clone(): ${name}', which calls its Clone`, at, by);
+    }
+    // An instance with a disposer is copied only as its class says, or two would be disposed.
+    let disposed: ClassType | undefined = undefined;
+    for (const u of reached) if (disposed === undefined && this.ctx.typing().disposable(u) && this.isClassType(u)) disposed = u;
+    if (disposed !== undefined) {
+      const name = this.ctx.typing().rec(disposed).name;
+      if (this.cls(disposed).methods.has("clone")) throw cloneRefused(`can't clone a value holding a '${name}' as a whole, since a '${name}' has a '[Symbol.dispose]' method and is copied only by its own 'clone()'; clone each '${name}' with its 'clone()'`, at, by);
+      throw cloneRefused(`can't clone a '${name}'${behind === disposed ? "" : ", or a value holding one"}: it has a '[Symbol.dispose]' method, which would then run for the copy too; declare 'clone(): ${name}' on the class to say what a copy is`, at, by);
     }
     // An array method's copy of a Dyn may panic, which unwinds as a Dyn's own copy does; only
     // `clone()` written on a value holding one asks for its Dyns to be cloned one by one.
@@ -7970,8 +7987,9 @@ export class Expressions<C extends Context> implements Union<C> {
   // a protected one also from the classes that embed it.
   /** @throws {CompileError} */
   private visible(this: Mut<this>, access: Access | undefined, declaring: ClassType, name: string, at: Ref<Span>): void {
-    // Only delegation reads the embedded collection, from wherever the class is used.
-    if (name === EMBEDDED || this.accessible(access, declaring, name)) return;
+    // Only delegation reads the embedded collection, from wherever the class is used, and only an
+    // 'await using' declaration's scope writes the liveness marker.
+    if (name === EMBEDDED || name === LIVE || this.accessible(access, declaring, name)) return;
     const message = name.startsWith("#")
       ? `property '${shownName(name)}' is not accessible outside class '${this.ctx.typing().rec(declaring).name}' because it has a private identifier`
       : `property '${name}' is ${access!} and only accessible within class '${this.ctx.typing().rec(declaring).name}'${access === "protected" ? " and its subclasses" : ""}`;
@@ -10660,6 +10678,10 @@ export class Expressions<C extends Context> implements Union<C> {
       return rust !== undefined;
     });
     if (holdsRust) throw new CompileError("E1004", `a Rust '${rust!.name}' can't become a '${this.ctx.typing().show(to)}' yet; call its methods on it, or take it as a generic parameter`, e.start, e.end);
+    // A Dyn's copy is the compiler's, which an instance with a disposer never gets.
+    if (this.ctx.typing().holdsPart(held, (u) => this.ctx.typing().disposable(u))) {
+      throw unsupported(this.ctx.typing().callableOf.has(this.ctx.typing().rec(to).of) ? "closures holding a value with a '[Symbol.dispose]' method, when stored or passed on as function values," : "values with a '[Symbol.dispose]' method held in a Dyn", e);
+    }
     const reason = this.ctx.typing().callableOf.has(this.ctx.typing().rec(to).of) ? undefined : unsatisfied(type, this.ctx.typing().rec(to).of, this.ctx.members(), { start: e.start, end: e.end });
     if (reason !== undefined) throw new CompileError("E0101", `${message}: ${reason}`, e.start, e.end);
     const blocker = this.unsent(held);
@@ -11120,6 +11142,10 @@ export class Expressions<C extends Context> implements Union<C> {
   // reference. A closure changing what it captures changes the variable where it was made.
   /** @throws {CompileError} */
   changesLocal(this: Mut<this>, id: LocalId, path: string, action: string, target: Ref<Expr>, throughMut: boolean): void {
+    // A `using` binding changes through its fields and methods, and never holds another value.
+    if (path === "" && action === "assign to" && this.lc(id).using === true) {
+      throw new CompileError("E0215", `cannot assign to '${this.lc(id).name}': it is declared with 'using', which keeps its value until its scope ends; declare another 'using' for another value`, target.start, target.end);
+    }
     this.ctx.changesPath(id, path, action, target);
     if (this.ctx.captured(id)) {
       this.ctx.changesCapture(id, path, action, target, throughMut);
@@ -11700,6 +11726,18 @@ function rawProp(prop: Ref<ObjectProp>): string[] | undefined {
     strings.push(p.value);
   }
   return strings;
+}
+
+// A disposer is the drop's to run, once: a call written out would be a second run. An async
+// one, `awaited`, is the 'await using' declaration's to await.
+function disposedByHand(at: Ref<Expr>, awaited: boolean): CompileError {
+  if (awaited) return new CompileError("E0710", "a '[Symbol.asyncDispose]' method is awaited where an 'await using' declaration's scope ends, so it can't be called by hand, which would dispose the value twice; declare the value with 'await using'", at.start, at.end);
+  return new CompileError("E0710", "a '[Symbol.dispose]' method runs when its value is dropped, so it can't be called by hand, which would dispose the value twice; let the value go out of scope, or move it to where it should end", at.start, at.end);
+}
+
+/** @throws {CompileError} */
+function notByHand(e: Ref<Expr>): void {
+  if (e.kind === "index" && (isDisposeKey(e.index) || isAsyncDisposeKey(e.index))) throw disposedByHand(e, isAsyncDisposeKey(e.index));
 }
 
 // A path as a message shows it, the collection a class extending Map or Set embeds left unsaid.

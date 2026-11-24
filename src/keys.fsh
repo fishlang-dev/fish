@@ -2,7 +2,7 @@ import { CompileError } from "./diag.fsh";
 import type { ClassMember, Expr, Stmt, TypeMember } from "./parser.fsh";
 import { forEachChild, reborrowNode, Rewrites, walk, type AnyNode } from "./nodes.fsh";
 import { cloneClassMember, cloneExpr, cloneOneOf2, cloneTypeMember, rebuiltStmts } from "./rebuild.fsh";
-import { ITERATOR } from "./typing.fsh";
+import { ASYNC_DISPOSE, DISPOSE, ITERATOR } from "./typing.fsh";
 import { unsupported } from "./unsupported.fsh";
 
 // Computed property names, `[key]`, whose key is known while compiling: an object or class has a
@@ -97,8 +97,16 @@ export function numberKey(e: Ref<Expr>): string | undefined {
 // Whether `key` is `Symbol.iterator`.
 export const isIteratorKey = (key: Ref<Expr>): boolean => key.kind === "member" && key.name === "iterator" && key.object.kind === "ident" && key.object.name === "Symbol";
 
+// Whether `key` is `Symbol.dispose`.
+export const isDisposeKey = (key: Ref<Expr>): boolean => key.kind === "member" && key.name === "dispose" && key.object.kind === "ident" && key.object.name === "Symbol";
+
+// Whether `key` is `Symbol.asyncDispose`.
+export const isAsyncDisposeKey = (key: Ref<Expr>): boolean => key.kind === "member" && key.name === "asyncDispose" && key.object.kind === "ident" && key.object.name === "Symbol";
+
 // A key `Symbol.iterator` and its kind, which no name stands for.
 export function symbolKey(key: Ref<Expr>): CompileError {
+  if (isAsyncDisposeKey(key)) return unsupported("'[Symbol.asyncDispose]' members other than a class's method, which an 'await using' declaration awaits,", { start: key.start, end: key.end });
+  if (isDisposeKey(key)) return unsupported("'[Symbol.dispose]' members other than a class's method, which runs when an instance is dropped,", { start: key.start, end: key.end });
   return unsupported(key.kind === "member" ? `'[Symbol.${key.name}]' members` : "computed property names", { start: key.start, end: key.end });
 }
 
@@ -175,10 +183,15 @@ function readLeaf(e: Ref<Expr>, consts: Ref<Map<string, Expr>>, enums: Ref<Map<s
   throw unknownKey(e, "a class's or a type's member name can only read a top-level const or enum");
 }
 
+// The names only a `Symbol` key gives a member, which a quoted or computed name can't take.
+const FIXED_NAMES = [ITERATOR, DISPOSE, ASYNC_DISPOSE];
+
 // Gives every class member and type member with a computed name the name its key gives. Their
 // layouts are settled before any body is checked, so a key there is a literal, a top-level const
 // holding one, a member of a top-level enum, or a template of those. A method keyed
-// `Symbol.iterator` is named `ITERATOR`; any other `Symbol` key is left for the checker to refuse.
+// `Symbol.iterator` is named `ITERATOR`, and a class's keyed `Symbol.dispose` or
+// `Symbol.asyncDispose` is named `DISPOSE` or `ASYNC_DISPOSE`; any other `Symbol` key is left for
+// the checker to refuse.
 /** @throws {CompileError} */
 export function lowerKeys(program: Mut<Stmt[]>) {
   const leaf = topKeys(program);
@@ -195,8 +208,9 @@ export function lowerKeysWith(program: Mut<Stmt[]>, leaf: Ref<TopKeys>) {
     if (n.of === "classMember") {
       const m = n.node;
       if (m.kind === "constructor" || m.kind === "staticBlock" || m.kind === "index") return;
-      if (typeof m.name === "string" && m.name === ITERATOR) {
-        failure = new CompileError("E0120", `'${ITERATOR}' as a quoted name would name a '[Symbol.iterator]' method, which is only written as '[Symbol.iterator]'`, m.start, m.end);
+      const quoted = typeof m.name === "string" && m.name === ITERATOR ? ITERATOR : typeof m.name === "string" && m.name === DISPOSE ? DISPOSE : typeof m.name === "string" && m.name === ASYNC_DISPOSE ? ASYNC_DISPOSE : undefined;
+      if (quoted !== undefined) {
+        failure = new CompileError("E0120", `'${quoted}' as a quoted name would name a '${quoted}' method, which is only written as '${quoted}'`, m.start, m.end);
         return;
       }
       const key = cloneOneOf2(m.name);
@@ -205,11 +219,19 @@ export function lowerKeysWith(program: Mut<Stmt[]>, leaf: Ref<TopKeys>) {
         rewrites.replaceClassMember(m, { ...m, name: ITERATOR });
         return;
       }
+      if (isDisposeKey(key) && m.kind === "method") {
+        rewrites.replaceClassMember(m, { ...m, name: DISPOSE });
+        return;
+      }
+      if (isAsyncDisposeKey(key) && m.kind === "method") {
+        rewrites.replaceClassMember(m, { ...m, name: ASYNC_DISPOSE });
+        return;
+      }
       if (key.kind === "member" && key.object.kind === "ident" && key.object.name === "Symbol") return;
       try {
         const name = knownKey(key, (e) => leaf.read(e));
-        if (name === ITERATOR) {
-          failure = unknownKey(key, `'${name}' would name a '[Symbol.iterator]' method, which is only written as '[Symbol.iterator]'`);
+        if (FIXED_NAMES.includes(name)) {
+          failure = unknownKey(key, `'${name}' would name a '${name}' method, which is only written as '${name}'`);
           return;
         }
         if (name.startsWith("#")) {
@@ -225,8 +247,9 @@ export function lowerKeysWith(program: Mut<Stmt[]>, leaf: Ref<TopKeys>) {
     if (n.of === "typeMember") {
       const m = n.node;
       if (m.kind === "property" || m.kind === "method" || m.kind === "get" || m.kind === "set") {
-        if (typeof m.name === "string" && m.name === ITERATOR) {
-          failure = new CompileError("E0120", `'${ITERATOR}' as a quoted name would name a '[Symbol.iterator]' method, which is only written as '[Symbol.iterator]'`, m.start, m.end);
+        const quoted = typeof m.name === "string" && m.name === ITERATOR ? ITERATOR : typeof m.name === "string" && m.name === DISPOSE ? DISPOSE : typeof m.name === "string" && m.name === ASYNC_DISPOSE ? ASYNC_DISPOSE : undefined;
+        if (quoted !== undefined) {
+          failure = new CompileError("E0120", `'${quoted}' as a quoted name would name a '${quoted}' method, which is only written as '${quoted}'`, m.start, m.end);
           return;
         }
         const key = cloneOneOf2(m.name);
@@ -238,8 +261,8 @@ export function lowerKeysWith(program: Mut<Stmt[]>, leaf: Ref<TopKeys>) {
         if (key.kind === "member" && key.object.kind === "ident" && key.object.name === "Symbol") return;
         try {
           const name = knownKey(key, (e) => leaf.read(e));
-          if (name === ITERATOR) {
-            failure = unknownKey(key, `'${name}' would name a '[Symbol.iterator]' method, which is only written as '[Symbol.iterator]'`);
+          if (FIXED_NAMES.includes(name)) {
+            failure = unknownKey(key, `'${name}' would name a '${name}' method, which is only written as '${name}'`);
             return;
           }
           rewrites.replaceTypeMember({ id: m.id }, withTypeMemberName(m, name));

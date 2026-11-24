@@ -274,6 +274,8 @@ export type Tables = {
   tagCalls: NodeSet<Expr>;
   // The `equals` each class's `===` calls.
   equalities: TypeMap<ClassType, InstanceId>;
+  // Each class's own disposer, its `[Symbol.dispose]` method, which a drop of an instance runs.
+  disposers: TypeMap<ClassType, InstanceId>;
   // Each quote, by the Ast types it was checked with, for comptime to build its value from.
   quotes: NodeMap<Expr, Categories>;
   // The array literals that became tuples, as objects of fields `0`, `1` and on, which a generic
@@ -467,6 +469,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     integerCalls: new NodeSet<Expr>(),
     tagCalls: new NodeSet<Expr>(),
     equalities: new TypeMap<ClassType, InstanceId>(),
+    disposers: new TypeMap<ClassType, InstanceId>(),
     quotes: new NodeMap<Expr, Categories>(),
     tupleLiterals: new NodeSet<Expr>(),
     restStarts: new NodeMap<Expr, usize>(),
