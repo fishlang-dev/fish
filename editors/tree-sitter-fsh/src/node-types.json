@@ -6085,6 +6085,16 @@
     "type": "using_declaration",
     "named": true,
     "fields": {
+      "await": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "await",
+            "named": false
+          }
+        ]
+      },
       "kind": {
         "multiple": false,
         "required": true,

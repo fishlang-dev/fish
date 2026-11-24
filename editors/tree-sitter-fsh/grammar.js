@@ -48,8 +48,10 @@ module.exports = grammar(TypeScript, {
     ),
 
     // `using file = open(path)` keeps a value to the end of its scope, where its disposer runs. It
-    // binds plain names only, so `using[0]` and `using as T` stay expressions.
+    // binds plain names only, so `using[0]` and `using as T` stay expressions. `await using` awaits
+    // the value's async disposer there; before anything but a name it awaits a value named `using`.
     using_declaration: $ => seq(
+      optional(field('await', 'await')),
       field('kind', 'using'),
       commaSep1(alias($._using_declarator, $.variable_declarator)),
       $._semicolon,

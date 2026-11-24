@@ -2,8 +2,8 @@
 
 A [tree-sitter](https://tree-sitter.github.io) grammar for Fish Lang (`.fsh`). It is
 tree-sitter-typescript's grammar with Fish's own forms added: `match` and its patterns, `|>` and
-`%`, `comptime`, `unsafe`, `macro function`, `throws`, `move` closures, `using` declarations, enums
-whose variants carry values, and decorators on functions, types and enums.
+`%`, `comptime`, `unsafe`, `macro function`, `throws`, `move` closures, `using` and `await using`
+declarations, enums whose variants carry values, and decorators on functions, types and enums.
 
 The language is named `fsh` because the fish shell already owns `fish` and `tree-sitter-fish`.
 

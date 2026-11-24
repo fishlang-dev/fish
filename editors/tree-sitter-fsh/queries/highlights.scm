@@ -17,6 +17,9 @@
 (using_declaration
   kind: "using" @keyword)
 
+(using_declaration
+  await: "await" @keyword)
+
 "|>" @operator
 
 (topic) @variable.builtin
