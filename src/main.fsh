@@ -21,7 +21,7 @@ import type { Ids } from "./nodes.fsh";
 import { bundle } from "./bundle.fsh";
 import { JS_NATIVE } from "./js_native.fsh";
 import { NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
-import { cachedObject, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
+import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
 import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
@@ -206,7 +206,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
   let building = together(newSession(), caches);
   try {
     let objects: string[] = [];
-    for (const u of runtimeUnits(ir, release, true, copyTarget(target))) objects.push(cachedObject(building, u));
+    for (const o of cachedObjects(building, runtimeUnits(ir, release, true, copyTarget(target)))) objects.push(o);
     for (const o of mathObjects(building, [...target.compile])) objects.push(o);
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
@@ -463,6 +463,10 @@ function refuseForeignRust(target: Ref<Target>) {
 // about 40 bytes for each byte of it, 24 GB for the compiler's own 570 MB, so a larger program
 // is compiled a file at a time, as a dev build is, and clang holds one file's code at once.
 const RELEASE_MODULE_LENGTH: usize = 64 * 1024 * 1024;
+// The most of one file's functions that go to clang as one unit. Clang holds a unit of this much
+// IR in under a gigabyte and compiles it in well under a minute, so a build's units can go to it
+// side by side on a small machine, and no one file sets how long the build takes.
+const UNIT_LENGTH: usize = 16 * 1024 * 1024;
 
 // A build's IR as clang is given it: a release build's as one module, so `-O2` inlines across std
 // and the program, unless it is over `RELEASE_MODULE_LENGTH`, and a dev build's as the program's
@@ -497,7 +501,7 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
     }
   }
   const named = performance.now() - naming;
-  const halves = split(ir, std, own, byFile);
+  const halves = split(ir, std, own, byFile, UNIT_LENGTH);
   const args = [...target.compile, "-x", "ir", "-", ...optimization(release, target), "-funwind-tables"];
   let cached: Unit[] = [{ name: "std", args: [...args], stdin: halves.std, inputs: [] }];
   for (const [file, text] of halves.groups) cached.push({ name: `file-${file.replace(/[^\w.-]/g, "_")}`, args: [...args], stdin: text, inputs: [] });
@@ -510,9 +514,9 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
 // whose text is the same takes its object without hashing the text again.
 function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ cached: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean, known: Mut<Map<string, string[]>>) {
   const started = stageStart(session);
-  let objects: string[] = [];
-  for (const u of runtimeUnits(ir, release, false, copyTarget(target), leaks)) objects.push(knownObject(session, u, known));
-  for (const u of halves.cached) objects.push(knownObject(session, u, known));
+  let units = runtimeUnits(ir, release, false, copyTarget(target), leaks);
+  for (const u of halves.cached) units.push(u.clone());
+  let objects = knownObjects(session, units, known);
   for (const o of mathObjects(session, [...target.compile])) objects.push(o);
   stageEnd(session, "runtime", started);
   const none: string[] = [];
@@ -543,19 +547,32 @@ function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ cached: Un
   }
 }
 
-// A unit's object: the one built from its text before when the text is the same and the object is
-// still there, else the cache's, hashed from its text.
+// The units' objects, in their order: for each, the one built from its text before when the text is
+// the same and the object is still there, else the cache's, hashed from its text; those the cache
+// lacks are compiled several at once.
 /** @throws {Error | IoError} */
-function knownObject(session: Mut<BuildSession>, u: Ref<Unit>, known: Mut<Map<string, string[]>>): string {
-  const text = u.stdin ?? "";
-  const was = known.get(u.name);
-  if (u.inputs.length === 0 && was !== undefined && was[0]! === text && existsSync(was[1]!)) {
-    if (session.timings !== undefined) session.timings!.objects.cached++;
-    return was[1]!;
+function knownObjects(session: Mut<BuildSession>, units: Ref<Unit[]>, known: Mut<Map<string, string[]>>): string[] {
+  let objects: string[] = [];
+  let fresh: Unit[] = [];
+  let places: usize[] = [];
+  for (let i: usize = 0; i < units.length; i++) {
+    const u: Ref<Unit> = units[i]!;
+    const was = known.get(u.name);
+    if (u.inputs.length === 0 && was !== undefined && was[0]! === (u.stdin ?? "") && existsSync(was[1]!)) {
+      if (session.timings !== undefined) session.timings!.objects.cached++;
+      objects.push(was[1]!);
+      continue;
+    }
+    objects.push("");
+    fresh.push(u.clone());
+    places.push(i);
   }
-  const object = cachedObject(session, u);
-  known.set(u.name, [text, object]);
-  return object;
+  const made = cachedObjects(session, fresh);
+  for (let k: usize = 0; k < fresh.length; k++) {
+    objects[places[k]!] = made[k]!;
+    known.set(fresh[k]!.name, [fresh[k]!.stdin ?? "", made[k]!]);
+  }
+  return objects;
 }
 
 // Runs clang, or a tool beside it, throwing what it printed if it fails.

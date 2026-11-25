@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { atNamesIn, firstNameIn, typeNamesIn } from "./layout.fsh";
 // A dev build's IR, or a large release build's, split into modules: std's part, whose text is
 // the same whatever the program's own code says, a part per group of the program's functions
-// (one per source file), and the program's part holding the rest. Each part's text changes only
+// (one per source file, or several for a very large one), and the program's part holding the rest. Each part's text changes only
 // when what it holds does, so its object can be cached by that text.
 //
 // Std's part is every definition its functions reach, stopping at the program's: its own functions,
@@ -86,8 +86,11 @@ const exposed = (item: Ref<Item>) => (item.kind === "define" ? item.text.replace
 // The IR split into std's part, a part for each of `groups`, and the program's. `stdSymbols` names
 // std's functions and `ownSymbols` the program's, as the IR spells them; `groups` names parts of
 // the program's functions, which leave the program's part for one of their own.
+// A group whose functions' text is longer than `limit`, when one is given, is divided in the IR's
+// order into parts of at most that much, the first under the group's name and the rest under
+// `<group>#2` and on, so no one file's part is the longest thing clang is given.
 // `times` is how long its reading, reaching and writing took, for `--timings`.
-export function split(ir: string, stdSymbols: string[], ownSymbols: string[], groups: Ref<Map<string, string[]>>): { std: string; groups: Map<string, string>; program: string; times: [string, f64][] } {
+export function split(ir: string, stdSymbols: string[], ownSymbols: string[], groups: Ref<Map<string, string[]>>, limit: usize = 0): { std: string; groups: Map<string, string>; program: string; times: [string, f64][] } {
   const began = performance.now();
   const std = keysOf(stdSymbols);
   const own = keysOf(ownSymbols);
@@ -150,11 +153,33 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
   let where = new Map<string, string>();
   for (const name of reached) where.set(name, STD);
   for (const [group, symbols] of groups) for (const k of keysOf(symbols)) if (!reached.has(k)) where.set(k, group);
+  let divided = new Map<string, i64>();
+  if (limit > 0) {
+    let filled = new Map<string, usize>();
+    for (const item of all) {
+      if (item.kind !== "define") continue;
+      const group = where.get(item.key);
+      if (group === undefined || group === STD || !groups.has(group)) continue;
+      let n = divided.get(group) ?? 1;
+      let size = filled.get(group) ?? 0;
+      if (size > 0 && size + item.text.length > limit) {
+        n++;
+        size = 0;
+        divided.set(group, n);
+      }
+      filled.set(group, size + item.text.length);
+      if (n > 1) where.set(item.key, `${group}#${n}`);
+    }
+  }
   const reachedAt = performance.now();
   let metadata = "";
   for (const line of lines) if (line.startsWith("!")) metadata += `${line}\n`;
   let out = new Map<string, string>();
-  for (const group of groups.keys()) out.set(group, typed(types, part(all, byName, where, group)));
+  for (const group of groups.keys()) {
+    out.set(group, typed(types, part(all, byName, where, group)));
+    const n = divided.get(group) ?? 1;
+    for (let more: i64 = 2; more <= n; more++) out.set(`${group}#${more}`, typed(types, part(all, byName, where, `${group}#${more}`)));
+  }
   const stdPart = typed(types, part(all, byName, where, STD));
   const programPart = typed(types, part(all, byName, where, "")) + metadata;
   const done = performance.now();

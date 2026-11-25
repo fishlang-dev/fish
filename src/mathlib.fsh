@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { availableParallelism, homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { Session } from "./compilation.fsh";
 
@@ -140,27 +140,115 @@ function emptyDir(): string {
   return mkdtempSync(join(tmpdir(), "fish-cc-"));
 }
 
-// The unit's object, compiled first if the cache has none.
-/** @throws {Error | IoError} */
-export function cachedObject(session: Mut<BuildSession>, u: Ref<Unit>): string {
-  const out = objectPath(session, u);
-  if (existsSync(out)) {
-    if (session.timings !== undefined) session.timings!.objects.cached++;
-    return out;
-  }
-  if (session.timings !== undefined) session.timings!.objects.built.push(u.name);
-  const temp = partial(out);
-  const cwd = emptyDir();
-  try {
-    const clang = Bun.spawnSync(command(u, temp), { stdin: input(u), cwd });
-    finish(u, clang.exitCode, new TextDecoder().decode(clang.stderr), temp, out);
-  } finally {
-    rmSync(cwd, { recursive: true, force: true });
-  }
-  return out;
+// What a clang compiling `u` is taken to hold at its peak: clang itself, and its source many times
+// over once it is parsed and optimized. The compiler's own units measured 50 to 100 bytes for each
+// byte of IR, the most where a few very large functions fill a unit.
+const CLANG_BASE = 100_000_000;
+const CLANG_PER_BYTE = 100;
+
+function clangBytes(u: Ref<Unit>): i64 {
+  return CLANG_BASE + ((u.stdin ?? "").length as i64) * CLANG_PER_BYTE;
 }
 
-// `cachedObject`, without blocking. A lock file beside the object keeps builds running at once, in
+// This machine's memory in bytes, or 0 when it can't be read.
+function machineMemory(): i64 {
+  try {
+    if (process.platform === "linux") {
+      const found = /^MemTotal:\s+(\d+) kB/m.exec(readFileSync("/proc/meminfo", "utf8"));
+      return found === null ? 0 : (parseInt(found[1]!) ?? 0) * 1024;
+    }
+    const asked = Bun.spawnSync(["sysctl", "-n", "hw.memsize"]);
+    return asked.exitCode === 0 ? parseInt(new TextDecoder().decode(asked.stdout).trim()) ?? 0 : 0;
+  } catch (_e) {
+    return 0;
+  }
+}
+
+const quoted = (s: string): string => "'" + s.replaceAll("'", "'\\''") + "'";
+
+// The units at `wanted` compiled into their places in `outs`, in that order and `jobs` at a time:
+// xargs runs a shell script for each, which gives clang the unit's source and keeps its errors
+// and exit code in files of the unit's own, and starts the next as one ends. Throws the first
+// failure once every object that did compile is in the cache.
+/** @throws {Error | IoError} */
+function compiledTogether(units: Ref<Unit[]>, outs: Ref<string[]>, wanted: Ref<usize[]>, jobs: usize): void {
+  const work = mkdtempSync(join(tmpdir(), "fish-cc-"));
+  const cwd = join(work, "empty");
+  mkdirSync(cwd);
+  try {
+    let temps: string[] = [];
+    let scripts: string[] = [];
+    for (let k: usize = 0; k < wanted.length; k++) {
+      const u: Ref<Unit> = units[wanted[k]!]!;
+      const temp = partial(outs[wanted[k]!]!);
+      temps.push(temp);
+      const at = join(work, `${k}`);
+      let from = "/dev/null";
+      if (u.stdin !== undefined) {
+        from = `${at}.in`;
+        writeFileSync(from, u.stdin!);
+      }
+      let words: string[] = [];
+      for (const word of command(u, temp)) words.push(quoted(word));
+      writeFileSync(`${at}.sh`, `cd ${quoted(cwd)} && ${words.join(" ")} < ${quoted(from)} 2> ${quoted(`${at}.err`)}\necho $? > ${quoted(`${at}.code`)}\n`);
+      scripts.push(`${at}.sh`);
+    }
+    Bun.spawnSync(["xargs", "-0", "-n", "1", "-P", `${jobs}`, "sh"], { stdin: new TextEncoder().encode(scripts.join("\0")) });
+    let failed: string | undefined = undefined;
+    for (let k: usize = 0; k < wanted.length; k++) {
+      const at = join(work, `${k}`);
+      const code = existsSync(`${at}.code`) ? parseInt(readFileSync(`${at}.code`, "utf8").trim()) ?? 1 : 1;
+      if (code === 0) {
+        renameSync(temps[k]!, outs[wanted[k]!]!);
+        continue;
+      }
+      rmSync(temps[k]!, { force: true });
+      const stderr = existsSync(`${at}.err`) ? readFileSync(`${at}.err`, "utf8") : "";
+      if (failed === undefined) failed = `clang failed building ${units[wanted[k]!]!.name}:\n${stderr}`;
+    }
+    if (failed !== undefined) throw new Error(failed!);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+// The units' objects, in their order, those the cache has none of compiled first: largest first,
+// as many at a time as the machine has cores, and no more than the largest that many are taken to
+// fit in half its memory, since the first to run together are the largest there are. A build of
+// many small files uses every core, and one of a few huge ones stays in memory.
+/** @throws {Error | IoError} */
+export function cachedObjects(session: Mut<BuildSession>, units: Ref<Unit[]>): string[] {
+  let outs: string[] = [];
+  let missing: usize[] = [];
+  for (let i: usize = 0; i < units.length; i++) {
+    const out = objectPath(session, units[i]!);
+    if (!existsSync(out)) missing.push(i);
+    else if (session.timings !== undefined) session.timings!.objects.cached++;
+    outs.push(out);
+  }
+  if (missing.length === 0) return outs;
+  if (session.timings !== undefined) for (const i of missing) session.timings!.objects.built.push(units[i]!.name);
+  missing.sort((a, b) => clangBytes(units[b]!) - clangBytes(units[a]!));
+  const cores = availableParallelism() as usize;
+  const budget = missing.length > 1 ? machineMemory() / 2 : 0;
+  let jobs: usize = 1;
+  let held = clangBytes(units[missing[0]!]!);
+  while (jobs < missing.length && jobs < cores) {
+    held += clangBytes(units[missing[jobs]!]!);
+    if (held > budget) break;
+    jobs++;
+  }
+  compiledTogether(units, outs, missing, jobs);
+  return outs;
+}
+
+// One unit's object, compiled first if the cache has none.
+/** @throws {Error | IoError} */
+export function cachedObject(session: Mut<BuildSession>, u: Ref<Unit>): string {
+  return cachedObjects(session, [u.clone()])[0]!;
+}
+
+// One unit's object, compiled first if the cache has none, without blocking. A lock file beside the object keeps builds running at once, in
 // this process or another, from compiling it twice: the rest wait for it to be there instead.
 /** @throws {Error | IoError} */
 export async function cachedObjectAsync(session: Mut<BuildSession>, u: Unit): Promise<string> {
@@ -242,9 +330,9 @@ function units(session: Mut<BuildSession>): Unit[] {
 // clang flags of a target other than the host's.
 /** @throws {Error | IoError} */
 export function mathObjects(session: Mut<BuildSession>, target: string[] = []): string[] {
-  let objects: string[] = [];
-  for (const u of units(session)) objects.push(cachedObject(session, target.length === 0 ? u : { ...u, args: [...target, ...u.args] }));
-  return objects;
+  let all: Unit[] = [];
+  for (const u of units(session)) all.push(target.length === 0 ? u : { ...u, args: [...target, ...u.args] });
+  return cachedObjects(session, all);
 }
 
 // `mathObjects`, without blocking: every path is found first, then each object compiled in turn.
