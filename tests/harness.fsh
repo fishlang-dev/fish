@@ -88,8 +88,8 @@ export function programsOf(dir: string, tmp: string, entry: string): Program[] t
 
 export function environment(extra: string): { [name: string]: string } {
   let env: { [name: string]: string } = {};
-  // A program that serves or runs tasks would trace or bind an inspector from the runner's env.
-  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("OTEL_") && k !== "FISH_INSPECT") env[k] = v;
+  // A program that serves or runs tasks would trace, inspect, or profile from the runner's env.
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("OTEL_") && k !== "FISH_INSPECT" && k !== "FISH_PROFILE" && k !== "FISH_PROFILE_HZ") env[k] = v;
   env[extra] = "1";
   return env;
 }
