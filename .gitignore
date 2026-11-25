@@ -14,3 +14,6 @@ build/
 
 # Release tarballs scripts/release.fsh writes
 dist/
+
+# The Rust HTTP service benchmarks/run.fsh builds with cargo
+benchmarks/http/rust/target/

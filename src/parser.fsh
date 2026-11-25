@@ -471,6 +471,25 @@ export class Cursor {
     this.tokens.push(this.lex.regex(slash));
     return this.next();
   }
+
+  // Takes what follows the last token, a tag's `>` or an expression's `}`, as a JSX element's
+  // text, in place of whatever was scanned past it as tokens.
+  /** @throws {CompileError} */
+  jsxText(this: Mut<this>): Token {
+    while (this.tokens.length > this.pos) this.tokens.pop();
+    const after: Token = { ...this.tokens[this.pos - 1]! };
+    this.tokens.push(this.lex.jsxText(after));
+    return this.next();
+  }
+
+  // Forgets what was scanned past the punctuator at the cursor, which a failed attempt at a JSX
+  // element may have read as text, so it is scanned again as tokens.
+  /** @throws {CompileError} */
+  rescan(this: Mut<this>): void {
+    const at = this.token();
+    while (this.tokens.length > this.pos + 1) this.tokens.pop();
+    this.lex.resume(at);
+  }
 }
 
 function cursor(src: string, ids: Ref<Ids>, from: usize = 0, docs = false): Cursor {

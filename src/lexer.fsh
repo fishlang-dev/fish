@@ -12,7 +12,8 @@ export type Token = {
   end: usize;
   // Drives automatic semicolon insertion.
   newlineBefore: boolean;
-  // On `/` and `/=`: the template substitutions open there, for rescanning it as a regex.
+  // On `/` and `/=`, and on any punctuator inside a template's substitution: the substitutions
+  // open there, for rescanning from it as a regex or as a JSX element's text.
   substitutions?: usize[];
   // On a template piece: its text as written, escapes undecoded, and its first invalid escape.
   raw?: string;
@@ -234,6 +235,31 @@ export class Lexer {
     return this.token("regex", src.slice(slash.start as i64, i as i64), slash.start);
   }
 
+  // Scans on from the end of a punctuator already given, as if nothing past it had been scanned.
+  resume(this: Mut<this>, after: Ref<Token>): void {
+    while (this.comments.length > 0 && this.comments[this.comments.length - 1]!.start >= after.end) this.comments.pop();
+    this.i = after.end;
+    this.newlineBefore = false;
+    this.substitutions = [];
+    if (after.substitutions !== undefined) this.substitutions = [...after.substitutions!];
+  }
+
+  // A JSX element's text: everything from the end of `after`, the `>` or `}` before it, up to the
+  // `<` or `{` that ends it, given as a string token holding the text as written.
+  /** @throws {CompileError} */
+  jsxText(this: Mut<this>, after: Ref<Token>): Token {
+    this.resume(after);
+    const src = this.src;
+    const start = this.i;
+    let i = start;
+    for (let c = src.charAt(i as i64); c !== "<" && c !== "{"; c = src.charAt(i as i64)) {
+      if (c === "") throw new CompileError("E0002", "this element is never closed", after.start, after.end);
+      i++;
+    }
+    this.i = i;
+    return this.token("string", src.slice(start as i64, i as i64), start);
+  }
+
   token(this: Mut<this>, kind: Token["kind"], text: string, start: usize): Token {
     const t: Token = { kind, text, start, end: this.i, newlineBefore: this.newlineBefore };
     this.newlineBefore = false;
@@ -362,7 +388,9 @@ export class Lexer {
     if (open > 0 && p === "{") this.substitutions[open - 1] = this.substitutions[open - 1]! + 1;
     if (open > 0 && p === "}") this.substitutions[open - 1] = this.substitutions[open - 1]! - 1;
     let t = this.token("punct", p, start);
-    if (p === "/" || p === "/=") t.substitutions = [...this.substitutions];
+    // Inside a template's substitution every punctuator keeps them, so a JSX element there can be
+    // scanned again from its `<`, `>` or `}`.
+    if (p === "/" || p === "/=" || open > 0) t.substitutions = [...this.substitutions];
     return t;
   }
 }
