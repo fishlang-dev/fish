@@ -8616,6 +8616,258 @@ void fsh_rt_tasks_free(char *p) {
   free(p);
 }
 
+static char *fsh_tasks_html(void) {
+  int64_t n = 0;
+  fsh_task_snap *snaps = fsh_tasks_snapshot(&n);
+  fsh_buf b = { NULL, 0, 0 };
+  fsh_buf_puts(&b,
+    "<!doctype html><html><head><meta charset=\"utf-8\">"
+    "<title>Fish Task Inspector</title>"
+    "<noscript><meta http-equiv=\"refresh\" content=\"1\"></noscript>"
+    "<style>"
+    "body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin:20px;color:#111;background:#fafafa}"
+    "h1{font-size:16px;margin:0 0 8px}p{font-size:12px;color:#555;margin:0 0 12px}"
+    "table{border-collapse:collapse;width:100%;font-size:13px;background:#fff}"
+    "th,td{border:1px solid #ddd;padding:6px 8px;text-align:left;vertical-align:top}"
+    "th{background:#f0f0f0}"
+    "</style></head><body>"
+    "<h1>Fish Task Inspector</h1>"
+    "<p id=\"meta\">");
+  fsh_buf_printf(&b, "%lld live task%s</p>", (long long)n, n == 1 ? "" : "s");
+  fsh_buf_puts(&b,
+    "<table><thead><tr>"
+    "<th>ID</th><th>State</th><th>Age</th><th>Polls</th><th>Awaiting</th><th>Await Site</th><th>Name</th><th>Spawn Site</th><th>Pool</th>"
+    "</tr></thead><tbody id=\"rows\">");
+  for (int64_t i = 0; i < n; i++) {
+    char await_text[96];
+    fsh_await_label(await_text, sizeof await_text, &snaps[i]);
+    fsh_buf_printf(&b, "<tr><td>%lld</td><td>", (long long)snaps[i].id);
+    fsh_buf_html(&b, fsh_state_label(snaps[i].state));
+    fsh_buf_printf(&b, "</td><td>%lldms</td><td>%lld</td><td>", (long long)snaps[i].age_ms, (long long)snaps[i].polls);
+    fsh_buf_html(&b, await_text[0] ? await_text : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_html(&b, snaps[i].await_site && snaps[i].await_site[0] ? snaps[i].await_site : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_html(&b, snaps[i].name[0] ? snaps[i].name : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_html(&b, snaps[i].spawn_site && snaps[i].spawn_site[0] ? snaps[i].spawn_site : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_puts(&b, snaps[i].blocking ? "blocking" : "worker");
+    fsh_buf_puts(&b, "</td></tr>");
+  }
+  fsh_buf_puts(&b,
+    "</tbody></table>"
+    "<script>"
+    "function cell(tr,v){var td=document.createElement('td');td.textContent=v;tr.appendChild(td);}"
+    "function tick(){fetch('/tasks.json').then(function(r){return r.json();}).then(function(ts){"
+    "var tb=document.getElementById('rows');tb.textContent='';"
+    "document.getElementById('meta').textContent=ts.length+' live task'+(ts.length===1?'':'s');"
+    "for(var i=0;i<ts.length;i++){var t=ts[i],tr=document.createElement('tr');"
+    "cell(tr,String(t.id));cell(tr,t.state);cell(tr,t.ageMs+'ms');cell(tr,String(t.polls));"
+    "cell(tr,t.awaiting||'-');cell(tr,t.awaitSite||'-');cell(tr,t.name||'-');"
+    "cell(tr,t.spawnSite||'-');cell(tr,t.blocking?'blocking':'worker');tb.appendChild(tr);}"
+    "}).catch(function(){});}"
+    "setInterval(tick,500);"
+    "</script></body></html>\n");
+  free(snaps);
+  return b.data;
+}
+
+static int fsh_inspect_fd = -1;
+static int fsh_inspect_pipe[2] = { -1, -1 };
+static pthread_t fsh_inspect_thread;
+static int fsh_inspect_running = 0;
+
+static void fsh_inspect_write_all(int fd, const char *data, size_t len) {
+  size_t off = 0;
+  while (off < len) {
+#ifdef MSG_NOSIGNAL
+    ssize_t n = send(fd, data + off, len - off, MSG_NOSIGNAL);
+#else
+    ssize_t n = send(fd, data + off, len - off, 0);
+#endif
+    if (n > 0) { off += (size_t)n; continue; }
+    if (n < 0 && errno == EINTR) continue;
+    break;
+  }
+}
+
+static void fsh_inspect_reply(int fd, const char *status, const char *type, const char *body, size_t len) {
+  char head[256];
+  int hlen = snprintf(head, sizeof head,
+    "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+    status, type, len);
+  if (hlen > 0) fsh_inspect_write_all(fd, head, (size_t)hlen);
+  if (body && len > 0) fsh_inspect_write_all(fd, body, len);
+}
+
+static void fsh_inspect_handle(int c) {
+  struct timeval tv = { 1, 0 };
+  setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+#ifdef SO_NOSIGPIPE
+  int on = 1;
+  setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
+#endif
+  char req[2048];
+  ssize_t n = recv(c, req, sizeof req - 1, 0);
+  if (n <= 0) return;
+  req[n] = 0;
+  if (strncmp(req, "GET ", 4) != 0) {
+    const char *msg = "method not allowed\n";
+    fsh_inspect_reply(c, "405 Method Not Allowed", "text/plain; charset=utf-8", msg, strlen(msg));
+    return;
+  }
+  char *path = req + 4;
+  char *end = path;
+  while (*end && *end != ' ' && *end != '?' && *end != '\r' && *end != '\n') end++;
+  *end = 0;
+  if (strcmp(path, "/") == 0) {
+    char *html = fsh_tasks_html();
+    fsh_inspect_reply(c, "200 OK", "text/html; charset=utf-8", html ? html : "", html ? strlen(html) : 0);
+    free(html);
+  } else if (strcmp(path, "/tasks.json") == 0 || strcmp(path, "/json") == 0) {
+    char *json = fsh_rt_tasks_json();
+    fsh_inspect_reply(c, "200 OK", "application/json", json ? json : "[]", json ? strlen(json) : 2);
+    free(json);
+  } else if (strcmp(path, "/tasks") == 0 || strcmp(path, "/text") == 0) {
+    char *text = fsh_rt_tasks_table();
+    fsh_inspect_reply(c, "200 OK", "text/plain; charset=utf-8", text ? text : "", text ? strlen(text) : 0);
+    free(text);
+  } else {
+    const char *msg = "not found\n";
+    fsh_inspect_reply(c, "404 Not Found", "text/plain; charset=utf-8", msg, strlen(msg));
+  }
+}
+
+// Runs on a dedicated thread outside the worker pool so the inspector stays reachable even when
+// every Fish worker is blocked.
+static void *fsh_inspector_loop(void *arg) {
+  (void)arg;
+  for (;;) {
+    struct pollfd fds[2];
+    fds[0].fd = fsh_inspect_fd;
+    fds[0].events = POLLIN;
+    fds[0].revents = 0;
+    fds[1].fd = fsh_inspect_pipe[0];
+    fds[1].events = POLLIN;
+    fds[1].revents = 0;
+    int r = poll(fds, 2, -1);
+    if (r < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) break;
+    if (fds[0].revents & POLLIN) {
+      int c = accept(fsh_inspect_fd, NULL, NULL);
+      if (c >= 0) {
+        fsh_inspect_handle(c);
+        close(c);
+      }
+    }
+  }
+  return NULL;
+}
+
+static int fsh_inspect_parse_port(const char *s, int *out) {
+  if (!s || !s[0]) return 0;
+  long v = 0;
+  for (const char *p = s; *p; p++) {
+    if (*p < '0' || *p > '9') return 0;
+    v = v * 10 + (*p - '0');
+    if (v > 65535) return 0;
+  }
+  *out = (int)v;
+  return 1;
+}
+
+static void fsh_inspector_start(void) {
+  const char *spec = getenv("FISH_INSPECT");
+  if (!spec || !spec[0] || strcmp(spec, "0") == 0 || strcmp(spec, "false") == 0) return;
+  char host[64] = "127.0.0.1";
+  int port = 9229;
+  if (strcmp(spec, "1") == 0 || strcmp(spec, "true") == 0) {
+    // Default loopback address and port.
+  } else if (fsh_inspect_parse_port(spec, &port)) {
+    // Port-only shorthand binds loopback.
+  } else {
+    const char *colon = strrchr(spec, ':');
+    if (!colon || colon == spec || (size_t)(colon - spec) >= sizeof host || !fsh_inspect_parse_port(colon + 1, &port)) {
+      fprintf(stderr, "fish inspector: invalid FISH_INSPECT '%s' (expected 1, <port>, or <host>:<port>)\n", spec);
+      return;
+    }
+    memcpy(host, spec, (size_t)(colon - spec));
+    host[colon - spec] = 0;
+    if (strcmp(host, "localhost") == 0) strcpy(host, "127.0.0.1");
+  }
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof addr);
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((uint16_t)port);
+  if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+    fprintf(stderr, "fish inspector: invalid FISH_INSPECT host '%s'\n", host);
+    return;
+  }
+  if (pipe(fsh_inspect_pipe) != 0) {
+    fprintf(stderr, "fish inspector: failed to create wakeup pipe\n");
+    return;
+  }
+  fcntl(fsh_inspect_pipe[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_inspect_pipe[1], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_inspect_pipe[0], F_SETFL, O_NONBLOCK);
+  fcntl(fsh_inspect_pipe[1], F_SETFL, O_NONBLOCK);
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    fprintf(stderr, "fish inspector: failed to create socket\n");
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+    return;
+  }
+  fcntl(fd, F_SETFD, FD_CLOEXEC);
+  int on = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+  if (bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(fd, 16) != 0) {
+    fprintf(stderr, "fish inspector: failed to listen on %s:%d (%s)\n", host, port, strerror(errno));
+    close(fd);
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+    return;
+  }
+  socklen_t alen = sizeof addr;
+  int bound = port;
+  if (getsockname(fd, (struct sockaddr *)&addr, &alen) == 0) bound = ntohs(addr.sin_port);
+  fsh_inspect_fd = fd;
+  if (pthread_create(&fsh_inspect_thread, NULL, fsh_inspector_loop, NULL) != 0) {
+    close(fd);
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_fd = fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+    return;
+  }
+  fsh_inspect_running = 1;
+  fprintf(stderr, "fish inspector listening on http://%s:%d\n", host, bound);
+  fflush(stderr);
+}
+
+static void fsh_inspector_stop(int detach) {
+  if (!fsh_inspect_running) return;
+  char b = 1;
+  ssize_t ignored = write(fsh_inspect_pipe[1], &b, 1);
+  (void)ignored;
+  if (detach) {
+    pthread_detach(fsh_inspect_thread);
+  } else {
+    pthread_join(fsh_inspect_thread, NULL);
+    close(fsh_inspect_fd);
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_fd = fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+  }
+  fsh_inspect_running = 0;
+}
+
 // Runs an async main: starts the workers, runs main as the first task until it is done or a
 // task panics, stops them, drops every task still alive, and gives main's outcome, its poll
 // result copied to out.
@@ -8628,6 +8880,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size, name, site);
   // The reactor is ready before any task can wait on a socket.
   fsh_io_start();
+  fsh_inspector_start();
   // Workers get 64 MiB stacks, since main's calls run on them: deep recursion, as a compiler's
   // over a program's tree, goes as far as it does under a JavaScript engine. Only the pages a
   // thread touches are ever committed.
@@ -8674,6 +8927,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
     for (int64_t i = 0; i < fsh_workers; i++) pthread_detach(fsh_threads[i]);
     pthread_detach(fsh_timer_thread);
     pthread_detach(fsh_io_thread);
+    fsh_inspector_stop(1);
     if (fsh_panicked) exit(101);
     memcpy(out, fsh_output(fsh_main_task), output_size);
     return fsh_main_task->outcome;
@@ -8687,6 +8941,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_mutex_unlock(&fsh_timer_lock);
   pthread_join(fsh_timer_thread, NULL);
   fsh_io_stop();
+  fsh_inspector_stop(0);
   while (fsh_timer_count > 0) fsh_timer_fire(fsh_timer_take(), 0);
   free(fsh_timers);
   // Every task not done is dropped where it stopped; one dropping may release another.
