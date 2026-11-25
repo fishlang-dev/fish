@@ -1,7 +1,8 @@
-script 46888c10adfd5e43520c8af09b15ab43090066a4c2a7131dcf28ae5e77d26cfc
+script 470cf9f9fa80a66d7b6a17a4ecb02ab09070a10c8b4b5220febc5c50e8f56064
 status 0
 stdout 2276
-f d nowhere 0 s5 nowhere
+0
+f d nowhere s5 nowhere
 true false 2 hi hi
 <dir>/f <dir>/d <dir>
 EEXIST: file already exists, symlink 'f' -> 's1' EEXIST symlink f
