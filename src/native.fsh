@@ -3,9 +3,9 @@ import { CASEMAP } from "./casemap.fsh";
 // The C half of the runtime, compiled by the same clang call as a program's IR. Its entry
 // points are named `fsh_rt_*`.
 
-// Every allocation goes through fsh_rt_alloc and fsh_rt_free, which count what is live. With
-// FISH_LEAKS=1 in the environment, a program reports at exit how many blocks it never freed; a
-// --leaks build always reports them, grouped by where each was allocated.
+// Every allocation goes through fsh_rt_alloc and fsh_rt_free. With FISH_LEAKS=1 in the
+// environment they count what is live, and a program reports at exit how many blocks it never
+// freed; a --leaks build always reports them, grouped by where each was allocated.
 //
 // A string is a block: a reference count, its length in bytes, a pointer to its bytes, the
 // block it shares them with when it is a slice, its UTF-16 length once known (-1 before), its
@@ -59,6 +59,25 @@ export const NATIVE = String.raw`
 
 // Tasks run on several threads, so everything they share is counted atomically.
 static int64_t fsh_live = 0;
+// Whether blocks are counted, -1 until the first allocation asks. Only a leak report reads the
+// count, and one counter every thread writes at each allocation and free slows a server down, so
+// a program not asked for its leaks counts nothing. A top-level const's constructor may allocate
+// before any of this file's run, which is why the first allocation reads the environment.
+#ifdef FSH_LEAK_SITES
+static int32_t fsh_counting = 1;
+#else
+static int32_t fsh_counting = -1;
+#endif
+
+static int32_t fsh_counts(void) {
+  int32_t counting = __atomic_load_n(&fsh_counting, __ATOMIC_RELAXED);
+  if (counting < 0) {
+    const char *check = getenv("FISH_LEAKS");
+    counting = check && check[0] == '1';
+    __atomic_store_n(&fsh_counting, counting, __ATOMIC_RELAXED);
+  }
+  return counting;
+}
 // Set when the program ends with tasks still running, whose memory is never freed.
 static int32_t fsh_abandoned = 0;
 // File jobs the blocking pool holds, whose memory is still live when a program ends mid-read.
@@ -85,7 +104,7 @@ void *fsh_rt_alloc(int64_t size) {
     fputs("out of memory\n", stderr);
     exit(101);
   }
-  __atomic_fetch_add(&fsh_live, 1, __ATOMIC_RELAXED);
+  if (fsh_counts()) __atomic_fetch_add(&fsh_live, 1, __ATOMIC_RELAXED);
 #ifdef FSH_LEAK_SITES
   fsh_site(b);
   b->size = size;
@@ -101,7 +120,7 @@ void *fsh_rt_alloc(int64_t size) {
 
 void fsh_rt_free(void *p) {
   if (!p) return;
-  __atomic_fetch_sub(&fsh_live, 1, __ATOMIC_RELAXED);
+  if (fsh_counts()) __atomic_fetch_sub(&fsh_live, 1, __ATOMIC_RELAXED);
 #ifdef FSH_LEAK_SITES
   fsh_block *b = (fsh_block *)p - 1;
   pthread_mutex_lock(&fsh_blocks_lock);
@@ -139,18 +158,16 @@ __attribute__((destructor)) static void fsh_leaks(void) {
   if (__atomic_load_n(&fsh_pool_busy, __ATOMIC_ACQUIRE) != 0) fsh_abandoned = 1;
   if (fsh_constants_drop && !fsh_abandoned) fsh_constants_drop();
   if (fsh_shutdown_end && !fsh_abandoned) fsh_shutdown_end();
-  const char *check = getenv("FISH_LEAKS");
-#ifdef FSH_LEAK_SITES
-  check = "1";
-#endif
-  if (check && check[0] == '1' && fsh_engine_end && !fsh_abandoned && !fsh_panic_began) fsh_engine_end();
+  // A program that never allocated never asked, and has nothing to report.
+  int32_t check = __atomic_load_n(&fsh_counting, __ATOMIC_RELAXED) > 0;
+  if (check && fsh_engine_end && !fsh_abandoned && !fsh_panic_began) fsh_engine_end();
   int64_t live = __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
   // After a panic, what JS frames it unwound held is still live in the engine, not leaked.
   int32_t held = fsh_engine_end && fsh_panic_began;
 #ifdef FSH_LEAK_SITES
   if (live != 0 && !fsh_abandoned && !held) fsh_leak_report();
 #else
-  if (check && check[0] == '1' && live != 0 && !fsh_abandoned && !held) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)live);
+  if (check && live != 0 && !fsh_abandoned && !held) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)live);
 #endif
 }
 
