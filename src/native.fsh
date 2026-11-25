@@ -643,6 +643,10 @@ static _Thread_local int32_t fsh_token = 0;
 // is making. A release build never touches it.
 typedef struct fsh_frame { const char *site; const char *name; struct fsh_frame *prev; } fsh_frame;
 _Thread_local fsh_frame *fsh_rt_frames = NULL;
+#ifdef FSH_PROFILE
+static int fsh_prof_register(void);
+static void fsh_prof_unregister(int slot);
+#endif
 // Where the task this thread is polling was spawned, and the panic's "panicked at" line.
 static _Thread_local const char *fsh_spawned_at = NULL;
 static _Thread_local const char *fsh_panic_line = NULL;
@@ -4607,6 +4611,9 @@ static fsh_task *fsh_next_task(int64_t me) {
 
 static void *fsh_work(void *arg) {
   fsh_worker = (int64_t)arg;
+#ifdef FSH_PROFILE
+  int prof_slot = fsh_prof_register();
+#endif
   // A stopping runtime runs nothing more, however much is queued.
   while (!__atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) {
     fsh_task *t = fsh_next_task(fsh_worker);
@@ -4618,6 +4625,9 @@ static void *fsh_work(void *arg) {
     while (__atomic_load_n(&fsh_queued, __ATOMIC_RELAXED) <= 0 && !fsh_stopping) pthread_cond_wait(&fsh_parked, &fsh_park);
     pthread_mutex_unlock(&fsh_park);
   }
+#ifdef FSH_PROFILE
+  fsh_prof_unregister(prof_slot);
+#endif
   pthread_mutex_lock(&fsh_park);
   fsh_stopped++;
   pthread_cond_broadcast(&fsh_left);
@@ -7789,6 +7799,9 @@ static void fsh_pool_run(fsh_file_job *job) {
 
 static void *fsh_pool_work(void *arg) {
   (void)arg;
+#ifdef FSH_PROFILE
+  int prof_slot = fsh_prof_register();
+#endif
   pthread_mutex_lock(&fsh_pool_lock);
   for (;;) {
     while (!fsh_pool_head) {
@@ -7801,6 +7814,9 @@ static void *fsh_pool_work(void *arg) {
       if (waited == ETIMEDOUT && !fsh_pool_head) {
         fsh_pool_threads--;
         pthread_mutex_unlock(&fsh_pool_lock);
+#ifdef FSH_PROFILE
+        fsh_prof_unregister(prof_slot);
+#endif
         return NULL;
       }
     }
@@ -9009,6 +9025,472 @@ static void fsh_inspector_stop(int detach) {
   }
   fsh_inspect_running = 0;
 }
+
+#ifdef FSH_PROFILE
+// Sampling profiler: a dedicated sampler thread sends SIGPROF to registered threads (main,
+// async workers, and blocking pool threads). Each target's async-signal-safe handler walks its
+// own fsh_rt_frames shadow stack into a lock-free ring buffer; the sampler drains the ring into
+// an aggregated stack table and writes a folded-stack or interactive SVG flame graph on exit.
+#define FSH_PROF_MAX_THREADS 1024
+#define FSH_PROF_MAX_DEPTH 64
+#define FSH_PROF_RING 4096
+
+typedef struct {
+  pthread_t tid;
+  int32_t active;
+} fsh_prof_slot;
+
+typedef struct {
+  int32_t state;
+  int32_t depth;
+  const char *names[FSH_PROF_MAX_DEPTH];
+} fsh_prof_sample;
+
+typedef struct {
+  char *stack;
+  uint64_t hash;
+  uint64_t count;
+} fsh_prof_entry;
+
+static pthread_mutex_t fsh_prof_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fsh_prof_cond = PTHREAD_COND_INITIALIZER;
+static fsh_prof_slot fsh_prof_slots[FSH_PROF_MAX_THREADS];
+static fsh_prof_sample fsh_prof_ring[FSH_PROF_RING];
+static uint64_t fsh_prof_write = 0;
+static int32_t fsh_prof_enabled = 0;
+static int32_t fsh_prof_stopping = 0;
+static int32_t fsh_prof_in_flight = 0;
+static int32_t fsh_prof_started = 0;
+static int fsh_prof_main_slot = -1;
+static int64_t fsh_prof_hz = 997;
+static int64_t fsh_prof_threads_seen = 0;
+static char fsh_prof_out[1024] = "fish-profile.svg";
+static pthread_t fsh_prof_thread;
+static fsh_prof_entry *fsh_prof_entries = NULL;
+static size_t fsh_prof_cap = 0;
+static size_t fsh_prof_count = 0;
+static uint64_t fsh_prof_total = 0;
+
+static int fsh_prof_register(void) {
+  pthread_mutex_lock(&fsh_prof_lock);
+  int found = -1;
+  for (int i = 0; i < FSH_PROF_MAX_THREADS; i++) {
+    if (!fsh_prof_slots[i].active) {
+      fsh_prof_slots[i].tid = pthread_self();
+      fsh_prof_slots[i].active = 1;
+      fsh_prof_threads_seen++;
+      found = i;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&fsh_prof_lock);
+  return found;
+}
+
+static void fsh_prof_unregister(int slot) {
+  if (slot < 0 || slot >= FSH_PROF_MAX_THREADS) return;
+  pthread_mutex_lock(&fsh_prof_lock);
+  fsh_prof_slots[slot].active = 0;
+  pthread_mutex_unlock(&fsh_prof_lock);
+}
+
+static void fsh_prof_handler(int sig) {
+  (void)sig;
+  int saved_errno = errno;
+  __atomic_fetch_add(&fsh_prof_in_flight, 1, __ATOMIC_ACQ_REL);
+  if (__atomic_load_n(&fsh_prof_enabled, __ATOMIC_ACQUIRE)) {
+    __atomic_signal_fence(__ATOMIC_ACQUIRE);
+    fsh_frame *f = fsh_rt_frames;
+    if (f) {
+      const char *tmp[FSH_PROF_MAX_DEPTH];
+      int32_t depth = 0;
+      while (f && depth < FSH_PROF_MAX_DEPTH) {
+        tmp[depth++] = f->name ? f->name : "<unknown>";
+        f = f->prev;
+      }
+      if (depth > 0) {
+        uint64_t idx = __atomic_fetch_add(&fsh_prof_write, 1, __ATOMIC_RELAXED) & (FSH_PROF_RING - 1);
+        int32_t expected = 0;
+        if (__atomic_compare_exchange_n(&fsh_prof_ring[idx].state, &expected, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+          fsh_prof_ring[idx].depth = depth;
+          for (int32_t i = 0; i < depth; i++) fsh_prof_ring[idx].names[i] = tmp[depth - 1 - i];
+          __atomic_store_n(&fsh_prof_ring[idx].state, 2, __ATOMIC_RELEASE);
+        }
+      }
+    }
+  }
+  __atomic_fetch_sub(&fsh_prof_in_flight, 1, __ATOMIC_RELEASE);
+  errno = saved_errno;
+}
+
+static uint64_t fsh_prof_hash(const char *s) {
+  uint64_t h = 14695981039346656037ULL;
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    h ^= (uint64_t)*p;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+static void fsh_prof_table_grow(void) {
+  size_t new_cap = fsh_prof_cap ? fsh_prof_cap * 2 : 256;
+  fsh_prof_entry *next = calloc(new_cap, sizeof(fsh_prof_entry));
+  if (!next) return;
+  for (size_t i = 0; i < fsh_prof_cap; i++) {
+    if (!fsh_prof_entries[i].stack) continue;
+    size_t mask = new_cap - 1;
+    size_t pos = (size_t)(fsh_prof_entries[i].hash & mask);
+    while (next[pos].stack) pos = (pos + 1) & mask;
+    next[pos] = fsh_prof_entries[i];
+  }
+  free(fsh_prof_entries);
+  fsh_prof_entries = next;
+  fsh_prof_cap = new_cap;
+}
+
+static void fsh_prof_record(const char *const *names, int32_t depth) {
+  size_t len = 0;
+  for (int32_t i = 0; i < depth; i++) len += strlen(names[i]) + (i > 0 ? 1 : 0);
+  char *stack = malloc(len + 1);
+  if (!stack) return;
+  char *w = stack;
+  for (int32_t i = 0; i < depth; i++) {
+    if (i > 0) *w++ = ';';
+    size_t n = strlen(names[i]);
+    memcpy(w, names[i], n);
+    w += n;
+  }
+  *w = 0;
+  uint64_t h = fsh_prof_hash(stack);
+  if (fsh_prof_count * 2 >= fsh_prof_cap) fsh_prof_table_grow();
+  if (!fsh_prof_entries || fsh_prof_cap == 0) { free(stack); return; }
+  size_t mask = fsh_prof_cap - 1;
+  size_t pos = (size_t)(h & mask);
+  while (fsh_prof_entries[pos].stack) {
+    if (fsh_prof_entries[pos].hash == h && strcmp(fsh_prof_entries[pos].stack, stack) == 0) {
+      fsh_prof_entries[pos].count++;
+      fsh_prof_total++;
+      free(stack);
+      return;
+    }
+    pos = (pos + 1) & mask;
+  }
+  fsh_prof_entries[pos].stack = stack;
+  fsh_prof_entries[pos].hash = h;
+  fsh_prof_entries[pos].count = 1;
+  fsh_prof_count++;
+  fsh_prof_total++;
+}
+
+static void fsh_prof_drain(void) {
+  for (size_t i = 0; i < FSH_PROF_RING; i++) {
+    if (__atomic_load_n(&fsh_prof_ring[i].state, __ATOMIC_ACQUIRE) == 2) {
+      int32_t d = fsh_prof_ring[i].depth;
+      const char *names[FSH_PROF_MAX_DEPTH];
+      if (d > FSH_PROF_MAX_DEPTH) d = FSH_PROF_MAX_DEPTH;
+      for (int32_t k = 0; k < d; k++) names[k] = fsh_prof_ring[i].names[k];
+      __atomic_store_n(&fsh_prof_ring[i].state, 0, __ATOMIC_RELEASE);
+      if (d > 0) fsh_prof_record(names, d);
+    }
+  }
+}
+
+static void *fsh_prof_sampler(void *arg) {
+  (void)arg;
+  sigset_t mask;
+  sigemptyset(&mask);
+  sigaddset(&mask, SIGPROF);
+  pthread_sigmask(SIG_BLOCK, &mask, NULL);
+  int64_t step_ns = 1000000000LL / fsh_prof_hz;
+  if (step_ns < 100000LL) step_ns = 100000LL;
+  for (;;) {
+    pthread_mutex_lock(&fsh_prof_lock);
+    if (fsh_prof_stopping) {
+      pthread_mutex_unlock(&fsh_prof_lock);
+      break;
+    }
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_nsec += (long)step_ns;
+    until.tv_sec += until.tv_nsec / 1000000000L;
+    until.tv_nsec %= 1000000000L;
+    pthread_cond_timedwait(&fsh_prof_cond, &fsh_prof_lock, &until);
+    if (fsh_prof_stopping) {
+      pthread_mutex_unlock(&fsh_prof_lock);
+      break;
+    }
+    // Hold fsh_prof_lock while sending SIGPROF so no registered thread can unregister and exit
+    // before pthread_kill runs; the handler never acquires fsh_prof_lock.
+    for (int i = 0; i < FSH_PROF_MAX_THREADS; i++) {
+      if (fsh_prof_slots[i].active) pthread_kill(fsh_prof_slots[i].tid, SIGPROF);
+    }
+    pthread_mutex_unlock(&fsh_prof_lock);
+    fsh_prof_drain();
+  }
+  return NULL;
+}
+
+static int fsh_prof_entry_cmp(const void *a, const void *b) {
+  return strcmp(((const fsh_prof_entry *)a)->stack, ((const fsh_prof_entry *)b)->stack);
+}
+
+static void fsh_buf_xml(fsh_buf *b, const char *s) {
+  if (!s) return;
+  for (const char *p = s; *p; p++) {
+    if (*p == '&') fsh_buf_puts(b, "&amp;");
+    else if (*p == '<') fsh_buf_puts(b, "&lt;");
+    else if (*p == '>') fsh_buf_puts(b, "&gt;");
+    else if (*p == '"') fsh_buf_puts(b, "&quot;");
+    else if (*p == '\'') fsh_buf_puts(b, "&apos;");
+    else fsh_buf_putn(b, p, 1);
+  }
+}
+
+typedef struct {
+  int32_t depth;
+  uint64_t x_start;
+  uint64_t samples;
+  char *name;
+} fsh_fg_rect;
+
+typedef struct {
+  char *name;
+  uint64_t x_start;
+  uint64_t samples;
+} fsh_fg_open;
+
+static void fsh_fg_push_rect(fsh_fg_rect **rects, size_t *count, size_t *cap, int32_t depth, uint64_t x_start, uint64_t samples, const char *name) {
+  if (*count == *cap) {
+    size_t ncap = *cap ? *cap * 2 : 128;
+    fsh_fg_rect *next = realloc(*rects, ncap * sizeof(fsh_fg_rect));
+    if (!next) return;
+    *rects = next;
+    *cap = ncap;
+  }
+  char *copy = strdup(name);
+  if (!copy) return;
+  (*rects)[(*count)++] = (fsh_fg_rect){ depth, x_start, samples, copy };
+}
+
+static void fsh_prof_write_svg(FILE *fp, const fsh_prof_entry *sorted, size_t n, uint64_t total) {
+  fsh_fg_rect *rects = NULL;
+  size_t rcount = 0, rcap = 0;
+  fsh_fg_open open[FSH_PROF_MAX_DEPTH];
+  int32_t open_depth = 0;
+  int32_t max_depth = 0;
+  uint64_t cursor = 0;
+
+  if (total > 0) {
+    fsh_fg_push_rect(&rects, &rcount, &rcap, 0, 0, total, "all");
+  }
+  for (size_t i = 0; i < n; i++) {
+    const char *parts[FSH_PROF_MAX_DEPTH];
+    size_t plen[FSH_PROF_MAX_DEPTH];
+    int32_t depth = 0;
+    const char *p = sorted[i].stack;
+    while (*p && depth < FSH_PROF_MAX_DEPTH) {
+      const char *semi = strchr(p, ';');
+      parts[depth] = p;
+      plen[depth] = semi ? (size_t)(semi - p) : strlen(p);
+      depth++;
+      if (!semi) break;
+      p = semi + 1;
+    }
+    if (depth > max_depth) max_depth = depth;
+    int32_t common = 0;
+    while (common < open_depth && common < depth &&
+           strlen(open[common].name) == plen[common] &&
+           memcmp(open[common].name, parts[common], plen[common]) == 0) {
+      common++;
+    }
+    for (int32_t d = open_depth - 1; d >= common; d--) {
+      fsh_fg_push_rect(&rects, &rcount, &rcap, d + 1, open[d].x_start, open[d].samples, open[d].name);
+      free(open[d].name);
+    }
+    for (int32_t d = 0; d < common; d++) open[d].samples += sorted[i].count;
+    for (int32_t d = common; d < depth; d++) {
+      char *copy = malloc(plen[d] + 1);
+      if (copy) { memcpy(copy, parts[d], plen[d]); copy[plen[d]] = 0; }
+      open[d] = (fsh_fg_open){ copy ? copy : strdup(""), cursor, sorted[i].count };
+    }
+    open_depth = depth;
+    cursor += sorted[i].count;
+  }
+  for (int32_t d = open_depth - 1; d >= 0; d--) {
+    fsh_fg_push_rect(&rects, &rcount, &rcap, d + 1, open[d].x_start, open[d].samples, open[d].name);
+    free(open[d].name);
+  }
+
+  int width = 1200;
+  int pad = 10;
+  int frame_h = 18;
+  int header_h = 46;
+  int footer_h = 26;
+  int inner_w = width - pad * 2;
+  int height = header_h + footer_h + (max_depth + 2) * frame_h;
+  int base_y = height - footer_h;
+
+  fsh_buf b = { NULL, 0, 0, 0 };
+  fsh_buf_printf(&b,
+    "<?xml version=\"1.0\" standalone=\"no\"?>\n"
+    "<svg version=\"1.1\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\" xmlns=\"http://www.w3.org/2000/svg\">\n"
+    "<style>"
+    "text{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;fill:#111}"
+    ".fg{cursor:pointer}.fg:hover rect{stroke:#111;stroke-width:0.8}"
+    "</style>\n"
+    "<rect width=\"100%%\" height=\"100%%\" fill=\"#f8f8f5\"/>\n"
+    "<text x=\"%d\" y=\"24\" style=\"font-size:16px;font-weight:bold\">Fish Flame Graph (%llu sample%s)</text>\n"
+    "<text id=\"reset\" x=\"%d\" y=\"24\" text-anchor=\"end\" style=\"cursor:pointer;fill:#444;display:none\">Reset Zoom</text>\n",
+    width, height, width, height, pad, (unsigned long long)total, total == 1 ? "" : "s", width - pad);
+
+  if (total == 0) {
+    fsh_buf_printf(&b, "<text x=\"%d\" y=\"%d\">No stack samples collected.</text>\n", pad, header_h + 18);
+  } else {
+    for (size_t i = 0; i < rcount; i++) {
+      double x = pad + ((double)rects[i].x_start / (double)total) * inner_w;
+      double w = ((double)rects[i].samples / (double)total) * inner_w;
+      if (w < 0.1) continue;
+      int y = base_y - (rects[i].depth + 1) * frame_h;
+      double pct = 100.0 * (double)rects[i].samples / (double)total;
+      uint64_t h = fsh_prof_hash(rects[i].name);
+      int cr = rects[i].depth == 0 ? 225 : (int)(205 + (h % 50));
+      int cg = rects[i].depth == 0 ? 190 : (int)(85 + ((h >> 8) % 125));
+      int cb = rects[i].depth == 0 ? 140 : (int)(25 + ((h >> 16) % 55));
+      fsh_buf_printf(&b, "<g class=\"fg\" data-x=\"%.4f\" data-w=\"%.4f\" data-d=\"%d\"><title>",
+        (double)rects[i].x_start / (double)total, (double)rects[i].samples / (double)total, rects[i].depth);
+      fsh_buf_xml(&b, rects[i].name);
+      fsh_buf_printf(&b, " (%llu sample%s, %.2f%%)</title>", (unsigned long long)rects[i].samples, rects[i].samples == 1 ? "" : "s", pct);
+      fsh_buf_printf(&b, "<rect x=\"%.2f\" y=\"%d\" width=\"%.2f\" height=\"%d\" rx=\"2\" fill=\"rgb(%d,%d,%d)\"/>",
+        x, y, w > 1.0 ? w - 0.5 : w, frame_h - 1, cr, cg, cb);
+      int max_chars = (int)((w - 6.0) / 7.2);
+      fsh_buf_printf(&b, "<text x=\"%.2f\" y=\"%d\">", x + 3.0, y + 13);
+      if (max_chars >= 3) {
+        size_t nlen = strlen(rects[i].name);
+        if ((int)nlen <= max_chars) {
+          fsh_buf_xml(&b, rects[i].name);
+        } else {
+          char cut[128];
+          int keep = max_chars - 2;
+          if (keep > (int)sizeof cut - 4) keep = (int)sizeof cut - 4;
+          if (keep < 1) keep = 1;
+          memcpy(cut, rects[i].name, (size_t)keep);
+          cut[keep] = '.';
+          cut[keep + 1] = '.';
+          cut[keep + 2] = 0;
+          fsh_buf_xml(&b, cut);
+        }
+      }
+      fsh_buf_puts(&b, "</text></g>\n");
+    }
+  }
+
+  fsh_buf_printf(&b,
+    "<script><![CDATA[\n"
+    "(function(){\n"
+    "var pad=%d,iw=%d,gs=document.getElementsByClassName('fg'),rst=document.getElementById('reset');\n"
+    "function zoom(zx,zw){\n"
+    "  rst.style.display=(zx>0||zw<1)?'block':'none';\n"
+    "  for(var i=0;i<gs.length;i++){\n"
+    "    var g=gs[i],x=parseFloat(g.getAttribute('data-x')),w=parseFloat(g.getAttribute('data-w'));\n"
+    "    var x0=Math.max(x,zx),x1=Math.min(x+w,zx+zw);\n"
+    "    if(x1<=x0){g.style.display='none';continue;}\n"
+    "    g.style.display='';\n"
+    "    var px=pad+((x0-zx)/zw)*iw,pw=((x1-x0)/zw)*iw;\n"
+    "    var r=g.getElementsByTagName('rect')[0],t=g.getElementsByTagName('text')[0];\n"
+    "    r.setAttribute('x',px.toFixed(2));r.setAttribute('width',Math.max(0.5,pw-0.5).toFixed(2));\n"
+    "    t.setAttribute('x',(px+3).toFixed(2));\n"
+    "  }\n"
+    "}\n"
+    "for(var i=0;i<gs.length;i++){gs[i].addEventListener('click',function(){zoom(parseFloat(this.getAttribute('data-x')),parseFloat(this.getAttribute('data-w')));});}\n"
+    "rst.addEventListener('click',function(){zoom(0,1);});\n"
+    "})();\n"
+    "]]></script>\n</svg>\n", pad, inner_w);
+
+  if (b.data && b.len > 0) fwrite(b.data, 1, b.len, fp);
+  free(b.data);
+  for (size_t i = 0; i < rcount; i++) free(rects[i].name);
+  free(rects);
+}
+
+static int fsh_prof_is_folded(const char *path) {
+  size_t len = strlen(path);
+  return (len >= 7 && strcmp(path + len - 7, ".folded") == 0) ||
+         (len >= 4 && strcmp(path + len - 4, ".txt") == 0);
+}
+
+__attribute__((constructor)) static void fsh_prof_init(void) {
+  const char *out = getenv("FISH_PROFILE");
+  if (out && (strcmp(out, "0") == 0 || strcmp(out, "off") == 0 || strcmp(out, "false") == 0)) return;
+  if (out && out[0] && strcmp(out, "1") != 0 && strcmp(out, "true") != 0) {
+    snprintf(fsh_prof_out, sizeof fsh_prof_out, "%s", out);
+  }
+  const char *hz_env = getenv("FISH_PROFILE_HZ");
+  if (hz_env && hz_env[0]) {
+    long v = strtol(hz_env, NULL, 10);
+    if (v >= 10 && v <= 10000) fsh_prof_hz = v;
+  }
+  fsh_prof_main_slot = fsh_prof_register();
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = fsh_prof_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  if (sigaction(SIGPROF, &sa, NULL) != 0) return;
+  __atomic_store_n(&fsh_prof_enabled, 1, __ATOMIC_RELEASE);
+  if (pthread_create(&fsh_prof_thread, NULL, fsh_prof_sampler, NULL) != 0) {
+    __atomic_store_n(&fsh_prof_enabled, 0, __ATOMIC_RELEASE);
+    return;
+  }
+  fsh_prof_started = 1;
+}
+
+__attribute__((destructor)) static void fsh_prof_fini(void) {
+  if (!fsh_prof_started) return;
+  fsh_prof_started = 0;
+  pthread_mutex_lock(&fsh_prof_lock);
+  fsh_prof_stopping = 1;
+  pthread_cond_broadcast(&fsh_prof_cond);
+  pthread_mutex_unlock(&fsh_prof_lock);
+  pthread_join(fsh_prof_thread, NULL);
+  __atomic_store_n(&fsh_prof_enabled, 0, __ATOMIC_RELEASE);
+  for (int i = 0; i < 500 && __atomic_load_n(&fsh_prof_in_flight, __ATOMIC_ACQUIRE) > 0; i++) {
+    struct timespec ts = { 0, 100000 };
+    nanosleep(&ts, NULL);
+  }
+  signal(SIGPROF, SIG_IGN);
+  fsh_prof_unregister(fsh_prof_main_slot);
+  fsh_prof_drain();
+
+  fsh_prof_entry *sorted = fsh_prof_count > 0 ? malloc(fsh_prof_count * sizeof(fsh_prof_entry)) : NULL;
+  size_t n = 0;
+  if (sorted) {
+    for (size_t i = 0; i < fsh_prof_cap; i++) {
+      if (fsh_prof_entries[i].stack) sorted[n++] = fsh_prof_entries[i];
+    }
+    if (n > 1) qsort(sorted, n, sizeof(fsh_prof_entry), fsh_prof_entry_cmp);
+  }
+
+  FILE *fp = fopen(fsh_prof_out, "wb");
+  if (!fp) {
+    fprintf(stderr, "fish profile: failed to write '%s' (%s)\n", fsh_prof_out, strerror(errno));
+  } else {
+    if (fsh_prof_is_folded(fsh_prof_out)) {
+      for (size_t i = 0; i < n; i++) fprintf(fp, "%s %llu\n", sorted[i].stack, (unsigned long long)sorted[i].count);
+    } else {
+      fsh_prof_write_svg(fp, sorted, n, fsh_prof_total);
+    }
+    fclose(fp);
+    fprintf(stderr, "fish profile: %llu samples across %lld thread%s written to %s\n",
+      (unsigned long long)fsh_prof_total, (long long)fsh_prof_threads_seen, fsh_prof_threads_seen == 1 ? "" : "s", fsh_prof_out);
+  }
+
+  free(sorted);
+  for (size_t i = 0; i < fsh_prof_cap; i++) free(fsh_prof_entries[i].stack);
+  free(fsh_prof_entries);
+  fsh_prof_entries = NULL;
+  fsh_prof_cap = fsh_prof_count = 0;
+}
+#endif
 
 // Runs an async main: starts the workers, runs main as the first task until it is done or a
 // task panics, stops them, drops every task still alive, and gives main's outcome, its poll

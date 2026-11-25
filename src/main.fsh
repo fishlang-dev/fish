@@ -84,9 +84,9 @@ function plain(session: Session): Session {
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false, debug = false): string {
+export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false, debug = false, profile = false): string {
   let looked: string[] = [];
-  return compiledIn(newCompilation(session), src, file, release, panic, library, leaks, debug, looked).ir;
+  return compiledIn(newCompilation(session), src, file, release, panic, library, leaks, debug, looked, profile).ir;
 }
 
 // Checks the program whose entry is `file` as `compile` would, generating nothing; throws its
@@ -109,14 +109,14 @@ function checkedFile(session: Session, file: string): { warnings: CompileError[]
 // The program checked and turned into IR, timed as the codegen stage, its packages bundled in and,
 // in a debug build, its debug info added.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function compiledIn(compilation: Compilation, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks: boolean, debug: boolean, looked: Mut<string[]>): Compiled {
+function compiledIn(compilation: Compilation, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks: boolean, debug: boolean, looked: Mut<string[]>, profile = false): Compiled {
   let program = compilation;
   // What a build's codegen fails on is collected in the session's list, when it has one.
   const failed = program.session.failed;
   program.session.failed = undefined;
   let made = checkedSource(program, file, src, library ? runtimeNames() : false, looked);
   const sources = [...made.loaded.sources];
-  return generated(made.checked, made.loaded, { src, file, release, panic, library, sources, leaks, debug, failed });
+  return generated(made.checked, made.loaded, { src, file, release, panic, library, sources, leaks, profile, debug, failed });
 }
 
 // `codegenChecked`, its errors given the program's files. A function of its own so that what
@@ -283,19 +283,19 @@ function cType(typing: Ref<Typing>, t: Type): string {
 // `links` names the C libraries the program's declared functions come from. With `leaks`, the
 // program reports at exit what it never freed, by where it was allocated. Gives the warnings.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), leaks = false, debug = false): CompileError[] {
+export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), leaks = false, debug = false, profile = false): CompileError[] {
   let looked: string[] = [];
-  return built(session, file, out, release, panic, [...links], target, leaks, debug, looked).warnings;
+  return built(session, file, out, release, panic, [...links], target, leaks, debug, looked, profile).warnings;
 }
 
 // `build`, giving the session back, with its caches and the build's timings. `looked` is given the
 // files the program was read from, or looked for, even when it doesn't build.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>): { warnings: CompileError[]; session: BuildSession } {
+function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, profile = false): { warnings: CompileError[]; session: BuildSession } {
   let { core, caches } = apart(session);
-  let ready = readied(core, caches, file, release, panic, leaks, debug, looked, target);
+  let ready = readied(core, caches, file, release, panic, leaks, debug, looked, target, profile);
   let known = new Map<string, string[]>();
-  linked(ready.building, ready.ir, ready.split, out, release, links, ready.shim, target, leaks, debug, known);
+  linked(ready.building, ready.ir, ready.split, out, release, links, ready.shim, target, leaks, debug, known, profile);
   return { warnings: ready.warnings, session: ready.building };
 }
 
@@ -303,8 +303,8 @@ function built(session: BuildSession, file: string, out: string, release: boolea
 // so the checked program and the loaded files, which only `fishc watch` keeps for its next build,
 // are dropped as it returns: clang then compiles with nothing of them held beside it.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>): { ir: string; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession } {
-  let made = compiledKept(core, file, release, panic, leaks, debug, looked, undefined, undefined, false);
+function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>, profile = false): { ir: string; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession } {
+  let made = compiledKept(core, file, release, panic, leaks, debug, looked, undefined, undefined, false, profile);
   const instrumenting = stageStart(made.kept.checked.tables.session);
   const ir = instrumented(made.ir, target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
@@ -324,9 +324,9 @@ function readied(core: Session, caches: Caches, file: string, release: boolean, 
 // did is not loaded or checked again. Gives what to keep for the next build. `manifest` is the
 // package's, which a build may read.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string; warnings: CompileError[]; session: BuildSession; kept: Kept } {
+export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true, profile = false): { ir: string; warnings: CompileError[]; session: BuildSession; kept: Kept } {
   let { core, caches } = apart(session);
-  let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest, keep);
+  let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest, keep, profile);
   const instrumenting = stageStart(made.kept.checked.tables.session);
   const ir = instrumented(made.ir, target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
@@ -342,14 +342,14 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
   // The next build gives the kept tables its own session.
   tables.session = newSession();
   let known: Map<string, string[]> = units !== undefined ? units! : new Map<string, string[]>();
-  linked(building, ir, split, out, release, links, shim, target, leaks, debug, known);
+  linked(building, ir, split, out, release, links, shim, target, leaks, debug, known, profile);
   return { ir: made.ir, warnings: made.warnings, session: building, kept: { checked: { instances, tables, warnings }, parts: checkerParts, loaded, contents, carried, emitted, units: known } };
 }
 
 // `compile` for `fishc watch`, from what its last build kept, giving the IR, the warnings and what
 // to keep.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string; warnings: CompileError[]; kept: Kept } {
+export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true, profile = false): { ir: string; warnings: CompileError[]; kept: Kept } {
   const reusing = kept !== undefined;
   // Reading the files again and putting the changed ones back, apart from the check it times itself.
   // Counted by hand from the front end's stages, since the session it starts on moves into the
@@ -370,7 +370,7 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   start.checked.tables.session.failed = undefined;
   const sources = [...start.loaded.sources];
   // Debug info marks every function's lines, so a `-g` build emits every function again.
-  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed, prior: debug ? undefined : start.emitted, rechecked: start.rechecked, keep });
+  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, profile, debug, failed, prior: debug ? undefined : start.emitted, rechecked: start.rechecked, keep });
   let warnings = [...made.checked.warnings];
   // A clean check gives its warnings in the order they are written in, which a kept one's
   // positions only give through their files' maps.
@@ -384,11 +384,11 @@ export function compiledKept(session: Session, file: string, release: boolean, p
 // How a build from what `fishc watch` kept differs from a clean build of `file`: its IR, its
 // warnings, or the error it stopped at, or undefined when they match.
 /** @throws {IoError} */
-export function cleanDifference(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, got: Ref<{ ir: string; warnings: CompileError[] } | CompileError>): string | undefined {
+export function cleanDifference(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, got: Ref<{ ir: string; warnings: CompileError[] } | CompileError>, profile = false): string | undefined {
   let clean: { ir: string; warnings: CompileError[] } | CompileError | undefined = undefined;
   try {
     let looked: string[] = [];
-    const made = compiledIn(newCompilation(session), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, looked);
+    const made = compiledIn(newCompilation(session), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, looked, profile);
     clean = { ir: made.ir, warnings: [...made.checked.warnings] };
   } catch (e) {
     if (!(e instanceof CompileError)) return `the clean build failed: ${(e as { message: string }).message}`;
@@ -520,9 +520,9 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
 /** @throws {Error | IoError} */
 // `known` is each unit's text and object from the build before, kept by `fishc watch`, so a unit
 // whose text is the same takes its object without hashing the text again.
-function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ cached: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean, known: Mut<Map<string, string[]>>) {
+function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ cached: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean, known: Mut<Map<string, string[]>>, profile = false) {
   const started = stageStart(session);
-  let units = runtimeUnits(ir, release, false, copyTarget(target), leaks);
+  let units = runtimeUnits(ir, release, false, copyTarget(target), leaks, profile);
   for (const u of halves.cached) units.push(u.clone());
   let objects = knownObjects(session, units, known);
   for (const o of mathObjects(session, [...target.compile])) objects.push(o);
@@ -937,14 +937,14 @@ const CODEGEN_PARTS = ["codegen names", "codegen setup", "codegen comptime", "co
 const OTHER_PARTS = ["reload compare", "reload read", "reload classify", "split names", "split items", "split reach", "split parts"];
 
 // What one of `fishc watch`'s builds takes.
-type Rebuild = { entry: string; binary: string; links: string[]; release: boolean; panic: Panic; leaks: boolean; debug: boolean; locked: boolean; timed: boolean; manifest: string | undefined };
+type Rebuild = { entry: string; binary: string; links: string[]; release: boolean; panic: Panic; leaks: boolean; profile: boolean; debug: boolean; locked: boolean; timed: boolean; manifest: string | undefined };
 
 // One of `fishc watch`'s builds: whether it built, and the files it read or looked for.
 function rebuilt(r: Ref<Rebuild>, kept: Kept | undefined): Rebuilt {
   let loaded: string[] = [];
   try {
     const start = performance.now();
-    let made = builtKept(sessionWith(r.locked, r.timed), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded, kept, r.manifest);
+    let made = builtKept(sessionWith(r.locked, r.timed), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded, kept, r.manifest, true, r.profile);
     const stages = ["reload", ...FRONT_END, "codegen", "instrument", "split", ...NATIVE_STAGES];
     reportTimings(made.session, ["reload", ...FRONT_END, "codegen", ...CODEGEN_PARTS, "instrument", "split", ...OTHER_PARTS, ...NATIVE_STAGES], start);
     // What no stage holds, so a rebuild's time is all accounted for.
@@ -990,7 +990,7 @@ function saved(carried: usize, ir: string, warnings: Ref<CompileError[]>): void 
 function verified(r: Ref<Rebuild>, got: Ref<{ ir: string; warnings: CompileError[] } | CompileError>): void {
   if (process.env.FISH_WATCH_VERIFY === undefined) return;
   try {
-    const wrong = cleanDifference(sessionWith(r.locked, false, true), r.entry, r.release, r.panic, r.leaks, r.debug, got);
+    const wrong = cleanDifference(sessionWith(r.locked, false, true), r.entry, r.release, r.panic, r.leaks, r.debug, got, r.profile);
     console.error(wrong === undefined ? "[fishc] verified: the build matches a clean one" : `[fishc] verify failed: ${wrong}`);
   } catch (e) {
     console.error(`[fishc] verify failed: ${(e as { message: string }).message}`);
@@ -1094,16 +1094,16 @@ export function runtimeLinks(ir: string, target: Ref<Target>): string[] {
 // them, and position-independent when `pic`, for a library. A `--leaks` build's runtime records
 // each block's site, so it is an object of its own.
 /** @throws {IoError} */
-export function runtimeUnits(ir: string, release: boolean, pic = false, target: Target = hostTarget(), leaks = false): Unit[] {
+export function runtimeUnits(ir: string, release: boolean, pic = false, target: Target = hostTarget(), leaks = false, profile = false): Unit[] {
   const js = callsEngine(ir);
   const openssl = callsTls(ir) ? findOpenSsl(target) : undefined;
   const none: string[] = [];
   const flags = [...target.compile, "-funwind-tables", "-pthread", ...optimization(release, target), ...(pic ? ["-fPIC"] : none), ...(js ? ["-I", engineDir()] : none)];
   const tls = openssl === undefined ? "" : "missing" in openssl ? "-tls-missing" : "-tls";
-  const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}`;
+  const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}${profile ? "-profile" : ""}`;
   const source = [NATIVE, ...(js ? [JS_NATIVE] : none), ...(openssl === undefined ? none : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
   const tlsFlags = openssl !== undefined && "compile" in openssl ? openssl.compile : [...none];
-  const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none)], stdin: source, inputs: js ? files(engineDir()) : none };
+  const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none), ...(profile ? ["-DFSH_PROFILE"] : none)], stdin: source, inputs: js ? files(engineDir()) : none };
   const engine: Unit[] = js ? engineSources().map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(engineDir()) })) : [];
   const zlib: Unit[] = callsZlib(ir) ? [{ name: "zlib", args: ["-x", "c", "-", ...flags], stdin: ZLIB_NATIVE, inputs: [] }] : [];
   const sqlite: Unit[] = callsSqlite(ir) ? [{ name: "sqlite", args: ["-x", "c", "-", ...flags], stdin: SQLITE_NATIVE, inputs: [] }] : [];
@@ -1463,6 +1463,7 @@ async function main(): Promise<void> {
           check: { type: "boolean" },
           fix: { type: "boolean" },
           leaks: { type: "boolean" },
+          profile: { type: "boolean" },
           debug: { type: "boolean", short: "g" },
           timings: { type: "boolean" },
           "no-check-cache": { type: "boolean" },
@@ -1693,6 +1694,7 @@ async function main(): Promise<void> {
   const lib: Library | undefined = libName === undefined ? undefined : libName === "shared" ? "shared" : "static";
   const release = values.release === true;
   const leaks = values.leaks === true;
+  const profile = values.profile === true;
   if (values.sanitize !== undefined && command !== "build") fail(`fishc ${command ?? ""}: '--sanitize' instruments a build; build with 'fishc build --sanitize address|thread', then run the binary it writes`);
   let target = file;
   let out = values.out;
@@ -1735,7 +1737,7 @@ async function main(): Promise<void> {
     try {
       const start = performance.now();
       let looked: string[] = [];
-      const made = built(sessionFor(), target, binary, release, panic, [...links], hostTarget(), leaks, values.debug === true, looked);
+      const made = built(sessionFor(), target, binary, release, panic, [...links], hostTarget(), leaks, values.debug === true, looked, profile);
       reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
       for (const w of made.warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
       const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
@@ -1757,7 +1759,7 @@ async function main(): Promise<void> {
     const binary = out ?? join(scratch!, basename(entry, ".fsh"));
     // What each build takes, the callback's own, since it may run on another thread.
     const manifest = findManifest(dirname(resolve(entry)));
-    const rebuild: Rebuild = { entry: `${entry}`, binary: `${binary}`, links: [...links], release, panic, leaks, debug: values.debug === true, locked, timed, manifest };
+    const rebuild: Rebuild = { entry: `${entry}`, binary: `${binary}`, links: [...links], release, panic, leaks, profile, debug: values.debug === true, locked, timed, manifest };
     await watchProgram({
       entry,
       binary,
@@ -1774,12 +1776,13 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
   if (values.timings === true && lib !== undefined) fail("fishc build: '--timings' times an executable's build; leave out '--lib' to time the program it would be built from");
   if (leaks && lib !== undefined) fail("fishc build: '--leaks' can't build a library; build the program that uses it with '--leaks' instead");
+  if (profile && lib !== undefined) fail("fishc build: '--profile' can't build a library; build the program that uses it with '--profile' instead");
   if (values.static === true && lib !== undefined) fail("fishc build: '--static' builds an executable, not a library; leave out '--lib', or '--static'");
   if ((values.static === true || values.dockerfile === true) && llvm) fail("fishc build: '--emit-llvm' prints the IR without linking it, so '--static' and '--dockerfile' don't apply; leave them out");
   const sanitize = values.sanitize === undefined ? undefined : values.sanitize.flatMap((s) => s.split(","));
@@ -1790,7 +1793,7 @@ async function main(): Promise<void> {
     if (llvm) {
       const start = performance.now();
       let looked: string[] = [];
-      const made = compiledIn(newCompilation(plain(sessionFor())), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked);
+      const made = compiledIn(newCompilation(plain(sessionFor())), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked, profile);
       reportTimings(made.checked.tables.session, [...FRONT_END, "codegen"], start);
       process.stdout.write(made.ir);
     } else {
@@ -1811,7 +1814,7 @@ async function main(): Promise<void> {
         else {
           const start = performance.now();
           let looked: string[] = [];
-          const made = built(sessionFor(), target!, binary, release, panic, [...links], copyTarget(platform), leaks, debug, looked);
+          const made = built(sessionFor(), target!, binary, release, panic, [...links], copyTarget(platform), leaks, debug, looked, profile);
           reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
           warnings = made.warnings;
         }
