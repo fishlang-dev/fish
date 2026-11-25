@@ -98,8 +98,8 @@ With a `fishc` already:
 fishc run scripts/build.fsh
 ```
 
-With none, the first time: this unpacks the pinned commit and builds stage 0 from it, which needs
-git and [Bun](https://bun.sh) once, then builds `fishc` with it.
+With none: this downloads the release `stage0.toml` pins for your machine, checks its sha256, and
+builds `fishc` with it. It needs curl and git.
 
 ```sh
 sh scripts/bootstrap.sh
