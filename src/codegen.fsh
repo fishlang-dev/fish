@@ -1332,7 +1332,7 @@ class Codegen implements PrintHost, ComptimeHost {
       if (!line.startsWith("  ret ")) return [line];
       const [link, prev] = [`%fsh.link${n}`, `%fsh.prev${n++}`];
       if (profiled) {
-        return [`  ${link} = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`, `  ${prev} = load volatile ptr, ptr ${link}`, `  store atomic ptr ${prev}, ptr @fsh_rt_frames syncscope("singlethread") release, align 8`, line];
+        return [`  ${link} = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`, `  ${prev} = load volatile ptr, ptr ${link}`, `  store atomic ptr ${prev}, ptr @fsh_rt_frames syncscope("singlethread") seq_cst, align 8`, line];
       }
       return [`  ${link} = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`, `  ${prev} = load ptr, ptr ${link}`, `  store ptr ${prev}, ptr @fsh_rt_frames`, line];
     });

@@ -1716,7 +1716,7 @@ async function main(): Promise<void> {
     }
   }
   const llvm = values["emit-llvm"] === true;
-  if (command === "check" && target !== undefined && values.out === undefined && !release && !llvm && lib === undefined) {
+  if (command === "check" && target !== undefined && values.out === undefined && !release && !llvm && !profile && lib === undefined) {
     try {
       const start = performance.now();
       const made = checkedFile(sessionFor(), target);
