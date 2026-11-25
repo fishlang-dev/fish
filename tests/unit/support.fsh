@@ -104,6 +104,7 @@ export function ranFor(command: string, args: string[], cwd?: string): Answer {
   const failed = run.error;
   if (failed !== null) assert(false, `can't run ${command}: ${failed.message}`);
   return { status: run.status ?? -1, stdout: text(run.stdout), stderr: text(run.stderr) };
+}
 
 // The CPU time this process has used, in microseconds.
 declare function clock(): i64;
