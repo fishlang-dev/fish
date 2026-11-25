@@ -118,6 +118,11 @@ type Site = { id: usize; start: usize; end: usize };
 // What the checker logs is declared beside the error that carries a failed check's log out.
 export type { BorrowEvent } from "./diag.fsh";
 
+// Whether a parameter is written as a shared reference.
+function sharedParam(p: Ref<Param>): boolean {
+  return p.type !== undefined && p.type.kind === "ref" && p.type.name === "Ref";
+}
+
 /** @throws {CompileError} */
 export function checkMoves<T extends Tables, B extends Body, I extends Instance>(tables: Mut<T>, f: Ref<B>, instance: Ref<I>, origins: Origin[]): { captures: Set<LocalId>; consumes: Set<usize>; keeps: boolean } {
   let cx = new MoveCx<T, B, I>(tables, f, instance);
@@ -1202,7 +1207,11 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     if (from !== undefined) {
       const result = lentAs ?? cx.instance.types.get(e)!;
       const mutable = this.isRef(cx, result) ? cx.tables.typing.rec(result).mutable : cx.tables.typing.holdsMut(result);
-      for (const s of from) this.sourceInto(cx, s, mutable, out);
+      const direct = this.isRef(cx, result);
+      for (const s of from) {
+        const shared = direct && this.takenShared(cx, e, s);
+        this.sourceInto(cx, s, mutable && !shared, out);
+      }
       return;
     }
     const type = cx.instance.types.get(e);
@@ -1214,6 +1223,22 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     const held = this.refMutability(cx, type);
     if (place === undefined || ref === undefined || held === false) return;
     out.push({ place, at: this.spot(cx, e), mutable: ref });
+  }
+
+  // Whether a call takes a source its returned reference borrows from by shared reference: the
+  // receiver of a method that doesn't change it, or an argument to a `Ref` parameter. A mutable
+  // result then began in one of std's methods that change their object from within, and the
+  // source stays lent read-only, so a second such call may run while the first's result lives.
+  takenShared(cx: Ref<MoveCx<T, B, I>>, e: Ref<Expr>, s: Ref<Expr>): boolean {
+    if (e.kind !== "call") return false;
+    const target = cx.instance.calls.get(e);
+    if (target === undefined) return false;
+    const f = bodyOf(cx.tables.arenas, cx.tables.arenas.instanceOf(target));
+    if (e.callee.kind === "member" && e.callee.object.id === s.id) return f.self !== undefined && !f.self.mutable && f.self.owned !== true;
+    for (let i: usize = 0; i < e.args.length && i < f.params.length; i++) {
+      if (e.args[i]!.id === s.id) return sharedParam(f.params[i]!);
+    }
+    return false;
   }
 
   // Whether an assignment to this target points a reference somewhere else. Any other
@@ -1703,7 +1728,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         else if (this.key(cx, s) !== undefined) {
           const place = this.key(cx, s)!;
           const at = this.spot(cx, s);
-          this.lend(cx, place, mutable, at, holder);
+          const shared = this.isRef(cx, result) && this.takenShared(cx, e, s);
+          this.lend(cx, place, mutable && !shared, at, holder);
           this.inherit(cx, holder, s);
           if (this.throughUnion(cx, s)) this.temporary(cx, holder, s);
         } else this.temporary(cx, holder, s);
