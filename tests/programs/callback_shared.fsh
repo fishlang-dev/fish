@@ -150,3 +150,28 @@ function main() {
   console.log(apply(() => a), apply(() => b + 1))
 }
 // expect: 1 3
+// case: callback_shared_check_refuses_a_closure_that_runs_once
+// error: 'twice' may call 'each' more than once, but this closure moves 'owned' out, so it can run only once
+function twice(each: (x: i64) => i64): i64 {
+  return each(1) + each(2);
+}
+function main() {
+  const base = 10;
+  console.log(twice((x) => x + base));
+  const owned = ["a".repeat(2)];
+  console.log(twice((x) => { const taken = owned; return x + (taken.length as i64); }));
+}
+// case: callback_shared_check_with_other_type_arguments
+// expect: 75 1,3
+function each<T>(xs: T[], depth: i64, f: (n: i64) => void): void {
+  f(xs.length as i64);
+  if (depth > 0) each<string>(["a", "b", "c"], depth - 1, f);
+}
+function main() {
+  let total = 0;
+  each<i64>([1, 2], 1, (n) => { total += n; });
+  let log: string[] = [];
+  each<i64>([1], 1, (n) => { log.push(String(n)); });
+  each<boolean>([true, false, true, false], 1, (n) => { total += n * 10; });
+  console.log(total, log.join(","));
+}
