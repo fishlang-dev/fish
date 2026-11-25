@@ -135,6 +135,17 @@ function clangRuntimeDir(triple: string): string {
   return new TextDecoder().decode(done.stdout).trim();
 }
 
+// Whether clang finds the library `name` among its own for `triple`. A system may keep a runtime
+// beside the directory `-print-runtime-dir` names and still link it from there, as Ubuntu 26.04
+// does; asked for a file, clang gives its path when it has it and the bare name back when not.
+/** @throws {IoError} */
+function clangFinds(triple: string, name: string): boolean {
+  const done = Bun.spawnSync(["clang", `--target=${triple}`, `-print-file-name=${name}`]);
+  if (done.exitCode !== 0) return false;
+  const path = new TextDecoder().decode(done.stdout).trim();
+  return path !== name && existsSync(path);
+}
+
 // `target` with every compile instrumented by clang's `kind` sanitizer and its runtime linked, so
 // the C runtime and std are checked as well as the program. Frame pointers are kept so reports show
 // whole stacks. Clang ships the runtimes per target, and none for musl, so a target it has none for
@@ -150,7 +161,12 @@ export function sanitizedTarget(target: Target, kinds: string[], given?: string,
   const cpu = triple === undefined ? undefined : triple.split("-")[0];
   const lib = kind === "address" ? "asan" : "tsan";
   const names = triple !== undefined && triple.includes("-apple-") ? [`libclang_rt.${lib}_osx_dynamic.dylib`] : [`libclang_rt.${lib}.a`, `libclang_rt.${lib}-${cpu ?? ""}.a`];
-  if (triple === undefined || musl(triple) || !names.some((n) => existsSync(join(runtimeDir === undefined ? clangRuntimeDir(triple) : runtimeDir(triple), n)))) throw new Error(`fishc build: clang has no ${kind} sanitizer runtime for ${triple ?? "this machine"}; build for a target it has one for, such as the host's own`);
+  let found = false;
+  if (triple !== undefined && !musl(triple)) {
+    const dir = runtimeDir === undefined ? clangRuntimeDir(triple) : runtimeDir(triple);
+    found = names.some((n) => existsSync(join(dir, n))) || (runtimeDir === undefined && names.some((n) => clangFinds(triple, n)));
+  }
+  if (!found) throw new Error(`fishc build: clang has no ${kind} sanitizer runtime for ${triple ?? "this machine"}; build for a target it has one for, such as the host's own`);
   const flags = [`-fsanitize=${kind}`, "-fno-omit-frame-pointer"];
   return { ...target, compile: [...target.compile, ...flags], sanitize: kind };
 }
