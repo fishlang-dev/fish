@@ -45,8 +45,10 @@ function writeBytes(path: string, bytes: Ref<u8[]>): void {
   }
 }
 
+// Without the maintenance a commit leaves running behind it, which is still in the repository
+// when a test removes it.
 function gitIn(cwd: string, args: string[]): void {
-  spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd });
+  spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "maintenance.auto=false", ...args], { cwd });
 }
 
 function depsJson(deps: Ref<[string, string][]>): string {

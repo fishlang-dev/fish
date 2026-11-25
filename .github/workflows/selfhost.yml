@@ -35,7 +35,9 @@ jobs:
           node-version: 24.10.0
       - name: Libraries fishc links, and what the tests build and run
         if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev zlib1g-dev libsqlite3-dev zip unzip
+        # The last is the sanitizer runtimes of the image's clang, named by its version, which the
+        # x86-64 image leaves out.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev zlib1g-dev libsqlite3-dev zip unzip "libclang-rt-$(clang -dumpversion | cut -d. -f1)-dev"
       - uses: actions/cache@v4
         with:
           path: ~/.cache/fish/stage0
@@ -45,7 +47,9 @@ jobs:
         run: sh scripts/bootstrap.sh
       - name: Golden programs
         run: build/fishc run tests/run.fsh -- --fishc "$PWD/build/fishc"
-      # Run whatever the golden programs did, so one run shows every failure.
+      # Run whatever the golden programs did, so one run shows every failure. A test with no limit
+      # of its own gets a minute, not ten seconds: the slowest runner takes several times as long
+      # as the machine the tests are written on.
       - name: Unit tests
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: cd tests/unit && FISHC="$PWD/../../build/fishc" ../../build/fishc test --release
+        run: cd tests/unit && FISHC="$PWD/../../build/fishc" ../../build/fishc test --release --timeout 60000

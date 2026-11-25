@@ -46,6 +46,28 @@ export function same(got: string, want: string, what: string): void {
   assert(got === want, `${what}:\n--- expected\n${want}\n--- got\n${got}`);
 }
 
+// The CPU time this process has used, in microseconds.
+declare function clock(): i64;
+
+// Fails the test unless `run` takes time linear in the size it is given: under 3.2 times as long
+// for 2n as for n, where linear work takes about 2 and quadratic about 4. A ratio holds on a machine
+// of any speed, which a limit in milliseconds doesn't. The time is the process's own, so tests
+// running beside it don't add to it, and each is the fastest of three runs.
+export function linear(n: usize, run: (size: usize) => void): void {
+  let small: i64 = 0;
+  let large: i64 = 0;
+  for (let round = 0; round < 3; round++) {
+    const started = unsafe { clock() };
+    run(n);
+    const half = unsafe { clock() };
+    run(2 * n);
+    const done = unsafe { clock() };
+    if (round === 0 || half - started < small) small = half - started;
+    if (round === 0 || done - half < large) large = done - half;
+  }
+  assert(large * 10 < small * 32, `size ${2 * n} took ${large / 1000}ms and size ${n} took ${small / 1000}ms, over 3.2 times as long`);
+}
+
 // Bytes as UTF-8 text.
 export function text(bytes: Ref<u8[]>): string {
   return new TextDecoder().decode(bytes);
