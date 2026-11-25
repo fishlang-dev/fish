@@ -13047,7 +13047,13 @@ class Codegen implements PrintHost, ComptimeHost {
   // A task's name and user spawn site for the task inspector. Std spawns pass null as site so
   // the runtime inherits the enclosing user frame's site.
   taskName(this: Mut<this>, future: FutureType): string {
-    return this.cString(this.frameName(this.futureOf.get(future)!));
+    const inst = this.futureOf.get(future)!;
+    const written = this.bodyAt(inst);
+    if (written.closure !== undefined && written.closure.self === undefined) {
+      const place = this.placeOf({ start: written.start, end: written.end });
+      this.noted(written.start, place);
+    }
+    return this.cString(this.frameName(inst));
   }
 
   taskSite(this: Mut<this>, at: Ref<Span>): string {

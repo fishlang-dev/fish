@@ -4384,6 +4384,7 @@ struct fsh_task {
   const char *spawn_site;
   int64_t created_ns;
   int64_t polls;
+  uint32_t wait_seq;
   const char *awaiting;
   const char *await_site;
   int64_t await_target;
@@ -4403,12 +4404,16 @@ static int64_t fsh_next_task_id = 0;
 static void *fsh_output(fsh_task *t) { return t->memory + t->frame_size; }
 
 // Records what a task is about to park on, with the active user await site when frames are on.
+// Uses an even/odd seqlock so concurrent snapshots never read a torn tuple across polls.
 static void fsh_task_wait(fsh_task *t, const char *what, int64_t target) {
   if (!t) return;
+  uint32_t seq = __atomic_load_n(&t->wait_seq, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 1, __ATOMIC_RELEASE);
   const char *site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
   __atomic_store_n(&t->await_site, site, __ATOMIC_RELAXED);
   __atomic_store_n(&t->await_target, target, __ATOMIC_RELAXED);
-  __atomic_store_n(&t->awaiting, what, __ATOMIC_RELEASE);
+  __atomic_store_n(&t->awaiting, what, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 2, __ATOMIC_RELEASE);
 }
 
 // A worker's queue: a ring of tasks, guarded by its own lock, which other workers steal from.
@@ -4531,9 +4536,12 @@ static void fsh_unlink(fsh_task *t) {
 static void fsh_run(fsh_task *t) {
   __atomic_store_n(&t->state, FSH_RUNNING, __ATOMIC_RELEASE);
   __atomic_fetch_add(&t->polls, 1, __ATOMIC_RELAXED);
+  uint32_t seq = __atomic_load_n(&t->wait_seq, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 1, __ATOMIC_RELEASE);
   __atomic_store_n(&t->await_site, NULL, __ATOMIC_RELAXED);
   __atomic_store_n(&t->await_target, 0, __ATOMIC_RELAXED);
-  __atomic_store_n(&t->awaiting, NULL, __ATOMIC_RELEASE);
+  __atomic_store_n(&t->awaiting, NULL, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 2, __ATOMIC_RELEASE);
   // A task's stack starts at its own root, whoever polls it, and a panic it unwound with leaves
   // its frames behind for this reset to drop.
   fsh_frame *frames = fsh_rt_frames;
@@ -4639,6 +4647,7 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   t->spawn_site = site ? site : t->spawned;
   t->created_ns = fsh_now();
   t->polls = 0;
+  t->wait_seq = 0;
   t->awaiting = NULL;
   t->await_site = NULL;
   t->await_target = 0;
@@ -8431,21 +8440,39 @@ typedef struct {
   int64_t polls;
 } fsh_task_snap;
 
-typedef struct { char *data; size_t len, cap; } fsh_buf;
+typedef struct { char *data; size_t len, cap; int failed; } fsh_buf;
 
 static void fsh_buf_grow(fsh_buf *b, size_t need) {
-  if (b->len + need + 1 <= b->cap) return;
+  if (b->failed) return;
+  if (need > SIZE_MAX - b->len - 1) {
+    free(b->data);
+    b->data = NULL;
+    b->len = b->cap = 0;
+    b->failed = 1;
+    return;
+  }
+  size_t required = b->len + need + 1;
+  if (required <= b->cap) return;
   size_t cap = b->cap ? b->cap : 256;
-  while (cap < b->len + need + 1) cap *= 2;
+  while (cap < required) {
+    if (cap > SIZE_MAX / 2) { cap = required; break; }
+    cap *= 2;
+  }
   char *next = realloc(b->data, cap);
-  if (!next) return;
+  if (!next) {
+    free(b->data);
+    b->data = NULL;
+    b->len = b->cap = 0;
+    b->failed = 1;
+    return;
+  }
   b->data = next;
   b->cap = cap;
 }
 
 static void fsh_buf_putn(fsh_buf *b, const char *s, size_t n) {
   fsh_buf_grow(b, n);
-  if (!b->data || b->len + n + 1 > b->cap) return;
+  if (b->failed || !b->data) return;
   memcpy(b->data + b->len, s, n);
   b->len += n;
   b->data[b->len] = 0;
@@ -8537,14 +8564,31 @@ static fsh_task_snap *fsh_tasks_snapshot(int64_t *count_out) {
   int64_t i = 0;
   if (snaps) {
     for (fsh_task *t = fsh_alive; t && i < n; t = t->next, i++) {
-      const char *awaiting = __atomic_load_n(&t->awaiting, __ATOMIC_ACQUIRE);
-      int64_t target = __atomic_load_n(&t->await_target, __ATOMIC_RELAXED);
-      const char *await_site = __atomic_load_n(&t->await_site, __ATOMIC_RELAXED);
+      int32_t state = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
+      const char *awaiting = NULL;
+      const char *await_site = NULL;
+      int64_t target = 0;
+      if (state == FSH_IDLE) {
+        for (int tries = 0; tries < 8; tries++) {
+          uint32_t s1 = __atomic_load_n(&t->wait_seq, __ATOMIC_ACQUIRE);
+          if (s1 & 1u) continue;
+          const char *w = __atomic_load_n(&t->awaiting, __ATOMIC_RELAXED);
+          const char *as = __atomic_load_n(&t->await_site, __ATOMIC_RELAXED);
+          int64_t tg = __atomic_load_n(&t->await_target, __ATOMIC_RELAXED);
+          uint32_t s2 = __atomic_load_n(&t->wait_seq, __ATOMIC_ACQUIRE);
+          if (s1 == s2) {
+            awaiting = w;
+            await_site = as;
+            target = tg;
+            break;
+          }
+        }
+      }
       int64_t age = now >= t->created_ns ? (now - t->created_ns) / 1000000 : 0;
       snaps[i] = (fsh_task_snap){
         t->id,
         t->name ? t->name : "",
-        __atomic_load_n(&t->state, __ATOMIC_ACQUIRE),
+        state,
         t->blocking,
         awaiting,
         await_site,
@@ -8677,10 +8721,12 @@ static int fsh_inspect_fd = -1;
 static int fsh_inspect_pipe[2] = { -1, -1 };
 static pthread_t fsh_inspect_thread;
 static int fsh_inspect_running = 0;
+static int32_t fsh_inspect_stopping = 0;
+static char fsh_inspect_host[64] = "127.0.0.1";
 
-static void fsh_inspect_write_all(int fd, const char *data, size_t len) {
+static void fsh_inspect_write_all(int fd, const char *data, size_t len, int64_t deadline) {
   size_t off = 0;
-  while (off < len) {
+  while (off < len && !__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE) && fsh_now() < deadline) {
 #ifdef MSG_NOSIGNAL
     ssize_t n = send(fd, data + off, len - off, MSG_NOSIGNAL);
 #else
@@ -8697,8 +8743,53 @@ static void fsh_inspect_reply(int fd, const char *status, const char *type, cons
   int hlen = snprintf(head, sizeof head,
     "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
     status, type, len);
-  if (hlen > 0) fsh_inspect_write_all(fd, head, (size_t)hlen);
-  if (body && len > 0) fsh_inspect_write_all(fd, body, len);
+  int64_t deadline = fsh_now() + 2000000000LL;
+  if (hlen > 0 && (size_t)hlen < sizeof head) fsh_inspect_write_all(fd, head, (size_t)hlen, deadline);
+  if (body && len > 0) fsh_inspect_write_all(fd, body, len, deadline);
+}
+
+static int fsh_ascii_ieq(const char *a, const char *b, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    unsigned char ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+    if (ca >= 'A' && ca <= 'Z') ca += 32;
+    if (cb >= 'A' && cb <= 'Z') cb += 32;
+    if (ca != cb) return 0;
+  }
+  return 1;
+}
+
+// Guards against DNS rebinding from untrusted browser origins by requiring Host to match
+// loopback or the configured bind host.
+static int fsh_inspect_host_ok(const char *req) {
+  const char *p = strchr(req, '\n');
+  while (p) {
+    p++;
+    if (*p == '\r' || *p == '\n' || !*p) break;
+    if (fsh_ascii_ieq(p, "host:", 5)) {
+      const char *v = p + 5;
+      while (*v == ' ' || *v == '\t') v++;
+      const char *e = v;
+      while (*e && *e != '\r' && *e != '\n') e++;
+      while (e > v && (e[-1] == ' ' || e[-1] == '\t')) e--;
+      // Strip optional :port (handling bracketed IPv6 [::1]:port).
+      const char *host_end = e;
+      if (v < e && *v == '[') {
+        const char *rb = memchr(v, ']', (size_t)(e - v));
+        if (rb) host_end = rb + 1;
+      } else {
+        for (const char *c = v; c < e; c++) if (*c == ':') { host_end = c; break; }
+      }
+      size_t hlen = (size_t)(host_end - v);
+      if (hlen == 9 && fsh_ascii_ieq(v, "localhost", 9)) return 1;
+      if (hlen == 9 && memcmp(v, "127.0.0.1", 9) == 0) return 1;
+      if (hlen == 5 && memcmp(v, "[::1]", 5) == 0) return 1;
+      size_t blen = strlen(fsh_inspect_host);
+      if (blen > 0 && hlen == blen && fsh_ascii_ieq(v, fsh_inspect_host, blen)) return 1;
+      return 0;
+    }
+    p = strchr(p, '\n');
+  }
+  return 1;
 }
 
 static void fsh_inspect_handle(int c) {
@@ -8710,9 +8801,26 @@ static void fsh_inspect_handle(int c) {
   setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
 #endif
   char req[2048];
-  ssize_t n = recv(c, req, sizeof req - 1, 0);
-  if (n <= 0) return;
-  req[n] = 0;
+  size_t total = 0;
+  int64_t deadline = fsh_now() + 1000000000LL;
+  while (total < sizeof req - 1 && !__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE) && fsh_now() < deadline) {
+    ssize_t n = recv(c, req + total, sizeof req - 1 - total, 0);
+    if (n > 0) {
+      total += (size_t)n;
+      req[total] = 0;
+      if (strstr(req, "\r\n\r\n") || strstr(req, "\n\n")) break;
+      continue;
+    }
+    if (n < 0 && errno == EINTR) continue;
+    break;
+  }
+  if (total == 0) return;
+  req[total] = 0;
+  if (!fsh_inspect_host_ok(req)) {
+    const char *msg = "forbidden host\n";
+    fsh_inspect_reply(c, "403 Forbidden", "text/plain; charset=utf-8", msg, strlen(msg));
+    return;
+  }
   if (strncmp(req, "GET ", 4) != 0) {
     const char *msg = "method not allowed\n";
     fsh_inspect_reply(c, "405 Method Not Allowed", "text/plain; charset=utf-8", msg, strlen(msg));
@@ -8744,7 +8852,7 @@ static void fsh_inspect_handle(int c) {
 // every Fish worker is blocked.
 static void *fsh_inspector_loop(void *arg) {
   (void)arg;
-  for (;;) {
+  while (!__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE)) {
     struct pollfd fds[2];
     fds[0].fd = fsh_inspect_fd;
     fds[0].events = POLLIN;
@@ -8759,9 +8867,17 @@ static void *fsh_inspector_loop(void *arg) {
     }
     if (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) break;
     if (fds[0].revents & POLLIN) {
-      int c = accept(fsh_inspect_fd, NULL, NULL);
-      if (c >= 0) {
+      while (!__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE)) {
+        int c = FSH_ACCEPT(fsh_inspect_fd);
+        if (c < 0) {
+          if (errno == EINTR || errno == ECONNABORTED || errno == EPROTO) continue;
+          break;
+        }
+        int fl = fcntl(c, F_GETFL, 0);
+        if (fl >= 0) fcntl(c, F_SETFL, fl & ~O_NONBLOCK);
+        fcntl(c, F_SETFD, FD_CLOEXEC);
         fsh_inspect_handle(c);
+        shutdown(c, SHUT_WR);
         close(c);
       }
     }
@@ -8816,7 +8932,7 @@ static void fsh_inspector_start(void) {
   fcntl(fsh_inspect_pipe[1], F_SETFD, FD_CLOEXEC);
   fcntl(fsh_inspect_pipe[0], F_SETFL, O_NONBLOCK);
   fcntl(fsh_inspect_pipe[1], F_SETFL, O_NONBLOCK);
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  int fd = socket(AF_INET, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
   if (fd < 0) {
     fprintf(stderr, "fish inspector: failed to create socket\n");
     close(fsh_inspect_pipe[0]);
@@ -8825,6 +8941,7 @@ static void fsh_inspector_start(void) {
     return;
   }
   fcntl(fd, F_SETFD, FD_CLOEXEC);
+  fcntl(fd, F_SETFL, O_NONBLOCK);
   int on = 1;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
   if (bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(fd, 16) != 0) {
@@ -8838,6 +8955,8 @@ static void fsh_inspector_start(void) {
   socklen_t alen = sizeof addr;
   int bound = port;
   if (getsockname(fd, (struct sockaddr *)&addr, &alen) == 0) bound = ntohs(addr.sin_port);
+  snprintf(fsh_inspect_host, sizeof fsh_inspect_host, "%s", host);
+  __atomic_store_n(&fsh_inspect_stopping, 0, __ATOMIC_RELEASE);
   fsh_inspect_fd = fd;
   if (pthread_create(&fsh_inspect_thread, NULL, fsh_inspector_loop, NULL) != 0) {
     close(fd);
@@ -8847,12 +8966,16 @@ static void fsh_inspector_start(void) {
     return;
   }
   fsh_inspect_running = 1;
+  if ((ntohl(addr.sin_addr.s_addr) >> 24) != 127) {
+    fprintf(stderr, "fish inspector: warning: binding non-loopback address %s:%d without authentication\n", host, bound);
+  }
   fprintf(stderr, "fish inspector listening on http://%s:%d\n", host, bound);
   fflush(stderr);
 }
 
 static void fsh_inspector_stop(int detach) {
   if (!fsh_inspect_running) return;
+  __atomic_store_n(&fsh_inspect_stopping, 1, __ATOMIC_RELEASE);
   char b = 1;
   ssize_t ignored = write(fsh_inspect_pipe[1], &b, 1);
   (void)ignored;
@@ -10057,7 +10180,6 @@ export const ZLIB_NATIVE = String.raw`
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
@@ -10174,7 +10296,6 @@ export const SQLITE_NATIVE = String.raw`
 #include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 

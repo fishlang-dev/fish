@@ -67,9 +67,19 @@ async function main(): Promise<void> {
 
   for (let i = 0; i < 4; i++) await ready.receive();
   while (!flags.entered.load()) await sleep(2);
-  await sleep(25);
-
-  const list = tasks();
+  let list: TaskInfo[] = [];
+  for (let attempt = 0; attempt < 200; attempt++) {
+    list = tasks();
+    const sT = findTask(list, "sleeper");
+    const rT = findTask(list, "receiver");
+    const jT = findTask(list, "joiner");
+    if (
+      sT !== null && sT!.state === "waiting" && sT!.ageMs >= 10 &&
+      rT !== null && rT!.state === "waiting" &&
+      jT !== null && jT!.state === "waiting"
+    ) break;
+    await sleep(10);
+  }
   const mainT = findTask(list, "main");
   const sleepT = findTask(list, "sleeper");
   const recvT = findTask(list, "receiver");
@@ -137,9 +147,13 @@ async function main(): Promise<void> {
   const gate = new Channel<i64>(1);
   const h = spawn(worker(ready.clone(), gate.clone()));
   await ready.receive();
-  await sleep(15);
   let found: TaskInfo | null = null;
-  for (const t of tasks()) if (t.name === "worker") found = t.clone();
+  for (let attempt = 0; attempt < 200; attempt++) {
+    found = null;
+    for (const t of tasks()) if (t.name === "worker") found = t.clone();
+    if (found !== null && found!.state === "waiting" && found!.ageMs >= 5) break;
+    await sleep(10);
+  }
   if (
     found !== null &&
     found!.state === "waiting" &&
@@ -203,9 +217,19 @@ async function main(): Promise<void> throws IoError {
   const hTcp = spawn(acceptWaiter(ready.clone(), listener));
 
   for (let i = 0; i < 3; i++) await ready.receive();
-  await sleep(20);
-
-  const list = tasks();
+  let list: TaskInfo[] = [];
+  for (let attempt = 0; attempt < 200; attempt++) {
+    list = tasks();
+    const gT = byName(list, "groupRunner");
+    const sT = byName(list, "semWaiter");
+    const tT = byName(list, "acceptWaiter");
+    if (
+      gT !== null && gT!.state === "waiting" &&
+      sT !== null && sT!.state === "waiting" &&
+      tT !== null && tT!.state === "waiting"
+    ) break;
+    await sleep(10);
+  }
   const gT = byName(list, "groupRunner");
   const sT = byName(list, "semWaiter");
   const tT = byName(list, "acceptWaiter");
@@ -225,9 +249,11 @@ async function main(): Promise<void> throws IoError {
 
 // case: inspect_http_server
 // expect: json ok
+// expect: query ok
 // expect: text ok
 // expect: html ok
 // expect: 404 ok
+// expect: 405 ok
 // expect: child exit 0
 import { type TaskInfo } from "fish:inspect";
 import { readFileSync, rmSync } from "node:fs";
@@ -242,12 +268,18 @@ async function heldWorker(ready: Channel<i64>, gate: Channel<i64>): Promise<void
 function closeConn(_c: TcpStream): void {}
 
 async function childMain(): Promise<void> throws IoError {
-  const ready = new Channel<i64>(2);
+  const ready = new Channel<i64>(4);
   const gate = new Channel<i64>(1);
   const stop = await TcpListener.bind("127.0.0.1", 0);
   const h = spawn(heldWorker(ready.clone(), gate.clone()));
+  const r2 = ready.clone();
+  const g2 = gate.clone();
+  const hArrow = spawn(async () => {
+    await r2.send(1);
+    await g2.receive();
+  });
   await ready.receive();
-  await sleep(15);
+  await ready.receive();
   const readyPort = parseInt(process.env.READY_PORT ?? "0", 10) ?? 0;
   const notify = await TcpStream.connect("127.0.0.1", readyPort);
   await notify.write(new TextEncoder().encode(`${stop.port}\n`));
@@ -255,6 +287,7 @@ async function childMain(): Promise<void> throws IoError {
   const _conn = await stop.accept();
   gate.close();
   await h;
+  await hArrow;
 }
 
 async function main(): Promise<void> throws IoError | AbortError | JsonError | Error {
@@ -277,43 +310,61 @@ async function main(): Promise<void> throws IoError | AbortError | JsonError | E
   const msg = new TextDecoder().decode(raw).trim();
   const stopPort = parseInt(msg, 10) ?? 0;
   closeConn(peer);
-  await sleep(15);
 
-  const errText = readFileSync(errFile, "utf8");
-  let inspectUrl = "";
-  const prefix = "fish inspector listening on ";
-  for (const line of errText.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith(prefix)) {
-      inspectUrl = trimmed.slice(prefix.length as i64);
-      break;
+  try {
+    const errText = readFileSync(errFile, "utf8");
+    let inspectUrl = "";
+    const prefix = "fish inspector listening on ";
+    for (const line of errText.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith(prefix)) {
+        inspectUrl = trimmed.slice(prefix.length as i64);
+        break;
+      }
     }
+
+    let sawWorker = false;
+    let sawMain = false;
+    let statusJson: i64 = 0;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const rJson = await fetch(`${inspectUrl}/tasks.json`);
+      statusJson = rJson.status;
+      const jsonBody = await rJson.text();
+      const parsed = JSON.parse<TaskInfo[]>(jsonBody);
+      sawWorker = false;
+      sawMain = false;
+      for (const t of parsed) {
+        if (t.name === "heldWorker" && t.state === "waiting" && t.awaiting === "channel.receive" && t.spawnSite.includes("inspect_http_server.fsh:")) sawWorker = true;
+        if (t.name === "main" && t.state === "waiting" && t.awaiting === "tcp.accept") sawMain = true;
+      }
+      if (statusJson === 200 && sawWorker && sawMain) break;
+      await sleep(10);
+    }
+    if (statusJson === 200 && sawWorker && sawMain) console.log("json ok");
+
+    const rQuery = await fetch(`${inspectUrl}/tasks.json?v=1`);
+    if (rQuery.status === 200) console.log("query ok");
+
+    const rText = await fetch(`${inspectUrl}/tasks`);
+    const txt = await rText.text();
+    if (rText.status === 200 && txt.includes("heldWorker") && txt.includes("channel.receive")) console.log("text ok");
+
+    const rHtml = await fetch(`${inspectUrl}/`);
+    const html = await rHtml.text();
+    if (rHtml.status === 200 && html.includes("Fish Task Inspector") && html.includes("heldWorker") && html.includes("&lt;arrow ") && html.includes("<table")) console.log("html ok");
+
+    const r404 = await fetch(`${inspectUrl}/missing`);
+    if (r404.status === 404) console.log("404 ok");
+
+    const r405 = await fetch(`${inspectUrl}/tasks.json`, { method: "POST" });
+    if (r405.status === 405) console.log("405 ok");
+  } catch (_e) {
+    console.log("ERR");
   }
-
-  const rJson = await fetch(`${inspectUrl}/tasks.json`);
-  const jsonBody = await rJson.text();
-  const parsed = JSON.parse<TaskInfo[]>(jsonBody);
-  let sawWorker = false;
-  let sawMain = false;
-  for (const t of parsed) {
-    if (t.name === "heldWorker" && t.state === "waiting" && t.awaiting === "channel.receive" && t.spawnSite.includes("inspect_http_server.fsh:")) sawWorker = true;
-    if (t.name === "main" && t.awaiting === "tcp.accept") sawMain = true;
-  }
-  if (rJson.status === 200 && sawWorker && sawMain) console.log("json ok");
-
-  const rText = await fetch(`${inspectUrl}/tasks`);
-  const txt = await rText.text();
-  if (rText.status === 200 && txt.includes("heldWorker") && txt.includes("channel.receive")) console.log("text ok");
-
-  const rHtml = await fetch(`${inspectUrl}/`);
-  const html = await rHtml.text();
-  if (rHtml.status === 200 && html.includes("Fish Task Inspector") && html.includes("heldWorker") && html.includes("<table")) console.log("html ok");
-
-  const r404 = await fetch(`${inspectUrl}/missing`);
-  if (r404.status === 404) console.log("404 ok");
-
-  const wake = await TcpStream.connect("127.0.0.1", stopPort);
-  closeConn(wake);
+  try {
+    const wake = await TcpStream.connect("127.0.0.1", stopPort);
+    closeConn(wake);
+  } catch (_e) {}
   const code = await child.exited;
   const finalErr = readFileSync(errFile, "utf8");
   rmSync(errFile, { force: true });
@@ -323,6 +374,7 @@ async function main(): Promise<void> throws IoError | AbortError | JsonError | E
 
 // case: inspect_invalid_env
 // expect: warn ok
+// expect: off ok
 // expect: exit 0
 async function main(): Promise<void> throws IoError {
   if (process.env.INSPECT_BAD === "1") {
@@ -332,5 +384,8 @@ async function main(): Promise<void> throws IoError {
   const r = Bun.spawnSync([process.execPath], { env: { INSPECT_BAD: "1", FISH_INSPECT: "not-an-addr" } });
   const err = new TextDecoder().decode(r.stderr);
   if (err.includes("fish inspector: invalid FISH_INSPECT")) console.log("warn ok");
+  const rOff = Bun.spawnSync([process.execPath], { env: { INSPECT_BAD: "1", FISH_INSPECT: "0" } });
+  const errOff = new TextDecoder().decode(rOff.stderr);
+  if (rOff.exitCode === 0 && !errOff.includes("fish inspector")) console.log("off ok");
   console.log(`exit ${r.exitCode ?? -1}`);
 }
