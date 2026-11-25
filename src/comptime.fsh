@@ -674,7 +674,7 @@ class Interpreter<H extends ComptimeHost> {
     try {
       const body = this.body(callee);
       const name = body.name;
-      const crypto = RANDOM.has(name) && stdModuleAt(this.host.tables.files, body.start) === "node:crypto";
+      const crypto = RANDOM.has(name) && stdModuleAt(this.host.tables.files, body.start) === "std:crypto";
       const isAsync = body.async === true;
       const generator = body.generator === true;
       const foreign = body.foreign === true;
@@ -766,7 +766,7 @@ class Interpreter<H extends ComptimeHost> {
       case "forOf": {
         const over = this.valueOf(f, s.right);
         const local = this.inst(f).locals.getById(s.left.id)!;
-        // Under Bun the items may be the very array a constant holds, so they are copied, not taken.
+        // The items may be the very array a constant holds, so each is copied, not taken.
         const items = this.iterated(over, s.right);
         for (let i: usize = 0; i < items.length; i++) {
           this.frames[f]!.locals.set(local, copyValue(items[i]!));

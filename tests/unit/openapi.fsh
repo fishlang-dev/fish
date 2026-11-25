@@ -4,7 +4,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { analyze, indented } from "../../src/main.fsh";
 import { openapiOf } from "../../src/openapi.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { fishc, ran, read, removed, same, scratch } from "./support.fsh";
 
 // The routes a check of `src` records, in the order they are written, each as a line.

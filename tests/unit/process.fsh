@@ -1,9 +1,9 @@
-// The std `process` module against node's: arguments, the environment
-// and the exit code. The environment is given through `env`.
+// The std `process` module against node's as recorded: arguments, the environment and the exit
+// code. The environment is given through `env`.
 import { spawnSync } from "node:child_process";
 import { realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { built, removed, same, scratch, text } from "./support.fsh";
+import { built, reference, removed, same, scratch, text } from "./support.fsh";
 
 function body(): string {
   return `console.log(process.argv.slice(2));
@@ -29,6 +29,7 @@ test("process.argv, process.env and process.exit match node", () => {
     assert(false, e.message);
   }
   const runs: [string[], string[]][] = [[[], []], [["a", "b c", ""], ["FISH_A=x", "FISH_EMPTY="]], [["1", "2", "3"], ["FISH_B=y y"]]];
+  let n = 0;
   for (const [args, vars] of runs) {
     let env: string[] = ["FISH_LEAKS=1"];
     env = env.concat(vars);
@@ -38,7 +39,8 @@ test("process.argv, process.env and process.exit match node", () => {
     let node = env.clone();
     node = node.concat(["node", script]);
     node = node.concat(args);
-    same(result("env", fish), result("env", node), `with ${JSON.stringify(args)}`);
+    const want = reference(`process-args-${n++}`, `${body()}\n${JSON.stringify(args)}\n${JSON.stringify(vars)}`, () => ({ status: 0, stdout: result("env", node), stderr: "" }));
+    same(result("env", fish), want.stdout, `with ${JSON.stringify(args)}`);
   }
   removed(dir);
 }, { timeout: 30_000 });

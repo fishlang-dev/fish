@@ -1,0 +1,178 @@
+script 9d05d357c8168a7c5ab2af55a503ed97dc11b9b8e60d1c1ea8da5ff4313ab8a8
+status 0
+stdout 11342
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-color'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-color'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--no-color"
+false - - 1 x 
+false - - 1 x 
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-name'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-name'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--no-name"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-name'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-name'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--no-name"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-name'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-name'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--no-name"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-name'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-name'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--no-name"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-zzz'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-zzz'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--no-zzz"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-zzz'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-zzz'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--no-zzz"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-color'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-color'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--no-color"
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-c, --color' does not take an argument
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-c, --color' does not take an argument
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-color'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-color'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--no-color"
+false - - 1 x 
+false - - 1 x 
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-v'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--no-v'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--no-v"
+- - - 2 x 
+- - - 2 x 
+true bob - 1 x 
+true bob - 1 x 
+true bob - 1 x 
+true bob - 1 x 
+- c - 1 x 
+- c - 1 x 
+- c - 1 x 
+- c - 1 x 
+true bob - 1 x 
+true bob - 1 x 
+true bob - 1 x 
+true bob - 1 x 
+true - - 1 x 
+true - - 1 x 
+true - - 1 x 
+true - - 1 x 
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-x'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-x'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "-x"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-x'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-x'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "-x"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-x'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-x'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "-x"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-x'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-x'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "-x"
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-n, --name <value>' argument missing
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-n, --name <value>' argument missing
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-n, --name <value>' argument missing
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-n, --name <value>' argument missing
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '--name' argument is ambiguous.
+Did you forget to specify the option argument for '--name'?
+To specify an option argument starting with a dash use '--name=-XYZ'.
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '--name' argument is ambiguous.
+Did you forget to specify the option argument for '--name'?
+To specify an option argument starting with a dash use '--name=-XYZ'.
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '--name' argument is ambiguous.
+Did you forget to specify the option argument for '--name'?
+To specify an option argument starting with a dash use '--name=-XYZ'.
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '--name' argument is ambiguous.
+Did you forget to specify the option argument for '--name'?
+To specify an option argument starting with a dash use '--name=-XYZ'.
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-n' argument is ambiguous.
+Did you forget to specify the option argument for '-n'?
+To specify an option argument starting with a dash use '--name=-XYZ' or '-n-XYZ'.
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-n' argument is ambiguous.
+Did you forget to specify the option argument for '-n'?
+To specify an option argument starting with a dash use '--name=-XYZ' or '-n-XYZ'.
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-n' argument is ambiguous.
+Did you forget to specify the option argument for '-n'?
+To specify an option argument starting with a dash use '--name=-XYZ' or '-n-XYZ'.
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-n' argument is ambiguous.
+Did you forget to specify the option argument for '-n'?
+To specify an option argument starting with a dash use '--name=-XYZ' or '-n-XYZ'.
+- -x - 1 x 
+- -x - 1 x 
+- -x - 1 x 
+- -x - 1 x 
+- -x - 1 x 
+- -x - 1 x 
+- -x - 1 x 
+- -x - 1 x 
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-c, --color' does not take an argument
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-c, --color' does not take an argument
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-c, --color' does not take an argument
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '-c, --color' does not take an argument
+- - a,b,c 1 x 
+- - a,b,c 1 x 
+- - a,b,c 1 x 
+- - a,b,c 1 x 
+- - - 2 x 
+- - - 2 x 
+- - - 2 x 
+- - - 2 x 
+- - - 1 x 
+- - - 1 x 
+- - - 1 x 
+- - - 1 x 
+ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL Unexpected argument 'a'. This command does not take positional arguments
+- - - 1 x a
+ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL Unexpected argument 'a'. This command does not take positional arguments
+- - - 1 x a
+ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL Unexpected argument '-a'. This command does not take positional arguments
+- - - 1 x -a,--b
+ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL Unexpected argument '-a'. This command does not take positional arguments
+- - - 1 x -a,--b
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--zzz'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--zzz'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--zzz"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--zzz'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--zzz'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--zzz"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-z'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-z'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "-z"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-z'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-z'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "-z"
+ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL Unexpected argument '-'. This command does not take positional arguments
+- - - 1 x -
+ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL Unexpected argument '-'. This command does not take positional arguments
+- - - 1 x -
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--='
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--='. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--="
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--='
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--='. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--="
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--=x'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--=x'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--=x"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--=x'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--=x'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--=x"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '---x'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '---x'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "---x"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '---x'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '---x'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "---x"
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '--name' argument is ambiguous.
+Did you forget to specify the option argument for '--name'?
+To specify an option argument starting with a dash use '--name=-XYZ'.
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '--name' argument is ambiguous.
+Did you forget to specify the option argument for '--name'?
+To specify an option argument starting with a dash use '--name=-XYZ'.
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '--name' argument is ambiguous.
+Did you forget to specify the option argument for '--name'?
+To specify an option argument starting with a dash use '--name=-XYZ'.
+ERR_PARSE_ARGS_INVALID_OPTION_VALUE Option '--name' argument is ambiguous.
+Did you forget to specify the option argument for '--name'?
+To specify an option argument starting with a dash use '--name=-XYZ'.
+- - - 1 y 
+- - - 1 y 
+- - - 1 y 
+- - - 1 y 
+- - - 1 x 
+- - - 1 x 
+- - - 1 x 
+- - - 1 x 
+- b - 1 x 
+- b - 1 x 
+- b - 1 x 
+- b - 1 x 
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--na"me'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--na"me'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--na\"me"
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--na"me'
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '--na"me'. To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- "--na\"me"
+ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL Unexpected argument 'p'. This command does not take positional arguments
+true - - 1 x p,q
+ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL Unexpected argument 'p'. This command does not take positional arguments
+true - - 1 x p,q
+
+stderr 0
+

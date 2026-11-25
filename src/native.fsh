@@ -740,7 +740,7 @@ static void fsh_backtrace(void) {
   if (!fsh_rt_frames) return;
   fputs("stack backtrace:\n", stderr);
   const char *at = fsh_panic_line && strncmp(fsh_panic_line, "panicked at ", 12) == 0 ? fsh_panic_line + 12 : NULL;
-  if (at && (strncmp(at, "<fish std>", 10) == 0 || strncmp(at, "node:", 5) == 0 || strncmp(at, "fish:", 5) == 0)) at = NULL;
+  if (at && (strncmp(at, "<fish std>", 10) == 0 || strncmp(at, "std:", 4) == 0)) at = NULL;
   int64_t n = 0;
   for (fsh_frame *f = fsh_rt_frames; f; f = f->prev, n++) {
     if (n == 64) {
@@ -2883,7 +2883,7 @@ int32_t fsh_rt_json_end(fsh_json_in *r) {
   return fsh_json_error(r, message);
 }
 
-// Node's os module, over libc. Each string is written to a buffer of the calling thread's,
+// The os module, over libc. Each string is written to a buffer of the calling thread's,
 // which the Fish side copies at once.
 static __thread char fsh_os_text[4096];
 
@@ -2893,7 +2893,7 @@ const char *fsh_rt_os_hostname(void) {
   return fsh_os_text;
 }
 
-// TMPDIR, TMP or TEMP, else /tmp, without a trailing slash, as Node gives it.
+// TMPDIR, TMP or TEMP, else /tmp, without a trailing slash.
 const char *fsh_rt_os_tmpdir(void) {
   const char *names[] = {"TMPDIR", "TMP", "TEMP"};
   const char *dir = NULL;
@@ -2948,7 +2948,7 @@ int64_t fsh_rt_os_parallelism(void) {
   return n > 0 ? n : 1;
 }
 
-// The program's arguments, kept from main for process.argv, which Node gives as the runtime's
+// The program's arguments, kept from main for process.argv, which holds the runtime's
 // path, the script's, then the arguments; a Fish program is both, so its path comes twice.
 static int32_t fsh_argc = 0;
 static char **fsh_argv = NULL;
@@ -2983,7 +2983,7 @@ const char *fsh_rt_arg(int64_t i) {
 }
 
 // The working directory, in the calling thread's buffer, as path.resolve starts from it. One the
-// system can't give, deleted or too long, is a panic, as Node throws for it.
+// system can't give, deleted or too long, is a panic.
 const char *fsh_rt_cwd(void) {
   if (getcwd(fsh_os_text, sizeof fsh_os_text)) return fsh_os_text;
   char message[256];
@@ -3228,7 +3228,7 @@ double fsh_rt_performance_now(void) {
   return (double)(t.tv_sec - fsh_started.tv_sec) * 1e3 + (double)(t.tv_nsec - fsh_started.tv_nsec) / 1e6;
 }
 
-// process.exit: output flushed and the process ended at once, as Node ends it, so what is still
+// process.exit: output flushed and the process ended at once, so what is still
 // alive isn't reported as leaked.
 void fsh_rt_exit(int64_t code) {
   fflush(NULL);
@@ -3257,10 +3257,10 @@ typedef struct fsh_insp {
   int64_t count, room;
   // An ARRAY's, Map's or Set's size, of which the first 100 are kept.
   int64_t size;
-  // An Error's OBJECT, its text the bracketed header Node prints in place of its stack, and
+  // An Error's OBJECT, its text the bracketed header printed in place of its stack, and
   // what it is past the depth, its class's name bracketed.
   int32_t error;
-  // An OBJECT whose bracketed keys are written as they are, as Node writes keys it shows itself.
+  // An OBJECT whose bracketed keys are written as they are, unquoted and unescaped.
   int32_t shown;
   char *cut;
 } fsh_insp;
@@ -3369,7 +3369,7 @@ fsh_insp *fsh_rt_insp_u64(uint64_t n) {
   return v;
 }
 
-// A float as Node prints a number: as String(x) writes it, and -0 as -0.
+// A float as String(x) writes it, and -0 as -0.
 fsh_insp *fsh_rt_insp_f64(double x, int32_t single) {
   char text[40];
   if (x == 0 && signbit(x)) strcpy(text, "-0");
@@ -3409,8 +3409,8 @@ fsh_insp *fsh_rt_insp_list(int32_t kind, int64_t size) {
   return v;
 }
 
-// An element, member, key or value; those past the first 100 are dropped, as Node prints only
-// those and counts the rest.
+// An element, member, key or value; those past the first 100 are dropped and
+// counted as how many more there are.
 void fsh_rt_insp_push(fsh_insp *list, fsh_insp *item) {
   int64_t limit = list->kind == FSH_INSP_MAP ? 200 : list->kind == FSH_INSP_VARIANT ? INT64_MAX : 100;
   if (list->count >= limit) fsh_insp_free(item);
@@ -3472,7 +3472,7 @@ static char *fsh_sb_done(fsh_sb *b) {
   return b->p;
 }
 
-// An ArrayBuffer as Node shows one: its first 100 bytes in hex, then its length.
+// An ArrayBuffer: its first 100 bytes in hex, then its length.
 fsh_insp *fsh_rt_insp_buffer(const uint8_t *data, int64_t length) {
   fsh_insp *v = fsh_rt_insp_object("ArrayBuffer");
   v->shown = 1;
@@ -3496,7 +3496,7 @@ fsh_insp *fsh_rt_insp_buffer(const uint8_t *data, int64_t length) {
   return v;
 }
 
-// A Buffer as Node shows one at any depth: its first 50 bytes in hex, then how many more.
+// A Buffer at any depth: its first 50 bytes in hex, then how many more.
 fsh_insp *fsh_rt_insp_node_buffer(const uint8_t *data, int64_t length) {
   fsh_sb b = {0};
   fsh_sb_str(&b, "<Buffer ");
@@ -3517,8 +3517,8 @@ fsh_insp *fsh_rt_insp_node_buffer(const uint8_t *data, int64_t length) {
   return v;
 }
 
-// An Error as Node prints one with no stack lines: its name and message, the class's name when
-// it differs and the error's name ends in Error, as Node's improveStack writes them, bracketed.
+// An Error with no stack lines: its name and message, the class's name when
+// it differs and the error's name ends in Error, bracketed.
 fsh_insp *fsh_rt_insp_error(const char *cls, fsh_str *name, fsh_str *message) {
   fsh_sb b = {0};
   fsh_sb_str(&b, "[");
@@ -3556,7 +3556,7 @@ fsh_insp *fsh_rt_insp_error(const char *cls, fsh_str *name, fsh_str *message) {
   return v;
 }
 
-// A UTF-8 text's length in UTF-16 units, as JavaScript counts a string, which Node's layout
+// A UTF-8 text's length in UTF-16 units, as JavaScript counts a string, which the layout
 // measures with.
 static int64_t fsh_units(const char *p, int64_t n) {
   int64_t units = 0;
@@ -3869,7 +3869,7 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
   if (v->kind == FSH_INSP_MAP || v->kind == FSH_INSP_SET)
     while (fields < v->count && v->keys[v->count - 1 - fields]) fields++;
   // An Error with nothing to show beside its header is its header; past the depth, its class.
-  // A header of several lines is indented as Node indents it, to where it is written.
+  // A header of several lines is indented to where it is written.
   if (v->error && size == 0) return fsh_insp_indented(v->text, c->indent);
   if (v->error && recurse > 2) return fsh_insp_copy(v->cut);
   // On the heap, sized to the text, a class's name or an Error's header, which may be long.
@@ -3938,9 +3938,9 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     }
     fsh_sb b = {0};
     const char *key = v->keys[i];
-    // An Error's '[cause]' and '[errors]' are written as Node writes keys it shows itself.
+    // An Error's '[cause]' and '[errors]' are written unquoted, as keys shown in brackets are.
     int64_t length = v->lengths[i];
-    // An own key named __proto__ is bracketed, as Node writes it apart from the prototype.
+    // An own key named __proto__ is bracketed, so it reads apart from the prototype.
     if (length == 9 && strcmp(key, "__proto__") == 0) fsh_sb_str(&b, "['__proto__']");
     else if ((fsh_insp_identifier(key) && (int64_t)strlen(key) == length) || ((v->error || v->shown) && key[0] == '[')) fsh_sb_str(&b, key);
     else fsh_insp_quote(&b, key, length);
@@ -3967,8 +3967,8 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     output[n++] = fsh_sb_done(&b);
   }
   c->indent -= 2;
-  // A hidden key comes after the elements; as Node reads the array at each entry's index, the
-  // columns pad as text unless there are elements past the entries shown. As in Node, only an
+  // A hidden key comes after the elements; as the array is read at each entry's index, the
+  // columns pad as text unless there are elements past the entries shown. Only an
   // entry past the 100th is kept out of them.
   if (hidden) {
     char text[64];
@@ -3999,7 +3999,7 @@ fsh_str *fsh_rt_insp_done(fsh_insp *v) {
   return s;
 }
 
-// A tree laid out at an inspect depth. Node's default depth 2 starts at 0, so depth d starts
+// A tree laid out at an inspect depth. The default depth 2 starts at 0, so depth d starts
 // at 2 - d, which the trees codegen builds are also cut by.
 static char *fsh_insp_at(fsh_insp *v, int64_t depth, int hidden) {
   fsh_ictx c = {0, 0, hidden};
@@ -4835,7 +4835,7 @@ static void *fsh_timing(void *arg) {
 // The callbacks setTimeout and setInterval set, earliest first and ties in the order set, which
 // the prelude's one timer task runs in turn. Each holds its callable's block and vtable.
 // ponytail: a sorted array, inserted into in O(n); a heap if programs keep many timers
-// weak: a timer that runs while the program does but doesn't keep it running, as Node's unref.
+// weak: a timer that runs while the program does but doesn't keep it running, as an unref'd one.
 typedef struct { int64_t deadline, id, every; void *block; void **vtable; int32_t weak; } fsh_timeout;
 static pthread_mutex_t fsh_timeouts_lock = PTHREAD_MUTEX_INITIALIZER;
 static fsh_timeout *fsh_timeouts = NULL;
@@ -4893,7 +4893,7 @@ void fsh_rt_timeouts_task(fsh_task *task) {
   pthread_mutex_unlock(&fsh_alive_lock);
 }
 
-// Sets a timer for a callable, its delay at least 1 ms as Node's is, giving its id.
+// Sets a timer for a callable, its delay at least 1 ms, giving its id.
 int64_t fsh_rt_timeout_set(void *block, void **vtable, int64_t ms, int32_t repeat) {
   if (ms < 1 || ms > 2147483647) ms = 1;
   pthread_mutex_lock(&fsh_timeouts_lock);
@@ -5022,8 +5022,8 @@ void fsh_rt_print_end(int32_t stream) {
 }
 
 // process.stdout.write and process.stderr.write go through console.log's buffers and locks, so
-// what they write keeps its place among printed lines. What they write is flushed at once, as
-// Node's is: a pipe is fully buffered, and a program answering a reader through one, as a language
+// what they write keeps its place among printed lines. What they write is flushed at once,
+// since a pipe is fully buffered, and a program answering a reader through one, as a language
 // server does, would otherwise say nothing until it exits.
 void fsh_rt_stream_write(int32_t stream, const char *bytes, int64_t length) {
   fsh_rt_print_begin(stream);
@@ -6181,7 +6181,7 @@ static void fsh_connect_untimed(fsh_socket *s, fsh_task *task) {
 }
 
 // A failed call's IoError message: what was being done, and the system's reason.
-// An errno's Node code and libuv's wording for it, as Node's errors give them.
+// An errno's code, as ENOENT, and libuv's wording for it, which errors carry.
 static const struct { int number; const char *code, *text; } fsh_errnos[] = {
   {ENOENT, "ENOENT", "no such file or directory"}, {EACCES, "EACCES", "permission denied"},
   {EISDIR, "EISDIR", "illegal operation on a directory"}, {ENOTDIR, "ENOTDIR", "not a directory"},
@@ -6226,7 +6226,7 @@ static int32_t fsh_io_parts(fsh_str **error, const char *message, const char *co
   return 5;
 }
 
-// A socket call's failure: Fish's message with the system's reason, and Node's code and system
+// A socket call's failure: Fish's message with the system's reason, and its code and system
 // call.
 static int32_t fsh_io_failed(fsh_str **error, const char *doing, const char *syscall) {
   static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -6239,8 +6239,8 @@ static int32_t fsh_io_failed(fsh_str **error, const char *doing, const char *sys
   return fsh_io_parts(error, message, code, syscall, NULL);
 }
 
-// A file call's failure, in Node's words: "ENOENT: no such file or directory, open 'x'". A call
-// on an open file, as read, names no path, as Node's doesn't.
+// A file call's failure, worded as "ENOENT: no such file or directory, open 'x'". A call
+// on an open file, as read, names no path.
 static int32_t fsh_fs_failed(fsh_str **error, int number, const char *syscall, const char *path) {
   char code[32], text[200];
   fsh_errno_words(number, code, sizeof code, text, sizeof text);
@@ -6292,7 +6292,7 @@ void fsh_rt_file_job_release(fsh_file_job *job) {
   fsh_rt_free(job);
 }
 
-// Reads a whole file, as Node's readFile does: open, read until the end, close. A failure
+// Reads a whole file: open, read until the end, close. A failure
 // leaves its errno and system call.
 static void fsh_read_whole(const char *path, fsh_array *data, int *error, const char **syscall) {
   int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -6326,7 +6326,7 @@ static void fsh_read_whole(const char *path, fsh_array *data, int *error, const 
   close(fd);
 }
 
-// Writes a whole file, creating it or emptying it first, as Node's writeFile does.
+// Writes a whole file, creating it or emptying it first.
 static void fsh_write_whole(const char *path, const fsh_array *data, int *error, const char **syscall) {
   int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
   if (fd < 0) {
@@ -6421,7 +6421,7 @@ int32_t fsh_rt_fs_exists(fsh_str *path) {
 }
 
 // statSync and lstatSync: size, mode, kind (1 a file, 2 a directory, 3 a symbolic link, 0
-// anything else) and the modification time in milliseconds, as Node's Stats has them.
+// anything else) and the modification time in milliseconds, as Stats has them.
 int32_t fsh_rt_fs_stat(fsh_str *path, int32_t follow, int64_t *out, double *mtime, fsh_str **error) {
   const char *syscall = follow ? "stat" : "lstat";
   char *c = fsh_rt_str_cstring(path);
@@ -6449,7 +6449,7 @@ static int fsh_by_name(const void *a, const void *b) {
   return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-// readdirSync: the names in a directory, without . and .., sorted as Node's scandir sorts them.
+// readdirSync: the names in a directory, without . and .., sorted by byte order.
 int32_t fsh_rt_fs_readdir(fsh_str *path, fsh_array *out, fsh_str **error) {
   out->data = NULL;
   out->length = out->capacity = 0;
@@ -6487,7 +6487,7 @@ int32_t fsh_rt_fs_readdir(fsh_str *path, fsh_array *out, fsh_str **error) {
   return 1;
 }
 
-// realpathSync: the resolved path. As Node's walk does, the path is first made absolute and
+// realpathSync: the resolved path. The path is first made absolute and
 // normalised, so ".." takes back the part before it whether that is a link or not, and an empty
 // path is the working directory. A failure names the part the walk stops at, followed a part at a
 // time: a missing part fails its lstat, and a link that can't be followed its stat, each named
@@ -6559,7 +6559,7 @@ int32_t fsh_rt_fs_realpath(fsh_str *path, fsh_str **out, fsh_str **error) {
   return result;
 }
 
-// mkdtempSync: a new directory named by the prefix and six random characters, as Node makes it.
+// mkdtempSync: a new directory named by the prefix and six random characters.
 int32_t fsh_rt_fs_mkdtemp(fsh_str *prefix, fsh_str **out, fsh_str **error) {
   char *c = fsh_rt_str_cstring(prefix);
   if (!c) return fsh_fs_failed(error, EINVAL, "mkdtemp", "");
@@ -6578,7 +6578,7 @@ int32_t fsh_rt_fs_mkdtemp(fsh_str *prefix, fsh_str **out, fsh_str **error) {
   return result;
 }
 
-// mkdirSync. With recursive, Node's MKDirpSync walk: a prefix missing its parent is retried after
+// mkdirSync. With recursive, a walk up: a prefix missing its parent is retried after
 // the prefix cut at its last '/', so *out is the first directory made as that prefix spells it,
 // or NULL when every one existed. A failure names the path as given.
 int32_t fsh_rt_fs_mkdir(fsh_str *path, int32_t recursive, int64_t mode, fsh_str **out, fsh_str **error) {
@@ -6628,7 +6628,7 @@ int32_t fsh_rt_fs_mkdir(fsh_str *path, int32_t recursive, int64_t mode, fsh_str 
   return result;
 }
 
-// A two-path call's failure, in Node's words: "ENOENT: no such file or directory, rename 'a' -> 'b'",
+// A two-path call's failure, worded as "ENOENT: no such file or directory, rename 'a' -> 'b'",
 // its path the first.
 static int32_t fsh_fs_failed_two(fsh_str **error, int number, const char *syscall, const char *from, const char *to) {
   char code[32], text[200];
@@ -6730,7 +6730,7 @@ static int fsh_copy_file(const char *from, const char *to, int64_t mode) {
 }
 
 // copyFileSync, its mode the bits of COPYFILE_EXCL (1), COPYFILE_FICLONE (2) and
-// COPYFILE_FICLONE_FORCE (4), checked first as Node checks it.
+// COPYFILE_FICLONE_FORCE (4), checked before the copy.
 int32_t fsh_rt_fs_copyfile(fsh_str *from, fsh_str *to, int64_t mode, fsh_str **error) {
   if (mode < 0 || mode > 7) return fsh_io_parts(error, "mode is out of range: >= 0 && <= 7", "ERR_OUT_OF_RANGE", "", NULL);
   char *a = fsh_rt_str_cstring(from), *b = fsh_rt_str_cstring(to);
@@ -6756,7 +6756,7 @@ void fsh_rt_errno_words(int64_t number, char *code, int64_t code_size, char *tex
   fsh_errno_words((int)number, code, (size_t)code_size, text, (size_t)text_size);
 }
 
-// Node's string flags for open, as libuv's table reads them, in this system's bits; -1 for one
+// The string flags for open, as libuv's table reads them, in this system's bits; -1 for one
 // it doesn't know.
 int64_t fsh_rt_fd_flags(const char *s) {
   size_t length = strlen(s);
@@ -6807,7 +6807,7 @@ static double fsh_stat_ms(struct timespec t) {
 
 // What Stats holds: size, mode, kind (1 a file, 2 a directory, 3 a link, 0 anything else), nlink,
 // dev, ino, uid and gid in out, and the modification, access, change and birth times in
-// milliseconds in times. Linux's stat has no birth time, so it is 0 there, as Node gives it on a
+// milliseconds in times. Linux's stat has no birth time, so it is 0 there, as on any
 // file system without one.
 static void fsh_stat_fill(const struct stat *st, int64_t *out, double *times) {
   out[0] = st->st_size;
@@ -7232,7 +7232,7 @@ static int64_t fsh_watch_take(fsh_watch *w, uint8_t *out, int64_t size, int64_t 
 }
 #endif
 
-// The watcher for a path, or -errno: ENOENT for a missing one, as Node's watch throws.
+// The watcher for a path, or -errno: ENOENT for a missing one.
 int64_t fsh_rt_watch_open(const char *path, int64_t recursive) {
   struct stat st;
   if (stat(path, &st) != 0) return -errno;
@@ -7297,7 +7297,7 @@ void fsh_rt_watch_close(int64_t handle) {
   fsh_watch_release(w);
 }
 
-// accessSync, its mode the bits of R_OK, W_OK and X_OK, checked first as Node checks it.
+// accessSync, its mode the bits of R_OK, W_OK and X_OK, checked before the call.
 int32_t fsh_rt_fs_access(fsh_str *path, int64_t mode, fsh_str **error) {
   if (mode < 0 || mode > 7) return fsh_io_parts(error, "mode is out of range: >= 0 && <= 7", "ERR_OUT_OF_RANGE", "", NULL);
   char *c = fsh_rt_str_cstring(path);
@@ -7307,7 +7307,7 @@ int32_t fsh_rt_fs_access(fsh_str *path, int64_t mode, fsh_str **error) {
   return result;
 }
 
-// chmodSync, its mode already checked by std as Node checks it.
+// chmodSync, its mode already checked by std.
 int32_t fsh_rt_fs_chmod(fsh_str *path, int64_t mode, fsh_str **error) {
   char *c = fsh_rt_str_cstring(path);
   if (!c) return fsh_fs_failed(error, EINVAL, "chmod", "");
@@ -7382,7 +7382,7 @@ static struct timespec fsh_utime_spec(double time) {
 }
 
 // utimesSync, or with follow 0 lutimesSync, its times in seconds; NaN and the infinities are
-// refused first, atime before mtime, as Node refuses them.
+// refused first, atime before mtime.
 int32_t fsh_rt_fs_utimes(fsh_str *path, double atime, double mtime, int32_t follow, fsh_str **error) {
   double times[2] = {atime, mtime};
   for (int i = 0; i < 2; i++) {
@@ -7400,7 +7400,7 @@ int32_t fsh_rt_fs_utimes(fsh_str *path, double atime, double mtime, int32_t foll
   return result;
 }
 
-// An entry another process removed since the walk listed it is gone already, as Node takes it.
+// An entry another process removed since the walk listed it is gone already, which is no failure.
 static int fsh_remove_one(const char *path, const struct stat *st, int kind, struct FTW *walk) {
   (void)st;
   (void)kind;
@@ -7409,7 +7409,7 @@ static int fsh_remove_one(const char *path, const struct stat *st, int kind, str
 }
 
 // rmSync: a file, or with recursive a directory and all inside it; force passes over a missing
-// path. Node's own words for a directory given without recursive.
+// path. A directory given without recursive has its own message.
 int32_t fsh_rt_fs_rm(fsh_str *path, int32_t recursive, int32_t force, fsh_str **error) {
   char *c = fsh_rt_str_cstring(path);
   if (!c) return fsh_fs_failed(error, EINVAL, "lstat", "");
@@ -7430,7 +7430,7 @@ int32_t fsh_rt_fs_rm(fsh_str *path, int32_t recursive, int32_t force, fsh_str **
   return result;
 }
 
-// A signal's name, as Node gives a child's: "SIGTERM", or NULL for one it doesn't name.
+// A signal's name, as a child's is given: "SIGTERM", or NULL for one it doesn't name.
 const char *fsh_rt_signal_name(int64_t number) {
   static const struct { int number; const char *name; } names[] = {
     { SIGHUP, "SIGHUP" }, { SIGINT, "SIGINT" }, { SIGQUIT, "SIGQUIT" }, { SIGILL, "SIGILL" }, { SIGTRAP, "SIGTRAP" },
@@ -7487,7 +7487,7 @@ typedef struct {
 // Writes input to a child's stdin and reads its stdout and stderr until both close, then waits for
 // it: numbers gets its pid, exit status (-1 when a signal ended it) and signal (0 for none). Gives
 // 0, or the errno that stopped it. With at_exit, reading also stops once the child itself has
-// exited, taking what its pipes already hold, as Bun's exited does: a process it left running in
+// exited, taking what its pipes already hold: a process it left running in
 // the background may hold the pipes open long after.
 static int fsh_child_wait(pid_t pid, int in_fd, int out_fd, int err_fd, const uint8_t *input, int64_t length, int64_t *numbers, fsh_array *out, fsh_array *err, int at_exit) {
   int failure = 0;
@@ -7591,7 +7591,7 @@ int32_t fsh_rt_spawn_finish(int64_t handle, int64_t *numbers, fsh_array *out, fs
 // spawnSync: runs a command found on PATH with its arguments, in cwd unless that is empty,
 // writing input to its stdin and reading its stdout and stderr until both close, then waiting for
 // it. Gives 1 with numbers its pid, exit status (-1 when a signal ended it) and signal (0 for
-// none), or 5 with the IoError's parts, in Node's words, when it couldn't start. flags holds two
+// none), or 5 with the IoError's parts when it couldn't start. flags holds two
 // bits per stream from stdin up, 0 piped, 1 inherited and 2 /dev/null; bit 6 has env, "K=V"
 // strings, replace the environment; bit 7 words a failure as Bun does; bit 8 has args begin with
 // argv[0]; bit 9 only starts the child, giving its pid and a handle that fsh_rt_spawn_finish takes;
@@ -7907,7 +7907,7 @@ int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str *
   if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
   int on = 1, off = 0;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
-  // "::" takes IPv4 clients too, as Node's listen does unless asked for IPv6 only.
+  // "::" takes IPv4 clients too, unless asked for IPv6 only.
   if (at.ss_family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);
   if (bind(fd, (struct sockaddr *)&at, FSH_ADDRESS_SIZE(&at)) < 0 || listen(fd, 128) < 0) {
     int32_t failed = fsh_io_failed(message, "can't listen there", "listen");
@@ -8096,7 +8096,7 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
     fsh_file_job *job = s->lookup;
     if (!fsh_job_done(job, task)) return 0;
     if (job->error) {
-      // Node's codes: a name with no address is ENOTFOUND, a resolver that couldn't answer EAI_AGAIN.
+      // A name with no address is ENOTFOUND, a resolver that couldn't answer EAI_AGAIN.
       const char *code = job->error == EAI_AGAIN ? "EAI_AGAIN" : "ENOTFOUND";
       size_t size = strlen(job->path) + 32;
       char *text = fsh_rt_alloc(size);
@@ -8192,7 +8192,7 @@ int32_t fsh_rt_unix_bind(fsh_str *path, fsh_socket **out, fsh_str **message) {
 }
 
 // Polls 'UnixStream.connect(path)': the frame keeps the socket while it connects. A listener with
-// a full backlog is the system's EAGAIN on Linux, given as is, as Node does.
+// a full backlog is the system's EAGAIN on Linux, given as is.
 int32_t fsh_rt_unix_connect(fsh_socket **socket_at, fsh_str *path, fsh_task *task, fsh_socket **out, fsh_str **message) {
   fsh_socket *s = *socket_at;
   struct sockaddr_un at;
@@ -8368,7 +8368,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_mutex_lock(&fsh_alive_lock);
   while (__atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) != FSH_DONE && !fsh_panicked) pthread_cond_wait(&fsh_finished, &fsh_alive_lock);
   pthread_mutex_unlock(&fsh_alive_lock);
-  // Pending timers keep the program alive, as Node's do: the timer task runs them, then ends. A
+  // Pending timers keep the program alive: the timer task runs them, then ends. A
   // main that failed ends the program with its error, its timers dropped with the other tasks;
   // a timer task claimed but not yet registered is waited for.
   if (fsh_main_task->outcome != 2) {
@@ -9191,7 +9191,7 @@ static void fsh_tls_loud(sigset_t *before) {
 }
 #endif
 
-// Node's codes for the certificate failures a client meets most.
+// The error codes for the certificate failures a client meets most.
 static const char *fsh_tls_code(long verify) {
   switch (verify) {
     case X509_V_ERR_HOSTNAME_MISMATCH:
@@ -9376,7 +9376,7 @@ static int fsh_tls_host_name(const char *host) {
 
 // Starts TLS as the client on a connected stream, verifying the server's certificate for name, a
 // host name or an IP address, against the PEM certificates in ca, or the system's when ca is
-// empty, as Node's ca option does. Gives why it can't, or an empty string.
+// empty, as the ca option takes it. Gives why it can't, or an empty string.
 fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
   // A second session would replace the first, leaking it and racing a read through a clone.
   if (s->tls) return fsh_tls_said("the stream already speaks TLS");
@@ -9419,7 +9419,7 @@ fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
   }
   SSL_set_fd(ssl, s->fd);
   SSL_set_connect_state(ssl);
-  // An absolute name's trailing dot names the same host, as Node takes it. An address is checked
+  // An absolute name's trailing dot names the same host. An address is checked
   // against the certificate's IP addresses and isn't sent as SNI, which takes only names. Any
   // name OpenSSL can't check against fails here, since a connection without the check would
   // take any certificate a trusted CA signed.
@@ -9524,8 +9524,8 @@ const char *fsh_rt_crypto_missing(void) {
 }
 
 // The zlib half of the runtime, a unit of its own compiled into a program, with -lz linked, only
-// when its IR calls it. One call runs a whole compression or decompression into a buffer as Node's
-// sync calls do, then a second copies it out.
+// when its IR calls it. One call runs a whole compression or decompression into a buffer,
+// then a second copies it out.
 export const ZLIB_NATIVE = String.raw`
 #include <limits.h>
 #include <stdint.h>
@@ -9551,7 +9551,7 @@ static void *fsh_zlib_grow(void *p, size_t n) {
   return q;
 }
 
-// A failure as Node reports it: zlib's message when it gave one, else Node's own.
+// A failure: zlib's message when it gave one, else the message passed in.
 static fsh_zlib_run *fsh_zlib_fail(z_stream *s, fsh_zlib_run *r, int err, const char *own, int64_t *result) {
   const char *message = s->msg ? s->msg : own;
   size_t n = strlen(message);
@@ -9575,7 +9575,7 @@ fsh_zlib_run *fsh_rt_zlib_run(int64_t inflating, int64_t bits, int64_t level, co
   memset(&s, 0, sizeof s);
   int err = inflating ? inflateInit2(&s, (int)bits) : deflateInit2(&s, (int)level, Z_DEFLATED, (int)bits, 8, Z_DEFAULT_STRATEGY);
   if (err != Z_OK) return fsh_zlib_fail(&s, r, err, "Init error", result);
-  // Concatenated gzip members are read as one, as Node's gunzip reads them; unzip does so once
+  // Concatenated gzip members are read as one; unzip does so once
   // its input starts as gzip.
   int members = bits == 31 || (bits == 47 && length >= 2 && data[0] == 0x1f && data[1] == 0x8b);
   size_t cap = inflating ? (size_t)length * 4 + 64 : deflateBound(&s, (uLong)length);

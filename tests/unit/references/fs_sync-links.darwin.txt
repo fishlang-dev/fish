@@ -1,0 +1,43 @@
+script 470cf9f9fa80a66d7b6a17a4ecb02ab09070a10c8b4b5220febc5c50e8f56064
+status 0
+stdout 2276
+0
+f d nowhere s5 nowhere
+true false 2 hi hi
+<dir>/f <dir>/d <dir>
+EEXIST: file already exists, symlink 'f' -> 's1' EEXIST symlink f
+EEXIST: file already exists, symlink 'f' -> 's1' EEXIST symlink f
+ENOENT: no such file or directory, symlink 'x' -> 'no/such/s' ENOENT symlink x
+ENOENT: no such file or directory, symlink 'x' -> 'no/such/s' ENOENT symlink x
+ENOTDIR: not a directory, symlink 'f' -> 'f/x' ENOTDIR symlink f
+ENOTDIR: not a directory, symlink 'f' -> 'f/x' ENOTDIR symlink f
+ENOENT: no such file or directory, symlink 'f' -> '' ENOENT symlink f
+ENOENT: no such file or directory, symlink 'f' -> '' ENOENT symlink f
+EEXIST: file already exists, link 'f' -> 'h1' EEXIST link f
+EEXIST: file already exists, link 'f' -> 'h1' EEXIST link f
+ENOENT: no such file or directory, link 'missing' -> 'h3' ENOENT link missing
+ENOENT: no such file or directory, link 'missing' -> 'h3' ENOENT link missing
+ENOENT: no such file or directory, link 'dl' -> 'h4' ENOENT link dl
+ENOENT: no such file or directory, link 'dl' -> 'h4' ENOENT link dl
+EPERM: operation not permitted, link 'd' -> 'h5' EPERM link d
+EPERM: operation not permitted, link 'd' -> 'h5' EPERM link d
+ENOENT: no such file or directory, link '' -> 'h6' ENOENT link 
+ENOENT: no such file or directory, link '' -> 'h6' ENOENT link 
+EINVAL: invalid argument, readlink 'f' EINVAL readlink f
+EINVAL: invalid argument, readlink 'f' EINVAL readlink f
+ENOENT: no such file or directory, readlink 'missing' ENOENT readlink missing
+ENOENT: no such file or directory, readlink 'missing' ENOENT readlink missing
+ENOENT: no such file or directory, readlink '' ENOENT readlink 
+ENOENT: no such file or directory, readlink '' ENOENT readlink 
+ENOTDIR: not a directory, readlink 'f/x' ENOTDIR readlink f/x
+ENOTDIR: not a directory, readlink 'f/x' ENOTDIR readlink f/x
+EINVAL: invalid argument, readlink 'd' EINVAL readlink d
+EINVAL: invalid argument, readlink 'd' EINVAL readlink d
+ENOENT: no such file or directory, realpath 'missing' ENOENT realpath missing
+ENOENT: no such file or directory, realpath 'dl' ENOENT realpath dl
+ENOENT: no such file or directory, realpath '' ENOENT realpath 
+ENOTDIR: not a directory, realpath 'f/x' ENOTDIR realpath f/x
+ENOENT: no such file or directory, realpath 'no/x/..' ENOENT realpath no/x/..
+
+stderr 0
+

@@ -14,7 +14,7 @@ function main() {
   console.log(path.normalize("/a//b/"));
 }
 // case: path_unknown_member
-// error: 'node:path' has no export named 'matchesGlob'
+// error: 'std:path' has no export named 'matchesGlob'
 import path from "node:path";
 function main() {
   console.log(path.matchesGlob("/a", "*"));

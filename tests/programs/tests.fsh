@@ -160,13 +160,13 @@ function main() {
   sure(x > 5, "big");
 }
 // case: assert_node_other_names
-// error: 'node:assert' has no export named 'equal'
+// error: 'std:assert' has no export named 'equal'
 import { equal } from "node:assert";
 function main() {
   equal(1, 1);
 }
 // case: assert_node_other_members
-// error: 'node:assert' has no export named 'strictEqual'; it has 'ok'
+// error: 'std:assert' has no export named 'strictEqual'; it has 'ok'
 import assert from "node:assert";
 function main() {
   assert.strictEqual(1, 1);

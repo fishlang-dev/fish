@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { pinned, stage0Digest } from "../../scripts/stage0.fsh";
+import { pinned, stage0Digest, written } from "../../scripts/stage0.fsh";
 import { fishcPath, removed, root, scratch } from "./support.fsh";
 
 // Where a 64-bit Mach-O's load command `kind` starts, or -1.
@@ -59,6 +59,27 @@ function pins(): void throws IoError | Error {
 test("stage0.toml pins a commit and a digest for each target it names", () => {
   try {
     pins();
+  } catch (e) {
+    assert(false, (e as { message: string }).message);
+  }
+}, { timeout: 30_000 });
+
+function readsBack(): void throws IoError | Error {
+  const p = pinned(root());
+  assert(p.release !== undefined, "stage0.toml pins no release");
+  for (const target of p.digests.keys()) assert(p.tarballs.has(target), `stage0.toml has a digest and no tarball for ${target}`);
+  const dir = scratch("stage0-written");
+  writeFileSync(join(dir, "stage0.toml"), written(p));
+  const again = pinned(dir);
+  assert(again.commit === p.commit && again.release === p.release && again.releases === p.releases, "the commit or the release reads back otherwise");
+  assert(again.digests.size === p.digests.size && again.tarballs.size === p.tarballs.size, "a target is lost or added on the way back");
+  assert(written(again) === written(p), "written twice, it differs");
+  removed(dir);
+}
+
+test("stage0.toml names a tarball for every target it has a digest for, and reads back as it is written", () => {
+  try {
+    readsBack();
   } catch (e) {
     assert(false, (e as { message: string }).message);
   }

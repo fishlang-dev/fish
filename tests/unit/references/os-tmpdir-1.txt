@@ -1,0 +1,7 @@
+script b2e0b511f10040448eedac9b5d5edbf9e8e7e1df708f2e13650a34997d37fd9e
+status 0
+stdout 3
+/c
+
+stderr 0
+

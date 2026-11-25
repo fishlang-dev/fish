@@ -1,0 +1,14 @@
+script 3cc498ddbb8222ea2ddb740aeb278bbb21b2c5800245b504ac3340f59dd74c7c
+status 0
+stdout 515
+<dir> <dir>
+ENOENT: no such file or directory, stat '<dir>/dangling' ENOENT stat
+ENOENT: no such file or directory, stat '<dir>/dangling' ENOENT stat
+ENOENT: no such file or directory, lstat '<dir>/real/deep/missing' ENOENT lstat
+ENOENT: no such file or directory, lstat '<dir>/missing' ENOENT lstat
+ENOENT: no such file or directory, lstat '<dir>/nope' ENOENT lstat
+ELOOP: too many symbolic links encountered, stat '<dir>/loop1' ELOOP stat
+ELOOP: too many symbolic links encountered, stat '<dir>/loop1' ELOOP stat
+
+stderr 0
+

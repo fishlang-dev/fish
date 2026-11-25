@@ -1,4 +1,4 @@
-// Node ids: what the parser gives every node, apart from the tables in `./nodes.ts` that key on them.
+// Node ids: what the parser gives every node, apart from the tables in `./nodes.fsh` that key on them.
 
 // Every node's own number, unique in its compilation, which the compiler's per-node tables key on.
 export type Id = { id: usize };

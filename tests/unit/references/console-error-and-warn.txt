@@ -1,0 +1,10 @@
+script 1f71da540ffa91597a2b31a2d8b83c2476cb4957e04bc15982647def85588cb2
+status 0
+stdout 18
+out 1
+out 2 [ 3 ]
+
+stderr 43
+err 1 { a: [ 1, 2 ], s: 'x' }
+warn [ 'y' ]
+

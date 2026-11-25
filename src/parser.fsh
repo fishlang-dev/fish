@@ -441,8 +441,7 @@ export class Cursor {
     return this.tokens[this.pos - 1]!.end;
   }
 
-  // Runs `parse`; if it throws a CompileError, puts the cursor back and returns undefined. Any
-  // other error goes on, which only the Bun build can meet: in Fish `parse` throws nothing else.
+  // Runs `parse`; if it throws a CompileError, puts the cursor back and returns undefined.
   /** @throws {CompileError} */
   attempt<T>(this: Mut<this>, parse: Parse<T>): T | undefined {
     const pos = this.pos;

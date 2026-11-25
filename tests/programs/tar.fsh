@@ -5,7 +5,7 @@
 // expect: stream: 3 entries
 // Archives the system's tar made, plain and gzipped, from a path, bytes and a stream, and a
 // path past ustar's 100 bytes.
-import { list, entries, TarError, type TarHeader } from "fish:tar";
+import { list, entries, TarError, type TarHeader } from "std:tar";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,7 +52,7 @@ async function main(): Promise<void> throws IoError | Error | TarError {
 // expect: ratio: true
 // expect: fifo: true
 // A corrupt header, each limit, and a FIFO are refused with TarError.
-import { list, TarError } from "fish:tar";
+import { list, TarError } from "std:tar";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -98,7 +98,7 @@ async function main(): Promise<void> throws IoError | TarError {
 // expect: mode 493
 // An archive the system's tar made, extracted and read back: files, a directory, a symlink and
 // a file's mode.
-import { extract, TarError } from "fish:tar";
+import { extract, TarError } from "std:tar";
 import { spawnSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -127,7 +127,7 @@ async function main(): Promise<void> throws IoError | Error | TarError {
 // expect: through a link: 'hop/x.txt' would be written through the symlink 'hop', which extract refuses
 // expect: nothing outside: true
 // Archives made with each escaping entry are refused, and nothing lands outside the target.
-import { extract, pack, TarError } from "fish:tar";
+import { extract, pack, TarError } from "std:tar";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { ZlibError } from "node:zlib";
@@ -178,7 +178,7 @@ async function main(): Promise<void> throws IoError | ZlibError | TarError {
 // expect: system gzip: a.txt|sub/|sub/b.txt
 // An archive pack writes reads back through entries() and through the system's tar, plain and
 // gzipped, with a long path kept through a PAX header.
-import { create, entries, list, TarError } from "fish:tar";
+import { create, entries, list, TarError } from "std:tar";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
