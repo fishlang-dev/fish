@@ -1,0 +1,33 @@
+script 4cc986ba0cddf4916056b7cd21453281f62f0d6334ae8567968e143b78c5e54d
+status 0
+stdout 1763
+2000
+2123.456
+true
+-1500
+8250
+The "time" argument must be an instance of Date or an Time in seconds. Received type number (NaN) ERR_INVALID_ARG_TYPE none
+The "time" argument must be an instance of Date or an Time in seconds. Received type number (NaN) ERR_INVALID_ARG_TYPE none
+The "time" argument must be an instance of Date or an Time in seconds. Received type number (Infinity) ERR_INVALID_ARG_TYPE none
+The "time" argument must be an instance of Date or an Time in seconds. Received type number (Infinity) ERR_INVALID_ARG_TYPE none
+The "time" argument must be an instance of Date or an Time in seconds. Received type number (-Infinity) ERR_INVALID_ARG_TYPE none
+The "time" argument must be an instance of Date or an Time in seconds. Received type number (-Infinity) ERR_INVALID_ARG_TYPE none
+ENOENT: no such file or directory, utime 'missing' ENOENT utime missing
+ENOENT: no such file or directory, lutime 'missing/y' ENOENT lutime missing/y
+ENOENT: no such file or directory, utime 'missing' ENOENT utime missing
+ENOENT: no such file or directory, lutime 'missing' ENOENT lutime missing
+ENOENT: no such file or directory, utime '' ENOENT utime 
+ENOENT: no such file or directory, lutime '/y' ENOENT lutime /y
+ENOENT: no such file or directory, utime '' ENOENT utime 
+ENOENT: no such file or directory, lutime '' ENOENT lutime 
+ENOENT: no such file or directory, utime 'dl' ENOENT utime dl
+ENOENT: no such file or directory, lutime 'dl/y' ENOENT lutime dl/y
+ENOENT: no such file or directory, utime 'dl' ENOENT utime dl
+set dl
+ENOTDIR: not a directory, utime 'f/x' ENOTDIR utime f/x
+ENOTDIR: not a directory, lutime 'f/x/y' ENOTDIR lutime f/x/y
+ENOTDIR: not a directory, utime 'f/x' ENOTDIR utime f/x
+ENOTDIR: not a directory, lutime 'f/x' ENOTDIR lutime f/x
+
+stderr 0
+

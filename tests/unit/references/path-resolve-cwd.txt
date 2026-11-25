@@ -1,0 +1,7 @@
+script a326c9bc91e9333f24aa47f515af65ca7ca2c52eb5700c4452f74c245dfe000d
+status 0
+stdout 19
+<dir>/x/y <dir> ..
+
+stderr 0
+

@@ -1,0 +1,27 @@
+script 22f32d16c91273344f879698d574e8c321919135b69b07b6f42af9a97ff08e68
+status 0
+stdout 353
+3 none false out
+ err
+ true
+"" 0
+fed in
+null SIGTERM false
+before the child
+inherited
+0
+true
+/
+
+bar--
+
+1000000 50000
+Executable not found in $PATH: "no-such-cmd-x" no-such-cmd-x
+ENOENT: no such file or directory, posix_spawn '/no/such' /no/such
+cmd must not be empty 
+ENOENT
+ENOENT: no such file or directory, posix_spawn 'echo' ENOENT posix_spawn echo
+
+stderr 10
+to stderr
+

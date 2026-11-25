@@ -1,0 +1,12 @@
+script 512e782c523a025cbc4cd2379aab776a86896280654021de447efce4a3125b9b
+status 0
+stdout 130
+6 héllo 6 true false false
+3 abc
+ENOENT: no such file or directory, open 'nope' ENOENT open nope
+"from stdin\n"
+true unset 2
+true
+
+stderr 0
+

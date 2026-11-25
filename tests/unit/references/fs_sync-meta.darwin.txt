@@ -1,0 +1,25 @@
+script d98389faa2acd7c6e186001e5197d12d5c423f3fff1e16f0c94fb000a5e64e7f
+status 0
+stdout 1046
+3 33188 true false false true
+true 16877 true true false
+[ 'd', 'ln' ] [ 'b.txt', 'f.txt' ]
+<dir>/d/f.txt <dir>/d/f.txt
+10 true true
+false false [ 'd', 'ln' ]
+ENOENT: no such file or directory, stat 'missing' ENOENT stat
+ENOENT: no such file or directory, lstat 'missing' ENOENT lstat
+ENOENT: no such file or directory, scandir 'missing' ENOENT scandir
+ENOENT: no such file or directory, lstat '<dir>/missing' ENOENT lstat
+ENOENT: no such file or directory, lstat 'missing' ENOENT lstat
+ENOENT: no such file or directory, stat 'd/missing/x' ENOENT stat
+ENOENT: no such file or directory, lstat 'd/missing/x' ENOENT lstat
+ENOENT: no such file or directory, scandir 'd/missing/x' ENOENT scandir
+ENOENT: no such file or directory, lstat '<dir>/d/missing' ENOENT lstat
+ENOENT: no such file or directory, lstat 'd/missing/x' ENOENT lstat
+ENOENT: no such file or directory, scandir 'ln' ENOENT scandir
+ENOENT: no such file or directory, mkdtemp 'nope/x-XXXXXX' ENOENT mkdtemp
+Path is a directory: rm returned EISDIR (is a directory) d ERR_FS_EISDIR rm
+
+stderr 0
+

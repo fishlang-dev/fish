@@ -1,7 +1,7 @@
 // The std `path` module against node's `path.posix`, over a table of
 // inputs edge cases included, each call run through Fish and through node and compared line by line.
 import { spawnSync } from "node:child_process";
-import { built, removed, same, scratch, text } from "./support.fsh";
+import { built, ranFor, reference, removed, same, scratch, text } from "./support.fsh";
 
 function quoted(s: string): string {
   return JSON.stringify(s);
@@ -35,7 +35,7 @@ test("path gives what node's path.posix gives", () => {
   const out = built(dir, "main", `import { join, normalize, dirname, basename, extname, resolve, relative, isAbsolute, parse, format, sep, delimiter } from "node:path";\nfunction main() {\n${lines}\n  console.log(sep, delimiter);\n}\n`);
   const fish = text(spawnSync(out, []).stdout);
   const script = `const { join, normalize, dirname, basename, extname, resolve, relative, isAbsolute, parse, format, sep, delimiter } = require("node:path").posix;\n${all.map((c) => `console.log(JSON.stringify(${c}));`).join("\n")}\nconsole.log(sep, delimiter);`;
-  const node = text(spawnSync("node", ["-e", script]).stdout);
+  const node = reference("path-posix", script, () => ranFor("node", ["-e", script])).stdout;
   same(fish, node, "the output");
   removed(dir);
 }, { timeout: 30_000 });
@@ -44,7 +44,12 @@ test("resolve starts from the working directory", () => {
   const dir = scratch("fish-path-");
   const out = built(dir, "cwd", `import path from "node:path";\nfunction main() { console.log(path.resolve("x/y"), path.resolve(), path.relative("x", ".")); }\n`);
   const fish = text(spawnSync(out, [], { cwd: dir }).stdout);
-  const node = text(spawnSync("node", ["-e", `const path = require("node:path"); console.log(path.resolve("x/y"), path.resolve(), path.relative("x", "."));`], { cwd: dir }).stdout);
-  same(fish, node, "the output");
+  const script = `const path = require("node:path"); console.log(path.resolve("x/y"), path.resolve(), path.relative("x", "."));`;
+  // The directory is a new one each run, so the answer is recorded with a name in its place.
+  const node = reference("path-resolve-cwd", script, () => {
+    const got = ranFor("node", ["-e", script], dir);
+    return { status: got.status, stdout: got.stdout.replaceAll(dir, "<dir>"), stderr: got.stderr };
+  }).stdout;
+  same(fish.replaceAll(dir, "<dir>"), node, "the output");
   removed(dir);
 }, { timeout: 30_000 });

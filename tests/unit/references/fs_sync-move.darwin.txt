@@ -1,0 +1,36 @@
+script c68d60b9426672a80cb492ba151dbdc47a7ff5257688881260539431afab9693
+status 0
+stdout 1188
+hi false true hi false
+hi hi hi hi
+true false
+false [
+  'a',   'c2',   'c3',
+  'c4',  'c9',   'cl',
+  'cl2', 'dl',   'f',
+  'lf',  'made', 'md',
+  'x'
+]
+ENOENT: no such file or directory, rename 'nope' -> 'a/h' ENOENT rename nope
+ENOENT: no such file or directory, rename 'a/missing' -> 'zz/g' ENOENT rename a/missing
+ENOTEMPTY: directory not empty, rename 'md' -> 'x' ENOTEMPTY rename md
+EEXIST: file already exists, copyfile 'f' -> 'c3' EEXIST copyfile f
+ENOENT: no such file or directory, copyfile 'nope' -> 'c5' ENOENT copyfile nope
+ENOTSUP: operation not supported on socket, copyfile 'a' -> 'c6' ENOTSUP copyfile a
+EISDIR: illegal operation on a directory, copyfile 'f' -> 'a' EISDIR copyfile f
+ENOENT: no such file or directory, copyfile 'f' -> 'zz/c' ENOENT copyfile f
+mode is out of range: >= 0 && <= 7 ERR_OUT_OF_RANGE - none
+ENOSYS: function not implemented, copyfile 'f' -> 'c8' ENOSYS copyfile f
+ENOENT: no such file or directory, unlink 'c' ENOENT unlink c
+EPERM: operation not permitted, unlink 'a' EPERM unlink a
+ENOTDIR: not a directory, unlink 'f/x' ENOTDIR unlink f/x
+[
+  'a',   'c2',   'c3',
+  'c4',  'c9',   'cl',
+  'cl2', 'dl',   'f',
+  'lf',  'made', 'md',
+  'x'
+]
+
+stderr 0
+

@@ -1,7 +1,7 @@
 // The std `util` module against node's: the same calls, output compared.
 // The node program is the Fish one with its type annotations taken out.
 import { spawnSync } from "node:child_process";
-import { built, removed, same, scratch, text } from "./support.fsh";
+import { built, ranFor, reference, removed, same, scratch, text } from "./support.fsh";
 
 function untyped(s: string): string {
   return s.replace(/: (i64|f64|string|boolean)(\[\])?( \| (i64|f64|string|null))*/g, "");
@@ -17,9 +17,9 @@ function compare(name: string, imports: string, declarations: string, body: stri
   const script = `${required}\n${untyped(declarations)}\n${untyped(body)}`;
   let nodeArgs: string[] = ["-e", script, "--"];
   nodeArgs = nodeArgs.concat(argv);
-  const node = spawnSync("node", nodeArgs);
-  same(text(fish.stderr), text(node.stderr), `${name}'s stderr`);
-  same(text(fish.stdout), text(node.stdout), `${name}'s output`);
+  const node = reference(`util-${name}`, `${script}\n${argv.join(" ")}`, () => ranFor("node", [...nodeArgs]));
+  same(text(fish.stderr), node.stderr, `${name}'s stderr`);
+  same(text(fish.stdout), node.stdout, `${name}'s output`);
   removed(tmp);
 }
 

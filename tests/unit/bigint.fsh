@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { CompileError, formatError } from "../../src/diag.fsh";
 import { build } from "../../src/main.fsh";
 import { cachedSession } from "../../src/stdcache.fsh";
-import { same } from "./support.fsh";
+import { ranFor, reference, same } from "./support.fsh";
 
 // A seeded generator, so a failure names values that reproduce.
 function values(seed: i64, count: usize): bigint[] {
@@ -49,10 +49,10 @@ function compare(name: string, body: string): void {
     const fish = spawnSync("env", ["FISH_LEAKS=1", out]);
     const script = join(dir, `${name}.ts`);
     writeFileSync(script, body);
-    const node = spawnSync("node", [script]);
-    same(text(node.stderr), "", "node's stderr");
+    const node = reference(`bigint-${name}`, body, () => ranFor("node", [script]));
+    same(node.stderr, "", "node's stderr");
     same(text(fish.stderr), "", "the program's stderr");
-    same(text(fish.stdout), text(node.stdout), "the output");
+    same(text(fish.stdout), node.stdout, "the output");
   } catch (e) {
     assert(false, e.message);
   }

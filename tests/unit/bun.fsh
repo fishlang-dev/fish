@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { built, freePort, removed, same, scratch, text } from "./support.fsh";
+import { built, freePort, reference, removed, same, scratch, text } from "./support.fsh";
 
 function write(path: string, contents: string): void {
   try {
@@ -42,9 +42,15 @@ function compare(tmp: string, name: string, body: string, stdin: string, setup: 
   const fish = spawnSync("env", [...env, "FISH_LEAKS=1", out], { cwd: dirs[0], input: stdin });
   const script = join(tmp, `${name}.ts`);
   write(script, `await (async () => {${body}\n})();\n`);
-  const bun = spawnSync("env", [...env, bunPath(), script], { cwd: dirs[1], input: stdin });
-  same(text(fish.stderr).replaceAll(dirs[0], "<dir>"), text(bun.stderr).replaceAll(dirs[1], "<dir>"), `${name}'s stderr`);
-  same(text(fish.stdout).replaceAll(dirs[0], "<dir>"), text(bun.stdout).replaceAll(dirs[1], "<dir>"), `${name}'s output`);
+  // Bun's directory is a new one each run, so its answer is recorded with a name in its place.
+  // The answer is recorded for the program, its input and its setup, whatever this machine's PATH is.
+  const asked = `${body}\n${stdin}\n${setup}\n${env.map((e) => e.replace(process.env.PATH ?? "", "<path>")).join(" ")}`;
+  const bun = reference(`bun-${name}`, asked, () => {
+    const got = spawnSync("env", [...env, bunPath(), script], { cwd: dirs[1], input: stdin });
+    return { status: got.status ?? -1, stdout: text(got.stdout).replaceAll(dirs[1], "<dir>"), stderr: text(got.stderr).replaceAll(dirs[1], "<dir>") };
+  });
+  same(text(fish.stderr).replaceAll(dirs[0], "<dir>"), bun.stderr, `${name}'s stderr`);
+  same(text(fish.stdout).replaceAll(dirs[0], "<dir>"), bun.stdout, `${name}'s output`);
   return text(fish.stdout).replaceAll(dirs[0], "<dir>");
 }
 
@@ -139,7 +145,7 @@ test("spawn gives a running child Bun's exit code, signal and output", () => {
 test("which finds executables on PATH, or by a path with a slash", () => {
   const tmp = scratch("fish-bun-");
   compare(tmp, "which", `
-  console.log(Bun.which("sh"), Bun.which("no-such-x"), Bun.which("/bin/sh"), Bun.which(""), Bun.which("/tmp"));
+  console.log((Bun.which("sh") ?? "").endsWith("/sh"), Bun.which("no-such-x"), Bun.which("/bin/sh"), Bun.which(""), Bun.which("/tmp"));
   console.log(Bun.which("./bin/tool"), Bun.which("bin/tool"), Bun.which("plain"), Bun.which("./plain"));`, "", `mkdir bin && printf '#!/bin/sh\\n' > bin/tool && chmod 755 bin/tool && : > plain`, []);
   removed(tmp);
 }, { timeout: 30_000 });
@@ -194,8 +200,8 @@ test("file, write, stdin, env, argv and the sleeps", () => {
   removed(tmp);
 }, { timeout: 30_000 });
 
-// Bun.serve gives a Server at once and Fish's is awaited, so each side has its own program: both
-// serve the same handler and print what a request through fetch got back.
+// Bun.serve gives a Server at once and Fish's is awaited, so Fish's program is its own: it serves
+// the handler and prints what a request through fetch got back, which is what Bun's prints.
 test("serve answers through fetch as Bun's does", () => {
   const tmp = scratch("fish-bun-");
   const port = freePort();
@@ -218,12 +224,7 @@ test("serve answers through fetch as Bun's does", () => {
 }
 `);
   const fish = spawnSync("env", ["FISH_LEAKS=1", out]);
-  const script = join(tmp, "serve.ts");
-  write(script, `const server = Bun.serve({ port: ${port}, hostname: "127.0.0.1", fetch: ${handler} });\n${asked}\nserver.stop();\n`);
-  const bun = spawnSync(bunPath(), [script]);
   same(text(fish.stderr), "", "Fish's stderr");
-  same(text(bun.stderr), "", "Bun's stderr");
-  same(text(fish.stdout), text(bun.stdout), "the output");
   same(text(fish.stdout), `201 hi POST http://127.0.0.1:${port}/a/b?c=d sent fetch\n`, "Fish's output");
   removed(tmp);
 }, { timeout: 30_000 });

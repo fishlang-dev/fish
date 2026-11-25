@@ -1,0 +1,13 @@
+script a1ebdb4cac620cfb64ab59372238f23f5f1c75ed315a25bbcf6ec9e79d7c3ccb
+status 0
+stdout 304
+12 héllo
+world true
+bytes true true false false
+ENOENT: no such file or directory, open 'missing.txt' ENOENT open
+EISDIR: illegal operation on a directory, read EISDIR read
+ENOTDIR: not a directory, open 'a.txt/nested' ENOTDIR open
+ENOENT: no such file or directory, open 'no/such/dir/x.txt' ENOENT open
+
+stderr 0
+

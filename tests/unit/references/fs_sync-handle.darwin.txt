@@ -1,0 +1,28 @@
+script b343b201fcea914563046f0693b83db62ab79642bdf1e24d4bd0f2f92514a048
+status 0
+stdout 694
+true 4 hell
+2 4 llo 
+0
+2 2 4 2 XYllo llo élo
+14 true true
+XYl
+0 384
+The value of "length" is out of range. It must be <= 4. Received 5 ERR_OUT_OF_RANGE
+The value of "offset" is out of range. It must be <= 4. Received 5 ERR_OUT_OF_RANGE
+The value of "length" is out of range. It must be <= 4. Received 4_294_967_300 ERR_OUT_OF_RANGE
+-1
+file closed EBADF read
+file closed EBADF write
+file closed EBADF fstat
+file closed EBADF ftruncate
+file closed EBADF fsync
+file closed EBADF fchmod
+ENOENT: no such file or directory, open 'missing' ENOENT open missing
+The argument 'flags' is invalid. Received 'zz' ERR_INVALID_ARG_VALUE
+abcmore
+EISDIR: illegal operation on a directory, read EISDIR read
+true
+
+stderr 0
+

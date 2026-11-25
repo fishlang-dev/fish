@@ -1,0 +1,46 @@
+script 740fabb9e6107e694d1fe3e7d3bc1a5bda7e34b4b464bb499c97467d04093d40
+status 0
+stdout 4094
+33152
+33188
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received '0o644' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received '0o644' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received 'abc' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received 'abc' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received '' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received '' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received '8' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received '8' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received "it's" ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received "it's" ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received `a'b"c` ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received `a'b"c` ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received 'a\'b"c`d' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received 'a\'b"c`d' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received 'a\'b"c${d}' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received 'a\'b"c${d}' ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx... ERR_INVALID_ARG_VALUE - none
+The argument 'mode' must be a 32-bit unsigned integer or an octal string. Received 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx... ERR_INVALID_ARG_VALUE - none
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received -1 ERR_OUT_OF_RANGE - none
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received -1 ERR_OUT_OF_RANGE - none
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received 4294967296 ERR_OUT_OF_RANGE - none
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received 4294967296 ERR_OUT_OF_RANGE - none
+ok 2147483647
+ok 2147483647
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received -5_000_000_000 ERR_OUT_OF_RANGE - none
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received -5_000_000_000 ERR_OUT_OF_RANGE - none
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received 9_000_000_000 ERR_OUT_OF_RANGE - none
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received 9_000_000_000 ERR_OUT_OF_RANGE - none
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received 549_755_813_887 ERR_OUT_OF_RANGE - none
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received 549_755_813_887 ERR_OUT_OF_RANGE - none
+ENOENT: no such file or directory, chmod 'missing' ENOENT chmod missing
+ENOENT: no such file or directory, chmod 'missing' ENOENT chmod missing
+ENOENT: no such file or directory, chmod 'dl' ENOENT chmod dl
+ENOENT: no such file or directory, chmod 'dl' ENOENT chmod dl
+ENOENT: no such file or directory, chmod '' ENOENT chmod 
+ENOENT: no such file or directory, chmod '' ENOENT chmod 
+ENOTDIR: not a directory, chmod 'f/x' ENOTDIR chmod f/x
+ENOTDIR: not a directory, chmod 'f/x' ENOTDIR chmod f/x
+
+stderr 0
+

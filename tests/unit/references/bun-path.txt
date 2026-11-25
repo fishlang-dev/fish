@@ -1,0 +1,12 @@
+script 8adc477c71f1adec01ff30fb0e477624fe149d1f9510f4fa9baf734a83ee92b3
+status 0
+stdout 274
+ran x
+
+<dir>/bin/tool
+The argument 'args[2]' must be a string without null bytes ERR_INVALID_ARG_VALUE
+The argument 'args[0]' must be a string without null bytes ERR_INVALID_ARG_VALUE
+The property 'options.env['A']' must be a string without null bytes ERR_INVALID_ARG_VALUE
+
+stderr 0
+
