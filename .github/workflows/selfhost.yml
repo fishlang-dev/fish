@@ -11,8 +11,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   selfhost:
-    # A fork's pull request never runs here: a fork can name a branch release/v*, and its code would
-    # run on whatever machine a runner is.
+    # A fork's pull request never runs here: a fork can name a branch release/v* too.
     if: github.event_name == 'workflow_dispatch' || (startsWith(github.head_ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository)
     strategy:
       fail-fast: false
@@ -34,9 +33,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24.10.0
-      # A runner of the project's own has these installed already, and no sudo to install them with.
       - name: Libraries fishc links, and what the tests build and run
-        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev zlib1g-dev libsqlite3-dev zip unzip
       - uses: actions/cache@v4
         with:
