@@ -33,6 +33,9 @@ import { compare, formatComparison, formatReport, readReport, sources, survey, t
 import { explain } from "./codes.fsh";
 import { explainBorrows, functionsIn } from "./explain.fsh";
 import { openapiOf } from "./openapi.fsh";
+import { complete, entries, program, REPL_VALUE, shown, thrownBy, type Entry, type ReplState } from "./repl.fsh";
+import { comptimeBody } from "./comptime.fsh";
+import type { InstanceId } from "./arenas.fsh";
 import type { Checked, Instance } from "./check.fsh";
 import type { Type, Typing } from "./typing.fsh";
 import { rustShim, type Shim } from "./rustshim.fsh";
@@ -501,6 +504,11 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
     }
   }
   const named = performance.now() - naming;
+  // The selectors that stand in for GlobalISel drop a branch on a constant and keep the block it
+  // never takes, and clang 18 passes over that block's return as it writes the unwind table, so
+  // the code after it unwinds as if its frame were gone. A synchronous table says nothing at a
+  // return, and a panic unwinds only from calls.
+  if (withoutGlobalIsel(release, target)) ir = ir.replace(/^(define [^\n]*) uwtable( personality [^\n]* \{| \{)$/gm, "$1 uwtable(sync)$2");
   const halves = split(ir, std, own, byFile, UNIT_LENGTH);
   const args = [...target.compile, "-x", "ir", "-", ...optimization(release, target), "-funwind-tables"];
   let cached: Unit[] = [{ name: "std", args: [...args], stdin: halves.std, inputs: [] }];
@@ -1108,10 +1116,15 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
 function optimization(release: boolean, target: Ref<Target>): string[] {
   if (release) return ["-O2"];
   if (target.sanitize !== undefined) return ["-O1"];
-  // Unoptimized AArch64 code off macOS is selected by GlobalISel, which in clang 18 crashes on a
-  // load of an empty aggregate, as a field of a literal type is; those builds go without it.
-  const arm64Linux = target.triple === "" ? process.platform === "linux" && process.arch === "arm64" : target.triple.startsWith("aarch64-unknown-linux");
-  return arm64Linux ? ["-O0", "-fno-global-isel"] : ["-O0"];
+  return withoutGlobalIsel(release, target) ? ["-O0", "-fno-global-isel"] : ["-O0"];
+}
+
+// Whether a build is unoptimized ARM64 code for Linux. Clang selects that with GlobalISel, which
+// in clang 18 crashes on a load of an empty aggregate, as a field of a literal type is, so those
+// builds go without it.
+function withoutGlobalIsel(release: boolean, target: Ref<Target>): boolean {
+  if (release || target.sanitize !== undefined) return false;
+  return target.triple === "" ? process.platform === "linux" && process.arch === "arm64" : target.triple.startsWith("aarch64-unknown-linux");
 }
 
 // Clang's command line for a program, its IR read from stdin unless `program` names it compiled
@@ -1119,6 +1132,176 @@ function optimization(release: boolean, target: Ref<Target>): string[] {
 function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = hostTarget(), program: string[] = ["-x", "ir", "-"]): string[] {
   const none: string[] = [];
   return ["clang", ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, ...optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)];
+}
+
+// What computes a checked program's top-level consts for the repl: every function is checked.
+class ReplHost {
+  tables: Tables;
+
+  constructor(tables: Tables) {
+    this.tables = tables;
+  }
+
+  ensureChecked(this: Mut<this>, _id: InstanceId): boolean {
+    return true;
+  }
+}
+
+// The repl's file checked, and each top-level const in `names` computed as a build computes it,
+// so one that can't be computed while compiling fails here; gives the last as `console.log`
+// prints it, when that is certain.
+/** @throws {CompileError | Error | IoError} */
+function replComputed(session: Session, file: string, names: Ref<string[]>): string | undefined {
+  let looked: string[] = [];
+  let queries = new Queries(file, undefined, new Map<string, string>());
+  const kept = queries.checked(session, looked, undefined);
+  let { checked } = kept;
+  let host = new ReplHost(checked.tables);
+  let found: InstanceId[] = [];
+  for (const name of names) {
+    for (let i: usize = 1; i <= host.tables.arenas.instanceCount(); i++) {
+      const body = bodyOf(host.tables.arenas, host.tables.arenas.instanceOf(i as InstanceId));
+      if (body.comptime === "const" && body.name === `const ${name}`) found.push(i as InstanceId);
+    }
+  }
+  let text: string | undefined = undefined;
+  for (const id of found) {
+    const value = comptimeBody(host, id);
+    text = shown(host.tables.typing, value, host.tables.arenas.instanceOf(id).returns, false);
+  }
+  return found.length === names.length ? text : undefined;
+}
+
+// An error as the repl prints it: placed in the line just entered when it lies there, and in the
+// whole program the line was run as otherwise.
+function replError(e: Ref<CompileError>, source: string, at: usize, line: string): string {
+  const end = at + line.length;
+  if (e.errors.length > 0 || e.start < at || e.end > end) return painted(e, "repl", source);
+  const n = e.note === undefined ? undefined : { ...e.note! };
+  const note = n !== undefined && n.start >= at && n.end <= end ? { message: n.message, start: n.start - at, end: n.end - at } : undefined;
+  return painted(new CompileError(e.code, e.message, e.start - at, e.end - at, note), "repl", line);
+}
+
+// What the repl needs to answer a line: what each check's session is made with, the file each line's program is
+// written to, beside the working directory's own so its imports resolve, and the binary a line
+// that has to run is built as.
+type Repl = { locked: boolean; timed: boolean; checking: boolean; file: string; binary: string };
+
+// Checks `above` at the top level, or checks or runs `before`, the line and `after` in `main`
+// after the kept bindings, adding to what `main` declares each error the check says it throws.
+// Gives "void" for a line that was to be printed and has no value.
+function replTried(repl: Ref<Repl>, state: Mut<ReplState>, above: string, before: string, line: string, after: string, awaits: boolean, run: boolean): "done" | "void" | "failed" {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const made = program(state, above, before + line + after, true, awaits);
+    try {
+      writeFileSync(repl.file, made.source);
+      if (run) {
+        let looked: string[] = [];
+        built(sessionWith(repl.locked, repl.timed, repl.checking), repl.file, repl.binary, false, "unwind", [], hostTarget(), false, false, looked);
+        Bun.spawnSync([repl.binary], { stdin: "ignore", stdout: "inherit", stderr: "inherit" });
+      } else replComputed(sessionWith(repl.locked, repl.timed, repl.checking), repl.file, []);
+      return "done";
+    } catch (e) {
+      if (!(e instanceof CompileError)) {
+        console.error((e as { message: string }).message);
+        return "failed";
+      }
+      let more: string[] = [];
+      if (e.code === "E0602") for (const t of thrownBy(e.message)) if (!state.throws.includes(t)) more.push(t);
+      if (more.length > 0) {
+        for (const t of more) state.throws.push(t);
+        continue;
+      }
+      const nothing = e.code === "E0118" || (e.code === "E0305" && e.message.includes("gives nothing once awaited"));
+      if (nothing && before !== "") return "void";
+      console.error(replError(e, made.source, above !== "" ? made.at : made.at + before.length, above !== "" ? above : line));
+      return "failed";
+    }
+  }
+  return "failed";
+}
+
+// Answers one statement of a line; false when it failed, which drops the rest of the line.
+function replEntry(repl: Ref<Repl>, state: Mut<ReplState>, entry: Ref<Entry>): boolean {
+  if (entry.kind === "declaration") {
+    if (replTried(repl, state, entry.text, "", "", "", false, false) !== "done") return false;
+    state.top.push(entry.text);
+    return true;
+  }
+  if (entry.kind === "binding") {
+    // A const that can be computed while compiling stands at the top level, where the functions
+    // declared after it see it; any other binding runs again inside main before each later line.
+    if (entry.constant && !entry.awaits && entry.names.length > 0) {
+      try {
+        writeFileSync(repl.file, program(state, entry.text, "", true, false).source);
+        replComputed(sessionWith(repl.locked, repl.timed, repl.checking), repl.file, entry.names);
+        state.top.push(entry.text);
+        return true;
+      } catch (_e) {}
+    }
+    if (replTried(repl, state, "", "", entry.text, "", entry.awaits, false) !== "done") return false;
+    state.bindings.push(entry.text);
+    if (entry.awaits) state.awaits = true;
+    return true;
+  }
+  if (entry.kind === "statement") return replTried(repl, state, "", "", entry.text, "", entry.awaits, true) === "done";
+  // A pure expression is answered by the interpreter that computes top-level consts, with no
+  // build; anything else, or a value whose printed form isn't certain, is built and run.
+  if (!entry.awaits) {
+    try {
+      writeFileSync(repl.file, program(state, `const ${REPL_VALUE} = ${entry.text};`, "", false, false).source);
+      const text = replComputed(sessionWith(repl.locked, repl.timed, repl.checking), repl.file, [REPL_VALUE]);
+      if (text !== undefined) {
+        console.log(text);
+        return true;
+      }
+    } catch (_e) {}
+  }
+  // An awaited value is named first, since an await can't sit inside the call that prints it.
+  const before = entry.awaits ? `const ${REPL_VALUE} = ` : "console.log(";
+  const after = entry.awaits ? `;\nconsole.log(${REPL_VALUE});` : ");";
+  const printed = replTried(repl, state, "", before, entry.text, after, entry.awaits, true);
+  if (printed !== "void") return printed === "done";
+  return replTried(repl, state, "", "", entry.text, ";", entry.awaits, true) === "done";
+}
+
+// `fishc repl`: reads lines until input ends or `.exit`, keeping declarations and bindings.
+/** @throws {IoError} */
+function runRepl(locked: boolean, timed: boolean, checking: boolean): never {
+  const scratch = mkdtempSync(join(tmpdir(), "fishc-repl-"));
+  const repl: Repl = { locked, timed, checking, file: join(process.cwd(), `.fishc-repl-${Date.now()}.fsh`), binary: join(scratch, "line") };
+  let state: ReplState = { top: [], bindings: [], awaits: false, throws: [] };
+  // An interrupt is how a repl is usually left, and it would leave the line's file behind.
+  const file = repl.file;
+  process.on("SIGINT", () => {
+    try {
+      rmSync(file, { force: true });
+      rmSync(scratch, { recursive: true, force: true });
+    } catch (_e) {}
+    process.exit(130);
+  });
+  try {
+    while (true) {
+      const first = prompt("fish>");
+      if (first === null) break;
+      let text: string = first;
+      while (!complete(text)) {
+        const more = prompt("....>");
+        if (more === null || more === "") break;
+        text += "\n" + more;
+      }
+      if (text.trim() === ".exit") break;
+      try {
+        for (const entry of entries(text)) if (!replEntry(repl, state, entry)) break;
+      } catch (e) {
+        console.error(e instanceof CompileError ? painted(e, "repl", text) : (e as { message: string }).message);
+      }
+    }
+  } finally {
+    rmSync(repl.file, { force: true });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+  return process.exit(0);
 }
 
 function fail(message: string): never {
@@ -1307,6 +1490,10 @@ async function main(): Promise<void> {
   const named = positionals.length > 1 ? positionals[1] : undefined;
   const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
+  if (command === "repl") {
+    if (positionals.length !== 1 || flags.some((k) => k !== "panic")) fail("usage: fishc repl");
+    runRepl(locked, timed, checking);
+  }
   // Parses a file without checking it, for test programs that only have to parse.
   if (command === "parse") {
     if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail("usage: fishc parse <file.fsh>");

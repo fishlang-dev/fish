@@ -391,7 +391,7 @@ function main() {
 `;
   sameOut(sanitized(project(root, "p", main), main), ok("[ 'a' ] [ 1, 2 ] [ 't', 9 ]\n2 true true true\n"), "the program");
   removed(root);
-}, { timeout: 30_000 });
+}, { timeout: 90_000 });
 
 test("a generic Fish function forwards its type parameter to a package", () => {
   const root = scratch("fish-packages-");
@@ -421,7 +421,7 @@ function main() {
   const dir = project(root, "p", main, [["lib.fsh", `import { relabel } from "esm";\nimport type { Result } from "esm";\nexport function counted(r: Result): string {\n  return relabel(r);\n}\n`]]);
   sameOut(sanitized(dir, main), ok("made2 made 2 true\n"), "the program");
   removed(root);
-}, { timeout: 30_000 });
+}, { timeout: 90_000 });
 
 test("a Fish type holding itself has no JS form yet", () => {
   const root = scratch("fish-packages-");

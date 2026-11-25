@@ -2649,6 +2649,9 @@ class Printer {
   /** @throws {Error | CompileError} */
   expression(this: Mut<this>, path: Ref<At<"expr">>, src: string, opts: Ref<Opts>): Doc {
     const e = path.node;
+    // A JSX element is kept as written: the parser read it as the calls that build it, and no
+    // call written out begins with `<`.
+    if (e.kind === "call" && charAt(src, e.start) === "<") return join(newLiteralline(), textLines(src.slice(e.start as i64, e.end as i64)));
     switch (e.kind) {
       case "arrow":
         return this.arrow(e, path, src, opts);

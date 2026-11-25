@@ -26,6 +26,10 @@ const REFUSED: [string, string][] = [
   ["tests/programs/string_raw.fsh > string_raw_invalid_escape_unterminated", "an invalid escape outside String.raw"],
   ["tests/programs/string_raw.fsh > string_raw_invalid_escape_pattern", "an invalid escape outside String.raw"],
   ["tests/programs/string_raw.fsh > string_raw_invalid_escape_import", "an invalid escape outside String.raw"],
+  ["tests/programs/jsx.fsh > jsx_closing_tag", "a closing tag for another element"],
+  ["tests/programs/jsx.fsh > jsx_void_with_content", "an element with no content written open"],
+  ["tests/programs/jsx.fsh > jsx_spread_on_element", "a spread into an HTML element's attributes"],
+  ["tests/programs/jsx.fsh > jsx_never_closed", "an element never closed"],
 ];
 
 // The compiler's sources, each with a test of its own below.
@@ -65,6 +69,7 @@ const SOURCES: string[] = [
   "src/interfaces.fsh",
   "src/js.fsh",
   "src/js_native.fsh",
+  "src/jsx.fsh",
   "src/keys.fsh",
   "src/layout.fsh",
   "src/lexer.fsh",
@@ -98,6 +103,7 @@ const SOURCES: string[] = [
   "src/regex.fsh",
   "src/registry.fsh",
   "src/registry_index.fsh",
+  "src/repl.fsh",
   "src/resolve.fsh",
   "src/runtime.fsh",
   "src/rust.fsh",
@@ -345,6 +351,7 @@ test("src/incremental.fsh formats keeping its comments, parses back to the same 
 test("src/interfaces.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/interfaces.fsh"));
 test("src/js.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/js.fsh"));
 test("src/js_native.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/js_native.fsh"));
+test("src/jsx.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/jsx.fsh"));
 test("src/keys.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/keys.fsh"));
 test("src/layout.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/layout.fsh"));
 test("src/lexer.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/lexer.fsh"));
@@ -378,6 +385,7 @@ test("src/rebuild.fsh formats keeping its comments, parses back to the same tree
 test("src/regex.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/regex.fsh"));
 test("src/registry.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/registry.fsh"));
 test("src/registry_index.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/registry_index.fsh"));
+test("src/repl.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/repl.fsh"));
 test("src/resolve.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/resolve.fsh"));
 test("src/runtime.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/runtime.fsh"));
 test("src/rust.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/rust.fsh"));

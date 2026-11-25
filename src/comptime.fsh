@@ -1996,11 +1996,11 @@ function tooBig(op: string, a: bigint, b: bigint): boolean {
   return a !== 0n && bits + b > 1n << 30n;
 }
 
-function isRecord(v: Ref<Value>): v is Record {
+export function isRecord(v: Ref<Value>): v is Record {
   return v !== null && typeof v === "object" && v.kind === "record";
 }
 
-function isItems(v: Ref<Value>): v is Items {
+export function isItems(v: Ref<Value>): v is Items {
   return v !== null && typeof v === "object" && v.kind === "array";
 }
 
