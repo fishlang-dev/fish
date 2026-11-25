@@ -56,7 +56,7 @@ async function main(): Promise<void> {
 }
 // case: fs_sync_in_async
 // expect: true fish
-// The blocking calls work inside async functions, as Node lets them.
+// The blocking calls work inside async functions.
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 async function main(): Promise<void> throws IoError {
   writeFileSync("/tmp/fish-sync-in-async.txt", "fish");

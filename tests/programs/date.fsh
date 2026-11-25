@@ -3,7 +3,7 @@
 // expect: 1970-01-01T00:00:00.001Z Thu, 01 Jan 1970 00:00:00 GMT
 // expect: 1969-12-31T23:59:59.999Z Wed, 31 Dec 1969 23:59:59 GMT
 // expect: 1969-12-31T00:00:00.000Z Wed, 31 Dec 1969 00:00:00 GMT
-// The epoch and the moments either side of it, as Bun writes them.
+// The epoch and the moments either side of it.
 function show(ms: i64) {
   const d = new Date(ms);
   console.log(d.toISOString(), d.toUTCString());
@@ -134,7 +134,7 @@ function main() {
 // expect:   1970-01-01T00:00:00.002Z,
 // expect:   1970-01-01T00:00:00.003Z
 // expect: ]
-// A Date prints as its ISO string, alone or inside other values, as Node prints one.
+// A Date prints as its ISO string, alone or inside other values.
 type Deep = { a: { b: { c: { d: Date } } } };
 function main() {
   console.log(new Date(0));
