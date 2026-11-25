@@ -9416,7 +9416,40 @@ async function* __streamPulled<T>(start: ((controller: ReadableStreamDefaultCont
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS;
+// Arena<T>, for a program that names it and declares no Arena of its own.
+const ARENA = String.raw`
+// An arena: a value moved in with alloc stays where it is until the arena drops, when every value
+// is dropped, so alloc lends it back for as long as the arena is borrowed. A chunk is filled to the
+// room reserved for it and never grows, which keeps a value in place while later ones are added.
+// The count is a Cell so an arena, changed through a shared reference, stays on one thread.
+class Arena<T> {
+  private chunks: T[][] = [];
+  private count: Cell<usize> = new Cell<usize>(0);
+  get length(): usize { return this.count.get(); }
+  alloc(this: Cell<this>, value: T): Mut<T> {
+    const full = this.chunks.length === 0 || this.chunks[this.chunks.length - 1].length === this.chunks[this.chunks.length - 1].capacity;
+    if (full) {
+      let chunk: T[] = [];
+      chunk.reserve(this.chunks.length < 9 ? 8 << (this.chunks.length as i64) : 4096);
+      this.chunks.push(chunk);
+    }
+    this.count.set(this.count.get() + 1);
+    this.chunks[this.chunks.length - 1].push(value);
+    return this.chunks[this.chunks.length - 1][this.chunks[this.chunks.length - 1].length - 1];
+  }
+  // Newest first, as a function's variables are dropped. A value holds references only to values
+  // added before it, since none can be stored through the reference alloc gave, so whatever a
+  // value's own disposer reads is still there. Quoted, since the prelude's computed names are
+  // never lowered and this is the name a '[Symbol.dispose]' method is lowered to.
+  "[Symbol.dispose]"(this: Mut<this>) {
+    while (this.chunks.length > 0) {
+      while (this.chunks[this.chunks.length - 1].length > 0) this.chunks[this.chunks.length - 1].pop();
+      this.chunks.pop();
+    }
+  }
+}
+`;
+export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -9434,7 +9467,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS]) {
+  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -9460,6 +9493,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let reading = sections.shift()!;
   let tls = sections.shift()!;
   let streaming = sections.shift()!;
+  let arenas = sections.shift()!;
   renamed(json, { kind: "json" });
   renamed(jsonName, { kind: "json" });
   let astNames: string[] = [];
@@ -9514,6 +9548,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   if (typing) chosen = chosen.concat(typed);
   if (secure) chosen = chosen.concat(tls);
   if (streamed) chosen = chosen.concat(streaming);
+  if (uses(written, arenas, ["Arena"])) chosen = chosen.concat(arenas);
   if (own.size > 0) renamed(chosen, { kind: "own", names: own });
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.

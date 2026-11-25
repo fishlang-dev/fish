@@ -3962,7 +3962,8 @@ class BodyChecker implements Context, GuardHost {
     const enclosing = this.state.enclosing === undefined ? undefined : { ...this.state.enclosing };
     const own = this.f().self === undefined ? undefined : { ...this.f().self! };
     if (this.f().closure !== undefined) this.st.self = enclosing !== undefined ? { ...enclosing, constructor: false, mutable: false, owned: false } : undefined;
-    else this.st.self = own !== undefined ? { ...own, type: viewed ?? own.type } : undefined;
+    // A method that changes its object from within sees it as a mutating method does.
+    else this.st.self = own !== undefined ? { ...own, type: viewed ?? own.type, mutable: own.mutable || own.interior === true } : undefined;
     this.st.owning = this.f().closure !== undefined && (this.f().async === true || this.f().closure!.move === true);
     this.st.owner = this.f().closure !== undefined ? this.closureOwner(this.f()) : this.f().declared ?? (this.f().owner !== undefined && this.f().owner === this.f().self?.type ? this.st.self!.type : this.f().owner);
     this.st.syncMain = this.cx.tables.timerMains.hasId(this.f().id);
