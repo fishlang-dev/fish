@@ -749,6 +749,15 @@ class Response {
     return res;
   }
 
+  // A response whose body is a page's markup, typed 'text/html; charset=utf-8' unless the headers
+  // given say otherwise.
+  static html(page: Ref<Html>, init?: ResponseInit): Response {
+    let res = new Response(null, init);
+    if (!res.headers.has("content-type")) res.headers.set("content-type", "text/html; charset=utf-8");
+    res.#body = new TextEncoder().encode(page.toString());
+    return res;
+  }
+
   // A response streaming server-sent events as EventSource reads them, each string an event's
   // data, typed 'text/event-stream' and uncached unless the headers given say otherwise.
   static sse(events: AsyncGenerator<string | ServerSentEvent>, init?: ResponseInit): Response {
@@ -4120,7 +4129,7 @@ const BYTE_STATICS = ["fromBase64", "fromHex"];
 const URL_NAMES = ["URL", "URLSearchParams"];
 const STREAM_NAMES = ["ReadableStream", "WritableStream", "ReadableStreamDefaultReader", "WritableStreamDefaultWriter", "ReadableStreamDefaultController", "ReadableStreamReadResult", "UnderlyingSource", "UnderlyingSink"];
 // std's names a program may declare its own of, which std's own code then reaches under another.
-const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date", "RangeError"];
+const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date", "RangeError", "Html"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
 export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
@@ -9416,6 +9425,41 @@ async function* __streamPulled<T>(start: ((controller: ReadableStreamDefaultCont
 }
 `;
 
+// Html and what a JSX element is read as, for a program that writes one, names Html, or serves HTTP.
+const HTML_NAMES = ["Html", "__htmlOf", "__htmlFrom", "__htmlChild", "__htmlAttr"];
+const HTML = String.raw`
+// Markup that is escaped already, which is what a JSX element gives. Made from a string it takes
+// the text as markup and escapes nothing, so that is for markup a program trusts.
+class Html {
+  private text: string;
+  constructor(text: string) { this.text = text; }
+  toString(): string { return this.text; }
+}
+function __htmlEscape(s: string): string {
+  return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\"", "&quot;").replaceAll("'", "&#39;");
+}
+function __htmlOf(text: string): Html { return new Html(text); }
+function __htmlFrom(h: Ref<Html>): string { return h.toString(); }
+// What an element's '{...}' holds, as markup: a string escaped, a number written out, an Html or
+// each of an array of them as it is, and nothing for null.
+function __htmlChild(x: Ref<string | i8 | i16 | i32 | i64 | isize | u8 | u16 | u32 | u64 | usize | f32 | f64 | Html | Html[] | null>): string {
+  if (x === null) return "";
+  if (typeof x === "string") return __htmlEscape(x);
+  if (typeof x === "number") return JSON.stringify(x);
+  if (x instanceof Html) return x.toString();
+  let out = "";
+  for (const h of x) out += h.toString();
+  return out;
+}
+// One attribute as it is written in a tag: its name alone for true, nothing for false and null,
+// and otherwise its value escaped between double quotes.
+function __htmlAttr(name: string, value: Ref<string | i8 | i16 | i32 | i64 | isize | u8 | u16 | u32 | u64 | usize | f32 | f64 | boolean | null>): string {
+  if (value === null || value === false) return "";
+  if (value === true) return " " + name;
+  return " " + name + "=\"" + __htmlEscape(typeof value === "string" ? value : JSON.stringify(value)) + "\"";
+}
+`;
+
 // Arena<T>, for a program that names it and declares no Arena of its own.
 const ARENA = String.raw`
 // An arena: a value moved in with alloc stays where it is until the arena drops, when every value
@@ -9449,7 +9493,7 @@ class Arena<T> {
   }
 }
 `;
-export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA;
+export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -9467,7 +9511,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA]) {
+  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -9494,6 +9538,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let tls = sections.shift()!;
   let streaming = sections.shift()!;
   let arenas = sections.shift()!;
+  let htmls = sections.shift()!;
   renamed(json, { kind: "json" });
   renamed(jsonName, { kind: "json" });
   let astNames: string[] = [];
@@ -9549,6 +9594,8 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   if (secure) chosen = chosen.concat(tls);
   if (streamed) chosen = chosen.concat(streaming);
   if (uses(written, arenas, ["Arena"])) chosen = chosen.concat(arenas);
+  // Response.html takes an Html, so every program that serves HTTP has it.
+  if (httpUsed || uses(written, htmls, HTML_NAMES)) chosen = chosen.concat(htmls);
   if (own.size > 0) renamed(chosen, { kind: "own", names: own });
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.
