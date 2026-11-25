@@ -250,22 +250,30 @@ test("discovery takes .ts, .tsx and .mts, and skips dependencies, hidden directo
   done(dir);
 });
 
+test("JSX is read, and counted as a rewrite to guide", () => {
+  const dir = project([["view.tsx", "const name = 'a';\nconst v = <div class=\"x\">{name}</div>;\nconst w = <p/>;\n"]]);
+  const r = survey(dir);
+  same(`${r.lines} ${r.unread.files}`, "3 0", "lines read and files unread");
+  const jsx = r.rules[rule(r, "jsx", false)]!.count;
+  assert(jsx === 2, `jsx counts ${jsx}`);
+  done(dir);
+});
+
 test("a file that can't be read adds its own blocker, not its lines", () => {
-  const dir = project([["ok.ts", "delete o.k;\n"], ["bad.ts", "let x!: number;\nconst = ;\n"], ["view.tsx", "const v = <div/>;\n"]]);
+  const dir = project([["ok.ts", "delete o.k;\n"], ["bad.ts", "let x!: number;\nconst = ;\n"], ["view.tsx", "const v = <div>;\n"]]);
   const r = survey(dir);
   assert(r.lines === 1, `${r.lines} lines`);
   same(`${r.unread.files} ${r.unread.lines}`, "2 3", "unread files and lines");
   const parse: Ref<RuleCount> = r.waiting[rule(r, "parse", true)]!;
   const note = parse.examples.length > 0 ? parse.examples[0]!.note ?? "" : "";
   assert(note.includes("expected"), `the note: ${note}`);
-  const jsx = r.waiting[rule(r, "jsx", true)]!.count;
-  assert(jsx === 1, `jsx counts ${jsx}`);
+  assert(parse.count === 2, `parse counts ${parse.count}`);
   // Graded per 1000 lines at least; with most lines unread, no grade at all.
   assert(r.score === 13, `score ${r.score}`);
   assert(r.grade === null, `grade ${r.grade ?? "none"}`);
   assert(formatReport(r).includes("no grade: only 25% of the lines could be read"), formatReport(r));
   done(dir);
-  const second = project([["a.tsx", "delete globalThis.x;\nconst v = <div/>;\n"]]);
+  const second = project([["a.tsx", "delete globalThis.x;\nconst v = <div>;\n"]]);
   assert(survey(second).grade === null, "a.tsx is graded");
   done(second);
   const third = project([["a.tsx", "let x!: number;\n"]]);
