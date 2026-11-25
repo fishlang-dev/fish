@@ -232,8 +232,11 @@ function element(c: Mut<Cursor>, parts: Mut<Expr[]>): Expr | undefined {
 export function jsx(c: Mut<Cursor>): Expr {
   const start: usize = c.peek().start;
   let parts: Expr[] = [];
-  // A component alone is its own call, which gives an Html already.
   const made = element(c, parts);
+  // A comment inside an element is part of its text as written, which is how the formatter prints
+  // it, so it isn't kept to be placed a second time. Nothing past the element is scanned yet.
+  while (c.lex.comments.length > 0 && c.lex.comments[c.lex.comments.length - 1].start >= start) c.lex.comments.pop();
+  // A component alone is its own call, which gives an Html already.
   if (made !== undefined) return made;
   const end: usize = c.end();
   const text = joined(c, parts, start, end);

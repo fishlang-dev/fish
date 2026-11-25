@@ -391,12 +391,12 @@ function selfSteps(r: Ref<Ranking>): string[] {
 }
 
 test("unread files are left out of the steps but not the shares, and the self curve stands alone", () => {
-  const repo = project([["a.ts", big()], ["bad.ts", "const = ;\n"], ["v.tsx", "const v = <div/>;\nconst w = 1;\n"]]);
+  const repo = project([["a.ts", big()], ["bad.ts", "const = ;\n"], ["v.tsx", "const v = <div>;\nconst w = 1;\n"]]);
   const self = project([["s.ts", "for (const k in o) {}\n"]]);
   const r = ranked([repo], self);
   same(`${r.repos[0]!.unread.files} ${r.repos[0]!.unread.lines}`, "2 3", "unread");
   list(r.curve.steps.map((s) => `${s.feature} ${s.portable.share}`), ["The rest of console 76.9"], "the steps");
-  list(r.curve.unread.map((u) => `${u.feature} ${u.files} ${u.lines}`), ["JSX for server-side HTML 1 2", "parser gaps 1 1"], "unread");
+  list(r.curve.unread.map((u) => `${u.feature} ${u.files} ${u.lines}`), ["parser gaps 2 3"], "unread");
   assert(formatRanking(r).includes("also waiting, in files Fish couldn't read"), formatRanking(r));
   list(selfSteps(r), ["for...in 100"], "the self steps");
   done(repo);
