@@ -11,7 +11,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   selfhost:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'release/v')
+    # A fork's pull request never runs here: a fork can name a branch release/v*, and its code would
+    # run on whatever machine a runner is.
+    if: github.event_name == 'workflow_dispatch' || (startsWith(github.head_ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository)
     strategy:
       fail-fast: false
       matrix:
@@ -23,13 +25,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # The unit tests still run Bun as a peer: the language server's driver and npm bundling.
-      # Pinned to the Bun std's behaviour is checked against, since a later one prints otherwise.
+      # The unit tests still run Bun as a peer, for the language server's driver and npm bundling,
+      # and ask Node what std's fs, path, util and console calls should give. Each is pinned to the
+      # version std's behaviour is checked against, since another prints otherwise.
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.10.0
+      # A runner of the project's own has these installed already, and no sudo to install them with.
       - name: Libraries fishc links, and what the tests build and run
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev zlib1g-dev libsqlite3-dev zip unzip
       - uses: actions/cache@v4
         with:
