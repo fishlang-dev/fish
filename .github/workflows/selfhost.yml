@@ -24,15 +24,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # The unit tests still run Bun as a peer, for the language server's driver and npm bundling,
-      # and ask Node what std's fs, path, util and console calls should give. Each is pinned to the
-      # version std's behaviour is checked against, since another prints otherwise.
+      # The unit tests still run Bun for npm bundling and as the fake Postgres server. Pinned to the
+      # version scripts/references.fsh records Bun's answers from.
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.3
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24.10.0
       - name: Libraries fishc links, and what the tests build and run
         if: runner.os == 'Linux'
         # The last is the sanitizer runtimes of the image's clang, named by its version, which the
