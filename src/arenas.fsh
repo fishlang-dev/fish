@@ -95,6 +95,11 @@ export class Arenas {
     return this.instances[id - 1]!;
   }
 
+  // An instance's record replaced whole, as when it takes another instance's check.
+  putInstance(this: Mut<this>, record: Instance): void {
+    this.instances[record.id - 1] = record;
+  }
+
   localMut(this: Mut<this>, id: LocalId): Mut<Local> {
     return this.locals[id - 1]!;
   }
