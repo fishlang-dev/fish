@@ -342,7 +342,7 @@ const PAIR = "{ ptr, ptr }";
 // `prior` is what the last build's codegen made, and `rechecked` the instances checked again since,
 // which `fishc watch` gives so a function nothing changed takes its last define; `keep` asks for
 // what this build made, for the next.
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; profile?: boolean; debug?: boolean; failed?: string[]; prior?: Emitted; rechecked?: Set<InstanceId>; keep?: boolean };
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; fuzz?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; profile?: boolean; debug?: boolean; failed?: string[]; prior?: Emitted; rechecked?: Set<InstanceId>; keep?: boolean };
 
 // The owner a generated symbol is made for, when that is a type.
 const typeOwner = (t: Type): string => `type ${idOf(t)}`;
@@ -377,6 +377,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // Why a function's last define wasn't taken, with how many times each.
   refusals: Map<string, usize>;
   harness: boolean;
+  fuzz: boolean;
   leaks: boolean;
   profile: boolean;
   // Whether the check is kept for the next build, as `fishc watch` keeps it.
@@ -495,6 +496,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.newlines = new Map<string, usize[]>();
     this.refusals = new Map<string, usize>();
     this.harness = options.harness ?? false;
+    this.fuzz = options.fuzz ?? false;
     this.leaks = options.leaks ?? false;
     this.profile = options.profile ?? false;
     this.keepsCheck = options.keep === true;
@@ -831,7 +833,7 @@ class Codegen implements PrintHost, ComptimeHost {
       // hides std's internals; nor do the arrows the checker wraps around a callback.
       const from = sourceOf(this.src, this.file, this.bodyAt(instance).start, this.sources).file;
       const ours = this.bodyAt(instance).start < STD_BASE && !BUILT_IN.test(from) && !(this.harness && from === this.file) && this.bodyAt(instance).closure?.made !== true;
-      this.framingOn = (!this.release || this.leaks || this.profile) && !this.library && ours;
+      this.framingOn = (!this.release || this.leaks || this.profile || this.fuzz) && (!this.library || this.fuzz) && ours;
       this.site = undefined;
       this.debuggingOn = this.debug && this.bodyAt(instance).start < STD_BASE && !BUILT_IN.test(from);
       this.marked = undefined;
@@ -1066,7 +1068,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // has the same place among them whatever the program around it.
   // The runtime reads which way a panic goes. A library leaves it to the runtime's default, so
   // two libraries in one program don't both define it; its exports abort on a panic anyway.
-  const abort: string[] = this.library ? [] : [`@fsh_panic_abort = constant i32 ${this.panic === "abort" ? 1 : 0}`];
+  const abort: string[] = this.library && !this.fuzz ? [] : [`@fsh_panic_abort = constant i32 ${this.panic === "abort" || this.fuzz ? 1 : 0}`];
   const module = [
     ...this.globals.toSorted(),
     ...abort,

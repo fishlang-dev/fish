@@ -5,6 +5,7 @@ import { CompileError, copyNames, named, type Names, type Source } from "./diag.
 import { expandMacros } from "./macros.fsh";
 import { flatten, load, type Loaded } from "./modules.fsh";
 import type { Stmt } from "./parser.fsh";
+import { liftFuzz, stripFuzz } from "./fuzz.fsh";
 import { liftTests, stripTests } from "./tests.fsh";
 
 // Checks the program whose entry is `file`, with text `src`, without building it, its package's
@@ -20,6 +21,7 @@ export function analyze(session: Session, src: string, file: string, read?: (pat
     let own: string[] = [];
     for (const m of loaded.modules) if (m.pkg === first && !m.path.startsWith("std:")) own.push(m.path);
     liftTests(compilation, loaded.modules, own);
+    liftFuzz(compilation, loaded.modules, own);
     program = expanded(compilation, loaded, false);
   } catch (e) {
     if (e instanceof CompileError) throw sourced(e, copyNames(compilation.names), loaded.sources);
@@ -39,6 +41,7 @@ export function analyze(session: Session, src: string, file: string, read?: (pat
 export function expanded(compilation: Mut<Compilation>, loaded: Mut<Loaded>, library: boolean): Stmt[] {
   let started = stageStart(compilation.session);
   stripTests(loaded);
+  stripFuzz(loaded);
   expandMacros(compilation, loaded, library, (round, macros) => check(round, macros, false, true));
   stageEnd(compilation.session, "macros", started);
   started = stageStart(compilation.session);
