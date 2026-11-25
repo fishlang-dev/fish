@@ -501,6 +501,11 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
     }
   }
   const named = performance.now() - naming;
+  // The selectors that stand in for GlobalISel drop a branch on a constant and keep the block it
+  // never takes, and clang 18 passes over that block's return as it writes the unwind table, so
+  // the code after it unwinds as if its frame were gone. A synchronous table says nothing at a
+  // return, and a panic unwinds only from calls.
+  if (withoutGlobalIsel(release, target)) ir = ir.replace(/^(define [^\n]*) uwtable( personality [^\n]* \{| \{)$/gm, "$1 uwtable(sync)$2");
   const halves = split(ir, std, own, byFile, UNIT_LENGTH);
   const args = [...target.compile, "-x", "ir", "-", ...optimization(release, target), "-funwind-tables"];
   let cached: Unit[] = [{ name: "std", args: [...args], stdin: halves.std, inputs: [] }];
@@ -1108,10 +1113,15 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
 function optimization(release: boolean, target: Ref<Target>): string[] {
   if (release) return ["-O2"];
   if (target.sanitize !== undefined) return ["-O1"];
-  // Unoptimized AArch64 code off macOS is selected by GlobalISel, which in clang 18 crashes on a
-  // load of an empty aggregate, as a field of a literal type is; those builds go without it.
-  const arm64Linux = target.triple === "" ? process.platform === "linux" && process.arch === "arm64" : target.triple.startsWith("aarch64-unknown-linux");
-  return arm64Linux ? ["-O0", "-fno-global-isel"] : ["-O0"];
+  return withoutGlobalIsel(release, target) ? ["-O0", "-fno-global-isel"] : ["-O0"];
+}
+
+// Whether a build is unoptimized ARM64 code for Linux. Clang selects that with GlobalISel, which
+// in clang 18 crashes on a load of an empty aggregate, as a field of a literal type is, so those
+// builds go without it.
+function withoutGlobalIsel(release: boolean, target: Ref<Target>): boolean {
+  if (release || target.sanitize !== undefined) return false;
+  return target.triple === "" ? process.platform === "linux" && process.arch === "arm64" : target.triple.startsWith("aarch64-unknown-linux");
 }
 
 // Clang's command line for a program, its IR read from stdin unless `program` names it compiled
