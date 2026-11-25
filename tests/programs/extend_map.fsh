@@ -144,7 +144,7 @@ function main() {
 // expect:   deep: { deeper: { p: [P [Map]], q: Q(0) [Set] {}, r: R(0) [Map] {} } }
 // expect: }
 // expect: S(1) [Map] { 'z' => 9, n: 3, m: 'x' }
-// A class extending Map or Set prints as Node prints one: its name, the collection's size and
+// A class extending Map or Set prints its name, the collection's size and
 // entries, then its own fields.
 class P extends Map<string, i64> {
   n: i64

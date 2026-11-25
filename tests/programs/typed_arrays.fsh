@@ -7,7 +7,7 @@
 // expect: { a: { b: Int32Array(0) [] } } { a: { b: { c: Int32Array(0) [] } } }
 // expect: Uint8Array(2) [ 4, 5 ] Uint8Array(2) [ 4, 5 ]
 // expect: Int8Array(1) [ -1 ] Uint16Array(1) [ 65535 ] Int16Array(1) [ -2 ] Uint32Array(1) [ 4294967295 ]
-// A typed array holds its sized element, prints under its name as Node prints it, and fits the
+// A typed array holds its sized element, prints under its name, and fits the
 // plain array of its element both ways.
 function total(a: Uint8Array): u8 {
   return a[0] + a[1];
@@ -60,7 +60,7 @@ function main() {
 // expect: }
 // expect: [ ArrayBuffer { [Uint8Contents]: <01 02 ff>, byteLength: 3 } ] { x: { y: { z: [ArrayBuffer] } } }
 // expect: ArrayBuffer { [Uint8Contents]: <>, byteLength: 0 }
-// An ArrayBuffer prints its first 100 bytes in hex, as Node prints one.
+// An ArrayBuffer prints its first 100 bytes in hex.
 function main() {
   const b: ArrayBuffer = [0, 0, 0];
   const c: ArrayBuffer = [1, 2, 255];

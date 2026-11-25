@@ -1,5 +1,5 @@
 // Base64 and hex: TC39's toBase64, toHex, u8.fromBase64 and u8.fromHex on bytes, and the HTML
-// spec's btoa and atob, checked against RFC 4648's test vectors and Bun's own results.
+// spec's btoa and atob, checked against RFC 4648's test vectors.
 // case: base64_encode
 // expect: [] []
 // expect: [Zg==] [66]
