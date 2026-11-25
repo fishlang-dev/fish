@@ -22,6 +22,7 @@ export const NATIVE = String.raw`
 #endif
 #include <math.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -4376,6 +4377,16 @@ struct fsh_task {
   // In a debug build, the call that spawned it, which its backtraces end with: for a task std
   // spawned with none of the program's frames below, the call that spawned the task doing so.
   const char *spawned;
+  // Task inspector metadata: immutable fields set before linking onto fsh_alive; polls and
+  // awaiting* updated atomically on the worker polling this task.
+  int64_t id;
+  const char *name;
+  const char *spawn_site;
+  int64_t created_ns;
+  int64_t polls;
+  const char *awaiting;
+  const char *await_site;
+  int64_t await_target;
   // The task group it was spawned into, which it holds a count on, and the glue that moves the
   // error it threw out of its output into the group, as the type the group's await throws.
   struct fsh_group *group;
@@ -4386,7 +4397,19 @@ struct fsh_task {
   char memory[];
 };
 
+static int64_t fsh_now(void);
+static int64_t fsh_next_task_id = 0;
+
 static void *fsh_output(fsh_task *t) { return t->memory + t->frame_size; }
+
+// Records what a task is about to park on, with the active user await site when frames are on.
+static void fsh_task_wait(fsh_task *t, const char *what, int64_t target) {
+  if (!t) return;
+  const char *site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
+  __atomic_store_n(&t->await_site, site, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->await_target, target, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->awaiting, what, __ATOMIC_RELEASE);
+}
 
 // A worker's queue: a ring of tasks, guarded by its own lock, which other workers steal from.
 typedef struct {
@@ -4507,6 +4530,10 @@ static void fsh_unlink(fsh_task *t) {
 // where it stopped and its reason kept for whoever awaits it, as tokio's tasks do.
 static void fsh_run(fsh_task *t) {
   __atomic_store_n(&t->state, FSH_RUNNING, __ATOMIC_RELEASE);
+  __atomic_fetch_add(&t->polls, 1, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->await_site, NULL, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->await_target, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->awaiting, NULL, __ATOMIC_RELEASE);
   // A task's stack starts at its own root, whoever polls it, and a panic it unwound with leaves
   // its frames behind for this reset to drop.
   fsh_frame *frames = fsh_rt_frames;
@@ -4590,7 +4617,7 @@ static void *fsh_work(void *arg) {
 
 // A new task for a future's frame, which it takes over: alive, and with one more reference for
 // whoever made it. Not yet queued.
-static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
+static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site, int32_t blocking) {
   fsh_task *t = fsh_rt_alloc(sizeof(fsh_task) + frame_size + output_size);
   memcpy(t->memory, frame, frame_size);
   t->frame_size = frame_size;
@@ -4599,7 +4626,7 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   t->drop = drop;
   t->drop_output = drop_output;
   t->outcome = 0;
-  t->blocking = 0;
+  t->blocking = blocking;
   t->refs = 2;
   t->joiner = NULL;
   t->panic = NULL;
@@ -4607,6 +4634,14 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   t->fail = NULL;
   t->state = FSH_QUEUED;
   t->spawned = fsh_rt_frames ? fsh_rt_frames->site : fsh_spawned_at;
+  t->id = __atomic_add_fetch(&fsh_next_task_id, 1, __ATOMIC_RELAXED);
+  t->name = name ? name : "";
+  t->spawn_site = site ? site : t->spawned;
+  t->created_ns = fsh_now();
+  t->polls = 0;
+  t->awaiting = NULL;
+  t->await_site = NULL;
+  t->await_target = 0;
   if (fsh_timeouts_starting) memset(t->trace, 0, sizeof t->trace);
   else memcpy(t->trace, fsh_current ? fsh_current->trace : fsh_trace_root, sizeof t->trace);
   fsh_timeouts_starting = 0;
@@ -4620,17 +4655,16 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
 }
 
 // The same, queued.
-fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 0);
   fsh_schedule(t);
   return t;
 }
 
 // The same, every poll run on the blocking pool, so it may block or compute for long without
 // holding up a worker.
-fsh_task *fsh_rt_spawn_blocking(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
-  t->blocking = 1;
+fsh_task *fsh_rt_spawn_blocking(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 1);
   __atomic_add_fetch(&fsh_blocking_live, 1, __ATOMIC_RELAXED);
   fsh_schedule(t);
   return t;
@@ -4638,8 +4672,8 @@ fsh_task *fsh_rt_spawn_blocking(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn 
 
 // The same, its first poll run here and now, as a JS callback's first part runs where it is
 // called; the task is queued only if that poll waits.
-fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 0);
   fsh_run(t);
   return t;
 }
@@ -4694,7 +4728,9 @@ int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out, const char *at, fs
     __atomic_fetch_add(&waiter->refs, 1, __ATOMIC_RELAXED);
     t->joiner = waiter;
   }
+  int64_t target_id = t->id;
   pthread_mutex_unlock(&fsh_alive_lock);
+  fsh_task_wait(waiter, "join", target_id);
   return 0;
 }
 
@@ -4968,6 +5004,7 @@ int32_t fsh_rt_timeout_next(fsh_task *task, void **out) {
     __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
     fsh_timer_add(arm, task, NULL, &fsh_timeouts);
   }
+  if (result == 0) fsh_task_wait(task, "timer_loop", 0);
   return result;
 }
 
@@ -4992,14 +5029,20 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
     *state = 1;
     __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
     fsh_timer_add(*deadline, task, NULL, frame);
+    fsh_task_wait(task, "sleep", 0);
     return 0;
   }
-  if (*state != 0) return fsh_now() >= *deadline;
+  if (*state != 0) {
+    if (fsh_now() >= *deadline) return 1;
+    fsh_task_wait(task, "sleep", 0);
+    return 0;
+  }
   *state = 1;
   int64_t ms = *deadline > 0 ? *deadline : 0, now = fsh_now();
   *deadline = ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000;
   __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
   fsh_timer_add(*deadline, task, NULL, frame);
+  fsh_task_wait(task, "sleep", 0);
   return 0;
 }
 
@@ -5323,7 +5366,10 @@ int32_t fsh_rt_semaphore_acquire(fsh_semaphore *s, fsh_task *task, fsh_permit **
   else fsh_wait_on(&s->waiting, task, tag);
   pthread_mutex_unlock(&s->lock);
   if (mine) fsh_task_release(mine);
-  if (!taken) return 0;
+  if (!taken) {
+    fsh_task_wait(task, "semaphore", 0);
+    return 0;
+  }
   fsh_rt_block_retain(&s->count);
   fsh_permit *p = fsh_rt_alloc(sizeof(fsh_permit));
   p->count = 1;
@@ -5404,6 +5450,7 @@ int32_t fsh_rt_channel_send(fsh_channel *c, void *value, fsh_task *task, void *t
   if (c->length == c->capacity) {
     fsh_wait_on(&c->senders, task, tag);
     pthread_mutex_unlock(&c->lock);
+    fsh_task_wait(task, "channel.send", 0);
     return 0;
   }
   memcpy(c->ring + (c->head + c->length) % c->capacity * c->size, value, c->size);
@@ -5427,6 +5474,7 @@ int32_t fsh_rt_channel_receive(fsh_channel *c, void *out, fsh_task *task, void *
     if (closed) memset(out, 0, c->size);
     else fsh_wait_on(&c->receivers, task, tag);
     pthread_mutex_unlock(&c->lock);
+    if (!closed) fsh_task_wait(task, "channel.receive", 0);
     return closed ? 2 : 0;
   }
   memcpy(out, c->ring + c->head * c->size, c->size);
@@ -5725,8 +5773,8 @@ void fsh_rt_group_drop(fsh_group *g) {
 
 // Starts a future as a task of the group, which waits for it and gives no handle to it: the
 // runtime's reference is the task's only one, and the task holds a count on the group.
-void fsh_rt_group_spawn(fsh_group *g, fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void (*fail)(void *, void *), void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+void fsh_rt_group_spawn(fsh_group *g, fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void (*fail)(void *, void *), void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 0);
   t->refs = 1;
   __atomic_fetch_add(&g->count, 1, __ATOMIC_RELAXED);
   t->group = g;
@@ -5804,6 +5852,7 @@ int32_t fsh_rt_group_wait(fsh_group *g, fsh_task *waiter, void *out, const char 
     fsh_panic_reason(reason, n < (int)sizeof reason ? (size_t)n : sizeof reason - 1);
     fsh_rt_panic("\ncatch what can fail inside the group's tasks, or 'spawn' one and await 'handle.join()' to catch its panic\n");
   }
+  if (result == 0 && !running) fsh_task_wait(waiter, "task_group", 0);
   return result;
 }
 
@@ -7862,9 +7911,13 @@ int32_t fsh_rt_file_poll(fsh_str *path, fsh_array *bytes, fsh_file_job **job_at,
     job->task = task;
     *job_at = job;
     fsh_pool_submit(job);
+    fsh_task_wait(task, op == 0 ? "file.read" : "file.write", 0);
     return 0;
   }
-  if (!fsh_job_done(job, task)) return 0;
+  if (!fsh_job_done(job, task)) {
+    fsh_task_wait(task, op == 0 ? "file.read" : "file.write", 0);
+    return 0;
+  }
   if (job->error) return fsh_fs_failed(error, job->error, job->syscall, strcmp(job->syscall, "open") == 0 ? job->path : NULL);
   if (op == 0) {
     *out = job->data;
@@ -7941,6 +7994,7 @@ int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out
   }
   if (errno == EAGAIN || errno == EWOULDBLOCK) {
     fsh_io_wait(listener->fd, 0, task);
+    fsh_task_wait(task, "tcp.accept", 0);
     return 0;
   }
   return fsh_io_failed(message, "can't accept a connection", "accept");
@@ -7972,7 +8026,11 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
     snprintf(text, sizeof text, "'read' needs room for at least 1 byte, not %lld", (long long)max);
     return fsh_io_parts(message, text, "EINVAL", "read", NULL);
   }
-  if (s->tls) return s->tls_ops->read(s, max, task, out, message);
+  if (s->tls) {
+    int32_t r = s->tls_ops->read(s, max, task, out, message);
+    if (r == 0) fsh_task_wait(task, "tcp.read", 0);
+    return r;
+  }
   // Received onto the stack, so the array holds just what came, however much room was asked for.
   char buffer[65536];
   ssize_t n = recv(s->fd, buffer, (size_t)(max < (int64_t)sizeof buffer ? max : (int64_t)sizeof buffer), 0);
@@ -7988,6 +8046,7 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
   }
   if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
     fsh_io_wait(s->fd, 0, task);
+    fsh_task_wait(task, "tcp.read", 0);
     return 0;
   }
   return fsh_io_failed(message, "can't read", "read");
@@ -7995,7 +8054,11 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
 
 // Polls 'write(bytes)': sends what is left past *written, waiting while the socket is full.
 int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_task *task, fsh_str **message) {
-  if (s->tls) return s->tls_ops->write(s, bytes, written, task, message);
+  if (s->tls) {
+    int32_t r = s->tls_ops->write(s, bytes, written, task, message);
+    if (r == 0) fsh_task_wait(task, "tcp.write", 0);
+    return r;
+  }
   while (*written < bytes->length) {
 #ifdef MSG_NOSIGNAL
     ssize_t n = send(s->fd, bytes->data + *written, (size_t)(bytes->length - *written), MSG_NOSIGNAL);
@@ -8009,6 +8072,7 @@ int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_
     if (errno == EINTR) continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       fsh_io_wait(s->fd, 1, task);
+      fsh_task_wait(task, "tcp.write", 0);
       return 0;
     }
     return fsh_io_failed(message, "can't write", "write");
@@ -8090,11 +8154,15 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
       s->fd = -1;
       s->lookup = job;
       fsh_pool_submit(job);
+      fsh_task_wait(task, "dns", 0);
       return 0;
     }
   } else if (s->fd < 0) {
     fsh_file_job *job = s->lookup;
-    if (!fsh_job_done(job, task)) return 0;
+    if (!fsh_job_done(job, task)) {
+      fsh_task_wait(task, "dns", 0);
+      return 0;
+    }
     if (job->error) {
       // Node's codes: a name with no address is ENOTFOUND, a resolver that couldn't answer EAI_AGAIN.
       const char *code = job->error == EAI_AGAIN ? "EAI_AGAIN" : "ENOTFOUND";
@@ -8119,6 +8187,7 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
       if (getpeername(s->fd, (struct sockaddr *)&peer, &peer_size) == 0) break;
       if (errno == ENOTCONN && (!s->deadline || fsh_now() < s->deadline)) {
         fsh_io_wait(s->fd, 1, task);
+        fsh_task_wait(task, "tcp.connect", 0);
         return 0;
       }
       // Past its deadline the attempt gives way to the next address. A refusal that lands after
@@ -8207,6 +8276,7 @@ int32_t fsh_rt_unix_connect(fsh_socket **socket_at, fsh_str *path, fsh_task *tas
       if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0) {
         if (errno == EINPROGRESS || errno == EINTR) {
           fsh_io_wait(fd, 1, task);
+          fsh_task_wait(task, "unix.connect", 0);
           fsh_rt_free(text);
           return 0;
         }
@@ -8297,6 +8367,7 @@ int32_t fsh_rt_udp_send(fsh_socket *s, fsh_array *bytes, fsh_str *host, int64_t 
     if (errno == EINTR) continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       fsh_io_wait(s->fd, 1, task);
+      fsh_task_wait(task, "udp.send", 0);
       return 0;
     }
     return fsh_io_failed(message, "can't send", "send");
@@ -8328,6 +8399,7 @@ int32_t fsh_rt_udp_receive(fsh_socket *s, fsh_task *task, fsh_array *out, fsh_st
     if (errno == EINTR) continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       fsh_io_wait(s->fd, 0, task);
+      fsh_task_wait(task, "udp.receive", 0);
       return 0;
     }
     return fsh_io_failed(message, "can't receive", "recvfrom");
@@ -8344,16 +8416,216 @@ void fsh_rt_handle_drop(fsh_task *t) {
   if (t) fsh_task_release(t);
 }
 
+// Task inspector: thread-safe live snapshots of active tasks formatted as JSON, plain text, or
+// HTML. Every internal buffer uses malloc/free so inspecting never triggers runtime leak counts.
+typedef struct {
+  int64_t id;
+  const char *name;
+  int32_t state;
+  int32_t blocking;
+  const char *awaiting;
+  const char *await_site;
+  int64_t await_target;
+  int64_t age_ms;
+  const char *spawn_site;
+  int64_t polls;
+} fsh_task_snap;
+
+typedef struct { char *data; size_t len, cap; } fsh_buf;
+
+static void fsh_buf_grow(fsh_buf *b, size_t need) {
+  if (b->len + need + 1 <= b->cap) return;
+  size_t cap = b->cap ? b->cap : 256;
+  while (cap < b->len + need + 1) cap *= 2;
+  char *next = realloc(b->data, cap);
+  if (!next) return;
+  b->data = next;
+  b->cap = cap;
+}
+
+static void fsh_buf_putn(fsh_buf *b, const char *s, size_t n) {
+  fsh_buf_grow(b, n);
+  if (!b->data || b->len + n + 1 > b->cap) return;
+  memcpy(b->data + b->len, s, n);
+  b->len += n;
+  b->data[b->len] = 0;
+}
+
+static void fsh_buf_puts(fsh_buf *b, const char *s) {
+  if (s) fsh_buf_putn(b, s, strlen(s));
+}
+
+static void fsh_buf_printf(fsh_buf *b, const char *fmt, ...) {
+  char tmp[256];
+  va_list ap, ap2;
+  va_start(ap, fmt);
+  va_copy(ap2, ap);
+  int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+  va_end(ap);
+  if (n >= 0 && (size_t)n < sizeof tmp) {
+    fsh_buf_putn(b, tmp, (size_t)n);
+  } else if (n > 0) {
+    char *big = malloc((size_t)n + 1);
+    if (big) {
+      vsnprintf(big, (size_t)n + 1, fmt, ap2);
+      fsh_buf_putn(b, big, (size_t)n);
+      free(big);
+    }
+  }
+  va_end(ap2);
+}
+
+static void fsh_buf_json(fsh_buf *b, const char *s) {
+  fsh_buf_putn(b, "\"", 1);
+  if (s) {
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+      if (*p == '"') fsh_buf_putn(b, "\\\"", 2);
+      else if (*p == '\\') fsh_buf_putn(b, "\\\\", 2);
+      else if (*p == '\n') fsh_buf_putn(b, "\\n", 2);
+      else if (*p == '\r') fsh_buf_putn(b, "\\r", 2);
+      else if (*p == '\t') fsh_buf_putn(b, "\\t", 2);
+      else if (*p < 0x20) fsh_buf_printf(b, "\\u%04x", (unsigned)*p);
+      else fsh_buf_putn(b, (const char *)p, 1);
+    }
+  }
+  fsh_buf_putn(b, "\"", 1);
+}
+
+static void fsh_buf_html(fsh_buf *b, const char *s) {
+  if (!s) return;
+  for (const char *p = s; *p; p++) {
+    if (*p == '&') fsh_buf_puts(b, "&amp;");
+    else if (*p == '<') fsh_buf_puts(b, "&lt;");
+    else if (*p == '>') fsh_buf_puts(b, "&gt;");
+    else if (*p == '"') fsh_buf_puts(b, "&quot;");
+    else fsh_buf_putn(b, p, 1);
+  }
+}
+
+static int fsh_snap_cmp(const void *a, const void *b) {
+  int64_t x = ((const fsh_task_snap *)a)->id;
+  int64_t y = ((const fsh_task_snap *)b)->id;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static const char *fsh_state_label(int32_t state) {
+  switch (state) {
+    case FSH_RUNNING: return "running";
+    case FSH_QUEUED:
+    case FSH_NOTIFIED: return "runnable";
+    case FSH_IDLE: return "waiting";
+    default: return "done";
+  }
+}
+
+static void fsh_await_label(char *out, size_t size, const fsh_task_snap *s) {
+  if (!s->awaiting || !s->awaiting[0]) {
+    out[0] = 0;
+    return;
+  }
+  if (s->await_target > 0) snprintf(out, size, "%s #%lld", s->awaiting, (long long)s->await_target);
+  else snprintf(out, size, "%s", s->awaiting);
+}
+
+// Copies every alive task's metadata under fsh_alive_lock, then sorts by task id.
+static fsh_task_snap *fsh_tasks_snapshot(int64_t *count_out) {
+  pthread_mutex_lock(&fsh_alive_lock);
+  int64_t n = 0;
+  for (fsh_task *t = fsh_alive; t; t = t->next) n++;
+  fsh_task_snap *snaps = n > 0 ? malloc((size_t)n * sizeof(fsh_task_snap)) : NULL;
+  int64_t now = fsh_now();
+  int64_t i = 0;
+  if (snaps) {
+    for (fsh_task *t = fsh_alive; t && i < n; t = t->next, i++) {
+      const char *awaiting = __atomic_load_n(&t->awaiting, __ATOMIC_ACQUIRE);
+      int64_t target = __atomic_load_n(&t->await_target, __ATOMIC_RELAXED);
+      const char *await_site = __atomic_load_n(&t->await_site, __ATOMIC_RELAXED);
+      int64_t age = now >= t->created_ns ? (now - t->created_ns) / 1000000 : 0;
+      snaps[i] = (fsh_task_snap){
+        t->id,
+        t->name ? t->name : "",
+        __atomic_load_n(&t->state, __ATOMIC_ACQUIRE),
+        t->blocking,
+        awaiting,
+        await_site,
+        target,
+        age,
+        t->spawn_site,
+        __atomic_load_n(&t->polls, __ATOMIC_RELAXED),
+      };
+    }
+  }
+  pthread_mutex_unlock(&fsh_alive_lock);
+  if (snaps && i > 1) qsort(snaps, (size_t)i, sizeof(fsh_task_snap), fsh_snap_cmp);
+  *count_out = i;
+  return snaps;
+}
+
+char *fsh_rt_tasks_json(void) {
+  int64_t n = 0;
+  fsh_task_snap *snaps = fsh_tasks_snapshot(&n);
+  fsh_buf b = { NULL, 0, 0 };
+  fsh_buf_puts(&b, "[");
+  for (int64_t i = 0; i < n; i++) {
+    if (i > 0) fsh_buf_puts(&b, ",");
+    char await_text[96];
+    fsh_await_label(await_text, sizeof await_text, &snaps[i]);
+    fsh_buf_printf(&b, "{\"id\":%lld,\"name\":", (long long)snaps[i].id);
+    fsh_buf_json(&b, snaps[i].name);
+    fsh_buf_puts(&b, ",\"state\":");
+    fsh_buf_json(&b, fsh_state_label(snaps[i].state));
+    fsh_buf_puts(&b, ",\"awaiting\":");
+    fsh_buf_json(&b, await_text);
+    fsh_buf_puts(&b, ",\"awaitSite\":");
+    fsh_buf_json(&b, snaps[i].await_site ? snaps[i].await_site : "");
+    fsh_buf_printf(&b, ",\"ageMs\":%lld,\"spawnSite\":", (long long)snaps[i].age_ms);
+    fsh_buf_json(&b, snaps[i].spawn_site ? snaps[i].spawn_site : "");
+    fsh_buf_printf(&b, ",\"blocking\":%s,\"polls\":%lld}", snaps[i].blocking ? "true" : "false", (long long)snaps[i].polls);
+  }
+  fsh_buf_puts(&b, "]");
+  free(snaps);
+  return b.data;
+}
+
+char *fsh_rt_tasks_table(void) {
+  int64_t n = 0;
+  fsh_task_snap *snaps = fsh_tasks_snapshot(&n);
+  fsh_buf b = { NULL, 0, 0 };
+  if (n == 0) {
+    fsh_buf_puts(&b, "no live tasks\n");
+    free(snaps);
+    return b.data;
+  }
+  fsh_buf_printf(&b, "%-6s %-9s %-10s %-7s %-18s %-24s %s\n", "ID", "STATE", "AGE", "POLLS", "AWAITING", "NAME", "SPAWN SITE");
+  for (int64_t i = 0; i < n; i++) {
+    char await_text[96];
+    fsh_await_label(await_text, sizeof await_text, &snaps[i]);
+    char age_text[32];
+    snprintf(age_text, sizeof age_text, "%lldms", (long long)snaps[i].age_ms);
+    const char *what = await_text[0] ? await_text : "-";
+    const char *name = snaps[i].name[0] ? snaps[i].name : "-";
+    const char *site = snaps[i].spawn_site && snaps[i].spawn_site[0] ? snaps[i].spawn_site : "-";
+    fsh_buf_printf(&b, "%-6lld %-9s %-10s %-7lld %-18s %-24s %s\n",
+      (long long)snaps[i].id, fsh_state_label(snaps[i].state), age_text, (long long)snaps[i].polls, what, name, site);
+  }
+  free(snaps);
+  return b.data;
+}
+
+void fsh_rt_tasks_free(char *p) {
+  free(p);
+}
+
 // Runs an async main: starts the workers, runs main as the first task until it is done or a
 // task panics, stops them, drops every task still alive, and gives main's outcome, its poll
 // result copied to out.
-int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, void *out) {
+int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, void *out, const char *name, const char *site) {
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
   fsh_workers = cores > 0 ? cores : 1;
   fsh_queues = calloc(fsh_workers, sizeof(fsh_queue));
   fsh_threads = calloc(fsh_workers, sizeof(pthread_t));
   for (int64_t i = 0; i < fsh_workers; i++) pthread_mutex_init(&fsh_queues[i].lock, NULL);
-  fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size);
+  fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size, name, site);
   // The reactor is ready before any task can wait on a socket.
   fsh_io_start();
   // Workers get 64 MiB stacks, since main's calls run on them: deep recursion, as a compiler's
@@ -9530,6 +9802,7 @@ export const ZLIB_NATIVE = String.raw`
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
@@ -9646,6 +9919,7 @@ export const SQLITE_NATIVE = String.raw`
 #include <sqlite3.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 

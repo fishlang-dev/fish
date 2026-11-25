@@ -3090,7 +3090,8 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${heldAt} = getelementptr { ${DYN}, ptr }, ptr ${frame}, i32 0, i32 1`);
       this.emit(`store ptr ${settle}, ptr ${heldAt}`);
       const [poll, drop] = this.jsSettler(type as DynType, this.jsSiteNow()!);
-      this.unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr @"fsh.js.settled.output", ptr ${frame}, i64 ${this.sizeOf(`{ ${DYN}, ptr }`)}, i64 8)`, task);
+      const jsTask = this.cString("js.promise");
+      this.unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr @"fsh.js.settled.output", ptr ${frame}, i64 ${this.sizeOf(`{ ${DYN}, ptr }`)}, i64 8, ptr ${jsTask}, ptr null)`, task);
       this.emit(`call void @fsh_rt_handle_drop(ptr ${task})`);
       return box;
     }
@@ -3525,7 +3526,8 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(line6);
       const raised = this.cur().raises.get(e);
       const fail = raised !== undefined ? this.groupFail(future, raised.from, raised.to) : "null";
-      this.unwinding(`call void @fsh_rt_group_spawn(ptr ${handle}, ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${fail}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))})`);
+      const [taskName, taskSite] = [this.taskName(future), this.taskSite({ start: e.start, end: e.end })];
+      this.unwinding(`call void @fsh_rt_group_spawn(ptr ${handle}, ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${fail}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))}, ptr ${taskName}, ptr ${taskSite})`);
       return undefined;
     }
     if (callee.name === "abort") {
@@ -9999,7 +10001,8 @@ class Codegen implements PrintHost, ComptimeHost {
         const [poll, drop, dropOutput] = this.taskGlue(loop);
         const [frame, task] = [this.alloca(this.llvm(loop)), this.temp()];
         this.emit(`store ${this.llvm(loop)} ${held}, ptr ${frame}`);
-        this.unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(loop))}, i64 ${this.sizeOf(this.pollType(loop))})`, task);
+        const loopTask = this.cString("__timerLoop");
+        this.unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(loop))}, i64 ${this.sizeOf(this.pollType(loop))}, ptr ${loopTask}, ptr null)`, task);
         this.emit(`call void @fsh_rt_timeouts_task(ptr ${task})`);
         this.emit(`br label %${done}`);
         this.startBlock(skip);
@@ -10093,7 +10096,8 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(line9);
         const how = e.callee.name;
         const spawning = how === "spawn" ? "fsh_rt_spawn" : how === "timer spawn" ? "fsh_rt_spawn_now" : how === "blocking spawn" ? "fsh_rt_spawn_blocking" : undefined;
-        this.unwinding(`call ptr @${spawning!}(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))})`, task);
+        const [taskName, taskSite] = [this.taskName(future), this.taskSite({ start: e.start, end: e.end })];
+        this.unwinding(`call ptr @${spawning!}(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))}, ptr ${taskName}, ptr ${taskSite})`, task);
         if (!this.cur().types.has(e)) {
           const part = { v: task, type: this.tables.typing.handleType(this.tables.typing.rec(future).gives, this.tables.typing.rec(future).throws) };
           this.pending.push(part);
@@ -12958,7 +12962,8 @@ class Codegen implements PrintHost, ComptimeHost {
     this.allocas.push(`  store ${this.llvm(future)} zeroinitializer, ptr ${frame}`);
     this.allocas.push(`  ${out} = alloca ${type}`);
     this.emit("call void @fsh_rt_args(i32 %argc, ptr %argv)");
-    this.emit(`${outcome} = call i32 @fsh_rt_run(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(type)}, ptr ${out})`);
+    const mainName = this.taskName(future);
+    this.emit(`${outcome} = call i32 @fsh_rt_run(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(type)}, ptr ${out}, ptr ${mainName}, ptr null)`);
     this.emit(`${failed} = icmp eq i32 ${outcome}, 2`);
     this.emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
     this.startBlock(ok);
@@ -13038,6 +13043,20 @@ class Codegen implements PrintHost, ComptimeHost {
     return made;
   }
 
+
+  // A task's name and user spawn site for the task inspector. Std spawns pass null as site so
+  // the runtime inherits the enclosing user frame's site.
+  taskName(this: Mut<this>, future: FutureType): string {
+    return this.cString(this.frameName(this.futureOf.get(future)!));
+  }
+
+  taskSite(this: Mut<this>, at: Ref<Span>): string {
+    if (at.start >= STD_BASE) return "null";
+    const from = sourceOf(this.src, this.file, at.start, this.sources).file;
+    if (BUILT_IN.test(from)) return "null";
+    const place = this.where(at);
+    return this.cString(place);
+  }
 
   // The size of an LLVM type in bytes, as a constant.
   sizeOf(type: string): string {
