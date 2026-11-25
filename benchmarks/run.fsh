@@ -13,7 +13,8 @@
 // A language whose tools aren't on PATH is left out and named. A pattern keeps the benchmarks
 // whose name contains it: a cpu program's name, or "http". `--record` appends the results as one
 // line of JSON to benchmarks/history.jsonl, with the commit, the machine and the tools' versions,
-// which is how the numbers are tracked over time; numbers from two machines don't compare.
+// which is how the numbers are tracked over time; numbers from two machines don't compare. The
+// commit is the checkout's, so it names the fishc only when that was built from it.
 //
 // The fishc is `--fishc`, else FISHC, else `fishc` on PATH.
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -186,8 +187,7 @@ async function main(): Promise<void> throws IoError | JsonError {
   }
 
   if (!record) return;
-  const fishcVersion = await firstLine([fishc, "--version"], here);
-  const line = JSON.stringify({ date: new Date().toISOString(), commit, machine: `${process.platform}-${process.arch}, ${availableParallelism()} cores`, tools: { fishc: fishcVersion, node, rustc }, cpu, http });
+  const line = JSON.stringify({ date: new Date().toISOString(), commit, machine: `${process.platform}-${process.arch}, ${availableParallelism()} cores`, tools: { node, rustc }, cpu, http });
   const history = join(here, "history.jsonl");
   writeFileSync(history, (existsSync(history) ? readFileSync(history, "utf8") : "") + line + "\n");
   console.log("\nrecorded in benchmarks/history.jsonl");
