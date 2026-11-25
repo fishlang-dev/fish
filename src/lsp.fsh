@@ -11,7 +11,7 @@ import { parse, type Stmt } from "./parser.fsh";
 import { format } from "./printer.fsh";
 import { testOf } from "./tests.fsh";
 import { Queries } from "./queries.fsh";
-import { cachedSession } from "./stdcache.fsh";
+import { cachedSession } from "./mathlib.fsh";
 import { CompileError, copyNames, locate, shown, sourceOf, written, type Source } from "./diag.fsh";
 import { STD_BASE } from "./std.fsh";
 import type { Type } from "./typing.fsh";

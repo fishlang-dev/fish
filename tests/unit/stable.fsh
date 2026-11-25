@@ -8,7 +8,7 @@ import { bodyOf } from "../../src/arenas.fsh";
 import { compiledOf } from "../../src/codegen.fsh";
 import { analyze, compile } from "../../src/main.fsh";
 import { STD_BASE } from "../../src/std.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 
 function base(): string {
   return `class Point {

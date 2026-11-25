@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { CompileError, formatError } from "../../src/diag.fsh";
 import { compile } from "../../src/main.fsh";
 import { newSession, newTimings, stageEnd, stageStart, timed, type Session, type Timings } from "../../src/compilation.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { removed, same, scratch } from "./support.fsh";
 
 function programA(): string {

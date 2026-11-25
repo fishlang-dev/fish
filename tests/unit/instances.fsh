@@ -7,7 +7,7 @@ import { shortened, symbolIn, symbolNames } from "../../src/codegen.fsh";
 import { CompileError } from "../../src/diag.fsh";
 import { compile } from "../../src/main.fsh";
 import type { Expr } from "../../src/parser.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { Typing, TypeMap, digest, type ClassType, type Type } from "../../src/typing.fsh";
 import { read, root } from "./support.fsh";
 

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { Session } from "./compilation.fsh";
+import { newSession, type Session } from "./compilation.fsh";
 
 // The runtime's `Math` functions: src/runtime/math.cpp over LLVM libc's correctly rounded ones,
 // and CORE-MATH's hyperbolic ones, both vendored. Compiling them takes seconds, so each clang
@@ -73,6 +73,11 @@ export type BuildSession = Session & { clang?: string; digests: Map<string, stri
 // `session` given the caches building needs, keeping any it already has.
 export function buildSession(session: Session & { clang?: string; digests?: Map<string, string>; mathUnits?: Unit[] }): BuildSession {
   return { ...session, digests: session.digests ?? new Map<string, string>() };
+}
+
+// The session the CLI, the language server and the tests compile with. Each parses std itself.
+export function cachedSession(): BuildSession {
+  return buildSession(newSession());
 }
 
 // `clang --version`, which names the target as well as the compiler, run once a session.
@@ -263,8 +268,8 @@ export async function objectAsync(u: Ref<Unit>, out: string): Promise<string> {
   const lock = `${out}.lock`;
   while (!existsSync(out)) {
     if (!claimed(lock)) {
-      // ponytail: polled, as no waiting a Bun and a Fish build share is cheaper; a wait on the
-      // compile itself if many builds contend.
+      // ponytail: polled, as another process holds the lock and nothing tells this one it is
+      // released; a wait on the compile itself if many builds contend.
       await Bun.sleep(20);
       continue;
     }

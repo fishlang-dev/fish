@@ -2,9 +2,8 @@
 // process where a test calls the compiler. Fish can't set `process.env` yet, so a test that moves
 // FISH_CACHE_DIR or PATH for its in-process builds runs itself again in a child process with them
 // set: `again` starts this test binary on the same test, FISH_CACHE_TEST_ROOT naming the directory
-// the parent made, and fails with the child's output. std's parsed-tree cache isn't tested here:
-// that cache is stdcache.ts's alone, and a compiler built by Fish parses std in each session. The
-// slower tests take two-minute limits.
+// the parent made, and fails with the child's output. Each session parses std itself, so there is no
+// parsed-tree cache to test. The slower tests take two-minute limits.
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
@@ -16,7 +15,7 @@ import { buildSession, cachedObject, cachedObjectAsync, files, mathObjectsAsync,
 import { checkKey, checkPath, readCheck, readEnvelope, writeCheck, writtenEnvelope, type Envelope } from "../../src/checkcache.fsh";
 import { newSession } from "../../src/compilation.fsh";
 import { hostTarget } from "../../src/target.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { fishcPath, read, removed, root as repo, same, scratch, text } from "./support.fsh";
 
 // The directory the parent test made, in the child `again` starts, else "".

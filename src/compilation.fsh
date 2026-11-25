@@ -47,7 +47,7 @@ export type Counts = { enums: usize; expansions: usize; constants: usize; checks
 
 // What lasts as long as whoever compiles: a CLI run, a language server, a test. Its options, and
 // the caches that spare later compilations the work earlier ones did. The caches only building
-// objects reads are on `mathlib.ts`'s `BuildSession`, out of the checker's reach.
+// objects reads are on `mathlib.fsh`'s `BuildSession`, out of the checker's reach.
 // `locking`: whether the lockfile may be rewritten, and which dependencies `fishc update` moves.
 // `engineHook`: whether programs may import `std:engine`, which only the compiler's own tests do.
 // `std`: std's statements when `cached`, each read a fresh copy, without which each compilation
