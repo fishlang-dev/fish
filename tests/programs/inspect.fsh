@@ -254,6 +254,8 @@ async function main(): Promise<void> throws IoError {
 // expect: html ok
 // expect: 404 ok
 // expect: 405 ok
+// expect: 403 ok
+// expect: 431 ok
 // expect: child exit 0
 import { type TaskInfo } from "fish:inspect";
 import { readFileSync, rmSync } from "node:fs";
@@ -358,6 +360,22 @@ async function main(): Promise<void> throws IoError | AbortError | JsonError | E
 
     const r405 = await fetch(`${inspectUrl}/tasks.json`, { method: "POST" });
     if (r405.status === 405) console.log("405 ok");
+
+    // Verify DNS-rebinding Host guard (403) and oversized header rejection (431).
+    const portStr = inspectUrl.slice((inspectUrl.lastIndexOf(":") as i64) + 1);
+    const inspectPort = parseInt(portStr, 10) ?? 0;
+    const c403 = await TcpStream.connect("127.0.0.1", inspectPort);
+    await c403.write(new TextEncoder().encode("GET /tasks.json HTTP/1.1\r\nHost: evil.example:9229\r\n\r\n"));
+    const b403 = await c403.read(256);
+    closeConn(c403);
+    if (new TextDecoder().decode(b403).startsWith("HTTP/1.1 403 ")) console.log("403 ok");
+
+    const c431 = await TcpStream.connect("127.0.0.1", inspectPort);
+    const big = "GET /tasks.json?" + "a".repeat(8200) + " HTTP/1.1\r\nHost: evil.example\r\n\r\n";
+    await c431.write(new TextEncoder().encode(big));
+    const b431 = await c431.read(256);
+    closeConn(c431);
+    if (new TextDecoder().decode(b431).startsWith("HTTP/1.1 431 ")) console.log("431 ok");
   } catch (_e) {
     console.log("ERR");
   }

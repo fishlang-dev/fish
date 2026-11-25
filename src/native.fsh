@@ -4408,7 +4408,8 @@ static void *fsh_output(fsh_task *t) { return t->memory + t->frame_size; }
 static void fsh_task_wait(fsh_task *t, const char *what, int64_t target) {
   if (!t) return;
   uint32_t seq = __atomic_load_n(&t->wait_seq, __ATOMIC_RELAXED);
-  __atomic_store_n(&t->wait_seq, seq + 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&t->wait_seq, seq + 1, __ATOMIC_RELAXED);
+  __atomic_thread_fence(__ATOMIC_RELEASE);
   const char *site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
   __atomic_store_n(&t->await_site, site, __ATOMIC_RELAXED);
   __atomic_store_n(&t->await_target, target, __ATOMIC_RELAXED);
@@ -4537,7 +4538,8 @@ static void fsh_run(fsh_task *t) {
   __atomic_store_n(&t->state, FSH_RUNNING, __ATOMIC_RELEASE);
   __atomic_fetch_add(&t->polls, 1, __ATOMIC_RELAXED);
   uint32_t seq = __atomic_load_n(&t->wait_seq, __ATOMIC_RELAXED);
-  __atomic_store_n(&t->wait_seq, seq + 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&t->wait_seq, seq + 1, __ATOMIC_RELAXED);
+  __atomic_thread_fence(__ATOMIC_RELEASE);
   __atomic_store_n(&t->await_site, NULL, __ATOMIC_RELAXED);
   __atomic_store_n(&t->await_target, 0, __ATOMIC_RELAXED);
   __atomic_store_n(&t->awaiting, NULL, __ATOMIC_RELAXED);
@@ -8575,7 +8577,8 @@ static fsh_task_snap *fsh_tasks_snapshot(int64_t *count_out) {
           const char *w = __atomic_load_n(&t->awaiting, __ATOMIC_RELAXED);
           const char *as = __atomic_load_n(&t->await_site, __ATOMIC_RELAXED);
           int64_t tg = __atomic_load_n(&t->await_target, __ATOMIC_RELAXED);
-          uint32_t s2 = __atomic_load_n(&t->wait_seq, __ATOMIC_ACQUIRE);
+          __atomic_thread_fence(__ATOMIC_ACQUIRE);
+          uint32_t s2 = __atomic_load_n(&t->wait_seq, __ATOMIC_RELAXED);
           if (s1 == s2) {
             awaiting = w;
             await_site = as;
@@ -8789,7 +8792,7 @@ static int fsh_inspect_host_ok(const char *req) {
     }
     p = strchr(p, '\n');
   }
-  return 1;
+  return 0;
 }
 
 static void fsh_inspect_handle(int c) {
@@ -8800,21 +8803,37 @@ static void fsh_inspect_handle(int c) {
   int on = 1;
   setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
 #endif
-  char req[2048];
+  char req[8192];
   size_t total = 0;
+  int complete = 0;
   int64_t deadline = fsh_now() + 1000000000LL;
   while (total < sizeof req - 1 && !__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE) && fsh_now() < deadline) {
     ssize_t n = recv(c, req + total, sizeof req - 1 - total, 0);
     if (n > 0) {
+      if (memchr(req + total, 0, (size_t)n) != NULL) {
+        const char *msg = "bad request\n";
+        fsh_inspect_reply(c, "400 Bad Request", "text/plain; charset=utf-8", msg, strlen(msg));
+        return;
+      }
       total += (size_t)n;
       req[total] = 0;
-      if (strstr(req, "\r\n\r\n") || strstr(req, "\n\n")) break;
+      if (strstr(req, "\r\n\r\n") || strstr(req, "\n\n")) {
+        complete = 1;
+        break;
+      }
       continue;
     }
     if (n < 0 && errno == EINTR) continue;
     break;
   }
   if (total == 0) return;
+  if (!complete) {
+    if (total == sizeof req - 1) {
+      const char *msg = "request header fields too large\n";
+      fsh_inspect_reply(c, "431 Request Header Fields Too Large", "text/plain; charset=utf-8", msg, strlen(msg));
+    }
+    return;
+  }
   req[total] = 0;
   if (!fsh_inspect_host_ok(req)) {
     const char *msg = "forbidden host\n";
