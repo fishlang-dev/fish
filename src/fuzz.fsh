@@ -150,7 +150,7 @@ function lifted(ids: Mut<Ids>, name: string, body: Body, at: Ref<Span>): Func {
 export function fuzzHarnessImports(dir: string, files: string[]): string {
   const imports = files.map((f) => {
     const rel = relative(dir, f);
-    const spec = rel.startsWith(".") ? rel : `./${rel}`;
+    const spec = rel.startsWith("./") || rel.startsWith("../") ? rel : `./${rel}`;
     return `import ${JSON.stringify(spec)};`;
   });
   return [
@@ -169,8 +169,8 @@ export function fuzzHarnessMain(ids: Mut<Ids>, target: Ref<FuzzTarget>, modules:
   const placeholder = "__fuzz_target";
   const text = `export function LLVMFuzzerTestOneInput(data: Ptr<u8>, size: usize): i32 {
   let bytes = new Uint8Array(size);
-  for (let i: usize = 0; i < size; i++) {
-    bytes[i] = unsafe { data.offset(i as i64).read() };
+  if (size > 0) {
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(bytes[0]), data, size as i64); }
   }
   try {
     ${placeholder}(bytes);
@@ -188,11 +188,10 @@ export function fuzzHarnessMain(ids: Mut<Ids>, target: Ref<FuzzTarget>, modules:
   return made;
 }
 
-// Extracts the reproducing artifact path libFuzzer printed, if any.
-export function artifactFromOutput(output: string): string | undefined {
-  const match = /Test unit written to ([^\r\n]+)/.exec(output);
-  if (match === null) return undefined;
-  return match[1]!.trim();
+// Quotes an argument for a printable shell replay hint when it contains whitespace or shell chars.
+export function shellQuote(arg: string): string {
+  if (arg !== "" && /^[A-Za-z0-9._/@:+-]+$/.test(arg)) return arg;
+  return "'" + arg.replaceAll("'", "'\\''") + "'";
 }
 
 function hexByte(b: u8): string {
@@ -203,16 +202,16 @@ function hexByte(b: u8): string {
 }
 
 // Formats the saved crash artifact for the terminal: path, length, hex preview, and UTF-8 preview.
-export function formatReproducer(target: Ref<FuzzTarget>, artifactPath: string, bytes: Ref<u8[]>, replayHint: string): string {
+export function formatReproducer(target: Ref<FuzzTarget>, artifactPath: string, sample: Ref<u8[]>, totalBytes: usize, replayHint: string): string {
   const limit: usize = 256;
-  const shown = bytes.length < limit ? bytes.length : limit;
+  const shown = sample.length < limit ? sample.length : limit;
   let hex: string[] = [];
-  for (let i: usize = 0; i < shown; i++) hex.push(hexByte(bytes[i]!));
-  const suffix = bytes.length > limit ? ` ... (${bytes.length - limit} more bytes)` : "";
-  const preview = shown === 0 ? `""` : JSON.stringify(new TextDecoder().decode(bytes.slice(0, shown as i64)));
+  for (let i: usize = 0; i < shown; i++) hex.push(hexByte(sample[i]!));
+  const suffix = totalBytes > shown ? ` ... (${totalBytes - shown} more bytes)` : "";
+  const preview = shown === 0 ? `""` : JSON.stringify(new TextDecoder().decode(sample.slice(0, shown as i64)));
   return [
     `FAIL ${target.module.file} > ${target.name}`,
-    `  reproducing input: ${artifactPath} (${bytes.length} byte${bytes.length === 1 ? "" : "s"})`,
+    `  reproducing input: ${artifactPath} (${totalBytes} byte${totalBytes === 1 ? "" : "s"})`,
     `  hex:  ${hex.length === 0 ? "(empty)" : hex.join(" ")}${suffix}`,
     `  text: ${preview}${suffix}`,
     `  replay: ${replayHint}`,

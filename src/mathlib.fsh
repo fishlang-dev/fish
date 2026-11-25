@@ -68,23 +68,24 @@ export type Unit = { name: string; args: string[]; stdin?: string; inputs: strin
 // `clang`: `clang --version`, which names the target as well as the compiler.
 // `digests`: each source a cached object depends on, hashed, by path, size and modification time.
 // `mathUnits`: the Math runtime's objects to compile.
-export type BuildSession = Session & { clang?: string; cc?: string; digests: Map<string, string>; mathUnits?: Unit[] };
+export type BuildSession = Session & { clang?: string; clangCc?: string; cc?: string; digests: Map<string, string>; mathUnits?: Unit[] };
 
 // `session` given the caches building needs, keeping any it already has.
-export function buildSession(session: Session & { clang?: string; cc?: string; digests?: Map<string, string>; mathUnits?: Unit[] }): BuildSession {
+export function buildSession(session: Session & { clang?: string; clangCc?: string; cc?: string; digests?: Map<string, string>; mathUnits?: Unit[] }): BuildSession {
   return { ...session, digests: session.digests ?? new Map<string, string>() };
 }
 
-// `clang --version`, which names the target as well as the compiler, run once a session.
+// `clang --version`, which names the target as well as the compiler, run once a session per `cc`.
 /** @throws {Error | IoError} */
 function clangVersion(session: Mut<BuildSession>): string {
-  const known = session.clang;
-  if (known !== undefined) return known;
   const cc = session.cc ?? "clang";
+  const known = session.clang;
+  if (known !== undefined && (session.clangCc ?? "clang") === cc) return known;
   const clang = Bun.spawnSync([cc, "--version"]);
   if (clang.exitCode !== 0) throw new Error(`${cc} failed:\n${new TextDecoder().decode(clang.stderr)}`);
   const version = new TextDecoder().decode(clang.stdout);
   session.clang = version;
+  session.clangCc = cc;
   return version;
 }
 
@@ -340,12 +341,13 @@ export function mathObjects(session: Mut<BuildSession>, target: string[] = []): 
 // ponytail: one at a time, as Fish can't map to promises yet; Promise.all over them once it can.
 /** @throws {Error | IoError} */
 export async function mathObjectsAsync(session: Mut<BuildSession>): Promise<string[]> {
+  const cc = session.cc ?? "clang";
   const all = units(session);
   let outs: string[] = [];
   for (const u of all) outs.push(objectPath(session, u));
   let objects: string[] = [];
   for (let i: usize = 0; i < all.length; i++) {
-    const object = await objectAsync(all[i]!, outs[i]!);
+    const object = await objectAsync(all[i]!, outs[i]!, cc);
     objects.push(object);
   }
   return objects;

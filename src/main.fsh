@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
@@ -25,7 +25,7 @@ import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, obje
 import { RUNTIME } from "./runtime.fsh";
 import { copyTarget, dockerfile, dockerfilePath, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
-import { artifactFromOutput, formatReproducer, fuzzHarnessImports, fuzzHarnessMain, liftFuzz, type FuzzTarget } from "./fuzz.fsh";
+import { formatReproducer, fuzzHarnessImports, fuzzHarnessMain, liftFuzz, shellQuote, type FuzzTarget } from "./fuzz.fsh";
 import { serveLsp } from "./lsp.fsh";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.fsh";
 import { hideMains, harnessImports, harnessMain, liftTests, runDefaults, runTests, stopTests, type RunOptions, type Test } from "./tests.fsh";
@@ -66,14 +66,14 @@ export { analyze } from "./analysis.fsh";
 type Compiled = { ir: string; checked: Checked; loaded: Loaded; emitted: Emitted | undefined };
 
 // A build session apart: what a compilation takes, and the caches only building objects reads.
-type Caches = { clang?: string; cc?: string; digests: Map<string, string>; mathUnits?: Unit[] };
+type Caches = { clang?: string; clangCc?: string; cc?: string; digests: Map<string, string>; mathUnits?: Unit[] };
 
 function apart(session: BuildSession): { core: Session; caches: Caches } {
-  return { core: { locking: session.locking, engineHook: session.engineHook, std: session.std, timings: session.timings, failed: session.failed, checkCache: session.checkCache }, caches: { clang: session.clang, cc: session.cc, digests: session.digests, mathUnits: session.mathUnits } };
+  return { core: { locking: session.locking, engineHook: session.engineHook, std: session.std, timings: session.timings, failed: session.failed, checkCache: session.checkCache }, caches: { clang: session.clang, clangCc: session.clangCc, cc: session.cc, digests: session.digests, mathUnits: session.mathUnits } };
 }
 
 function together(core: Session, caches: Caches): BuildSession {
-  return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, checkCache: core.checkCache, clang: caches.clang, cc: caches.cc, digests: caches.digests, mathUnits: caches.mathUnits };
+  return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, checkCache: core.checkCache, clang: caches.clang, clangCc: caches.clangCc, cc: caches.cc, digests: caches.digests, mathUnits: caches.mathUnits };
 }
 
 // `session` for a build that keeps nothing of its check once its program is emitted.
@@ -604,17 +604,18 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
   let building = together(made.checked.tables.session, caches);
   // ponytail: each object in turn, as Fish can't map to promises yet; Promise.all over them once it can.
   let objects: string[] = [];
+  const cc = building.cc ?? "clang";
   for (const u of runtimeUnits(made.ir, release)) {
-    const object = await objectAsync(u, objectPath(building, u));
+    const object = await objectAsync(u, objectPath(building, u), cc);
     objects.push(object);
   }
   for (const u of halves.cached) {
-    const object = await objectAsync(u, objectPath(building, u));
+    const object = await objectAsync(u, objectPath(building, u), cc);
     objects.push(object);
   }
   const math = await mathObjectsAsync(building);
   for (const o of math) objects.push(o);
-  const compiler = Bun.spawn([...clangArgs(out, release, links, objects, shim, copyTarget(host)), ...runtimeLinks(made.ir, host)], { stdin: new TextEncoder().encode(halves.program), stderr: "pipe" });
+  const compiler = Bun.spawn([...clangArgs(out, release, links, objects, shim, copyTarget(host), ["-x", "ir", "-"], cc), ...runtimeLinks(made.ir, host)], { stdin: new TextEncoder().encode(halves.program), stderr: "pipe" });
   const errors = new Response(compiler.stderr);
   const [code, stderr] = await Promise.all([compiler.exited, errors.text()]);
   if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
@@ -807,64 +808,151 @@ function buildFuzzTarget(session: BuildSession, dir: string, files: Ref<string[]
   }
 }
 
-async function readStream(stream: Response): Promise<string> {
-  return await stream.text();
+function isArtifactName(name: string): boolean {
+  return name.startsWith("crash-") || name.startsWith("oom-") || name.startsWith("timeout-") || name.startsWith("leak-");
 }
 
-// Runs one built libFuzzer binary, streaming/reporting output and formatting any saved reproducer.
+// Records existing libFuzzer artifact files and their mtimes so a new crash artifact can be
+// identified after an inherited-stdio run without buffering libFuzzer's output in memory.
+function snapshotArtifacts(dir: string): Map<string, f64> {
+  let snap = new Map<string, f64>();
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!isArtifactName(name)) continue;
+      const st = statSync(join(dir, name));
+      if (st.isFile()) snap.set(name, st.mtimeMs);
+    }
+  } catch (_e) {
+    // Directory may not exist yet or be unreadable.
+  }
+  return snap;
+}
+
+function newestArtifact(dir: string, before: Ref<Map<string, f64>>): string | undefined {
+  let bestPath: string | undefined = undefined;
+  let bestMtime: f64 = -1;
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!isArtifactName(name)) continue;
+      const full = join(dir, name);
+      const st = statSync(full);
+      if (!st.isFile()) continue;
+      const prev = before.get(name);
+      if (prev !== undefined && st.mtimeMs <= prev!) continue;
+      if (st.mtimeMs >= bestMtime) {
+        bestMtime = st.mtimeMs;
+        bestPath = full;
+      }
+    }
+  } catch (_e) {
+    return undefined;
+  }
+  return bestPath;
+}
+
+// Reads at most `limit` bytes plus total file size from `path` without loading huge artifacts.
 /** @throws {IoError} */
-async function runFuzzBinary(binary: string, target: Ref<FuzzTarget>, sourceHint: string, options: Ref<FuzzOptions>): Promise<i64> {
+function readArtifactHead(path: string, limit: usize): { sample: u8[]; total: usize } {
+  const total = statSync(path).size as usize;
+  const take = total < limit ? total : limit;
+  if (take === 0) return { sample: [], total };
+  let buf = new Uint8Array(take);
+  const fd = openSync(path, "r");
+  let got: usize = 0;
+  try {
+    const n = readSync(fd, buf, 0, take as i64, 0);
+    if (n > 0) got = n as usize;
+  } finally {
+    closeSync(fd);
+  }
+  return { sample: buf.slice(0, got as i64), total };
+}
+
+function buildReplayHint(isFile: boolean, fileArg: string | undefined, totalTargets: usize, targetName: string, artifactPath: string): string {
+  let parts: string[] = ["fishc", "fuzz"];
+  if (isFile && fileArg !== undefined) parts.push(shellQuote(fileArg));
+  if (totalTargets > 1) parts.push(shellQuote(targetName));
+  parts.push("--replay");
+  parts.push(shellQuote(artifactPath));
+  return parts.join(" ");
+}
+
+type FuzzRace = { kind: "exit"; code: i64 } | { kind: "signal"; code: i64 };
+
+function fuzzSignalled(signal: "SIGINT" | "SIGTERM", code: i64): Promise<FuzzRace> {
+  return new Promise<FuzzRace>((resolve) => {
+    process.once(signal, () => resolve({ kind: "signal", code }));
+  });
+}
+
+// Runs one built libFuzzer binary with inherited stdio so progress streams live in O(1) memory,
+// detecting any saved crash artifact and printing the formatted reproducer.
+/** @throws {IoError} */
+async function runFuzzBinary(binary: string, scratch: string, target: Ref<FuzzTarget>, isFile: boolean, fileArg: string | undefined, totalTargets: usize, options: Ref<FuzzOptions>, running: Mut<Set<i32>>): Promise<i64> {
   let args: string[] = [];
+  let artDir = process.cwd();
+  let before = new Map<string, f64>();
   if (options.replay !== undefined) {
+    args.push(`-artifact_prefix=${scratch}${sep}`);
     args.push(resolve(options.replay!));
   } else {
     if (options.runs !== undefined) args.push(`-runs=${options.runs!}`);
     if (options.maxTime !== undefined) args.push(`-max_total_time=${options.maxTime!}`);
     if (options.artifacts !== undefined) {
-      const dir = resolve(options.artifacts!);
-      mkdirSync(dir, { recursive: true });
-      args.push(`-artifact_prefix=${dir}${sep}`);
+      artDir = resolve(options.artifacts!);
+      mkdirSync(artDir, { recursive: true });
+      args.push(`-artifact_prefix=${artDir}${sep}`);
     }
     if (options.corpus !== undefined) {
       const dir = resolve(options.corpus!);
       mkdirSync(dir, { recursive: true });
       args.push(dir);
     }
+    before = snapshotArtifacts(artDir);
   }
-  const child = Bun.spawn([binary, ...args], { cwd: process.cwd(), stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
+  const child = Bun.spawn([binary, ...args], { cwd: process.cwd(), stdin: "ignore", stdout: "inherit", stderr: "inherit", detached: true });
   const group = child.pid as i32;
-  const outTask = readStream(new Response(child.stdout));
-  const errTask = readStream(new Response(child.stderr));
-  const waited = await Promise.race([child.exited, signalled("SIGINT", 130), signalled("SIGTERM", 143)]);
-  if (waited === 130 || waited === 143) {
-    try {
-      process.kill(-(group as i64), "SIGKILL");
-    } catch {
-      // Already exited.
-    }
-    return waited;
-  }
-  const stdout = await outTask;
-  const stderr = await errTask;
-  if (stdout !== "") process.stdout.write(stdout);
-  if (stderr !== "") process.stderr.write(stderr);
-  if (waited === 0) {
+  running.add(group);
+  const code = await child.exited;
+  running.delete(group);
+  if (code === 0) {
     console.log(`ok ${target.module.file} > ${target.name}`);
     return 0;
   }
-  const artifact = artifactFromOutput(stderr) ?? artifactFromOutput(stdout);
-  if (artifact !== undefined && existsSync(artifact!)) {
-    const raw = readFileSync(artifact!);
-    const replayHint = `fishc fuzz ${sourceHint} --replay ${artifact!}`;
-    console.error(`\n${formatReproducer(target, artifact!, raw, replayHint)}`);
+  const artifact = options.replay !== undefined ? resolve(options.replay!) : newestArtifact(artDir, before);
+  if (artifact !== undefined && existsSync(artifact!) && statSync(artifact!).isFile()) {
+    const shown = options.artifacts !== undefined || options.replay !== undefined ? artifact! : relative(process.cwd(), artifact!);
+    const head = readArtifactHead(artifact!, 256);
+    const replayHint = buildReplayHint(isFile, fileArg, totalTargets, target.name, shown);
+    console.error(`\n${formatReproducer(target, shown, head.sample, head.total, replayHint)}`);
   } else {
-    console.error(`FAIL ${target.module.file} > ${target.name} (exited with ${waited})`);
+    console.error(`FAIL ${target.module.file} > ${target.name} (exited with ${code})`);
   }
   return 1;
 }
 
 /** @throws {Error | IoError | JsonError} */
-async function runFuzz(session: BuildSession, dir: string, files: Ref<string[]>, filter: string | undefined, sourceHint: string, options: Ref<FuzzOptions>): Promise<i64> {
+async function runFuzzLoop(dir: string, files: Ref<string[]>, chosen: Ref<FuzzTarget[]>, totalTargets: usize, scratch: string, cc: string, isFile: boolean, fileArg: string | undefined, options: Ref<FuzzOptions>, running: Mut<Set<i32>>): Promise<FuzzRace> {
+  for (let i: usize = 0; i < chosen.length; i++) {
+    const target: Ref<FuzzTarget> = chosen[i]!;
+    const binary = join(scratch, `fuzz-${i}`);
+    try {
+      buildFuzzTarget(sessionWith(false, false, true), dir, files, target.name, binary, options.asan, cc);
+    } catch (e) {
+      if (e instanceof CompileError) {
+        console.error(painted(e, relative(process.cwd(), join(dir, "__fish_fuzz__.fsh")), ""));
+        return { kind: "exit", code: 1 };
+      }
+      throw e;
+    }
+    const ran = await runFuzzBinary(binary, scratch, target, isFile, fileArg, totalTargets, options, running);
+    if (ran !== 0) return { kind: "exit", code: ran };
+  }
+  return { kind: "exit", code: 0 };
+}
+
+/** @throws {Error | IoError | JsonError} */
+async function runFuzz(session: BuildSession, dir: string, files: Ref<string[]>, filter: string | undefined, isFile: boolean, fileArg: string | undefined, options: Ref<FuzzOptions>): Promise<i64> {
   let targets: FuzzTarget[] = [];
   try {
     targets = discoverFuzz(session, dir, files);
@@ -879,6 +967,7 @@ async function runFuzz(session: BuildSession, dir: string, files: Ref<string[]>,
     console.log("no fuzz targets found");
     return 0;
   }
+  const totalTargets = targets.length;
   const chosen = filter === undefined ? targets : targets.filter((t) => t.name.includes(filter!));
   if (chosen.length === 0) {
     console.error(`fishc fuzz: no fuzz target's name contains '${filter ?? ""}'`);
@@ -894,32 +983,21 @@ async function runFuzz(session: BuildSession, dir: string, files: Ref<string[]>,
   }
   const cc = findFuzzerClang(options.asan);
   const scratch = mkdtempSync(join(tmpdir(), "fishc-fuzz-"));
+  let running = new Set<i32>();
   let code: i64 = 0;
   try {
-    for (let i: usize = 0; i < chosen.length; i++) {
-      const target: Ref<FuzzTarget> = chosen[i]!;
-      const binary = join(scratch, `fuzz-${i}`);
-      try {
-        buildFuzzTarget(sessionWith(false, false, true), dir, files, target.name, binary, options.asan, cc);
-      } catch (e) {
-        if (e instanceof CompileError) {
-          console.error(painted(e, relative(process.cwd(), join(dir, "__fish_fuzz__.fsh")), ""));
-          code = 1;
-          break;
-        }
-        throw e;
-      }
-      const targetHint = chosen.length === 1 ? sourceHint : `${sourceHint} ${JSON.stringify(target.name)}`;
-      const ran = await runFuzzBinary(binary, target, targetHint, options);
-      if (ran !== 0) {
-        code = ran;
-        break;
-      }
-    }
+    const outcome = await Promise.race([
+      runFuzzLoop(dir, files, chosen, totalTargets, scratch, cc, isFile, fileArg, options, running),
+      fuzzSignalled("SIGINT", 130),
+      fuzzSignalled("SIGTERM", 143),
+    ]);
+    code = outcome.code;
   } catch (e) {
+    stopTests(running);
     rmSync(scratch, { recursive: true, force: true });
     throw e;
   }
+  stopTests(running);
   rmSync(scratch, { recursive: true, force: true });
   return code;
 }
@@ -1822,24 +1900,22 @@ async function main(): Promise<void> {
     if (values.corpus !== undefined) options.corpus = values.corpus;
     if (values.artifacts !== undefined) options.artifacts = values.artifacts;
     if (values.replay !== undefined) {
-      if (!existsSync(values.replay)) fail(`fishc fuzz: replay file '${values.replay}' doesn't exist`);
+      if (!existsSync(values.replay) || !statSync(values.replay).isFile()) fail(`fishc fuzz: replay file '${values.replay}' doesn't exist or isn't a regular file`);
       options.replay = values.replay;
     }
     const first = positionals.length > 1 ? positionals[1] : undefined;
     const second = positionals.length > 2 ? positionals[2] : undefined;
-    const isFile = first !== undefined && (first.endsWith(".fsh") || (existsSync(first) && statSync(first).isFile()));
+    const isFile = first !== undefined && first.endsWith(".fsh");
     if (!isFile && second !== undefined) fail(usage);
     let dir = "";
     let files: string[] = [];
     let filter: string | undefined = undefined;
-    let sourceHint = "";
     if (isFile) {
-      if (!existsSync(first!)) fail(`fishc fuzz: can't find '${first!}'`);
+      if (!existsSync(first!) || !statSync(first!).isFile()) fail(`fishc fuzz: can't find file '${first!}'`);
       const full = resolve(first!);
       dir = dirname(full);
       files = [full];
       filter = second;
-      sourceHint = first!;
     } else {
       const found = findManifest(process.cwd()) ?? fail(`fishc fuzz: no ${MANIFEST} here or in any directory above; give a .fsh file or run inside a package`);
       dir = dirname(found!);
@@ -1847,10 +1923,9 @@ async function main(): Promise<void> {
       files = fishFiles(dir, problems);
       for (const message of problems) console.error(message.replace(/^fishc fmt/, "fishc fuzz"));
       filter = first;
-      sourceHint = filter ?? "";
     }
     try {
-      const code = await runFuzz(sessionFor(), dir, files, filter, sourceHint, options);
+      const code = await runFuzz(sessionFor(), dir, files, filter, isFile, isFile ? first : undefined, options);
       process.exit(code);
     } catch (e) {
       console.error((e as { message: string }).message);

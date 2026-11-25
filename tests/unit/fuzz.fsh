@@ -92,6 +92,13 @@ function main() {
     const replayed = fishc(dir, ["fuzz", file, "--replay", crashPath]);
     assert(replayed.code === 1, `expected replay crash exit 1, got ${replayed.code}`);
     assert(replayed.err.includes("found FISH magic"), `replay did not reproduce panic: ${replayed.err}`);
+    // Replaying must not pollute cwd with duplicate crash-* files.
+    const cwdCrashes = listDir(dir).filter((f) => f.startsWith("crash-"));
+    assert(cwdCrashes.length === 0, `replay polluted cwd with crash files: ${cwdCrashes.join(", ")}`);
+
+    // --replay on a directory must be refused with exit 2.
+    const badReplay = fishc(dir, ["fuzz", file, "--replay", artifacts]);
+    assert(badReplay.code === 2, `expected exit 2 for --replay on a directory, got ${badReplay.code}`);
   } finally {
     removed(dir);
   }
@@ -154,12 +161,49 @@ function main() {}
     const amb = fishc(dir, ["fuzz"]);
     assert(amb.code === 2, `expected exit 2 for multiple targets without limit, got ${amb.code}`);
 
-    // Filtering to "tag" catches the thrown Error and saves a reproducer.
+    // A non-.fsh file in cwd with the same name as a filter must not hijack package filtering.
+    write(join(dir, "tag"), "not a fish file");
+
+    // Filtering to "tag" catches the thrown Error and saves a reproducer with a valid replay hint.
     const artifacts = join(dir, "art");
     const hit = fishc(dir, ["fuzz", "tag", "--artifacts", artifacts, "--max-time", "20"]);
     assert(hit.code === 1, `expected crash on thrown Error, got ${hit.code}: ${hit.err}`);
     assert(hit.err.includes("Error: bad tag"), `missing thrown Error text: ${hit.err}`);
     assert(hit.err.includes("de ad"), `missing hex bytes de ad: ${hit.err}`);
+    assert(hit.err.includes("replay: fishc fuzz tag --replay "), `unexpected replay hint: ${hit.err}`);
+  } finally {
+    removed(dir);
+  }
+}, { timeout: 60_000 });
+
+test("fishc fuzz handles dotfiles, flag isolation, empty files, and multi-target runs", () => {
+  const dir = scratch("fish-fuzz-edge-");
+  try {
+    // Dotfile target imports cleanly.
+    const dotfile = join(dir, ".hidden.fsh");
+    write(dotfile, `fuzz("dot", (d: Ref<Uint8Array>) => { assert(d.length >= 0); });\n`);
+    const dotListed = fishc(dir, ["fuzz", dotfile, "--list"]);
+    assert(dotListed.code === 0 && dotListed.out.includes("> dot"), `dotfile --list failed: ${dotListed.out}\n${dotListed.err}`);
+
+    // File with no fuzz targets exits 0 cleanly.
+    const empty = join(dir, "empty.fsh");
+    write(empty, `function main() {}\n`);
+    const none = fishc(dir, ["fuzz", empty]);
+    assert(none.code === 0 && none.out.includes("no fuzz targets found"), `expected no targets: ${none.out}\n${none.err}`);
+
+    // Flag isolation across subcommands and invalid flag values.
+    assert(fishc(dir, ["build", empty, "--runs", "10"]).code === 2, "build must reject --runs");
+    assert(fishc(dir, ["check", empty, "--list"]).code === 2, "check must reject --list");
+    assert(fishc(dir, ["fuzz", dotfile, "--runs", "0"]).code === 2, "fuzz must reject --runs 0");
+    assert(fishc(dir, ["fuzz", dotfile, "--release"]).code === 2, "fuzz must reject --release");
+    assert(fishc(dir, ["fuzz", dotfile, "missing", "--list"]).code === 1, "unmatched filter must exit 1");
+
+    // Multi-target file with --runs runs every target in sequence.
+    const multi = join(dir, "multi.fsh");
+    write(multi, `fuzz("one", (d) => { assert(d.length >= 0); });\nfuzz("two", function(d) { assert(d.length >= 0); });\n`);
+    const both = fishc(dir, ["fuzz", multi, "--runs", "50", "--no-asan"]);
+    assert(both.code === 0, `multi-target --runs failed: ${both.out}\n${both.err}`);
+    assert(both.out.includes("> one") && both.out.includes("> two"), `missing multi-target ok lines: ${both.out}`);
   } finally {
     removed(dir);
   }
