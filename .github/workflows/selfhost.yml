@@ -33,8 +33,11 @@ jobs:
           path: ~/.cache/fish/stage0
           key: stage0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('stage0.toml') }}
       - name: Build
+        id: build
         run: sh scripts/bootstrap.sh
       - name: Golden programs
         run: build/fishc run tests/run.fsh -- --fishc "$PWD/build/fishc"
+      # Run whatever the golden programs did, so one run shows every failure.
       - name: Unit tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cd tests/unit && FISHC="$PWD/../../build/fishc" ../../build/fishc test --release

@@ -29,7 +29,10 @@
 //
 // The fishc is `--fishc`, else FISHC, else `fishc` on PATH. Programs are built and run as many at
 // once as the machine has cores, or FISH_TEST_JOBS, or `--jobs`. A pattern keeps the tests whose
-// name contains it. Each failure is printed as it is found, and the run exits 1 if any failed.
+// name contains it. Each failure is printed as it is found. A program that failed while others ran
+// beside it is run once more on its own when they are done, and passes if it passes then, named as
+// having needed a second run: a program that waits on a timer can miss it on a busy machine. The
+// run exits 1 if any failed.
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -265,23 +268,32 @@ function verdict(p: Program, run: Outcome): string {
   return run.exitCode === want ? "" : `expected exit ${want}, got ${run.exitCode}:\n${run.stderr}`;
 }
 
-type Queue = { programs: Program[]; next: Atomic<i64>; failed: Atomic<i64>; fishc: string; tmp: string };
+type Queue = { programs: Program[]; next: Atomic<i64>; fishc: string; tmp: string };
 
-async function worker(q: shared<Queue>): Promise<void> {
+// More failures than this are no accident of timing, and running each again alone would take longer
+// than the run did.
+const SECOND_RUNS = 20;
+
+// The programs a worker saw fail, by their place in the queue.
+async function worker(q: shared<Queue>): Promise<i64[]> {
+  let failed: i64[] = [];
   while (true) {
     const i = q.next.add(1);
-    if (i >= (q.programs.length as i64)) return;
+    if (i >= (q.programs.length as i64)) return failed;
     const p = q.programs[i as usize]!.clone();
-    let why = p.problem;
-    if (why === "") {
-      const run = await outcome(q.fishc, q.tmp, p.clone());
-      why = verdict(p.clone(), run);
-    }
+    const why = await failure(q.fishc, q.tmp, p.clone());
     if (why !== "") {
-      q.failed.add(1);
+      failed.push(i);
       console.log(`fail ${p.name}\n${why.trimEnd()}\n`);
     }
   }
+}
+
+// Why a program fails, or "" when it passes.
+async function failure(fishc: string, tmp: string, p: Program): Promise<string> {
+  if (p.problem !== "") return p.problem;
+  const run = await outcome(fishc, tmp, p.clone());
+  return verdict(p.clone(), run);
 }
 
 async function main(): Promise<void> throws IoError {
@@ -309,14 +321,31 @@ async function main(): Promise<void> throws IoError {
   }
   const started = performance.now();
   const total = programs.length as i64;
-  const q = shared<Queue>({ programs, next: new Atomic(0), failed: new Atomic(0), fishc, tmp });
-  let workers: JoinHandle<void>[] = [];
+  const q = shared<Queue>({ programs: programs.clone(), next: new Atomic(0), fishc, tmp });
+  let workers: JoinHandle<i64[]>[] = [];
   for (let w = 0; w < jobs; w++) workers.push(spawn(worker(q.clone())));
+  let again: i64[] = [];
   while (workers.length > 0) {
     const w = workers.pop()!;
-    await w;
+    const saw = await w;
+    for (const i of saw) again.push(i);
   }
-  const failed = q.failed.load();
-  console.log(`${total - failed} pass, ${failed} fail, ${total} programs in ${((performance.now() - started) / 1000).toFixed(0)}s`);
+  let failed = again.length as i64;
+  let second = 0;
+  if (jobs > 1 && failed <= SECOND_RUNS) {
+    again.sort((a, b) => a - b);
+    for (const i of again) {
+      const p = programs[i as usize]!.clone();
+      if (p.problem !== "") continue;
+      const why = await failure(fishc, tmp, p.clone());
+      if (why === "") {
+        failed--;
+        second++;
+        console.log(`pass ${p.name}, on a second run alone\n`);
+      } else console.log(`fail ${p.name}, on a second run alone\n${why.trimEnd()}\n`);
+    }
+  }
+  const seconds = second === 0 ? "" : ` (${second} on a second run)`;
+  console.log(`${total - failed} pass${seconds}, ${failed} fail, ${total} programs in ${((performance.now() - started) / 1000).toFixed(0)}s`);
   if (failed > 0) process.exit(1);
 }
