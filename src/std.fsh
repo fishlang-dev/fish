@@ -8313,6 +8313,61 @@ export async function flushTraces(): Promise<void> {
   await __traceSend();
 }
 `,
+  // Live snapshot of active async tasks, imported as fish:inspect.
+  "fish:inspect": String.raw`
+declare function fsh_rt_tasks_json(): Ptr<u8>;
+declare function fsh_rt_tasks_table(): Ptr<u8>;
+declare function fsh_rt_tasks_free(p: Ptr<u8>): void;
+
+// One active task in the async runtime at the moment of the snapshot.
+export type TaskInfo = {
+  id: i64;
+  name: string;
+  state: string;
+  awaiting: string;
+  awaitSite: string;
+  ageMs: i64;
+  spawnSite: string;
+  blocking: boolean;
+  polls: i64;
+};
+
+// A JSON array of every live task, matching TaskInfo[].
+export function tasksJson(): string {
+  let text = "[]";
+  unsafe {
+    const p = fsh_rt_tasks_json();
+    if (!p.isNull()) {
+      text = fromCString(p);
+      fsh_rt_tasks_free(p);
+    }
+  }
+  return text;
+}
+
+// A human-readable table of every live task for logging or terminal output.
+export function formatTasks(): string {
+  let text = "";
+  unsafe {
+    const p = fsh_rt_tasks_table();
+    if (!p.isNull()) {
+      text = fromCString(p);
+      fsh_rt_tasks_free(p);
+    }
+  }
+  return text;
+}
+
+// Live snapshot of every active task, sorted by task id.
+export function tasks(): TaskInfo[] {
+  const raw = tasksJson();
+  try {
+    return JSON.parse<TaskInfo[]>(raw);
+  } catch (_e) {
+    return [];
+  }
+}
+`,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
   // buffer so readers can be mixed.
   stdin: String.raw`
