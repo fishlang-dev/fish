@@ -666,7 +666,7 @@ function timersRunAsync(ids: Mut<Ids>, written: Mut<Stmt[]>, timerMains: Mut<Tab
   rebuiltStmts(written, rewrites);
 }
 // A span's batch is sent by a timer std sets, so what begins one counts as setting a timer: the
-// fish:trace module's code calls it.
+// std:trace module's code calls it.
 const TIMER_GLOBALS = new Set(["setTimeout", "setInterval", "__traceBegin"]);
 
 // Whether a piece of syntax holds a node `found` picks out.

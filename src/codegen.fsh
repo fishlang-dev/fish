@@ -81,8 +81,8 @@ function floatConstant(value: f64, type: "f32" | "f64"): string {
 // intrinsics, printing and reference counts, none of which panics or calls back into Fish.
 const CALLEE = /^(?:%\S+ = )?(?:call|invoke) [^@%]*([@%][^(]*)\(/;
 const FRAME = "{ ptr, ptr, ptr }";
-// The files of std's built-in modules, such as `node:path` and `fish:engine`.
-const BUILT_IN = /^(node|fish):/;
+// The files of std's built-in modules, such as `std:path` and `std:engine`.
+const BUILT_IN = /^std:/;
 const QUIET = /^@(llvm\.|printf$|dprintf$|fflush$|fsh_rt_str_retain$|fsh_rt_str_release$)/;
 
 // A name inside LLVM's quotes. A generic class's instance is named by its type arguments, and a
@@ -9530,7 +9530,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  // node:fs's blocking calls: what each gives, or a failure raised as the IoError the runtime's
+  // std:fs's blocking calls: what each gives, or a failure raised as the IoError the runtime's
   // parts make.
   syncFile(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, name: string): string | undefined {
     const path = this.operand(e.args[0]!, e.args, 1);

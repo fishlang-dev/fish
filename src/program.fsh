@@ -13,7 +13,7 @@ export function fileAt(files: Ref<Compilation["files"]>, offset: usize): string 
   return files.findLast((f) => offset >= f.base)?.file ?? "";
 }
 
-// The name std's module holding a source offset is shown by, as "node:fs", or nothing when the
+// The name std's module holding a source offset is shown by, as "std:fs", or nothing when the
 // offset is in a file of the program's own, whatever that file is named.
 export function stdModuleAt(files: Ref<Compilation["files"]>, offset: usize): string | undefined {
   const f = files.findLast((f) => offset >= f.base);

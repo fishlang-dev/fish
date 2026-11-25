@@ -189,7 +189,7 @@ test("static and shared libraries link the cached runtime, built position-indepe
 
 function engineProgram(root: string): string {
   const file = join(root, "engine.fsh");
-  write(file, `import { evaluate } from "fish:engine";\nfunction main() {\n  const v = evaluate("export default 1;");\n  console.log("ok");\n}\n`);
+  write(file, `import { evaluate } from "std:engine";\nfunction main() {\n  const v = evaluate("export default 1;");\n  console.log("ok");\n}\n`);
   return file;
 }
 

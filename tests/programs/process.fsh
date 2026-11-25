@@ -38,7 +38,7 @@ function main() {
   process.exit("1");
 }
 // case: process_unknown_member
-// error: 'node:process' has no export named 'ppid'
+// error: 'std:process' has no export named 'ppid'
 import process from "node:process";
 function main() {
   console.log(process.ppid);

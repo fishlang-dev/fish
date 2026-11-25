@@ -39,13 +39,13 @@ function main() {
   console.log(hostname(), os.hostname().length > 0);
 }
 // case: os_unknown_member
-// error: 'node:os' has no export named 'cpus'; it has 'hostname', 'tmpdir', 'constants', 'homedir', 'platform', 'availableParallelism'
+// error: 'std:os' has no export named 'cpus'; it has 'hostname', 'tmpdir', 'constants', 'homedir', 'platform', 'availableParallelism'
 import os from "node:os";
 function main() {
   console.log(os.cpus());
 }
 // case: os_unknown_import
-// error: 'node:os' has no export named 'nope'
+// error: 'std:os' has no export named 'nope'
 import { nope } from "os";
 function main() {
   console.log(nope());

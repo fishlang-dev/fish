@@ -27,7 +27,7 @@ function main() {
   const f = format;
 }
 // case: util_unknown_member
-// error: 'node:util' has no export named 'promisify'
+// error: 'std:util' has no export named 'promisify'
 import { promisify } from "node:util";
 function main() {}
 // case: util_format_shadowed
@@ -170,7 +170,7 @@ function main(): void throws ParseArgsError {
   parseArgs({ options: { a: { type: "string" }, a: { type: "boolean" } } });
 }
 // case: util_parse_args_internal
-// error: 'node:util' has no export named 'ParsedArgs'
+// error: 'std:util' has no export named 'ParsedArgs'
 import { ParsedArgs } from "node:util";
 function main() {}
 // case: util_format_f32

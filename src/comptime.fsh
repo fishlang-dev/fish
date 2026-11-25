@@ -674,7 +674,7 @@ class Interpreter<H extends ComptimeHost> {
     try {
       const body = this.body(callee);
       const name = body.name;
-      const crypto = RANDOM.has(name) && stdModuleAt(this.host.tables.files, body.start) === "node:crypto";
+      const crypto = RANDOM.has(name) && stdModuleAt(this.host.tables.files, body.start) === "std:crypto";
       const isAsync = body.async === true;
       const generator = body.generator === true;
       const foreign = body.foreign === true;

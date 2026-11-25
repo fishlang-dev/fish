@@ -11,7 +11,7 @@ import { parse, type ClassMember, type ClassNode, type Declarator, type EnumMemb
 import { fishFiles } from "./fmt.fsh";
 import { MANIFEST, type RustDependency } from "./manifest.fsh";
 import { HANDLE, RUST_NAME, rustSymbol, type RustTables } from "./rust.fsh";
-import { ENGINE_HOOK, STD, STD_MODULES, STD_VALUES, stdModule } from "./std.fsh";
+import { ENGINE_HOOK, STD, STD_MODULES, STD_ONLY, STD_VALUES, stdModule, stdModuleNames } from "./std.fsh";
 import { refuseCompat } from "./migrate.fsh";
 import { unsupported } from "./unsupported.fsh";
 import { dup, forEachChild, nextId, nodeIdOf, NodeMap, Rewrites, shiftSpansStmt, shiftSpansStmts, walk, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
@@ -101,7 +101,7 @@ class Loader {
   /** @throws {CompileError | Error | IoError} */
   std(this: Mut<this>, cx: Mut<Compilation>, read: Ref<Reader>, name: string): Module {
     const text = STD_MODULES[name];
-    return this.visit(cx, read, `std:${name}`, text !== undefined ? text : "", name === "Bun" ? "bun" : `node:${name}`);
+    return this.visit(cx, read, `std:${name}`, text !== undefined ? text : "", name === "Bun" ? "bun" : `std:${name}`);
   }
 
   /** @throws {CompileError | Error | IoError} */
@@ -168,14 +168,14 @@ class Loader {
   /** @throws {CompileError | Error | IoError} */
   target(this: Mut<this>, cx: Mut<Compilation>, read: Ref<Reader>, path: string, key: string, s: Ref<Stmt>, specifier: string, importing: Ref<Stmt[]>): Module {
     const std = path.startsWith("std:");
-    if (specifier === "fish:engine") {
-      if (!cx.session.engineHook) throw new CompileError("E0903", "'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", s.start, s.end);
-      return this.visit(cx, read, "std:fish:engine", ENGINE_HOOK, "fish:engine");
+    if (specifier === "std:engine") {
+      if (!cx.session.engineHook) throw new CompileError("E0903", "'std:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", s.start, s.end);
+      return this.visit(cx, read, "std:engine", ENGINE_HOOK, "std:engine");
     }
     if (specifier.startsWith("rust:")) return this.rustModule(cx, read, key, specifier.slice("rust:".length as i64), s);
     // A bare name the importing file's own fish.toml depends on is that Fish package, even one
-    // Node also has; `node:` always means the built-in, and any other bare name is npm's.
-    const lib = this.fish !== undefined && !std && !/^(\.\.?(\/|$)|node:)/.test(specifier) ? dependencyLib(this.fish, path, specifier, { start: s.start, end: s.end }) : undefined;
+    // Node also has; `std:` and `node:` always mean the built-in, and any other bare name is npm's.
+    const lib = this.fish !== undefined && !std && !/^(\.\.?(\/|$)|node:|std:)/.test(specifier) ? dependencyLib(this.fish, path, specifier, { start: s.start, end: s.end }) : undefined;
     if (lib !== undefined) {
       const text = readWith(read, lib);
       let target = this.visit(cx, read, lib, text, relative(dirname(this.entry), lib));
@@ -192,6 +192,13 @@ class Loader {
     }
     const named = stdModule(specifier);
     if (named !== undefined) return this.std(cx, read, named);
+    // Std's own modules had `fish:` names once; saying where one went beats npm not having it.
+    if (specifier.startsWith("fish:")) {
+      const moved = specifier.slice("fish:".length as i64);
+      const now = stdModule(`std:${moved}`) !== undefined ? `; this one is 'std:${moved}'` : "";
+      throw new CompileError("E0902", `'${specifier}' names no module: std's modules are named 'std:'${now}`, s.start, s.end);
+    }
+    if (specifier.startsWith("std:")) throw new CompileError("E0902", `std has no module named '${specifier.slice("std:".length as i64)}'; it has ${stdModuleNames().map((n) => `'${n}'`).join(", ")}`, s.start, s.end);
     if (!/^\.\.?(\/|$)/.test(specifier)) return this.packageModule(cx, path, specifier, s, importing);
     // A dependency builds from its own files, which its checksum covers, and reaches others by name,
     // whether the path climbs out as written or through a link.
@@ -580,7 +587,7 @@ function membersUsed(statements: Ref<Stmt[]>, name: string): { name: string; sta
 function packageExports(ids: Mut<Ids>, reader: Mut<DeclarationReader>, from: string, specifier: string, s: Ref<Stmt>, entry: string): Exports {
   // A name a Node module has is that module, unless an npm package of that name is installed, as
   // a bundler takes it.
-  const found = specifier.startsWith("node:") ? undefined : findTypings(from, specifier);
+  const found = specifier.startsWith("node:") || specifier.startsWith("std:") ? undefined : findTypings(from, specifier);
   if (found === undefined || ("missing" in found && NODE_MODULES.has(specifier.split("/")[0]!))) {
     throw new CompileError("E0908", `'${specifier}' is a Node module Fish's std doesn't have yet`, s.start, s.end);
   }
@@ -642,8 +649,14 @@ function globalsIn(statements: Ref<Stmt[]>): string[] {
   return found;
 }
 
-// The names of std's modules, as its table has them.
-const STD_NAMES = new Set<string>(Object.keys(STD_MODULES));
+// The names of std's modules a program may also write bare, as its table has them.
+function bareNames(): Set<string> {
+  let names = new Set<string>();
+  for (const name of Object.keys(STD_MODULES)) if (!STD_ONLY.has(name)) names.add(name);
+  return names;
+}
+
+const STD_NAMES = bareNames();
 
 // The file a statement imports from, or re-exports from.
 export function specifierOf(s: Ref<Stmt>): string | undefined {
@@ -1021,7 +1034,7 @@ function linkOf(ids: Mut<Ids>, modules: Mut<Module[]>, index: usize, indexOf: Re
       if (s.named !== undefined) {
         for (const sp of s.named) {
           if (modules[to]!.path === "std:buffer" && sp.name === "Buffer") {
-            if (sp.alias !== undefined && sp.alias !== "Buffer") throw new CompileError("E0907", "Buffer is a global, so import it under its own name, as in 'import { Buffer } from \"node:buffer\"'", sp.start, sp.end);
+            if (sp.alias !== undefined && sp.alias !== "Buffer") throw new CompileError("E0907", "Buffer is a global, so import it under its own name, as in 'import { Buffer } from \"std:buffer\"'", sp.start, sp.end);
             continue;
           }
           bindIn(l.imports, sp.alias !== undefined ? sp.alias : sp.name, to, sp.name, sp);
@@ -1072,7 +1085,7 @@ function linkOf(ids: Mut<Ids>, modules: Mut<Module[]>, index: usize, indexOf: Re
     const from = indexOf.get(global.path);
     if (from !== undefined && !l.own.has(name) && !l.imports.has(name) && !spaces.has(name)) spaces.set(name, { from, explicit: false });
   }
-  // A std module's value members imported by name, as `import { argv } from "node:process"`.
+  // A std module's value members imported by name, as `import { argv } from "std:process"`.
   let valued = new Map<string, "value" | "table">();
   for (const [alias, imp] of l.imports) {
     const kind = valuesOf(modules[imp.from]!).get(imp.name);

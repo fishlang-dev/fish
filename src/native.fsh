@@ -740,7 +740,7 @@ static void fsh_backtrace(void) {
   if (!fsh_rt_frames) return;
   fputs("stack backtrace:\n", stderr);
   const char *at = fsh_panic_line && strncmp(fsh_panic_line, "panicked at ", 12) == 0 ? fsh_panic_line + 12 : NULL;
-  if (at && (strncmp(at, "<fish std>", 10) == 0 || strncmp(at, "node:", 5) == 0 || strncmp(at, "fish:", 5) == 0)) at = NULL;
+  if (at && (strncmp(at, "<fish std>", 10) == 0 || strncmp(at, "std:", 4) == 0)) at = NULL;
   int64_t n = 0;
   for (fsh_frame *f = fsh_rt_frames; f; f = f->prev, n++) {
     if (n == 64) {
