@@ -166,11 +166,13 @@ export function built(dir: string, name: string, source: string): string {
   return out;
 }
 
-// A TCP port on 127.0.0.1 that was free a moment ago, asked of a Node child process, for a server
-// that can't report the port it bound.
+// A TCP port on 127.0.0.1 that was free a moment ago, for a server that can't report the port it
+// bound: a Fish program binds port 0, prints the port the system gave it, and lets it go.
 export function freePort(): i64 {
-  const script = `const s = require("node:net").createServer().listen(0, "127.0.0.1", () => { console.log(s.address().port); s.close(); });`;
-  const run = spawnSync("node", ["-e", script]);
+  const dir = scratch("fish-port-");
+  const out = built(dir, "port", `async function main(): Promise<void> throws IoError {\n  const listener = await TcpListener.bind("127.0.0.1", 0);\n  console.log(listener.port);\n}\n`);
+  const run = spawnSync(out, []);
+  removed(dir);
   const port = parseInt(text(run.stdout).trim());
   assert(port !== null, `no free port: ${text(run.stderr)}`);
   return port;

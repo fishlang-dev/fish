@@ -1,5 +1,6 @@
-// TLS between Fish and Bun, both ways, with the test-only certificates in
-// tests/fixtures/tls. Bun's side runs as a child process in the background under `sh`.
+// TLS between Fish and implementations that aren't Fish's, both ways, with the test-only
+// certificates in tests/fixtures/tls: OpenSSL's own server answers Fish's client, and curl fetches
+// from Fish's server. The other side runs as a child process in the background under `sh`.
 //
 // Left out: "a stream already speaking TLS refuses to start it again, leaking nothing". It stands a
 // module in for std's own by adding it to std's module table in process, as only std may start
@@ -53,35 +54,33 @@ async function main(): Promise<void> throws IoError {
 `;
 }
 
-test("a Fish client fetches from Bun's HTTPS server, and refuses it untrusted", () => {
+test("a Fish client fetches from OpenSSL's HTTPS server, and refuses it untrusted", () => {
   const tmp = scratch("fish-tls-");
   const binary = built(tmp, "client", client());
-  const server = join(tmp, "server.ts");
-  write(server, `const dir = ${JSON.stringify(fixtures())};
-const server = Bun.serve({
-  port: 0,
-  hostname: "127.0.0.1",
-  tls: { cert: Bun.file(dir + "/server.pem"), key: Bun.file(dir + "/server-key.pem") },
-  fetch: (req) => new Response("bun " + new URL(req.url).pathname),
-});
-console.log(server.port);
-`);
+  // `-WWW` answers a GET with the file of its path, from the directory it runs in.
+  const www = join(tmp, "www");
+  try {
+    mkdirSync(www);
+  } catch (e) {
+    assert(false, e.message);
+  }
+  write(join(www, "x"), "openssl /x");
+  const port = freePort();
   // Each client run's exit code, then its stdout and stderr, in files of their own.
-  const script = `bun "$1" > "$2/port" 2> "$2/bun.err" & peer=$!
+  const script = `cd "$5" && openssl s_server -quiet -accept "$6" -cert "$7/server.pem" -key "$7/server-key.pem" -WWW > /dev/null 2> "$2/openssl.err" & peer=$!
 n=0
-while ! grep -q . "$2/port" 2> /dev/null && [ $n -lt 200 ]; do sleep 0.05; n=$((n + 1)); done
-port=$(head -n 1 "$2/port")
-env FISH_LEAKS=1 "$3" "https://localhost:$port/x" "$4" > "$2/out1" 2> "$2/err1"; echo $? > "$2/code1"
-env FISH_LEAKS=1 "$3" "https://localhost:$port/x" "" > "$2/out2" 2> "$2/err2"; echo $? > "$2/code2"
+until curl -s -k -o /dev/null "https://localhost:$6/x" || [ $n -ge 200 ]; do sleep 0.05; n=$((n + 1)); done
+env FISH_LEAKS=1 "$3" "https://localhost:$6/x" "$4" > "$2/out1" 2> "$2/err1"; echo $? > "$2/code1"
+env FISH_LEAKS=1 "$3" "https://localhost:$6/x" "" > "$2/out2" 2> "$2/err2"; echo $? > "$2/code2"
 kill $peer`;
-  spawnSync("sh", ["-c", script, "sh", server, tmp, binary, join(fixtures(), "ca.pem")]);
-  same(readText(join(tmp, "bun.err")), "", "Bun's stderr");
-  same(`${readText(join(tmp, "code1")).trim()} ${readText(join(tmp, "err1"))}${readText(join(tmp, "out1"))}`, "0 200 bun /x\n", "the trusting client's exit code, stderr and output");
+  spawnSync("sh", ["-c", script, "sh", "", tmp, binary, join(fixtures(), "ca.pem"), www, `${port}`, fixtures()]);
+  same(readText(join(tmp, "openssl.err")), "", "OpenSSL's stderr");
+  same(`${readText(join(tmp, "code1")).trim()} ${readText(join(tmp, "err1"))}${readText(join(tmp, "out1"))}`, "0 200 openssl /x\n", "the trusting client's exit code, stderr and output");
   same(`${readText(join(tmp, "code2")).trim()} ${readText(join(tmp, "err2"))}${readText(join(tmp, "out2"))}`, "0 UNABLE_TO_GET_ISSUER_CERT_LOCALLY certificate verify failed: unable to get local issuer certificate\n", "the untrusting client's exit code, stderr and output");
   removed(tmp);
 }, { timeout: 60_000 });
 
-test("Bun's fetch reaches a Fish HTTPS server", () => {
+test("curl reaches a Fish HTTPS server, trusting the test CA", () => {
   const tmp = scratch("fish-tls-");
   const binary = built(tmp, "server", `import { readFileSync } from "node:fs";
 
@@ -95,21 +94,15 @@ async function main(): Promise<void> throws IoError {
 `);
   // A port free a moment ago, since the server's stdout is buffered until it exits.
   const port = freePort();
-  const fetcher = join(tmp, "fetch.ts");
-  write(fetcher, `const ca = await Bun.file(${JSON.stringify(join(fixtures(), "ca.pem"))}).text();
-let res;
-for (let tries = 0; !res && tries < 100; tries++) {
-  res = await fetch("https://localhost:${port}/y", { tls: { ca } }).catch(() => Bun.sleep(50).then(() => undefined));
-}
-if (!res) console.log("the Fish server never answered");
-else console.log(res.status, await res.text());
-`);
+  // curl prints the body, then the status after a space; tried until the server is up.
   const script = `"$1" "$2" "$3" > /dev/null 2>&1 & server=$!
-bun "$4"
+n=0
+until body=$(curl -sS --cacert "$4" -w " %{http_code}" "https://localhost:$3/y" 2> /dev/null) || [ $n -ge 100 ]; do sleep 0.05; n=$((n + 1)); done
+if [ -z "$body" ]; then echo "the Fish server never answered"; else echo "\${body##* } \${body% *}"; fi
 kill $server`;
-  const run = spawnSync("sh", ["-c", script, "sh", binary, fixtures(), `${port}`, fetcher]);
-  same(text(run.stderr), "", "Bun's stderr");
-  same(text(run.stdout), `200 fish https://localhost:${port}/y\n`, "what Bun's fetch got");
+  const run = spawnSync("sh", ["-c", script, "sh", binary, fixtures(), `${port}`, join(fixtures(), "ca.pem")]);
+  same(text(run.stderr), "", "the script's stderr");
+  same(text(run.stdout), `200 fish https://localhost:${port}/y\n`, "what curl got");
   removed(tmp);
 }, { timeout: 60_000 });
 

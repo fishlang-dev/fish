@@ -369,20 +369,40 @@ function main() {
   removed(root);
 }, { timeout: 120_000 });
 
-// A server answering one request with "ok" and writing what it was sent: its method, path, x-tag
-// header and body.
+// A Fish program answering one request with "ok" and writing what it was sent: its method, path,
+// x-tag header and body. It is built without a sanitizer, so only the client is instrumented.
 function server(): string {
-  return String.raw`const fs = require("node:fs");
-const [portFile, seenFile] = process.argv.slice(2);
-const s = require("node:http").createServer((req, res) => {
-  let body = "";
-  req.on("data", (c) => (body += c));
-  req.on("end", () => {
-    fs.writeFileSync(seenFile, req.method + " " + new URL(req.url, "http://h").pathname + " " + (req.headers["x-tag"] ?? null) + " " + body);
-    res.end("ok");
-  });
-});
-s.listen(0, "127.0.0.1", () => fs.writeFileSync(portFile + ".part", String(s.address().port)) || fs.renameSync(portFile + ".part", portFile));
+  return String.raw`import { renameSync, writeFileSync } from "std:fs";
+
+// Answers one request with "ok", writing its method, path, x-tag header and body to the file its
+// second argument names, once it has told the port it listens on through the file its first names.
+async function main(): Promise<void> throws IoError {
+  const [portFile, seenFile] = [process.argv[2]!, process.argv[3]!];
+  const listener = await TcpListener.bind("127.0.0.1", 0);
+  writeFileSync(portFile + ".part", String(listener.port));
+  renameSync(portFile + ".part", portFile);
+  const conn = await listener.accept();
+  let got: u8[] = [];
+  let head = -1;
+  let length = 0;
+  while (head < 0 || got.length < (head as usize) + length) {
+    const more = await conn.read(4096);
+    if (more.length === 0) break;
+    for (const b of more) got.push(b);
+    const sofar = new TextDecoder().decode(got);
+    if (head < 0 && sofar.includes("\r\n\r\n")) {
+      head = sofar.indexOf("\r\n\r\n") + 4;
+      for (const line of sofar.slice(0, head).split("\r\n")) if (line.toLowerCase().startsWith("content-length:")) length = (parseInt(line.slice(15).trim()) ?? 0) as usize;
+    }
+  }
+  const request = new TextDecoder().decode(got);
+  const lines = request.slice(0, head < 0 ? request.length as i64 : head).split("\r\n");
+  const [method, path] = [lines[0]!.split(" ")[0]!, lines[0]!.split(" ")[1]!.split("?")[0]!];
+  let tag = "null";
+  for (const line of lines) if (line.toLowerCase().startsWith("x-tag:")) tag = line.slice(6).trim();
+  writeFileSync(seenFile, method + " " + path + " " + tag + " " + (head < 0 ? "" : request.slice(head)));
+  await conn.write(new TextEncoder().encode("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"));
+}
 `;
 }
 
@@ -399,15 +419,18 @@ function readOr(path: string): string {
 test("an address-sanitized fetch sends the method, headers and body it was given", async () => {
   if (!can("address")) return;
   const root = scratch("fish-sanitize-");
-  const script = join(root, "server.cjs");
-  write(script, server());
+  const peer = join(root, "peer");
+  made(peer);
+  write(join(peer, "main.fsh"), server());
+  const madePeer = fishc(peer, ["build", "main.fsh", "-o", "server"]);
+  same(madePeer.err, "", "building the server");
   const portFile = join(root, "port");
   const seenFile = join(root, "seen");
   let node: Subprocess | null = null;
   try {
-    node = Bun.spawn(["node", script, portFile, seenFile], { stdout: "ignore", stderr: "ignore" });
+    node = Bun.spawn([join(peer, "server"), portFile, seenFile], { stdout: "ignore", stderr: "ignore" });
   } catch (e) {
-    assert(false, `can't start node: ${e.message}`);
+    assert(false, `can't start the server: ${e.message}`);
   }
   const deadline = Date.now() + 5000;
   while (readOr(portFile) === "" && Date.now() < deadline) await sleep(20);

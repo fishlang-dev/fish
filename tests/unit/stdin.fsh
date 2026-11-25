@@ -14,16 +14,17 @@ function echo(): string {
 `;
 }
 
-// Writes each piece of the JSON array of byte arrays its first argument names to stdout, synchronously
-// so each is its own write, pausing its second argument's milliseconds after each.
+// A program writing each piece of the JSON array of byte arrays its first argument names to stdout,
+// each in a write of its own, pausing its second argument's milliseconds after each.
 function feeder(): string {
-  return `const fs = require("node:fs");
-const pieces = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-const pause = Number(process.argv[3]);
-const wait = new Int32Array(new SharedArrayBuffer(4));
-for (const p of pieces) {
-  fs.writeSync(1, Buffer.from(p));
-  Atomics.wait(wait, 0, 0, pause);
+  return `import { readFileSync, writeSync } from "std:fs";
+async function main(): Promise<void> throws IoError | JsonError {
+  const pieces = JSON.parse<u8[][]>(readFileSync(process.argv[2]!, "utf8"));
+  const pause = parseInt(process.argv[3]!) ?? 0;
+  for (const p of pieces) {
+    writeSync(1, p);
+    await sleep(pause);
+  }
 }
 `;
 }
@@ -39,11 +40,10 @@ function write(path: string, contents: string): void {
 // Runs `binary` with each piece written to its stdin with a pause before the next, then closed,
 // giving its stdout; it must exit with 0 and report no leaks.
 function piped(dir: string, binary: string, pieces: Ref<u8[][]>, pause: i64): string {
-  const feed = join(dir, "feed.cjs");
-  write(feed, feeder());
+  const feed = built(dir, "feed", feeder());
   const input = join(dir, "pieces.json");
   write(input, JSON.stringify(pieces));
-  const run = spawnSync("sh", ["-c", `node "$1" "$2" "$3" | env FISH_LEAKS=1 "$4"`, "sh", feed, input, `${pause}`, binary]);
+  const run = spawnSync("sh", ["-c", `"$1" "$2" "$3" | env FISH_LEAKS=1 "$4"`, "sh", feed, input, `${pause}`, binary]);
   const err = text(run.stderr);
   assert(run.status === 0, `exited with ${run.status ?? -1}: ${err}`);
   assert(!err.includes("fish: leaked"), `leaked: ${err}`);
