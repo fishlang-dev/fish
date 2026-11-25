@@ -1,0 +1,7 @@
+script 70d129e0779332d0f94ea0749a0b942519dbcb3ecc23e63b1b421c68cbd91e97
+status 0
+stdout 5
+/tmp
+
+stderr 0
+

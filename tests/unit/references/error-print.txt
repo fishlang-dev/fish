@@ -1,0 +1,18 @@
+script 13bcee8c8ad9017cb0d021579f4fd6bf07d58ddeeca69392bee12c8c01a4d8a9
+status 0
+stdout 500
+[Error: x]
+[Error]
+[NotFound [Error]: nf]
+[MyError: m] [Named: n] { extra: [ 1 ] } [Coded [Error]] { code: 1 }
+[Coded [Error]: cd] { code: 404, [cause]: [Error: in] }
+{ e: [Error: x] { [cause]: [Error: y] } }
+[ [Error: in array] ]
+[Error: a] { [cause]: [Error: b] { [cause]: [NotFound [Error]: c] } }
+[Error: long message long message long message long message long message long message long message long message ]
+[Error: deep] {
+  [cause]: [Error: 1] { [cause]: [Error: 2] { [cause]: [Error] } }
+}
+
+stderr 0
+

@@ -1,0 +1,12 @@
+script 067d4a4c9be75f1283c17f83afa461f27fb119d48e7ad1fcff6d150da618cf44
+status 0
+stdout 357
+31,139,8,0,0,0,0,0,2,19,203,72,205,201,201,7,0,134,166,16,54,5,0,0,0 120,156,203,72,205,201,201,7,0,6,44,2,21 203,72,205,201,201,7,0
+hello hello hello hello hello
+true true
+incorrect header check -3 Z_DATA_ERROR
+unexpected end of file -5 Z_BUF_ERROR
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received 10 none ERR_OUT_OF_RANGE
+
+stderr 0
+

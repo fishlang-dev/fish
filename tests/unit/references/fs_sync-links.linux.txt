@@ -1,0 +1,29 @@
+script 46888c10adfd5e43520c8af09b15ab43090066a4c2a7131dcf28ae5e77d26cfc
+status 1
+stdout 0
+
+stderr 642
+node:fs:1879
+  binding.symlink(
+          ^
+
+Error: ENOENT: no such file or directory, symlink '' -> 's4'
+    at symlinkSync (node:fs:1879:11)
+    at [eval]:5:3
+    at [eval]:35:3
+    at runScriptInThisContext (node:internal/vm:219:10)
+    at node:internal/process/execution:451:12
+    at [eval]-wrapper:6:24
+    at runScriptInContext (node:internal/process/execution:449:60)
+    at evalFunction (node:internal/process/execution:283:30)
+    at evalTypeScript (node:internal/process/execution:295:3)
+    at node:internal/main/eval_string:71:3 {
+  errno: -2,
+  code: 'ENOENT',
+  syscall: 'symlink',
+  path: '',
+  dest: 's4'
+}
+
+Node.js v24.10.0
+

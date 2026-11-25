@@ -10,7 +10,7 @@ import { CompileError, formatError } from "../../src/diag.fsh";
 import { build } from "../../src/main.fsh";
 import { compile, parsePattern, type RegexTables } from "../../src/regex.fsh";
 import { cachedSession } from "../../src/stdcache.fsh";
-import { same } from "./support.fsh";
+import { ranFor, reference, same } from "./support.fsh";
 
 type Case = { p: string; f: string; s: string };
 
@@ -64,17 +64,17 @@ function remove(dir: string): void {
   } catch (_e) {}
 }
 
-// JavaScript's answer for each case, from Bun.
-function asked(dir: string, mode: string, cases: Ref<Case[]>): string[] {
+// JavaScript's answer for each case, as recorded from Bun under `key`.
+function asked(key: string, dir: string, mode: string, cases: Ref<Case[]>): string[] {
   try {
     const script = join(dir, "oracle.js");
     const file = join(dir, "cases.json");
+    const listed = `[${cases.map((c) => `[${JSON.stringify(c.p)},${JSON.stringify(c.f)},${JSON.stringify(c.s)}]`).join(",\n")}]`;
     writeFileSync(script, oracle());
-    writeFileSync(file, `[${cases.map((c) => `[${JSON.stringify(c.p)},${JSON.stringify(c.f)},${JSON.stringify(c.s)}]`).join(",\n")}]`);
-    const run = spawnSync("bun", [script, mode, file]);
-    const out = text(run.stdout);
-    assert(run.status === 0, `bun failed: ${text(run.stderr)}`);
-    return JSON.parse<string[]>(out);
+    writeFileSync(file, listed);
+    const run = reference(key, `${oracle()}\n${mode}\n${listed}`, () => ranFor("bun", [script, mode, file]));
+    assert(run.status === 0, `bun failed: ${run.stderr}`);
+    return JSON.parse<string[]>(run.stdout);
   } catch (e) {
     assert(false, e.message);
     return [];
@@ -103,7 +103,7 @@ test("regex syntax is accepted and refused as JavaScript does", () => {
     cases.push({ p, f: FLAGS[random(FLAGS.length)]!, s: "" });
   }
   const dir = temp();
-  const js = asked(dir, "syntax", cases);
+  const js = asked("regex-syntax", dir, "syntax", cases);
   remove(dir);
   let wrong: string[] = [];
   let t = tables();
@@ -154,7 +154,7 @@ function corpus(dir: string, mode: string, count: usize): { cases: Case[]; wants
       tried.push({ p, f, s });
     } catch (_e) {}
   }
-  const answers = asked(dir, mode, tried);
+  const answers = asked(`regex-${mode}`, dir, mode, tried);
   let cases: Case[] = [];
   let wants: string[] = [];
   for (let i: usize = 0; i < tried.length && cases.length < count; i++) {

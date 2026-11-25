@@ -1,0 +1,19 @@
+script 8779be28437961192299e376b6595d08d3fe23a8353e96e9d35922ebf1d98040
+status 0
+stdout 167
+"a'b"
+1
+-0
+true
+null
+[ 1, 'a' ]
+{ a: { b: { c: [Object] } } }
+P { x: 1, y: [ 1, 2 ] }
+Map(1) { 'k' => [ 1 ] }
+Set(1) { 'x' }
+'u'
+true false true false
+true true false
+
+stderr 0
+

@@ -2,7 +2,7 @@
 // JavaScript under node, which must print the same text. A data enum has no JavaScript form, so its
 // line is written out.
 import { spawnSync } from "node:child_process";
-import { built, removed, same, scratch, text } from "./support.fsh";
+import { built, ranFor, reference, removed, same, scratch, text } from "./support.fsh";
 
 function fish(): string {
   return `type P = { name: string; tags: string[]; n?: i64; v: i64 | null };
@@ -60,8 +60,8 @@ test("console.log prints values as node prints them", () => {
   const dir = scratch("fish-print-");
   const out = built(dir, "main", fish());
   const ran = spawnSync("env", ["FISH_LEAKS=1", out]);
-  const want = spawnSync("node", ["-e", node()]);
-  same(text(ran.stdout), text(want.stdout), "the output");
+  const want = reference("print-values", node(), () => ranFor("node", ["-e", node()]));
+  same(text(ran.stdout), want.stdout, "the output");
   same(text(ran.stderr), "", "the program's stderr");
   removed(dir);
 }, { timeout: 30_000 });

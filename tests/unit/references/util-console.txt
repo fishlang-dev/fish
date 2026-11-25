@@ -1,0 +1,16 @@
+script be28e7b4ca51ad548c93f7a6f154e930be2b7f6b3bcdcd0c03c7f4a4f05c17e7
+status 0
+stdout 153
+xs has 3 items: [ 1, 2, 3, [length]: 3 ]
+a-1 and { b: [ 2 ] }
+100%%
+100% done
+a b { x: 'y' }
+no specifiers 1 two P { x: 1, y: [ 1, 2 ] }
+1 %s 2
+styled
+3
+
+stderr 20
+written to stderr 4
+

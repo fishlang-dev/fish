@@ -1,46 +1,11 @@
 // Generates src/casemap.fsh: the C runtime's case tables, taken from JavaScript's own
 // toUpperCase and toLowerCase and its Cased and Case_Ignorable properties, so Fish's case
-// mapping matches the JavaScript engine that made them. Fish's case functions are built from
-// these tables, so the mappings are asked of a Bun child process, as a reference only.
+// mapping matches the JavaScript engine that made them. The tables are a recorded answer, kept
+// with the tests' other reference answers; scripts/references.fsh records them anew.
 //   fishc run scripts/casemap.fsh
-import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-
-// The mappings and properties as JavaScript has them: each simple mapping a pair, each special one
-// its code point then what it maps to, and each property a list of inclusive ranges.
-type Tables = { upper: i64[][]; upperSpecial: i64[][]; lower: i64[][]; lowerSpecial: i64[][]; cased: i64[][]; ignorable: i64[][]; unicode: string };
-
-function script(): string {
-  return `function mapping(change) {
-  const simple = [];
-  const special = [];
-  for (let cp = 0; cp <= 0x10ffff; cp++) {
-    if (cp >= 0xd800 && cp < 0xe000) continue;
-    const to = [...change(String.fromCodePoint(cp))].map((c) => c.codePointAt(0));
-    if (to.length === 1 && to[0] === cp) continue;
-    if (to.length > 3) throw new Error("U+" + cp.toString(16) + " maps to " + to.length + " code points; widen the special tables");
-    if (to.length === 1) simple.push([cp, to[0]]);
-    else special.push([cp, ...to]);
-  }
-  return [simple, special];
-}
-function ranges(property) {
-  const found = [];
-  for (let cp = 0; cp <= 0x10ffff; cp++) {
-    if (cp >= 0xd800 && cp < 0xe000) continue;
-    if (!property.test(String.fromCodePoint(cp))) continue;
-    const last = found.at(-1);
-    if (last && last[1] === cp - 1) last[1] = cp;
-    else found.push([cp, cp]);
-  }
-  return found;
-}
-const [upper, upperSpecial] = mapping((s) => s.toUpperCase());
-const [lower, lowerSpecial] = mapping((s) => s.toLowerCase());
-console.log(JSON.stringify({ upper, upperSpecial, lower, lowerSpecial, cased: ranges(/\\p{Cased}/u), ignorable: ranges(/\\p{Case_Ignorable}/u), unicode: process.versions.unicode ?? "unknown" }));
-`;
-}
+import { recordedTables } from "./casetables.fsh";
 
 function hex(n: i64): string {
   const digits = "0123456789abcdef";
@@ -68,10 +33,7 @@ function specials(name: string, rows: Ref<i64[][]>): string {
 }
 
 function main(): void throws Error | JsonError | IoError {
-  const run = spawnSync("bun", ["-e", script()]);
-  const decoder = new TextDecoder();
-  if (run.status !== 0) throw new Error(`bun failed: ${decoder.decode(run.stderr)}`);
-  const t = JSON.parse<Tables>(decoder.decode(run.stdout));
+  const t = recordedTables(join(import.meta.dir, ".."));
   const c = [
     pairs("fsh_upper", t.upper),
     pairs("fsh_lower", t.lower),
