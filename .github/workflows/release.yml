@@ -91,7 +91,7 @@ jobs:
     if: needs.cut.outputs.published == 'no'
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
+        os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -143,7 +143,7 @@ jobs:
     if: ${{ !failure() && !cancelled() && needs.cut.result == 'success' && needs.cut.outputs.promoted == 'no' }}
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
+        os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 300
     steps:
