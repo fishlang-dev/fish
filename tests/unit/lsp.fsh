@@ -1,10 +1,9 @@
-// Checking documents and splitting frames in process, through the
-// compiler's own functions, and `fishc lsp` itself as the native fishc. A Fish child's output comes
-// whole once it ends, while the server is driven message by message, so each server test runs a
-// Bun driver, a reference harness only, that starts `fishc lsp`, speaks the protocol to it, and
-// prints what it saw once done: one fact per line, a name, a tab and a JSON string. Objects in a
-// fact are written with their keys sorted, as Fish's JSON.stringify writes them, so the expected
-// JSON below is written that way too.
+// Checking documents and splitting frames in process, through the compiler's own functions, and
+// `fishc lsp` itself as the native fishc. A Fish child's output comes whole once it ends, while the
+// server is driven message by message, so each server test builds a Fish driver that starts `fishc
+// lsp` behind two named pipes, speaks the protocol to it, and prints what it saw once done: one fact
+// per line, a name, a tab and a JSON string. Objects in a fact are written with their keys sorted,
+// so the expected JSON below is written that way too.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -16,7 +15,7 @@ import { diagnose, frames } from "../../src/lsp.fsh";
 import { analyze } from "../../src/main.fsh";
 import { load } from "../../src/modules.fsh";
 import { cachedSession } from "../../src/mathlib.fsh";
-import { fishcPath, removed, same, scratch, text } from "./support.fsh";
+import { built, fishcPath, removed, same, scratch, text } from "./support.fsh";
 
 // A file in the test's directory holding `src`, as an editor's file would be on disk.
 function file(dir: string, name: string, src: string): string {
@@ -145,121 +144,215 @@ test("frames are split by their byte lengths, and a partial one waits", () => {
   assert(next === ['{"c":3}'], `the bodies after the rest: ${JSON.stringify(next)}`);
 });
 
-// What every driver starts with: a running `fishc lsp` and the messages it has sent, as the Bun
-// test's `server()` and `started()`.
+// What every driver starts with: a running `fishc lsp` and the messages it has sent, the JSON it
+// reads them as, and the requests and notifications the tests send.
 function prelude(): string {
-  return String.raw`const { join } = require("node:path");
-const fishc = process.argv[2];
-const facts = {};
-const procs = [];
-function canon(v) {
-  const s = JSON.stringify(v, (_k, x) => (x !== null && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) : x));
-  return s === undefined ? "undefined" : s;
-}
-const frame = (body) => "Content-Length: " + Buffer.byteLength(body) + "\r\n\r\n" + body;
-function frames(buffer) {
-  const bodies = [];
-  let at = 0;
-  for (;;) {
-    const end = buffer.indexOf("\r\n\r\n", at);
-    if (end < 0) break;
-    const length = /content-length: *(\d+)/i.exec(buffer.subarray(at, end).toString());
-    const start = end + 4;
-    if (length === null) {
-      at = start;
-      continue;
-    }
-    const size = Number(length[1]);
-    if (buffer.length < start + size) break;
-    bodies.push(buffer.subarray(start, start + size).toString());
-    at = start + size;
+  return String.raw`import { open, FileHandle } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import type { Subprocess } from "bun";
+
+// A JSON value with its objects' keys sorted, so two runs print it alike.
+function canon(v: Ref<Json>): string {
+  if (v === null) return "null";
+  if (typeof v === "boolean") return v ? "true" : "false";
+  if (typeof v === "number") return String(v);
+  if (typeof v === "string") return JSON.stringify(v);
+  if (Array.isArray(v)) {
+    let parts: string[] = [];
+    for (const x of v) parts.push(canon(x));
+    return "[" + parts.join(",") + "]";
   }
-  return { bodies, rest: buffer.subarray(at) };
+  let keys: string[] = [];
+  for (const k of v.keys()) keys.push(k);
+  keys.sort();
+  let parts: string[] = [];
+  for (const k of keys) parts.push(JSON.stringify(k) + ":" + canon(v.get(k)!));
+  return "{" + parts.join(",") + "}";
 }
-function server() {
-  const proc = Bun.spawn([fishc, "lsp"], { stdin: "pipe", stdout: "pipe", stderr: "ignore" });
-  procs.push(proc);
-  const received = [];
-  const waiting = [];
-  (async () => {
-    let pending = Buffer.alloc(0);
-    for await (const chunk of proc.stdout) {
-      const { bodies, rest } = frames(Buffer.concat([pending, Buffer.from(chunk)]));
-      pending = rest;
-      received.push(...bodies.map((b) => JSON.parse(b)));
-      waiting.splice(0).forEach((go) => go());
-    }
-  })();
-  const raw = (text) => {
-    proc.stdin.write(text);
-    proc.stdin.flush();
-  };
-  let ids = 0;
-  return {
-    proc,
-    raw,
-    notify: (method, params = {}) => raw(frame(JSON.stringify({ jsonrpc: "2.0", method, params }))),
-    request: (method, params = {}) => {
-      const id = ++ids;
-      raw(frame(JSON.stringify({ jsonrpc: "2.0", id, method, params })));
-      return id;
-    },
-    async next(matches) {
-      const deadline = Date.now() + 10_000;
-      for (;;) {
-        const at = received.findIndex(matches);
-        if (at >= 0) return received.splice(0, at + 1).at(-1);
-        if (Date.now() > deadline) throw new Error("no matching message from the server");
-        await new Promise((go) => {
-          waiting.push(go);
-          setTimeout(go, 100);
-        });
+
+// The member 'key' of an object, or null for anything else or a key it lacks.
+function at(v: Ref<Json>, key: string): Json {
+  if (v instanceof Map) {
+    const got = v.get(key);
+    if (got !== undefined) return got.clone();
+  }
+  return null;
+}
+
+// The element 'i' of an array, or null.
+function item(v: Ref<Json>, i: usize): Json {
+  if (Array.isArray(v) && i < v.length) return v[i]!.clone();
+  return null;
+}
+
+// The elements of an array, or none.
+function items(v: Ref<Json>): Json[] {
+  let out: Json[] = [];
+  if (Array.isArray(v)) for (const x of v) out.push(x.clone());
+  return out;
+}
+
+// A value as a fact prints it: a string as it is, anything else as JSON.
+function shown(v: Ref<Json>): string {
+  return typeof v === "string" ? v : canon(v);
+}
+
+function has(v: Ref<Json>, key: string): boolean {
+  return v instanceof Map && v.has(key);
+}
+
+function frame(body: string): string {
+  return "Content-Length: " + String(new TextEncoder().encode(body).length) + "\r\n\r\n" + body;
+}
+
+function uriOf(path: string): string {
+  return pathToFileURL(path).href;
+}
+
+// A running 'fishc lsp', spoken to through two named pipes, since a child's stdin can't be written
+// while it runs, and the messages it has sent that nothing has taken yet.
+class Server {
+  child: Subprocess;
+  toServer: FileHandle;
+  fromServer: FileHandle;
+  pending: u8[] = [];
+  received: Json[] = [];
+  ids: i64 = 0;
+
+  constructor(child: Subprocess, toServer: FileHandle, fromServer: FileHandle) {
+    this.child = child;
+    this.toServer = toServer;
+    this.fromServer = fromServer;
+  }
+
+  async raw(this: Mut<this>, text: string): Promise<void> throws IoError {
+    await this.toServer.write(new TextEncoder().encode(text));
+  }
+
+  async notify(this: Mut<this>, method: string, params: string = "{}"): Promise<void> throws IoError {
+    await this.raw(frame("{\"jsonrpc\":\"2.0\",\"method\":" + JSON.stringify(method) + ",\"params\":" + params + "}"));
+  }
+
+  async request(this: Mut<this>, method: string, params: string = "{}"): Promise<i64> throws IoError {
+    this.ids += 1;
+    const id = this.ids;
+    await this.raw(frame("{\"jsonrpc\":\"2.0\",\"id\":" + String(id) + ",\"method\":" + JSON.stringify(method) + ",\"params\":" + params + "}"));
+    return id;
+  }
+
+  // Takes whole frames out of what has arrived, parsing each body.
+  private frames(this: Mut<this>): void throws JsonError {
+    for (;;) {
+      const text = new TextDecoder().decode(this.pending);
+      const end = text.indexOf("\r\n\r\n");
+      if (end < 0) return;
+      const length = /content-length: *(\d+)/i.exec(text.slice(0, end));
+      const start = new TextEncoder().encode(text.slice(0, end + 4)).length;
+      if (length === null) {
+        this.pending = this.pending.slice(start as i64);
+        continue;
       }
-    },
-  };
+      const size = (parseInt(length[1]!) ?? 0) as usize;
+      if (this.pending.length < start + size) return;
+      const body = new TextDecoder().decode(this.pending.slice(start as i64, (start + size) as i64));
+      this.pending = this.pending.slice((start + size) as i64);
+      this.received.push(JSON.parse(body));
+    }
+  }
+
+  // The first message 'matches' holds for, dropping those before it, read as they arrive.
+  async next(this: Mut<this>, matches: (m: Json) => boolean): Promise<Json> throws IoError | JsonError {
+    for (;;) {
+      for (let i: usize = 0; i < this.received.length; i++) {
+        if (!matches(this.received[i]!.clone())) continue;
+        const found = this.received[i]!.clone();
+        this.received = this.received.slice((i + 1) as i64);
+        return found;
+      }
+      let buffer: u8[] = new Array<u8>(65536).fill(0);
+      const got = await this.fromServer.read(buffer);
+      if (got.bytesRead === 0) throw new IoError("the server closed its output");
+      for (const b of buffer.slice(0, got.bytesRead)) this.pending.push(b);
+      this.frames();
+    }
+  }
 }
-async function started() {
-  const s = server();
-  const init = s.request("initialize", { capabilities: {} });
-  await s.next((m) => m.id === init);
-  s.notify("initialized");
+
+// 'fishc lsp' started in 'dir', reading one named pipe and writing the other.
+async function server(fishc: string, dir: string, n: i64): Promise<Server> throws IoError {
+  const [inPipe, outPipe] = [join(dir, "lsp-in-" + String(n)), join(dir, "lsp-out-" + String(n))];
+  spawnSync("mkfifo", [inPipe, outPipe]);
+  const child = Bun.spawn(["sh", "-c", "exec \"$1\" lsp < \"$2\" > \"$3\"", "sh", fishc, inPipe, outPipe], { stdout: "ignore", stderr: "ignore" });
+  const toServer = await open(inPipe, "w");
+  const fromServer = await open(outPipe, "r");
+  return new Server(child, toServer, fromServer);
+}
+
+async function started(fishc: string, dir: string, n: i64): Promise<Server> throws IoError | JsonError {
+  let s = await server(fishc, dir, n);
+  const init = await s.request("initialize", "{\"capabilities\":{}}");
+  const _done = await s.next(answering(init));
+  await s.notify("initialized");
   return s;
 }
-const published = (uri) => (m) => m.method === "textDocument/publishDiagnostics" && m.params.uri === uri;
-const diagnostics = (m) => m.params.diagnostics;
-const opened = (s, uri, text) => s.notify("textDocument/didOpen", { textDocument: { uri, languageId: "fish", version: 1, text } });
-const changed = (s, uri, version, text) => s.notify("textDocument/didChange", { textDocument: { uri, version }, contentChanges: [{ text }] });
-async function finish(s) {
-  s.request("shutdown");
-  s.notify("exit");
-  facts.exit = await s.proc.exited;
+
+// Whether a message answers the request 'id', or for 'id' -1, one that answers none.
+function answering(id: i64): (m: Json) => boolean {
+  return (m) => has(m, "id") && canon(at(m, "id")) === (id < 0 ? "null" : String(id));
+}
+
+function published(uri: string): (m: Json) => boolean {
+  return (m) => at(m, "method") === "textDocument/publishDiagnostics" && at(at(m, "params"), "uri") === uri;
+}
+
+function diagnostics(m: Ref<Json>): Json[] {
+  return items(at(at(m, "params"), "diagnostics"));
+}
+
+async function opened(s: Mut<Server>, uri: string, text: string): Promise<void> throws IoError {
+  await s.notify("textDocument/didOpen", "{\"textDocument\":{\"uri\":" + JSON.stringify(uri) + ",\"languageId\":\"fish\",\"version\":1,\"text\":" + JSON.stringify(text) + "}}");
+}
+
+async function changed(s: Mut<Server>, uri: string, version: i64, text: string): Promise<void> throws IoError {
+  await s.notify("textDocument/didChange", "{\"textDocument\":{\"uri\":" + JSON.stringify(uri) + ",\"version\":" + String(version) + "},\"contentChanges\":[{\"text\":" + JSON.stringify(text) + "}]}");
+}
+
+// Shuts the server down as the protocol asks and gives its exit code.
+async function finish(s: Mut<Server>): Promise<string> throws IoError {
+  const _id = await s.request("shutdown");
+  await s.notify("exit");
+  await s.toServer.close();
+  const code = await s.child.exited;
+  return String(code);
 }
 `;
 }
 
-// Printing the facts once `drive()` ends, or the error that stopped it, which kills the servers.
-function finished(): string {
-  return String.raw`drive()
-  .then(
-    () => {},
-    (e) => {
-      facts.error = e.message;
-      for (const p of procs) p.kill(9);
-    },
-  )
-  .then(() => {
-    process.stdout.write(Object.entries(facts).map(([k, v]) => k + "\t" + JSON.stringify(String(v))).join("\n"));
-    process.exit(0);
-  });
-`;
-}
-
-// The facts a driver whose `drive()` body is `driver` printed, with `dir` the directory its files are in.
+// The facts a driver whose body is `driver` printed, with `dir` the directory its files are in.
+// `fishc` and `dir` are in scope there, and `facts`, which it fills; an error that stops it is the
+// fact "error".
 function run(dir: string, driver: string): string {
-  const drv = file(dir, "drive.ts", `${prelude()}\nconst dir = ${JSON.stringify(dir)};\nasync function drive() {\n${driver}\n}\n${finished()}`);
-  const ran = spawnSync("bun", [drv, fishcPath()], { cwd: dir });
-  const failed = ran.error;
-  if (failed !== null) assert(false, `can't run bun: ${failed.message}`);
+  const program = `${prelude()}
+async function drive(fishc: string, dir: string, facts: Mut<Map<string, string>>): Promise<void> throws IoError | JsonError {
+${driver}
+}
+
+async function main(): Promise<void> {
+  let facts = new Map<string, string>();
+  try {
+    await drive(process.argv[2]!, process.argv[3]!, facts);
+  } catch (e) {
+    facts.set("error", e.message);
+  }
+  let lines: string[] = [];
+  for (const [k, v] of facts) lines.push(k + "\\t" + JSON.stringify(v));
+  console.log(lines.join("\\n"));
+}
+`;
+  const out = built(dir, "drive", program);
+  const ran = spawnSync(out, [fishcPath(), dir], { cwd: dir });
   return text(ran.stdout);
 }
 
@@ -288,21 +381,28 @@ function exited(facts: string, code: i64): void {
 
 test("the server starts, refuses what it doesn't know, and shuts down", () => {
   const dir = scratch("fishc-lsp-");
-  const r = run(dir, String.raw`const s = server();
-const init = s.request("initialize", { capabilities: {} });
-facts.init = canon((await s.next((m) => m.id === init)).result);
-s.notify("initialized");
-s.notify("$/somethingNew");
-const unknown = s.request("textDocument/somethingNew");
-facts.unknown = canon((await s.next((m) => m.id === unknown)).error?.code);
-s.notify("textDocument/didChange", { textDocument: { uri: "file:///x.fsh" } });
-facts.log = canon((await s.next((m) => m.method === "window/logMessage")).params.type);
-s.raw(frame("{not json"));
-facts.parse = canon((await s.next((m) => m.id === null)).error?.code);
-const shutdown = s.request("shutdown");
-facts.shutdown = canon((await s.next((m) => m.id === shutdown)).result);
-s.notify("exit");
-facts.exit = await s.proc.exited;`);
+  const r = run(dir, String.raw`let s = await server(fishc, dir, 0);
+const init = await s.request("initialize", "{\"capabilities\":{}}");
+const initialized = await s.next(answering(init));
+facts.set("init", canon(at(initialized, "result")));
+await s.notify("initialized");
+await s.notify("$/somethingNew");
+const unknown = await s.request("textDocument/somethingNew");
+const refused = await s.next(answering(unknown));
+facts.set("unknown", canon(at(at(refused, "error"), "code")));
+await s.notify("textDocument/didChange", "{\"textDocument\":{\"uri\":\"file:///x.fsh\"}}");
+const log = await s.next((m) => at(m, "method") === "window/logMessage");
+facts.set("log", canon(at(at(log, "params"), "type")));
+await s.raw(frame("{not json"));
+const unreadable = await s.next(answering(-1));
+facts.set("parse", canon(at(at(unreadable, "error"), "code")));
+const shutdown = await s.request("shutdown");
+const shut = await s.next(answering(shutdown));
+facts.set("shutdown", canon(at(shut, "result")));
+await s.notify("exit");
+await s.toServer.close();
+const code = await s.child.exited;
+facts.set("exit", String(code));`);
   same(fact(r, "init"), `{"capabilities":{"codeLensProvider":{"resolveProvider":false},"completionProvider":{"triggerCharacters":["."]},"definitionProvider":true,"documentFormattingProvider":true,"hoverProvider":true,"inlayHintProvider":true,"referencesProvider":true,"textDocumentSync":1},"serverInfo":{"name":"fishc"}}`, "initialize's result");
   same(fact(r, "unknown"), "-32601", "an unknown request's error code");
   same(fact(r, "log"), "1", "the logged message's type");
@@ -314,9 +414,11 @@ facts.exit = await s.proc.exited;`);
 
 test("exit without shutdown is a failure, as the protocol says", () => {
   const dir = scratch("fishc-lsp-");
-  const r = run(dir, String.raw`const s = server();
-s.notify("exit");
-facts.exit = await s.proc.exited;`);
+  const r = run(dir, String.raw`let s = await server(fishc, dir, 0);
+await s.notify("exit");
+await s.toServer.close();
+const code = await s.child.exited;
+facts.set("exit", String(code));`);
   exited(r, 1);
   removed(dir);
 }, { timeout: 20_000 });
@@ -327,20 +429,26 @@ test("a document's error is published at its place, and cleared when fixed or cl
   const src = `function main() {\n${line}\n}\n`;
   file(dir, "typo.fsh", src);
   const r = run(dir, `const src = ${JSON.stringify(src)};
-const uri = Bun.pathToFileURL(join(dir, "typo.fsh")).href;
-const s = await started();
-opened(s, uri, src);
-const [d, ...more] = diagnostics(await s.next(published(uri)));
-facts.more = canon(more);
-facts.range = canon(d.range);
-facts.severity = d.severity;
-facts.code = d.code;
-facts.source = d.source;
-changed(s, uri, 2, src.replace("true", "1"));
-facts.fixed = canon(diagnostics(await s.next(published(uri))));
-s.notify("textDocument/didClose", { textDocument: { uri } });
-facts.closed = canon(diagnostics(await s.next(published(uri))));
-await finish(s);`);
+const uri = uriOf(join(dir, "typo.fsh"));
+let s = await started(fishc, dir, 0);
+await opened(s, uri, src);
+const first = await s.next(published(uri));
+const found = diagnostics(first);
+const d = item(at(at(first, "params"), "diagnostics"), 0);
+const more: Json = found.slice(1);
+facts.set("more", canon(more));
+facts.set("range", canon(at(d, "range")));
+facts.set("severity", shown(at(d, "severity")));
+facts.set("code", shown(at(d, "code")));
+facts.set("source", shown(at(d, "source")));
+await changed(s, uri, 2, src.replace("true", "1"));
+const fixed = await s.next(published(uri));
+facts.set("fixed", canon(at(at(fixed, "params"), "diagnostics")));
+await s.notify("textDocument/didClose", "{\\"textDocument\\":{\\"uri\\":" + JSON.stringify(uri) + "}}");
+const closed = await s.next(published(uri));
+facts.set("closed", canon(at(at(closed, "params"), "diagnostics")));
+const code = await finish(s);
+facts.set("exit", code);`);
   const at = line.indexOf("true");
   same(fact(r, "more"), "[]", "the diagnostics after the first");
   same(fact(r, "range"), `{"end":{"character":${at + 4},"line":1},"start":{"character":${at},"line":1}}`, "the error's range");
@@ -358,11 +466,15 @@ test("each function's error in a document is published, in source order", () => 
   const src = 'function a(): i64 {\n  return "x";\n}\nfunction main() {\n  const _n: i64 = true;\n  console.log(a());\n}\n';
   file(dir, "several.fsh", src);
   const r = run(dir, `const src = ${JSON.stringify(src)};
-const uri = Bun.pathToFileURL(join(dir, "several.fsh")).href;
-const s = await started();
-opened(s, uri, src);
-facts.found = canon(diagnostics(await s.next(published(uri))).map((d) => [d.severity, d.code, d.range.start]));
-await finish(s);`);
+const uri = uriOf(join(dir, "several.fsh"));
+let s = await started(fishc, dir, 0);
+await opened(s, uri, src);
+const first = await s.next(published(uri));
+let found: string[] = [];
+for (const d of diagnostics(first)) found.push("[" + canon(at(d, "severity")) + "," + canon(at(d, "code")) + "," + canon(at(at(d, "range"), "start")) + "]");
+facts.set("found", "[" + found.join(",") + "]");
+const code = await finish(s);
+facts.set("exit", code);`);
   same(fact(r, "found"), `[[1,"E0101",{"character":9,"line":1}],[1,"E0101",{"character":18,"line":4}]]`, "the diagnostics");
   exited(r, 0);
   removed(dir);
@@ -373,13 +485,20 @@ test("a document's warnings are published with warning severity, and an error re
   const src = "function main() {\n  const unused = 1;\n  return;\n  print(2);\n}\n";
   file(dir, "warned.fsh", src);
   const r = run(dir, `const src = ${JSON.stringify(src)};
-const uri = Bun.pathToFileURL(join(dir, "warned.fsh")).href;
-const s = await started();
-opened(s, uri, src);
-facts.found = canon(diagnostics(await s.next(published(uri))).map((d) => [d.severity, d.code, d.message, d.range.start]));
-changed(s, uri, 2, src.replace("= 1", "= true + 1"));
-facts.broken = canon(diagnostics(await s.next(published(uri))).map((d) => d.severity));
-await finish(s);`);
+const uri = uriOf(join(dir, "warned.fsh"));
+let s = await started(fishc, dir, 0);
+await opened(s, uri, src);
+const first = await s.next(published(uri));
+let found: string[] = [];
+for (const d of diagnostics(first)) found.push("[" + canon(at(d, "severity")) + "," + canon(at(d, "code")) + "," + canon(at(d, "message")) + "," + canon(at(at(d, "range"), "start")) + "]");
+facts.set("found", "[" + found.join(",") + "]");
+await changed(s, uri, 2, src.replace("= 1", "= true + 1"));
+const broken = await s.next(published(uri));
+let severities: string[] = [];
+for (const d of diagnostics(broken)) severities.push(canon(at(d, "severity")));
+facts.set("broken", "[" + severities.join(",") + "]");
+const code = await finish(s);
+facts.set("exit", code);`);
   same(fact(r, "found"), `[[2,"W0001","unused variable 'unused'; if it's intentional, name it '_unused'",{"character":8,"line":1}],[2,"W0002","unreachable code after 'return'",{"character":2,"line":3}]]`, "the warnings");
   same(fact(r, "broken"), "[1]", "the severities once broken");
   exited(r, 0);
@@ -391,13 +510,15 @@ test("a misspelled name's diagnostic suggests the near name", () => {
   const src = "function main() {\n  const count = 1;\n  print(cont);\n}\n";
   file(dir, "suggest.fsh", src);
   const r = run(dir, `const src = ${JSON.stringify(src)};
-const uri = Bun.pathToFileURL(join(dir, "suggest.fsh")).href;
-const s = await started();
-opened(s, uri, src);
-const [d] = diagnostics(await s.next(published(uri)));
-facts.message = d.message;
-facts.start = canon(d.range.start);
-await finish(s);`);
+const uri = uriOf(join(dir, "suggest.fsh"));
+let s = await started(fishc, dir, 0);
+await opened(s, uri, src);
+const first = await s.next(published(uri));
+const d = item(at(at(first, "params"), "diagnostics"), 0);
+facts.set("message", shown(at(d, "message")));
+facts.set("start", canon(at(at(d, "range"), "start")));
+const code = await finish(s);
+facts.set("exit", code);`);
   same(fact(r, "message"), "cannot find name 'cont'; did you mean 'count'?", "the message");
   same(fact(r, "start"), `{"character":8,"line":2}`, "where it starts");
   exited(r, 0);
@@ -406,14 +527,18 @@ await finish(s);`);
 
 test("a document that can't be checked is logged, and the server keeps serving", () => {
   const dir = scratch("fishc-lsp-");
-  const r = run(dir, String.raw`const uri = Bun.pathToFileURL(join(dir, "never-saved.fsh")).href;
-const s = await started();
-opened(s, uri, "function main() {}\n");
-facts.log = canon((await s.next((m) => m.method === "window/logMessage")).params.type);
-const shutdown = s.request("shutdown");
-facts.shutdown = canon((await s.next((m) => m.id === shutdown)).result);
-s.notify("exit");
-facts.exit = await s.proc.exited;`);
+  const r = run(dir, String.raw`const uri = uriOf(join(dir, "never-saved.fsh"));
+let s = await started(fishc, dir, 0);
+await opened(s, uri, "function main() {}\n");
+const log = await s.next((m) => at(m, "method") === "window/logMessage");
+facts.set("log", canon(at(at(log, "params"), "type")));
+const shutdown = await s.request("shutdown");
+const shut = await s.next(answering(shutdown));
+facts.set("shutdown", canon(at(shut, "result")));
+await s.notify("exit");
+await s.toServer.close();
+const code = await s.child.exited;
+facts.set("exit", String(code));`);
   same(fact(r, "log"), "1", "the logged message's type");
   same(fact(r, "shutdown"), "null", "shutdown's result");
   exited(r, 0);
@@ -427,15 +552,17 @@ test("an error in an imported file shows on the importer, saying where it is", (
   const src = 'import { half } from "./util.fsh";\nfunction main() { print(half(4)); }\n';
   file(dir, "imports/main.fsh", src);
   const r = run(dir, `const src = ${JSON.stringify(src)};
-const uri = Bun.pathToFileURL(join(dir, "imports/main.fsh")).href;
-const s = await started();
-opened(s, uri, src);
-const [d] = diagnostics(await s.next(published(uri)));
-facts.range = canon(d.range);
-facts.message = d.message;
-facts.related = d.relatedInformation?.[0]?.location.uri;
-facts.util = Bun.pathToFileURL(join(dir, "imports/util.fsh")).href;
-await finish(s);`);
+const uri = uriOf(join(dir, "imports/main.fsh"));
+let s = await started(fishc, dir, 0);
+await opened(s, uri, src);
+const first = await s.next(published(uri));
+const d = item(at(at(first, "params"), "diagnostics"), 0);
+facts.set("range", canon(at(d, "range")));
+facts.set("message", shown(at(d, "message")));
+facts.set("related", shown(at(at(item(at(d, "relatedInformation"), 0), "location"), "uri")));
+facts.set("util", uriOf(join(dir, "imports/util.fsh")));
+const code = await finish(s);
+facts.set("exit", code);`);
   same(fact(r, "range"), `{"end":{"character":0,"line":0},"start":{"character":0,"line":0}}`, "the range");
   assert(fact(r, "message").startsWith("util.fsh:2:"), `the message: ${fact(r, "message")}`);
   same(fact(r, "related"), fact(r, "util"), "the related location's uri");
@@ -452,16 +579,20 @@ test("an importer sees an open file's unsaved text, breaking and fixing it", () 
   file(dir, "unsaved/main.fsh", src);
   const r = run(dir, `const src = ${JSON.stringify(src)};
 const good = ${JSON.stringify(good)};
-const utilUri = Bun.pathToFileURL(join(dir, "unsaved/util.fsh")).href;
-const uri = Bun.pathToFileURL(join(dir, "unsaved/main.fsh")).href;
-const s = await started();
-opened(s, uri, src);
-facts.before = canon(diagnostics(await s.next(published(uri))));
-opened(s, utilUri, good.replace("/ 2", "/ true"));
-facts.broken = diagnostics(await s.next(published(uri)))[0].message;
-changed(s, utilUri, 2, good);
-facts.fixed = canon(diagnostics(await s.next(published(uri))));
-await finish(s);`);
+const utilUri = uriOf(join(dir, "unsaved/util.fsh"));
+const uri = uriOf(join(dir, "unsaved/main.fsh"));
+let s = await started(fishc, dir, 0);
+await opened(s, uri, src);
+const before = await s.next(published(uri));
+facts.set("before", canon(at(at(before, "params"), "diagnostics")));
+await opened(s, utilUri, good.replace("/ 2", "/ true"));
+const broken = await s.next(published(uri));
+facts.set("broken", shown(at(item(at(at(broken, "params"), "diagnostics"), 0), "message")));
+await changed(s, utilUri, 2, good);
+const fixed = await s.next(published(uri));
+facts.set("fixed", canon(at(at(fixed, "params"), "diagnostics")));
+const code = await finish(s);
+facts.set("exit", code);`);
   same(fact(r, "before"), "[]", "the diagnostics before");
   assert(fact(r, "broken").startsWith("util.fsh:2:"), `the message once broken: ${fact(r, "broken")}`);
   same(fact(r, "fixed"), "[]", "the diagnostics once fixed");
@@ -519,19 +650,25 @@ test("fallible calls and awaits are hinted with what they throw", () => {
   const src = hinted();
   file(dir, "hinted.fsh", src);
   const r = run(dir, `const src = ${JSON.stringify(src)};
-const uri = Bun.pathToFileURL(join(dir, "hinted.fsh")).href;
-const s = await started();
-opened(s, uri, src);
-const all = { start: { line: 0, character: 0 }, end: { line: 99, character: 0 } };
-const id = s.request("textDocument/inlayHint", { textDocument: { uri }, range: all });
-facts.all = canon((await s.next((m) => m.id === id)).result);
-const firstLines = { start: { line: 0, character: 0 }, end: { line: 18, character: 0 } };
-const some = s.request("textDocument/inlayHint", { textDocument: { uri }, range: firstLines });
-facts.some = canon((await s.next((m) => m.id === some)).result.map((h) => h.position.line));
-changed(s, uri, 2, src.replace("return n;", "return true;"));
-const broken = s.request("textDocument/inlayHint", { textDocument: { uri }, range: all });
-facts.broken = canon((await s.next((m) => m.id === broken)).result);
-await finish(s);`);
+const uri = uriOf(join(dir, "hinted.fsh"));
+let s = await started(fishc, dir, 0);
+await opened(s, uri, src);
+const all = "{\\"start\\":{\\"line\\":0,\\"character\\":0},\\"end\\":{\\"line\\":99,\\"character\\":0}}";
+const asked = (range: string): string => "{\\"textDocument\\":{\\"uri\\":" + JSON.stringify(uri) + "},\\"range\\":" + range + "}";
+const id = await s.request("textDocument/inlayHint", asked(all));
+const hinted = await s.next(answering(id));
+facts.set("all", canon(at(hinted, "result")));
+const some = await s.request("textDocument/inlayHint", asked("{\\"start\\":{\\"line\\":0,\\"character\\":0},\\"end\\":{\\"line\\":18,\\"character\\":0}}"));
+const first = await s.next(answering(some));
+let lines: string[] = [];
+for (const h of items(at(first, "result"))) lines.push(canon(at(at(h, "position"), "line")));
+facts.set("some", "[" + lines.join(",") + "]");
+await changed(s, uri, 2, src.replace("return n;", "return true;"));
+const broken = await s.request("textDocument/inlayHint", asked(all));
+const none = await s.next(answering(broken));
+facts.set("broken", canon(at(none, "result")));
+const code = await finish(s);
+facts.set("exit", code);`);
   const want = [hint(src, "  return risky(n)", ""), hint(src, "  return risky(1)", "becomes 'ApiError' through 'From'"), hint(src, "print(risky(2)", ""), hint(src, "await later(3)", "")];
   same(fact(r, "all"), `[${want.join(",")}]`, "the hints");
   same(fact(r, "some"), "[17]", "the lines hinted in the first lines");
@@ -545,16 +682,21 @@ test("a TS-compat document is refused at its directive, pointing at fishc lint",
   const src = "// @fish-edition ts-compat\nfunction main() {}\n";
   file(dir, "compat.fsh", src);
   const r = run(dir, `const src = ${JSON.stringify(src)};
-const uri = Bun.pathToFileURL(join(dir, "compat.fsh")).href;
-const s = await started();
-opened(s, uri, src);
-const [d, ...more] = diagnostics(await s.next(published(uri)));
-facts.more = canon(more);
-facts.range = canon(d.range);
-facts.message = d.message;
-changed(s, uri, 2, src.replace("ts-compat", "native"));
-facts.fixed = canon(diagnostics(await s.next(published(uri))));
-await finish(s);`);
+const uri = uriOf(join(dir, "compat.fsh"));
+let s = await started(fishc, dir, 0);
+await opened(s, uri, src);
+const first = await s.next(published(uri));
+const found = diagnostics(first);
+const d = item(at(at(first, "params"), "diagnostics"), 0);
+const more: Json = found.slice(1);
+facts.set("more", canon(more));
+facts.set("range", canon(at(d, "range")));
+facts.set("message", shown(at(d, "message")));
+await changed(s, uri, 2, src.replace("ts-compat", "native"));
+const fixed = await s.next(published(uri));
+facts.set("fixed", canon(at(at(fixed, "params"), "diagnostics")));
+const code = await finish(s);
+facts.set("exit", code);`);
   same(fact(r, "more"), "[]", "the diagnostics after the first");
   same(fact(r, "range"), `{"end":{"character":26,"line":0},"start":{"character":0,"line":0}}`, "the range");
   assert(fact(r, "message").includes("run 'fishc lint'"), `the message: ${fact(r, "message")}`);
