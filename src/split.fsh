@@ -83,6 +83,123 @@ const typeAt = (text: string) => ("{[<".includes(text[0]!) ? text.slice(0, (clos
 
 const exposed = (item: Ref<Item>) => (item.kind === "define" ? item.text.replace(/^define internal /, "define ") : item.text.replace(/ = (internal|private) /, " = "));
 
+// A function's symbol without what tells its instances apart: each instance's hash, and a generic
+// class's type arguments.
+function written(symbol: string): string {
+  let out = "";
+  let depth = 0;
+  for (let i: usize = 0; i < symbol.length; i++) {
+    const c = symbol[i]!;
+    if (c === "<") depth++;
+    else if (c === ">" && depth > 0) depth--;
+    else if (depth === 0) out += c;
+  }
+  return out.replace(/#[0-9a-z]+/g, "");
+}
+
+// The items without the program's functions that are another instance of their function with the
+// same text, its own name aside: type arguments that give a body the same layout and the same
+// calls lower to the same text. The instance with the smallest symbol is kept and every reference
+// to the others names it, so each is compiled once. A round that merges two callees can make
+// their callers the same, so rounds go on until one merges nothing. Std's functions stay as they
+// are: std's part reads the same whatever the program is.
+// ponytail: instances that call each other in a cycle never merge, since each round compares text
+// as it stands; start from the coarsest grouping and refine if a program shows many.
+function shared(found: Item[], own: Ref<Set<string>>): Item[] {
+  let all = found;
+  let groups = new Map<string, usize[]>();
+  for (let i: usize = 0; i < all.length; i++) {
+    const item: Ref<Item> = all[i]!;
+    if (item.kind !== "define" || !own.has(item.key) || !item.key.includes("#")) continue;
+    const name = written(item.key);
+    const had = groups.get(name);
+    if (had === undefined) groups.set(name, [i]);
+    else {
+      let list: usize[] = had;
+      list.push(i);
+      groups.set(name, list);
+    }
+  }
+  let several: usize[][] = [];
+  let candidates = new Set<string>();
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    let sorted: [string, usize][] = [];
+    for (const i of members) sorted.push([all[i]!.key, i]);
+    sorted.sort((a, b) => (a[0] < b[0] ? -1 : 1));
+    let ordered: usize[] = [];
+    for (const [k, i] of sorted) {
+      ordered.push(i);
+      candidates.add(k);
+    }
+    several.push(ordered);
+  }
+  if (several.length === 0) return all;
+  // Who refers to each function that may go, by place in `all`.
+  let referrers = new Map<string, usize[]>();
+  for (let i: usize = 0; i < all.length; i++) {
+    const item: Ref<Item> = all[i]!;
+    for (const r of item.refs) {
+      if (r === item.key || !candidates.has(r)) continue;
+      const had = referrers.get(r);
+      if (had === undefined) referrers.set(r, [i]);
+      else if (had[had.length - 1]! !== i) {
+        let list: usize[] = had;
+        list.push(i);
+        referrers.set(r, list);
+      }
+    }
+  }
+  // Each candidate's text with its own name left out, read again only once the text changed.
+  let masked = new Map<usize, string>();
+  let gone = new Set<usize>();
+  for (;;) {
+    let pairs: [usize, usize][] = [];
+    for (const members of several) {
+      let byText = new Map<string, usize>();
+      for (const i of members) {
+        if (gone.has(i)) continue;
+        let text = masked.get(i);
+        if (text === undefined) {
+          const item: Ref<Item> = all[i]!;
+          text = item.text.replaceAll(`@${item.name}`, "@");
+          masked.set(i, text);
+        }
+        const kept = byText.get(text);
+        if (kept === undefined) byText.set(text, i);
+        else pairs.push([i, kept]);
+      }
+    }
+    if (pairs.length === 0) break;
+    for (const [dropped, kept] of pairs) {
+      gone.add(dropped);
+      masked.delete(dropped);
+      const from = all[dropped]!.key;
+      const to = all[kept]!.key;
+      const [spelled, respelled] = [`@${all[dropped]!.name}`, `@${all[kept]!.name}`];
+      const refer = referrers.get(from);
+      if (refer === undefined) continue;
+      const already = referrers.get(to);
+      let moved: usize[] = [];
+      if (already !== undefined) for (const r of already) moved.push(r);
+      for (const r of refer) {
+        if (gone.has(r)) continue;
+        const item: Ref<Item> = all[r]!;
+        const text = item.text.replaceAll(spelled, respelled);
+        let refs: string[] = [];
+        for (const k of item.refs) refs.push(k === from ? to : k);
+        all[r] = { kind: item.kind, name: item.name, key: item.key, text, refs, copied: item.copied };
+        masked.delete(r);
+        if (r !== kept) moved.push(r);
+      }
+      referrers.set(to, moved);
+    }
+  }
+  let left: Item[] = [];
+  for (let i: usize = 0; i < all.length; i++) if (!gone.has(i)) left.push(all[i]!.clone());
+  return left;
+}
+
 // The IR split into std's part, a part for each of `groups`, and the program's. `stdSymbols` names
 // std's functions and `ownSymbols` the program's, as the IR spells them; `groups` names parts of
 // the program's functions, which leave the program's part for one of their own.
@@ -95,7 +212,7 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
   const std = keysOf(stdSymbols);
   const own = keysOf(ownSymbols);
   const lines = ir.split("\n");
-  const all = items(lines);
+  const all = shared(items(lines), own);
   const read = performance.now();
   // Each named struct's definition, by its name, for the parts that use it.
   let types = new Map<string, string>();
