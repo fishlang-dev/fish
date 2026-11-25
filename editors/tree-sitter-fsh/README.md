@@ -16,6 +16,9 @@ npm test           # the cases in test/corpus
 npm run corpus     # every .fsh file in src, scripts and tests parses with no ERROR or MISSING node
 ```
 
+`npm run corpus` runs `fishc run script/corpus.fsh`, so it needs `fishc` on `PATH`; npm puts the
+pinned `tree-sitter` there for it.
+
 `src/` is generated and committed, so editors can build the parser without the CLI.
 
 ## Queries
