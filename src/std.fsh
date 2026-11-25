@@ -2624,7 +2624,7 @@ class Http1 {
 // Tracing, which comes with the HTTP library: serve opens a span for each request, and spans
 // are sent to their collector over HTTP.
 const TRACE = String.raw`
-// Tracing: the spans serve and the fish:trace module record, and their export to an OTLP
+// Tracing: the spans serve and the std:trace module record, and their export to an OTLP
 // collector. Every name here is one no program writes; the module holds the public ones.
 declare function fsh_rt_trace_get(out: MutPtr<i64>): void;
 declare function fsh_rt_trace_set(words: Ptr<i64>): void;
@@ -2788,7 +2788,7 @@ function __traceFinish(record: __traceRecord): void {
   __traceHeld.update((s) => { s.timer = timer; });
 }
 
-// Ends a span opened by the fish:trace module, whose parent becomes current again unless
+// Ends a span opened by the std:trace module, whose parent becomes current again unless
 // another span has taken its place since.
 function __traceEnd(record: __traceRecord, prior: Ref<i64[]>): void {
   const now = __traceWords();
@@ -5767,7 +5767,7 @@ export function format(pathObject: FormatInputPathObject): string {
   // Files read and written on the runtime's blocking pool. A call naming an encoding, as
   // readFile(path, "utf8"), is linked to readFileText, which gives a string.
   "fs/promises": String.raw`
-import { chmodSync } from "fs";
+import { chmodSync } from "std:fs";
 
 export async function readFile(path: string): Promise<u8[]> throws IoError {
   return await fileRead(path);
@@ -7374,10 +7374,10 @@ export class Statement {
   }
 }
 `,
-  // Tar archives, read an entry at a time and written from files, imported as fish:tar.
-  "fish:tar": String.raw`
-import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "fs";
-import { dirname, isAbsolute, join, normalize, relative, resolve } from "path";
+  // Tar archives, read an entry at a time and written from files, imported as std:tar.
+  tar: String.raw`
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
+import { dirname, isAbsolute, join, normalize, relative, resolve } from "std:path";
 import { gunzipSync, gzipSync, ZlibError } from "zlib";
 import { open } from "fs/promises";
 
@@ -7811,10 +7811,10 @@ export async function create(file: string, paths: string[], options: TarPackOpti
   await out.close();
 }
 `,
-  // Zip archives, read through their central directory and written deflated, as fish:zip.
-  "fish:zip": String.raw`
-import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, utimesSync, chmodSync, writeFileSync } from "fs";
-import { dirname, isAbsolute, join, relative, resolve } from "path";
+  // Zip archives, read through their central directory and written deflated, as std:zip.
+  zip: String.raw`
+import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "std:path";
 import { deflateRawSync, inflateRawSync, ZlibError } from "zlib";
 import { open } from "fs/promises";
 
@@ -7828,7 +7828,7 @@ export class ZipError extends Error {
 }
 
 export type ZipEntryType = "file" | "directory" | "symlink";
-// As fish:tar's: an entry's path, what it is, its unpacked size, its mode's permission bits, its
+// As std:tar's: an entry's path, what it is, its unpacked size, its mode's permission bits, its
 // time in seconds since the epoch, and a symlink's target.
 export type ZipHeader = { path: string; type: ZipEntryType; size: i64; mode: i64; mtime: i64; target: string };
 export type ZipEntry = { path: string; type: ZipEntryType; size: i64; mode: i64; mtime: i64; target: string; data: u8[] };
@@ -8039,7 +8039,7 @@ function throughLinks(root: string, to: string, path: string): void throws IoErr
   }
 }
 
-// Writes the archive's entries under dir and gives the paths written, refusing as fish:tar's
+// Writes the archive's entries under dir and gives the paths written, refusing as std:tar's
 // extract does anything that would land outside dir.
 export async function extract(source: ZipSource, dir: string, limits: ZipLimits = {}): Promise<string[]> throws IoError | ZipError {
   const root = resolve(dir);
@@ -8229,9 +8229,9 @@ export async function create(file: string, paths: string[], options: ZipPackOpti
   await out.close();
 }
 `,
-  // Spans in a program's own code, imported as fish:trace. Their state is std's own, which serve
+  // Spans in a program's own code, imported as std:trace. Their state is std's own, which serve
   // shares, so what is here only wraps it.
-  "fish:trace": String.raw`
+  trace: String.raw`
 // endpoint is the collector's base URL, as OTEL_EXPORTER_OTLP_ENDPOINT is, and "" turns tracing
 // off whatever the environment says; serviceName is the service the spans are from; batchDelay
 // is the milliseconds finished spans wait to be sent together. What isn't given is read from
@@ -8570,8 +8570,8 @@ export function exit(code: i64 = 0): never {
 `,
   // node:url's file URL functions, as Node gives them on POSIX. URL and URLSearchParams are globals.
   url: String.raw`
-import { platform } from "os";
-import { resolve } from "path";
+import { platform } from "std:os";
+import { resolve } from "std:path";
 
 // The path made absolute and percent-encoded where a URL's path can't hold it as written, with
 // '%', '\' and tabs and newlines encoded too, as Node does. A trailing slash stays.
@@ -8639,8 +8639,8 @@ function hexDigit(b: u8): i64 {
   // here. Bun.build isn't here. spawnSync's stdout and stderr are u8[],
   // empty when not piped, where Bun gives a Buffer, or undefined.
   Bun: String.raw`
-import { statSync } from "fs";
-import { dirname, resolve } from "path";
+import { statSync } from "std:fs";
+import { dirname, resolve } from "std:path";
 import { bytes as stdinBytes } from "stdin";
 
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
@@ -8991,14 +8991,28 @@ export function evaluate(module: string): JsValue {
 }
 `;
 
-// The std module a specifier names, if any: `node:os` and `os` both name `os`.
+// Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace"]);
+
+// The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
+// for code ported from Node, as `bun` names Bun's module.
 export function stdModule(specifier: string): string | undefined {
-  // Fish's own modules are reached only by their fish: names, so npm keeps the bare ones.
-  if (specifier.startsWith("fish:")) return STD_MODULES[specifier] !== undefined ? specifier : undefined;
+  if (specifier.startsWith("std:")) {
+    const own = specifier.slice("std:".length as i64);
+    return STD_MODULES[own] !== undefined && own !== "Bun" ? own : undefined;
+  }
   const bare = specifier.startsWith("node:") ? specifier.slice("node:".length as i64) : specifier;
   // "path/posix" is "path", which is POSIX's here.
   const name = bare === "path/posix" ? "path" : bare === "bun" ? "Bun" : bare;
-  return STD_MODULES[name] !== undefined && !name.startsWith("fish:") ? name : undefined;
+  return STD_MODULES[name] !== undefined && !STD_ONLY.has(name) ? name : undefined;
+}
+
+// The names `std:` reaches, as an error lists them.
+export function stdModuleNames(): string[] {
+  let names: string[] = [];
+  for (const name of Object.keys(STD_MODULES)) if (name !== "Bun") names.push(name);
+  names.sort();
+  return names;
 }
 
 // What awaiting a JS promise that rejects throws: the JS error's message, and what JS threw. It
@@ -9472,7 +9486,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const own = new Set(HIDDEN_NAMES.filter((n) => declared.has(n)));
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
-  // The fish:trace module's code names __traceOn, and what it wraps is sent through Http1.
+  // The std:trace module's code names __traceOn, and what it wraps is sent through Http1.
   const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn"]);
   const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
   const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentionsName(written, "Request"));

@@ -130,10 +130,10 @@ function main() {
   console.log(Buffer.from([1]).readUInt8(0));
 }
 // case: buffer_import_renamed
-// error: Buffer is a global, so import it under its own name, as in 'import { Buffer } from "node:buffer"'
+// error: Buffer is a global, so import it under its own name, as in 'import { Buffer } from "std:buffer"'
 import { Buffer as B } from "node:buffer";
 function main() {}
 // case: buffer_import_other
-// error: 'node:buffer' has no export named 'Blob'
+// error: 'std:buffer' has no export named 'Blob'
 import { Blob } from "node:buffer";
 function main() {}

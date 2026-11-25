@@ -4,7 +4,7 @@
 // expect: stream: 3 entries
 // Archives the system's zip made, listed from a path and read from a stream, a deflated file's
 // data read back.
-import { entries, list, ZipError } from "fish:zip";
+import { entries, list, ZipError } from "std:zip";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -49,7 +49,7 @@ async function main(): Promise<void> throws IoError | Error | ZipError {
 // expect: ratio: 'z.txt' unpacks more than 2 bytes per byte packed; raise maxRatio if it is trusted
 // expect: not zip: this isn't a zip archive: it has no end of central directory record
 // A corrupt entry, an encrypted one, each limit and bytes that aren't zip are refused.
-import { list, ZipError } from "fish:zip";
+import { list, ZipError } from "std:zip";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -103,7 +103,7 @@ async function main(): Promise<void> throws IoError | ZipError {
 // expect: nothing outside: true
 // An archive the system's zip made extracted and read back, and archives with each escaping
 // entry refused with nothing written outside the target.
-import { extract, pack, ZipError } from "fish:zip";
+import { extract, pack, ZipError } from "std:zip";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -157,7 +157,7 @@ async function main(): Promise<void> throws IoError | ZlibError | Error | ZipErr
 // expect: unzip -l: a.txt big.txt sub/ sub/b.txt
 // An archive create writes reads back through entries() and through the system's unzip, which
 // tests every entry's CRC.
-import { create, entries, ZipError } from "fish:zip";
+import { create, entries, ZipError } from "std:zip";
 
 function varied(size: i64): string {
   let t = "";

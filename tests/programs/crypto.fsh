@@ -68,7 +68,7 @@ const ID = comptime randomUUID();
 const N = comptime randomBytes(3);
 function main() { console.log(ID, N); }
 // case: crypto_unknown_member
-// error: 'node:crypto' has no export named 'createCipheriv'
+// error: 'std:crypto' has no export named 'createCipheriv'
 import crypto from "node:crypto";
 function main() {
   console.log(crypto.createCipheriv("aes-256-gcm"));

@@ -159,7 +159,7 @@ function lifted(ids: Mut<Ids>, name: string, body: Body, at: Ref<Span>): Func {
 // all of them are loaded, and what its `main` reads the arguments with and exits through. It is
 // native Fish whatever the package's edition.
 export function harnessImports(dir: string, files: string[]): string {
-  return ["// @fish-edition native", ...files.map((f) => `import ${JSON.stringify(`./${relative(dir, f)}`)};`), 'import { argv, exit } from "node:process";', ""].join("\n");
+  return ["// @fish-edition native", ...files.map((f) => `import ${JSON.stringify(`./${relative(dir, f)}`)};`), 'import { argv, exit } from "std:process";', ""].join("\n");
 }
 
 // The harness's `main`. Given `--list`, it prints the test names, one per line, in order; given a

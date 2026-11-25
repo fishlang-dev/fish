@@ -38,12 +38,12 @@ function equivalents(): Map<string, Equivalent> {
   m.set("nanoid", IN_STD("crypto.getRandomValues, to build IDs from"));
   add(m, ["dayjs", "date-fns", "moment", "luxon"], PLANNED("Date parsing and formatting"));
   add(m, ["pino", "winston", "bunyan"], PLANNED("Structured logging"));
-  add(m, ["@opentelemetry/api", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/sdk-trace-base", "@opentelemetry/exporter-trace-otlp-http"], IN_STD("the fish:trace module"));
+  add(m, ["@opentelemetry/api", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/sdk-trace-base", "@opentelemetry/exporter-trace-otlp-http"], IN_STD("the std:trace module"));
   add(m, ["pg", "postgres"], IN_STD("the postgres module's Pool"));
-  add(m, ["better-sqlite3", "sqlite3"], IN_STD("the sqlite module's Database"));
-  add(m, ["tar", "tar-stream", "tar-fs"], IN_STD("the fish:tar module"));
-  add(m, ["adm-zip", "jszip", "yauzl", "yazl", "unzipper", "extract-zip"], IN_STD("the fish:zip module"));
-  m.set("archiver", IN_STD("the fish:zip and fish:tar modules"));
+  add(m, ["better-sqlite3", "sqlite3"], IN_STD("std:sqlite's Database"));
+  add(m, ["tar", "tar-stream", "tar-fs"], IN_STD("the std:tar module"));
+  add(m, ["adm-zip", "jszip", "yauzl", "yazl", "unzipper", "extract-zip"], IN_STD("the std:zip module"));
+  m.set("archiver", IN_STD("the std:zip and std:tar modules"));
   add(m, ["ioredis", "redis"], PLANNED("Redis client"));
   add(m, ["glob", "fast-glob", "globby"], PLANNED("Glob"));
   m.set("fs-extra", PLANNED("Directory operations"));

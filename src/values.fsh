@@ -2097,7 +2097,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const abort = this.abortError();
       return { type: this.ctx.tables().typing.leafFuture("sleep", "void", abort, true), what: "'sleep'" };
     }
-    // `fileRead(path)` and `fileWrite(path, bytes)`: the futures node:fs/promises is written over,
+    // `fileRead(path)` and `fileWrite(path, bytes)`: the futures std:fs/promises is written over,
     // each a job on the runtime's blocking pool.
     if (callee.kind === "ident" && (callee.name === "fileRead" || callee.name === "fileWrite") && (inStd || stdModuleAt(this.ctx.tables().files, e.start) !== undefined)) {
       const reading = callee.name === "fileRead";
@@ -2113,7 +2113,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const io = this.ioError();
       return { type: this.ctx.tables().typing.leafFuture(reading ? "readFile" : "writeFile", "void", io), what: `'${callee.name}'` };
     }
-    // The blocking calls node:fs is written over, as `fileReadSync(path)`, run on the calling
+    // The blocking calls std:fs is written over, as `fileReadSync(path)`, run on the calling
     // thread.
     const sync = callee.kind === "ident" && (inStd || stdModuleAt(this.ctx.tables().files, e.start) !== undefined) ? syncFileSignatures(this.ctx.tables().typing)[callee.name] : undefined;
     if (sync !== undefined) {
@@ -2152,7 +2152,7 @@ export class Expressions<C extends Context> implements Union<C> {
       this.value(e.args[3]!);
       return { type: "i64", what: "'timerSet'" };
     }
-    if (callee.kind === "ident" && callee.name === "jsEvaluate" && stdModuleAt(this.ctx.tables().files, e.start) === "fish:engine") {
+    if (callee.kind === "ident" && callee.name === "jsEvaluate" && stdModuleAt(this.ctx.tables().files, e.start) === "std:engine") {
       this.coerceValue(e.args[0]!, "string", "a module's source is a 'string'");
       this.ctx.tables().jsEvaluations.add(cloneExpr(e));
       return { type: this.ctx.tables().typing.blockType("JsValue"), what: "'jsEvaluate'" };
@@ -2190,7 +2190,7 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     // Milliseconds on a clock that only goes forward, for the std HTTP server's deadlines.
     if (callee.kind === "ident" && callee.name === "nowMs" && e.start >= STD_BASE && e.args.length === 0) return { type: "i64", what: "'nowMs'" };
-    // The signal the first SIGINT or SIGTERM aborts, for node:process's 'shutdown' and the HTTP server.
+    // The signal the first SIGINT or SIGTERM aborts, for std:process's 'shutdown' and the HTTP server.
     if (callee.kind === "ident" && callee.name === "shutdownSignal" && (e.start >= STD_BASE || stdModuleAt(this.ctx.tables().files, e.start) !== undefined) && e.args.length === 0) return { type: this.ctx.tables().typing.blockType("AbortSignal"), what: "'shutdownSignal'" };
     // The UTF-8 conversions behind the prelude's TextEncoder and TextDecoder, which only they call.
     if (callee.kind === "ident" && (callee.name === "utf8Encode" || callee.name === "utf8Decode") && this.ctx.st.owner !== undefined && this.ctx.typing().rec(this.ctx.st.owner!).name === (callee.name === "utf8Encode" ? "TextEncoder" : "TextDecoder")) {
@@ -2260,9 +2260,9 @@ export class Expressions<C extends Context> implements Union<C> {
       const viewed = this.ctx.tables().typing.jsView(held);
       throw new CompileError(callable ? "E1005" : "E0503", callable ? `'${target.js.name}' from '${target.js.module}' holds a function, and functions crossing between Fish and JS aren't supported yet` : `this expression is not callable: type '${this.ctx.typing().show(viewed)}' has no call signatures`, e.start, e.end);
     }
-    if (target !== undefined && target.name.replace(/-fsh\d+$/, "") === "ok" && stdModuleAt(this.ctx.tables().files, target.start) === "node:assert") return this.assertion(e);
-    // node:util's functions that take any values, as Node's do, given their meaning here.
-    const util = target !== undefined && callee.kind === "ident" && stdModuleAt(this.ctx.tables().files, target.start) === "node:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
+    if (target !== undefined && target.name.replace(/-fsh\d+$/, "") === "ok" && stdModuleAt(this.ctx.tables().files, target.start) === "std:assert") return this.assertion(e);
+    // std:util's functions that take any values, as Node's do, given their meaning here.
+    const util = target !== undefined && callee.kind === "ident" && stdModuleAt(this.ctx.tables().files, target.start) === "std:util" ? target.name.replace(/-fsh\d+$/, "") : undefined;
     if (util === "format") {
       if (e.optional) throw new CompileError("E0505", "'format' is always there, so it is called without '?.'", e.start, e.end);
       this.refuseSpread(e.args);
@@ -11442,7 +11442,7 @@ export function stringLike(typing: Ref<Typing>, t: Type): boolean {
   return true;
 }
 
-// The blocking file calls std's node:fs is written over: their parameters, what each gives, and
+// The blocking file calls std:fs is written over: their parameters, what each gives, and
 // whether it throws an IoError.
 function syncFileSignatures(typing: Mut<Typing>): Record<string, [Type[], Type, boolean]> {
   const bytes = typing.arrayType("u8");
