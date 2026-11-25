@@ -3649,7 +3649,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const r = this.recOf(held);
     const object = r?.kind === "shared" ? this.ctx.tables().typing.lower(r.of) : held;
     if (!this.ctx.typing().isTuple(object)) return this.keyRead(e, object);
-    // Parts of the index the read is made of: the same nodes under Bun, copies where Fish owns them.
+    // Parts of the index the read is made of, copied, since the read is built from them.
     const parts = { ...e };
     const count = this.ctx.typing().elementsOf(object as ObjectType).length;
     if (e.index.kind !== "int") throw new CompileError("E0117", `a tuple's element is named by a number written in place, like '[0]'; '${this.ctx.typing().show(object)}' has no element for a computed index`, e.index.start, e.index.end);

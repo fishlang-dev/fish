@@ -3,7 +3,7 @@
 // it would clash with.
 import { newCompilation } from "../../src/compilation.fsh";
 import { parse } from "../../src/parser.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { stdFor } from "../../src/std.fsh";
 
 function given(src: string): string[] {

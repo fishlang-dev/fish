@@ -104,8 +104,9 @@ function shown(f: string): string {
 type Event = { kind: "change" } | { kind: "settled" } | { kind: "exited"; code: i64 } | { kind: "signal" } | { kind: "stopped" };
 
 // Until `count` signals have arrived, or `round` ends this wait, which also stands in for a source
-// with nothing to wait for. Polled, since Bun and Fish share no way to await an AbortSignal.
-// ponytail: polled every 10 ms, as Fish's process.on is; await the signal itself once both can
+// with nothing to wait for.
+// ponytail: polled every 10 ms, as process.on's handler only counts; await the signal itself once
+// std can
 async function signalled(s: Ref<Signals>, count: i64, round: Ref<AbortSignal>): Promise<Event> {
   while (received(s) < count && !round.aborted) await Bun.sleep(10);
   return { kind: "signal" };
@@ -128,9 +129,8 @@ async function stopped(child: Ref<Subprocess>): Promise<Event> {
   return { kind: "stopped" };
 }
 
-// A change to one of `names` in `dir`. The watch ends with `signal`, which Bun's needs told and
-// Fish's ends anyway once its wait is dropped. A watch that fails counts as a change, leaving the
-// settle's comparison of contents to decide.
+// A change to one of `names` in `dir`, until `signal`. A watch that fails counts as a change,
+// leaving the settle's comparison of contents to decide.
 async function changeIn(dir: string, names: string[], signal: AbortSignal): Promise<Event> {
   try {
     for await (const e of watch(dir, { signal })) {

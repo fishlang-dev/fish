@@ -803,7 +803,7 @@ function markOptional(n: Ref<RegexNode>, captures: Mut<Capture[]>, sure: boolean
 // registers repeat checks use, flags (1 unicode, 2 sticky, 4 backtracking, 8 a fold table, 16 a
 // table of group names, 32 global) and
 // where the instructions end, then instructions of 32-bit words. Positions are UTF-16 code units; with `u` or `v` a character is a code point, and a
-// surrogate pair one step. The layout is shared with `native.ts`.
+// surrogate pair one step. The layout is shared with `native.fsh`.
 export const OP: {
   match: u32; char: u32; any: u32; anyAll: u32; set: u32; split: u32; jump: u32; save: u32; assert: u32; reset: u32; mark: u32; check: u32;
   backref: u32; look: u32; lookEnd: u32;

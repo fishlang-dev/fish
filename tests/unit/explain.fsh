@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { CompileError, type BorrowEvent } from "../../src/diag.fsh";
 import { explainBorrows } from "../../src/explain.fsh";
 import { analyze } from "../../src/main.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { fishc, ran, removed, same, scratch } from "./support.fsh";
 
 type Logged = { events: BorrowEvent[]; error: CompileError | undefined };

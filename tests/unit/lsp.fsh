@@ -14,7 +14,7 @@ import { type Kept } from "../../src/incremental.fsh";
 import { diagnose, frames } from "../../src/lsp.fsh";
 import { analyze } from "../../src/main.fsh";
 import { load } from "../../src/modules.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { built, fishcPath, removed, same, scratch, text } from "./support.fsh";
 
 // A file in the test's directory holding `src`, as an editor's file would be on disk.

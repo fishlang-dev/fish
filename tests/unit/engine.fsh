@@ -9,7 +9,7 @@ import { JS_NATIVE } from "../../src/js_native.fsh";
 import { buildAsync, callsEngine, compile, engineDir, engineSources } from "../../src/main.fsh";
 import { mathObjects, type BuildSession } from "../../src/mathlib.fsh";
 import { NATIVE } from "../../src/native.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { removed, same, scratch, text } from "./support.fsh";
 
 // A session whose programs may import the compiler's own test hook.

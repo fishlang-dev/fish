@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CompileError, formatError } from "../../src/diag.fsh";
 import { build } from "../../src/main.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { ranFor, reference, same } from "./support.fsh";
 
 // A seeded generator, so a failure names values that reproduce.

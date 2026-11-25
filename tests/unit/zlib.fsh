@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { compile, runtimeLinks, runtimeUnits } from "../../src/main.fsh";
 import { ZLIB_NATIVE } from "../../src/native.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { HOST_TARGET, sanitizedTarget } from "../../src/target.fsh";
 import { built, fishc, ranFor, read, reference, removed, root, same, scratch, text } from "./support.fsh";
 

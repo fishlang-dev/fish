@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { CompileError, formatError } from "../../src/diag.fsh";
 import { build } from "../../src/main.fsh";
 import { compile, parsePattern, type RegexTables } from "../../src/regex.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { ranFor, reference, same } from "./support.fsh";
 
 type Case = { p: string; f: string; s: string };

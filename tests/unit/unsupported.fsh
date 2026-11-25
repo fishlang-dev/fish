@@ -5,7 +5,7 @@ import { newCompilation } from "../../src/compilation.fsh";
 import { CompileError } from "../../src/diag.fsh";
 import { runtimeNames } from "../../src/main.fsh";
 import { parse } from "../../src/parser.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 
 // The error `src`, checked as a program of its own, is refused with; code "none" when it checks.
 function refusal(src: string, library: boolean): CompileError {

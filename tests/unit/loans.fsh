@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CompileError, formatError } from "../../src/diag.fsh";
 import { build } from "../../src/main.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 
 function head(): string {
   return `class P { n: i64; constructor(n: i64) { this.n = n; } }
