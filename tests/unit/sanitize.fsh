@@ -137,7 +137,9 @@ test("an instrumented runtime is cached apart from a plain one, a dev build's at
   const [plain, plainName] = runtimeArgs(root, file, []);
   const [address, addressName] = runtimeArgs(root, file, ["--sanitize", "address"]);
   const words = plain.split(" ");
-  same(address, ["-x", "c", "-", "-fsanitize=address", "-fno-omit-frame-pointer", ...words.slice(3).map((a) => (a === "-O0" ? "-O1" : a))].join(" "), "the address-sanitized runtime's flags");
+  // -O1 stands in for -O0 and for the instruction selector ARM64 Linux picks beside it, which
+  // only -O0 uses.
+  same(address, ["-x", "c", "-", "-fsanitize=address", "-fno-omit-frame-pointer", ...words.slice(3).filter((a) => a !== "-fno-global-isel").map((a) => (a === "-O0" ? "-O1" : a))].join(" "), "the address-sanitized runtime's flags");
   assert(words.includes("-O0"), `the plain runtime's flags: ${plain}`);
   same(`${plainName} ${addressName}`, "runtime runtime", "the runtimes' object names");
   removed(root);

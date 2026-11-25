@@ -3,6 +3,7 @@
 import { CompileError } from "../../src/diag.fsh";
 import { parse, parseWithComments } from "../../src/parser.fsh";
 import { assertSameProgram, format, programShape } from "../../src/printer.fsh";
+import { linear } from "./support.fsh";
 
 function check(failed: Ref<string[]>): void {
   assert(failed.length === 0, failed.join("\n\n"));
@@ -1106,12 +1107,10 @@ test("output the parser can't read back is the formatter's error, not the user's
 });
 
 test("bare bodies are found in time linear in the file", () => {
-  const src = "if (a) b;\n".repeat(20000);
-  const started = performance.now();
-  const out = formatted(src);
-  const took = performance.now() - started;
-  assert(out === src, "the bare bodies formatted otherwise");
-  assert(took < 4000, `formatting took ${took}ms`);
+  linear(5000, (n) => {
+    const src = "if (a) b;\n".repeat(n);
+    assert(formatted(src) === src, "the bare bodies formatted otherwise");
+  });
 });
 
 test("comments before, after and between statements, members and declarations format to text that parses back the same and formats again unchanged", () => {
@@ -1362,14 +1361,12 @@ test("output whose tree differs from the source's is refused as a change of mean
 });
 
 test("comments that fall back to an enclosing node are moved in time linear in their number", () => {
-  let lines: string[] = [];
-  for (let i = 0; i < 6400; i++) lines.push(`import /* c${i} */ * as m${i} from "m${i}";`);
-  const src = lines.join("\n");
-  const started = performance.now();
-  const out = formatted(src);
-  const took = performance.now() - started;
-  assert(!out.startsWith("<format threw"), out);
-  assert(took < 2400, `formatting took ${took}ms`);
+  linear(1600, (n) => {
+    let lines: string[] = [];
+    for (let i: usize = 0; i < n; i++) lines.push(`import /* c${i} */ * as m${i} from "m${i}";`);
+    const out = formatted(lines.join("\n"));
+    assert(!out.startsWith("<format threw"), out);
+  });
 });
 
 test("comments anywhere are kept, in order, with the tree the same and formatting stable", () => {
@@ -1440,12 +1437,10 @@ test("a template's CR and CRLF line endings read as LF, as JavaScript reads them
 });
 
 test("a long array of numbers fills its lines in time linear in its length", () => {
-  let numbers: string[] = [];
-  for (let i = 0; i < 64000; i++) numbers.push(`${i}`);
-  const src = `x = [${numbers.join(", ")}];`;
-  const started = performance.now();
-  const out = formatted(src);
-  const took = performance.now() - started;
-  assert(!out.startsWith("<format threw"), out);
-  assert(took < 3000, `formatting took ${took}ms`);
+  linear(16000, (n) => {
+    let numbers: string[] = [];
+    for (let i: usize = 0; i < n; i++) numbers.push(`${i}`);
+    const out = formatted(`x = [${numbers.join(", ")}];`);
+    assert(!out.startsWith("<format threw"), out);
+  });
 });

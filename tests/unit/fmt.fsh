@@ -106,6 +106,16 @@ test("- formats standard input to standard output, and with --check exits 1 on u
   done(top);
 });
 
+test("a JSX element is kept as written while what surrounds it is formatted", () => {
+  const top = fresh();
+  const dir = files(top, "jsx", []);
+  const written = "function page(name:string):Html{\n  const title=<h1  class=\"t\">Hi   {name}</h1>;\n  return <main>\n      {title}\n    <p>one</p>\n  </main>;\n}\n";
+  const kept = "function page(name: string): Html {\n  const title = <h1  class=\"t\">Hi   {name}</h1>;\n  return <main>\n      {title}\n    <p>one</p>\n  </main>;\n}\n";
+  ran(fmt(dir, ["-"], written), 0, kept, "", "a file with JSX");
+  ran(fmt(dir, ["-"], kept), 0, kept, "", "formatted again");
+  done(top);
+});
+
 test("a file that doesn't parse is reported and left as it was, and the others are still formatted", () => {
   const top = fresh();
   const dir = files(top, "broken", [["a.fsh", messy()], ["bad.fsh", "function (\n"], ["z.fsh", messy()]]);

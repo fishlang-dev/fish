@@ -59,7 +59,7 @@ const RULES: Rule[] = [
   { id: "A9", action: "auto", title: "function expressions: arrow functions" },
   { id: "parse", action: "unsupported", title: "files Fish's parser can't read", feature: "parser gaps" },
   { id: "unreadable", action: "unsupported", title: "files that couldn't be opened" },
-  { id: "jsx", action: "unsupported", title: "JSX in .tsx files", feature: "JSX for server-side HTML" },
+  { id: "jsx", action: "guided", title: "JSX: an element compiles as written and gives an Html; a component React renders becomes a function that gives one" },
   { id: "moduleForms", action: "unsupported", title: "namespace imports, 'import x = require()', 'export =' and dynamic import()", feature: "Namespace imports" },
   { id: "pathAliases", action: "unsupported", title: "imports through path aliases such as '@/lib' or '~/lib'", feature: "Path aliases" },
   { id: "bunModules", action: "unsupported", title: "imports of Bun's own modules such as bun:test", feature: "Bun's own modules" },
@@ -202,8 +202,7 @@ function scanFile(path: string, file: string): FileScan {
       col = at.col;
     }
     const note = e instanceof Error && e.name === "RangeError" ? "too deeply nested to read" : messageOf(e, "it can't be read");
-    const id = path.endsWith(".tsx") && /<[A-Za-z>]/.test(src) ? "jsx" : "parse";
-    return { file, lines, read: false, findings: [[id, { file, line, col, note }]] };
+    return { file, lines, read: false, findings: [["parse", { file, line, col, note }]] };
   }
   findings.sort((a, b) => {
     const byLine = (a[1].line as i64) - (b[1].line as i64);
@@ -547,6 +546,8 @@ function arrayMade(e: Ref<Expr>): boolean {
 // rather than the start of a long chain.
 function exprRules(e: Ref<Expr>, s: Mut<Scan>) {
   if (e.kind === "call") callRules(e, s);
+  // The parser reads a JSX element as the call that builds its Html.
+  if (e.kind === "call" && e.callee.kind === "ident" && e.callee.name === "__htmlOf") note(s, "jsx", e.start);
   else if (e.kind === "new") {
     const args: Ref<Expr[] | undefined> = e.args;
     if (args !== undefined) for (const a of args) if (a.kind === "spread") s.spreads.push({ at: a.start, name: identName(a.value) });

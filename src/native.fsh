@@ -4425,6 +4425,9 @@ static _Thread_local int32_t fsh_timeouts_starting = 0;
 static fsh_task *fsh_timeouts_task = NULL;
 // Blocking tasks not yet done, which the runtime's end can't drop while a pool thread may poll one.
 static int64_t fsh_blocking_live = 0;
+// Blocking tasks done whose pool thread is still letting go of them. The runtime's end waits for
+// these, or the blocks that thread is about to free would be counted as leaks.
+static int64_t fsh_blocking_ending = 0;
 
 static void fsh_push(fsh_queue *q, fsh_task *t) {
   pthread_mutex_lock(&q->lock);
@@ -4543,13 +4546,18 @@ static void fsh_run(fsh_task *t) {
   if (t == fsh_main_task || t == fsh_timeouts_task) pthread_cond_broadcast(&fsh_finished);
   pthread_mutex_unlock(&fsh_alive_lock);
   // Before the joiner wakes, so a main that ends once it is woken sees this one done.
-  if (t->blocking) __atomic_sub_fetch(&fsh_blocking_live, 1, __ATOMIC_RELEASE);
+  int32_t blocking = t->blocking;
+  if (blocking) {
+    __atomic_add_fetch(&fsh_blocking_ending, 1, __ATOMIC_RELEASE);
+    __atomic_sub_fetch(&fsh_blocking_live, 1, __ATOMIC_RELEASE);
+  }
   if (t->group) fsh_group_done(t->group, t, result);
   if (joiner) {
     fsh_rt_wake(joiner);
     fsh_task_release(joiner);
   }
   fsh_task_release(t);
+  if (blocking) __atomic_sub_fetch(&fsh_blocking_ending, 1, __ATOMIC_RELEASE);
 }
 
 static fsh_task *fsh_next_task(int64_t me) {
@@ -7392,11 +7400,12 @@ int32_t fsh_rt_fs_utimes(fsh_str *path, double atime, double mtime, int32_t foll
   return result;
 }
 
+// An entry another process removed since the walk listed it is gone already, as Node takes it.
 static int fsh_remove_one(const char *path, const struct stat *st, int kind, struct FTW *walk) {
   (void)st;
   (void)kind;
   (void)walk;
-  return remove(path);
+  return remove(path) != 0 && errno != ENOENT;
 }
 
 // rmSync: a file, or with recursive a directory and all inside it; force passes over a missing
@@ -7643,7 +7652,15 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
       posix_spawnattr_setpgroup(&attributes, 0);
     }
     posix_spawnattr_setflags(&attributes, spawn_flags);
-    failure = posix_spawnp(&pid, file, &actions, &attributes, argv, envp);
+    // A relative command with a slash is looked for in the child's directory. The system is given
+    // its whole path, since macOS can start one from there and still answer ENOENT.
+    char whole[PATH_MAX], here[PATH_MAX];
+    const char *path = file;
+    if (dir && file[0] != '/' && strchr(file, '/')) {
+      int n = dir[0] == '/' ? snprintf(whole, sizeof whole, "%s/%s", dir, file) : getcwd(here, sizeof here) ? snprintf(whole, sizeof whole, "%s/%s/%s", here, dir, file) : -1;
+      if (n > 0 && (size_t)n < sizeof whole) path = whole;
+    }
+    failure = posix_spawnp(&pid, path, &actions, &attributes, argv, envp);
     posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
   }
@@ -8390,6 +8407,8 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
     return fsh_main_task->outcome;
   }
   for (int64_t i = 0; i < fsh_workers; i++) pthread_join(fsh_threads[i], NULL);
+  // A pool thread is never joined, so one still freeing a task it finished is waited for here.
+  while (__atomic_load_n(&fsh_blocking_ending, __ATOMIC_ACQUIRE) != 0) sched_yield();
   pthread_mutex_lock(&fsh_timer_lock);
   fsh_timers_stopping = 1;
   pthread_cond_signal(&fsh_timer_changed);

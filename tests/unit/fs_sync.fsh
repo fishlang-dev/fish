@@ -373,14 +373,15 @@ function linksBody(): string {
   symlinkSync("f", "s1");
   symlinkSync("d", "s2", "dir");
   symlinkSync("nowhere", "s3", "file");
-  symlinkSync("", "s4", null);
+  // An empty target is a link on macOS and ENOENT on Linux; either way both say the same.
+  try { symlinkSync("", "s4", null); console.log(readlinkSync("s4").length); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
   await symlink("f", "s5");
   await fsp.symlink("s5", "s6", "junction");
   linkSync("f", "h1");
   await fsp.link("s1", "h2");
   const r6 = await readlink("s6");
   const rl = await fsp.readlink("dl");
-  console.log(readlinkSync("s1"), readlinkSync("s2"), readlinkSync("s3"), readlinkSync("s4").length, r6, rl);
+  console.log(readlinkSync("s1"), readlinkSync("s2"), readlinkSync("s3"), r6, rl);
   console.log(lstatSync("s5").isSymbolicLink(), lstatSync("h1").isSymbolicLink(), statSync("f").size, readFileSync("h2", "utf8"), readFileSync("s6", "utf8"));
   const p6 = await realpath("s6");
   const p2 = await fsp.realpath("d/../s2");

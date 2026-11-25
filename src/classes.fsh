@@ -7,6 +7,7 @@ import { cloneClassNode, cloneExpr, cloneJsName, cloneParam, cloneStmt, cloneTyp
 import { ASYNC_DISPOSE, DISPOSE, EMBEDDED, LIVE, MAP_METHODS, SET_METHODS, type Access, type ClassType, type FunctionType, type Type, type Typing } from "./typing.fsh";
 import { unsupported } from "./unsupported.fsh";
 import { symbolKey } from "./keys.fsh";
+import { STD_BASE } from "./std.fsh";
 import type { Arenas, BodyId, ClassId, InstanceId } from "./arenas.fsh";
 import { forEachChild, nextId, NodeSet, reborrowNode, renumberParam, renumberStmts, renumberTypeNode, Rewrites, walk, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
 
@@ -43,8 +44,9 @@ export type Body = Span & Id & {
   accessor?: boolean;
   // For a member of a generic class's instance: what the class's type parameters stand for.
   scope?: Map<string, Type>;
-  // `owned`: a method declared `this: Own<this>` takes its object over.
-  self?: { type: ClassType; constructor: boolean; mutable: boolean; owned?: boolean };
+  // `owned`: a method declared `this: Own<this>` takes its object over. `interior`: one of std's
+  // declared `this: Cell<this>` changes its object while a caller lends it read-only.
+  self?: { type: ClassType; constructor: boolean; mutable: boolean; owned?: boolean; interior?: boolean };
   // An overloaded function's signatures, in the order a call tries them.
   overloads?: BodyId[];
   overloadNames?: string[];
@@ -433,7 +435,7 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
     body: m.body.map((s) => cloneStmt(s)),
     returnType: m.returnType !== undefined ? cloneTypeNode(m.returnType) : nothing,
     typeParams: m.typeParams.map((p) => cloneTypeParam(p)),
-    self: isStatic ? undefined : { type: d.type, constructor: false, mutable: receiver !== undefined ? mutates(receiver) : false, owned: receiver !== undefined ? owns(receiver) : false },
+    self: isStatic ? undefined : { type: d.type, constructor: false, mutable: receiver !== undefined ? mutates(receiver) : false, owned: receiver !== undefined ? owns(receiver) : false, interior: receiver !== undefined ? changesWithin(receiver) : false },
     owner: d.type,
     access,
     start: m.start,
@@ -1167,7 +1169,7 @@ export function copyFor(tables: Mut<Tables>, classId: ClassId, bodyId: BodyId): 
   for (const st of f.body) prologue.push(tables.prologues.has(st));
   let copy = cloneBody(f);
   copy.name = `${tables.typing.rec(c.type).name}.${f.name}`;
-  copy.self = f.self.owned !== undefined ? { type: c.type, constructor: f.self.constructor, mutable: f.self.mutable, owned: f.self.owned } : { type: c.type, constructor: f.self.constructor, mutable: f.self.mutable };
+  copy.self = receiverFor(f.self, c.type);
   copy.owner = c.type;
   copy.declared = f.owner;
   copy.scope = scope;
@@ -1192,6 +1194,14 @@ export function copyFor(tables: Mut<Tables>, classId: ClassId, bodyId: BodyId): 
 // A copy of a body as written, keeping its nodes' ids.
 export function cloneBody(f: Ref<Body>): Body {
   return copied(f, true);
+}
+
+// A body's receiver as a body of `type` has it.
+function receiverFor(self: Ref<NonNullable<Body["self"]>>, type: ClassType): NonNullable<Body["self"]> {
+  let out: NonNullable<Body["self"]> = { type, constructor: self.constructor, mutable: self.mutable };
+  if (self.owned !== undefined) out.owned = self.owned;
+  if (self.interior === true) out.interior = true;
+  return out;
 }
 
 // A copy of a body's signature, its statements left out, for reading while its arena changes.
@@ -1224,7 +1234,7 @@ function copied(f: Ref<Body>, statements: boolean): Body {
     for (const [n, t] of f.scope) scope.set(n, t);
     out.scope = scope;
   }
-  if (f.self !== undefined) out.self = f.self.owned !== undefined ? { type: f.self.type, constructor: f.self.constructor, mutable: f.self.mutable, owned: f.self.owned } : { type: f.self.type, constructor: f.self.constructor, mutable: f.self.mutable };
+  if (f.self !== undefined) out.self = receiverFor(f.self, f.self.type);
   if (f.overloads !== undefined) out.overloads = [...f.overloads];
   if (f.overloadNames !== undefined) out.overloadNames = [...f.overloadNames];
   if (f.signature !== undefined) out.signature = true;
@@ -1339,8 +1349,15 @@ function usesOnThisIn(root: AnyNode, name: string, viaSuper: boolean): boolean {
 /** @throws {CompileError} */
 export function mutates(p: Ref<Param>): boolean {
   if (wraps(p, "Mut") || wraps(p, "Own")) return true;
-  if (wraps(p, "Ref")) return false;
+  if (wraps(p, "Ref") || changesWithin(p)) return false;
   throw unsupported("receivers other than 'this: Ref<this>', 'this: Mut<this>' and 'this: Own<this>'", { start: p.start, end: p.end });
+}
+
+// `this: Cell<this>`, which only std may write: the method changes the object, as a `Cell` is
+// changed, while its caller lends the object read-only. What it returns borrows the object as a
+// read-only method's result does, so std must keep whatever those results point at where it is.
+export function changesWithin(p: Ref<Param>): boolean {
+  return p.start >= STD_BASE && wraps(p, "Cell");
 }
 
 // `this: Own<this>` takes the object over: an owner may change it too.

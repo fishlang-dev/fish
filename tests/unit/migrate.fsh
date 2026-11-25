@@ -3,7 +3,7 @@
 import { CompileError } from "../../src/diag.fsh";
 import { directive, fix, migrations, rejects, surveyHits, type Hit, type Parsed } from "../../src/migrate.fsh";
 import { parse, parseWithComments, type Stmt } from "../../src/parser.fsh";
-import { same } from "./support.fsh";
+import { linear, same } from "./support.fsh";
 
 // Fails the test with both lists shown when they differ.
 function list(got: Ref<string[]>, want: Ref<string[]>, what: string): void {
@@ -312,12 +312,10 @@ test("A4 leaves an exported counter", () => {
 });
 
 test("A4 is linear in the uses of a counter", () => {
-  const src = `let n = 0;\nn++;\n${"console.log(n);\n".repeat(20000)}`;
-  const started = performance.now();
-  const count = fixedCount(src);
-  const took = performance.now() - started;
-  assert(count === 1, `${count} fixed`);
-  assert(took < 15000, `took ${took} ms`);
+  linear(5000, (n) => {
+    const count = fixedCount(`let n = 0;\nn++;\n${"console.log(n);\n".repeat(n)}`);
+    assert(count === 1, `${count} fixed`);
+  });
 }, { timeout: 30_000 });
 
 test("A3 reads a name's literal only from a const, or a let nothing assigns, unannotated and bound once", () => {
@@ -365,14 +363,12 @@ test("A1 leaves a var in a loop whose value carries from one turn to the next", 
 });
 
 test("A1's scope check is linear in the file", () => {
-  let parts: string[] = [];
-  for (let i: i64 = 0; i < 8000; i++) parts.push(`function f${i}() {\n  var a = 1;\n  var b = a + 1;\n  return b;\n}\n`);
-  const src = parts.join("");
-  const started = performance.now();
-  const count = fixedCount(src);
-  const took = performance.now() - started;
-  assert(count === 16000, `${count} fixed`);
-  assert(took < 15000, `took ${took} ms`);
+  linear(1000, (n) => {
+    let parts: string[] = [];
+    for (let i: usize = 0; i < n; i++) parts.push(`function f${i}() {\n  var a = 1;\n  var b = a + 1;\n  return b;\n}\n`);
+    const count = fixedCount(parts.join(""));
+    assert(count === 2 * n, `${count} fixed`);
+  });
 }, { timeout: 30_000 });
 
 test("A9 after return keeps the arrow on the return's line", () => {
@@ -397,13 +393,11 @@ test("a fix a comment blocks is reported as one to make by hand", () => {
 });
 
 test("collecting each name's uses is linear in the file", () => {
-  let parts: string[] = [];
-  for (let i: i64 = 0; i < 16000; i++) parts.push(`function f${i}() { let x = 1; for (let i = 0; i < 2; i++) x += i; return x; }`);
-  const src = parts.join("\n");
-  const started = performance.now();
-  migrationsOf(src);
-  const took = performance.now() - started;
-  assert(took < 12000, `took ${took} ms`);
+  linear(4000, (n) => {
+    let parts: string[] = [];
+    for (let i: usize = 0; i < n; i++) parts.push(`function f${i}() { let x = 1; for (let i = 0; i < 2; i++) x += i; return x; }`);
+    migrationsOf(parts.join("\n"));
+  });
 }, { timeout: 30_000 });
 
 // Each guided hit in `src` as its rule and the text it spans, in source order, and the messages.
@@ -541,14 +535,12 @@ test("G11 reports an alias changed through one name while the other is still use
 });
 
 test("the guided rules are linear in the file", () => {
-  let parts: string[] = [];
-  for (let i: i64 = 0; i < 8000; i++) parts.push(`function f${i}(xs: string, i: number) {\n  const a = { n: i };\n  const b = a;\n  b.n = 2;\n  for (let j = 0; j < xs.length; j++) g(xs[i] + a.n);\n  save();\n}\n`);
-  const src = parts.join("");
-  const started = performance.now();
-  const g11 = migrationsOf(src).filter((h) => h.rule === "G11").length;
-  const took = performance.now() - started;
-  assert(g11 === 8000, `${g11} G11 hits`);
-  assert(took < 15000, `took ${took} ms`);
+  linear(2000, (n) => {
+    let parts: string[] = [];
+    for (let i: usize = 0; i < n; i++) parts.push(`function f${i}(xs: string, i: number) {\n  const a = { n: i };\n  const b = a;\n  b.n = 2;\n  for (let j = 0; j < xs.length; j++) g(xs[i] + a.n);\n  save();\n}\n`);
+    const g11 = migrationsOf(parts.join("")).filter((h) => h.rule === "G11").length;
+    assert(g11 === n, `${g11} G11 hits`);
+  });
 }, { timeout: 30_000 });
 
 test("G2 finds async class methods, object-literal methods and interface or type methods giving a Promise", () => {
@@ -574,16 +566,14 @@ test("G4 and G5 see through a generic base", () => {
 });
 
 test("G3 and G11 are linear in the uses of one name", () => {
-  const n: usize = 16000;
-  const blocks = `function f(xs: number[]) {\n${"  { let k = 0; g(xs[k]); }\n".repeat(n)}}\n`;
-  let parts: string[] = [];
-  for (let i: usize = 0; i < n; i++) parts.push(`  const b${i} = a;\n  a.n = ${i};\n  use(b${i});\n`);
-  const aliases = `function h() {\n  const a = { n: 1 };\n${parts.join("")}}\n`;
-  const started = performance.now();
-  const g3 = migrationsOf(blocks).filter((h) => h.rule === "G3").length;
-  const g11 = migrationsOf(aliases).filter((h) => h.rule === "G11").length;
-  const took = performance.now() - started;
-  assert(g3 === n, `${g3} G3 hits`);
-  assert(g11 === n, `${g11} G11 hits`);
-  assert(took < 15000, `took ${took} ms`);
+  linear(4000, (n) => {
+    const blocks = `function f(xs: number[]) {\n${"  { let k = 0; g(xs[k]); }\n".repeat(n)}}\n`;
+    let parts: string[] = [];
+    for (let i: usize = 0; i < n; i++) parts.push(`  const b${i} = a;\n  a.n = ${i};\n  use(b${i});\n`);
+    const aliases = `function h() {\n  const a = { n: 1 };\n${parts.join("")}}\n`;
+    const g3 = migrationsOf(blocks).filter((h) => h.rule === "G3").length;
+    const g11 = migrationsOf(aliases).filter((h) => h.rule === "G11").length;
+    assert(g3 === n, `${g3} G3 hits`);
+    assert(g11 === n, `${g11} G11 hits`);
+  });
 }, { timeout: 30_000 });

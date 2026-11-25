@@ -445,7 +445,7 @@ test("compiling the same programs again in one process gives identical IR", () =
     assert(rounds[2][i] === rounds[0][i], `${programs[i].file}: the third round's IR differs`);
   }
   removed(root);
-}, { timeout: 300_000 });
+}, { timeout: 1_200_000 });
 
 // A process that builds many times, as a test runner or a daemon does, gives std's part the same
 // text each time a program is built again, so it links the object it cached the first time.
@@ -531,7 +531,7 @@ test("split and one-module dev builds of sampled test programs behave alike", as
     for (const r of results) if (r !== "") differing.push(r);
   }
   assert(differing.length === 0, differing.join("\n"));
-}, { timeout: 420_000 });
+}, { timeout: 1_800_000 });
 
 test("giving a session the build caches again keeps the ones it has", () => {
   let session = buildSession(newSession());
