@@ -2,7 +2,9 @@
 // pinned now, and that fishc must reach the bootstrap fixpoint and be the very binary the release's
 // tarball holds; then stage0.toml names the release, its tarball's sha256 and the binary's digest
 // for this machine, and adds the commit to the chain it can be rebuilt from. Commit the change once
-// the release is published, since a checkout with nothing cached downloads it.
+// the release is published, since a checkout with nothing cached downloads it. The release workflow
+// runs this on each target's runner and joins the stage0.toml each writes into the one it commits.
+// The fishc that runs scripts/build.fsh is FISHC when set, and build/fishc otherwise.
 // `--tarball <path>` checks a tarball on disk instead of downloading it, and `--no-fixpoint` leaves
 // the fixpoint out, which an hour and a half shorter run is only for trying the script.
 //   fishc run scripts/promote.fsh -- <version> [--tarball <path>] [--no-fixpoint]
@@ -44,8 +46,9 @@ async function main(): Promise<void> throws IoError | Error {
   const args = process.argv.slice(2);
   const version = args.length > 0 && !args[0]!.startsWith("--") ? args[0]! : fail("usage: fishc run scripts/promote.fsh -- <version> [--tarball <path>] [--no-fixpoint]");
   const tag = `v${version}`;
-  const fishc = join(ROOT, "build", "fishc");
-  if (!existsSync(fishc)) fail("no build/fishc to run the build with; run scripts/build.fsh first");
+  const runner = process.env.FISHC ?? "";
+  const fishc = runner !== "" ? runner : join(ROOT, "build", "fishc");
+  if (!existsSync(fishc)) fail(`no fishc at ${fishc} to run the build with; run scripts/build.fsh first, or set FISHC`);
   const commit = output("git", ["rev-parse", `${tag}^{commit}`]);
   let p: Pinned = pinned(ROOT);
   if (p.commit === commit) fail(`stage 0 is ${tag} already`);

@@ -5,6 +5,8 @@
 # Bun, runs scripts/build.fsh, which builds stage 0 from source and then fishc with it. Arguments go
 # to scripts/build.fsh. With a fishc already, run that instead:
 #   fishc run scripts/build.fsh -- [-o <fishc>]
+# With --stage0 nothing is built: the released stage 0 is downloaded and checked, and the last line
+# printed is its path, for a caller that only runs scripts with it.
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 toml="$root/stage0.toml"
@@ -34,9 +36,11 @@ if [ -n "$release" ] && [ -n "$sum" ]; then
     tar -xzf "$cache/$name" -C "$cache" --strip-components=1
     rm -f "$cache/$name"
   fi
+  case " $* " in *" --stage0 "*) echo "$cache/bin/fishc"; exit 0 ;; esac
   echo "running scripts/build.fsh with stage 0, $release"
   exec "$cache/bin/fishc" run "$root/scripts/build.fsh" -- "$@"
 fi
+case " $* " in *" --stage0 "*) echo "bootstrap: stage0.toml has no released stage 0 for $target" >&2; exit 1 ;; esac
 
 first=$(sed -n 's/^chain = \["\([0-9a-f]*\)".*$/\1/p' "$toml")
 first=${first:-$commit}

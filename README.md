@@ -80,12 +80,12 @@ arrays (`arr.iter()`), and operator-overloading traits.
 curl -fsSL https://raw.githubusercontent.com/fishlang-dev/fish/main/install.sh | sh
 ```
 
-This downloads the latest release for your machine, checks its sha256, unpacks it under
-`~/.fishc`, links `fishc` into `~/.local/bin`, adds that to `PATH` in your shell's startup file,
-and builds a hello world to check it works. Releases are built for macOS on ARM64 so far. `fishc`
-needs clang 15 or newer (`xcode-select --install` on macOS). `FISHC_VERSION=0.1.0` picks a
-release, and `FISHC_NO_MODIFY_PATH=1` leaves your startup file alone. To uninstall,
-`rm -rf ~/.fishc ~/.local/bin/fishc`.
+This downloads the latest release for your machine, checks its sha256, unpacks it under `~/.fishc`,
+links `fishc` into `~/.local/bin`, adds that to `PATH` in your shell's startup file, and builds a
+hello world to check it works. Releases are built for macOS on ARM64 and for Linux on x86-64 and
+ARM64. `fishc` needs clang 15 or newer (`xcode-select --install` on macOS). `FISHC_VERSION=0.1.0`
+picks a release, and `FISHC_NO_MODIFY_PATH=1` leaves your startup file alone. To uninstall, `rm -rf
+~/.fishc ~/.local/bin/fishc`.
 
 ## Building fishc
 

@@ -1,11 +1,13 @@
 # Releases the version a release branch is named for, once its pull request into main is merged.
-# It runs on main as merged, each step only once those before it passed: the release is cut, with
+# It runs on main as merged, each job only once those before it passed: the release is cut, with
 # the version bumped, the changelog written and a release commit and tag pushed to main; it is
-# packed and published; and last it is promoted to stage 0, the pin pushed to main too.
+# packed on each target's own runner; it is published with every target's tarball; and last it is
+# promoted to stage 0, each target checking its own tarball, and the pin pushed to main too.
 # The branch was built and tested by the self-hosting workflow on its pull request; this runs no
 # tests of its own. A run made again takes up where the last one stopped: what is already tagged,
 # published or pinned is left as it is. Run by hand with a version, it does the same on main as it
 # stands, for a release whose merge started no run or whose run can't be made again.
+# The scripts are run by stage 0 itself, so nothing is built that isn't a release's own binary.
 name: release
 on:
   pull_request:
@@ -22,17 +24,20 @@ permissions:
 concurrency:
   group: release
   cancel-in-progress: false
+env:
+  GH_TOKEN: ${{ github.token }}
 jobs:
-  release:
+  cut:
     if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && startsWith(github.head_ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository)
-    # The one target stage0.toml has a released stage 0 for. Another joins once it has its own:
-    # its tarball packed here, and its digest and tarball in stage0.toml.
     runs-on: macos-latest
-    timeout-minutes: 300
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.state.outputs.version }}
+      published: ${{ steps.state.outputs.published }}
+      promoted: ${{ steps.state.outputs.promoted }}
     env:
       HEAD_REF: ${{ github.head_ref }}
       GIVEN: ${{ inputs.version }}
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,10 +66,6 @@ jobs:
             echo "promoted=$promoted"
           } >> "$GITHUB_OUTPUT"
           echo "v$version: cut $cut, published $published, promoted $promoted"
-      # The fishc that runs the release scripts.
-      - name: Build
-        if: steps.state.outputs.promoted == 'no'
-        run: sh scripts/bootstrap.sh
       # Only the merge itself is cut: a main that has moved past it holds what no pull request's
       # tests ran on. Run by hand, it is main as it stands.
       - name: Cut
@@ -79,32 +80,116 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          build/fishc run scripts/release.fsh -- "$VERSION"
+          fishc=$(sh scripts/bootstrap.sh --stage0 | tail -n 1)
+          "$fishc" run scripts/release.fsh -- "$VERSION"
           git push origin HEAD:refs/heads/main
           git push origin "v$VERSION"
+  # Each target's tarball, built on its own runner by its own stage 0. Another target joins here
+  # and in promote once stage0.toml has a released stage 0 for it.
+  pack:
+    needs: cut
+    if: needs.cut.outputs.published == 'no'
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Libraries fishc links
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev zlib1g-dev
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/fish/stage0
+          key: stage0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('stage0.toml') }}
       - name: Pack
-        if: steps.state.outputs.published == 'no'
         env:
-          VERSION: ${{ steps.state.outputs.version }}
-        run: build/fishc run scripts/release.fsh -- --pack "$VERSION"
+          VERSION: ${{ needs.cut.outputs.version }}
+        run: |
+          fishc=$(sh scripts/bootstrap.sh --stage0 | tail -n 1)
+          FISHC="$fishc" "$fishc" run scripts/release.fsh -- --pack "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.os }}
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+  publish:
+    needs: [cut, pack]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          path: dist
+          merge-multiple: true
       - name: Publish
-        if: steps.state.outputs.published == 'no'
         env:
-          VERSION: ${{ steps.state.outputs.version }}
+          VERSION: ${{ needs.cut.outputs.version }}
         run: |
           awk -v v="$VERSION" '$0 ~ "^## " v " " {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
           gh release create "v$VERSION" dist/*.tar.gz dist/*.tar.gz.sha256 --title "fishc $VERSION" --notes-file notes.md
-          rm notes.md
-      # Last, and only for a release that is out: the published tarball's fishc must be the very
-      # binary this runner builds from the tag, and reach the bootstrap fixpoint.
-      - name: Promote to stage 0
-        if: steps.state.outputs.promoted == 'no'
+  # Last, and only for a release that is out: on each target, the published tarball's fishc must
+  # be the very binary its runner builds from the tag, and reach the bootstrap fixpoint.
+  promote:
+    needs: [cut, publish]
+    if: ${{ !failure() && !cancelled() && needs.cut.result == 'success' && needs.cut.outputs.promoted == 'no' }}
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Libraries fishc links
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev zlib1g-dev
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/fish/stage0
+          key: stage0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('stage0.toml') }}
+      - name: Promote
         env:
-          VERSION: ${{ steps.state.outputs.version }}
+          VERSION: ${{ needs.cut.outputs.version }}
         run: |
+          fishc=$(sh scripts/bootstrap.sh --stage0 | tail -n 1)
+          FISHC="$fishc" "$fishc" run scripts/promote.fsh -- "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pin-${{ matrix.os }}
+          path: stage0.toml
+          if-no-files-found: error
+  # Each target wrote a stage0.toml naming itself alone; the one pushed names them all.
+  pin:
+    needs: [cut, promote]
+    if: ${{ !failure() && !cancelled() && needs.promote.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pin-*
+          path: pins
+      - name: Pin
+        env:
+          VERSION: ${{ needs.cut.outputs.version }}
+        run: |
+          sh scripts/pins.sh pins/*/stage0.toml > stage0.toml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          build/fishc run scripts/promote.fsh -- "$VERSION"
           git add stage0.toml
           git commit -q -m "build: pin the v$VERSION release as stage 0"
           git push origin HEAD:refs/heads/main

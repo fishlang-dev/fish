@@ -7,6 +7,8 @@
 // The tarball's fishc is built from the commit's own tree at /tmp/fish-stage0/<commit>, the fixed
 // path stage 0 is built at, since a fishc holds the path it was built at: any machine building the
 // commit there gets the same binary, which is what lets a release be pinned as stage 0.
+// The fishc that runs scripts/build.fsh is FISHC when set, as the workflow sets it to stage 0, and
+// build/fishc otherwise.
 //   fishc run scripts/release.fsh -- <version> | --nightly | --pack <version>
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -88,6 +90,13 @@ function bumped(version: string): string throws IoError {
   return text.replace(/^version = "[^"]*"$/m, `version = "${version}"`);
 }
 
+function fishc(): string {
+  const given = process.env.FISHC ?? "";
+  const path = given !== "" ? given : join(ROOT, "build", "fishc");
+  if (!existsSync(path)) fail(`no fishc at ${path} to build the release with; run scripts/build.fsh first, or set FISHC`);
+  return path;
+}
+
 // Builds fishc from this checkout and packs it with the sources it reads as it runs, as
 // `bin/fishc` and `share/fishc/`, into dist/<name>.tar.gz beside its sha256.
 async function pack(name: string, commit: string): Promise<string> throws IoError {
@@ -100,7 +109,7 @@ async function pack(name: string, commit: string): Promise<string> throws IoErro
   const stage = join(dist, name);
   rmSync(stage, { recursive: true, force: true });
   mkdirSync(join(stage, "bin"), { recursive: true });
-  await shown(["build/fishc", "run", "scripts/build.fsh", "--", "-o", join(stage, "bin", "fishc"), "--source", tree]);
+  await shown([fishc(), "run", "scripts/build.fsh", "--", "-o", join(stage, "bin", "fishc"), "--source", tree]);
   const share = join(stage, "share", "fishc");
   mkdirSync(join(share, "src"), { recursive: true });
   run("cp", ["-R", join(tree, "vendor"), join(share, "vendor")]);
@@ -117,7 +126,6 @@ async function pack(name: string, commit: string): Promise<string> throws IoErro
 
 async function main(): Promise<void> throws IoError {
   const args = process.argv.slice(2);
-  if (!existsSync(join(ROOT, "build", "fishc"))) fail("no build/fishc to build the release with; run scripts/build.fsh first");
   const date = new Date().toISOString().slice(0, 10);
   if (args.length === 1 && args[0]! === "--nightly") {
     await pack(`fishc-nightly-${date}-${hostKey()}`, run("git", ["rev-parse", "HEAD"]));
