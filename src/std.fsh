@@ -1938,6 +1938,9 @@ async function __wsRead(conn: TcpStream, start: u8[], socket: WebSocketSender, i
       incoming.close();
       return;
     }
+    // The client's code is kept before the messages end: the handler returns once they do, on
+    // another thread, and closes with the code it finds.
+    if (why !== null) socket.__wsHeard(why.code);
     incoming.close();
     if (why === null) {
       if (stop.aborted) socket.__wsEnd(1001, "");
@@ -1945,7 +1948,6 @@ async function __wsRead(conn: TcpStream, start: u8[], socket: WebSocketSender, i
     } else {
       // The client's close is answered once the handler returns, so its replies to what came
       // before go out first, or after a second when it doesn't.
-      socket.__wsHeard(why.code);
       const either = AbortSignal.any([socket.__wsReturned(), AbortSignal.timeout(1000)]);
       await Http1.abortOf(either);
       socket.__wsEnd(why.code, "");
