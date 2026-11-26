@@ -295,6 +295,8 @@ function inPlace(): string[] {
   return [
     // the spans of nodes just made, before any tree holds them;
     "parseargs.fsh: Object.assign(node, { start", "tests.fsh: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.fsh: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
+    // a call just parsed from text, given its own parts back before any tree holds it;
+    "parseargs.fsh: arrow.body.object = parse;",
     // a Body's overloads, given as ids, an enum's record, a Body's template mark and a Local's type, which are no nodes;
     "check.fsh: for (const f of this.funcs) if (f.overloadNames) f.overloads =", "check.fsh: for (const e of this.enums.values())", "classes.fsh: f.template = true", "check.fsh: local.type = type;",
     // lists of statements the checker walks, which it edits as a copy recorded by the list's owner

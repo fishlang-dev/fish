@@ -228,7 +228,8 @@ function __propShrinkFloat(v: f64): f64[] {
   let out: f64[] = [];
   if (v === 0.0 || v !== v) return out;
   out.push(0.0);
-  const whole = Math.trunc(v);
+  // Truncated by hand, since a program may declare its own Math; a value this large is already whole.
+  const whole = v > -9.0e18 && v < 9.0e18 ? ((v as i64) as f64) : v;
   if (whole !== v && whole - whole === 0.0) out.push(whole);
   if (v - v === 0.0 && v / 2.0 !== v) out.push(v / 2.0);
   return out;
