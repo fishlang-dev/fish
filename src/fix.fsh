@@ -113,7 +113,8 @@ function enclosingInStmt(s: Ref<Stmt>, offset: usize): SpanRange | undefined {
     if (s.else !== undefined) return enclosingInList(s.else!, offset);
     return undefined;
   }
-  if (s.kind === "while" || s.kind === "for" || s.kind === "forIn" || s.kind === "forOf") return enclosingInList(s.body, offset);
+  if (s.kind === "while" || s.kind === "doWhile" || s.kind === "for" || s.kind === "forIn" || s.kind === "forOf") return enclosingInList(s.body, offset);
+  if (s.kind === "labeled") return enclosingInStmt(s.body, offset);
   if (s.kind === "try") {
     const tryHit = enclosingInList(s.block, offset);
     if (tryHit !== undefined) return tryHit;
@@ -440,9 +441,11 @@ export function fixProgram(
           continue;
         }
 
-        // Accept immediately when total errors drop, or when a direct mutability fix or verified
-        // borrow/clone unblocks checking of a later unrelated error without introducing regressions.
-        let acceptDirect = after.length < errors.length;
+        // Accept immediately when total errors drop without introducing non-ownership regressions,
+        // or when a direct mutability fix or verified borrow/clone unblocks checking cleanly.
+        let acceptDirect =
+          after.length < errors.length &&
+          (!calleeBorrow || after.length === 0 || (trial.calleeSpan !== undefined && borrowSafeWithoutClone(entry, open, errors, trial.next, after)));
         if (!acceptDirect && after.length === errors.length && (!calleeBorrow || candidate.kind === "borrow")) {
           if (!calleeBorrow) {
             acceptDirect = true;
@@ -491,7 +494,9 @@ export function fixProgram(
               const calleeSpan2 = callableAt(trial2.next, trial.primaryFile, calleeOffset2);
               if (calleeSpan2 !== undefined && hasErrorInCallable(entry, trial2.next, after2, trial.primaryFile, calleeSpan2!)) continue;
               const followKey = errorKey(entry, trial.next.get(entry) ?? entryOrig, follow);
-              let acceptPair = after2.length < errors.length;
+              let acceptPair =
+                after2.length < errors.length &&
+                (after2.length === 0 || (calleeSpan2 !== undefined && borrowSafeWithoutClone(entry, open, errors, trial2.next, after2)));
               if (!acceptPair && after2.length === errors.length && calleeSpan2 !== undefined && !hasErrorKey(entry, trial2.next, after2, followKey)) {
                 if (!cloneChecked) {
                   cloneChecked = true;

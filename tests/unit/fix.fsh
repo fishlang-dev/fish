@@ -292,13 +292,26 @@ function takeOwned(xs: i64[]): usize {
   return xs.length;
 }
 
+function useTakeOwned1(): usize {
+  const nums = [1, 2, 3];
+  const a = takeOwned(nums);
+  return a + nums.length;
+}
+
+function useTakeOwned2(): usize {
+  const nums = [4, 5, 6];
+  const a = takeOwned(nums);
+  return a + nums.length;
+}
+
 function main() {
   const cb: (xs: i64[]) => usize = takeOwned;
   const nums = [1, 2, 3];
-  const a = takeOwned(nums);
-  const b = cb(nums);
+  const a = useTakeOwned1();
+  const b = useTakeOwned2();
+  const c = cb(nums);
   const h = keep(nums);
-  console.log(a, b, h.items.length, nums.length);
+  console.log(a, b, c, h.items.length, nums.length);
 }
 `,
     );
@@ -313,7 +326,7 @@ function main() {
     const bin = join(dir, "app");
     assert(fishc(dir, ["build", entry, "-o", bin]).code === 0, "build after callback/default fix failed");
     const ran = spawnSync(bin, [], { cwd: dir });
-    assert(ran.status === 0 && text(ran.stdout).trim() === "3 3 3 3", `unexpected output: ${text(ran.stdout)}`);
+    assert(ran.status === 0 && text(ran.stdout).trim() === "6 6 3 3 3", `unexpected output: ${text(ran.stdout)}`);
   } finally {
     removed(dir);
   }
