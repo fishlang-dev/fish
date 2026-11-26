@@ -86,8 +86,25 @@ const BUILT_IN = /^std:/;
 const QUIET = /^@(llvm\.|printf$|dprintf$|fflush$|fsh_rt_str_retain$|fsh_rt_str_release$)/;
 
 // A name inside LLVM's quotes. A generic class's instance is named by its type arguments, and a
-// test by its name, which may hold quotes, so those are escaped as LLVM spells them.
-const quoted = (name: string) => name.replace(/["\\]/g, (c) => `\\${hexByte(c.charCodeAt(0) as usize)}`);
+// test or member by its name, which may hold quotes, backslashes, control bytes, or non-ASCII
+// bytes, so every byte outside printable ASCII (plus `"` and `\`) is hex-escaped as LLVM spells it.
+function quoted(name: string): string {
+  let clean = true;
+  for (let i: usize = 0; i < name.length; i++) {
+    const c = name.charCodeAt(i);
+    if (c < 0x20 || c >= 0x7f || c === 0x22 || c === 0x5c) {
+      clean = false;
+      break;
+    }
+  }
+  if (clean) return name;
+  let out = "";
+  for (const b of wtf8(name)) {
+    const plain = b >= 0x20 && b < 0x7f && b !== 0x22 && b !== 0x5c;
+    out += plain ? String.fromCharCode(b as u16) : "\\" + hexByte(b as usize);
+  }
+  return out;
+}
 // A symbol with each type argument list longer than this written as a hash of it: a generic
 // class made from a structural type spells its fields in its name, which every method's symbol
 // and frame name repeats.
@@ -163,7 +180,7 @@ export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
 // An instance's name in the IR, from the names `symbolNames` gave the compilation's instances.
 export const symbolIn = (arenas: Ref<Arenas>, i: Ref<Instance>, names: Ref<Map<InstanceId, string>>) => {
   const b = bodyOf(arenas, i);
-  return b.rust !== undefined ? `@"${trusted(b.rust).symbol}"` : b.foreign === true ? `@"${b.name}"` : `@"fsh.${quoted(names.get(i.id) ?? shortened(i.symbol))}"`;
+  return b.rust !== undefined ? `@"${trusted(b.rust).symbol}"` : b.foreign === true ? `@"${quoted(b.name)}"` : `@"fsh.${quoted(names.get(i.id) ?? shortened(i.symbol))}"`;
 };
 
 // A field as JSON reads and writes it: where it sits, and whether an empty one is left out.
@@ -182,6 +199,22 @@ function innerOf<A extends Lifetime>(e: Ref<Expr, A>): Ref<Expr, A> {
   if (e.kind === "as") return e.expr;
   if (e.kind === "satisfies") return e.expr;
   if (e.kind === "unsafe") return e.expr;
+  return e;
+}
+
+function consumeChild<A extends Lifetime>(e: Ref<Expr, A>): Ref<Expr, A> {
+  if (e.kind === "as") return e.expr;
+  if (e.kind === "satisfies") return e.expr;
+  if (e.kind === "unsafe") return e.expr;
+  if (e.kind === "nonNull") return e.expr;
+  return e;
+}
+
+function unwrappedConsume<A extends Lifetime>(e: Ref<Expr, A>): Ref<Expr, A> {
+  if (e.kind === "as") return unwrappedConsume(e.expr);
+  if (e.kind === "satisfies") return unwrappedConsume(e.expr);
+  if (e.kind === "unsafe") return unwrappedConsume(e.expr);
+  if (e.kind === "nonNull") return unwrappedConsume(e.expr);
   return e;
 }
 
@@ -1454,7 +1487,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.reads.set(this.current, read);
     const made = this.constantGlobals.get(c);
     if ((made !== undefined && made !== "")) return made;
-    const name = `@"fsh.const.${this.bodyAt(c).name.slice("const ".length as i64)}"`;
+    const name = `@"fsh.const.${quoted(this.bodyAt(c).name.slice("const ".length as i64))}"`;
     this.constantGlobals.set(c, name);
     const part = this.inst(c).returns;
     this.globals.push(`${name} = internal global ${this.llvm(part)} zeroinitializer`);
@@ -3723,7 +3756,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // The copy of a Dyn whose value can't be cloned: it panics rather than split state in two,
   // naming the Rust type when a Rust value is what can't be copied.
   dynUncopyable(this: Mut<this>, rust = ""): string {
-    const name = rust !== "" ? `@"fsh.dyn.uncopyable.${rust}"` : `@"fsh.dyn.uncopyable"`;
+    const name = rust !== "" ? `@"fsh.dyn.uncopyable.${quoted(rust)}"` : `@"fsh.dyn.uncopyable"`;
     if (!this.uncopyable.has(rust)) {
       this.uncopyable.add(rust);
       const why = rust !== ""
@@ -3802,9 +3835,9 @@ class Codegen implements PrintHost, ComptimeHost {
     let made: string[] = [];
     for (let i: usize = 0; i < declared.length; i++) {
       if (abstract(this, declared[i]!.returns) || i >= methods.length || methods[i] === undefined) made.push("null");
-      else made.push(this.methodThunk(`@"fsh.dyn.${n}.${declared[i]!.name}"`, type, declared[i]!, methods[i]!));
+      else made.push(this.methodThunk(`@"fsh.dyn.${n}.${quoted(declared[i]!.name)}"`, type, declared[i]!, methods[i]!));
     }
-    return [...made, ...this.tables.typing.rec(this.tables.typing.rec(to).of).fields.map((f, i) => this.fieldThunk(`@"fsh.dyn.${n}.get ${f.name}"`, type, f, fields[i as usize]))];
+    return [...made, ...this.tables.typing.rec(this.tables.typing.rec(to).of).fields.map((f, i) => this.fieldThunk(`@"fsh.dyn.${n}.get ${quoted(f.name)}"`, type, f, fields[i as usize]))];
   }
 
 
@@ -4222,14 +4255,17 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // `called` run when `missing` is false; the empty Option in its place otherwise.
   whenPresent(this: Mut<this>, e: Ref<Expr>, missing: string, gives: Type, called: (cg: Mut<Codegen>) => string | undefined): string | undefined {
+    const type = this.cur().types.get(e);
+    const lent = type !== undefined && this.tables.typing.holdsRef(type);
+    let kept: { slot: string; type: Type }[] = [];
     const [some, none, end] = [this.label(), this.label(), this.label()];
     this.emit(`br i1 ${missing}, label %${none}, label %${some}`);
     this.startBlock(some);
     const mark = this.pending.length;
     const got = called(this);
-    const type = this.cur().types.get(e);
     const wrapped = got !== undefined && type !== undefined ? this.convert(got, gives, type) : undefined;
-    this.settle(mark);
+    if (lent) this.hoistPending(mark, kept);
+    else this.settle(mark);
     const someEnd = this.block;
     this.emit(`br label %${end}`);
     this.startBlock(none);
@@ -4237,9 +4273,12 @@ class Codegen implements PrintHost, ComptimeHost {
     const noneEnd = this.block;
     this.emit(`br label %${end}`);
     this.startBlock(end);
-    if (wrapped === undefined || type === undefined || empty === undefined) return undefined;
-    const result = this.temp();
-    this.emit(`${result} = phi ${this.llvm(type)} [ ${wrapped}, %${someEnd} ], [ ${empty}, %${noneEnd} ]`);
+    let result: string | undefined = undefined;
+    if (wrapped !== undefined && type !== undefined && empty !== undefined) {
+      result = this.temp();
+      this.emit(`${result} = phi ${this.llvm(type)} [ ${wrapped}, %${someEnd} ], [ ${empty}, %${noneEnd} ]`);
+    }
+    this.repushPending(kept);
     return result;
   }
 
@@ -8802,10 +8841,33 @@ class Codegen implements PrintHost, ComptimeHost {
       const part = this.tables.typing.rec(array).element;
       this.cloneAll(out, at, part, this.tables.typing.rec(inner).element);
     } else {
-      // The arguments run first, as in JavaScript, before anything is cloned.
-      const sources = e.args.map((a) => this.value(a));
+      // The arguments run first, as in JavaScript, before anything is cloned. Snapshot the
+      // receiver and any earlier argument when a later argument may mutate them.
+      let baseAt = at;
+      if (e.args.some((a) => this.writes(a))) {
+        const loaded = this.temp();
+        this.emit(`${loaded} = load ${ARRAY}, ptr ${at}`);
+        const copy = this.copied(loaded, array);
+        const snap = this.alloca(ARRAY);
+        this.emit(`store ${ARRAY} ${copy}, ptr ${snap}`);
+        this.pending.push({ v: copy, type: array });
+        baseAt = snap;
+      }
+      const sources = e.args.map((a, i) => {
+        const from = this.value(a);
+        let laterWrites = false;
+        for (let j: usize = (i + 1) as usize; j < e.args.length; j++) if (this.writes(e.args[j]!)) laterWrites = true;
+        if (!laterWrites) return from;
+        const loaded = this.temp();
+        this.emit(`${loaded} = load ${ARRAY}, ptr ${from}`);
+        const copy = this.copied(loaded, array);
+        const snap = this.alloca(ARRAY);
+        this.emit(`store ${ARRAY} ${copy}, ptr ${snap}`);
+        this.pending.push({ v: copy, type: array });
+        return snap;
+      });
       const part3 = this.tables.typing.rec(array).element;
-      this.cloneAll(out, at, part3, undefined);
+      this.cloneAll(out, baseAt, part3, undefined);
       for (const from of sources) {
         const part4 = this.tables.typing.rec(array).element;
         this.cloneAll(out, from, part4, undefined);
@@ -8838,13 +8900,65 @@ class Codegen implements PrintHost, ComptimeHost {
   readingLoop(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, method: string, array: ArrayType, at: string): string | undefined {
     const element = this.tables.typing.rec(array).element;
     const t = this.llvm(element);
+    const searching = method === "includes" || method === "indexOf" || method === "lastIndexOf";
+    const args = e.args.map((a, i) => {
+      if (i === 0 && searching) {
+        const inner = unwrappedConsume(a);
+        if (this.cur().consumes.has(inner.id) && this.lendable(inner)) {
+          const atype = this.valueType(a);
+          const innerType = this.cur().types.get(inner)!;
+          const keeps = this.keepsAlong(a, inner);
+          if (this.handedOn(a).id === inner.id && keeps) {
+            const v = this.owned(a);
+            if (this.needsDrop(atype)) this.pending.push({ v, type: atype });
+            return v;
+          }
+          if (!this.allocatesAlong(a, inner)) {
+            // `value(a)` borrows from `inner` without allocating any Dyn or recursive box.
+            // Move `inner`'s whole place into `pending` after `value(a)` succeeds so discarded
+            // fields and disposers still drop once and any panic in `as`/`!` leaves `inner` intact.
+            const v = this.value(a);
+            const addr = this.address(inner);
+            const place = this.placeType(inner);
+            const llPlace = this.llvm(place);
+            const held = this.temp();
+            this.emit(`${held} = load ${llPlace}, ptr ${addr}`);
+            this.emit(`store ${llPlace} zeroinitializer, ptr ${addr}`);
+            if (this.needsDrop(place)) this.pending.push({ v: held, type: place });
+            return v;
+          }
+          if (keeps) {
+            const v = this.value(a);
+            if (this.placeType(inner) === innerType && this.unboxes(innerType, atype)) {
+              const addr = this.address(inner);
+              const llInner = this.llvm(innerType);
+              const held = this.temp();
+              this.emit(`${held} = load ${llInner}, ptr ${addr}`);
+              this.freeBlocks(held, innerType);
+            }
+            this.take(inner);
+            if (this.needsDrop(atype)) this.pending.push({ v, type: atype });
+            return v;
+          }
+          // When a wrapper projects away owned fields before boxing into Dyn, `owned(a)` copies
+          // the kept projection into the Dyn box and leaves `inner` intact to drop its own fields.
+          const handed = this.handedOn(a);
+          const topDyn = this.tables.boxedMembers.get(handed) !== undefined || this.isDyn(atype);
+          if (topDyn && handed.id !== inner.id) {
+            const v = this.owned(a);
+            if (this.needsDrop(atype)) this.pending.push({ v, type: atype });
+            return v;
+          }
+          return this.readOperand(a, true);
+        }
+      }
+      return this.operand(a, e.args, (i + 1) as usize);
+    });
     const [lengthAt, dataAt, length, data] = [this.temp(), this.temp(), this.temp(), this.temp()];
     this.emit(`${lengthAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 1`);
     this.emit(`${dataAt} = getelementptr ${ARRAY}, ptr ${at}, i32 0, i32 0`);
     this.emit(`${length} = load i64, ptr ${lengthAt}`);
     this.emit(`${data} = load ptr, ptr ${dataAt}`);
-    const args = e.args.map((a) => this.value(a));
-    const searching = method === "includes" || method === "indexOf" || method === "lastIndexOf";
     const from = method === "slice" ? (args.length > 0 ? args[0]! : undefined) : (args.length > 1 ? args[1]! : undefined);
     const start = method !== "join" && method !== "lastIndexOf" && (from !== undefined && from !== "") ? this.position(from, length) : "0";
     // `lastIndexOf` looks at every element up to where it starts searching back from, and keeps
@@ -9415,6 +9529,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // block, or an object whose fields each do.
   keepsPart(this: Mut<this>, from: Type, to: Type): boolean {
     const target = this.recOf(to);
+    if (target !== undefined && target.kind === "dyn") return true;
     if (target !== undefined && target.kind === "recursive") return this.keepsAll(from, target.of);
     const source = this.recOf(from);
     if (source === undefined || source.kind !== "object" || target === undefined || target.kind !== "object") return false;
@@ -9438,16 +9553,519 @@ class Codegen implements PrintHost, ComptimeHost {
   // A value read for an operand. One read from a place takes a reference of its own while a
   // later operand that might change the place runs, released when the statement ends.
   operand(this: Mut<this>, e: Ref<Expr>, later: Ref<Expr[]>, from: usize): string {
-    const v = this.value(e);
     let written = false;
     for (let i = from; i < later.length; i++) if (this.writes(later[i]!)) written = true;
-    return this.kept(e, v, written);
+    return this.readOperand(e, written);
   }
 
   // An operand evaluated before `later`, which may write what it reads.
   operandBefore(this: Mut<this>, e: Ref<Expr>, later: Ref<Expr>): string {
+    return this.readOperand(e, this.writes(later));
+  }
+
+  // Whether converting a value of `from` to `to` allocates any recursive type block, at the
+  // top level or inside nested object/class/union conversions.
+  allocatesBlock(this: Mut<this>, from: Type, to: Type, seen: Mut<Set<string>>): boolean {
+    const lowFrom = this.tables.typing.lower(from);
+    const lowTo = this.tables.typing.lower(to);
+    if (from === to || lowFrom === lowTo) return false;
+    const key = `${idOf(from)},${idOf(to)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    const refFrom = this.referent(from);
+    if (refFrom !== from) return this.allocatesBlock(refFrom, to, seen);
+    if (this.kindOf(from) === "union") {
+      const ur = this.tables.typing.rec(from as UnionType);
+      const members = ur.members.slice();
+      const isUnknown = ur.unknown === true;
+      for (const m of members) {
+        if (this.allocatesBlock(m, to, seen)) return true;
+        if (isUnknown && isNumeric(m) && m !== "f64" && this.allocatesBlock("f64", to, seen)) return true;
+      }
+      return false;
+    }
+    if (this.kindOf(to) === "union") {
+      const into = this.tables.typing.membersFor(from, to as UnionType);
+      if (into.length > 0) {
+        for (const t of into) {
+          if (this.allocatesBlock(from, t, seen)) return true;
+        }
+        return false;
+      }
+      if (this.kindOf(from) === "recursive") return this.allocatesBlock(this.tables.typing.unfold(from), to, seen);
+      return false;
+    }
+    if (this.kindOf(from) === "recursive") return this.allocatesBlock(this.tables.typing.unfold(from), to, seen);
+    if (this.kindOf(to) === "recursive") return true;
+    const fk = this.kindOf(from);
+    const tk = this.kindOf(to);
+    if ((fk === "object" || fk === "class") && (tk === "object" || tk === "class")) {
+      const tr = this.tables.typing.rec(to as ObjectType | ClassType);
+      const base = tr.kind === "class" ? tr.base : undefined;
+      let fields: [string, Type][] = [];
+      for (const f of tr.fields) fields.push([f.name, f.type]);
+      if (base !== undefined && this.allocatesBlock(from, base, seen)) return true;
+      for (let i: usize = 0; i < fields.length; i++) {
+        const name = fields[i]![0];
+        const ftype = fields[i]![1];
+        const given = this.tables.typing.field(from as ObjectType | ClassType, name);
+        const givenType = given !== undefined ? given.type : "null";
+        if (this.allocatesBlock(givenType, ftype, seen)) return true;
+      }
+    }
+    return false;
+  }
+
+  // Whether evaluating `e` down to `stop` allocates any Dyn box or recursive type block.
+  allocatesAlong(this: Mut<this>, e: Ref<Expr>, stop: Ref<Expr>): boolean {
+    let cur: Ref<Expr> = e;
+    while (true) {
+      if (this.tables.boxedMembers.get(cur) !== undefined) return true;
+      const to = this.cur().coercions.get(cur);
+      const from = this.cur().types.get(cur);
+      if (to !== undefined && from !== undefined) {
+        if (this.isDyn(to) && (!this.isDyn(from) || this.relays(from, to as DynType))) return true;
+        if (this.allocatesBlock(from, to, new Set<string>())) return true;
+      }
+      const prevId = cur.id;
+      if (prevId === stop.id) return false;
+      cur = consumeChild(cur);
+      if (cur.id === prevId) return false;
+    }
+  }
+
+  // Whether evaluating `e` itself (ignoring any outer coercion on `e`) allocates any Dyn box
+  // or recursive type block inside `e`'s wrapper chain.
+  allocatesInside(this: Mut<this>, e: Ref<Expr>): boolean {
+    if (!this.wraps(e)) return false;
+    return this.allocatesAlong(innerOf(e), unwrappedConsume(e));
+  }
+
+  // Whether evaluating `e` down to `stop` performs any Dyn boxing or Dyn relaying.
+  boxesDynAlong(this: Mut<this>, e: Ref<Expr>, stop: Ref<Expr>): boolean {
+    let cur: Ref<Expr> = e;
+    while (true) {
+      if (this.tables.boxedMembers.get(cur) !== undefined) return true;
+      const to = this.cur().coercions.get(cur);
+      const from = this.cur().types.get(cur);
+      if (to !== undefined && from !== undefined && this.isDyn(to) && (!this.isDyn(from) || this.relays(from, to as DynType))) return true;
+      const prevId = cur.id;
+      if (prevId === stop.id) return false;
+      cur = consumeChild(cur);
+      if (cur.id === prevId) return false;
+    }
+  }
+
+  // Whether every coercion along `e` down to `stop` preserves all owned parts of `stop`.
+  keepsAlong(this: Mut<this>, e: Ref<Expr>, stop: Ref<Expr>): boolean {
+    let cur: Ref<Expr> = e;
+    while (true) {
+      const to = this.cur().coercions.get(cur);
+      const from = this.cur().types.get(cur);
+      if (to !== undefined && from !== undefined && !this.keepsAll(from, to)) return false;
+      const prevId = cur.id;
+      if (prevId === stop.id) return true;
+      cur = consumeChild(cur);
+      if (cur.id === prevId) return true;
+    }
+  }
+
+  // Whether `copyInto(v, from, to)` can build an owned `to` without unfolding a cyclic pair of
+  // distinct recursive types, copying a move-only target, or bypassing Dyn boxing/relaying.
+  canCopyInto(this: Mut<this>, from: Type, to: Type, seen: Mut<Set<string>>): boolean {
+    if (!this.needsDrop(to)) return true;
+    if (this.moveOnly(to)) return false;
+    const lowFrom = this.tables.typing.lower(from);
+    const lowTo = this.tables.typing.lower(to);
+    if (from === to || lowFrom === lowTo) return true;
+    if (this.isDyn(to) && (!this.isDyn(from) || this.relays(from, to as DynType))) return false;
+    if (this.kindOf(from) === "union") {
+      if (this.tables.typing.rec(from as UnionType).unknown === true) return !this.allocatesBlock(from, to, new Set<string>());
+      const members = this.tables.typing.rec(from as UnionType).members.slice();
+      for (const m of members) {
+        if (!this.canCopyInto(m, to, seen)) return false;
+      }
+      return true;
+    }
+    if (this.kindOf(to) === "union") {
+      const into = this.tables.typing.membersFor(from, to as UnionType);
+      if (into.length === 1) return this.canCopyInto(from, into[0]!, seen);
+      if (into.length === 0 && this.kindOf(from) === "recursive") {
+        const key = `f:${idOf(from)},${idOf(to)}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        const ok = this.canCopyInto(this.tables.typing.unfold(from), to, seen);
+        seen.delete(key);
+        return ok;
+      }
+      return false;
+    }
+    if (this.kindOf(from) === "recursive") {
+      const key = `f:${idOf(from)},${idOf(to)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      const ok = this.canCopyInto(this.tables.typing.unfold(from), to, seen);
+      seen.delete(key);
+      return ok;
+    }
+    if (this.kindOf(to) === "recursive") {
+      const key = `t:${idOf(from)},${idOf(to)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      const ok = this.canCopyInto(from, this.tables.typing.unfold(to), seen);
+      seen.delete(key);
+      return ok;
+    }
+    const fk = this.kindOf(from);
+    const tk = this.kindOf(to);
+    if ((fk === "object" || fk === "class") && (tk === "object" || tk === "class")) {
+      const tr = this.tables.typing.rec(to as ObjectType | ClassType);
+      const base = tr.kind === "class" ? tr.base : undefined;
+      let fields: [string, Type][] = [];
+      for (const f of tr.fields) fields.push([f.name, f.type]);
+      if (base !== undefined && !this.canCopyInto(from, base, seen)) return false;
+      for (let i: usize = 0; i < fields.length; i++) {
+        const name = fields[i]![0];
+        const ftype = fields[i]![1];
+        const given = this.tables.typing.field(from as ObjectType | ClassType, name);
+        const givenType = given !== undefined ? given.type : "null";
+        if (!this.canCopyInto(givenType, ftype, seen)) return false;
+      }
+      return true;
+    }
+    return true;
+  }
+
+  // Builds a freshly owned copy of `v` (of type `from`) converted to copyable type `to`,
+  // splitting union sources first so tag checks are never skipped and allocating recursive
+  // blocks directly on owned copies so no throwaway shell block is ever leaked or live block freed.
+  copyInto(this: Mut<this>, v: string, from: Type, to: Type): string {
+    const lowFrom = this.tables.typing.lower(from);
+    const lowTo = this.tables.typing.lower(to);
+    if (from === to || lowFrom === lowTo) return this.needsDrop(to) ? this.copied(v, to) : v;
+    if (!this.needsDrop(to)) return this.convert(v, from, to);
+    if (this.kindOf(from) === "union") {
+      if (this.tables.typing.rec(from as UnionType).unknown === true) {
+        const proj = this.convert(v, from, to);
+        return this.copied(proj, to);
+      }
+      const members = this.tables.typing.rec(from as UnionType).members.slice();
+      const llTo = this.llvm(to);
+      const slot = this.alloca(llTo);
+      const done = this.label();
+      for (let i: usize = 0; i < members.length; i++) {
+        const m = members[i]!;
+        const [yes, no] = [this.label(), this.label()];
+        const last = i === members.length - 1;
+        if (!last) {
+          const held = this.conversions().holds(v, from as UnionType, [m]);
+          this.emit(`br i1 ${held}, label %${yes}, label %${no}`);
+        } else this.emit(`br label %${yes}`);
+        this.startBlock(yes);
+        const part = this.convert(v, from, m);
+        const made = this.copyInto(part, m, to);
+        this.emit(`store ${llTo} ${made}, ptr ${slot}`);
+        this.emit(`br label %${done}`);
+        this.startBlock(no);
+        if (last) this.emit("unreachable");
+      }
+      this.startBlock(done);
+      const out = this.temp();
+      this.emit(`${out} = load ${llTo}, ptr ${slot}`);
+      return out;
+    }
+    if (this.kindOf(to) === "union") {
+      const into = this.tables.typing.membersFor(from, to as UnionType);
+      if (into.length === 1) {
+        const t = into[0]!;
+        const made = this.copyInto(v, from, t);
+        return this.convert(made, t, to);
+      }
+      if (this.kindOf(from) === "recursive") {
+        const unfolded = this.tables.typing.unfold(from);
+        const loaded = this.convert(v, from, unfolded);
+        return this.copyInto(loaded, unfolded, to);
+      }
+    }
+    if (this.kindOf(from) === "recursive") {
+      const unfolded = this.tables.typing.unfold(from);
+      const loaded = this.convert(v, from, unfolded);
+      return this.copyInto(loaded, unfolded, to);
+    }
+    if (this.kindOf(to) === "recursive") {
+      const toBlock = this.tables.typing.unfold(to);
+      const inner = this.copyInto(v, from, toBlock);
+      return this.convert(inner, toBlock, to);
+    }
+    if (!this.moveOnly(from) && this.keepsAll(from, to)) {
+      const copy = this.copied(v, from);
+      return this.convert(copy, from, to);
+    }
+    const fk = this.kindOf(from);
+    const tk = this.kindOf(to);
+    if ((fk === "object" || fk === "class") && (tk === "object" || tk === "class")) {
+      const tr = this.tables.typing.rec(to as ObjectType | ClassType);
+      const embeds = tr.kind === "class" ? tr.base : undefined;
+      let fields: [string, Type][] = [];
+      for (const f of tr.fields) fields.push([f.name, f.type]);
+      const llFrom = this.llvm(from);
+      const llTo = this.llvm(to);
+      let result = "undef";
+      if (embeds !== undefined) {
+        const base = this.copyInto(v, from, embeds);
+        const llBase = this.llvm(embeds);
+        const next = this.temp();
+        this.emit(`${next} = insertvalue ${llTo} ${result}, ${llBase} ${base}, 0`);
+        result = next;
+      }
+      for (let i: usize = 0; i < fields.length; i++) {
+        const name = fields[i]![0];
+        const ftype = fields[i]![1];
+        const at = i + (embeds !== undefined ? 1 : 0);
+        const llFtype = this.llvm(ftype);
+        const given = this.tables.typing.field(from as ObjectType | ClassType, name);
+        if (given === undefined) {
+          const empty = this.convert("zeroinitializer", "null", ftype);
+          const next = this.temp();
+          this.emit(`${next} = insertvalue ${llTo} ${result}, ${llFtype} ${empty}, ${at}`);
+          result = next;
+          continue;
+        }
+        const givenType = given.type;
+        const path = this.tables.typing.fieldPath(from as ObjectType | ClassType, name).join(", ");
+        const part = this.temp();
+        this.emit(`${part} = extractvalue ${llFrom} ${v}, ${path}`);
+        const made = this.copyInto(part, givenType, ftype);
+        const next = this.temp();
+        this.emit(`${next} = insertvalue ${llTo} ${result}, ${llFtype} ${made}, ${at}`);
+        result = next;
+      }
+      return result;
+    }
+    const proj = this.convert(v, from, to);
+    return this.copied(proj, to);
+  }
+
+  // Maps `from` into the target subtype of `union`, rejecting move-only targets unless
+  // `allowMoveOnly` is set (for intermediate steps projected before a copyable final target).
+  copyableUnionTarget(this: Mut<this>, from: Type, union: UnionType, allowMoveOnly: boolean): Type | undefined {
+    const srcMembers: Type[] = this.kindOf(from) === "union" ? this.tables.typing.rec(from as UnionType).members.slice() : [from];
+    let targets: Type[] = [];
+    for (const m of srcMembers) {
+      const into = this.tables.typing.membersFor(m, union);
+      if (into.length === 1) {
+        const t = into[0]!;
+        if (!allowMoveOnly && this.moveOnly(t)) return undefined;
+        if (!targets.includes(t)) targets.push(t);
+        continue;
+      }
+      if (into.length === 0 && this.kindOf(m) === "recursive") {
+        const unfolded = this.tables.typing.unfold(m);
+        const uMembers: Type[] = this.kindOf(unfolded) === "union" ? this.tables.typing.rec(unfolded as UnionType).members.slice() : [unfolded];
+        for (const um of uMembers) {
+          const uinto = this.tables.typing.membersFor(um, union);
+          if (uinto.length !== 1) return undefined;
+          const ut = uinto[0]!;
+          if (!allowMoveOnly && this.moveOnly(ut)) return undefined;
+          if (!targets.includes(ut)) targets.push(ut);
+        }
+        continue;
+      }
+      return undefined;
+    }
+    if (targets.length === 0) return undefined;
+    return targets.length === 1 ? targets[0]! : this.tables.typing.unionType(targets);
+  }
+
+  // Projects a move-only intermediate type `from` guided by a copyable downstream type `want`,
+  // preserving every field of `from` that `want` can observe (including move-only classes/objects
+  // structurally satisfying optional fields) while omitting fields that `from` already stripped.
+  projectFor(this: Mut<this>, from: Type, want: Type, seen: Mut<Set<string>>): Type | undefined {
+    if (!this.moveOnly(from)) return from;
+    if (this.moveOnly(want)) return undefined;
+    if (typeof from === "string" || typeof want === "string") return undefined;
+    const key = `${idOf(from)},${idOf(want)}`;
+    if (seen.has(key)) return undefined;
+    seen.add(key);
+    const fk = this.kindOf(from);
+    const wk = this.kindOf(want);
+    let out: Type | undefined = undefined;
+    if (fk === "recursive") {
+      const unfolded = this.tables.typing.unfold(from);
+      out = this.projectFor(unfolded, want, seen);
+    } else if (wk === "recursive") {
+      const unfolded = this.tables.typing.unfold(want);
+      out = this.projectFor(from, unfolded, seen);
+    } else if (fk === "union") {
+      const members = this.tables.typing.rec(from as UnionType).members.slice();
+      let kept: Type[] = [];
+      let allOk = true;
+      for (const m of members) {
+        const proj = this.projectFor(m, want, seen);
+        if (proj === undefined) {
+          allOk = false;
+          break;
+        }
+        if (!kept.includes(proj)) kept.push(proj);
+      }
+      if (allOk && kept.length > 0) out = kept.length === 1 ? kept[0]! : this.tables.typing.unionType(kept);
+    } else if (wk === "union") {
+      const into = this.tables.typing.membersFor(from, want as UnionType);
+      if (into.length === 1) out = this.projectFor(from, into[0]!, seen);
+    } else if ((fk === "object" || fk === "class") && wk === "object") {
+      const fromTuple = fk === "object" && this.tables.typing.rec(from as ObjectType).tuple === true;
+      const wr = this.tables.typing.rec(want as ObjectType);
+      const wantTuple = wr.tuple === true;
+      if (!fromTuple && !wantTuple) {
+        const wfields = wr.fields.map((f) => copyField(f));
+        let kept: Field[] = [];
+        let allOk = true;
+        for (const wf of wfields) {
+          const ff = this.tables.typing.field(from as ObjectType | ClassType, wf.name);
+          if (ff === undefined) continue;
+          const ffCopy = copyField(ff);
+          const proj = this.projectFor(ffCopy.type, wf.type, seen);
+          if (proj === undefined) {
+            allOk = false;
+            break;
+          }
+          let nf = copyField(ffCopy);
+          nf.type = proj;
+          kept.push(nf);
+        }
+        if (allOk) {
+          const obj = this.tables.typing.objectType(kept);
+          out = this.tables.typing.lower(obj);
+        }
+      }
+    }
+    seen.delete(key);
+    return out;
+  }
+
+  // Resolves recorded intermediate `as` steps forward using the unprojected semantic type `semCur`
+  // so downstream unions match the exact semantic type, then projects any move-only steps backward
+  // guided by the copyable `finalTarget`.
+  resolveSemanticSteps(this: Mut<this>, src: Type, revSteps: Ref<Type[]>): { semSteps: Type[]; semCur: Type } | undefined {
+    let semSteps: Type[] = [];
+    let semCur = src;
+    for (let i: usize = revSteps.length; i > 0; i--) {
+      const rawStep = revSteps[i - 1]!;
+      let step = rawStep;
+      if (this.moveOnly(step) && this.kindOf(step) === "union") {
+        const matched = this.copyableUnionTarget(semCur, step as UnionType, true);
+        if (matched === undefined) return undefined;
+        step = this.tables.typing.lower(matched);
+      }
+      semSteps.push(step);
+      semCur = step;
+    }
+    return { semSteps, semCur };
+  }
+
+  projectStepsFor(this: Mut<this>, semSteps: Ref<Type[]>, finalTarget: Type): Type[] | undefined {
+    let revOut: Type[] = [];
+    let want = finalTarget;
+    for (let i: usize = semSteps.length; i > 0; i--) {
+      const s = semSteps[i - 1]!;
+      const proj = this.moveOnly(s) ? this.projectFor(s, want, new Set<string>()) : s;
+      if (proj === undefined) return undefined;
+      const lowered = this.tables.typing.lower(proj);
+      revOut.push(lowered);
+      want = lowered;
+    }
+    let out: Type[] = [];
+    for (let i: usize = revOut.length; i > 0; i--) out.push(revOut[i - 1]!);
+    return out;
+  }
+
+  canCopyChain(this: Mut<this>, src: Type, steps: Ref<Type[]>, finalTarget: Type): boolean {
+    let cur = src;
+    for (let i: usize = 0; i < steps.length; i++) {
+      const next = steps[i]!;
+      if (!this.canCopyInto(cur, next, new Set<string>())) return false;
+      cur = next;
+    }
+    return this.canCopyInto(cur, finalTarget, new Set<string>());
+  }
+
+  copyChain(this: Mut<this>, val: string, src: Type, steps: Ref<Type[]>, finalTarget: Type): string {
+    let curVal = val;
+    let curType = src;
+    let owned = false;
+    for (let i: usize = 0; i < steps.length; i++) {
+      const next = steps[i]!;
+      if (curType === next || this.tables.typing.lower(curType) === this.tables.typing.lower(next)) continue;
+      curVal = this.copyInto(curVal, curType, next);
+      if (this.needsDrop(next)) this.pending.push({ v: curVal, type: next });
+      curType = next;
+      owned = true;
+    }
+    if (owned && (curType === finalTarget || this.tables.typing.lower(curType) === this.tables.typing.lower(finalTarget))) return curVal;
+    const out = this.copyInto(curVal, curType, finalTarget);
+    if (this.needsDrop(finalTarget)) this.pending.push({ v: out, type: finalTarget });
+    return out;
+  }
+
+  readOperand(this: Mut<this>, e: Ref<Expr>, written: boolean): string {
+    const type = this.valueType(e);
+    const stop = unwrappedConsume(e);
+    const wrapStop = this.unwrapped(e);
+    const allocWrap = this.allocatesAlong(e, wrapStop);
+    if (written && !this.fresh(e) && this.needsDrop(type) && !this.boxesDynAlong(e, stop) && (e.kind !== "string" || allocWrap)) {
+      const moveUnion = this.moveOnly(type) && this.kindOf(type) === "union";
+      const allocCopy = !moveUnion && !this.moveOnly(type) && !this.isDyn(type) && allocWrap;
+      if (moveUnion || allocCopy) {
+        // Unwrap only while an intermediate `as` either matches `type`, allocates inside, or is
+        // a move-only union; track the exact unprojected semantic type for downstream unions and
+        // project move-only steps backward guided by the copyable final target.
+        let inner: Ref<Expr> = e;
+        let revSteps: Type[] = [];
+        while (this.wraps(inner)) {
+          if (inner.kind === "as") {
+            const curType = this.cur().types.get(inner);
+            if (curType !== undefined && curType !== type) {
+              const curMoveUnion = this.moveOnly(curType) && this.kindOf(curType) === "union";
+              if (!curMoveUnion && !this.allocatesInside(inner)) break;
+              revSteps.push(this.tables.typing.lower(curType));
+            }
+          }
+          inner = innerOf(inner);
+        }
+        const rawSrc = this.cur().types.get(inner);
+        if (rawSrc !== undefined) {
+          const refType = this.referent(rawSrc);
+          const src = this.tables.typing.lower(refType);
+          const resolved = this.resolveSemanticSteps(src, revSteps);
+          if (resolved !== undefined) {
+            if (moveUnion) {
+              if (resolved.semCur !== type) {
+                const union = type as UnionType;
+                const target = this.copyableUnionTarget(resolved.semCur, union, false);
+                if (target !== undefined && (this.needsDrop(target) || allocWrap)) {
+                  const steps = this.projectStepsFor(resolved.semSteps, target);
+                  if (steps !== undefined && this.canCopyChain(src, steps, target)) {
+                    const evaled = this.known.get(inner) ?? this.evaluate(inner);
+                    const val = this.isRef(rawSrc) ? this.convert(evaled, rawSrc, refType) : evaled;
+                    const ownedTarget = this.copyChain(val, src, steps, target);
+                    return this.convert(ownedTarget, target, union);
+                  }
+                }
+              }
+            } else {
+              const steps = this.projectStepsFor(resolved.semSteps, type);
+              if (steps !== undefined && this.canCopyChain(src, steps, type)) {
+                const evaled = this.known.get(inner) ?? this.evaluate(inner);
+                const val = this.isRef(rawSrc) ? this.convert(evaled, rawSrc, refType) : evaled;
+                return this.copyChain(val, src, steps, type);
+              }
+            }
+          }
+        }
+      }
+    }
     const v = this.value(e);
-    return this.kept(e, v, this.writes(later));
+    return this.kept(e, v, written);
   }
 
   kept(this: Mut<this>, e: Ref<Expr>, v: string, written: boolean): string {
@@ -9506,11 +10124,37 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
   // A pending value as it is now: one whose slot is its home may have been changed there.
+  // Clears the slot so a later loop iteration that skips the branch cannot double-free it.
   released(this: Mut<this>, p: Ref<{ v: string; type: Type; slot?: string; home?: boolean }>): string {
     if (p.home !== true) return p.v;
     const v = this.temp();
     this.emit(`${v} = load ${this.llvm(p.type)}, ptr ${p.slot!}`);
+    this.emit(`store ${this.llvm(p.type)} zeroinitializer, ptr ${p.slot!}`);
     return v;
+  }
+
+  // Hoists pending temporaries created since `mark` into zero-initialized stack slots so a
+  // branch's result that borrows them can outlive the branch and settle cleanly at statement end.
+  hoistPending(this: Mut<this>, mark: usize, kept: Mut<{ slot: string; type: Type }[]>): void {
+    for (const made of this.pending.splice(mark as i64)) {
+      if (made.home === true) {
+        kept.push({ slot: made.slot!, type: made.type });
+        continue;
+      }
+      const slot = this.alloca(this.llvm(made.type));
+      this.allocas.push(`  store ${this.llvm(made.type)} zeroinitializer, ptr ${slot}`);
+      this.emit(`store ${this.llvm(made.type)} ${made.v}, ptr ${slot}`);
+      kept.push({ slot, type: made.type });
+    }
+  }
+
+  // Registers hoisted branch slots back onto `pending` after a join block's `phi`.
+  repushPending(this: Mut<this>, kept: Ref<{ slot: string; type: Type }[]>): void {
+    for (const { slot, type } of kept) {
+      const v = this.temp();
+      this.emit(`${v} = load ${this.llvm(type)}, ptr ${slot}`);
+      this.pending.push({ v, type, slot, home: true });
+    }
   }
 
 
@@ -10419,7 +11063,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // an optional chain, the result is the chain's Option.
   stringCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, callee: Ref<Extract<Expr, { kind: "member" }>>): string {
     const s = this.operand(callee.object, e.args, 0);
-    const args = e.args.map((a) => this.value(a));
+    const args = e.args.map((a, i) => this.operand(a, e.args, (i + 1) as usize));
     const result = this.temp();
     // A call used as a statement has no type of its own; a string it makes is released when the
     // statement ends.
@@ -10873,7 +11517,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (op === "=") {
       chosen = this.owned(e.value);
     } else {
-      const operand6 = this.value(target);
+      const operand6 = this.operandBefore(target, e.value);
       const operand7 = this.value(e.value);
       chosen = this.numeric(op, operand6, operand7, { start: e.start, end: e.end }, type);
     }
@@ -11173,25 +11817,31 @@ class Codegen implements PrintHost, ComptimeHost {
     const raw = this.evaluate(object);
     if (this.fresh(object)) this.pending.push({ v: raw, type: option });
     this.known.set(exprKey(object), raw);
+    const type = this.cur().types.get(e);
+    const lent = type !== undefined && this.tables.typing.holdsRef(type);
+    let kept: { slot: string; type: Type }[] = [];
     const [some, none, end] = [this.label(), this.label(), this.label()];
     const line = `br i1 ${this.conversions().holds(raw, option, ["null"])}, label %${none}, label %${some}`;
     this.emit(line);
     this.startBlock(some);
     const mark = this.pending.length;
     const got = compute(this);
-    this.settle(mark);
+    if (lent) this.hoistPending(mark, kept);
+    else this.settle(mark);
     const someEnd = this.block;
     this.emit(`br label %${end}`);
     this.startBlock(none);
-    const type = this.cur().types.get(e);
     const empty = got !== undefined && type !== undefined ? this.convert("zeroinitializer", "null", type) : undefined;
     const noneEnd = this.block;
     this.emit(`br label %${end}`);
     this.startBlock(end);
     this.known.delete(object);
-    if (got === undefined || type === undefined || empty === undefined) return undefined;
-    const result = this.temp();
-    this.emit(`${result} = phi ${this.llvm(type)} [ ${got}, %${someEnd} ], [ ${empty}, %${noneEnd} ]`);
+    let result: string | undefined = undefined;
+    if (got !== undefined && type !== undefined && empty !== undefined) {
+      result = this.temp();
+      this.emit(`${result} = phi ${this.llvm(type)} [ ${got}, %${someEnd} ], [ ${empty}, %${noneEnd} ]`);
+    }
+    this.repushPending(kept);
     return result;
   }
 
@@ -12886,7 +13536,7 @@ class Codegen implements PrintHost, ComptimeHost {
     // abort happens here, before C sees the unwind.
     const part = this.inst(i).returns;
     const call = `${this.inst(i).returns === "void" ? "" : "%r = "}invoke ${this.llvm(part)} ${this.symbol(i)}(${params.map(([t, a]) => `${this.llvm(t)} ${a}`).join(", ")})`;
-    const head = `define ${crossed(this.tables.typing, this.inst(i).returns)} @"${this.bodyAt(i).name}"(${params.map(([t, a]) => `${crossing(this.tables.typing, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
+    const head = `define ${crossed(this.tables.typing, this.inst(i).returns)} @"${quoted(this.bodyAt(i).name)}"(${params.map(([t, a]) => `${crossing(this.tables.typing, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
     let done: string;
     if (this.inst(i).returns === "void") {
       done = "  ret void";
@@ -13766,16 +14416,13 @@ class Codegen implements PrintHost, ComptimeHost {
           const old = cg.value(e.operand);
           const type = cg.cur().types.get(e)!;
           if (type === "bigint") {
-            // The old value outlives the store that releases the place's hold on it.
-            const kept = cg.copied(old, type);
             const bigConstant2 = cg.bigConstant(1n);
             const result = cg.bigOperate(e.op === "++" ? "+" : "-", old, bigConstant2, { start: e.start, end: e.end });
-            cg.store(e.operand, result);
-            if (e.prefix) {
-              cg.emit(`call void @fsh_rt_big_release(ptr ${kept})`);
-              return result;
-            }
+            if (e.prefix) return cg.store(e.operand, result);
+            // The old value outlives the store that releases the place's hold on it.
+            const kept = cg.copied(old, type);
             cg.pending.push({ v: kept, type });
+            cg.store(e.operand, result);
             return kept;
           }
           const result = cg.numeric(e.op === "++" ? "+" : "-", old, isFloat(type) ? floatConstant(1, type) : "1", { start: e.start, end: e.end }, type);
@@ -13785,7 +14432,14 @@ class Codegen implements PrintHost, ComptimeHost {
       case "conditional": {
         const cond = this.value(e.cond);
         const get20 = this.cur().types.get(e)!;
-        const lent = this.isRef(get20);
+        const lent = this.tables.typing.holdsRef(get20);
+        if (!this.cur().types.has(e.then) || !this.cur().types.has(e.else)) {
+          const live: Ref<Expr> = this.cur().types.has(e.then) ? e.then : e.else;
+          const mark = this.pending.length;
+          const v = this.needsDrop(get20) ? this.owned(live) : this.value(live);
+          if (!lent) this.settle(mark);
+          return v;
+        }
         let kept: { slot: string; type: Type }[] = [];
         // Each side gives a value of its own when the result owns memory.
         const side = (cg: Mut<Codegen>, x: Ref<Expr>) => {
@@ -13793,22 +14447,10 @@ class Codegen implements PrintHost, ComptimeHost {
           const get21 = cg.cur().types.get(e);
           const v = cg.needsDrop(get21) ? cg.owned(x) : cg.value(x);
           // A side lent out of the conditional lends what it made, which lasts the statement.
-          if (lent) {
-            for (const made of cg.pending.splice(mark as i64)) {
-              if (made.home === true) {
-                kept.push({ slot: made.slot!, type: made.type });
-                continue;
-              }
-              const slot = cg.alloca(cg.llvm(made.type));
-              cg.allocas.push(`  store ${cg.llvm(made.type)} zeroinitializer, ptr ${slot}`);
-              cg.emit(`store ${cg.llvm(made.type)} ${made.v}, ptr ${slot}`);
-              kept.push({ slot, type: made.type });
-            }
-          } else cg.settle(mark);
+          if (lent) cg.hoistPending(mark, kept);
+          else cg.settle(mark);
           return v;
         };
-        if (!this.cur().types.has(e.then)) return side(this, e.else);
-        if (!this.cur().types.has(e.else)) return side(this, e.then);
         const [then, otherwise, end] = [this.label(), this.label(), this.label()];
         this.emit(`br i1 ${cond}, label %${then}, label %${otherwise}`);
         this.startBlock(then);
@@ -13826,11 +14468,7 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(line10);
         // Only the side that ran filled its slot; the other's reads as nothing to drop. Each is
         // dropped from its slot when the statement ends, as the result may lend the slot itself.
-        for (const { slot, type } of kept) {
-          const v = this.temp();
-          this.emit(`${v} = load ${this.llvm(type)}, ptr ${slot}`);
-          this.pending.push({ v, type, slot, home: true });
-        }
+        this.repushPending(kept);
         return result;
       }
       case "binary": {
@@ -14260,6 +14898,8 @@ class Codegen implements PrintHost, ComptimeHost {
       if (!this.cur().consumes.has(e.left.id) || !this.lendable(e.left)) assert(false, "internal error: a Rust value on the left of '??' isn't moved");
       this.take(e.left);
     }
+    const lent = this.tables.typing.holdsRef(type);
+    let hoisted: { slot: string; type: Type }[] = [];
     const [some, none, end] = [this.label(), this.label(), this.label()];
     const line = `br i1 ${this.conversions().holds(v, option, ["null"])}, label %${none}, label %${some}`;
     this.emit(line);
@@ -14277,12 +14917,14 @@ class Codegen implements PrintHost, ComptimeHost {
     this.startBlock(none);
     const mark = this.pending.length;
     const fallback = this.needsDrop(type) ? this.owned(e.right) : this.value(e.right);
-    this.settle(mark);
+    if (lent) this.hoistPending(mark, hoisted);
+    else this.settle(mark);
     const noneEnd = this.block;
     this.emit(`br label %${end}`);
     this.startBlock(end);
     const result = this.temp();
     this.emit(`${result} = phi ${this.llvm(type)} [ ${kept}, %${someEnd} ], [ ${fallback}, %${noneEnd} ]`);
+    this.repushPending(hoisted);
     return result;
   }
 
