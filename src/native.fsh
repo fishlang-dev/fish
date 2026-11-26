@@ -11562,7 +11562,7 @@ static int fsh_tls_host_name(const char *host) {
 // Starts TLS as the client on a connected stream, verifying the server's certificate for name, a
 // host name or an IP address, against the PEM certificates in ca, or the system's when ca is
 // empty, as the ca option takes it. Gives why it can't, or an empty string.
-fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
+fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca, fsh_str *alpn) {
   if (s->sim) return fsh_tls_said("TLS is not supported in simulation mode (FISH_SIM_SEED)");
   // A second session would replace the first, leaking it and racing a read through a clone.
   if (s->tls) return fsh_tls_said("the stream already speaks TLS");
@@ -11625,9 +11625,49 @@ fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
     return fsh_tls_said(text);
   }
   fsh_rt_free(host);
+  // The protocols offered, as "h2,http/1.1", in the wire form ALPN sends: each name after its length.
+  if (alpn->length > 0) {
+    char *list = fsh_rt_str_cstring(alpn);
+    unsigned char wire[256];
+    size_t at = 0, from = 0, n = list ? strlen(list) : 0;
+    for (size_t i = 0; list && i <= n; i++) {
+      if (i < n && list[i] != ',') continue;
+      size_t len = i - from;
+      if (len > 0 && len < 256 && at + 1 + len <= sizeof wire) {
+        wire[at++] = (unsigned char)len;
+        memcpy(wire + at, list + from, len);
+        at += len;
+      }
+      from = i + 1;
+    }
+    fsh_rt_free(list);
+    if (at > 0) SSL_set_alpn_protos(ssl, wire, (unsigned int)at);
+  }
   s->tls = fsh_tls_new(ctx, ssl);
   s->tls_ops = &fsh_tls_calls;
   return fsh_tls_said("");
+}
+
+// A server's choice from what a client offers: h2 before http/1.1, and nothing when it offers
+// neither, so a client that asked for something else carries on without ALPN.
+static int fsh_tls_alpn_select(SSL *ssl, const unsigned char **out, unsigned char *outlen, const unsigned char *in, unsigned int inlen, void *arg) {
+  static const unsigned char ours[] = "\x02h2\x08http/1.1";
+  (void)ssl;
+  (void)arg;
+  if (SSL_select_next_proto((unsigned char **)out, outlen, ours, sizeof ours - 1, in, inlen) == OPENSSL_NPN_NEGOTIATED) return SSL_TLSEXT_ERR_OK;
+  return SSL_TLSEXT_ERR_NOACK;
+}
+
+// The protocol ALPN chose for a stream once its handshake is done, or an empty string.
+fsh_str *fsh_rt_tls_protocol(fsh_socket *s) {
+  const unsigned char *p = NULL;
+  unsigned int n = 0;
+  if (s->tls && ((fsh_tls *)s->tls)->ssl) SSL_get0_alpn_selected(((fsh_tls *)s->tls)->ssl, &p, &n);
+  char text[256];
+  if (!p || n >= sizeof text) n = 0;
+  if (n > 0) memcpy(text, p, n);
+  text[n] = 0;
+  return fsh_tls_said(text);
 }
 
 // Has a listener's connections speak TLS as the server, with the PEM certificate chain in cert
@@ -11659,6 +11699,7 @@ fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
     SSL_CTX_free(ctx);
     return fsh_tls_said(why);
   }
+  SSL_CTX_set_alpn_select_cb(ctx, fsh_tls_alpn_select, NULL);
   listener->tls = fsh_tls_new(ctx, NULL);
   listener->tls_ops = &fsh_tls_calls;
   return fsh_tls_said("");
@@ -11692,8 +11733,12 @@ const char *fsh_rt_crypto_missing(void) {
 export function tlsStub(why: string): string {
   const said = JSON.stringify(why);
   return String.raw`
-fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
+fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca, fsh_str *alpn) {
   return fsh_rt_str_from_cstring(${said});
+}
+
+fsh_str *fsh_rt_tls_protocol(fsh_socket *s) {
+  return fsh_rt_str_from_cstring("");
 }
 
 fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
