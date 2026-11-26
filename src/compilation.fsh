@@ -181,6 +181,9 @@ export type Tables = {
   insertedAfter: NodeMap<Stmt, Stmt[]>;
   wrappedIn: NodeMap<Stmt, Stmt>;
   unusedDefaults: NodeSet<Expr>;
+  // The `as f64` a `Number` predicate writes around its argument, which converts whichever number
+  // a union of numbers holds rather than requiring an `f64`.
+  numericAs: NodeSet<Expr>;
   timerMains: NodeSet<Declared>;
   // A nested function's calls of itself, which run with the calling closure's own captures.
   selfCalls: NodeSet<Expr>;
@@ -430,6 +433,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     insertedAfter: new NodeMap<Stmt, Stmt[]>(),
     wrappedIn: new NodeMap<Stmt, Stmt>(),
     unusedDefaults: new NodeSet<Expr>(),
+    numericAs: new NodeSet<Expr>(),
     timerMains: new NodeSet<Declared>(),
     selfCalls: new NodeSet<Expr>(),
     substituted: new NodeSet<Expr>(),
