@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import type { BuildInfo } from "./compilation.fsh";
 
 // Build targets: the four v1 platforms and Linux over musl for static binaries, named by their
 // Rust triples, and the clang flags that build for one from the host fishc runs on.
@@ -287,4 +288,45 @@ export function findOpenSsl(target: Ref<Target>): OpenSsl {
   }
   if (existsSync("/usr/include/openssl/ssl.h")) return { compile: [], link: [...LIBS] };
   return { missing: `TLS needs OpenSSL, which wasn't found when this program was built; ${INSTALL}` };
+}
+
+// The OS, CPU and libc `std:build` names for a build of `info`.
+export function buildFacts(info: Ref<BuildInfo>): { os: string; arch: string; libc: string } {
+  const triple = info.triple !== "" ? info.triple : hostTriple() ?? "";
+  const os = triple.includes("-apple-") ? "macos" : "linux";
+  const arch = triple.startsWith("x86_64") ? "x86_64" : "aarch64";
+  const libc = triple.includes("-apple-") ? "darwin" : triple.endsWith("-musl") ? "musl" : "gnu";
+  return { os, arch, libc };
+}
+
+// The source of `std:build` for a build of `info`: the target's OS, CPU and libc, whether it is a
+// release build, and the `--flag`s it was given, as constants a `comptime` condition reads.
+export function buildModule(info: Ref<BuildInfo>): string {
+  const { os, arch, libc } = buildFacts(info);
+  const names = info.flags.map((f) => JSON.stringify(f.name)).join(", ");
+  const values = info.flags.map((f) => (f.value === null ? "null" : JSON.stringify(f.value))).join(", ");
+  return `
+export type Os = "macos" | "linux";
+export type Arch = "x86_64" | "aarch64";
+export type Libc = "darwin" | "gnu" | "musl";
+export const target: { os: Os; arch: Arch; libc: Libc; release: boolean } = { os: "${os}", arch: "${arch}", libc: "${libc}", release: ${info.release} };
+// The build's --flag options, by name: a bare --flag name has no value, so get gives null for it.
+export class BuildFlags {
+  names: string[];
+  values: (string | null)[];
+  constructor(names: string[], values: (string | null)[]) {
+    this.names = names;
+    this.values = values;
+  }
+  has(name: string): boolean {
+    for (const n of this.names) if (n === name) return true;
+    return false;
+  }
+  get(name: string): string | null {
+    for (let i: usize = 0; i < this.names.length; i++) if (this.names[i] === name) return this.values[i];
+    return null;
+  }
+}
+export const flags: BuildFlags = new BuildFlags([${names}], [${values}]);
+`;
 }

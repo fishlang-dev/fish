@@ -84,6 +84,14 @@ static int32_t fsh_abandoned = 0;
 // File jobs the blocking pool holds, whose memory is still live when a program ends mid-read.
 static int64_t fsh_pool_busy = 0;
 
+#ifdef FSH_HEAP_PROFILE
+// A --heap-profile build's blocks each start with a header saying how big the block is and, for
+// the sampled few, which stack the profile charged it to, so a free can take it back.
+typedef struct fsh_hblock { int64_t stack; int64_t size; } fsh_hblock;
+static void fsh_heap_alloc(fsh_hblock *h);
+static void fsh_heap_free(fsh_hblock *h);
+#endif
+
 #ifdef FSH_LEAK_SITES
 // A --leaks build's blocks each start with a header naming the allocation's site, on one list
 // the report walks at exit. Its size keeps the block after it 16-byte aligned, as malloc's is.
@@ -98,6 +106,13 @@ void *fsh_rt_alloc(int64_t size) {
   // A size the header would overflow fails as one malloc can't give.
   fsh_block *b = size < 0 || size > INT64_MAX - (int64_t)sizeof(fsh_block) ? NULL : malloc(sizeof(fsh_block) + size);
   void *p = b ? b + 1 : NULL;
+#elif defined(FSH_HEAP_PROFILE)
+  fsh_hblock *h = size < 0 || size > INT64_MAX - (int64_t)sizeof(fsh_hblock) ? NULL : malloc(sizeof(fsh_hblock) + size);
+  void *p = h ? h + 1 : NULL;
+  if (h) {
+    h->size = size;
+    fsh_heap_alloc(h);
+  }
 #else
   void *p = malloc(size);
 #endif
@@ -129,6 +144,10 @@ void fsh_rt_free(void *p) {
   b->next->prev = b->prev;
   pthread_mutex_unlock(&fsh_blocks_lock);
   p = b;
+#elif defined(FSH_HEAP_PROFILE)
+  fsh_hblock *h = (fsh_hblock *)p - 1;
+  if (h->stack != 0) fsh_heap_free(h);
+  p = h;
 #endif
   free(p);
 }
@@ -730,6 +749,328 @@ static void fsh_leak_report(void) {
     else fprintf(stderr, "in %s\n", g->name);
   }
   free(all);
+}
+#endif
+
+#ifdef FSH_HEAP_PROFILE
+// The heap profiler: about one allocation in each 512 KiB allocated is sampled, by a countdown of
+// bytes each thread draws from an exponential distribution, as Go's and tcmalloc's are, so a
+// sample stands for 1 / (1 - e^(-size / 512 KiB)) allocations of its size. A sample charges the
+// program's frames at that moment to a stack; its free takes back the live share. SIGUSR1 and the
+// program's exit each write the profile, in pprof's format, to heap.<pid>.<n>.pb, or to the path
+// FISH_HEAP_PROFILE names with .<n> added.
+#define FSH_HEAP_RATE 524288.0
+#define FSH_HEAP_DEPTH 64
+
+typedef struct {
+  int32_t depth;
+  const char *names[FSH_HEAP_DEPTH];
+  const char *sites[FSH_HEAP_DEPTH];
+  uint64_t hash;
+  double alloc_n, alloc_b, live_n, live_b;
+} fsh_heap_stack;
+
+static pthread_mutex_t fsh_heap_lock = PTHREAD_MUTEX_INITIALIZER;
+static fsh_heap_stack *fsh_heap_stacks = NULL;
+static int64_t fsh_heap_count = 0, fsh_heap_cap = 0;
+// Open addressing over the stacks by hash: each slot holds a stack's index + 1.
+static int64_t *fsh_heap_index = NULL;
+static int64_t fsh_heap_slots = 0;
+static _Thread_local double fsh_heap_left = -1;
+static _Thread_local uint64_t fsh_heap_seed = 0;
+static int32_t fsh_heap_snapshots = 0;
+
+static double fsh_heap_draw(void) {
+  if (fsh_heap_seed == 0) fsh_heap_seed = ((uint64_t)(uintptr_t)&fsh_heap_seed) ^ ((uint64_t)time(NULL) << 20) ^ 0x9E3779B97F4A7C15ULL;
+  fsh_heap_seed ^= fsh_heap_seed << 13;
+  fsh_heap_seed ^= fsh_heap_seed >> 7;
+  fsh_heap_seed ^= fsh_heap_seed << 17;
+  double u = ((double)(fsh_heap_seed >> 11) + 1.0) / 9007199254740993.0;
+  return -log(u) * FSH_HEAP_RATE;
+}
+
+static double fsh_heap_scale(int64_t size) {
+  double p = 1.0 - exp(-(double)size / FSH_HEAP_RATE);
+  return p > 0 ? 1.0 / p : 1.0;
+}
+
+static void fsh_heap_grow(void) {
+  int64_t slots = fsh_heap_slots ? fsh_heap_slots * 2 : 1024;
+  int64_t *index = calloc((size_t)slots, sizeof(int64_t));
+  if (!index) return;
+  for (int64_t i = 0; i < fsh_heap_count; i++) {
+    int64_t at = (int64_t)(fsh_heap_stacks[i].hash & (uint64_t)(slots - 1));
+    while (index[at]) at = (at + 1) & (slots - 1);
+    index[at] = i + 1;
+  }
+  free(fsh_heap_index);
+  fsh_heap_index = index;
+  fsh_heap_slots = slots;
+}
+
+// The stack the frames running now are, made if it's new; -1 when there's no room.
+static int64_t fsh_heap_stack_now(void) {
+  fsh_heap_stack s;
+  s.depth = 0;
+  s.hash = 1469598103934665603ULL;
+  for (fsh_frame *f = fsh_rt_frames; f && s.depth < FSH_HEAP_DEPTH; f = f->prev) {
+    s.names[s.depth] = f->name;
+    s.sites[s.depth] = f->site;
+    s.hash = (s.hash ^ (uint64_t)(uintptr_t)f->name) * 1099511628211ULL;
+    s.hash = (s.hash ^ (uint64_t)(uintptr_t)f->site) * 1099511628211ULL;
+    s.depth++;
+  }
+  if (fsh_heap_count * 2 >= fsh_heap_slots) fsh_heap_grow();
+  if (!fsh_heap_slots) return -1;
+  int64_t at = (int64_t)(s.hash & (uint64_t)(fsh_heap_slots - 1));
+  while (fsh_heap_index[at]) {
+    fsh_heap_stack *o = &fsh_heap_stacks[fsh_heap_index[at] - 1];
+    if (o->hash == s.hash && o->depth == s.depth && memcmp(o->names, s.names, sizeof(char *) * s.depth) == 0 && memcmp(o->sites, s.sites, sizeof(char *) * s.depth) == 0) return fsh_heap_index[at] - 1;
+    at = (at + 1) & (fsh_heap_slots - 1);
+  }
+  if (fsh_heap_count == fsh_heap_cap) {
+    int64_t cap = fsh_heap_cap ? fsh_heap_cap * 2 : 256;
+    fsh_heap_stack *grown = realloc(fsh_heap_stacks, (size_t)cap * sizeof *grown);
+    if (!grown) return -1;
+    fsh_heap_stacks = grown;
+    fsh_heap_cap = cap;
+  }
+  s.alloc_n = s.alloc_b = s.live_n = s.live_b = 0;
+  fsh_heap_stacks[fsh_heap_count] = s;
+  fsh_heap_index[at] = fsh_heap_count + 1;
+  return fsh_heap_count++;
+}
+
+static void fsh_heap_alloc(fsh_hblock *h) {
+  h->stack = 0;
+  if (fsh_heap_left < 0) fsh_heap_left = fsh_heap_draw();
+  fsh_heap_left -= (double)h->size;
+  if (fsh_heap_left >= 0) return;
+  fsh_heap_left = fsh_heap_draw();
+  double scale = fsh_heap_scale(h->size);
+  pthread_mutex_lock(&fsh_heap_lock);
+  int64_t i = fsh_heap_stack_now();
+  if (i >= 0) {
+    fsh_heap_stack *s = &fsh_heap_stacks[i];
+    s->alloc_n += scale;
+    s->alloc_b += scale * (double)h->size;
+    s->live_n += scale;
+    s->live_b += scale * (double)h->size;
+    h->stack = i + 1;
+  }
+  pthread_mutex_unlock(&fsh_heap_lock);
+}
+
+static void fsh_heap_free(fsh_hblock *h) {
+  double scale = fsh_heap_scale(h->size);
+  pthread_mutex_lock(&fsh_heap_lock);
+  fsh_heap_stack *s = &fsh_heap_stacks[h->stack - 1];
+  s->live_n -= scale;
+  s->live_b -= scale * (double)h->size;
+  pthread_mutex_unlock(&fsh_heap_lock);
+}
+
+// pprof's protobuf, written by hand: varints, and messages built into buffers of their own so
+// their lengths are known before they are written.
+typedef struct { uint8_t *data; size_t length, capacity; } fsh_pb;
+
+static void fsh_pb_bytes(fsh_pb *b, const void *data, size_t n) {
+  if (b->length + n > b->capacity) {
+    size_t cap = b->capacity ? b->capacity : 256;
+    while (cap < b->length + n) cap *= 2;
+    uint8_t *grown = realloc(b->data, cap);
+    if (!grown) return;
+    b->data = grown;
+    b->capacity = cap;
+  }
+  memcpy(b->data + b->length, data, n);
+  b->length += n;
+}
+
+static void fsh_pb_varint(fsh_pb *b, uint64_t v) {
+  uint8_t out[10];
+  size_t n = 0;
+  do {
+    out[n] = (uint8_t)(v & 0x7F);
+    v >>= 7;
+    if (v) out[n] |= 0x80;
+    n++;
+  } while (v);
+  fsh_pb_bytes(b, out, n);
+}
+
+static void fsh_pb_int(fsh_pb *b, int field, uint64_t v) {
+  fsh_pb_varint(b, (uint64_t)field << 3);
+  fsh_pb_varint(b, v);
+}
+
+static void fsh_pb_sub(fsh_pb *b, int field, fsh_pb *inner) {
+  fsh_pb_varint(b, ((uint64_t)field << 3) | 2);
+  fsh_pb_varint(b, inner->length);
+  fsh_pb_bytes(b, inner->data, inner->length);
+  inner->length = 0;
+}
+
+// The string table, deduplicated by a linear scan.
+// ponytail: linear lookups; a hash would matter only for profiles with tens of thousands of names.
+typedef struct { const char **items; int64_t count, capacity; } fsh_pb_strings;
+
+static int64_t fsh_pb_string(fsh_pb_strings *t, const char *s, size_t n) {
+  for (int64_t i = 0; i < t->count; i++) if (strlen(t->items[i]) == n && memcmp(t->items[i], s, n) == 0) return i;
+  if (t->count == t->capacity) {
+    int64_t cap = t->capacity ? t->capacity * 2 : 64;
+    const char **grown = realloc(t->items, (size_t)cap * sizeof(char *));
+    if (!grown) return 0;
+    t->items = grown;
+    t->capacity = cap;
+  }
+  char *copy = malloc(n + 1);
+  if (!copy) return 0;
+  memcpy(copy, s, n);
+  copy[n] = 0;
+  t->items[t->count] = copy;
+  return t->count++;
+}
+
+// A frame's site, "file:line:col", split into its file and line; a frame with none is line 0.
+static void fsh_heap_site(const char *site, const char **file, size_t *file_length, int64_t *line) {
+  *file = "";
+  *file_length = 0;
+  *line = 0;
+  if (!site) return;
+  const char *col = strrchr(site, ':');
+  const char *at = col;
+  while (at && at > site && at[-1] != ':') at--;
+  if (!col || at == site) {
+    *file = site;
+    *file_length = strlen(site);
+    return;
+  }
+  *file = site;
+  *file_length = (size_t)(at - 1 - site);
+  *line = atoll(at);
+}
+
+static void fsh_heap_write(void) {
+  pthread_mutex_lock(&fsh_heap_lock);
+  int32_t n = ++fsh_heap_snapshots;
+  char path[1100];
+  const char *named = getenv("FISH_HEAP_PROFILE");
+  if (named && named[0]) snprintf(path, sizeof path, "%s.%d", named, n);
+  else snprintf(path, sizeof path, "heap.%d.%d.pb", (int)getpid(), n);
+  fsh_pb out = { 0 }, msg = { 0 }, inner = { 0 }, line = { 0 };
+  fsh_pb_strings strings = { 0 };
+  fsh_pb_string(&strings, "", 0);
+  const char *types[4][2] = { { "alloc_objects", "count" }, { "alloc_space", "bytes" }, { "inuse_objects", "count" }, { "inuse_space", "bytes" } };
+  for (int i = 0; i < 4; i++) {
+    fsh_pb_int(&msg, 1, (uint64_t)fsh_pb_string(&strings, types[i][0], strlen(types[i][0])));
+    fsh_pb_int(&msg, 2, (uint64_t)fsh_pb_string(&strings, types[i][1], strlen(types[i][1])));
+    fsh_pb_sub(&out, 1, &msg);
+  }
+  // A location and a function for each frame of each stack: their ids are the frame's place
+  // across the stacks, so nothing needs deduplicating but the strings.
+  uint64_t next = 1;
+  double total = 0;
+  for (int64_t i = 0; i < fsh_heap_count; i++) {
+    fsh_heap_stack *s = &fsh_heap_stacks[i];
+    uint64_t first = next;
+    for (int32_t d = 0; d < s->depth; d++, next++) {
+      const char *file;
+      size_t file_length;
+      int64_t at;
+      fsh_heap_site(s->sites[d], &file, &file_length, &at);
+      const char *name = s->names[d] ? s->names[d] : "<runtime>";
+      int64_t named_at = fsh_pb_string(&strings, name, strlen(name));
+      int64_t file_at = fsh_pb_string(&strings, file, file_length);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_int(&msg, 2, (uint64_t)named_at);
+      fsh_pb_int(&msg, 3, (uint64_t)named_at);
+      fsh_pb_int(&msg, 4, (uint64_t)file_at);
+      fsh_pb_sub(&out, 5, &msg);
+      fsh_pb_int(&line, 1, next);
+      fsh_pb_int(&line, 2, (uint64_t)at);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_sub(&msg, 4, &line);
+      fsh_pb_sub(&out, 4, &msg);
+    }
+    if (s->depth == 0) {
+      int64_t named_at = fsh_pb_string(&strings, "<runtime>", 9);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_int(&msg, 2, (uint64_t)named_at);
+      fsh_pb_int(&msg, 3, (uint64_t)named_at);
+      fsh_pb_sub(&out, 5, &msg);
+      fsh_pb_int(&line, 1, next);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_sub(&msg, 4, &line);
+      fsh_pb_sub(&out, 4, &msg);
+      next++;
+    }
+    for (uint64_t id = first; id < next; id++) fsh_pb_varint(&inner, id);
+    fsh_pb_sub(&msg, 1, &inner);
+    double values[4] = { s->alloc_n, s->alloc_b, s->live_n, s->live_b };
+    for (int v = 0; v < 4; v++) fsh_pb_varint(&inner, (uint64_t)(int64_t)(values[v] + 0.5));
+    fsh_pb_sub(&msg, 2, &inner);
+    fsh_pb_sub(&out, 2, &msg);
+    total += s->live_b;
+  }
+  fsh_pb_int(&msg, 1, (uint64_t)fsh_pb_string(&strings, "space", 5));
+  fsh_pb_int(&msg, 2, (uint64_t)fsh_pb_string(&strings, "bytes", 5));
+  fsh_pb_sub(&out, 11, &msg);
+  for (int64_t i = 0; i < strings.count; i++) {
+    size_t length = strlen(strings.items[i]);
+    fsh_pb_varint(&out, (6 << 3) | 2);
+    fsh_pb_varint(&out, length);
+    fsh_pb_bytes(&out, strings.items[i], length);
+  }
+  int64_t stacks = fsh_heap_count;
+  pthread_mutex_unlock(&fsh_heap_lock);
+  fsh_pb_int(&out, 12, (uint64_t)FSH_HEAP_RATE);
+  FILE *f = fopen(path, "wb");
+  if (!f || fwrite(out.data, 1, out.length, f) != out.length) fprintf(stderr, "fish heap profile: can't write '%s' (%s)\n", path, strerror(errno));
+  else fprintf(stderr, "fish heap profile: %lld stacks, %.0f bytes live, written to %s\n", (long long)stacks, total, path);
+  if (f) fclose(f);
+  for (int64_t i = 0; i < strings.count; i++) free((void *)strings.items[i]);
+  free(strings.items);
+  free(out.data);
+  free(msg.data);
+  free(inner.data);
+  free(line.data);
+}
+
+// SIGUSR1 wakes a thread of the profiler's own, which writes the profile outside the handler.
+static int fsh_heap_pipe[2] = { -1, -1 };
+
+static void fsh_heap_signal(int n) {
+  (void)n;
+  char one = 1;
+  ssize_t wrote = write(fsh_heap_pipe[1], &one, 1);
+  (void)wrote;
+}
+
+static void *fsh_heap_waiter(void *unused) {
+  (void)unused;
+  char one;
+  while (read(fsh_heap_pipe[0], &one, 1) == 1 || errno == EINTR) fsh_heap_write();
+  return NULL;
+}
+
+__attribute__((constructor)) static void fsh_heap_start(void) {
+  if (pipe(fsh_heap_pipe) != 0) return;
+  fcntl(fsh_heap_pipe[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_heap_pipe[1], F_SETFD, FD_CLOEXEC);
+  pthread_t waiter;
+  if (pthread_create(&waiter, NULL, fsh_heap_waiter, NULL) != 0) return;
+  pthread_detach(waiter);
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = fsh_heap_signal;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  sigaction(SIGUSR1, &sa, NULL);
+}
+
+__attribute__((destructor)) static void fsh_heap_end(void) {
+  fsh_heap_write();
 }
 #endif
 
@@ -8657,6 +8998,151 @@ void fsh_rt_sim_reset_faults(void) {
   fsh_sim_drop_rate = 0.0;
 }
 
+// A restart: serve's TCP listener handed to a new copy of the program, named to it in
+// FISH_LISTEN_FDS, with FISH_READY_FD the pipe it says on that it listens. The old process stops
+// accepting only once it has, so no connection is refused in between.
+
+// The port a descriptor listens on for TCP, or -1 when it isn't a listening TCP socket.
+static int64_t fsh_listening_port(int fd) {
+  int listening = 0;
+  socklen_t n = sizeof listening;
+  struct sockaddr_storage at;
+  socklen_t size = sizeof at;
+  // macOS answers SO_ACCEPTCONN with ENOPROTOOPT; there, a stream socket with no peer listens.
+  if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &listening, &n) < 0) {
+    int type = 0;
+    socklen_t typed = sizeof type;
+    struct sockaddr_storage peer;
+    socklen_t peer_size = sizeof peer;
+    listening = getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &typed) == 0 && type == SOCK_STREAM && getpeername(fd, (struct sockaddr *)&peer, &peer_size) < 0 && errno == ENOTCONN;
+  }
+  if (!listening) return -1;
+  if (getsockname(fd, (struct sockaddr *)&at, &size) < 0 || (at.ss_family != AF_INET && at.ss_family != AF_INET6)) return -1;
+  return ntohs(at.ss_family == AF_INET6 ? ((struct sockaddr_in6 *)&at)->sin6_port : ((struct sockaddr_in *)&at)->sin_port);
+}
+
+// Whether a listener was handed over and taken, the only case in which this process says it is
+// ready: one that bound a socket of its own isn't serving where the old one was.
+static int32_t fsh_adopted = 0;
+
+// The listener the process that started this one handed over, for a bind on its port, taken once.
+static int fsh_inherited_listener(int64_t port) {
+  const char *named = getenv("FISH_LISTEN_FDS");
+  if (named == NULL) return -1;
+  char *end = NULL;
+  long fd = strtol(named, &end, 10);
+  unsetenv("FISH_LISTEN_FDS");
+  if (end == named || *end != 0 || fd < 3 || fd > INT_MAX) return -1;
+  int64_t bound = fsh_listening_port((int)fd);
+  if (bound < 0) return -1;
+  if (port != 0 && bound != port) {
+    close((int)fd);
+    return -1;
+  }
+  fsh_adopted = 1;
+  return (int)fd;
+}
+
+// Tells the process that started this one for a restart that it listens, once; closing the pipe
+// unwritten tells it the handover failed.
+void fsh_rt_restart_ready(void) {
+  const char *named = getenv("FISH_READY_FD");
+  if (named == NULL) return;
+  long fd = strtol(named, NULL, 10);
+  unsetenv("FISH_READY_FD");
+  if (fd < 3 || fd > INT_MAX) return;
+  if (fsh_adopted) {
+    char one = 1;
+    ssize_t wrote = write((int)fd, &one, 1);
+    (void)wrote;
+  }
+  close((int)fd);
+}
+
+static pid_t fsh_restart_pid = 0;
+
+// Starts this program again, with its arguments and environment, handing it the listener on
+// port: the reading end of the pipe it says it listens on, or -1 with errno.
+int64_t fsh_rt_restart_spawn(int64_t port) {
+  int listener = -1;
+  // ponytail: scans descriptors for the listener; a handle passed from serve would skip it.
+  for (int i = 3; i < 65536 && listener < 0; i++) if (fcntl(i, F_GETFD) >= 0 && fsh_listening_port(i) == port) listener = i;
+  if (listener < 0) {
+    errno = EBADF;
+    return -1;
+  }
+  // A copy without close-on-exec is handed over: macOS's spawn closes a close-on-exec descriptor
+  // even when it is dup2'd onto itself.
+  listener = dup(listener);
+  if (listener < 0) return -1;
+  int ready[2];
+  if (pipe(ready) < 0) {
+    close(listener);
+    return -1;
+  }
+  fcntl(ready[0], F_SETFD, FD_CLOEXEC);
+  extern char **environ;
+  int64_t count = 0;
+  while (environ[count] != NULL) count++;
+  char **envp = fsh_rt_alloc((count + 3) * sizeof(char *));
+  int64_t at = 0;
+  for (int64_t i = 0; i < count; i++) if (strncmp(environ[i], "FISH_LISTEN_FDS=", 16) != 0 && strncmp(environ[i], "FISH_READY_FD=", 14) != 0) envp[at++] = environ[i];
+  char listen_var[48], ready_var[48];
+  snprintf(listen_var, sizeof listen_var, "FISH_LISTEN_FDS=%d", listener);
+  snprintf(ready_var, sizeof ready_var, "FISH_READY_FD=%d", ready[1]);
+  envp[at++] = listen_var;
+  envp[at++] = ready_var;
+  envp[at] = NULL;
+  char **argv = fsh_rt_alloc((fsh_argc + 2) * sizeof(char *));
+  argv[0] = fsh_exe;
+  for (int32_t i = 1; i < fsh_argc; i++) argv[i] = fsh_argv[i];
+  argv[fsh_argc > 0 ? fsh_argc : 1] = NULL;
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  // A descriptor dup2'd onto itself is kept by POSIX_SPAWN_CLOEXEC_DEFAULT.
+  for (int fd = 0; fd < 3; fd++) posix_spawn_file_actions_adddup2(&actions, fd, fd);
+  posix_spawn_file_actions_adddup2(&actions, listener, listener);
+  posix_spawn_file_actions_adddup2(&actions, ready[1], ready[1]);
+  posix_spawnattr_t attributes;
+  posix_spawnattr_init(&attributes);
+#ifdef __APPLE__
+  posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+#endif
+  fflush(NULL);
+  pid_t pid = 0;
+  int failure = posix_spawn(&pid, fsh_exe, &actions, &attributes, argv, envp);
+  posix_spawnattr_destroy(&attributes);
+  posix_spawn_file_actions_destroy(&actions);
+  fsh_rt_free(envp);
+  fsh_rt_free(argv);
+  close(ready[1]);
+  close(listener);
+  if (failure) {
+    close(ready[0]);
+    errno = failure;
+    return -1;
+  }
+  fsh_restart_pid = pid;
+  return ready[0];
+}
+
+// Waits up to ms for the new process to say it listens: 1 when it did, 0 when it ended first, -1
+// when it took too long, and is stopped.
+int64_t fsh_rt_restart_wait(int64_t fd, int64_t ms) {
+  struct pollfd p = { (int)fd, POLLIN, 0 };
+  int r;
+  do r = poll(&p, 1, (int)ms); while (r < 0 && errno == EINTR);
+  int64_t said = -1;
+  char one = 0;
+  if (r > 0) said = read((int)fd, &one, 1) == 1 ? 1 : 0;
+  close((int)fd);
+  if (said == -1 && fsh_restart_pid > 0) kill(fsh_restart_pid, SIGKILL);
+  // A new process that ended or was stopped is reaped; one that listens lives on past this one.
+  if (said != 1 && fsh_restart_pid > 0) waitpid(fsh_restart_pid, NULL, 0);
+  fsh_restart_pid = 0;
+  return said;
+}
+
 // 'TcpListener.bind(host, port)': listening at once, or 5 with the reason.
 int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
   fsh_sim_init();
@@ -8676,6 +9162,12 @@ int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str *
     }
     *out = fsh_sim_socket_new(0, norm, bound);
     fsh_sim_listener_add((*out)->sim);
+    return 1;
+  }
+  // A restart hands over the listener before its old process stops accepting.
+  int inherited = fsh_inherited_listener(port);
+  if (inherited >= 0) {
+    *out = fsh_socket_new(inherited);
     return 1;
   }
   struct sockaddr_storage at;
@@ -11342,6 +11834,10 @@ export const TLS_NATIVE = String.raw`
 #include <openssl/x509v3.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/core_names.h>
+#include <openssl/kdf.h>
+#include <openssl/params.h>
+#include <openssl/ecdsa.h>
 
 // A stream's SSL object, or a listener's context its connections are made from. A clone of a
 // stream may read on one thread while another writes, and OpenSSL's calls on one SSL object
@@ -11723,6 +12219,128 @@ int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_leng
   return ok;
 }
 
+// std:auth's JWT algorithms by number: HS256 (0), HS384 (1), HS512 (2), RS256 (3), ES256 (4) and
+// EdDSA (5), whose Ed25519 hashes inside the signature.
+static const EVP_MD *fsh_jwt_md(int64_t which) {
+  return which == 1 ? EVP_sha384() : which == 2 ? EVP_sha512() : which == 5 ? NULL : EVP_sha256();
+}
+
+// A PEM key of the kind the algorithm signs with: RSA, P-256 or Ed25519, or NULL.
+static EVP_PKEY *fsh_jwt_key(int64_t which, const uint8_t *key, int64_t length, int private) {
+  BIO *b = BIO_new_mem_buf(key, (int)length);
+  if (b == NULL) return NULL;
+  EVP_PKEY *k = private ? PEM_read_bio_PrivateKey(b, NULL, NULL, NULL) : PEM_read_bio_PUBKEY(b, NULL, NULL, NULL);
+  BIO_free(b);
+  if (k == NULL) return NULL;
+  char group[32] = "";
+  size_t n = 0;
+  int fits = which == 3 ? EVP_PKEY_is_a(k, "RSA") && EVP_PKEY_get_bits(k) >= 2048
+    : which == 4 ? EVP_PKEY_is_a(k, "EC") && EVP_PKEY_get_utf8_string_param(k, OSSL_PKEY_PARAM_GROUP_NAME, group, sizeof group, &n) == 1 && strcmp(group, "prime256v1") == 0
+    : EVP_PKEY_is_a(k, "ED25519");
+  if (!fits) { EVP_PKEY_free(k); return NULL; }
+  return k;
+}
+
+// Signs data with the key into out, which holds 1024 bytes, giving the signature's length; -1
+// when the key isn't one the algorithm takes. ES256's is JWS's 64 bytes of r then s, not DER.
+int64_t fsh_rt_crypto_sign(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, uint8_t *out) {
+  int64_t made = -1;
+  if (which <= 2) {
+    unsigned int n = 0;
+    if (HMAC(fsh_jwt_md(which), key, (int)key_length, data, (size_t)length, out, &n) != NULL) made = n;
+    ERR_clear_error();
+    return made;
+  }
+  EVP_PKEY *k = fsh_jwt_key(which, key, key_length, 1);
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  uint8_t der[1024];
+  size_t n = sizeof der;
+  if (k != NULL && ctx != NULL && EVP_DigestSignInit(ctx, NULL, fsh_jwt_md(which), NULL, k) == 1 && EVP_DigestSign(ctx, der, &n, data, (size_t)length) == 1) {
+    if (which != 4) { memcpy(out, der, n); made = (int64_t)n; }
+    else {
+      const uint8_t *at = der;
+      ECDSA_SIG *sig = d2i_ECDSA_SIG(NULL, &at, (long)n);
+      if (sig != NULL && BN_bn2binpad(ECDSA_SIG_get0_r(sig), out, 32) == 32 && BN_bn2binpad(ECDSA_SIG_get0_s(sig), out + 32, 32) == 32) made = 64;
+      ECDSA_SIG_free(sig);
+    }
+  }
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(k);
+  ERR_clear_error();
+  return made;
+}
+
+// Whether sig is data's signature under the key: 1 when it is, 0 when it isn't, -1 when the key
+// isn't one the algorithm takes. An HMAC is compared in constant time.
+int64_t fsh_rt_crypto_verify(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, const uint8_t *sig, int64_t sig_length) {
+  if (which <= 2) {
+    uint8_t mac[EVP_MAX_MD_SIZE];
+    unsigned int n = 0;
+    int64_t ok = HMAC(fsh_jwt_md(which), key, (int)key_length, data, (size_t)length, mac, &n) != NULL && (int64_t)n == sig_length && CRYPTO_memcmp(mac, sig, n) == 0;
+    ERR_clear_error();
+    return ok;
+  }
+  EVP_PKEY *k = fsh_jwt_key(which, key, key_length, 0);
+  if (k == NULL) { ERR_clear_error(); return -1; }
+  uint8_t der[128];
+  const uint8_t *given = sig;
+  size_t given_length = (size_t)sig_length;
+  int64_t ok = 0;
+  int shaped = 1;
+  if (which == 4) {
+    shaped = 0;
+    ECDSA_SIG *es = sig_length == 64 ? ECDSA_SIG_new() : NULL;
+    BIGNUM *r = es != NULL ? BN_bin2bn(sig, 32, NULL) : NULL;
+    BIGNUM *s = es != NULL ? BN_bin2bn(sig + 32, 32, NULL) : NULL;
+    if (r != NULL && s != NULL && ECDSA_SIG_set0(es, r, s) == 1) {
+      uint8_t *at = der;
+      int n = i2d_ECDSA_SIG(es, &at);
+      if (n > 0) { given = der; given_length = (size_t)n; shaped = 1; }
+    } else { BN_free(r); BN_free(s); }
+    ECDSA_SIG_free(es);
+  }
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  if (shaped && ctx != NULL && EVP_DigestVerifyInit(ctx, NULL, fsh_jwt_md(which), NULL, k) == 1) ok = EVP_DigestVerify(ctx, given, given_length, data, (size_t)length) == 1;
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(k);
+  ERR_clear_error();
+  return ok;
+}
+
+// A password's hash into out: argon2id (0) with a KiB of memory, b passes and c lanes, run on one
+// thread, or scrypt (1) with N = a, r = b and p = c. 1 when done, 0 when the parameters were
+// refused, -1 when this OpenSSL has no Argon2, which came in 3.2.
+int64_t fsh_rt_crypto_kdf(int64_t kind, const uint8_t *password, int64_t password_length, const uint8_t *salt, int64_t salt_length, int64_t a, int64_t b, int64_t c, uint8_t *out, int64_t out_length) {
+  int64_t ok = 0;
+  if (kind == 1) ok = EVP_PBE_scrypt((const char *)password, (size_t)password_length, salt, (size_t)salt_length, (uint64_t)a, (uint64_t)b, (uint64_t)c, (uint64_t)1 << 31, out, (size_t)out_length) == 1;
+  else {
+#if OPENSSL_VERSION_NUMBER >= 0x30200000L
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "ARGON2ID", NULL);
+    EVP_KDF_CTX *ctx = kdf != NULL ? EVP_KDF_CTX_new(kdf) : NULL;
+    if (ctx == NULL) ok = -1;
+    else {
+      uint32_t memory = (uint32_t)a, passes = (uint32_t)b, lanes = (uint32_t)c, threads = 1;
+      OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_PASSWORD, (void *)password, (size_t)password_length),
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *)salt, (size_t)salt_length),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ITER, &passes),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_THREADS, &threads),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_LANES, &lanes),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_MEMCOST, &memory),
+        OSSL_PARAM_construct_end(),
+      };
+      ok = EVP_KDF_derive(ctx, out, (size_t)out_length, params) == 1;
+    }
+    EVP_KDF_CTX_free(ctx);
+    EVP_KDF_free(kdf);
+#else
+    ok = -1;
+#endif
+  }
+  ERR_clear_error();
+  return ok;
+}
+
 // Why the crypto calls can't work: nothing, with OpenSSL linked.
 const char *fsh_rt_crypto_missing(void) {
   return "";
@@ -11747,6 +12365,18 @@ fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
 
 int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, int64_t rounds, uint8_t *out) {
   return 0;
+}
+
+int64_t fsh_rt_crypto_sign(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, uint8_t *out) {
+  return -2;
+}
+
+int64_t fsh_rt_crypto_verify(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, const uint8_t *sig, int64_t sig_length) {
+  return -2;
+}
+
+int64_t fsh_rt_crypto_kdf(int64_t kind, const uint8_t *password, int64_t password_length, const uint8_t *salt, int64_t salt_length, int64_t a, int64_t b, int64_t c, uint8_t *out, int64_t out_length) {
+  return -2;
 }
 
 const char *fsh_rt_crypto_missing(void) {
