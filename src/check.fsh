@@ -31,6 +31,7 @@ import { lowerOverloads } from "./overloads.fsh";
 import { checkMoves } from "./moves.fsh";
 import { ContextState, Expressions, ExpressionsState, stringLike, type Context, type DynTable } from "./values.fsh";
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.fsh";
+import { callbacksOnlyCalled } from "./callbacks.fsh";
 
 export type { Type } from "./typing.fsh";
 export type { Body } from "./classes.fsh";
@@ -192,6 +193,10 @@ export type Instance = {
   iterators?: NodeMap<Stmt, Expr>;
 };
 
+// A function's checked instances whose parameters at `at` hold closures the body only calls, each
+// under what its other bindings and those closures' shapes spell.
+type Lender = { at: usize[]; byKey: Map<string, InstanceId> };
+
 type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 
 // What a `break` or `continue` can name: a loop, a switch, or a labeled statement, whose
@@ -202,7 +207,8 @@ type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: string; loop?: Stmt; facts?: usize; wanted?: boolean; gives?: [Expr, Type][] };
 
 // The statements a destructuring assignment becomes: every part read, then every target written.
-type Destructured = { reads: Stmt[]; writes: Stmt[] };
+// Where the assignment ends, which each part's read is in use until.
+type Destructured = { reads: Stmt[]; writes: Stmt[]; until: usize };
 
 // An `await using` binding whose scope encloses the code being checked: its name and local, where
 // it is declared, and how many targets and `finally` blocks were open there, which say what a
@@ -661,7 +667,7 @@ function timersRunAsync(ids: Mut<Ids>, written: Mut<Stmt[]>, timerMains: Mut<Tab
   rebuiltStmts(written, rewrites);
 }
 // A span's batch is sent by a timer std sets, so what begins one counts as setting a timer: the
-// fish:trace module's code calls it.
+// std:trace module's code calls it.
 const TIMER_GLOBALS = new Set(["setTimeout", "setInterval", "__traceBegin"]);
 
 // Whether a piece of syntax holds a node `found` picks out.
@@ -1350,6 +1356,12 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // Every closure's instance, and the instance each closure type calls.
   closures: InstanceId[];
   closureBodies: TypeMap<ClosureType, InstanceId>;
+  // For each function, its checked instances with parameters whose closures the body only calls,
+  // which a later instance differing only in those closures takes its check from.
+  lenders: Map<BodyId, Lender[]>;
+  // Set by FISH_VERIFY_SHARED_CHECKS=1: an instance that would take another's check is checked
+  // from the start as well, and the build stops where the two differ.
+  verifyLent: boolean;
   // Each declaration and body is checked on its own, so one mistake doesn't hide the next; the
   // errors are reported together. A bad signature, or a failed body whose result another needs,
   // is met again from every body that uses it, and is reported once.
@@ -1412,6 +1424,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.nextLocal = 0;
     this.closures = [];
     this.closureBodies = new TypeMap<ClosureType, InstanceId>();
+    this.lenders = new Map<BodyId, Lender[]>();
+    this.verifyLent = (process.env.FISH_VERIFY_SHARED_CHECKS ?? "") === "1";
   }
 
   // A checker put back together from a finished one's tables and parts, to check again.
@@ -3392,6 +3406,19 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     const outerDemanded = this.demanded;
     this.beingChecked = id;
     try {
+      // An instance that differs from a checked one only in closures its body does nothing with
+      // but call would be checked to the same result, so it takes a copy of that one's.
+      const lender = this.lenderOf(id);
+      let expected: Instance | undefined = undefined;
+      if (lender !== undefined) {
+        const copy = this.lent(id, lender.from, lender.at);
+        if (!this.verifyLent) {
+          this.tables.arenas.putInstance(copy);
+          this.done.add(id);
+          return;
+        }
+        expected = copy;
+      }
       // A pass whose body made a new demand is thrown away, whatever it concluded, and the body
       // is checked again with the demanded types; each pass adds one, so this ends.
       for (;;) {
@@ -3417,12 +3444,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           const body = this.tables.arenas.instanceOf(id).body;
           if (!(e instanceof CompileError)) throw e;
           if (this.demanded === 0) {
+            if (expected !== undefined) this.lentDiffers(id, lender!.from, `its own check fails: ${e.message}`);
             const thrown = this.tables.arenas.bodyOf(body).signature === true ? this.incompatible(body, e) : e;
             this.failed.set(body, thrown.clone());
             throw thrown;
           }
         }
         if (this.demanded === 0) {
+          if (expected !== undefined) this.sameCheck(id, lender!.from, expected!);
+          else this.lends(id);
           this.shed(id);
           return;
         }
@@ -3432,6 +3462,199 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       this.beingChecked = outer;
       this.demanded = outerDemanded;
     }
+  }
+
+  // What a closure is to a body that only calls it: what it takes, gives and throws, whether it
+  // can run only once, and how a value of its type is copied and what it borrows. Nothing for
+  // any value but a plain closure whose own body is checked.
+  private callbackShape(this: Mut<this>, t: Type): string | undefined {
+    const closure = this.tables.typing.lower(t);
+    if (this.tables.typing.kindOf(closure) !== "closure") return undefined;
+    const run = this.closureBodies.get(closure as ClosureType);
+    if (run === undefined || !this.done.has(run)) return undefined;
+    const written = bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(run));
+    if (written.closure === undefined || written.async === true || written.generator === true) return undefined;
+    const r = this.tables.typing.rec(closure as ClosureType);
+    let takes: string[] = [];
+    for (const p of r.params) takes.push(this.tables.typing.keyOf(p));
+    const throws = r.throws === undefined ? "" : this.tables.typing.keyOf(r.throws!);
+    const borrows = `${this.tables.typing.isCopy(closure) ? "copy" : "own"},${this.tables.typing.holdsRef(closure) ? "ref" : ""},${this.tables.typing.holdsMut(closure) ? "mut" : ""}`;
+    return `(${takes.join(",")})${this.tables.typing.keyOf(r.returns)}!${throws}|${r.once !== undefined ? "once" : ""}|${borrows}`;
+  }
+
+  // What an instance's bindings spell to a lender whose only-called parameters are `at`: the
+  // shape of the closure at each of those, and every other binding as it is.
+  private lendKey(this: Mut<this>, bindings: Ref<Map<string, Type>>, at: Ref<usize[]>): string | undefined {
+    let names = [...bindings.keys()];
+    names.sort();
+    let parts: string[] = [];
+    for (const name of names) {
+      const t = bindings.get(name)!;
+      const k = name.startsWith("#") ? (parseInt(name.slice(1)) ?? -1) : -1;
+      if (k < 0 || !at.includes(k as usize)) {
+        parts.push(`${name}=${this.tables.typing.keyOf(t)}`);
+        continue;
+      }
+      const shape = this.callbackShape(t);
+      if (shape === undefined) return undefined;
+      parts.push(`${name}~${shape}`);
+    }
+    return parts.join("|");
+  }
+
+  // Records a checked instance as one others may take their check from, when its body only calls
+  // the closures some of its parameters hold. One reading a lowered copy of its body can't lend:
+  // its tables name that copy's nodes. Nor can one whose body writes closures of its own, since
+  // each instance has its own for them.
+  private lends(this: Mut<this>, id: InstanceId): void {
+    const instance = this.tables.arenas.instanceOf(id);
+    if (!instance.concrete || instance.lowered !== undefined || instance.retired === true) return;
+    if (instance.inner !== undefined && instance.inner!.length > 0) return;
+    const body = instance.body;
+    const bindings = new Map<string, Type>([...instance.bindings]);
+    let callbacks = false;
+    for (const [name, t] of bindings) {
+      if (!name.startsWith("#")) continue;
+      const held = this.tables.typing.lower(t);
+      if (this.tables.typing.kindOf(held) === "closure") callbacks = true;
+    }
+    if (!callbacks) return;
+    let at = [...callbacksOnlyCalled(this.tables.arenas, this.tables.typing, id)];
+    if (at.length === 0) return;
+    at.sort((a, b) => (a < b ? -1 : 1));
+    const key = this.lendKey(bindings, at);
+    if (key === undefined) return;
+    let known: Lender[] = [];
+    const had = this.lenders.get(body);
+    if (had !== undefined) for (const l of had) known.push(l.clone());
+    const spelled = at.join(",");
+    let found = false;
+    for (let i: usize = 0; i < known.length; i++) {
+      if (known[i]!.at.join(",") !== spelled) continue;
+      found = true;
+      if (!known[i]!.byKey.has(key)) known[i]!.byKey.set(key, id);
+    }
+    if (!found) known.push({ at, byKey: new Map<string, InstanceId>([[key, id]]) });
+    this.lenders.set(body, known);
+  }
+
+  // The checked instance `id` may take its check from, and the parameters whose closures differ.
+  private lenderOf(this: Mut<this>, id: InstanceId): { from: InstanceId; at: usize[] } | undefined {
+    const instance = this.tables.arenas.instanceOf(id);
+    if (!instance.concrete || instance.bindings.size === 0) return undefined;
+    const known = this.lenders.get(instance.body);
+    if (known === undefined) return undefined;
+    const bindings = new Map<string, Type>([...instance.bindings]);
+    for (const l of known) {
+      const key = this.lendKey(bindings, l.at);
+      if (key === undefined) continue;
+      const from = l.byKey.get(key);
+      if (from === undefined || from === id || !this.done.has(from)) continue;
+      const lender = this.tables.arenas.instanceOf(from);
+      if (lender.lowered !== undefined || lender.retired === true) continue;
+      return { from, at: [...l.at] };
+    }
+    return undefined;
+  }
+
+  // `id`'s record as a copy of the check of `from`, which differs from it only in the closures at
+  // `at`: a call of itself runs `id`, a call through one of those parameters runs `id`'s own
+  // closure, and a call of the same function with other type arguments runs that function's
+  // instance for `id`'s closures.
+  /** @throws {CompileError} */
+  private lent(this: Mut<this>, id: InstanceId, from: InstanceId, at: Ref<usize[]>): Instance {
+    let copy = this.tables.arenas.instanceOf(from).clone();
+    const body = copy.body;
+    const given = new Map<string, Type>([...copy.bindings]);
+    const taken = new Map<string, Type>([...this.tables.arenas.instanceOf(id).bindings]);
+    copy.id = id;
+    copy.symbol = this.tables.arenas.instanceOf(id).symbol;
+    copy.bindings = new Map<string, Type>([...taken]);
+    copy.depth = this.tables.arenas.instanceOf(id).depth;
+    copy.inner = undefined;
+    copy.keepsAssumedBy = undefined;
+    let closures = new Map<InstanceId, InstanceId>();
+    let theirs: Type[] = [];
+    let ours: Type[] = [];
+    for (const k of at) {
+      const [their, mine] = [given.get(`#${k}`)!, taken.get(`#${k}`)!];
+      theirs.push(their);
+      ours.push(mine);
+      const [run, runs] = [this.tables.typing.lower(their), this.tables.typing.lower(mine)];
+      closures.set(this.closureBodies.get(run as ClosureType)!, this.closureBodies.get(runs as ClosureType)!);
+    }
+    for (const site of copy.calls.ids()) {
+      const target = copy.calls.getById(site)!;
+      if (target === from) {
+        copy.calls.setValueById(site, id);
+        continue;
+      }
+      const mine = closures.get(target);
+      if (mine !== undefined) {
+        copy.calls.setValueById(site, mine);
+        continue;
+      }
+      if (this.tables.arenas.instanceOf(target).body !== body) continue;
+      let bound = new Map<string, Type>();
+      let swapped = false;
+      for (const [name, t] of [...this.tables.arenas.instanceOf(target).bindings]) {
+        const j = theirs.indexOf(t);
+        if (j >= 0) swapped = true;
+        bound.set(name, j >= 0 ? ours[j as usize]! : t);
+      }
+      if (!swapped) continue;
+      const f = cloneSignature(this.tables.arenas.bodyOf(body));
+      const made = this.instancing().instanceOf(f, bound).id;
+      copy.calls.setValueById(site, made);
+    }
+    return copy;
+  }
+
+  // Stops the build: `id` would have taken the check of `from`, and its own check says otherwise.
+  private lentDiffers(id: InstanceId, from: InstanceId, how: string): void {
+    console.error(`fishc: ${this.tables.arenas.instanceOf(id).symbol} would take the check of ${this.tables.arenas.instanceOf(from).symbol}, but ${how}`);
+    process.exit(70);
+  }
+
+  // Compares `id`'s own check with the copy it would have taken from `from`.
+  private sameCheck(this: Mut<this>, id: InstanceId, from: InstanceId, expected: Ref<Instance>): void {
+    const own = this.tables.arenas.instanceOf(id);
+    const lender = this.tables.arenas.instanceOf(from);
+    let theirs: Type[] = [];
+    let ours: Type[] = [];
+    for (const [name, t] of lender.bindings) {
+      const mine = own.bindings.get(name)!;
+      if (mine === t) continue;
+      theirs.push(this.tables.typing.lower(t));
+      ours.push(this.tables.typing.lower(mine));
+    }
+    const typed = (t: Type): Type => {
+      const j = theirs.indexOf(t);
+      return j >= 0 ? ours[j as usize]! : t;
+    };
+    if (typed(expected.returns) !== own.returns) this.lentDiffers(id, from, `it returns '${this.tables.typing.show(own.returns)}', not '${this.tables.typing.show(expected.returns)}'`);
+    if ((expected.throws === undefined) !== (own.throws === undefined) || (expected.throws !== undefined && typed(expected.throws!) !== own.throws!)) this.lentDiffers(id, from, "what it throws differs");
+    if (expected.keeps !== own.keeps) this.lentDiffers(id, from, "whether it keeps what it is lent differs");
+    const sizes: [string, usize, usize][] = [["types", expected.types.size, own.types.size], ["calls", expected.calls.size, own.calls.size], ["coercions", expected.coercions.size, own.coercions.size], ["locals", expected.locals.size, own.locals.size], ["setters", expected.setters.size, own.setters.size], ["jumps", expected.jumps.size, own.jumps.size], ["borrows", expected.borrowsFrom.size, own.borrowsFrom.size], ["raises", expected.raises.size, own.raises.size], ["caught", expected.caught.size, own.caught.size], ["patterns", expected.patterns.size, own.patterns.size], ["consumes", expected.consumes.size, own.consumes.size]];
+    for (const [what, a, b] of sizes) if (a !== b) this.lentDiffers(id, from, `its ${what} hold ${b} entries, not ${a}`);
+    for (const site of expected.types.ids()) {
+      const a = expected.types.getById(site)!;
+      const b = own.types.getById(site);
+      if (b === undefined) this.lentDiffers(id, from, `the expression ${site} has no type`);
+      else if (typed(a) !== b) this.lentDiffers(id, from, `the expression ${site} has type '${this.tables.typing.show(b)}', not '${this.tables.typing.show(a)}'`);
+    }
+    for (const site of expected.calls.ids()) {
+      const a = expected.calls.getById(site)!;
+      const b = own.calls.getById(site);
+      if (b === undefined) this.lentDiffers(id, from, `the call ${site} runs nothing`);
+      else if (a !== b) this.lentDiffers(id, from, `the call ${site} runs ${this.tables.arenas.instanceOf(b).symbol}, not ${this.tables.arenas.instanceOf(a).symbol}`);
+    }
+    for (const site of expected.coercions.ids()) {
+      const a = expected.coercions.getById(site)!;
+      const b = own.coercions.getById(site);
+      if (b === undefined || typed(a) !== b) this.lentDiffers(id, from, `the coercion at ${site} differs`);
+    }
+    for (const node of expected.consumes) if (!own.consumes.has(node)) this.lentDiffers(id, from, `the place ${node} is handed over in one and not the other`);
   }
 
   // Clears what checking an instance recorded, for another pass: its tables and its closures.
@@ -4815,7 +5038,7 @@ class BodyChecker implements Context, GuardHost {
   destructuring(this: Mut<this>, e: Ref<Extract<Expr, { kind: "destructure" }>>): Stmt[] {
     // Every part is read first, then every target written, so a target can't change what a
     // later part reads, as in '({ a: o.b, b: o.a } = o)'.
-    let out: Destructured = { reads: [], writes: [] };
+    let out: Destructured = { reads: [], writes: [], until: e.end };
     this.destructureFrom(out, e.pattern, cloneExpr(e.value));
     return [...out.reads, ...out.writes];
   }
@@ -4824,6 +5047,12 @@ class BodyChecker implements Context, GuardHost {
   }
   private partIdent(this: Mut<this>, name: string, at: Ref<Span>): Expr {
     return { id: nextId(this.cx.tables.ids), kind: "ident", name, start: at.start, end: at.end };
+  }
+  // A read of a part's fresh variable, in use until the assignment ends.
+  private partRead(this: Mut<this>, out: Ref<Destructured>, name: string, at: Ref<Span>): Expr {
+    const read = this.partIdent(name, at);
+    this.cx.tables.heldUntil.set(cloneExpr(read), out.until);
+    return read;
   }
   private partDeclared(this: Mut<this>, target: Pattern, init: Expr, at: Ref<Span>, typedAs: Expr | undefined): Stmt {
     const s: Stmt = { id: nextId(this.cx.tables.ids), kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.tables.ids), target, type: undefined, init, start: at.start, end: at.end }], start: at.start, end: at.end };
@@ -4864,28 +5093,31 @@ class BodyChecker implements Context, GuardHost {
     if (p.kind !== "array" && p.kind !== "object") throw new CompileError("E0003", "this can't be a destructuring target; assign to a variable, a field or an element", p.start, p.end);
     // A literal is taken part by part, each part typed as its target.
     if (p.kind === "array" && value.kind === "array" && !value.elements.some((x) => x === undefined || x.kind === "spread")) {
-      let parts: { nested: Expr | undefined; read: Expr | undefined }[] = [];
+      let parts: { writes: Stmt[] | undefined; read: Expr | undefined }[] = [];
       for (let i: usize = 0; i < value.elements.length; i++) {
         const x: Ref<Expr> = value.elements[i]!;
         const q: Ref<Pattern> | undefined = i < p.elements.length && p.elements[i] !== undefined ? p.elements[i]! : undefined;
         const inner = q === undefined ? undefined : defaultTarget(q);
-        // A nested literal for a nested pattern is taken apart in turn.
+        // A nested literal for a nested pattern is taken apart in its place, its parts read
+        // before the later ones, its targets written in this element's turn.
         if (inner !== undefined && (inner.kind === "array" || inner.kind === "object") && (x.kind === "array" || x.kind === "object") && q!.kind !== "default") {
-          parts.push({ nested: cloneExpr(x), read: undefined });
+          let nested: Destructured = { reads: [], writes: [], until: out.until };
+          this.destructureFrom(nested, q!, cloneExpr(x));
+          for (const r of nested.reads) out.reads.push(cloneStmt(r));
+          parts.push({ writes: nested.writes, read: undefined });
           continue;
         }
         const name = this.freshPart();
         const typedAs = q !== undefined ? this.partTarget(q) : undefined;
         const partId = nextId(this.cx.tables.ids);
         out.reads.push(this.partDeclared({ id: partId, kind: "ident", name, start: x.start, end: x.end }, cloneExpr(x), { start: x.start, end: x.end }, typedAs));
-        parts.push({ nested: undefined, read: this.partIdent(name, { start: x.start, end: x.end }) });
+        parts.push({ writes: undefined, read: this.partRead(out, name, { start: x.start, end: x.end }) });
       }
       for (let i: usize = 0; i < p.elements.length; i++) {
         if (p.elements[i] === undefined) continue;
         const q: Ref<Pattern> = p.elements[i]!;
-        const nested = i < parts.length && parts[i]!.nested !== undefined ? cloneExpr(parts[i]!.nested!) : undefined;
         const read = i < parts.length && parts[i]!.read !== undefined ? cloneExpr(parts[i]!.read!) : undefined;
-        if (nested !== undefined) this.destructureFrom(out, q, nested);
+        if (i < parts.length && parts[i]!.writes !== undefined) for (const w of parts[i]!.writes!) out.writes.push(cloneStmt(w));
         else if (read !== undefined) this.destructureWrite(out, q, read);
         else if (q.kind !== "default") throw new CompileError("E0003", `the array on the right has no element at index ${i} for this target`, q.start, q.end);
         else this.destructureWrite(out, q.target, cloneExpr(q.value));
@@ -4907,7 +5139,7 @@ class BodyChecker implements Context, GuardHost {
         const typedAs = q !== undefined ? this.partTarget(q.value) : undefined;
         const partId = nextId(this.cx.tables.ids);
         out.reads.push(this.partDeclared({ id: partId, kind: "ident", name, start: x.start, end: x.end }, cloneExpr(x.value), { start: x.start, end: x.end }, typedAs));
-        parts.set(key, this.partIdent(name, x));
+        parts.set(key, this.partRead(out, name, x));
       }
       for (const prop of p.props) {
         const part = parts.get(typeof prop.key === "string" ? prop.key : "");
@@ -4923,7 +5155,7 @@ class BodyChecker implements Context, GuardHost {
       const at = { start: value.start, end: value.end };
       const partId = nextId(this.cx.tables.ids);
       out.reads.push(this.partDeclared({ id: partId, kind: "ident", name, start: at.start, end: at.end }, value, at, undefined));
-      whole = this.partIdent(name, at);
+      whole = this.partRead(out, name, at);
     } else whole = value;
     // Each top-level piece is read by a declaration naming only it, nested patterns down to
     // their leaves, so only the leaves move out of a place. A slot with a default reads
@@ -4958,7 +5190,7 @@ class BodyChecker implements Context, GuardHost {
       }
     }
     for (const [q, name] of leaves) {
-      const read = this.partIdent(name, { start: q.start, end: q.end });
+      const read = this.partRead(out, name, { start: q.start, end: q.end });
       this.destructureWrite(out, q, read);
     }
   }

@@ -1,20 +1,24 @@
-// Builds fishc from src with stage 0, the fishc stage0.toml pins, kept in the cache and checked
-// against its digest each time it is used. `--stage0 <fishc>` adopts a binary into the cache once
-// its digest matches, and `--stage0 <tarball>` a release's tarball once its sha256 does. With no
-// stage 0 cached, a pinned release is downloaded with curl and checked; with none pinned, or with
-// `--from-source`, stage 0 is built from source: the pinned commit, or each commit of its chain in
-// turn, the first of which needs git and, this once, Bun. scripts/bootstrap.sh runs this with no
-// fishc at all.
-// `--record` rebuilds stage 0 and writes its digest for this machine into stage0.toml.
+// Builds fishc from src with stage 0, the released fishc stage0.toml pins, kept in the cache and
+// checked against its digest each time it is used. With no stage 0 cached, the pinned release's
+// tarball for this machine is downloaded with curl and checked against its sha256. `--stage0
+// <tarball>` takes one from disk instead, and `--stage0 <fishc>` adopts a binary once its digest
+// matches. scripts/bootstrap.sh runs this with no fishc at all.
+// A new target: stage0.toml has no tarball for a machine no release was packed on. Its first
+// stage 0 is cross-compiled on a machine that has one, from the pinned commit's tree at its fixed
+// path (`fishc build main.fsh --release --target <triple>`, with `--sysroot` for another system),
+// then built twice more on the target, each by the one before, until two builds are the same
+// binary. That one is packed as scripts/release.fsh lays a release out and published beside the
+// release, and `--stage0 <tarball> --record` writes its sha256 and its fishc's digest into
+// stage0.toml for this machine, building nothing.
 // `--source <tree>` builds the src of another tree, as a release builds its tagged commit's.
 // `--leaks` builds fishc with `--leaks`, for scripts/memsites.fsh to read what it holds.
-//   fishc run scripts/build.fsh -- [-o <fishc>] [--stage0 <fishc>|<tarball>] [--from-source] [--record] [--source <tree>] [--leaks]
+//   fishc run scripts/build.fsh -- [-o <fishc>] [--stage0 <fishc>|<tarball>] [--record] [--source <tree>] [--leaks]
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { hostKey, pinned, stage0Digest, tarballName, type Pinned } from "./stage0.fsh";
+import { hostKey, pinned, stage0Digest, tarballName, written, type Pinned } from "./stage0.fsh";
 
 // The value after `flag` in the arguments, or undefined.
 function option(args: Ref<string[]>, flag: string): string | undefined {
@@ -31,35 +35,61 @@ function cacheDir(): string {
   return join(xdg !== "" ? xdg : home !== "" ? join(home, ".cache") : tmpdir(), "fish");
 }
 
-// Where the pinned stage 0 is cached: a release unpacked as bin/fishc beside the share/fishc it
-// reads, or a binary built from source, which reads its source tree instead.
+// Where the pinned stage 0 is cached: its release unpacked, bin/fishc beside the share/fishc it
+// reads.
 export function stage0Path(p: Ref<Pinned>): string {
+  return join(cacheDir(), "stage0", p.commit, "bin", "fishc");
+}
+
+// Why a machine stage0.toml names no tarball for can't build, and what gives it one.
+function noStage0(): string {
+  return `stage0.toml has no stage 0 for ${hostKey()}, since no release was packed on such a machine; its first one is cross-compiled on a machine that has one, as 'A new target' at the top of scripts/build.fsh says`;
+}
+
+// `file` unpacked into the cache as the pinned release, without its top directory.
+function untarred(p: Ref<Pinned>, file: string): void throws IoError {
   const dir = join(cacheDir(), "stage0", p.commit);
-  return p.release === undefined ? join(dir, "fishc") : join(dir, "bin", "fishc");
+  mkdirSync(dir, { recursive: true });
+  const untar = spawnSync("tar", ["-xzf", file, "-C", dir, "--strip-components=1"]);
+  if (untar.status !== 0) fail(`can't unpack ${file}: ${new TextDecoder().decode(untar.stderr).trim()}`);
 }
 
 // The pinned release's tarball for this machine, at `tarball` or downloaded, checked against its
 // sha256 and unpacked into the cache, then its fishc checked against its digest.
 function unpackedRelease(p: Ref<Pinned>, tarball: string | undefined): string throws IoError {
-  const release = p.release ?? fail("stage0.toml pins no release to unpack");
-  const want = p.tarballs.get(hostKey()) ?? fail(`stage0.toml has no tarball for ${hostKey()}; build stage 0 with --from-source`);
-  const dir = join(cacheDir(), "stage0", p.commit);
-  mkdirSync(dir, { recursive: true });
-  let file = tarball ?? join(dir, tarballName(release, hostKey()));
+  const release = p.release ?? fail("stage0.toml pins no release to take stage 0 from");
+  const want = p.tarballs.get(hostKey()) ?? fail(noStage0());
+  let file = tarball ?? join(cacheDir(), "stage0", tarballName(release, hostKey()));
   if (tarball === undefined) {
+    mkdirSync(dirname(file), { recursive: true });
     const url = `${p.releases ?? "https://github.com/fishlang-dev/fish/releases/download"}/${release}/${tarballName(release, hostKey())}`;
     console.log(`downloading stage 0, ${url}`);
     const got = spawnSync("curl", ["-fsSL", "-o", file, url]);
-    if (got.status !== 0) fail(`can't download ${url}: ${new TextDecoder().decode(got.stderr).trim()}; build stage 0 with --from-source instead`);
+    if (got.status !== 0) fail(`can't download ${url}: ${new TextDecoder().decode(got.stderr).trim()}; give it from disk with --stage0 <tarball>`);
   }
   const sum = createHash("sha256").update(readFileSync(file)).digest("hex");
   if (sum !== want) fail(`${file} isn't ${release}'s tarball for ${hostKey()}: its sha256 is ${sum}, and stage0.toml pins ${want}`);
-  const untar = spawnSync("tar", ["-xzf", file, "-C", dir, "--strip-components=1"]);
-  if (untar.status !== 0) fail(`can't unpack ${file}: ${new TextDecoder().decode(untar.stderr).trim()}`);
+  untarred(p, file);
   if (tarball === undefined) rmSync(file);
   const path = stage0Path(p);
   if (!checked(p, path)) fail(`the fishc in ${release}'s tarball isn't the one stage0.toml pins`);
   console.log(`stage 0 is ${release}, cached at ${path}`);
+  return path;
+}
+
+// A target's first stage 0, from the tarball it was packed into: unpacked into the cache, with its
+// sha256 and its fishc's digest written into stage0.toml for this machine.
+function seeded(root: string, tarball: string): string throws IoError | Error {
+  let p = pinned(root);
+  if (p.release === undefined) fail("stage0.toml pins no release for the tarball to be a target's of");
+  const sum = createHash("sha256").update(readFileSync(tarball)).digest("hex");
+  untarred(p, tarball);
+  const path = stage0Path(p);
+  const digest = stage0Digest(path);
+  p.tarballs.set(hostKey(), sum);
+  p.digests.set(hostKey(), digest);
+  writeFileSync(join(root, "stage0.toml"), written(p));
+  console.log(`stage0.toml names ${hostKey()}: digest ${digest}, tarball ${sum}`);
   return path;
 }
 
@@ -78,9 +108,9 @@ function checked(p: Ref<Pinned>, binary: string): boolean throws IoError {
   return false;
 }
 
-// `binary` copied into the cache as stage 0, once it is checked, unless its digest was just recorded.
-function adopted(p: Ref<Pinned>, binary: string, record: boolean): string throws IoError {
-  if (!record && !checked(p, binary)) process.exit(1);
+// `binary` copied into the cache as stage 0, once it is checked.
+function adopted(p: Ref<Pinned>, binary: string): string throws IoError {
+  if (!checked(p, binary)) process.exit(1);
   const path = stage0Path(p);
   mkdirSync(dirname(path), { recursive: true });
   const partial = `${path}.${process.pid}`;
@@ -89,28 +119,6 @@ function adopted(p: Ref<Pinned>, binary: string, record: boolean): string throws
   renameSync(partial, path);
   console.log(`stage 0 cached at ${path}`);
   return path;
-}
-
-function linked(target: string, path: string): void throws IoError {
-  if (lstatSync(path, { throwIfNoEntry: false }) === undefined) symlinkSync(target, path);
-}
-
-// The pinned commit's source as Fish in `to`, its src being TypeScript: each src/*.ts, or its .fsh
-// twin, with its `.ts` imports renamed `.fsh`, the runtime's C sources inside it and vendor beside it.
-export function mirror(root: string, to: string): usize throws IoError {
-  const src = join(root, "src");
-  mkdirSync(to, { recursive: true });
-  let n: usize = 0;
-  for (const f of readdirSync(src)) {
-    if (!f.endsWith(".ts") || f.endsWith(".d.ts")) continue;
-    const twin = join(src, f.slice(0, (f.length as i64) - 3) + ".fsh");
-    const text = readFileSync(existsSync(twin) ? twin : join(src, f), "utf8");
-    writeFileSync(join(to, f.slice(0, (f.length as i64) - 3) + ".fsh"), text.replace(/(["'])(\.{1,2}\/[^"']+)\.ts\1/g, "$1$2.fsh$1"));
-    n++;
-  }
-  linked(join(src, "runtime"), join(to, "runtime"));
-  linked(join(root, "vendor"), join(dirname(to), "vendor"));
-  return n;
 }
 
 async function exitOf(exited: Promise<i64>): Promise<i64> {
@@ -139,7 +147,8 @@ async function ran(label: string, cmd: string[], cwd: string): Promise<i64> thro
 
 // fishc built by `fishc` from the source in `src` into `out`, as a release build. A fishc finds
 // vendor and the runtime's sources from where its source was when it was built, so `src` is a
-// directory that stays: the repository's src, or the mirror in stage 0's own tree. With `leaks`, a
+// directory that stays: the repository's src, or that of a commit's tree at its fixed path. With
+// `leaks`, a
 // `--leaks` build, whose fishc reports at exit what it still holds, by allocation site.
 export async function compiled(fishc: string, src: string, out: string, leaks = false): Promise<boolean> throws IoError {
   const started = Date.now();
@@ -172,102 +181,29 @@ export function unpacked(commit: string, root: string): string throws IoError {
   return tree;
 }
 
-// Stage 0's tree, with the links a stage 0 built from TypeScript reads its runtime through.
-function prepared(p: Ref<Pinned>, root: string): string throws IoError {
-  const tree = unpacked(p.commit, root);
-  mkdirSync(join(tree, "build", "src"), { recursive: true });
-  linked(join(tree, "src", "runtime"), join(tree, "build", "src", "runtime"));
-  linked(join(tree, "vendor"), join(tree, "build", "vendor"));
-  return tree;
-}
-
-async function step(label: string, command: string, cwd: string): Promise<void> throws IoError {
-  const code = await ran(`stage 0: ${label}`, ["sh", "-c", command], cwd);
-  if (code !== 0) fail(`stage 0: couldn't ${label}`);
-}
-
-// Stage 0 built from the pinned commit in its tree: the commit's own compiler, run by Bun, builds a
-// first fishc from its source, and that one builds the source again, as the fixpoint's second
-// generation is built; only the second is the binary the digest pins. Checked against the digest,
-// or with `record`, its digest written into stage0.toml for this machine's target.
-async function rebuilt(p: Ref<Pinned>, root: string, record: boolean): Promise<string> throws IoError {
-  const second = await fromTypeScript(p, root);
-  if (record) recorded(root, stage0Digest(second));
-  return adopted(p, second, record);
-}
-
-// The fishc a commit whose src is TypeScript builds of itself: its own compiler, run by Bun, builds
-// a first fishc from its source, and that one builds the source again, as the fixpoint's second
-// generation is built. The commit is the pinned one, or the first of the chain.
-async function fromTypeScript(p: Ref<Pinned>, root: string): Promise<string> throws IoError {
-  const commit = p.chain.length > 0 ? p.chain[0]! : p.commit;
-  console.log(`stage 0 isn't cached; building it from ${commit}, about an hour, once`);
-  let first: Pinned = { commit, digests: new Map<string, string>(), tarballs: new Map<string, string>(), chain: [] };
-  const tree = prepared(first, root);
-  await step("mirror its source", "bun src/main.ts run scripts/mirror.fsh", tree);
-  await step("build a first fishc with Bun", `bun src/main.ts build tests/compiler/main.fsh --release -o "${join(tree, "first")}"`, tree);
-  console.log("stage 0: build it again with that fishc");
-  const at = join(tree, "build", "src");
-  for (const f of readdirSync(at)) if (f.endsWith(".fsh")) rmSync(join(at, f));
-  mirror(tree, at);
-  const second = await compiled(join(tree, "first"), at, join(tree, "second"));
-  if (!second) fail("stage 0: the first fishc couldn't build the commit's source");
-  return join(tree, "second");
-}
-
-// Stage 0 built from source down its chain: the first commit from TypeScript, then each later one
-// by the fishc before it at its fixed path, the last checked against the digest and cached.
-async function fromSource(p: Ref<Pinned>, root: string, record: boolean): Promise<string> throws IoError {
-  let fishc = await fromTypeScript(p, root);
-  for (let i: usize = 1; i < p.chain.length; i++) {
-    const tree = unpacked(p.chain[i]!, root);
-    const out = join(tree, "fishc");
-    const built = await compiled(fishc, join(tree, "src"), out);
-    if (!built) fail(`stage 0: ${p.chain[i]!} couldn't be built from the commit before it`);
-    fishc = out;
-  }
-  if (record) recorded(root, stage0Digest(fishc));
-  return adopted(p, fishc, record);
-}
-
-// stage0.toml with this machine's target's digest set to `digest`.
-function recorded(root: string, digest: string): void throws IoError {
-  const path = join(root, "stage0.toml");
-  const line = `"${hostKey()}" = "${digest}"`;
-  let lines = readFileSync(path, "utf8").split("\n");
-  const at = lines.findIndex((l) => l.startsWith(`"${hostKey()}" =`));
-  if (at >= 0) lines[at as usize] = line;
-  else lines.splice(lines.findIndex((l) => l === "[digests]") + 1, 0, line);
-  writeFileSync(path, lines.join("\n"));
-  console.log(`stage0.toml: ${line}`);
-}
-
 async function main(): Promise<void> throws IoError | Error {
   const args = process.argv.slice(2);
   const root = join(import.meta.dir, "..");
-  const record = args.includes("--record");
-  let p = pinned(root);
   const out = resolve(option(args, "-o") ?? join(root, "build", "fishc"));
   const given = option(args, "--stage0");
+  const tarball = given !== undefined && given!.endsWith(".tar.gz");
+  if (args.includes("--record")) {
+    if (!tarball) fail("--record writes a target's first stage 0 into stage0.toml from its tarball: --stage0 <tarball> --record");
+    console.log(`stage 0 cached at ${seeded(root, resolve(given!))}; nothing is built`);
+    return;
+  }
+  const p = pinned(root);
   let stage0 = stage0Path(p);
-  const source = args.includes("--from-source") || p.release === undefined;
-  if (record) {
-    if (p.chain.length > 1) stage0 = await fromSource(p, root, true);
-    else stage0 = await rebuilt(p, root, true);
-    p = pinned(root);
-  } else if (given !== undefined && given!.endsWith(".tar.gz")) stage0 = unpackedRelease(p, resolve(given!));
-  else if (given !== undefined) stage0 = adopted(p, resolve(given!), false);
-  else if (!existsSync(stage0) && !source) stage0 = unpackedRelease(p, undefined);
-  else if (!existsSync(stage0) && p.chain.length > 1) stage0 = await fromSource(p, root, false);
-  else if (!existsSync(stage0)) stage0 = await rebuilt(p, root, false);
+  if (tarball) stage0 = unpackedRelease(p, resolve(given!));
+  else if (given !== undefined) stage0 = adopted(p, resolve(given!));
+  else if (!existsSync(stage0)) stage0 = unpackedRelease(p, undefined);
   else {
     console.log(`checking the cached stage 0, ${stage0}`);
     if (!checked(p, stage0)) fail("the cached stage 0 has changed; adopt a good one with --stage0 <fishc>");
     console.log("stage 0's digest matches stage0.toml");
   }
-  // A stage 0 built from source reads its own tree as it builds; a release's tarball holds what it reads.
-  if (p.release === undefined) prepared(p, root);
-  else unpacked(p.commit, root);
+  // A stage 0 adopted as a bare binary reads its commit's tree at its fixed path as it builds.
+  unpacked(p.commit, root);
   mkdirSync(dirname(out), { recursive: true });
   const tree = option(args, "--source");
   const built = await compiled(stage0, join(tree === undefined ? root : resolve(tree!), "src"), out, args.includes("--leaks"));

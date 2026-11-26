@@ -16,6 +16,7 @@ import { made, type PatternInfo } from "./match.fsh";
 import { STD_BASE } from "./std.fsh";
 import { EMBEDDED, LIVE, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.fsh";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.fsh";
+import { callbacksOnlyCalled, calledThrough } from "./callbacks.fsh";
 import { partEnd, partStart, type Tables } from "./compilation.fsh";
 import { allWords } from "./sizes.fsh";
 import type { Kind, Verdict } from "./narrow.fsh";
@@ -80,8 +81,8 @@ function floatConstant(value: f64, type: "f32" | "f64"): string {
 // intrinsics, printing and reference counts, none of which panics or calls back into Fish.
 const CALLEE = /^(?:%\S+ = )?(?:call|invoke) [^@%]*([@%][^(]*)\(/;
 const FRAME = "{ ptr, ptr, ptr }";
-// The files of std's built-in modules, such as `node:path` and `fish:engine`.
-const BUILT_IN = /^(node|fish):/;
+// The files of std's built-in modules, such as `std:path` and `std:engine`.
+const BUILT_IN = /^std:/;
 const QUIET = /^@(llvm\.|printf$|dprintf$|fflush$|fsh_rt_str_retain$|fsh_rt_str_release$)/;
 
 // A name inside LLVM's quotes. A generic class's instance is named by its type arguments, and a
@@ -1402,90 +1403,12 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  // The parameters of a plain function holding a closure that its body only calls, or hands on
-  // to the same function at the same place; one read anywhere else, a nested function's included,
-  // is used some other way.
   callbacksOnlyCalled(i: InstanceId): Set<usize> {
-    const b = this.bodyAt(i);
-    let at = new Set<usize>();
-    if (b.self !== undefined || b.closure !== undefined || b.generator === true || b.async === true || b.foreign === true || b.rust !== undefined || b.js !== undefined || b.exported === true || b.comptime !== undefined || this.inst(i).symbol === "main") return at;
-    if (b.params.some((p) => p.comptime || p.rest)) return at;
-    let kAt: usize = 0;
-    for (const p of b.params) {
-      const k = kAt;
-      kAt++;
-      if (p.pattern.kind !== "ident" || p.optional || p.default !== undefined) continue;
-      const get2 = this.inst(i).locals.get(p)!;
-      const part = this.loc(get2).type;
-      if (this.kindOf(part) !== "closure") continue;
-      const name = p.pattern.name;
-      let uses = 0;
-      let calls = 0;
-      // A generic function value runs another instance for each type it is called with.
-      let runs = new Set<InstanceId>();
-      // Inside a nested arrow or function only reading it counts: its calls aren't the body's.
-      for (const st of b.body) {
-        walkWhile({ of: "stmt", node: st }, (n) => {
-          if (n.of === "objectProp" && n.node.kind === "shorthand" && n.node.name === name) uses++;
-          if (n.of !== "expr") return true;
-          const e = n.node;
-          if (e.kind === "ident" && e.name === name) uses++;
-          if (e.kind === "arrow" || e.kind === "function") {
-            walk(n, (m) => {
-              if (m.of === "expr" && m.node.kind === "ident" && m.node.name === name) uses++;
-              if (m.of === "objectProp" && m.node.kind === "shorthand" && m.node.name === name) uses++;
-            });
-            return false;
-          }
-          if (e.kind === "call") {
-            const target = this.inst(i).calls.get(e);
-            if (e.callee.kind === "ident" && e.callee.name === name && e.args.every((a) => a.kind !== "spread")) {
-              calls++;
-              if (target !== undefined) runs.add(target);
-            }
-            let j: usize = 0;
-            for (const a of e.args) {
-              if (a.kind === "ident" && a.name === name && j === (k as usize) && target !== undefined && this.sameFunction(target, i)) calls++;
-              j++;
-            }
-          }
-          return true;
-        });
-      }
-      // A call through the pair passes an environment and builds no frame, so it can only run a
-      // plain closure: a generic function value's instance takes no environment.
-      const plain = [...runs].every((r) => {
-        const called = bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(r));
-        return called.closure !== undefined && called.async !== true && called.generator !== true;
-      });
-      if (uses > 0 && uses === calls && runs.size <= 1 && plain) at.add(k as usize);
-    }
-    return at;
+    return callbacksOnlyCalled(this.tables.arenas, this.tables.typing, i);
   }
 
-
-  sameFunction(a: InstanceId, b: InstanceId): boolean {
-    const x = this.bodyAt(a);
-    const y = this.bodyAt(b);
-    return x.name === y.name && x.start === y.start;
-  }
-
-
-  // The closure's body a call of the parameter `name` runs, in `i`.
   calledThrough(i: InstanceId, name: string): InstanceId | undefined {
-    let found: InstanceId | undefined = undefined;
-    const body2 = this.bodyAt(i).body;
-    for (const st of body2) {
-      walkWhile({ of: "stmt", node: st }, (n) => {
-        if (found !== undefined) return false;
-        if (n.of === "expr" && n.node.kind === "call" && n.node.callee.kind === "ident" && n.node.callee.name === name) {
-          const target = this.inst(i).calls.get(n.node);
-          if (target !== undefined) found = target;
-        }
-        return true;
-      });
-    }
-    return found;
+    return calledThrough(this.tables.arenas, i, name);
   }
 
 
@@ -9630,7 +9553,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  // node:fs's blocking calls: what each gives, or a failure raised as the IoError the runtime's
+  // std:fs's blocking calls: what each gives, or a failure raised as the IoError the runtime's
   // parts make.
   syncFile(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, name: string): string | undefined {
     const path = this.operand(e.args[0]!, e.args, 1);

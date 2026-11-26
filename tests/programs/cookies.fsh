@@ -73,8 +73,8 @@ async function main(): Promise<void> throws IoError | AbortError {
 // expect: d=; Expires=Tue, 29 Feb 2000 00:00:00 GMT; SameSite=Lax
 // expect: d=; Expires=Mon, 01 Jan 1900 00:00:00 GMT; SameSite=Lax
 // expect: d=; Expires=Fri, 31 Dec 9999 23:59:59 GMT; SameSite=Lax
-// Set and delete keep the map and one Set-Cookie line per name, attributes in Bun's order with
-// its defaults, the value percent-encoded so nothing in it ends the cookie or the header, and
+// Set and delete keep the map and one Set-Cookie line per name, attributes in a fixed order with
+// their defaults, the value percent-encoded so nothing in it ends the cookie or the header, and
 // an expiry in epoch milliseconds written as an HTTP date on either side of the epoch.
 function main() {
   let jar = new CookieMap("a=1; b=2");

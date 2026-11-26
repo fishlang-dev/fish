@@ -245,19 +245,19 @@ const BUILTINS = new Map<string, Equivalent>([
   ["timers/promises", STD("sleep")],
   // `fetch` and `serve` are the client and the server, but importing `http` itself needs its shim.
   ["http", PLANNED("node:http server shim")], ["console", PLANNED("The rest of console")],
-  ["test", PLANNED("Jest-style test API")], ["sqlite", STD("the sqlite module's Database, each call awaited")],
-  ["fs/promises", STD("fs/promises, for readFile, writeFile, open, access, utimes, lutimes, chmod, symlink, link, readlink, realpath and watch")], ["fs", STD("fs, for readFileSync, writeFileSync, existsSync, statSync and lstatSync with throwIfNoEntry, readdirSync with withFileTypes, realpathSync, mkdtempSync, rmSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, chmodSync, symlinkSync, linkSync, readlinkSync, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync and constants with the open flags")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative, normalize, isAbsolute, parse and format")], ["crypto", STD("crypto, for createHash, createHmac, randomBytes, randomUUID, getRandomValues and hash")],
+  ["test", PLANNED("Jest-style test API")], ["sqlite", STD("std:sqlite's Database, each call awaited")],
+  ["fs/promises", STD("std:fs/promises, for readFile, writeFile, open, access, utimes, lutimes, chmod, symlink, link, readlink, realpath and watch")], ["fs", STD("std:fs, for readFileSync, writeFileSync, existsSync, statSync and lstatSync with throwIfNoEntry, readdirSync with withFileTypes, realpathSync, mkdtempSync, rmSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, chmodSync, symlinkSync, linkSync, readlinkSync, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync and constants with the open flags")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative, normalize, isAbsolute, parse and format")], ["crypto", STD("crypto, for createHash, createHmac, randomBytes, randomUUID, getRandomValues and hash")],
   // fetch and serve speak HTTPS, but importing `https` needs the same shim as `http`, and `tls`
   // Node's own connect and its sockets with events.
-  ["https", PLANNED("node:http server shim")], ["tls", PLANNED("node:tls")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("child_process, for spawnSync, execFileSync and execSync")],
-  ["events", PLANNED("EventTarget and EventEmitter")], ["url", STD("url, for fileURLToPath and pathToFileURL")], ["querystring", PLANNED("node:querystring")],
-  ["os", STD("os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", STD("zlib, for gzipSync, gunzipSync, deflateSync, inflateSync, deflateRawSync, inflateRawSync and unzipSync, and those seven as promises")], ["stream", STD("ReadableStream and WritableStream, as globals")],
-  ["buffer", STD("Buffer, for from, alloc, allocUnsafe, concat, byteLength, compare, equals, toString, indexOf and includes of text, and the read methods")], ["assert", STD("assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
+  ["https", PLANNED("node:http server shim")], ["tls", PLANNED("node:tls")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("std:child_process, for spawnSync, execFileSync and execSync")],
+  ["events", PLANNED("EventTarget and EventEmitter")], ["url", STD("std:url, for fileURLToPath and pathToFileURL")], ["querystring", PLANNED("node:querystring")],
+  ["os", STD("std:os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", STD("std:zlib, for gzipSync, gunzipSync, deflateSync, inflateSync, deflateRawSync, inflateRawSync and unzipSync, and those seven as promises")], ["stream", STD("ReadableStream and WritableStream, as globals")],
+  ["buffer", STD("Buffer, for from, alloc, allocUnsafe, concat, byteLength, compare, equals, toString, indexOf and includes of text, and the read methods")], ["assert", STD("std:assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
   // `dns` isn't here: connect and fetch look host names up, but no plan item gives `dns.lookup`.
   // `buffer` is the Buffer global; its methods std lacks, such as `writeUInt32BE`, are found by name.
   // `crypto` is more than std's random functions and one-shot hashes: an import of only those is portable.
-  ["readline", STD("the readLine global and the stdin module, for lines, text and bytes")], ["dgram", STD("UdpSocket")],
-  ["process", STD("process, for argv, env, exit, platform, arch, execPath, cwd, chdir, pid, on, once, kill, signals, stdout.write and stderr.write")], ["perf_hooks", STD("the global performance, for now()")],
+  ["readline", STD("the readLine global and std:stdin, for lines, text and bytes")], ["dgram", STD("UdpSocket")],
+  ["process", STD("std:process, for argv, env, exit, platform, arch, execPath, cwd, chdir, pid, on, once, kill, signals, stdout.write and stderr.write")], ["perf_hooks", STD("the global performance, for now()")],
   ["async_hooks", PLANNED("Task-local context")], ["tty", PLANNED("Terminal detection and styled text")],
 ]);
 const FEATURES = features();

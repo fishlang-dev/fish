@@ -1,0 +1,15 @@
+script 6fb81ddef3944837f3d3c4a90f09446ee3dafd675ab17b1bf56928e8bbff5b82
+status 0
+stdout 216
+a b
+
+out
+3
+ 1
+"Command failed: sh -c echo partial; echo bad >&2; exit 4\nbad\n" 4 null 8 4
+"Command failed: kill -TERM $$" null SIGTERM 0 0
+spawnSync no-such-cmd-x ENOENT ENOENT spawnSync no-such-cmd-x no-such-cmd-x
+
+stderr 10
+warnedbad
+

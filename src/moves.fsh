@@ -3080,7 +3080,7 @@ function exprUses(tables: Ref<Tables>, instance: Ref<Instance>, st: Mut<LastUseS
     case "ident": {
       const env = instance.envs?.get(e)?.env;
       if (env !== undefined) for (const l of env) markUsed(tables, st, l, call ?? e.end);
-      markUsed(tables, st, instance.locals.get(e), call ?? e.end);
+      markUsed(tables, st, instance.locals.get(e), Math.max(call ?? e.end, tables.heldUntil.get(e) ?? 0));
       return;
     }
     case "member":

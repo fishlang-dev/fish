@@ -1,5 +1,5 @@
 // Deterministic simulation testing: FISH_SIM_SEED single-threaded runtime, virtual clocks,
-// seeded PRNG/scheduling, virtual TCP + fault injection (fish:sim), deadlock detection, and
+// seeded PRNG/scheduling, virtual TCP + fault injection (std:sim), deadlock detection, and
 // `fishc test --sim [--seed <n>] [--seeds <count>]`.
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -38,7 +38,7 @@ test("FISH_SIM_SEED replays concurrent tasks, PRNG, clocks, and virtual TCP iden
     const file = join(dir, "replay.fsh");
     write(
       file,
-      `import { enabled, now, seed } from "fish:sim";
+      `import { enabled, now, seed } from "std:sim";
 
 async function worker(id: i64, ch: Channel<string>): Promise<void> {
   for (let step = 0; step < 4; step++) {
@@ -118,7 +118,7 @@ test("virtual clock advances 60s instantly and virtual network supports delay, p
     const file = join(dir, "net.fsh");
     write(
       file,
-      `import { advance, heal, now, partition, resetFaults, setDelay } from "fish:sim";
+      `import { advance, heal, now, partition, resetFaults, setDelay } from "std:sim";
 
 async function serveTwo(listener: TcpListener): Promise<void> throws IoError {
   for (let i = 0; i < 2; i++) {
@@ -229,7 +229,7 @@ test("fishc test --sim --seeds finds a concurrency race and --seed replays it de
     write(join(dir, "fish.toml"), `[package]\nname = "simrace"\nversion = "0.1.0"\n`);
     write(
       join(dir, "race.fsh"),
-      `import { enabled } from "fish:sim";
+      `import { enabled } from "std:sim";
 
 async function sendTag(ch: Channel<string>, tag: string): Promise<void> {
   await sleep(1);
@@ -288,7 +288,7 @@ test("virtual HTTP serve/fetch and setDropRate work deterministically with zero 
     const file = join(dir, "http.fsh");
     write(
       file,
-      `import { resetFaults, setDropRate } from "fish:sim";
+      `import { resetFaults, setDropRate } from "std:sim";
 
 async function main(): Promise<void> throws Error | IoError | AbortError {
   const ctl = new AbortController();
@@ -347,7 +347,7 @@ test("simulation supports AbortSignal.timeout, setTimeout drain, spawnBlocking, 
     const file = join(dir, "edge.fsh");
     write(
       file,
-      `import { now } from "fish:sim";
+      `import { now } from "std:sim";
 
 async function main(): Promise<void> throws IoError | AbortError {
   // AbortSignal.timeout cancels virtual accept cleanly with zero leaks.

@@ -22,7 +22,7 @@ async function main(): Promise<void> {
   }
 }
 // case: fs_unknown_member
-// error: 'node:fs/promises' has no export named 'readdir'
+// error: 'std:fs/promises' has no export named 'readdir'
 import * as fs from "node:fs/promises";
 async function main(): Promise<void> {
   fs.readdir(".");
@@ -56,14 +56,14 @@ async function main(): Promise<void> {
 }
 // case: fs_sync_in_async
 // expect: true fish
-// The blocking calls work inside async functions, as Node lets them.
+// The blocking calls work inside async functions.
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 async function main(): Promise<void> throws IoError {
   writeFileSync("/tmp/fish-sync-in-async.txt", "fish");
   console.log(existsSync("/tmp/fish-sync-in-async.txt"), readFileSync("/tmp/fish-sync-in-async.txt", "utf8"));
 }
 // case: fs_sync_unknown_member
-// error: 'node:fs' has no export named 'appendFileSync'
+// error: 'std:fs' has no export named 'appendFileSync'
 import * as fs from "node:fs";
 function main(): void { fs.appendFileSync("x"); }
 // case: fs_read_sync_offset_without_length

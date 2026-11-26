@@ -416,11 +416,11 @@ class Headers {
   }
 }
 
-// A cookie's attributes, with Bun's names. maxAge is in seconds and expires a Date or milliseconds
+// A cookie's attributes. maxAge is in seconds and expires a Date or milliseconds
 // since the epoch, as Date.now() gives.
 type CookieInit = { path?: string; domain?: string; maxAge?: i64; expires?: i64 | Date; secure?: boolean; httpOnly?: boolean; sameSite?: "strict" | "lax" | "none"; partitioned?: boolean };
 
-// Cookies by name, as Bun's CookieMap: read from a Cookie header as RFC 6265 reads one, the
+// Cookies by name: read from a Cookie header as RFC 6265 reads one, the
 // first of a repeated name kept, and changed by set and delete, each change a Set-Cookie line
 // a response sends.
 class CookieMap {
@@ -459,12 +459,12 @@ class CookieMap {
     for (const [name, value] of this.#cookies) callback(value, name);
   }
 
-  // Sets a cookie, with Bun's defaults of path '/' and SameSite=Lax. A name must be an HTTP
+  // Sets a cookie, by default with path '/' and SameSite=Lax. A name must be an HTTP
   // token and a path or domain printable ASCII without ';'; the value is percent-encoded as
   // encodeURIComponent does, so nothing in it can end the cookie or the header.
   set(this: Mut<this>, name: string, value: string, options?: CookieInit) {
     const line = __cookieLine(name, value, options);
-    // Deleted first, so a cookie set again comes last, as Bun orders it.
+    // Deleted first, so a cookie set again comes last.
     this.#cookies.delete(name);
     this.#cookies.set(name, value);
     this.#change(name, line);
@@ -558,7 +558,7 @@ function __cookieAttribute(name: string, attribute: string, value: string): stri
 }
 
 // unix is a socket path to send the request over in place of the URL's host and port; tls.ca is
-// PEM certificates an https: server's is verified against in place of the system's, as Bun's is.
+// PEM certificates an https: server's is verified against in place of the system's.
 type RequestInit = { method?: string; headers?: Headers; body?: string | u8[] | ReadableStream<u8[]>; signal?: AbortSignal; unix?: string; tls?: { ca?: string } };
 
 // A body given as text or bytes, as the bytes sent.
@@ -705,7 +705,7 @@ class Response {
   cookies: CookieMap = new CookieMap();
 
   // A text or streamed body is typed 'text/plain;charset=UTF-8' unless the headers say
-  // otherwise; bytes are given no type, as Bun does.
+  // otherwise; bytes are given no type.
   constructor(body?: string | u8[] | Dyn<AsyncGenerator<string>> | ReadableStream<u8[]> | null, init?: ResponseInit) {
     let status: i64 = 200;
     let statusText = "";
@@ -916,7 +916,7 @@ function __sseLine(value: string): string {
 type ServeInfo = { hostname: string; port: i64 };
 // Body sizes are in bytes and timeouts in milliseconds; a timeout of 0 is none.
 // unix is a socket path to serve on in place of a port, removed when serve stops. tls has the
-// server speak HTTPS with a PEM certificate chain and its private key, as Bun's does. trace: false
+// server speak HTTPS with a PEM certificate chain and its private key. trace: false
 // keeps the server's requests out of the program's traces, when tracing is on.
 type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64; trace?: boolean };
 type ServeHandler = (req: Request) => Promise<Response>;
@@ -942,7 +942,7 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   let port: i64 = 8000;
   const p = options.port;
   if (p !== null) port = p;
-  // Bun's 128 MiB body limit and 10 second idle timeout, and Node's minute for a request's head.
+  // A 128 MiB body limit, a 10 second idle timeout, and a minute for a request's head.
   const limits: __serveLimits = {
     maxBodySize: Http1.option(options.maxBodySize, 134217728, "maxBodySize", "bytes"),
     headerTimeout: Http1.option(options.headerTimeout, 60000, "headerTimeout", "milliseconds, or 0 for no timeout"),
@@ -1600,7 +1600,7 @@ function __staticType(path: string): string {
 // the connection is closed with 1009; maxBuffered the most bytes sends and pongs may queue for a client
 // that reads slowly, past which it is closed with 1013; idleTimeout how long the client may send
 // nothing before it is pinged, and as long again before it is dropped, in milliseconds, 0 for
-// never. The defaults are Bun's: 16 MiB, 16 MiB and two minutes.
+// never. The defaults are 16 MiB, 16 MiB and two minutes.
 type WebSocketOptions = { maxMessageSize?: i64; maxBuffered?: i64; idleTimeout?: i64 };
 type __wsLimits = { maxMessageSize: i64; maxBuffered: i64; idleTimeout: i64 };
 type __wsWhy = { code: i64; reason: string; heard: boolean };
@@ -2482,7 +2482,7 @@ class Http1 {
   // Sends a response with a streamed body: its head, then each piece as its generator makes it,
   // a chunk apiece to an HTTP/1.1 client and closed-delimited to a 1.0 one, which has no chunks.
   // The server stopping ends the body cleanly at the generator's next await or yield. The
-  // client's end of the stream, as Node's server takes it, ends it there with nothing more
+  // client's end of the stream ends it there with nothing more
   // written, as does a write that fails or times out: a half-closed client and one that has gone
   // look the same. Whether the connection may serve another request.
   static async stream(conn: Ref<TcpStream>, res: Ref<Response>, pieces: Mut<Dyn<AsyncGenerator<string>>>, head: boolean, close: boolean, version: string, client: Ref<AbortSignal>, stop: Ref<AbortSignal>): Promise<boolean> {
@@ -2635,7 +2635,7 @@ class Http1 {
 // Tracing, which comes with the HTTP library: serve opens a span for each request, and spans
 // are sent to their collector over HTTP.
 const TRACE = String.raw`
-// Tracing: the spans serve and the fish:trace module record, and their export to an OTLP
+// Tracing: the spans serve and the std:trace module record, and their export to an OTLP
 // collector. Every name here is one no program writes; the module holds the public ones.
 declare function fsh_rt_trace_get(out: MutPtr<i64>): void;
 declare function fsh_rt_trace_set(words: Ptr<i64>): void;
@@ -2799,7 +2799,7 @@ function __traceFinish(record: __traceRecord): void {
   __traceHeld.update((s) => { s.timer = timer; });
 }
 
-// Ends a span opened by the fish:trace module, whose parent becomes current again unless
+// Ends a span opened by the std:trace module, whose parent becomes current again unless
 // another span has taken its place since.
 function __traceEnd(record: __traceRecord, prior: Ref<i64[]>): void {
   const now = __traceWords();
@@ -4756,7 +4756,7 @@ function __stdinTake(mode: i64): u8[] | null {
   }
 }
 
-// Bun's and a browser's prompt: the message and a space on standard output, then the next line of
+// A browser's prompt: the message and a space on standard output, then the next line of
 // standard input without its line ending, or null once input has ended. It waits on this thread,
 // as Bun's does.
 function prompt(message?: string): string | null {
@@ -4824,7 +4824,7 @@ export class Stats {
     this.ctimeMs = times[2];
     this.birthtimeMs = times[3];
   }
-  // Math.round, as Node rounds it, written out since a program may declare its own Math.
+  // Math.round, halves toward +Infinity, written out since a program may declare its own Math.
   get mtime(): Date {
     const half = this.mtimeMs + 0.5;
     const whole = half as i64;
@@ -4863,7 +4863,7 @@ declare function fsh_rt_path_stat(path: Ptr<u8>, follow: i64, out: MutPtr<i64>, 
 declare function fsh_rt_fd_open_flag(which: i64): i64;
 declare function fsh_rt_fd_call(which: i64, fd: i64, value: i64): i64;
 
-// A failed descriptor call's IoError, from the -errno the runtime gave: Node's code and words,
+// A failed descriptor call's IoError, from the -errno the runtime gave: its code and words,
 // naming the path only for open.
 function failed(result: i64, syscall: string, path: string | null): IoError {
   let code: u8[] = new Array(32).fill(0 as u8);
@@ -4877,9 +4877,9 @@ function failed(result: i64, syscall: string, path: string | null): IoError {
   return e;
 }
 
-// Node's RangeError for a number outside what a call takes, the number grouped by threes past
-// 2^32 as Node writes it.
-// Node's own checks in C++ write it plainly, as given by plain.
+// The RangeError for a number outside what a call takes, the number grouped by threes past
+// 2^32.
+// Some checks write it plainly, as given by plain.
 function outOfRange(name: string, range: string, n: i64, plain: boolean = false): IoError {
   let shown = String(n);
   if (!plain && (n > 4294967296 || n < -4294967296)) {
@@ -4941,12 +4941,12 @@ export function readSync(fd: i64, buffer: Mut<u8[]>): i64 throws IoError;
 export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64, length: i64, position?: i64 | null): i64 throws IoError;
 export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64 = 0, length?: i64, position?: i64 | null): i64 throws IoError {
   checkFd(fd, false);
-  // Node's length |= 0, which FileHandle's read doesn't do.
+  // length |= 0, which FileHandle's read doesn't do.
   const n = ((length ?? (buffer.length as i64) - offset) as i32) as i64;
   return readInto(fd, buffer, offset, n, position ?? -1);
 }
 
-// A read's checks in Node's order, then the read.
+// A read's checks, offset, buffer, length then position, then the read.
 function readInto(fd: i64, buffer: Mut<u8[]>, offset: i64, n: i64, position: i64): i64 throws IoError {
   if (offset < 0 || offset > SAFE) throw outOfRange("offset", ">= 0 && <= 9007199254740991", offset);
   const size = buffer.length as i64;
@@ -4981,7 +4981,7 @@ export function writeSync(fd: i64, data: Ref<string | u8[]>, second?: i64 | null
 }
 
 function written(fd: i64, bytes: Ref<u8[]>, offset: i64, n: i64, position: i64): i64 throws IoError {
-  // A pointer for an empty write, which still reaches the system as Node's does.
+  // A pointer for an empty write, which still reaches the system.
   const none: u8[] = [0];
   const r = unsafe { fsh_rt_fd_write(fd, n === 0 ? ptrOf(none[0]) : ptrOf(bytes[offset as usize]), n, position) };
   if (r < 0) throw failed(r, "write", null);
@@ -4997,7 +4997,7 @@ export function fstatSync(fd: i64): Stats throws IoError {
   return new Stats(out, times);
 }
 
-// A path's Stats, or undefined when it doesn't exist and throwIfNoEntry is false, as Node's.
+// A path's Stats, or undefined when it doesn't exist and throwIfNoEntry is false.
 function pathStats(path: string, follow: boolean, throwIfNoEntry: boolean): Stats | undefined throws IoError {
   checkPath(path);
   let out: i64[] = new Array(8).fill(0);
@@ -5032,7 +5032,7 @@ class FsConstants {
   get O_SYNC(): i64 { return unsafe { fsh_rt_fd_open_flag(8) }; }
 }
 
-// A negative length truncates to nothing, as Node's does.
+// A negative length truncates to nothing.
 export function ftruncateSync(fd: i64, len: i64 = 0): void throws IoError {
   if (len < -SAFE || len > SAFE) throw outOfRange("len", ">= -9007199254740991 && <= 9007199254740991", len);
   checkFd(fd);
@@ -5193,7 +5193,7 @@ export function hmac(algorithm: "sha1" | "sha256", key: string | u8[], data: str
   return shaOf(which, outer);
 }
 
-// Node's one-shot crypto.hash, in the text encodings it gives; base64url is unpadded, as there.
+// Node's one-shot crypto.hash, in the text encodings it gives; base64url is unpadded.
 export function hash(algorithm: "sha1" | "sha256", data: string | u8[], encoding: "hex" | "base64" | "base64url" = "hex"): string {
   return encoded(shaOf(algorithm === "sha1" ? 1 : 256, bytesOf(data)), encoding);
 }
@@ -5319,8 +5319,8 @@ function takesText(name: string, specs: Ref<ParseArgsSpec[]>): boolean {
   return i >= 0 && specs[i as usize].text;
 }
 
-// The program's arguments, process.argv after the two paths it starts with, as Node's default
-// gives a script.
+// The program's arguments, process.argv after the two paths it starts with: the runtime's
+// and the script's.
 function programArgs(): string[] {
   let all: string[] = [];
   const n = unsafe { fsh_rt_argc() };
@@ -5328,18 +5328,18 @@ function programArgs(): string[] {
   return all;
 }
 
-// A JSON string of text with no control characters, as Node's message quotes an option.
+// A JSON string of text with no control characters, as a message quotes an option.
 function quoted(s: string): string {
   return "\"" + s.replaceAll("\\", "\\\\").replaceAll("\"", "\\\"") + "\"";
 }
 
-// Node's message, which leaves its last quote open.
+// The message, which leaves its last quote open.
 function unknown(raw: string, allowPositionals: boolean): ParseArgsError {
   const hint = allowPositionals ? ". To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- " + quoted(raw) : "";
   return new ParseArgsError("ERR_PARSE_ARGS_UNKNOWN_OPTION", "Unknown option '" + raw + "'" + hint);
 }
 
-// One option met in the arguments, checked as Node's strict mode checks it, then stored.
+// One option met in the arguments, checked as strict mode checks it, then stored.
 function option(p: Mut<ParsedArgs>, specs: Ref<ParseArgsSpec[]>, given: string, raw: string, value: string | null, inline: boolean, allowPositionals: boolean, allowNegative: boolean): void throws ParseArgsError {
   let name = given;
   let negated = false;
@@ -5424,7 +5424,7 @@ export function parseArgs<V>(given: string[] | null, specs: ParseArgsSpec[], all
       continue;
     }
     if (n > 2 && arg.startsWith("--")) {
-      // As Node's: an "=" past the third character marks a value, which starts after the first.
+      // An "=" past the third character marks a value, which starts after the first.
       if (arg.indexOf("=", 3) < 0) {
         const name = arg.slice(2);
         let value: string | null = null;
@@ -5446,11 +5446,11 @@ export function parseArgs<V>(given: string[] | null, specs: ParseArgsSpec[], all
   return { values, positionals: p.positionals };
 }
 `,
-  // A port of Node's path.posix for the functions Fish has, so each gives what Node gives.
+  // A port of Node's path.posix for the functions Fish has.
   path: String.raw`
 declare function fsh_rt_cwd(): Ptr<u8>;
 
-// A string's length and the UTF-16 unit at an index, as Node's code reads them, in i64.
+// A string's length and the UTF-16 unit at an index, in i64.
 function size(s: string): i64 {
   return s.length as i64;
 }
@@ -5761,7 +5761,7 @@ export function parse(path: string): ParsedPath {
 
 export type FormatInputPathObject = { root?: string; dir?: string; base?: string; ext?: string; name?: string };
 
-// Node's precedence: dir over root, base over name and ext, and an ext given without its dot gets one.
+// The precedence: dir over root, base over name and ext, and an ext given without its dot gets one.
 export function format(pathObject: FormatInputPathObject): string {
   const root = pathObject.root ?? "";
   const given = pathObject.dir ?? "";
@@ -5778,7 +5778,7 @@ export function format(pathObject: FormatInputPathObject): string {
   // Files read and written on the runtime's blocking pool. A call naming an encoding, as
   // readFile(path, "utf8"), is linked to readFileText, which gives a string.
   "fs/promises": String.raw`
-import { chmodSync } from "fs";
+import { chmodSync } from "std:fs";
 
 export async function readFile(path: string): Promise<u8[]> throws IoError {
   return await fileRead(path);
@@ -5801,7 +5801,7 @@ declare function fsh_rt_fd_begin(held: Ref<__FileDescriptor>): i64;
 declare function fsh_rt_fd_end(held: Ref<__FileDescriptor>): void;
 declare function fsh_rt_fd_take(held: Ref<__FileDescriptor>): i64;
 
-// Node's error for a call on a closed handle.
+// The error for a call on a closed handle.
 function closed(syscall: string): IoError {
   let e = new IoError("file closed");
   e.code = "EBADF";
@@ -5831,7 +5831,7 @@ export class FileHandle {
     return unsafe { fsh_rt_fd_of(this.#held) };
   }
 
-  // Node's error for a closed handle, before a call's arguments are looked at.
+  // The error for a closed handle, before a call's arguments are looked at.
   #open(syscall: string): void throws IoError {
     if (this.fd < 0) throw closed(syscall);
   }
@@ -5860,7 +5860,7 @@ export class FileHandle {
   }
 
   // write(buffer, offset?, length?, position?), or write(text, position?, encoding?) for a
-  // string's UTF-8, as Node reads its arguments by what it's given; a null position writes at the
+  // string's UTF-8, the arguments read by what is given; a null position writes at the
   // file's own. The bytes are taken, as the write runs on the blocking pool; one signature, since
   // async methods can't be overloaded yet.
   async write(data: string | u8[], second?: i64 | null, third?: i64 | "utf8" | "utf-8" | null, position?: i64 | null): Promise<{ bytesWritten: i64 }> throws IoError {
@@ -5932,7 +5932,7 @@ export class FileHandle {
     });
   }
 
-  // Closing a closed handle does nothing, as Node's does. With calls in flight, the last of them
+  // Closing a closed handle does nothing. With calls in flight, the last of them
   // closes the file as it finishes; later calls throw "file closed" at once.
   async close(): Promise<void> throws IoError {
     const fd = unsafe { fsh_rt_fd_take(this.#held) };
@@ -5940,7 +5940,7 @@ export class FileHandle {
   }
 }
 
-// Node's string flags, as "r" or "a+", or a number given to open as it is. The handle is made in
+// The string flags, as "r" or "a+", or a number given to open as it is. The handle is made in
 // the same job as the descriptor, so a caller that stops waiting still has it closed.
 export async function open(path: string, flags: string | i64 = "r", mode: i64 = 0o666): Promise<FileHandle> throws IoError {
   return await spawnBlocking(() => {
@@ -5955,7 +5955,7 @@ export async function access(path: string, mode: i64 = 0): Promise<void> throws 
   await spawnBlocking(() => pathAccess(path, mode));
 }
 
-// A time as utimes takes it, as Node's toUnixTimestamp reads one: a Date's seconds, and a
+// A time as utimes takes it: a Date's seconds, and a
 // negative finite number now; NaN and the infinities pass on to be refused.
 function seconds(time: f64 | Date): f64 {
   if (time instanceof Date) return (time.getTime() as f64) / 1000;
@@ -5999,8 +5999,8 @@ declare function fsh_rt_watch_hold(handle: i64): void;
 declare function fsh_rt_watch_wait(handle: i64, out: MutPtr<u8>, size: i64): i64;
 declare function fsh_rt_watch_close(handle: i64): void;
 
-// Changes under a path as they happen, as Node's watch gives them. The watcher starts here, so a
-// missing path throws at the call, as Bun's does. Where Node's iterator throws an AbortError once
+// Changes under a path as they happen. The watcher starts here, so a
+// missing path throws at the call. Where an iterator throws an AbortError once
 // the signal aborts, this one ends: a generator that throws has a type no parameter can name, so
 // it couldn't be handed to a function that races its next() against a timer.
 export function watch(path: string, options: { recursive?: boolean; signal?: AbortSignal } = {}): AsyncGenerator<FileChangeInfo> throws IoError {
@@ -6153,7 +6153,7 @@ export function accessSync(path: string, mode: i64 = 0): void throws IoError {
   pathAccess(path, mode);
 }
 
-// A time as utimes takes it, as Node's toUnixTimestamp reads one: a Date's seconds, and a
+// A time as utimes takes it: a Date's seconds, and a
 // negative finite number now; NaN and the infinities pass on to be refused.
 function seconds(time: f64 | Date): f64 {
   if (time instanceof Date) return (time.getTime() as f64) / 1000;
@@ -6169,7 +6169,7 @@ export function lutimesSync(path: string, atime: f64 | Date, mtime: f64 | Date):
   pathUtimes(path, seconds(atime), seconds(mtime), false);
 }
 
-// A string as Node's inspect quotes it in an argument error, cut at 128 characters: in single
+// A string as an argument error quotes it, cut at 128 characters: in single
 // quotes, unless it holds one and another quote kind is free; with all taken, its ' escaped.
 function quoted(text: string): string {
   const backtick = !text.includes("${"`"}") && !text.includes("$" + "{");
@@ -6178,7 +6178,7 @@ function quoted(text: string): string {
   return shown.length > 128 ? shown.slice(0, 128) + "..." : shown;
 }
 
-// A number as Node prints it in a range error: grouped by threes with _ above 2 ** 32.
+// A number as a range error prints it: grouped by threes with _ above 2 ** 32.
 function grouped(n: f64): string {
   const text = String(n);
   if (n <= 4294967296 && n >= -4294967296) return text;
@@ -6189,7 +6189,7 @@ function grouped(n: f64): string {
   return text.slice(0, i) + rest;
 }
 
-// The mode as Node's parseFileMode reads it: a number as given, a string as octal digits, then
+// The mode as chmod reads it: a number as given, a string as octal digits, then
 // checked as a 32-bit unsigned integer.
 function fileMode(mode: i64 | string): i64 throws IoError {
   let n: f64 = 0;
@@ -6236,8 +6236,8 @@ export function readlinkSync(path: string): string throws IoError {
 declare function fsh_rt_zlib_run(inflating: i64, bits: i64, level: i64, data: Ptr<u8>, length: i64, limit: i64, result: MutPtr<i64>): Ptr<u8>;
 declare function fsh_rt_zlib_take(run: Ptr<u8>, out: MutPtr<u8>): void;
 
-// What a compression or decompression throws, as Node's errors carry zlib's: the message, zlib's
-// error number and its name. A level out of range is Node's RangeError, with no errno.
+// What a compression or decompression throws, carrying zlib's: the message, zlib's
+// error number and its name. A level out of range is a RangeError, with no errno.
 export class ZlibError extends Error {
   errno: i64 | null;
   code: string;
@@ -6248,7 +6248,7 @@ export class ZlibError extends Error {
   }
 }
 
-// maxOutputLength caps what a call may give, as Node's does, refusing it past the cap.
+// maxOutputLength caps what a call may give, refusing it past the cap.
 export type ZlibOptions = { level?: i64; maxOutputLength?: i64 };
 
 export const constants = { Z_NO_COMPRESSION: 0, Z_BEST_SPEED: 1, Z_BEST_COMPRESSION: 9, Z_DEFAULT_COMPRESSION: -1 };
@@ -6265,7 +6265,7 @@ function codeOf(errno: i64): string {
   return "Z_ERRNO";
 }
 
-// A number as Node's range errors show it, grouped by underscores beyond 2 ** 32.
+// A number as range errors show it, grouped by underscores beyond 2 ** 32.
 function shown(n: i64): string {
   const text = String(n);
   if (n <= 4294967296 && n >= -4294967296) return text;
@@ -6335,7 +6335,7 @@ export function unzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] 
   return run(true, 47, data, options);
 }
 
-// Node's async calls take a callback; these give a promise instead, as promisify would.
+// These give a promise where a callback API would take a callback, as promisify would.
 // The closure borrows the input rather than moving it into the call: a blocking task that moves
 // an array it captured frees it twice.
 async function runAsync(inflating: boolean, bits: i64, data: string | u8[], options: ZlibOptions): Promise<u8[]> throws ZlibError {
@@ -6425,8 +6425,8 @@ export class ExecError extends Error {
   }
 }
 
-// What the exec calls give: the child's stdout, after its stderr has gone on to this process's,
-// as Node's do; or the error, Node's message naming the command as it was given.
+// What the exec calls give: the child's stdout, after its stderr has gone on to this process's;
+// or the error, its message naming the command as it was given.
 function executed(r: SpawnSyncReturns<u8[]>, command: string): u8[] throws IoError | ExecError {
   if (r.stderr.length > 0) unsafe { write(2, ptrOf(r.stderr[0]), r.stderr.length as usize) };
   const failed = r.error;
@@ -7385,10 +7385,10 @@ export class Statement {
   }
 }
 `,
-  // Tar archives, read an entry at a time and written from files, imported as fish:tar.
-  "fish:tar": String.raw`
-import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "fs";
-import { dirname, isAbsolute, join, normalize, relative, resolve } from "path";
+  // Tar archives, read an entry at a time and written from files, imported as std:tar.
+  tar: String.raw`
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
+import { dirname, isAbsolute, join, normalize, relative, resolve } from "std:path";
 import { gunzipSync, gzipSync, ZlibError } from "zlib";
 import { open } from "fs/promises";
 
@@ -7822,10 +7822,10 @@ export async function create(file: string, paths: string[], options: TarPackOpti
   await out.close();
 }
 `,
-  // Zip archives, read through their central directory and written deflated, as fish:zip.
-  "fish:zip": String.raw`
-import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, utimesSync, chmodSync, writeFileSync } from "fs";
-import { dirname, isAbsolute, join, relative, resolve } from "path";
+  // Zip archives, read through their central directory and written deflated, as std:zip.
+  zip: String.raw`
+import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "std:path";
 import { deflateRawSync, inflateRawSync, ZlibError } from "zlib";
 import { open } from "fs/promises";
 
@@ -7839,7 +7839,7 @@ export class ZipError extends Error {
 }
 
 export type ZipEntryType = "file" | "directory" | "symlink";
-// As fish:tar's: an entry's path, what it is, its unpacked size, its mode's permission bits, its
+// As std:tar's: an entry's path, what it is, its unpacked size, its mode's permission bits, its
 // time in seconds since the epoch, and a symlink's target.
 export type ZipHeader = { path: string; type: ZipEntryType; size: i64; mode: i64; mtime: i64; target: string };
 export type ZipEntry = { path: string; type: ZipEntryType; size: i64; mode: i64; mtime: i64; target: string; data: u8[] };
@@ -8050,7 +8050,7 @@ function throughLinks(root: string, to: string, path: string): void throws IoErr
   }
 }
 
-// Writes the archive's entries under dir and gives the paths written, refusing as fish:tar's
+// Writes the archive's entries under dir and gives the paths written, refusing as std:tar's
 // extract does anything that would land outside dir.
 export async function extract(source: ZipSource, dir: string, limits: ZipLimits = {}): Promise<string[]> throws IoError | ZipError {
   const root = resolve(dir);
@@ -8240,9 +8240,9 @@ export async function create(file: string, paths: string[], options: ZipPackOpti
   await out.close();
 }
 `,
-  // Spans in a program's own code, imported as fish:trace. Their state is std's own, which serve
+  // Spans in a program's own code, imported as std:trace. Their state is std's own, which serve
   // shares, so what is here only wraps it.
-  "fish:trace": String.raw`
+  trace: String.raw`
 // endpoint is the collector's base URL, as OTEL_EXPORTER_OTLP_ENDPOINT is, and "" turns tracing
 // off whatever the environment says; serviceName is the service the spans are from; batchDelay
 // is the milliseconds finished spans wait to be sent together. What isn't given is read from
@@ -8313,8 +8313,8 @@ export async function flushTraces(): Promise<void> {
   await __traceSend();
 }
 `,
-  // Live snapshot of active async tasks, imported as fish:inspect.
-  "fish:inspect": String.raw`
+  // Live snapshot of active async tasks, imported as std:inspect.
+  inspect: String.raw`
 declare function fsh_rt_tasks_json(): Ptr<u8>;
 declare function fsh_rt_tasks_table(): Ptr<u8>;
 declare function fsh_rt_tasks_free(p: Ptr<u8>): void;
@@ -8368,8 +8368,8 @@ export function tasks(): TaskInfo[] {
   }
 }
 `,
-  // Deterministic simulation controls, imported as fish:sim. Active when FISH_SIM_SEED is set.
-  "fish:sim": String.raw`
+  // Deterministic simulation controls, imported as std:sim. Active when FISH_SIM_SEED is set.
+  sim: String.raw`
 declare function fsh_rt_sim_enabled(): i32;
 declare function fsh_rt_sim_seed(): u64;
 declare function fsh_rt_sim_now(): i64;
@@ -8498,7 +8498,7 @@ export function cwd(): string {
   return unsafe { fromCString(fsh_rt_cwd()) };
 }
 
-// The working directory of every task and thread at once, as it is one per process. Node's
+// The working directory of every task and thread at once, as it is one per process. The
 // error names the directory left and the one asked for, with path the one left.
 export function chdir(directory: string): void throws IoError {
   const from = cwd();
@@ -8624,7 +8624,7 @@ declare function fsh_rt_stream_write(stream: i32, bytes: Ptr<u8>, length: i64): 
 declare function isatty(fd: i32): i32;
 
 // process.stdout and process.stderr, of which Fish has isTTY and write: the chunk as it is, with no
-// newline added, giving true as Node's does.
+// newline added, giving true.
 export class WriteStream {
   fd: i32;
   constructor(fd: i32) {
@@ -8668,7 +8668,7 @@ export function stderr(): WriteStream {
   return new WriteStream(2);
 }
 
-// Node's process.kill: sends the signal, SIGTERM unless named, refusing in Bun's words.
+// Node's process.kill: sends the signal, SIGTERM unless named; a failure is "kill() failed: <code>: <reason>".
 export function kill(pid: i64, signal: string | i64 = "SIGTERM"): boolean throws IoError {
   const failed = unsafe { fsh_rt_kill(pid, signalNumberOf(signal)) };
   if (failed === 0) return true;
@@ -8691,13 +8691,13 @@ export function exit(code: i64 = 0): never {
   while (true) {}
 }
 `,
-  // node:url's file URL functions, as Node gives them on POSIX. URL and URLSearchParams are globals.
+  // node:url's file URL functions, for POSIX paths. URL and URLSearchParams are globals.
   url: String.raw`
-import { platform } from "os";
-import { resolve } from "path";
+import { platform } from "std:os";
+import { resolve } from "std:path";
 
 // The path made absolute and percent-encoded where a URL's path can't hold it as written, with
-// '%', '\' and tabs and newlines encoded too, as Node does. A trailing slash stays.
+// '%', '\' and tabs and newlines encoded too. A trailing slash stays.
 export function pathToFileURL(path: string): URL {
   let resolved = resolve(path);
   if (path.endsWith("/") && !resolved.endsWith("/")) resolved = resolved + "/";
@@ -8719,7 +8719,7 @@ export function pathToFileURL(path: string): URL {
 }
 
 // The path a file: URL names, decoded. A host, an encoded '/' or a scheme other than file: is
-// refused, as Node refuses them.
+// refused.
 export function fileURLToPath(url: string | URL): string throws TypeError {
   const u = typeof url === "string" ? new URL(url) : url;
   if (u.protocol !== "file:") throw new TypeError("The URL must be of scheme file");
@@ -8762,8 +8762,8 @@ function hexDigit(b: u8): i64 {
   // here. Bun.build isn't here. spawnSync's stdout and stderr are u8[],
   // empty when not piped, where Bun gives a Buffer, or undefined.
   Bun: String.raw`
-import { statSync } from "fs";
-import { dirname, resolve } from "path";
+import { statSync } from "std:fs";
+import { dirname, resolve } from "std:path";
 import { bytes as stdinBytes } from "stdin";
 
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
@@ -9114,14 +9114,28 @@ export function evaluate(module: string): JsValue {
 }
 `;
 
-// The std module a specifier names, if any: `node:os` and `os` both name `os`.
+// Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim"]);
+
+// The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
+// for code ported from Node, as `bun` names Bun's module.
 export function stdModule(specifier: string): string | undefined {
-  // Fish's own modules are reached only by their fish: names, so npm keeps the bare ones.
-  if (specifier.startsWith("fish:")) return STD_MODULES[specifier] !== undefined ? specifier : undefined;
+  if (specifier.startsWith("std:")) {
+    const own = specifier.slice("std:".length as i64);
+    return STD_MODULES[own] !== undefined && own !== "Bun" ? own : undefined;
+  }
   const bare = specifier.startsWith("node:") ? specifier.slice("node:".length as i64) : specifier;
   // "path/posix" is "path", which is POSIX's here.
   const name = bare === "path/posix" ? "path" : bare === "bun" ? "Bun" : bare;
-  return STD_MODULES[name] !== undefined && !name.startsWith("fish:") ? name : undefined;
+  return STD_MODULES[name] !== undefined && !STD_ONLY.has(name) ? name : undefined;
+}
+
+// The names `std:` reaches, as an error lists them.
+export function stdModuleNames(): string[] {
+  let names: string[] = [];
+  for (const name of Object.keys(STD_MODULES)) if (name !== "Bun") names.push(name);
+  names.sort();
+  return names;
 }
 
 // What awaiting a JS promise that rejects throws: the JS error's message, and what JS threw. It
@@ -9665,7 +9679,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const own = new Set(HIDDEN_NAMES.filter((n) => declared.has(n)));
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
-  // The fish:trace module's code names __traceOn, and what it wraps is sent through Http1.
+  // The std:trace module's code names __traceOn, and what it wraps is sent through Http1.
   const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn"]);
   const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
   const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentionsName(written, "Request"));

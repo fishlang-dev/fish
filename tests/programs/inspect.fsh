@@ -2,7 +2,7 @@
 // expect: 0
 // expect: []
 // expect: no live tasks
-import { tasks, tasksJson, formatTasks } from "fish:inspect";
+import { tasks, tasksJson, formatTasks } from "std:inspect";
 
 function main(): void {
   console.log(tasks().length);
@@ -17,7 +17,7 @@ function main(): void {
 // expect: joiner ok
 // expect: blocker ok
 // expect: table ok
-import { tasks, formatTasks, type TaskInfo } from "fish:inspect";
+import { tasks, formatTasks, type TaskInfo } from "std:inspect";
 
 async function sleeper(ready: Channel<i64>): Promise<void> {
   await ready.send(1);
@@ -135,7 +135,7 @@ async function main(): Promise<void> {
 // case: inspect_release_keeps_names_and_spawn_sites
 // mode: release
 // expect: ok
-import { tasks, type TaskInfo } from "fish:inspect";
+import { tasks, type TaskInfo } from "std:inspect";
 
 async function worker(ready: Channel<i64>, gate: Channel<i64>): Promise<void> {
   await ready.send(1);
@@ -171,7 +171,7 @@ async function main(): Promise<void> {
 // expect: group ok
 // expect: sem ok
 // expect: tcp ok
-import { tasks, type TaskInfo } from "fish:inspect";
+import { tasks, type TaskInfo } from "std:inspect";
 
 type SemBox = { sem: Semaphore };
 
@@ -257,7 +257,7 @@ async function main(): Promise<void> throws IoError {
 // expect: 403 ok
 // expect: 431 ok
 // expect: child exit 0
-import { type TaskInfo } from "fish:inspect";
+import { type TaskInfo } from "std:inspect";
 import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

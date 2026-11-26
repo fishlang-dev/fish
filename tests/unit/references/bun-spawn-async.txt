@@ -1,0 +1,19 @@
+script de861af08376ec0490c4a93312f4069e9c05937f6003c51365b8939b73c3c16a
+status 0
+stdout 171
+143 null SIGTERM true true
+3 3 null out
+ err
+ 3
+fed in
+137 SIGKILL true
+0 300000
+before the child
+inherited
+0
+/
+
+ENOENT: no such file or directory, posix_spawn '/no/such'
+
+stderr 0
+

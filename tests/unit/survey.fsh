@@ -731,32 +731,32 @@ test("pg and postgres are replaced by std's postgres module", () => {
   done(dir);
 });
 
-test("better-sqlite3 and sqlite3 are replaced by std's sqlite module", () => {
+test("better-sqlite3 and sqlite3 are replaced by std:sqlite", () => {
   const dir = project([["package.json", '{"dependencies":{"better-sqlite3":"11","sqlite3":"5"}}'], ["a.ts", "const x = 1;\n"]]);
   const d = depsOf(dir);
   same(countsOf(d), "std 2, planned 0, native 0, pure 0, unknown 0", "the counts");
-  list(equivalents(d), ["the sqlite module's Database false", "the sqlite module's Database false"], "the equivalents");
+  list(equivalents(d), ["std:sqlite's Database false", "std:sqlite's Database false"], "the equivalents");
   done(dir);
 });
 
-test("the OpenTelemetry packages are replaced by std's fish:trace module", () => {
+test("the OpenTelemetry packages are replaced by std's std:trace module", () => {
   const dir = project([["package.json", '{"dependencies":{"@opentelemetry/api":"1","@opentelemetry/sdk-node":"0.57","@opentelemetry/exporter-trace-otlp-http":"0.57"}}'], ["a.ts", "const x = 1;\n"]]);
   const d = depsOf(dir);
   same(countsOf(d), "std 3, planned 0, native 0, pure 0, unknown 0", "the counts");
-  const tracing = "the fish:trace module false";
+  const tracing = "the std:trace module false";
   list(equivalents(d), [tracing, tracing, tracing], "the equivalents");
   done(dir);
 });
 
 // Node's own sqlite is synchronous and names its classes otherwise, so an import of it is found
 // as a member std lacks, and the report says where std's is.
-test("node:sqlite is answered by std's sqlite module, bun:sqlite still waits", () => {
+test("node:sqlite is answered by std:sqlite, bun:sqlite still waits", () => {
   const dir = project([
     ["a.ts", 'import { DatabaseSync } from "node:sqlite";\n'],
     ["b.ts", 'import { Database } from "bun:sqlite";\n'],
   ]);
   same(features(dir), `[["Node built-ins"],["Bun's own modules"]]`, "the features");
-  list(builtinsOf(survey(dir)), ["sqlite 1 the sqlite module's Database, each call awaited false"], "the built-ins");
+  list(builtinsOf(survey(dir)), ["sqlite 1 std:sqlite's Database, each call awaited false"], "the built-ins");
   done(dir);
 });
 
@@ -768,7 +768,7 @@ test("ws and the frameworks' WebSocket helpers are replaced by Router.ws", () =>
   done(dir);
 });
 
-test("node:readline waits on nothing, as readLine and the stdin module replace it", () => {
+test("node:readline waits on nothing, as readLine and std:stdin replace it", () => {
   const dir = project([["a.ts", 'import { createInterface } from "node:readline";\n']]);
   same(features(dir), "[[]]", "the features");
   done(dir);
@@ -824,7 +824,7 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
     ["b.ts", 'import { URL } from "node:url";\nimport qs from "querystring";\n'],
   ]);
   same(features(url), '[[],["Node built-ins","node:querystring"]]', "url");
-  list(builtinsOf(survey(url)), ["querystring 1 node:querystring true", "url 1 url, for fileURLToPath and pathToFileURL false"], "the built-ins");
+  list(builtinsOf(survey(url)), ["querystring 1 node:querystring true", "url 1 std:url, for fileURLToPath and pathToFileURL false"], "the built-ins");
   done(url);
 });
 
@@ -834,7 +834,7 @@ test("child_process's sync calls are std's, and spawn still waits", () => {
     ["b.ts", 'import { spawn } from "child_process";\n'],
   ]);
   same(features(dir), '[[],["Node built-ins"]]', "the features");
-  list(builtinsOf(survey(dir)), ["child_process 1 child_process, for spawnSync, execFileSync and execSync false"], "the built-ins");
+  list(builtinsOf(survey(dir)), ["child_process 1 std:child_process, for spawnSync, execFileSync and execSync false"], "the built-ins");
   done(dir);
 });
 
@@ -974,7 +974,7 @@ test("node:assert ports for its default export and ok, and its other names wait 
   ]);
   same(features(dir), '[[],[],["Node built-ins"],["Node built-ins"]]', "the features");
   const all = survey(dir).builtins;
-  same(all !== undefined ? all.map((x) => `${x.module} ${x.equivalent !== undefined ? x.equivalent.name : "undefined"}`).join(", ") : "none", "assert assert, for the default export and ok", "the built-ins");
+  same(all !== undefined ? all.map((x) => `${x.module} ${x.equivalent !== undefined ? x.equivalent.name : "undefined"}`).join(", ") : "none", "assert std:assert, for the default export and ok", "the built-ins");
   done(dir);
 });
 

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CompileError } from "../../src/diag.fsh";
 import { analyze } from "../../src/main.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { didYouMean, suggestion } from "../../src/suggest.fsh";
 import { same } from "./support.fsh";
 

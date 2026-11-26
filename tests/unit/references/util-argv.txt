@@ -1,0 +1,9 @@
+script 4071728a3d3ec12994d07f8745990ee8e5c5b561ee01a34309277bae978ee4f0
+status 0
+stdout 74
+debug a true file.txt
+0
+ERR_PARSE_ARGS_UNKNOWN_OPTION Unknown option '-l'
+
+stderr 0
+

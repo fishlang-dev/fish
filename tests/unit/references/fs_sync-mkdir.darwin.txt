@@ -1,0 +1,17 @@
+script 216c9221317a7ef3c2149c28d180763d20a1ca73edb2c37024953e08054e2d83
+status 0
+stdout 466
+true x true
+p r true
+<dir>/abs
+448 488
+EEXIST: file already exists, mkdir 'a' EEXIST mkdir true
+EEXIST: file already exists, mkdir 'f' EEXIST mkdir true
+ENOENT: no such file or directory, mkdir 'x/missing/y' ENOENT mkdir true
+EEXIST: file already exists, mkdir 'f' EEXIST mkdir true
+ENOTDIR: not a directory, mkdir 'f/q/r' ENOTDIR mkdir true
+ENOENT: no such file or directory, mkdir '' ENOENT mkdir true
+ENOENT: no such file or directory, mkdir '' ENOENT mkdir true
+
+stderr 0
+

@@ -624,8 +624,7 @@ export type GeneratorType = Brand<usize, "generator">;
 export const INTERIORS = new Set(["Atomic", "Lock", "RwLock", "Cell"]);
 
 // A short name for what `description` describes, the same in every program that has it: six
-// base-36 digits of its 64-bit FNV-1a hash over UTF-8. The hash is written here rather than taken
-// from Bun so that a compiler built by Fish names instances exactly as this one does.
+// base-36 digits of its 64-bit FNV-1a hash over UTF-8, so every build names an instance alike.
 export function digest(description: string): string {
   return fullDigest(description).slice(-6);
 }

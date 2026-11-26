@@ -1,7 +1,7 @@
 // Console.error and console.warn against node's, stdout and stderr
 // each as node writes them, and the clocks.
 import { spawnSync } from "node:child_process";
-import { built, removed, same, scratch, text } from "./support.fsh";
+import { built, ranFor, reference, removed, same, scratch, text } from "./support.fsh";
 
 test("console.error and console.warn write to stderr as node does", () => {
   const dir = scratch("fish-console-");
@@ -11,9 +11,9 @@ test("console.error and console.warn write to stderr as node does", () => {
   console.log("out 2", [3]);`;
   const out = built(dir, "main", `function main() {\n  ${source}\n}\n`);
   const fish = spawnSync("env", ["FISH_LEAKS=1", out]);
-  const node = spawnSync("node", ["-e", source]);
-  same(text(fish.stdout), text(node.stdout), "stdout");
-  same(text(fish.stderr), text(node.stderr), "stderr");
+  const node = reference("console-error-and-warn", source, () => ranFor("node", ["-e", source]));
+  same(text(fish.stdout), node.stdout, "stdout");
+  same(text(fish.stderr), node.stderr, "stderr");
   removed(dir);
 }, { timeout: 30_000 });
 
@@ -26,7 +26,7 @@ test("stdout and stderr keep their order in one pipe, as node keeps them", () =>
   console.log("out 3");`;
   const out = built(dir, "order", `function main() {\n  ${source}\n}\n`);
   const fish = text(spawnSync("sh", ["-c", `"${out}" 2>&1 | cat`]).stdout);
-  const node = text(spawnSync("sh", ["-c", `node -e '${source}' 2>&1 | cat`]).stdout);
+  const node = reference("console-one-pipe", source, () => ranFor("sh", ["-c", `node -e '${source}' 2>&1 | cat`])).stdout;
   same(fish, node, "the output");
   removed(dir);
 }, { timeout: 30_000 });

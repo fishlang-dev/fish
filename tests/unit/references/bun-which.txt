@@ -1,0 +1,8 @@
+script 76d8d46e54b2238e123441d1b1ee3332612bbd90c35159ab3838385fe7282819
+status 0
+stdout 68
+true null /bin/sh null null
+<dir>/bin/tool <dir>/bin/tool null null
+
+stderr 0
+

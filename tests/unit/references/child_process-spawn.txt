@@ -1,0 +1,17 @@
+script 12f242b02119dcde9f0c3ff10cbfda7d68efb6b80f6d43faa324f014de52fe15
+status 0
+stdout 151
+0 null hi there
+ 0 true
+3 err
+
+null SIGTERM
+null spawnSync no-such-cmd-x ENOENT ENOENT spawnSync no-such-cmd-x no-such-cmd-x
+fed in
+/
+
+1000000 50000
+0
+
+stderr 0
+

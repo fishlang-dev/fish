@@ -1,0 +1,67 @@
+script a3c75eac908b205f691deda3ba7b2f39a38b9b44c9b391af1b8d662b0d18cbd5
+status 0
+stdout 4395
+4 hell 4 3 ho w
+4 0 0 0 0
+2 3 2 1 0 2
+XYllo worldZrldab
+17 true false true true
+XYl
+0 384
+The value of "offset" is out of range. It must be >= 0 && <= 9007199254740991. Received -1 ERR_OUT_OF_RANGE
+The value of "length" is out of range. It must be >= 0. Received -1 ERR_OUT_OF_RANGE
+The value of "length" is out of range. It must be <= 1. Received 2 ERR_OUT_OF_RANGE
+The value of "position" is out of range. It must be >= -1 && <= 9007199254740991. Received -2 ERR_OUT_OF_RANGE
+The value of "position" is out of range. It must be >= -1 && <= 9007199254740991. Received 9_007_199_254_740_992 ERR_OUT_OF_RANGE
+The value of "length" is out of range. It must be <= 4. Received 5 ERR_OUT_OF_RANGE
+The argument 'buffer' is empty and cannot be written. Received Uint8Array(0) [] ERR_INVALID_ARG_VALUE
+0
+The value of "offset" is out of range. It must be >= 0 && <= 9007199254740991. Received -1 ERR_OUT_OF_RANGE
+The value of "offset" is out of range. It must be <= 4. Received 5 ERR_OUT_OF_RANGE
+The value of "length" is out of range. It must be >= 0. Received -1 ERR_OUT_OF_RANGE
+The value of "length" is out of range. It must be <= 4. Received 5 ERR_OUT_OF_RANGE
+The value of "length" is out of range. It must be <= 3. Received 4 ERR_OUT_OF_RANGE
+EBADF: bad file descriptor, write EBADF write none
+EBADF: bad file descriptor, read EBADF read none
+EBADF: bad file descriptor, write EBADF write
+EBADF: bad file descriptor, fstat EBADF fstat
+EBADF: bad file descriptor, ftruncate EBADF ftruncate
+EBADF: bad file descriptor, fchmod EBADF fchmod
+EBADF: bad file descriptor, fsync EBADF fsync
+EBADF: bad file descriptor, close EBADF close
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received -1 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received -1 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received -1 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received 2147483648 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received 2147483648 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received 2147483648 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received 4294967297 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received 4_294_967_297 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received 4_294_967_297 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received -4294967297 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received -4_294_967_297 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received -4_294_967_297 ERR_OUT_OF_RANGE
+EBADF: bad file descriptor, read EBADF
+0
+The value of "length" is out of range. It must be >= 0. Received -1_099_511_627_776 ERR_OUT_OF_RANGE
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received 4_294_967_297 ERR_OUT_OF_RANGE
+The value of "fd" is out of range. It must be >= 0 && <= 2147483647. Received 4294967297 ERR_OUT_OF_RANGE
+The value of "len" is out of range. It must be >= -9007199254740991 && <= 9007199254740991. Received 9_007_199_254_740_992 ERR_OUT_OF_RANGE
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received -1 ERR_OUT_OF_RANGE
+EISDIR: illegal operation on a directory, read EISDIR read
+416
+EBADF: bad file descriptor, read EBADF read
+onetwo 0
+ENOENT: no such file or directory, open 'missing' ENOENT open missing
+ENOENT: no such file or directory, open 'missing' ENOENT open missing
+EEXIST: file already exists, open 'g' EEXIST open g
+EEXIST: file already exists, open 'g' EEXIST open g
+The argument 'flags' is invalid. Received 'bogus' ERR_INVALID_ARG_VALUE - none
+EISDIR: illegal operation on a directory, open '.' EISDIR open .
+ENOENT: no such file or directory, open '' ENOENT open 
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received -1 ERR_OUT_OF_RANGE - none
+The value of "mode" is out of range. It must be >= 0 && <= 4294967295. Received 4294967296 ERR_OUT_OF_RANGE - none
+The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received 'a\x00b' ERR_INVALID_ARG_VALUE - none
+
+stderr 0
+

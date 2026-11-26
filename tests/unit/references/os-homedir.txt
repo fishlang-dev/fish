@@ -1,0 +1,7 @@
+script 21eedaac8d2b0ba818418be462ddc432eebdde744f173124cb1a3a50de6b4c87
+status 0
+stdout 16
+/somewhere/else
+
+stderr 0
+

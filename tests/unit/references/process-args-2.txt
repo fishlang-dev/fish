@@ -1,0 +1,11 @@
+script fa8bdef2fe68c1c07c820d7e4d464514bceb72906de13c1a3ee9f83d0e82c691
+status 0
+stdout 57
+[ '1', '2', '3' ]
+unset y y false
+
+--- stderr
+
+--- exit 7
+stderr 0
+

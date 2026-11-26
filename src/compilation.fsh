@@ -47,9 +47,9 @@ export type Counts = { enums: usize; expansions: usize; constants: usize; checks
 
 // What lasts as long as whoever compiles: a CLI run, a language server, a test. Its options, and
 // the caches that spare later compilations the work earlier ones did. The caches only building
-// objects reads are on `mathlib.ts`'s `BuildSession`, out of the checker's reach.
+// objects reads are on `mathlib.fsh`'s `BuildSession`, out of the checker's reach.
 // `locking`: whether the lockfile may be rewritten, and which dependencies `fishc update` moves.
-// `engineHook`: whether programs may import `fish:engine`, which only the compiler's own tests do.
+// `engineHook`: whether programs may import `std:engine`, which only the compiler's own tests do.
 // `std`: std's statements when `cached`, each read a fresh copy, without which each compilation
 // parses std's source; and how many times std was parsed rather than loaded.
 // `timings`: each build stage's time, kept only when `--timings` asks.
@@ -171,6 +171,9 @@ export type Tables = {
   // type it takes; and the defaults it adds, which an Option's absence takes and anything else
   // never needs.
   destructuredParts: NodeMap<Stmt, Expr>;
+  // Each read of such a fresh variable, with the end of the whole assignment: every part is read
+  // before any target is written, so what a part borrows stays in use until the last write.
+  heldUntil: NodeMap<Expr, usize>;
   // What checking put into a statement list beside a statement, by the statement: the parts a
   // destructuring declaration became after it, and the block a `for` head's declarations moved
   // into around it. A generic class's instances check copies of one body, with its nodes' ids, so
@@ -225,7 +228,7 @@ export type Tables = {
   printCalls: NodeSet<Expr>;
   // `handle.join()` calls, which take the handle over and give it back awaitable as a TaskPanic.
   joinCalls: NodeSet<Expr>;
-  // node:util's `format` calls.
+  // std:util's `format` calls.
   formatCalls: NodeSet<Expr>;
   // The timer calls written in a program, rewritten into the std's own, and the async arrows
   // running their callbacks.
@@ -239,7 +242,7 @@ export type Tables = {
   groupCalls: NodeSet<Expr>;
   // The operands of an `await`, while they are checked.
   awaitedNow: NodeSet<Expr>;
-  // node:util's `inspect` calls.
+  // std:util's `inspect` calls.
   inspectCalls: NodeSet<Expr>;
   // The `isDeepStrictEqual` calls checked as the `===` they were turned into.
   deepEqualities: NodeSet<Expr>;
@@ -423,6 +426,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     liftedFunctions: new NodeMap<Stmt | Expr, { name: string; symbol: string }>(),
     getterNames: new Set<string>(),
     destructuredParts: new NodeMap<Stmt, Expr>(),
+    heldUntil: new NodeMap<Expr, usize>(),
     insertedAfter: new NodeMap<Stmt, Stmt[]>(),
     wrappedIn: new NodeMap<Stmt, Stmt>(),
     unusedDefaults: new NodeSet<Expr>(),

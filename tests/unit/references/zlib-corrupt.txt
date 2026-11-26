@@ -1,0 +1,70 @@
+script 1c41b044af6ca9216aa693d8ff22311b9b9f993bb9c5c13c430711e1daac665d
+status 0
+stdout 2769
+gunzip incorrect header check -3 Z_DATA_ERROR
+inflate incorrect header check -3 Z_DATA_ERROR
+inflateRaw invalid stored block lengths -3 Z_DATA_ERROR
+unzip incorrect header check -3 Z_DATA_ERROR
+gunzip unexpected end of file -5 Z_BUF_ERROR
+inflate unexpected end of file -5 Z_BUF_ERROR
+inflateRaw unexpected end of file -5 Z_BUF_ERROR
+unzip unexpected end of file -5 Z_BUF_ERROR
+gunzip unexpected end of file -5 Z_BUF_ERROR
+inflate incorrect header check -3 Z_DATA_ERROR
+inflateRaw invalid block type -3 Z_DATA_ERROR
+unzip unexpected end of file -5 Z_BUF_ERROR
+gunzip unexpected end of file -5 Z_BUF_ERROR
+inflate incorrect header check -3 Z_DATA_ERROR
+inflateRaw invalid block type -3 Z_DATA_ERROR
+unzip unexpected end of file -5 Z_BUF_ERROR
+gunzip unexpected end of file -5 Z_BUF_ERROR
+inflate incorrect header check -3 Z_DATA_ERROR
+inflateRaw invalid block type -3 Z_DATA_ERROR
+unzip unexpected end of file -5 Z_BUF_ERROR
+gunzip gives 97
+inflate incorrect header check -3 Z_DATA_ERROR
+inflateRaw invalid block type -3 Z_DATA_ERROR
+unzip gives 97
+gunzip gives 97,98
+inflate incorrect header check -3 Z_DATA_ERROR
+inflateRaw invalid block type -3 Z_DATA_ERROR
+unzip gives 97,98
+gunzip incorrect header check -3 Z_DATA_ERROR
+inflate incorrect header check -3 Z_DATA_ERROR
+inflateRaw invalid block type -3 Z_DATA_ERROR
+unzip incorrect header check -3 Z_DATA_ERROR
+gunzip incorrect data check -3 Z_DATA_ERROR
+inflate incorrect header check -3 Z_DATA_ERROR
+inflateRaw invalid block type -3 Z_DATA_ERROR
+unzip incorrect data check -3 Z_DATA_ERROR
+gunzip incorrect length check -3 Z_DATA_ERROR
+inflate incorrect header check -3 Z_DATA_ERROR
+inflateRaw invalid block type -3 Z_DATA_ERROR
+unzip incorrect length check -3 Z_DATA_ERROR
+gunzip incorrect header check -3 Z_DATA_ERROR
+inflate incorrect data check -3 Z_DATA_ERROR
+inflateRaw invalid stored block lengths -3 Z_DATA_ERROR
+unzip incorrect data check -3 Z_DATA_ERROR
+gunzip incorrect header check -3 Z_DATA_ERROR
+inflate unexpected end of file -5 Z_BUF_ERROR
+inflateRaw invalid stored block lengths -3 Z_DATA_ERROR
+unzip unexpected end of file -5 Z_BUF_ERROR
+gunzip incorrect header check -3 Z_DATA_ERROR
+inflate gives 97,98,99
+inflateRaw invalid stored block lengths -3 Z_DATA_ERROR
+unzip gives 97,98,99
+gunzip incorrect header check -3 Z_DATA_ERROR
+inflate gives 97,98,99
+inflateRaw invalid stored block lengths -3 Z_DATA_ERROR
+unzip gives 97,98,99
+gunzip incorrect header check -3 Z_DATA_ERROR
+inflate incorrect header check -3 Z_DATA_ERROR
+inflateRaw unexpected end of file -5 Z_BUF_ERROR
+unzip incorrect header check -3 Z_DATA_ERROR
+gunzip incorrect header check -3 Z_DATA_ERROR
+inflate Missing dictionary 2 Z_NEED_DICT
+inflateRaw invalid stored block lengths -3 Z_DATA_ERROR
+unzip Missing dictionary 2 Z_NEED_DICT
+
+stderr 0
+

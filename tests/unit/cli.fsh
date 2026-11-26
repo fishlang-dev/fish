@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { indented } from "../../src/main.fsh";
-import { fishcPath, ran, read, removed, same, scratch, text, type Ran } from "./support.fsh";
+import { fishcPath, ran, ranFor, read, reference, removed, same, scratch, text, type Ran } from "./support.fsh";
 
 // Runs the native fishc with `args` in `cwd`, without the variables that decide whether output is
 // coloured, and with `vars`, each `NAME=value`, set.
@@ -300,12 +300,13 @@ test("fishc build and run --timings print every stage, saying which objects were
 // Node's `JSON.stringify(JSON.parse(s), null, 2)` for each of `inputs`.
 function nodeIndented(inputs: Ref<string[]>): string[] {
   const script = `console.log(JSON.stringify(JSON.parse(process.argv[1]).map((s) => JSON.stringify(JSON.parse(s), null, 2))));`;
-  const run = spawnSync("node", ["-e", script, JSON.stringify(inputs)]);
-  assert(run.status === 0, `node failed: ${text(run.stderr)}`);
+  const given = JSON.stringify(inputs);
+  const run = reference("cli-json-indented", `${script}\n${given}`, () => ranFor("node", ["-e", script, given]));
+  assert(run.status === 0, `node failed: ${run.stderr}`);
   try {
-    return JSON.parse<string[]>(text(run.stdout));
+    return JSON.parse<string[]>(run.stdout);
   } catch (e) {
-    assert(false, `node gave: ${text(run.stdout)}`);
+    assert(false, `node gave: ${run.stdout}`);
     return [];
   }
 }

@@ -1,0 +1,12 @@
+script 031a2fa0b546cc636fa5c1974722cf12a4b7cb49a14768627b5e284f0ed61d1c
+status 0
+stdout 49
+[]
+unset unset false
+done
+
+--- stderr
+
+--- exit 0
+stderr 0
+

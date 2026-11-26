@@ -7,7 +7,7 @@ import { type Kept } from "../../src/incremental.fsh";
 import { CompileError } from "../../src/diag.fsh";
 import { builtKept, cleanDifference, compiledKept } from "../../src/main.fsh";
 import { Queries } from "../../src/queries.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { hostTarget } from "../../src/target.fsh";
 import { removed, scratch, text } from "./support.fsh";
 

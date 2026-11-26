@@ -4,7 +4,7 @@ import { CompileError, copyNames, locate, sourceOf, type Fix, type FixKind, type
 import { parse, type Stmt } from "./parser.fsh";
 import { Queries } from "./queries.fsh";
 import { STD_BASE } from "./std.fsh";
-import { cachedSession } from "./stdcache.fsh";
+import { cachedSession } from "./mathlib.fsh";
 
 // Multi-round, trial-verifying auto-fixer for Fish borrow, move, and mutability errors.
 // Candidate fixes on each diagnostic are tried in preference order (shared borrow -> mutable

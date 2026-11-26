@@ -1,5 +1,5 @@
 // expect: false 0 true
-import { enabled, now, resetFaults, seed } from "fish:sim";
+import { enabled, now, resetFaults, seed } from "std:sim";
 
 function main() {
   resetFaults();

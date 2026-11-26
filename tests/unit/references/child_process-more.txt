@@ -1,0 +1,9 @@
+script b20d93547aac15e1b439db79816cd4e5db694798806e64456401f7d04cf8d91f
+status 0
+stdout 60
+bytes in
+null spawnSync pwd ENOENT ENOENT spawnSync pwd
+2 2
+
+stderr 0
+
