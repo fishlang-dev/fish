@@ -5,7 +5,8 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { bodyOf, type Arenas } from "./arenas.fsh";
 import { C_KEYWORDS } from "./check.fsh";
-import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.fsh";
+import { codegenChecked, compiledOf, shortened, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.fsh";
+import { demangled, helperName, namesFrom, namesText, plainName } from "./demangle.fsh";
 import { fileCosts, formatFiles, formatMemory, formatTimings, formatUsage, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Peaks, type Reading, type Session, type Tables, type Timings } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { cachedSession } from "./mathlib.fsh";
@@ -64,7 +65,7 @@ export { analyze } from "./analysis.fsh";
 
 // What compiling a program gives: its IR, the checked program, and the Rust crates its calls go to.
 // The program as loaded comes back too, which `fishc watch` keeps.
-type Compiled = { ir: string; checked: Checked; loaded: Loaded; emitted: Emitted | undefined };
+type Compiled = { ir: string; checked: Checked; loaded: Loaded; emitted: Emitted | undefined; helpers: Map<string, string> };
 
 // A build session apart: what a compilation takes, and the caches only building objects reads.
 type Caches = { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
@@ -125,7 +126,7 @@ function compiledIn(compilation: Compilation, src: string, file: string, release
 // codegen made is returned straight from the call: unwrapped from a local after the `try`, the
 // checked program and its IR would be copied whole while the originals stayed alive.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function codegenSourced(checked: Checked, options: Options, names: Names, sources: Ref<Source[]>): { ir: string; checked: Checked; emitted: Emitted | undefined } {
+function codegenSourced(checked: Checked, options: Options, names: Names, sources: Ref<Source[]>): { ir: string; checked: Checked; emitted: Emitted | undefined; helpers: Map<string, string> } {
   try {
     return codegenChecked(checked, options);
   } catch (e) {
@@ -149,7 +150,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   partEnd(done.checked.tables.session, "codegen bundle", bundling);
   stageEnd(done.checked.tables.session, "codegen", started);
   stopAfter(done.checked.tables.session, "codegen");
-  return { ir, checked: done.checked, loaded, emitted: done.emitted };
+  return { ir, checked: done.checked, loaded, emitted: done.emitted, helpers: done.helpers };
 }
 
 // The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
@@ -298,6 +299,7 @@ function built(session: BuildSession, file: string, out: string, release: boolea
   let ready = readied(core, caches, file, release, panic, leaks, debug, looked, target);
   let known = new Map<string, string[]>();
   linked(ready.building, ready.ir, ready.split, out, release, links, ready.shim, target, leaks, debug, known);
+  writeFileSync(`${out}.fshnames`, ready.names);
   return { warnings: ready.warnings, session: ready.building };
 }
 
@@ -305,7 +307,7 @@ function built(session: BuildSession, file: string, out: string, release: boolea
 // so the checked program and the loaded files, which only `fishc watch` keeps for its next build,
 // are dropped as it returns: clang then compiles with nothing of them held beside it.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>): { ir: string; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession } {
+function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>): { ir: string; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession; names: string } {
   let made = compiledKept(core, file, release, panic, leaks, debug, looked, undefined, undefined, false);
   const instrumenting = stageStart(made.kept.checked.tables.session);
   const ir = instrumented(made.ir, target);
@@ -314,12 +316,13 @@ function readied(core: Session, caches: Caches, file: string, release: boolean, 
   stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
   const splitting = stageStart(made.kept.checked.tables.session);
   const split = parts(ir, made.kept.checked, release, target, debug);
+  const names = namesTable(made.kept.checked, made.helpers);
   stageEnd(made.kept.checked.tables.session, "split", splitting);
   if (made.kept.checked.tables.session.timings !== undefined) for (const [name, ms] of split.times) made.kept.checked.tables.session.timings!.ms.set(name, ms);
   let { checked } = made.kept;
   let { tables } = checked;
   const building = together(tables.session, caches);
-  return { ir, split, shim, warnings: made.warnings, building };
+  return { ir, split, shim, warnings: made.warnings, building, names };
 }
 
 // `built` for `fishc watch`, from what its last build kept: a program whose files all read as they
@@ -336,6 +339,7 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
   stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
   const splitting = stageStart(made.kept.checked.tables.session);
   const split = parts(ir, made.kept.checked, release, target, debug);
+  const names = namesTable(made.kept.checked, made.helpers);
   stageEnd(made.kept.checked.tables.session, "split", splitting);
   if (made.kept.checked.tables.session.timings !== undefined) for (const [name, ms] of split.times) made.kept.checked.tables.session.timings!.ms.set(name, ms);
   let { checked, parts: checkerParts, loaded, contents, carried, emitted, units } = made.kept;
@@ -345,13 +349,14 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
   tables.session = newSession();
   let known: Map<string, string[]> = units !== undefined ? units! : new Map<string, string[]>();
   linked(building, ir, split, out, release, links, shim, target, leaks, debug, known);
+  writeFileSync(`${out}.fshnames`, names);
   return { ir: made.ir, warnings: made.warnings, session: building, kept: { checked: { instances, tables, warnings }, parts: checkerParts, loaded, contents, carried, emitted, units: known } };
 }
 
 // `compile` for `fishc watch`, from what its last build kept, giving the IR, the warnings and what
 // to keep.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string; warnings: CompileError[]; kept: Kept } {
+export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string; warnings: CompileError[]; kept: Kept; helpers: Map<string, string> } {
   const reusing = kept !== undefined;
   // Reading the files again and putting the changed ones back, apart from the check it times itself.
   // Counted by hand from the front end's stages, since the session it starts on moves into the
@@ -380,7 +385,7 @@ export function compiledKept(session: Session, file: string, release: boolean, p
     const placed: Ref<Source[]> = made.loaded.sources;
     warnings.sort((a, b) => (realOffset(a.start, placed) as i64) - (realOffset(b.start, placed) as i64));
   }
-  return { ir: made.ir, warnings, kept: { checked: made.checked, parts: start.parts, loaded: made.loaded, contents: start.contents, carried: start.carried, emitted: made.emitted, units: start.units } };
+  return { ir: made.ir, warnings, kept: { checked: made.checked, parts: start.parts, loaded: made.loaded, contents: start.contents, carried: start.carried, emitted: made.emitted, units: start.units }, helpers: made.helpers };
 }
 
 // How a build from what `fishc watch` kept differs from a clean build of `file`: its IR, its
@@ -472,6 +477,36 @@ const RELEASE_MODULE_LENGTH: usize = 64 * 1024 * 1024;
 // IR in under a gigabyte and compiles it in well under a minute, so a build's units can go to it
 // side by side on a small machine, and no one file sets how long the build takes.
 const UNIT_LENGTH: usize = 16 * 1024 * 1024;
+
+// A build's `.fshnames` table: each compiled instance whose symbol doesn't read as its Fish name
+// alone, and each helper made for a type.
+function namesTable(checked: Mut<Checked>, helpers: Ref<Map<string, string>>): string {
+  const names = symbolNames(checked.tables.arenas);
+  // Each instance's IR symbol, its own symbol, and the arguments it was made for past those of a
+  // generic class it is a member of, which its class's name already shows.
+  let made: { symbol: string; own: string; args: Type[] }[] = [];
+  for (const i of compiledOf(checked)) {
+    const body = bodyOf(checked.tables.arenas, i);
+    if (body.foreign === true || body.rust !== undefined) continue;
+    let args: Type[] = [];
+    for (const [k, t] of i.bindings) if (body.scope === undefined || !body.scope!.has(k)) args.push(t);
+    // With no arguments of its own and no private name renamed, it reads alone as it is named.
+    if (args.length === 0 && !i.symbol.includes("@")) continue;
+    made.push({ symbol: `fsh.${names.get(i.id) ?? shortened(i.symbol)}`, own: i.symbol, args });
+  }
+  let out: [string, string][] = [];
+  for (const m of made) {
+    const shown = m.args.map((t) => checked.tables.typing.described(t));
+    const own = shown.length === 0 ? "" : `<${shown.join(", ")}>`;
+    // Shortened as the symbol is: an argument list as long as a structural type spells out reads as
+    // its digest, which keeps the table small.
+    const fish = shortened(m.own.replace(/([^.\s])#[0-9a-z]{6}(\.[0-9]+)?(?=$|\.)/, `$1${own}`).replace(/(#\w+)@[^.#\s]+/g, "$1"));
+    if (fish !== plainName(m.symbol)) out.push([m.symbol, fish]);
+  }
+  // A helper's type is cut short past a line's worth, as a panic message cuts one.
+  for (const [symbol, helper] of helpers) out.push([symbol, helperName(helper.length <= 320 ? helper : `${helper.slice(0, 320)}...`)]);
+  return namesText(out);
+}
 
 // A build's IR as clang is given it: a release build's as one module, so `-O2` inlines across std
 // and the program, unless it is over `RELEASE_MODULE_LENGTH`, and a dev build's as the program's
@@ -1486,6 +1521,26 @@ function bloatReport(file: string, release: boolean, top: string | undefined, js
   return process.exit(0);
 }
 
+// `fishc demangle`: standard input to standard output with each of the compiler's symbols in it
+// named as Fish names it, from the table beside `binary`, or `names`, when one is given.
+/** @throws {Error | IoError} */
+function demangleReport(binary: string | undefined, names: string | undefined): never {
+  if (binary !== undefined && names !== undefined) fail("fishc demangle: give a binary or '--names <file>', not both");
+  if (binary !== undefined && !existsSync(binary)) fail(`fishc demangle: '${binary}' doesn't exist`);
+  const path = names !== undefined ? names! : binary !== undefined ? `${binary!}.fshnames` : undefined;
+  let table = new Map<string, string>();
+  if (path !== undefined) {
+    if (!existsSync(path!)) fail(binary !== undefined ? `fishc demangle: '${binary!}' has no names table beside it, '${path!}'; build it again with this fishc` : `fishc demangle: '${path!}' doesn't exist`);
+    try {
+      table = namesFrom(readFileSync(path!, "utf8"));
+    } catch (e) {
+      fail(`fishc demangle: '${path!}' isn't a names table: ${(e as { message: string }).message}`);
+    }
+  }
+  process.stdout.write(demangled(new TextDecoder().decode(readFileSync(0)), table));
+  return process.exit(0);
+}
+
 // `fishc allocs`: the heap allocation sites in a .fsh file's IR, through the runtime functions
 // that may allocate, by function and generic body.
 /** @throws {Error | IoError} */
@@ -1557,6 +1612,7 @@ async function main(): Promise<void> {
           jobs: { type: "string" },
           fn: { type: "string" },
           top: { type: "string" },
+          names: { type: "string" },
         },
       });
     } catch (e) {
@@ -1619,6 +1675,10 @@ async function main(): Promise<void> {
   if (command === "allocs") {
     if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "top" && k !== "json")) fail("usage: fishc allocs <file.fsh> [--release] [--top <n>] [--json]");
     allocsReport(named!, values.release === true, values.top, values.json === true);
+  }
+  if (command === "demangle") {
+    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "names")) fail("usage: fishc demangle [<binary>] [--names <file.fshnames>]");
+    demangleReport(named, values.names);
   }
   if (command === "survey") {
     const dirs = positionals.slice(1);
@@ -1871,7 +1931,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
