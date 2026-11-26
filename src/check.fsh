@@ -207,7 +207,8 @@ type Jump = Extract<Stmt, { kind: "break" | "continue" }>;
 type Target = { stmt: Stmt; kind: "loop" | "switch" | "label" | "arm"; label?: string; loop?: Stmt; facts?: usize; wanted?: boolean; gives?: [Expr, Type][] };
 
 // The statements a destructuring assignment becomes: every part read, then every target written.
-type Destructured = { reads: Stmt[]; writes: Stmt[] };
+// Where the assignment ends, which each part's read is in use until.
+type Destructured = { reads: Stmt[]; writes: Stmt[]; until: usize };
 
 // An `await using` binding whose scope encloses the code being checked: its name and local, where
 // it is declared, and how many targets and `finally` blocks were open there, which say what a
@@ -5037,7 +5038,7 @@ class BodyChecker implements Context, GuardHost {
   destructuring(this: Mut<this>, e: Ref<Extract<Expr, { kind: "destructure" }>>): Stmt[] {
     // Every part is read first, then every target written, so a target can't change what a
     // later part reads, as in '({ a: o.b, b: o.a } = o)'.
-    let out: Destructured = { reads: [], writes: [] };
+    let out: Destructured = { reads: [], writes: [], until: e.end };
     this.destructureFrom(out, e.pattern, cloneExpr(e.value));
     return [...out.reads, ...out.writes];
   }
@@ -5046,6 +5047,12 @@ class BodyChecker implements Context, GuardHost {
   }
   private partIdent(this: Mut<this>, name: string, at: Ref<Span>): Expr {
     return { id: nextId(this.cx.tables.ids), kind: "ident", name, start: at.start, end: at.end };
+  }
+  // A read of a part's fresh variable, in use until the assignment ends.
+  private partRead(this: Mut<this>, out: Ref<Destructured>, name: string, at: Ref<Span>): Expr {
+    const read = this.partIdent(name, at);
+    this.cx.tables.heldUntil.set(cloneExpr(read), out.until);
+    return read;
   }
   private partDeclared(this: Mut<this>, target: Pattern, init: Expr, at: Ref<Span>, typedAs: Expr | undefined): Stmt {
     const s: Stmt = { id: nextId(this.cx.tables.ids), kind: "let", keyword: "const", declarations: [{ id: nextId(this.cx.tables.ids), target, type: undefined, init, start: at.start, end: at.end }], start: at.start, end: at.end };
@@ -5086,28 +5093,31 @@ class BodyChecker implements Context, GuardHost {
     if (p.kind !== "array" && p.kind !== "object") throw new CompileError("E0003", "this can't be a destructuring target; assign to a variable, a field or an element", p.start, p.end);
     // A literal is taken part by part, each part typed as its target.
     if (p.kind === "array" && value.kind === "array" && !value.elements.some((x) => x === undefined || x.kind === "spread")) {
-      let parts: { nested: Expr | undefined; read: Expr | undefined }[] = [];
+      let parts: { writes: Stmt[] | undefined; read: Expr | undefined }[] = [];
       for (let i: usize = 0; i < value.elements.length; i++) {
         const x: Ref<Expr> = value.elements[i]!;
         const q: Ref<Pattern> | undefined = i < p.elements.length && p.elements[i] !== undefined ? p.elements[i]! : undefined;
         const inner = q === undefined ? undefined : defaultTarget(q);
-        // A nested literal for a nested pattern is taken apart in turn.
+        // A nested literal for a nested pattern is taken apart in its place, its parts read
+        // before the later ones, its targets written in this element's turn.
         if (inner !== undefined && (inner.kind === "array" || inner.kind === "object") && (x.kind === "array" || x.kind === "object") && q!.kind !== "default") {
-          parts.push({ nested: cloneExpr(x), read: undefined });
+          let nested: Destructured = { reads: [], writes: [], until: out.until };
+          this.destructureFrom(nested, q!, cloneExpr(x));
+          for (const r of nested.reads) out.reads.push(cloneStmt(r));
+          parts.push({ writes: nested.writes, read: undefined });
           continue;
         }
         const name = this.freshPart();
         const typedAs = q !== undefined ? this.partTarget(q) : undefined;
         const partId = nextId(this.cx.tables.ids);
         out.reads.push(this.partDeclared({ id: partId, kind: "ident", name, start: x.start, end: x.end }, cloneExpr(x), { start: x.start, end: x.end }, typedAs));
-        parts.push({ nested: undefined, read: this.partIdent(name, { start: x.start, end: x.end }) });
+        parts.push({ writes: undefined, read: this.partRead(out, name, { start: x.start, end: x.end }) });
       }
       for (let i: usize = 0; i < p.elements.length; i++) {
         if (p.elements[i] === undefined) continue;
         const q: Ref<Pattern> = p.elements[i]!;
-        const nested = i < parts.length && parts[i]!.nested !== undefined ? cloneExpr(parts[i]!.nested!) : undefined;
         const read = i < parts.length && parts[i]!.read !== undefined ? cloneExpr(parts[i]!.read!) : undefined;
-        if (nested !== undefined) this.destructureFrom(out, q, nested);
+        if (i < parts.length && parts[i]!.writes !== undefined) for (const w of parts[i]!.writes!) out.writes.push(cloneStmt(w));
         else if (read !== undefined) this.destructureWrite(out, q, read);
         else if (q.kind !== "default") throw new CompileError("E0003", `the array on the right has no element at index ${i} for this target`, q.start, q.end);
         else this.destructureWrite(out, q.target, cloneExpr(q.value));
@@ -5129,7 +5139,7 @@ class BodyChecker implements Context, GuardHost {
         const typedAs = q !== undefined ? this.partTarget(q.value) : undefined;
         const partId = nextId(this.cx.tables.ids);
         out.reads.push(this.partDeclared({ id: partId, kind: "ident", name, start: x.start, end: x.end }, cloneExpr(x.value), { start: x.start, end: x.end }, typedAs));
-        parts.set(key, this.partIdent(name, x));
+        parts.set(key, this.partRead(out, name, x));
       }
       for (const prop of p.props) {
         const part = parts.get(typeof prop.key === "string" ? prop.key : "");
@@ -5145,7 +5155,7 @@ class BodyChecker implements Context, GuardHost {
       const at = { start: value.start, end: value.end };
       const partId = nextId(this.cx.tables.ids);
       out.reads.push(this.partDeclared({ id: partId, kind: "ident", name, start: at.start, end: at.end }, value, at, undefined));
-      whole = this.partIdent(name, at);
+      whole = this.partRead(out, name, at);
     } else whole = value;
     // Each top-level piece is read by a declaration naming only it, nested patterns down to
     // their leaves, so only the leaves move out of a place. A slot with a default reads
@@ -5180,7 +5190,7 @@ class BodyChecker implements Context, GuardHost {
       }
     }
     for (const [q, name] of leaves) {
-      const read = this.partIdent(name, { start: q.start, end: q.end });
+      const read = this.partRead(out, name, { start: q.start, end: q.end });
       this.destructureWrite(out, q, read);
     }
   }

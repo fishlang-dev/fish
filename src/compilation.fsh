@@ -171,6 +171,9 @@ export type Tables = {
   // type it takes; and the defaults it adds, which an Option's absence takes and anything else
   // never needs.
   destructuredParts: NodeMap<Stmt, Expr>;
+  // Each read of such a fresh variable, with the end of the whole assignment: every part is read
+  // before any target is written, so what a part borrows stays in use until the last write.
+  heldUntil: NodeMap<Expr, usize>;
   // What checking put into a statement list beside a statement, by the statement: the parts a
   // destructuring declaration became after it, and the block a `for` head's declarations moved
   // into around it. A generic class's instances check copies of one body, with its nodes' ids, so
@@ -423,6 +426,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     liftedFunctions: new NodeMap<Stmt | Expr, { name: string; symbol: string }>(),
     getterNames: new Set<string>(),
     destructuredParts: new NodeMap<Stmt, Expr>(),
+    heldUntil: new NodeMap<Expr, usize>(),
     insertedAfter: new NodeMap<Stmt, Stmt[]>(),
     wrappedIn: new NodeMap<Stmt, Stmt>(),
     unusedDefaults: new NodeSet<Expr>(),
