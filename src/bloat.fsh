@@ -32,7 +32,7 @@ export function irFunctions(ir: string): Sized[] {
 }
 
 // The name a `define` line gives, quotes kept. IR escapes a quote inside one as `\22`.
-function definedName(line: string): string {
+export function definedName(line: string): string {
   const at = line.indexOf("@");
   if (at < 0) return "";
   const m = line.charCodeAt((at + 1) as usize) === 34 ? /^"[^"]*"/.exec(line.slice(at + 1)) : /^[\w.$-]+/.exec(line.slice(at + 1));
@@ -106,7 +106,7 @@ export function bloat(unit: string, sized: Ref<Sized[]>): Bloat {
   return { unit, total, functions, groups };
 }
 
-const share = (bytes: i64, total: i64): string => `${(total === 0 ? 0 : ((bytes as f64) * 100) / (total as f64)).toFixed(1)}%`.padStart(7);
+export const share = (bytes: i64, total: i64): string => `${(total === 0 ? 0 : ((bytes as f64) * 100) / (total as f64)).toFixed(1)}%`.padStart(7);
 
 // The two tables, `top` rows each.
 export function formatBloat(b: Ref<Bloat>, top: i64): string {
