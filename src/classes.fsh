@@ -175,6 +175,11 @@ export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: 
     r.abstract = true;
     tables.typing.setRec(type, r);
   }
+  if (node.derives !== undefined && node.derives.includes("C")) {
+    let r = tables.typing.rec(type);
+    r.c = true;
+    tables.typing.setRec(type, r);
+  }
   // A generic class's statics can't use its type parameters, so every instance shares one set.
   const shared = node.typeParams.length > 0 ? tables.genericStatics.get(node) : undefined;
   let d: Declaring = { name, scope: copyScope(scope), type, shared: shared !== undefined, fields: [], abstracts: [], methods: new Map(), statics: shared !== undefined ? shared : new Map(), staticFields: new Map(), getters: new Map(), setters: new Map() };
@@ -205,6 +210,7 @@ export function declareClass(tables: Mut<Tables>, node: Ref<ClassNode & { name: 
     const init: Expr | undefined = m.init !== undefined ? cloneExpr(m.init) : m.optional ? { id: nextId(tables.ids), kind: "null", start: m.start, end: m.end } : undefined;
     add(d, fieldOf(tables.ids, m.name, m.type !== undefined ? cloneTypeNode(m.type) : undefined, m.optional, init, access, m.modifiers.includes("readonly"), { start: m.start, end: m.end }));
   }
+  if (d.methods.has(DISPOSE) && tables.typing.rec(type).c === true) throw new CompileError("E1007", "a '@c' struct can't have a '[Symbol.dispose]' method: C copies its values, so one would be disposed of twice", node.start, node.end);
   if (d.methods.has(DISPOSE)) {
     let r = tables.typing.rec(type);
     r.disposes = true;

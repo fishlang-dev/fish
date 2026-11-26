@@ -307,6 +307,39 @@ const extension = (type: Type) => (type === "boolean" || type === "u8" || type =
 const crossing = (typing: Ref<Typing>, type: Type) => (extension(type) === "" ? llvmOf(typing, type) : `${llvmOf(typing, type)} ${extension(type)}`);
 const crossed = (typing: Ref<Typing>, type: Type) => (extension(type) === "" ? llvmOf(typing, type) : `${extension(type)} ${llvmOf(typing, type)}`);
 
+// Whether a type is a `@c` struct, which crosses to C by value.
+function cStructOf(typing: Ref<Typing>, t: Type): boolean {
+  if (typeof t === "string") return false;
+  const r = typing.rec(t);
+  return r.kind === "class" && r.c === true;
+}
+
+// Whether a C function takes or gives a `@c` struct, so it is called through a shim in C: how a
+// struct is passed by value is the target's C ABI, which clang knows and LLVM IR leaves to it.
+function shimmed(typing: Ref<Typing>, i: Ref<Instance>): boolean {
+  return cStructOf(typing, i.returns) || i.signature!.some((t) => cStructOf(typing, t));
+}
+
+// How C spells each number and boolean crossing to it.
+const C_TYPES = new Map<string, string>([
+  ["i8", "int8_t"], ["i16", "int16_t"], ["i32", "int32_t"], ["i64", "int64_t"], ["i128", "__int128"],
+  ["u8", "uint8_t"], ["u16", "uint16_t"], ["u32", "uint32_t"], ["u64", "uint64_t"], ["u128", "unsigned __int128"],
+  ["isize", "intptr_t"], ["usize", "size_t"], ["f32", "float"], ["f64", "double"], ["boolean", "_Bool"],
+]);
+
+// The shims' C, carried in the module as comments a build gathers into a unit of its own: the
+// structs first, as they were defined, then each function's shim by its name.
+function cShimText(structs: Ref<string[]>, shims: Ref<Map<string, string[]>>): string[] {
+  let out: string[] = [];
+  for (const line of structs) out.push(`; fsh.c ${line}`);
+  const names = [...shims.keys()].toSorted();
+  for (const name of names) {
+    const lines = shims.get(name)!;
+    for (const line of lines) out.push(`; fsh.c ${line}`);
+  }
+  return out;
+}
+
 // The C parameters a value crossing to a Rust shim is passed as: a pointer for a Rust type, a
 // string or an Option of either, which is null when empty; an array's buffer and length; and a
 // flag first for an Option of a number, a boolean or an array.
@@ -466,6 +499,11 @@ class Codegen implements PrintHost, ComptimeHost {
   orders: Map<string, string>;
   intrinsics: Set<string>;
   foreign: Set<string>;
+  // The C a `@c` struct crosses to C through, which a build compiles beside the runtime: each
+  // struct's definition by its type, then each C function's shim by its name.
+  cStructs: TypeMap<Type, string>;
+  cLines: string[];
+  cShims: Map<string, string[]>;
   declaredRust: Set<string>;
   rustDrops: Set<string>;
   generatorOf: TypeMap<GeneratorType, InstanceId>;
@@ -689,6 +727,9 @@ class Codegen implements PrintHost, ComptimeHost {
 
     // The C functions the program declares itself, which the libm functions Math uses may be.
     this.foreign = new Set<string>();
+    this.cStructs = new TypeMap<Type, string>();
+    this.cLines = [];
+    this.cShims = new Map<string, string[]>();
 
     // The shim functions declared, each once however many declarations name its Rust function,
     // and the drop functions of the Rust types the program drops.
@@ -805,6 +846,10 @@ class Codegen implements PrintHost, ComptimeHost {
           params.push("ptr");
           this.out.push(`declare ${gives.returns} ${rust}(${params.join(", ")})`);
           this.out.push("");
+          continue;
+        }
+        if (shimmed(this.tables.typing, this.inst(instance))) {
+          this.declareShim(instance);
           continue;
         }
         if (!DECLARED.has(this.bodyAt(instance).name)) {
@@ -1073,6 +1118,7 @@ class Codegen implements PrintHost, ComptimeHost {
   const module = [
     ...this.globals.toSorted(),
     ...abort,
+    ...cShimText(this.cLines, this.cShims),
     "",
     ...RUNTIME,
     ...[...this.intrinsics].filter((line) => !this.foreign.has(/@([\w.]+)\(/.exec(line)![1]!)).toSorted(),
@@ -9425,6 +9471,89 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // A C function taking or giving a `@c` struct, declared as its shim: a struct it gives is
+  // written to a slot passed first, and one it takes is passed by a pointer to a copy.
+  declareShim(this: Mut<this>, instance: InstanceId): void {
+    const name = this.bodyAt(instance).name;
+    const signature = this.inst(instance).signature!;
+    const returns = this.inst(instance).returns;
+    let params: string[] = cStructOf(this.tables.typing, returns) ? ["ptr"] : [];
+    for (const t of signature) params.push(cStructOf(this.tables.typing, t) ? "ptr" : crossing(this.tables.typing, t));
+    this.out.push(`declare ${cStructOf(this.tables.typing, returns) ? "void" : crossed(this.tables.typing, returns)} @"fsh_cshim_${name}"(${params.join(", ")})`);
+    this.out.push("");
+    if (this.cShims.has(name)) return;
+    const ret = returns === "void" ? "void" : this.cType(returns);
+    let types: string[] = [];
+    for (const t of signature) types.push(this.cType(t));
+    let taken: string[] = cStructOf(this.tables.typing, returns) ? [`${ret}* out`] : [];
+    let passed: string[] = [];
+    for (let i: usize = 0; i < signature.length; i++) {
+      const struct = cStructOf(this.tables.typing, signature[i]!);
+      taken.push(`${types[i]!}${struct ? "*" : ""} a${i}`);
+      passed.push(`${struct ? "*" : ""}a${i}`);
+    }
+    const call = `${name}(${passed.join(", ")})`;
+    const body = cStructOf(this.tables.typing, returns) ? `*out = ${call};` : returns === "void" ? `${call};` : `return ${call};`;
+    this.cShims.set(name, [
+      `${ret} ${name}(${types.length === 0 ? "void" : types.join(", ")});`,
+      `${cStructOf(this.tables.typing, returns) ? "void" : ret} fsh_cshim_${name}(${taken.length === 0 ? "void" : taken.join(", ")}) { ${body} }`,
+    ]);
+  }
+
+  // How C spells a type crossing to it, a `@c` struct by the name its definition gives it.
+  cType(this: Mut<this>, t: Type): string {
+    if (typeof t === "string") return C_TYPES.get(t)!;
+    const r = this.tables.typing.rec(t);
+    if (r.kind === "pointer") return "void*";
+    assert(r.kind === "class" && r.c === true, `internal error: a '${this.tables.typing.keyOf(t)}' crossed to C`);
+    const known = this.cStructs.get(t);
+    if (known !== undefined) return known;
+    let fields: string[] = [];
+    for (let i: usize = 0; i < r.fields.length; i++) {
+      let held = r.fields[i]!.type;
+      let dims = "";
+      while (typeof held !== "string" && this.tables.typing.rec(held).kind === "fixed") {
+        const fixed = this.tables.typing.rec(held) as FixedRecord;
+        dims += `[${fixed.size}]`;
+        held = fixed.element;
+      }
+      fields.push(`${this.cType(held)} f${i}${dims};`);
+    }
+    const name = `fsh_s${this.cStructs.size}`;
+    this.cStructs.set(t, name);
+    this.cLines.push(`typedef struct ${name} { ${fields.length === 0 ? "char f0;" : fields.join(" ")} } ${name};`);
+    return name;
+  }
+
+  // A call to a C function through its shim.
+  shimInvoke(this: Mut<this>, target: InstanceId, args: Ref<string[]>, hooks: Ref<Hooks>): string | undefined {
+    const signature = this.inst(target).signature!;
+    const type = this.inst(target).returns;
+    const out = cStructOf(this.tables.typing, type) ? this.alloca(this.llvm(type)) : undefined;
+    let passed: string[] = out !== undefined ? [`ptr ${out}`] : [];
+    for (let i: usize = 0; i < args.length; i++) {
+      const t = signature[i]!;
+      if (cStructOf(this.tables.typing, t)) {
+        const slot = this.alloca(this.llvm(t));
+        this.emit(`store ${args[i]!}, ptr ${slot}`);
+        passed.push(`ptr ${slot}`);
+      } else passed.push(args[i]!.replace(/^\S+ /, `${crossing(this.tables.typing, t)} `));
+    }
+    const call = `call ${out !== undefined ? "void" : crossed(this.tables.typing, type)} @"fsh_cshim_${this.bodyAt(target).name}"(${passed.join(", ")})`;
+    if (out === undefined && type !== "void") {
+      const result = this.temp();
+      this.unwindingWith(call, result, hooks);
+      hooks.after?.(this);
+      return result;
+    }
+    this.unwindingWith(call, undefined, hooks);
+    hooks.after?.(this);
+    if (out === undefined) return undefined;
+    const result = this.temp();
+    this.emit(`${result} = load ${this.llvm(type)}, ptr ${out}`);
+    return result;
+  }
+
   // A receiver copied into a slot for an owning method: the copy is its own, pending until the
   // call takes it.
   spill(this: Mut<this>, slot: string, type: Type, v: string): string {
@@ -11220,6 +11349,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const hooks: Hooks = given !== undefined ? given : {};
     const type = this.inst(target).returns;
     if (this.bodyAt(target).rust !== undefined) return this.rustInvoke(target, pointer, args, at!, hooks);
+    if (this.bodyAt(target).foreign === true && shimmed(this.tables.typing, this.inst(target))) return this.shimInvoke(target, args, hooks);
     const values = (pointer !== undefined && pointer !== "") ? [`ptr ${pointer}`, ...args] : args;
     // A narrow value crosses to C widened, both ways.
     const passed = this.bodyAt(target).foreign === true ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(this.tables.typing, this.inst(target).signature![i as usize]!)} `)) : values;
