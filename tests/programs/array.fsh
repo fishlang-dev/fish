@@ -1365,6 +1365,7 @@ function mkGuardDropFree(): Guard | { x: i64 } { return { x: 7 }; }
 function mkRecLit(_: i64): Rec { return "lit"; }
 function mkGuardRecLit(_: i64): Guard | Rec { return "lit"; }
 function bumpCounter(): i64 { return disposedCount.load(); }
+function bumpStr(): string { return disposedCount.load() >= 0 ? "b" + "!" : "z"; }
 function eqMut(obj: Mut<{ s: string; extra: i64 }>): boolean {
   return obj === mkObj((obj.s = "b" + "!"));
 }
@@ -1373,8 +1374,8 @@ function eqGen<T extends string | null>(x: T, next: T): boolean {
   return v === mkOpt((v = next));
 }
 function eqUnionMoveProj(x: S | SG): boolean {
-  let u: S | SG = x;
-  return u === mkS((u = { z: "b" + "!" }).z);
+  const u: S | SG = x;
+  return u === mkS(bumpStr());
 }
 function runRealRecStr<T>(expected: T): boolean {
   let u: T | string = "hello" + "!";
@@ -1389,8 +1390,8 @@ function runRealRecNum<T>(expected: T): boolean {
   return u === mkGuardT((u = 9), expected);
 }
 function runRealRecNested<T>(expected: T): boolean {
-  let nObj: { next: T | string; g: Guard } = { next: "hello" + "!", g: new Guard(99) };
-  return nObj === mkGuardNested((nObj = { next: "bye" + "!", g: new Guard(1) }).next, expected);
+  const nObj: { next: T | string; g: Guard } = { next: "hello" + "!", g: new Guard(99) };
+  return nObj === mkGuardNested(bumpStr(), expected);
 }
 function runRealRecAll(r: Rec, r2: Rec, nr: NumRec): [boolean, boolean, boolean, boolean, boolean] {
   if (typeof r === "string" || typeof r2 === "string" || typeof nr === "number") return [false, false, false, false, false];
@@ -1465,10 +1466,10 @@ function main() {
   const eqMixRecLive = mixRecLive === mkNodeOtherLive((mixRecLive = { k: "z" + "!", next: null, extra: "e" + "!" }));
   let rUnfold: Rec = "hello" + "!";
   const eqRecUnfold = rUnfold === mkUnboxedRec((rUnfold = "bye" + "!"));
-  let mg1: { s: string; g: Guard } = { s: "a" + "!", g: new Guard(1) };
-  const eqMoveProjAs = (mg1 as { s: string }) === mkObj((mg1 = { s: "b" + "!", g: new Guard(2) }).s);
-  let mg2: { s: string; g: Guard } = { s: "a" + "!", g: new Guard(3) };
-  const eqMoveProj = mg2 === mkObj((mg2 = { s: "b" + "!", g: new Guard(4) }).s);
+  const mg1: { s: string; g: Guard } = { s: "a" + "!", g: new Guard(1) };
+  const eqMoveProjAs = (mg1 as { s: string }) === mkObj(bumpStr());
+  const mg2: { s: string; g: Guard } = { s: "a" + "!", g: new Guard(3) };
+  const eqMoveProj = mg2 === mkObj(bumpStr());
   let unfoldBox: Rec | ExtraOther = { k: "a" + "!", next: null, extra: "drop" + "!" };
   const eqUnfoldBox = unfoldBox === mkRecOrOther((unfoldBox = "bye" + "!"));
   let tagObj: { s: string; extra: string } = { s: "a" + "!", extra: "e" + "!" };
@@ -1487,16 +1488,16 @@ function main() {
   const eqStripOpt = (fullX as { s: string }) === mkGuardRecWithOpt((fullX = { s: "z" + "!", opt: "y" + "!" }).s);
   let fullMoveU: Full = { s: "a" + "!", opt: "b" + "!" };
   const eqStripOptMoveU = (fullMoveU as (Guard | { s: string })) === mkGuardRecWithOpt((fullMoveU = { s: "z" + "!", opt: "y" + "!" }).s);
-  let fm1: FullMove = { s: "a" + "!", opt: "b" + "!", g: new Guard(1) };
-  const eqStripOptMoveObj1 = (fm1 as { s: string; g: Guard }) === mkGuardRecWithOpt((fm1 = { s: "z" + "!", opt: "y" + "!", g: new Guard(2) }).s);
-  let fm2: FullMove = { s: "a" + "!", opt: "b" + "!", g: new Guard(3) };
-  const eqStripOptMoveObj2 = (fm2 as { s: string; g: Guard }) === mkRecWithOpt((fm2 = { s: "z" + "!", opt: "y" + "!", g: new Guard(4) }).s);
-  let bmMoveU: { s: string; extra: string; g: Guard } = { s: "a" + "!", extra: "e" + "!", g: new Guard(5) };
-  const eqMoveUMember1 = (bmMoveU as (Guard | { s: string; g: Guard })) === mkTagChoice((bmMoveU = { s: "b" + "!", extra: "f" + "!", g: new Guard(6) }).s);
-  let fmMoveU: FullMove = { s: "a" + "!", opt: "b" + "!", g: new Guard(7) };
-  const eqMoveUMember2 = (fmMoveU as (Guard | { s: string; g: Guard })) === mkGuardRecWithOpt((fmMoveU = { s: "z" + "!", opt: "y" + "!", g: new Guard(8) }).s);
-  let fmRec: FullMoveRec = { s: "a" + "!", opt: "b" + "!", g: new Guard(9), next: { s: "x" + "!" } };
-  const eqMoveNarrowRec = ((fmRec as MoveNarrow) as { s: string; opt?: string }) === mkGuardRecWithOpt((fmRec = { s: "z" + "!", opt: "y" + "!", g: new Guard(10), next: { s: "y" + "!" } }).s);
+  const fm1: FullMove = { s: "a" + "!", opt: "b" + "!", g: new Guard(1) };
+  const eqStripOptMoveObj1 = (fm1 as { s: string; g: Guard }) === mkGuardRecWithOpt(bumpStr());
+  const fm2: FullMove = { s: "a" + "!", opt: "b" + "!", g: new Guard(3) };
+  const eqStripOptMoveObj2 = (fm2 as { s: string; g: Guard }) === mkRecWithOpt(bumpStr());
+  const bmMoveU: { s: string; extra: string; g: Guard } = { s: "a" + "!", extra: "e" + "!", g: new Guard(5) };
+  const eqMoveUMember1 = (bmMoveU as (Guard | { s: string; g: Guard })) === mkTagChoice(bumpStr());
+  const fmMoveU: FullMove = { s: "a" + "!", opt: "b" + "!", g: new Guard(7) };
+  const eqMoveUMember2 = (fmMoveU as (Guard | { s: string; g: Guard })) === mkGuardRecWithOpt(bumpStr());
+  const fmRec: FullMoveRec = { s: "a" + "!", opt: "b" + "!", g: new Guard(9), next: { s: "x" + "!" } };
+  const eqMoveNarrowRec = ((fmRec as MoveNarrow) as { s: string; opt?: string }) === mkGuardRecWithOpt(bumpStr());
   const eqLitGuardRec = "lit" === mkGuardRecLit(bumpCounter());
   const eqLitAsGuardRec = ("lit" as string) === mkGuardRecLit(bumpCounter());
   const eqLitAsRec = ("lit" as string) === mkRecLit(bumpCounter());

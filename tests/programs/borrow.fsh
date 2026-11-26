@@ -1565,3 +1565,237 @@ function main() {
   [a, n] = [other[0], clear(xs)];
   console.log(a.s, n);
 }
+// case: borrow_call_satisfies_callee
+// error: cannot change 's'
+// Calling a closure via satisfies keeps its borrows live through the call (F-2440).
+function main() {
+  let s = "hello" + "!";
+  const f = () => s.length as i64;
+  s = "bye" + "!";
+  console.log((f satisfies () => i64)());
+}
+// case: borrow_call_unsafe_callee
+// error: cannot change 's'
+// Calling a closure wrapped in unsafe keeps its borrows live through the call (F-2440).
+function main() {
+  let s = "hello" + "!";
+  const f = () => s.length as i64;
+  s = "bye" + "!";
+  console.log((unsafe { f })());
+}
+// case: borrow_call_conditional_callee
+// error: cannot change 's'
+// Calling a closure via conditional keeps its borrows live through the call (F-2440).
+function main() {
+  let s = "hello" + "!";
+  const f = () => s.length as i64;
+  const cond = true;
+  s = "bye" + "!";
+  console.log((cond ? f : f)());
+}
+// case: borrow_escape_index_mut
+// error: keeping references through the reference 'xs'
+// Storing a local reference into an indexed Mut parameter is rejected (F-2442).
+function stash(xs: Mut<{ r: Ref<string> }[]>) {
+  const local = "tmp" + 1;
+  xs[0].r = local;
+}
+function main() {
+  let s = "init" + 1;
+  let xs: { r: Ref<string> }[] = [{ r: s }];
+  stash(xs);
+  console.log(xs[0].r);
+}
+// case: borrow_escape_index_push_mut
+// error: keeping references through the reference 'xs'
+// Pushing a local reference into an indexed Mut parameter is rejected (F-2442).
+function stash(xs: Mut<Ref<string>[][]>) {
+  const local = "tmp" + 1;
+  xs[0].push(local);
+}
+function main() {
+  let s = "init" + 1;
+  let xs: Ref<string>[][] = [[s]];
+  stash(xs);
+  console.log(xs[0].length);
+}
+// case: borrow_escape_optional_mut
+// error: keeping references through the reference 'opt'
+// Storing a local reference through an optional Mut parameter is rejected (F-2442).
+function stash(opt: Mut<{ r: Ref<string> }> | null) {
+  const local = "tmp" + 1;
+  if (opt !== null) opt.r = local;
+}
+function main() {
+  let s = "init" + 1;
+  let box: { r: Ref<string> } = { r: s };
+  stash(box);
+  console.log(box.r);
+}
+// case: borrow_compare_move_only_mutated
+// error: cannot change 'g' while a comparison is reading 'g'
+// Mutating a move-only LHS in the RHS of === is rejected (F-2708).
+@derive(Eq)
+class Guard {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function mkGuard(_: Guard): Guard { return new Guard(1); }
+function main() {
+  let g = new Guard(1);
+  console.log(g === mkGuard((g = new Guard(2))));
+}
+// case: borrow_compare_move_only_union_mutated
+// error: cannot change 'u' while a comparison is reading 'u'
+// Mutating a move-only union LHS in the RHS of === is rejected (F-2708).
+@derive(Eq)
+class Guard {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function mkGuardStr(_: Guard | string): Guard | string { return new Guard(1); }
+function main() {
+  let u: Guard | string = new Guard(1);
+  console.log(u === mkGuardStr((u = "bye" + "!")));
+}
+// case: borrow_compare_move_only_ref_mutated
+// error: cannot change 'g' while a comparison is reading 'g'
+// Mutating the target of a Ref<moveOnly> LHS in the RHS of === is rejected (F-2708).
+@derive(Eq)
+class Guard {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function mkGuard(_: Guard): Guard { return new Guard(1); }
+function main() {
+  let g = new Guard(1);
+  const r: Ref<Guard> = g;
+  console.log(r === mkGuard((g = new Guard(2))));
+}
+// case: borrow_compare_move_only_ok
+// expect: true 2
+// Comparing a move-only value with itself or mutating it in catch after a throwing RHS is allowed (F-2708).
+@derive(Eq)
+class Guard {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function mayThrow(): Guard throws string { throw "boom"; }
+function main() {
+  let g = new Guard(1);
+  const same = g === g;
+  try {
+    const _eq = g === mayThrow();
+  } catch (_e) {
+    g = new Guard(2);
+  }
+  console.log(same, g.n);
+}
+// case: borrow_labeled_break_release_ok
+// expect: a!
+// expect: b!
+// Loans of references declared inside a labeled block are released on break (F-2441).
+function main() {
+  let s = "a" + "!";
+  out: {
+    const r: Ref<string> = s;
+    console.log(r);
+    break out;
+  }
+  s = "b" + "!";
+  console.log(s);
+}
+// case: borrow_call_iife_arrow_move
+// error: cannot move 'xs'
+// An immediately-called arrow closure keeps its captures lent across argument evaluation (F-2440).
+function dropArr(xs: string[]): i64 { return xs.length as i64; }
+function main() {
+  let xs: string[] = ["hello" + "!"];
+  console.log(((_: i64) => xs.length as i64)(dropArr(xs)));
+}
+// case: borrow_call_iife_arrow_mut_conflict
+// error: cannot mutably lend 's'
+// An immediately-called arrow mutating a captured variable conflicts with a shared Ref arg to it (F-2440).
+function main() {
+  let s = "hello" + "!";
+  console.log(((r: Ref<string>) => { s = "world" + "!"; return r.length as i64; })(s));
+}
+// case: borrow_call_iife_arrow_mut_read_arg_ok
+// expect: 6
+// An immediately-called arrow mutating a captured variable may read that variable in a non-Ref arg (F-2440).
+function main() {
+  let s = "hello" + "!";
+  console.log(((x: i64) => { s = "world" + "!"; return x; })(s.length as i64));
+}
+// case: borrow_compare_projected_ref_field_mutated
+// error: cannot move 'owner' while a comparison is reading 'owner'
+// Projecting a move-only field through a Ref local in === keeps the owner lent across RHS (F-2708).
+@derive(Eq)
+class Guard {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function dropAndMake(_o: { g: Guard }): Guard { return new Guard(1); }
+function main() {
+  let owner: { g: Guard } = { g: new Guard(1) };
+  const r: Ref<{ g: Guard }> = owner;
+  console.log(r.g === dropAndMake(owner));
+}
+// case: borrow_compare_call_ref_mutated
+// error: cannot move 'g' while a comparison is reading 'g'
+// A call returning a Ref<moveOnly> in === keeps the underlying place lent across RHS (F-2708).
+@derive(Eq)
+class Guard {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function idRef(x: Ref<Guard>): Ref<Guard> { return x; }
+function dropAndMake(_g: Guard): Guard { return new Guard(1); }
+function main() {
+  let g = new Guard(1);
+  const r: Ref<Guard> = g;
+  console.log(idRef(r) === dropAndMake(g));
+}
+// case: borrow_compare_match_block_arm_mutated
+// error: cannot move 'g' while a comparison is reading 'g'
+// A match block arm returning a move-only place in === keeps that place lent across RHS (F-2708).
+@derive(Eq)
+class Guard {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function dropAndMake(_g: Guard): Guard { return new Guard(1); }
+function main() {
+  let g = new Guard(1);
+  const g2 = new Guard(2);
+  const k: i64 = 0;
+  console.log((match (k) { case 0 => { return g; }, case _ => { return g2; } }) === dropAndMake(g));
+}
+// case: borrow_compare_mut_guard_still_usable_ok
+// expect: true 2
+// Comparing a Mut<moveOnly> with another Ref<moveOnly> and mutating through it later is allowed (F-2708).
+@derive(Eq)
+class Guard {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  bump(this: Mut<this>): void { this.n += 1; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function check(m: Mut<Guard>, other: Ref<Guard>): boolean {
+  const eq = m === other;
+  m.bump();
+  return eq;
+}
+function main() {
+  let g = new Guard(1);
+  const o = new Guard(1);
+  const eq = check(g, o);
+  console.log(eq, g.n);
+}
