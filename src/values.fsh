@@ -5928,7 +5928,8 @@ export class Expressions<C extends Context> implements Union<C> {
   private missingField(this: Mut<this>, from: Type, shape: InterfaceType | ObjectType): string | undefined {
     // A borrowed handle is the handle, counted again where it goes.
     if (this.isRefType(from) && (this.ctx.typing().jsShape(this.ctx.typing().rec(from).to) !== undefined)) from = this.ctx.typing().rec(from).to;
-    const own = this.ctx.typing().jsShape(from);
+    // A package's interface met inside a handle's shape is that handle's, as a JsValue of it is.
+    const own: InterfaceType | ObjectType | undefined = this.ctx.typing().jsShape(from) ?? (this.isInterface(from) ? from : undefined);
     if (own === shape) return undefined;
     // A pair of types met again while it is compared: handles' shapes referring to themselves
     // fit; a Fish type referring to itself has no value JS could take yet. Object types are
@@ -6019,8 +6020,7 @@ export class Expressions<C extends Context> implements Union<C> {
     // `with(o: R): R`; a Fish value referring to itself has no value JS could take yet.
     const key = `${this.ctx.typing().keyOf(from)} ${this.ctx.typing().keyOf(to)}`;
     if (this.ctx.exprsState.passing.has(key)) {
-      const held = this.isRefType(from) ? this.ctx.typing().rec(from).to : from;
-      return this.ctx.typing().jsShape(held) !== undefined;
+      return this.handleHeld(from);
     }
     this.ctx.exprsState.passing.add(key);
     try {
@@ -6028,6 +6028,17 @@ export class Expressions<C extends Context> implements Union<C> {
     } finally {
       this.ctx.exprsState.passing.delete(key);
     }
+  }
+  // Whether a value is a package's handle, or arrays and unions of them: inside a handle's shape
+  // its fields are the package's interfaces themselves, which no Fish value is typed as.
+  private handleHeld(this: Mut<this>, t: Type): boolean {
+    const held = this.isRefType(t) ? this.ctx.typing().rec(t).to : t;
+    if (held === "null") return true;
+    if (this.ctx.typing().jsShape(held) !== undefined || this.isInterface(held)) return true;
+    const r = this.recOf(held);
+    if (r?.kind === "array") return this.handleHeld(r.element);
+    if (r?.kind === "union") return r.members.every((m) => this.handleHeld(m));
+    return false;
   }
   private passesJsOnce(this: Mut<this>, from: Type, to: Type): boolean {
     const referred = this.isRefType(from) ? this.recOf(this.ctx.typing().rec(from).to) : undefined;
