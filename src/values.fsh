@@ -19,7 +19,7 @@ import { EXPRESSION_FORMS, IMPORT_META_MEMBERS, unsupported } from "./unsupporte
 import { isAsyncDisposeKey, isDisposeKey, isIteratorKey, keyParts, leafOf, unknownKey } from "./keys.fsh";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.fsh";
 import { BUFFER_ENCODINGS, BUFFER_READS, BUFFER_REFUSED, BUFFER_STATICS, JSON_VALUE_NAME, STD_BASE } from "./std.fsh";
-import { parseArgsArgs } from "./parseargs.fsh";
+import { parseArgsArgs, typedParseArgs, writtenFields } from "./parseargs.fsh";
 import { parseExpression } from "./parser.fsh";
 import { holesOf, quoted, type Category } from "./quote.fsh";
 import { holdsNull } from "./defaults.fsh";
@@ -2278,6 +2278,16 @@ export class Expressions<C extends Context> implements Union<C> {
       this.shown(e.args);
       this.ctx.tables().inspectCalls.add(cloneExpr(e));
       return { type: "string", what: "'inspect'" };
+    }
+    // `parseArgs<T>()` reads the arguments into T, through std's port with specs from its fields.
+    if (util === "parseArgs" && e.typeArgs.length === 1 && !this.ctx.view().parsedArgs.has(e)) {
+      if (e.optional) throw new CompileError("E0505", "'parseArgs' is always there, so it is called without '?.'", e.start, e.end);
+      const members = writtenFields(e.typeArgs[0]!, this.ctx.decls());
+      const tb = this.ctx.tables();
+      const typed = typedParseArgs(tb.ids, e, members, tb.files, target!.name);
+      tb.parsedArgs.add(typed.inner);
+      const made = this.ctx.tables().rewrites.replace(e, typed.call);
+      return { type: this.value(made), what: "'parseArgs'" };
     }
     // `parseArgs(config)` calls std's port with the arguments its literal says, once.
     if (util === "parseArgs" && !this.ctx.view().parsedArgs.has(e)) {
