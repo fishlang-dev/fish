@@ -85,6 +85,9 @@ const FRAME = "{ ptr, ptr, ptr }";
 const BUILT_IN = /^std:/;
 const QUIET = /^@(llvm\.|printf$|dprintf$|fflush$|fsh_rt_str_retain$|fsh_rt_str_release$)/;
 
+// The helper families made for one type, which `fishc demangle` names by that type.
+const TYPED_HELPERS = new Set<string>(["drop", "copy", "element.drop", "eq", "json", "json.read", "text", "insp", "sort.order"]);
+
 // A name inside LLVM's quotes. A generic class's instance is named by its type arguments, and a
 // test by its name, which may hold quotes, so those are escaped as LLVM spells them.
 const quoted = (name: string) => name.replace(/["\\]/g, (c) => `\\${hexByte(c.charCodeAt(0) as usize)}`);
@@ -469,6 +472,7 @@ class Codegen implements PrintHost, ComptimeHost {
   generatorOf: TypeMap<GeneratorType, InstanceId>;
   futureOf: TypeMap<FutureType, InstanceId>;
   taken: Map<string, string>;
+  helperTypes: Map<string, string>;
   glued: TypeSet<FutureType>;
   shares: Map<InstanceId, Share>;
   pairs: Map<LocalId, string>;
@@ -701,6 +705,8 @@ class Codegen implements PrintHost, ComptimeHost {
     // Each generated name in each family and what it stands for, so two things described alike
     // are never given one name.
     this.taken = new Map<string, string>();
+    // Each helper made for a type, by its symbol, and the type, which `fishc demangle` names it by.
+    this.helperTypes = new Map<string, string>();
 
     // The future types whose task glue is made.
     this.glued = new TypeSet<FutureType>();
@@ -763,6 +769,7 @@ class Codegen implements PrintHost, ComptimeHost {
   timer = partStart(this.tables.session);
   this.shares = this.sharing();
   if (prior !== undefined) this.stale = this.staleNames(prior!);
+  if (prior !== undefined) for (const [k, v] of prior!.helpers) this.helperTypes.set(k, v);
   partEnd(this.tables.session, "codegen sharing", timer);
   timer = partStart(this.tables.session);
 
@@ -1428,6 +1435,7 @@ class Codegen implements PrintHost, ComptimeHost {
     let id = stem;
     for (let n = 1; this.taken.has(`${family} ${id}`) && this.taken.get(`${family} ${id}`) !== owner; n++) id = `${stem}.${n}`;
     this.taken.set(`${family} ${id}`, owner);
+    if (TYPED_HELPERS.has(family)) this.helperTypes.set(`fsh.${family}.${id}`, `${family} ${description}`);
     return id;
   }
 
@@ -14740,7 +14748,7 @@ export type Made = { symbol: string; face: string; places: Placed[]; reads: Inst
 // What a build's codegen made, kept for `fishc watch`'s next build: each define by its symbol, the
 // module's globals and declarations by name, what each instance asked for, and how many
 // instances there were.
-export type Emitted = { defines: Map<string, string>; uses: Map<string, string[]>; items: Map<string, Item>; made: Map<InstanceId, Made>; count: usize; reemitted: usize; refusals: Map<string, usize> };
+export type Emitted = { defines: Map<string, string>; uses: Map<string, string[]>; items: Map<string, Item>; made: Map<InstanceId, Made>; count: usize; reemitted: usize; refusals: Map<string, usize>; helpers: Map<string, string> };
 
 // A global or a declaration, and which part of the module it goes in.
 export type Item = { line: string; place: "global" | "intrinsic" | "rust" | "declared" };
@@ -14817,7 +14825,7 @@ export function definesIn(lines: Ref<string[]>): Map<string, string> {
 
 // `codegen`, giving back the checked program, which what is built from the IR reads after it.
 /** @throws {CompileError} */
-export function codegenChecked(checked: Checked, options: Options): { ir: string; checked: Checked; emitted: Emitted | undefined } {
+export function codegenChecked(checked: Checked, options: Options): { ir: string; checked: Checked; emitted: Emitted | undefined; helpers: Map<string, string> } {
   let { instances, tables, warnings } = checked;
   const naming = partStart(tables.session);
   const measured = allWords(tables.typing);
@@ -14834,7 +14842,7 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
   let generator = new Codegen({ instances, tables, warnings: [] }, options);
   partEnd(generator.tables.session, "codegen setup", setup);
   const ir = prior !== undefined ? generator.module(prior!) : generator.module();
-  if (!keep) return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings }, emitted: undefined };
+  if (!keep) return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings }, emitted: undefined, helpers: generator.helperTypes };
   const keeping = partStart(generator.tables.session);
   let made = new Map<InstanceId, Made>();
   for (const id of [...generator.instances]) {
@@ -14853,9 +14861,9 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
     if (before !== undefined && before === text && prior!.uses.has(name)) uses.set(name, [...prior!.uses.get(name)!]);
     else uses.set(name, namesIn(text));
   }
-  const emitted: Emitted = { defines, uses, items: itemsOf(generator), made, count: generator.tables.arenas.instanceCount() as usize, reemitted: generator.reemitted, refusals: new Map<string, usize>([...generator.refusals]) };
+  const emitted: Emitted = { defines, uses, items: itemsOf(generator), made, count: generator.tables.arenas.instanceCount() as usize, reemitted: generator.reemitted, refusals: new Map<string, usize>([...generator.refusals]), helpers: new Map<string, string>([...generator.helperTypes]) };
   partEnd(generator.tables.session, "codegen kept", keeping);
-  return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings }, emitted };
+  return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings }, emitted, helpers: generator.helperTypes };
 }
 
 // The runtime's breadcrumb stride, in UTF-16 units.
