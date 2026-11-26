@@ -459,3 +459,20 @@ function main() {
   console.log(check("x"));
   console.log(finite(4), finite(true));
 }
+// case: number_predicates_on_a_union_holding_a_literal_or_an_enum
+// expect: true
+// expect: true false
+enum Color { Red, Green }
+function lit(p: f64 | 3 | string): boolean {
+  if (typeof p === "number") return Number.isInteger(p);
+  return false;
+}
+function shade(p: Color | f64 | string): boolean {
+  if (typeof p === "number") return Number.isInteger(p);
+  return false;
+}
+function main() {
+  const k: 3 = 3;
+  console.log(lit(k));
+  console.log(shade(Color.Green), shade(0.5));
+}
