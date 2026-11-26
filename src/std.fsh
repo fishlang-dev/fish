@@ -8368,6 +8368,63 @@ export function tasks(): TaskInfo[] {
   }
 }
 `,
+  // Deterministic simulation controls, imported as fish:sim. Active when FISH_SIM_SEED is set.
+  "fish:sim": String.raw`
+declare function fsh_rt_sim_enabled(): i32;
+declare function fsh_rt_sim_seed(): u64;
+declare function fsh_rt_sim_now(): i64;
+declare function fsh_rt_sim_advance(ms: i64): void;
+declare function fsh_rt_sim_partition(a: Ptr<u8>, b: Ptr<u8>): void;
+declare function fsh_rt_sim_heal(a: Ptr<u8>, b: Ptr<u8>): void;
+declare function fsh_rt_sim_set_delay(minMs: i64, maxMs: i64): void;
+declare function fsh_rt_sim_set_drop_rate(rate: f64): void;
+declare function fsh_rt_sim_reset_faults(): void;
+
+// Whether the runtime is executing in deterministic simulation mode (FISH_SIM_SEED set).
+export function enabled(): boolean {
+  return unsafe { fsh_rt_sim_enabled() !== 0 };
+}
+
+// The active simulation seed (0 when simulation mode is not enabled).
+export function seed(): u64 {
+  return unsafe { fsh_rt_sim_seed() };
+}
+
+// Current virtual monotonic clock in milliseconds (or real monotonic ms outside sim mode).
+export function now(): i64 {
+  return unsafe { fsh_rt_sim_now() };
+}
+
+// Advances the virtual clock by ms milliseconds and fires any newly due timers and network events.
+export function advance(ms: i64): void {
+  unsafe { fsh_rt_sim_advance(ms) };
+}
+
+// Injects a symmetric network partition between endpoints a and b (host, host:port, or "*").
+export function partition(a: string, b: string): void {
+  unsafe { fsh_rt_sim_partition(cString(a), cString(b)) };
+}
+
+// Removes a symmetric network partition between endpoints a and b.
+export function heal(a: string, b: string): void {
+  unsafe { fsh_rt_sim_heal(cString(a), cString(b)) };
+}
+
+// Sets simulated network latency range in milliseconds for virtual TCP delivery.
+export function setDelay(minMs: i64, maxMs: i64 = minMs): void {
+  unsafe { fsh_rt_sim_set_delay(minMs, maxMs) };
+}
+
+// Sets simulated network drop/reset probability in [0.0, 1.0] for virtual TCP operations.
+export function setDropRate(rate: f64): void {
+  unsafe { fsh_rt_sim_set_drop_rate(rate) };
+}
+
+// Clears all partitions, delays, and drop-rate faults.
+export function resetFaults(): void {
+  unsafe { fsh_rt_sim_reset_faults() };
+}
+`,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
   // buffer so readers can be mixed.
   stdin: String.raw`
