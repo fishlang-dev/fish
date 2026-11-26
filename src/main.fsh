@@ -25,6 +25,7 @@ import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, obje
 import { RUNTIME } from "./runtime.fsh";
 import { copyTarget, dockerfile, dockerfilePath, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
+import { displayFixPath, fixProgram } from "./fix.fsh";
 import { formatReproducer, fuzzHarnessImports, fuzzHarnessMain, liftFuzz, shellQuote, type FuzzTarget } from "./fuzz.fsh";
 import { serveLsp } from "./lsp.fsh";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.fsh";
@@ -1878,6 +1879,78 @@ async function main(): Promise<void> {
     }
     process.exit(lintPaths(paths, values.fix === true));
   }
+  if (command === "fix") {
+    const usage = "usage: fishc fix [<file.fsh>] [--dry-run] [--check]";
+    const allowed = new Set(["panic", "dry-run", "check"]);
+    if (positionals.length > 2 || flags.some((k) => !allowed.has(k)) || values.panic !== "unwind") fail(usage);
+    const dryRun = values["dry-run"] === true;
+    const checkOnly = values.check === true;
+    let entry = file;
+    let manifest: string | undefined = undefined;
+    let projectRoot = "";
+    if (entry !== undefined) {
+      if (!existsSync(entry!) || !statSync(entry!).isFile()) fail(`fishc fix: can't find file '${entry!}'`);
+      const found = findManifest(dirname(resolve(entry!)));
+      manifest = found;
+      projectRoot = found !== undefined ? dirname(found!) : dirname(resolve(entry!));
+    } else {
+      const found = findManifest(process.cwd()) ?? fail(`fishc fix: no ${MANIFEST} here or in any directory above; give a .fsh file or run inside a package`);
+      try {
+        const pkg = loadManifest(found!, "entry");
+        manifest = found;
+        projectRoot = pkg.dir;
+        entry = join(pkg.dir, pkg.entry);
+      } catch (e) {
+        if (e instanceof CompileError) {
+          console.error(painted(e, relative(process.cwd(), found!), readFileSync(found!, "utf8")));
+          process.exit(1);
+        }
+        fail(`fishc fix: ${(e as { message: string }).message}`);
+      }
+    }
+    try {
+      const report = fixProgram(entry!, manifest, projectRoot);
+      const cwd = process.cwd();
+      let writeFailed = false;
+      let failedPaths = new Set<string>();
+      if (!dryRun && !checkOnly) {
+        for (const [path, text] of report.edited) {
+          const orig = report.originals.get(path) ?? "";
+          const failed = rewrite(path, text, Buffer.from(orig));
+          if (failed !== undefined) {
+            console.error(`fishc fix: can't write '${displayFixPath(path, cwd)}': ${failed}`);
+            writeFailed = true;
+            failedPaths.add(path);
+          }
+        }
+      }
+      let reportedCount: usize = 0;
+      for (const a of report.applied) {
+        if (failedPaths.has(a.file)) continue;
+        const verb = dryRun || checkOnly ? "would fix" : "fixed";
+        console.log(`${verb} [${a.kind}] ${displayFixPath(a.file, cwd)}:${a.line}: ${a.message}`);
+        reportedCount++;
+      }
+      const entryText = report.edited.get(realpathSync(resolve(entry!))) ?? report.originals.get(realpathSync(resolve(entry!))) ?? "";
+      for (const rem of report.remaining) {
+        console.error(painted(rem, displayFixPath(realpathSync(resolve(entry!)), cwd), entryText));
+      }
+      const count = dryRun || checkOnly ? report.applied.length : reportedCount;
+      const fileCount = dryRun || checkOnly ? report.edited.size : report.edited.size - failedPaths.size;
+      if (count === 0 && report.remaining.length === 0 && !writeFailed) {
+        console.log("nothing to fix");
+      } else {
+        const prefix = dryRun || checkOnly ? "would apply" : "applied";
+        const suffix = report.remaining.length > 0 ? `, ${report.remaining.length} error${report.remaining.length === 1 ? "" : "s"} remaining` : "";
+        console.log(`${prefix} ${count} fix${count === 1 ? "" : "es"} in ${fileCount} file${fileCount === 1 ? "" : "s"}${suffix}`);
+      }
+      if (writeFailed || report.remaining.length > 0 || (checkOnly && count > 0)) process.exit(1);
+      process.exit(0);
+    } catch (e) {
+      console.error(`fishc fix: ${(e as { message: string }).message}`);
+      process.exit(1);
+    }
+  }
   if (command === "test") {
     // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
     const usage = "usage: fishc test [<filter>] [--release] [--timeout <ms>] [--jobs <n>]";
@@ -2112,7 +2185,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || fuzzFlag || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]\n       fishc fix [<file.fsh>] [--dry-run] [--check]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.

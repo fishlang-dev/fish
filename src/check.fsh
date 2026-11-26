@@ -2,7 +2,7 @@ import { memberKey, type Replaced } from "./edits.fsh";
 import { cloneBody, cloneSignature, declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.fsh";
 import { crossingOf, rustClassOf } from "./rust.fsh";
 import { newDeclarations, newTables, timingEnd, timingStart, type Compilation, type Declarations, type Tables } from "./compilation.fsh";
-import { copyNames, CompileError, compileErrors, named } from "./diag.fsh";
+import { copyNames, CompileError, compileErrors, named, withFixes, type Fix } from "./diag.fsh";
 import { warnings } from "./warnings.fsh";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.fsh";
 import { FILE_SPAN, stdModuleAt } from "./program.fsh";
@@ -43,7 +43,7 @@ type Func = Declared & { body: Stmt[] };
 // numbers it in its check, naming its slot in the IR; `localId` names it in the compilation's arena.
 // `using` marks one a `using` declaration made: it keeps its value to the end of its scope, so it
 // is never assigned to, moved, or held by a closure.
-export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; localId: LocalId; generic?: BodyId; using?: boolean };
+export type Local = { name: string; type: Type; mutable: boolean; param: boolean; id: usize; localId: LocalId; generic?: BodyId; using?: boolean; constAt?: usize };
 
 // Every function to compile: the top-level ones, then each class's constructor and methods.
 // A checked program: the functions to compile, the tables its check filled in, and the
@@ -6007,7 +6007,7 @@ class BodyChecker implements Context, GuardHost {
         // So does a regex given as a 'RegExp', which keeps its pattern's captures.
         const describes = annotated !== undefined && (this.cx.isInterface(annotated) || (annotated === ANY_REGEX && s.keyword === "const"));
         // A `using` binding is lent as a `Mut` and changed through its methods, as a `let` is.
-        this.declare(d.target.name, annotated !== undefined && !describes ? annotated : widened, s.keyword === "let" || isUsing(s.keyword), false, { ...s });
+        this.declare(d.target.name, annotated !== undefined && !describes ? annotated : widened, s.keyword === "let" || isUsing(s.keyword), false, { ...s }, s.keyword === "const" && s.declarations.length === 1 ? s.start : undefined);
         if (isUsing(s.keyword)) this.usingBound(s, d.target.name, d.init);
         const candidate = this.locals().get(s);
         if (s.keyword === "let" && annotated === undefined && type === "i64" && this.exprs().literalOnly(d.init, false)) this.cx.candidates.set(candidate!, cloneStmt(s));
@@ -6624,10 +6624,10 @@ class BodyChecker implements Context, GuardHost {
   }
 
   /** @throws {CompileError} */
-  declare(this: Mut<this>, name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param | Expr): void {
+  declare(this: Mut<this>, name: string, type: Type, mutable: boolean, param: boolean, node: Stmt | Param | Expr, constAt?: usize): void {
     // A destructuring's own variable, named for its pattern, may repeat; nothing names it.
     if (this.innerScope().has(name) && !name.startsWith("[") && !name.startsWith("{")) throw new CompileError("E0402", `cannot redeclare '${name}' in the same scope`, node.start, node.end);
-    const localId = this.cx.tables.arenas.addLocal({ name, type, mutable, param, id: this.cx.nextLocal++ }).localId;
+    const localId = this.cx.tables.arenas.addLocal({ name, type, mutable, param, id: this.cx.nextLocal++, constAt }).localId;
     const depth = this.scopeList().length;
     this.state.depths.set(localId, depth);
     this.innerScope().set(name, localId);
@@ -6771,7 +6771,9 @@ class BodyChecker implements Context, GuardHost {
     // mutable reference it holds a copy of; as in Rust, only a copy of a `let` may change.
     if (this.f().closure!.move && !(this.cx.isRef(type) && (path !== "" || throughMut))) {
       if (this.outerChecker().constant(held)) {
-        throw new CompileError("E0207", `cannot ${action} '${name}${path}' in this closure because '${name}' is a constant; declare it with 'let'`, target.start, target.end);
+        const at = this.cx.localOf(held).constAt;
+        const fixes: Fix[] = at !== undefined ? [{ kind: "mut", message: `change 'const' to 'let' on '${name}'`, edits: [{ start: at, end: at + 5, text: "let" }] }] : [];
+        throw withFixes(new CompileError("E0207", `cannot ${action} '${name}${path}' in this closure because '${name}' is a constant; declare it with 'let'`, target.start, target.end), fixes);
       }
       return;
     }
