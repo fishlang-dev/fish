@@ -703,3 +703,21 @@ async function main() {
   const b = await nextOf<i64>(h);
   if (b === null) console.log("done");
 }
+// case: async_generator_for_await_in_a_generic_class
+// expect: qr
+// expect: 1
+class Src<V> { items: V[] = []; async *each(): AsyncGenerator<V> { for (const x of this.items) yield x.clone(); } }
+class Sink<V> { src: Src<V> = new Src<V>();
+  async collect(): Promise<V[]> { let out: V[] = []; for await (const x of this.src.each()) out.push(x); return out; } }
+async function main() { let s = new Sink<string>(); s.src.items.push("q"); s.src.items.push("r"); const r = await s.collect(); console.log(r.join(""));
+  let t = new Sink<i64>(); t.src.items.push(9); const u = await t.collect(); console.log(u.length); }
+// case: async_generator_for_await_over_own_method_in_a_generic_class
+// expect: q
+class Src<V> { items: V[] = []; async *each(): AsyncGenerator<V> { for (const x of this.items) yield x.clone(); }
+  async collect(): Promise<V[]> { let out: V[] = []; for await (const x of this.each()) out.push(x); return out; } }
+async function main() { let s = new Src<string>(); s.items.push("q"); const r = await s.collect(); console.log(r.join("")); }
+// case: async_generator_for_await_in_a_generic_function
+// expect: 1
+class Src<V> { items: V[] = []; async *each(): AsyncGenerator<V> { for (const x of this.items) yield x.clone(); } }
+async function collect<V>(s: Ref<Src<V>>): Promise<i64> { let n = 0; for await (const x of s.each()) n++; return n; }
+async function main() { let s = new Src<string>(); s.items.push("q"); const n = await collect(s); console.log(n); }

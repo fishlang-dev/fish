@@ -3045,6 +3045,20 @@ export class Typing {
     const found = swap.get(t);
     if (found !== undefined) return found;
     if (typeof t === "string") return t;
+    // A future made of others, as `Promise.all` makes, is made again of theirs replaced, and an
+    // async generator's `next()` of its generator replaced.
+    const combined = this.combinedOf.get(t as FutureType);
+    if (combined !== undefined) {
+      const futures = combined.futures.map((f) => this.replaced(f, swap) as FutureType | HandleType | DynType);
+      const array = combined.array === undefined ? undefined : (this.replaced(combined.array, swap) as ArrayType);
+      if (!futures.some((f, i) => f !== combined.futures[i as usize]) && array === combined.array) return t;
+      return this.combinedFuture({ ...combined, futures, array });
+    }
+    const leaf = this.leafOf.get(t as FutureType);
+    if (leaf !== undefined && leaf.method === "next") {
+      const of = this.replaced(leaf.of, swap);
+      return of === leaf.of ? t : this.leafFuture("next", of, undefined, leaf.signal);
+    }
     if (this.unswappable(t) && [...swap.keys()].every((k) => this.kindOf(k) === "param")) return t;
     const r = this.rec(t);
     if (r.kind === "class") {
