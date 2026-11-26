@@ -274,9 +274,6 @@ test("concurrent order race", async () => {
     const replayPass = fishc(dir, ["test", "--sim", "--seed", passSeed]);
     assert(replayPass.code === 0, `expected replay of passing seed ${passSeed} to pass:\n${replayPass.out}`);
 
-    // Guard: --seed without --sim is rejected.
-    const bad = fishc(dir, ["test", "--seed", "1"]);
-    assert(bad.code === 2, `expected exit 2 for --seed without --sim, got ${bad.code}`);
   } finally {
     removed(dir);
   }

@@ -85,7 +85,7 @@ test("a private static field is never suggested outside its class", () => {
 
 test("std's internal classes are never suggested", () => {
   const server = 'function f(r: Request): Response { return new Response("a"); }\nfunction main() { ';
-  same(analyzed(`${server}const h = new Http2(); }\n`), "only a class can be constructed with 'new'", "Http2");
+  same(analyzed(`${server}const h = new Http3(); }\n`), "only a class can be constructed with 'new'", "Http3");
   same(analyzed(`${server}const h = new HttpHed(); }\n`), "only a class can be constructed with 'new'", "HttpHed");
   same(analyzed(`${server}const h: Htp1 = 1; }\n`), "cannot find type 'Htp1'", "Htp1");
 });
