@@ -1346,6 +1346,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   demanded: usize;
   instancingState: InstancingState;
   querying: Set<string>;
+  // Whether a generic function's definition is being checked, where a type computed per instance
+  // is refused rather than stood in for.
+  definingGeneric: boolean;
   // A generic definition's placeholder for each comptime argument, one per argument.
   placeholders: NodeMap<Expr, Type>;
   // The targets some `break` leaves, and the loops some `continue` repeats.
@@ -1418,6 +1421,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.instancingState = new InstancingState();
     this.querying = new Set<string>();
     this.placeholders = new NodeMap<Expr, Type>();
+    this.definingGeneric = false;
     this.broken = new NodeSet<Stmt>();
     this.continued = new NodeSet<Stmt>();
     this.inProgress = new Set<InstanceId>();
@@ -1844,7 +1848,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   /** @throws {CompileError} */
   resolveIn(this: Mut<this>, scope: Ref<Map<string, Type>> | undefined, t: Ref<TypeNode>): Type {
-    return this.resolver().resolveIn(scope, t);
+    try {
+      return this.resolver().resolveIn(scope, t);
+    } catch (e) {
+      // A call inferring its callee's type arguments reads a `T[K]` over placeholders as a
+      // placeholder of its own; the instance it makes computes it. A generic definition still
+      // refuses it, which its check below takes as checking per instance.
+      if (this.definingGeneric || !(e instanceof CompileError) || !perInstance(e)) throw e;
+      return this.tables.typing.typeParameter("per instance", undefined, undefined);
+    }
   }
 
   /** @throws {CompileError} */
@@ -2066,9 +2078,12 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     for (const id of [...this.funcs]) {
       try {
+        this.definingGeneric = this.instancing().generic(id);
         const definition = this.definition(id);
         this.checkBody(definition);
+        this.definingGeneric = false;
       } catch (e) {
+        this.definingGeneric = false;
         // `keyof T` and `T[K]` over the function's own type parameters are computed per instance,
         // so a generic function using them is checked as each call instantiates it.
         if (e instanceof CompileError && perInstance(e) && this.instancing().generic(id)) continue;
