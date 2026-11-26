@@ -4800,8 +4800,11 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   return t;
 }
 
-// The same, queued.
+static void fsh_rt_start_background(void);
+
+// The same, queued. In a library nothing started the runtime, so its first spawn does.
 fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  if (!fsh_queues && !fsh_sim_active) fsh_rt_start_background();
   fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 0);
   fsh_schedule(t);
   return t;
@@ -10491,6 +10494,34 @@ static int32_t fsh_sim_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_
   fsh_main_task->outcome = 0;
   fsh_task_release(fsh_main_task);
   return outcome;
+}
+
+// The runtime started with no main task, for a library whose host calls in from its own threads:
+// the workers, the reactor and the timer thread, once, left running until the process ends.
+// ponytail: a panicking task here prints its message but nothing waits to end the process with
+// 101, as a program's main thread does; give libraries a panic hook if that matters.
+static pthread_once_t fsh_background_once = PTHREAD_ONCE_INIT;
+static void fsh_background_start(void) {
+  long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  fsh_workers = cores > 0 ? cores : 1;
+  fsh_queue *queues = calloc(fsh_workers, sizeof(fsh_queue));
+  fsh_threads = calloc(fsh_workers, sizeof(pthread_t));
+  for (int64_t i = 0; i < fsh_workers; i++) pthread_mutex_init(&queues[i].lock, NULL);
+  fsh_queues = queues;
+  fsh_io_start();
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 64 << 20);
+  for (int64_t i = 0; i < fsh_workers; i++) {
+    pthread_create(&fsh_threads[i], &attr, fsh_work, (void *)i);
+    pthread_detach(fsh_threads[i]);
+  }
+  pthread_attr_destroy(&attr);
+  pthread_create(&fsh_timer_thread, NULL, fsh_timing, NULL);
+  pthread_detach(fsh_timer_thread);
+}
+static void fsh_rt_start_background(void) {
+  pthread_once(&fsh_background_once, fsh_background_start);
 }
 
 // Runs an async main: starts the workers, runs main as the first task until it is done or a

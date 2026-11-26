@@ -9002,6 +9002,337 @@ export class Pool {
   }
 }
 `,
+  // Redis over RESP2, as node-redis's createClient shapes it: commands on a pool of connections,
+  // and publish and subscribe.
+  redis: String.raw`// A reply as the server gives it: a status or bulk string, an integer, an array, or nil.
+export type RedisReply = null | string | i64 | RedisReply[];
+
+// An error reply from the server, as "WRONGTYPE Operation against a key ...": its message, and its
+// first word as the code.
+export class RedisError extends Error {
+  code: string;
+  constructor(message: string) {
+    super(message);
+    this.name = "RedisError";
+    const space = message.indexOf(" ");
+    this.code = space < 0 ? message : message.slice(0, space);
+  }
+}
+
+// url is redis://[user:password@]host[:port][/database], or rediss:// over TLS; poolSize is how
+// many connections the client keeps at most.
+export type RedisClientOptions = { url?: string; poolSize?: i64 };
+// SET's options: a lifetime in seconds or milliseconds, and setting only when the key is missing
+// or only when it is there.
+export type SetOptions = { EX?: i64; PX?: i64; NX?: boolean; XX?: boolean };
+// A message published to a channel the subscriber listens on.
+export type RedisMessage = { channel: string; message: string };
+
+type Config = { host: string; port: i64; user: string; password: string; database: i64; tls: boolean; max: i64 };
+
+// One connection, holding what it read past the last reply.
+class Conn {
+  stream: TcpStream;
+  buffer: u8[] = [];
+
+  constructor(stream: TcpStream) {
+    this.stream = stream;
+  }
+
+  // A connection to the server, signed in and on its database.
+  static async open(c: Ref<Config>): Promise<Conn> throws RedisError | IoError | AbortError {
+    const stream = await TcpStream.connect(c.host, c.port);
+    if (c.tls) await __tlsClient(stream, c.host, "", new AbortController().signal);
+    let conn = new Conn(stream);
+    if (c.password.length > 0) {
+      const auth: string[] = c.user.length > 0 ? ["AUTH", c.user, c.password] : ["AUTH", c.password];
+      await conn.call(auth);
+    }
+    if (c.database !== 0) {
+      const select: string[] = ["SELECT", String(c.database)];
+      await conn.call(select);
+    }
+    return conn;
+  }
+
+  // Sends a command and reads its reply, an error reply thrown.
+  async call(this: Mut<this>, args: Ref<string[]>): Promise<RedisReply> throws RedisError | IoError | AbortError {
+    await this.stream.write(encode(args));
+    const reply = await this.reply();
+    if (reply instanceof RedisError) throw reply;
+    return reply;
+  }
+
+  // The next reply, an error reply given rather than thrown.
+  async reply(this: Mut<this>): Promise<RedisReply | RedisError> throws IoError | AbortError {
+    while (true) {
+      const parsed = parse(this.buffer, 0);
+      if (parsed !== null) {
+        const rest = this.buffer.splice(parsed.next);
+        this.buffer = rest;
+        return parsed.value;
+      }
+      const got = await this.stream.read(65536);
+      if (got.length === 0) throw new IoError("the Redis server closed the connection");
+      for (const b of got) this.buffer.push(b);
+    }
+  }
+}
+
+// A command as RESP sends it: an array of bulk strings.
+function encode(args: Ref<string[]>): u8[] {
+  let out = new TextEncoder().encode("*" + String(args.length as i64) + "\r\n");
+  for (const arg of args) {
+    const bytes = new TextEncoder().encode(arg);
+    for (const b of new TextEncoder().encode("$" + String(bytes.length as i64) + "\r\n")) out.push(b);
+    for (const b of bytes) out.push(b);
+    out.push(13);
+    out.push(10);
+  }
+  return out;
+}
+
+type Parsed = { value: RedisReply | RedisError; next: i64 };
+
+// Where the line starting at an index ends, at its CR, or -1 when its CR LF hasn't come yet.
+function lineEnd(b: Ref<u8[]>, at: i64): i64 {
+  for (let i = at; i + 1 < (b.length as i64); i++) if (b[i as usize] === 13 && b[(i + 1) as usize] === 10) return i;
+  return -1;
+}
+
+// The reply starting at an index and where the next one starts, or null when it hasn't all come.
+// An error inside an array stands for the whole reply, as the client only gives it to throw.
+// ponytail: a reply is parsed again from its start after each read; a parser keeping its place
+// would read a large reply in one pass.
+function parse(b: Ref<u8[]>, at: i64): Parsed | null {
+  const end = lineEnd(b, at);
+  if (end < 0) return null;
+  const kind = b[at as usize];
+  const line = new TextDecoder().decode(b.slice(at + 1, end));
+  const next = end + 2;
+  if (kind === 43) return { value: line, next: next };
+  if (kind === 45) return { value: new RedisError(line), next: next };
+  if (kind === 58) return { value: parseInt(line) ?? 0, next: next };
+  if (kind === 36) {
+    const n = parseInt(line) ?? -1;
+    if (n < 0) return { value: null, next: next };
+    if ((b.length as i64) < next + n + 2) return null;
+    return { value: new TextDecoder().decode(b.slice(next, next + n)), next: next + n + 2 };
+  }
+  if (kind === 42) {
+    const n = parseInt(line) ?? -1;
+    if (n < 0) return { value: null, next: next };
+    let items: RedisReply[] = [];
+    let failed: RedisError | null = null;
+    let at2 = next;
+    for (let i = 0; i < n; i++) {
+      const item = parse(b, at2);
+      if (item === null) return null;
+      at2 = item.next;
+      const v = item.value;
+      if (v instanceof RedisError) failed = v;
+      else items.push(v);
+    }
+    if (failed !== null) return { value: failed, next: at2 };
+    return { value: items, next: at2 };
+  }
+  return { value: new RedisError("ERR the server sent a reply this client can't read, starting with byte " + String(kind as i64)), next: next };
+}
+
+// A redis:// or rediss:// URL as what to connect to.
+function config(url: string, max: i64): Config throws TypeError {
+  let u = new URL("redis://localhost");
+  try {
+    u = new URL(url);
+  } catch (e) {
+    // The URL itself isn't repeated, as it may hold a password.
+    throw new TypeError("the Redis URL can't be read as a URL: " + e.message);
+  }
+  if (u.protocol !== "redis:" && u.protocol !== "rediss:") throw new TypeError("a Redis URL starts with redis:// or rediss://, not " + u.protocol);
+  const port = u.port.length === 0 ? 6379 : parseInt(u.port) ?? 6379;
+  const path = u.pathname.startsWith("/") ? u.pathname.slice(1) : u.pathname;
+  const database = path.length === 0 ? 0 : parseInt(path) ?? -1;
+  if (database < 0) throw new TypeError("a Redis URL's path is the database's number, not '" + path + "'");
+  if (max < 1) throw new TypeError("poolSize is a whole number of at least 1, not " + String(max));
+  const host = u.hostname.startsWith("[") ? u.hostname.slice(1, (u.hostname.length as i64) - 1) : u.hostname;
+  return { host: host.length === 0 ? "localhost" : host, port: port, user: unescaped(u.username), password: unescaped(u.password), database: database, tls: u.protocol === "rediss:", max: max };
+}
+
+type Shared = { gate: Semaphore; idle: Lock<Conn[]> };
+
+// A client of one server, as node-redis's createClient gives: commands run on a pool of
+// connections, at most poolSize, each running one command at a time; a connection that breaks is
+// dropped and the next command opens another. Clones share the pool.
+export class RedisClient {
+  private config: Config;
+  private state: shared<Shared>;
+
+  constructor(config: Config) {
+    const idle: Conn[] = [];
+    this.state = shared<Shared>({ gate: new Semaphore(config.max), idle: new Lock<Conn[]>(idle) });
+    this.config = config;
+  }
+
+  // Opens a connection now, so a wrong address or password fails here rather than at the first command.
+  async connect(this: Ref<this>): Promise<void> throws RedisError | IoError | AbortError {
+    const conn = await Conn.open(this.config);
+    this.state.idle.update((cs) => cs.push(conn));
+  }
+
+  // Any command, as its words, and the reply the server gives.
+  async sendCommand(this: Ref<this>, args: string[]): Promise<RedisReply> throws RedisError | IoError | AbortError {
+    const state = this.state.clone();
+    const _permit = await state.gate.acquire();
+    const idle = state.idle.update((cs) => cs.pop());
+    let conn: Conn;
+    if (idle === null) conn = await Conn.open(this.config);
+    else conn = idle;
+    await conn.stream.write(encode(args));
+    const reply = await conn.reply();
+    // The server answered, so the connection is whole and goes back to the pool.
+    state.idle.update((cs) => cs.push(conn));
+    if (reply instanceof RedisError) throw reply;
+    return reply;
+  }
+
+  async ping(this: Ref<this>): Promise<string> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["PING"]);
+    return asText(reply);
+  }
+
+  // The string at a key, or null when there is none.
+  async get(this: Ref<this>, key: string): Promise<string | null> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["GET", key]);
+    if (reply === null) return null;
+    return asText(reply);
+  }
+
+  // "OK", or null when NX or XX kept it from setting.
+  async set(this: Ref<this>, key: string, value: string, options: SetOptions = {}): Promise<string | null> throws RedisError | IoError | AbortError {
+    let args: string[] = ["SET", key, value];
+    const ex = options.EX;
+    if (ex !== null) {
+      args.push("EX");
+      args.push(String(ex));
+    }
+    const px = options.PX;
+    if (px !== null) {
+      args.push("PX");
+      args.push(String(px));
+    }
+    if (options.NX === true) args.push("NX");
+    if (options.XX === true) args.push("XX");
+    const reply = await this.sendCommand(args);
+    if (reply === null) return null;
+    return asText(reply);
+  }
+
+  async incr(this: Ref<this>, key: string): Promise<i64> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["INCR", key]);
+    return asInteger(reply);
+  }
+
+  async incrBy(this: Ref<this>, key: string, by: i64): Promise<i64> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["INCRBY", key, String(by)]);
+    return asInteger(reply);
+  }
+
+  async decr(this: Ref<this>, key: string): Promise<i64> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["DECR", key]);
+    return asInteger(reply);
+  }
+
+  // How many of the keys there were to delete.
+  async del(this: Ref<this>, keys: string | string[]): Promise<i64> throws RedisError | IoError | AbortError {
+    let args: string[] = ["DEL"];
+    if (typeof keys === "string") args.push(keys);
+    else for (const k of keys) args.push(k);
+    const reply = await this.sendCommand(args);
+    return asInteger(reply);
+  }
+
+  async exists(this: Ref<this>, key: string): Promise<boolean> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["EXISTS", key]);
+    return asInteger(reply) === 1;
+  }
+
+  // Whether the key was there to be given a lifetime of seconds.
+  async expire(this: Ref<this>, key: string, seconds: i64): Promise<boolean> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["EXPIRE", key, String(seconds)]);
+    return asInteger(reply) === 1;
+  }
+
+  // Seconds the key has left, -1 when it has no lifetime and -2 when it isn't there.
+  async ttl(this: Ref<this>, key: string): Promise<i64> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["TTL", key]);
+    return asInteger(reply);
+  }
+
+  // How many subscribers got the message.
+  async publish(this: Ref<this>, channel: string, message: string): Promise<i64> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["PUBLISH", channel, message]);
+    return asInteger(reply);
+  }
+
+  // The messages published to the channels, on a connection of their own that stays subscribed
+  // until the loop over them ends.
+  async *subscribe(this: Ref<this>, channels: string | string[]): AsyncGenerator<RedisMessage> throws RedisError | IoError | AbortError {
+    let conn = await Conn.open(this.config);
+    let args: string[] = ["SUBSCRIBE"];
+    if (typeof channels === "string") args.push(channels);
+    else for (const c of channels) args.push(c);
+    await conn.stream.write(encode(args));
+    while (true) {
+      const reply = await conn.reply();
+      if (reply instanceof RedisError) throw reply;
+      if (!Array.isArray(reply) || reply.length !== 3) continue;
+      const kind = reply[0].clone();
+      const channel = reply[1].clone();
+      const message = reply[2].clone();
+      if (kind === "message" && typeof channel === "string" && typeof message === "string") yield { channel: channel, message: message };
+    }
+  }
+
+  // Closes the idle connections; a command after this opens new ones.
+  close(this: Ref<this>) {
+    this.state.idle.update((cs) => { while (cs.length > 0) cs.pop(); });
+  }
+}
+
+export function createClient(options: RedisClientOptions = {}): RedisClient throws TypeError {
+  return new RedisClient(config(options.url ?? "redis://localhost:6379", options.poolSize ?? 10));
+}
+
+// A URL's user or password with its percent escapes decoded.
+function unescaped(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let out: u8[] = [];
+  let i: usize = 0;
+  while (i < bytes.length) {
+    if (bytes[i] === 37 && i + 2 < bytes.length) {
+      const n = parseInt(new TextDecoder().decode(bytes.slice((i + 1) as i64, (i + 3) as i64)), 16);
+      if (n !== null) {
+        out.push(n as u8);
+        i += 3;
+        continue;
+      }
+    }
+    out.push(bytes[i]);
+    i += 1;
+  }
+  return new TextDecoder().decode(out);
+}
+
+function asText(reply: RedisReply): string throws RedisError {
+  if (typeof reply === "string") return reply;
+  throw new RedisError("ERR the server's reply isn't a string");
+}
+
+function asInteger(reply: RedisReply): i64 throws RedisError {
+  if (typeof reply === "number") return reply;
+  throw new RedisError("ERR the server's reply isn't an integer");
+}
+`,
   // SQLite through the system's library, which links into a program only when it imports this:
   // statements with parameters bound apart from their text, and rows read by column name into a
   // type, as the postgres module reads them.
@@ -11060,7 +11391,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.

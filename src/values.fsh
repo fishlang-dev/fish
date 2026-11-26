@@ -215,6 +215,8 @@ export interface Context {
   macroBody(id: BodyId): boolean;
   // The instance being checked.
   checking(): InstanceId;
+  // Whether the program is a library, whose runtime its first spawn starts, so a sync export may.
+  library(): boolean;
   tables(this: Mut<this>): Mut<Tables>;
   // The typing, for reading records from a method that changes nothing.
   typing(): Ref<Typing>;
@@ -2073,7 +2075,7 @@ export class Expressions<C extends Context> implements Union<C> {
     // what `spawnBlocking` becomes.
     const spawning = callee.kind === "ident" && callee.name === "blocking spawn" ? "spawnBlocking" : "spawn";
     if (callee.kind === "ident" && ((callee.name === "spawn" && (!this.ctx.byName().has("spawn") || inStd)) || (callee.name === "timer spawn" && inStd) || callee.name === "blocking spawn")) {
-      if (!this.ctx.st.async) throw new CompileError("E0301", "'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
+      if (!this.ctx.st.async && !(spawning === "spawn" && this.ctx.library())) throw new CompileError("E0301", "'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
       if (e.args.length !== 1) throw new CompileError("E0305", "'spawn' takes the Promise to run, like 'spawn(save(user))'", e.start, e.end);
       // `spawn(async () => ...)` runs the arrow's body as the task: its call is what is spawned.
       const given: Ref<Expr> = e.args[0]!;

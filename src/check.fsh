@@ -4103,6 +4103,9 @@ class BodyChecker implements Context, GuardHost {
   checking(): InstanceId {
     return this.state.instanceId;
   }
+  library(): boolean {
+    return this.cx.library;
+  }
   macroBody(id: BodyId): boolean {
     return this.cx.macroBodies.has(id);
   }
