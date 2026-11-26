@@ -7,7 +7,9 @@
 // only when a build's totals are worse than the baseline by more than budget.json's noise. A
 // stage's own numbers are marked, not gated, since an item may move work from one stage to
 // another. `--record` writes this run as the baseline. The baseline is one machine's: a run on
-// another says so and compares nothing.
+// another says so and compares nothing. A fishc that takes --timings-json also gives the files each
+// build's time went to, the costliest printed after its table and not gated, since an item may move
+// work from one file to another.
 //   fishc run scripts/budget.fsh -- [--fishc <path>] [--build dev|release] [--record]
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -17,6 +19,8 @@ import { cacheDir, hostKey } from "./stage0.fsh";
 
 type Phase = { stage: string; ms: f64; cpu: f64; peak: i64; children: i64 };
 type Build = { kind: string; wall: f64; cpu: f64; peak: i64; footprint: i64; size: i64; phases: Phase[] };
+type FileRow = { file: string; parse: f64; check: f64; codegen: f64; instances: i64 };
+type Timed = { files: FileRow[] };
 type Baseline = { machine: string; commit: string; recorded: string; builds: Build[] };
 type Noise = { time: f64; seconds: f64; memory: f64; bytes: i64; size: f64 };
 type Budget = { wall: f64[]; peak: i64[]; noise: Noise };
@@ -69,8 +73,25 @@ function phasesOf(err: string): Phase[] {
   return phases;
 }
 
-// One cold build of `src` by `fishc`, measured.
-function measured(fishc: string, src: string, kind: string): Build throws IoError {
+// Whether `fishc` takes --timings-json, which a fishc built before it doesn't know.
+function writesJson(fishc: string): boolean {
+  const r = spawnSync(fishc, ["check", "none.fsh", "--timings-json", "none.json"], { cwd: tmpdir() });
+  return !new TextDecoder().decode(r.stderr).includes("--timings-json");
+}
+
+// The costliest `shown` files of a build's --timings-json.
+function costliest(json: string, shown: usize): void throws IoError | JsonError {
+  const files = JSON.parse<Timed>(readFileSync(json, "utf8")).files;
+  const s = (ms: f64) => `${(ms / 1000).toFixed(1)} s`;
+  console.log(row(["file", "parse", "check", "codegen", "instances"]));
+  for (let i: usize = 0; i < files.length && i < shown; i++) {
+    const f: Ref<FileRow> = files[i]!;
+    console.log(row([f.file, s(f.parse), s(f.check), s(f.codegen), `${f.instances}`]));
+  }
+}
+
+// One cold build of `src` by `fishc`, measured, its costliest files printed when `json`.
+function measured(fishc: string, src: string, kind: string, json: boolean): Build throws IoError | JsonError {
   const cache = mkdtempSync(join(tmpdir(), "fish-budget-"));
   try {
     if (spawnSync("cp", ["-R", join(cacheDir(), "stage0"), join(cache, "stage0")]).status !== 0) fail(`can't copy stage 0 from ${cacheDir()}`);
@@ -79,10 +100,13 @@ function measured(fishc: string, src: string, kind: string): Build throws IoErro
     const release = kind === "release" ? "--release" : "";
     console.log(`building src cold, ${kind}, with ${fishc}`);
     const started = performance.now();
-    const r = spawnSync("sh", ["-c", `FISH_CACHE_DIR="$2" FISH_USAGE=1 /usr/bin/time -l "$0" build main.fsh ${release} --timings -o "$3" 2> "$1" > /dev/null`, fishc, log, cache, out], { cwd: src });
+    const timings = join(cache, "timings.json");
+    const asJson = json ? `--timings-json "${timings}"` : "";
+    const r = spawnSync("sh", ["-c", `FISH_CACHE_DIR="$2" FISH_USAGE=1 /usr/bin/time -l "$0" build main.fsh ${release} --timings ${asJson} -o "$3" 2> "$1" > /dev/null`, fishc, log, cache, out], { cwd: src });
     const err = readFileSync(log, "utf8");
     if (r.status !== 0) fail(`the ${kind} build exited with ${r.status ?? -1}:\n${err.slice(-4000)}`);
     console.log(`  done in ${Math.round((performance.now() - started) / 1000)}s`);
+    if (json) costliest(timings, 10);
     const real = number(err, /([\d.]+) real/);
     const cpu = number(err, /([\d.]+) user/) + number(err, /([\d.]+) sys/);
     const peak = number(err, /(\d+) +maximum resident set size/) as i64;
@@ -184,7 +208,8 @@ function main(): void throws IoError | Error | JsonError {
     else console.log(`the baseline is ${b.machine}'s and this is ${here}: nothing is compared`);
   } else console.log("no baseline recorded yet: record one with --record");
   let builds: Build[] = [];
-  for (const kind of KINDS) if (only === undefined || only! === kind) builds.push(measured(fishc, join(root, "src"), kind));
+  const json = writesJson(fishc);
+  for (const kind of KINDS) if (only === undefined || only! === kind) builds.push(measured(fishc, join(root, "src"), kind, json));
   let worse: string[] = [];
   for (const b of builds) {
     let was: Build | undefined = undefined;

@@ -9,7 +9,7 @@ import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Interf
 import type { Categories, Free, Hygiene, Quote } from "./quote.fsh";
 import type { RegexTables } from "./regex.fsh";
 import type { RustClass, RustName, RustTables } from "./rust.fsh";
-import type { Locking } from "./program.fsh";
+import { FILE_SPAN, type Locking } from "./program.fsh";
 import type { TopKeys } from "./keys.fsh";
 import { TypeMap, Typing, type ClassType, type DynType, type LiteralType, type Type, type UnionType } from "./typing.fsh";
 import type { DynTable } from "./values.fsh";
@@ -539,7 +539,14 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
 // stage ended, the most a stage ended at when it runs more than once. `stop`, from FISH_MEM_STOP, is
 // the stage the process ends after. `usage`, kept when FISH_USAGE=1 asks, is each stage's CPU time
 // and peaks, read from getrusage alone, since FISH_MEM's `ps` at each body's end would skew the times.
-export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading>; tables?: string; stop?: string; usage?: Usage };
+// `files` is each file's share, by the offset it starts at, named in `names`; `fileInner` is to it
+// what `inner` is to the stages. `json`, from `--timings-json`, is where the times are written.
+export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading>; tables?: string; stop?: string; usage?: Usage; files: Map<usize, FileCost>; names: Map<usize, string>; fileInner: f64; json?: string };
+
+// A file's share of a build in ms: the parse of its text; the checks of its bodies, their move
+// checks and comptime included and the checks they needed of other bodies left out; the emission
+// of its instances; and how many instances it was compiled to.
+export type FileCost = { parse: f64; check: f64; codegen: f64; instances: usize };
 
 // Each stage's own CPU time in ms, fishc's and its children's, left out of the stage around it as
 // `ms` is; the most fishc and the largest of its children had been resident as it last ended, in
@@ -626,7 +633,7 @@ export const STOP_STAGES = ["parse", "check", "codegen"];
 export const NATIVE_STAGES = ["compile", "runtime", "link"];
 
 export function newTimings(): Timings {
-  const made: Timings = { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 }, report: true };
+  const made: Timings = { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 }, report: true, files: new Map(), names: new Map(), fileInner: 0 };
   return made;
 }
 
@@ -701,6 +708,54 @@ export function partStart(session: Ref<Session>): Started {
 export function partEnd(session: Mut<Session>, name: string, started: Ref<Started>) {
   if (!started.timing || session.timings === undefined) return;
   session.timings.ms.set(name, (session.timings.ms.get(name) ?? 0) + now(session.timings) - started.start);
+}
+
+// Starts timing a file's share of a stage, as `stageStart` does a stage.
+export function fileStart(session: Mut<Session>): Started {
+  if (session.timings === undefined) return { timing: false, outer: 0, start: 0, cpuOuter: 0, cpuStart: 0 };
+  const outer = session.timings.fileInner;
+  session.timings.fileInner = 0;
+  return { timing: true, outer, start: now(session.timings), cpuOuter: 0, cpuStart: 0 };
+}
+
+// Adds the time since `started`, less the file shares timed inside it, to the `part` of the file
+// holding source offset `at`, counting an instance when `instance`.
+export function fileEnd(session: Mut<Session>, at: usize, part: "parse" | "check" | "codegen", started: Ref<Started>, instance = false) {
+  if (!started.timing || session.timings === undefined) return;
+  const spent = now(session.timings) - started.start;
+  const own = spent - session.timings.fileInner;
+  session.timings.fileInner = started.outer + spent;
+  const base = at - (at % (FILE_SPAN as usize));
+  const was = session.timings.files.get(base);
+  let cost: FileCost = was === undefined ? { parse: 0, check: 0, codegen: 0, instances: 0 } : { parse: was!.parse, check: was!.check, codegen: was!.codegen, instances: was!.instances };
+  if (part === "parse") cost.parse += own;
+  else if (part === "check") cost.check += own;
+  else cost.codegen += own;
+  if (instance) cost.instances++;
+  session.timings.files.set(base, cost);
+}
+
+// Each file's costs, costliest first, named as the program writes them; std's prelude is in no
+// file of the program.
+export function fileCosts(timings: Ref<Timings>): ({ file: string } & FileCost)[] {
+  let out: ({ file: string } & FileCost)[] = [];
+  for (const [base, c] of timings.files) out.push({ file: timings.names.get(base) ?? "<fish std>", parse: c.parse, check: c.check, codegen: c.codegen, instances: c.instances });
+  out.sort((a, b) => b.parse + b.check + b.codegen - (a.parse + a.check + a.codegen));
+  return out;
+}
+
+// The `shown` costliest files, one line each, and how many more there are.
+export function formatFiles(timings: Ref<Timings>, shown: usize): string {
+  const costs = fileCosts(timings);
+  if (costs.length === 0) return "";
+  const ms = (n: f64) => `${n.toFixed(1)} ms`.padStart(13);
+  let out = `${"file".padEnd(32)}${"parse".padStart(13)}${"check".padStart(13)}${"codegen".padStart(13)}${"instances".padStart(11)}\n`;
+  for (let i: usize = 0; i < costs.length && i < shown; i++) {
+    const c: Ref<{ file: string } & FileCost> = costs[i]!;
+    out += `${c.file.padEnd(32)}${ms(c.parse)}${ms(c.check)}${ms(c.codegen)}${`${c.instances}`.padStart(11)}\n`;
+  }
+  if (costs.length > shown) out += `${costs.length - shown} more files; --timings-json <path> lists every one\n`;
+  return out;
 }
 
 // Runs `run`, adding its own time to stage `name` when timing.

@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { bodyOf, type Arenas } from "./arenas.fsh";
 import { C_KEYWORDS } from "./check.fsh";
 import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.fsh";
-import { formatMemory, formatTimings, formatUsage, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Peaks, type Reading, type Session, type Tables } from "./compilation.fsh";
+import { fileCosts, formatFiles, formatMemory, formatTimings, formatUsage, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Peaks, type Reading, type Session, type Tables, type Timings } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { cachedSession } from "./mathlib.fsh";
 import { CompileError, copyNames, formatError, movedOffset, type BorrowEvent, type Names, type Source } from "./diag.fsh";
@@ -911,9 +911,9 @@ export function indented(json: string): string {
   return out;
 }
 
-// A session for one build, with the lockfile kept as it is when `locked`, timed when `timed`, and
-// reading no cached check when `checking`.
-function sessionWith(locked: boolean, timed: boolean, checking = false): BuildSession {
+// A session for one build, with the lockfile kept as it is when `locked`, timed when `timed` or
+// when `json` names where to write the times, and reading no cached check when `checking`.
+function sessionWith(locked: boolean, timed: boolean, checking = false, json?: string): BuildSession {
   let made = cachedSession();
   made.locking.locked = locked;
   // FISH_MEM=1 records what the process holds as each stage ends, as stages are timed.
@@ -921,9 +921,10 @@ function sessionWith(locked: boolean, timed: boolean, checking = false): BuildSe
   // FISH_MEM_STOP=<stage> ends the process as that stage ends, with the same readings.
   const stop = process.env.FISH_MEM_STOP;
   if (stop !== undefined && !STOP_STAGES.includes(stop!)) fail(`fishc: FISH_MEM_STOP names '${stop!}', which is no stage to stop after; give ${STOP_STAGES.join(", ")}`);
-  if (timed || memory || stop !== undefined) {
+  if (timed || json !== undefined || memory || stop !== undefined) {
     let timings = newTimings();
     timings.report = timed;
+    if (json !== undefined) timings.json = json!;
     if (memory || stop !== undefined) timings.memory = new Map<string, Reading>();
     if (stop !== undefined) timings.stop = stop!;
     // FISH_USAGE=1 records each stage's CPU time and the peaks of fishc and of clang.
@@ -1407,13 +1408,35 @@ function openapiFile(file: string, out: string | undefined): never {
   return process.exit(0);
 }
 
-// The time each of a build's `stages` took, printed when the build was timed.
+// The time each of a build's `stages` took, printed when the build was timed, with the files it
+// went to, and written as JSON where `--timings-json` asks.
 function reportTimings(session: Ref<Session>, stages: Ref<string[]>, start: f64) {
   if (session.timings === undefined) return;
-  if (session.timings.report) process.stderr.write(formatTimings(session.timings, stages, performance.now() - start));
+  const total = performance.now() - start;
+  if (session.timings.report) process.stderr.write(formatTimings(session.timings, stages, total) + formatFiles(session.timings, 10));
+  if (session.timings.json !== undefined) {
+    try {
+      writeFileSync(session.timings.json!, timingsJson(session.timings, stages, total));
+    } catch (e) {
+      console.error(`fishc: can't write the timings to '${session.timings.json!}': ${e.message}`);
+    }
+  }
   if (session.timings.memory !== undefined) process.stderr.write(formatMemory(session.timings.memory!, stages));
   if (session.timings.usage !== undefined) process.stderr.write(formatUsage(session.timings.usage!, stages));
   if (session.timings.tables !== undefined) process.stderr.write(session.timings.tables!);
+}
+
+// `--timings-json`'s object: the stages in order, FISH_USAGE's readings when kept, and every file.
+function timingsJson(timings: Ref<Timings>, stages: Ref<string[]>, total: f64): string {
+  let staged: { stage: string; ms: f64; note?: string }[] = [];
+  let usage: { stage: string; cpu: f64; peak: i64; children: i64 }[] = [];
+  for (const s of stages) {
+    staged.push({ stage: s.clone(), ms: timings.ms.get(s) ?? 0, note: timings.notes.get(s) });
+    const p = timings.usage !== undefined ? timings.usage!.peaks.get(s) : undefined;
+    if (p !== undefined) usage.push({ stage: s.clone(), cpu: timings.usage!.cpu.get(s) ?? 0, peak: p!.own, children: p!.children });
+  }
+  if (timings.usage === undefined) return JSON.stringify({ version: 1, total, stages: staged, files: fileCosts(timings) }) + "\n";
+  return JSON.stringify({ version: 1, total, stages: staged, usage, files: fileCosts(timings) }) + "\n";
 }
 
 // A directory `fishc survey` can read, holding TypeScript.
@@ -1468,6 +1491,7 @@ async function main(): Promise<void> {
           leaks: { type: "boolean" },
           debug: { type: "boolean", short: "g" },
           timings: { type: "boolean" },
+          "timings-json": { type: "string" },
           "no-check-cache": { type: "boolean" },
           sanitize: { type: "string", multiple: true },
           timeout: { type: "string" },
@@ -1487,12 +1511,14 @@ async function main(): Promise<void> {
   const locked = values.locked === true;
   const timed = values.timings === true;
   const checking = values["no-check-cache"] === true;
-  const sessionFor = (): BuildSession => sessionWith(locked, timed, checking);
+  const json = values["timings-json"];
+  const sessionFor = (): BuildSession => sessionWith(locked, timed, checking, json);
   // `fishc run` and `fishc watch` take the program's arguments after the file, or all of them with no file.
   const command = positionals.length > 0 ? positionals[0] : undefined;
   const named = positionals.length > 1 ? positionals[1] : undefined;
   const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
+  if (json !== undefined && command !== "build" && command !== "check" && command !== "run") fail(`fishc: '--timings-json' writes the timings of a build, check or run; 'fishc ${command ?? ""}' takes no '--timings-json'`);
   if (command === "repl") {
     if (positionals.length !== 1 || flags.some((k) => k !== "panic")) fail("usage: fishc repl");
     runRepl(locked, timed, checking);
@@ -1777,11 +1803,12 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
   if (values.timings === true && lib !== undefined) fail("fishc build: '--timings' times an executable's build; leave out '--lib' to time the program it would be built from");
+  if (json !== undefined && lib !== undefined) fail("fishc build: '--timings-json' times an executable's build; leave out '--lib' to time the program it would be built from");
   if (leaks && lib !== undefined) fail("fishc build: '--leaks' can't build a library; build the program that uses it with '--leaks' instead");
   if (values.static === true && lib !== undefined) fail("fishc build: '--static' builds an executable, not a library; leave out '--lib', or '--static'");
   if ((values.static === true || values.dockerfile === true) && llvm) fail("fishc build: '--emit-llvm' prints the IR without linking it, so '--static' and '--dockerfile' don't apply; leave them out");
