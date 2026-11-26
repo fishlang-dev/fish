@@ -11342,6 +11342,10 @@ export const TLS_NATIVE = String.raw`
 #include <openssl/x509v3.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/core_names.h>
+#include <openssl/kdf.h>
+#include <openssl/params.h>
+#include <openssl/ecdsa.h>
 
 // A stream's SSL object, or a listener's context its connections are made from. A clone of a
 // stream may read on one thread while another writes, and OpenSSL's calls on one SSL object
@@ -11723,6 +11727,128 @@ int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_leng
   return ok;
 }
 
+// std:auth's JWT algorithms by number: HS256 (0), HS384 (1), HS512 (2), RS256 (3), ES256 (4) and
+// EdDSA (5), whose Ed25519 hashes inside the signature.
+static const EVP_MD *fsh_jwt_md(int64_t which) {
+  return which == 1 ? EVP_sha384() : which == 2 ? EVP_sha512() : which == 5 ? NULL : EVP_sha256();
+}
+
+// A PEM key of the kind the algorithm signs with: RSA, P-256 or Ed25519, or NULL.
+static EVP_PKEY *fsh_jwt_key(int64_t which, const uint8_t *key, int64_t length, int private) {
+  BIO *b = BIO_new_mem_buf(key, (int)length);
+  if (b == NULL) return NULL;
+  EVP_PKEY *k = private ? PEM_read_bio_PrivateKey(b, NULL, NULL, NULL) : PEM_read_bio_PUBKEY(b, NULL, NULL, NULL);
+  BIO_free(b);
+  if (k == NULL) return NULL;
+  char group[32] = "";
+  size_t n = 0;
+  int fits = which == 3 ? EVP_PKEY_is_a(k, "RSA") && EVP_PKEY_get_bits(k) >= 2048
+    : which == 4 ? EVP_PKEY_is_a(k, "EC") && EVP_PKEY_get_utf8_string_param(k, OSSL_PKEY_PARAM_GROUP_NAME, group, sizeof group, &n) == 1 && strcmp(group, "prime256v1") == 0
+    : EVP_PKEY_is_a(k, "ED25519");
+  if (!fits) { EVP_PKEY_free(k); return NULL; }
+  return k;
+}
+
+// Signs data with the key into out, which holds 1024 bytes, giving the signature's length; -1
+// when the key isn't one the algorithm takes. ES256's is JWS's 64 bytes of r then s, not DER.
+int64_t fsh_rt_crypto_sign(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, uint8_t *out) {
+  int64_t made = -1;
+  if (which <= 2) {
+    unsigned int n = 0;
+    if (HMAC(fsh_jwt_md(which), key, (int)key_length, data, (size_t)length, out, &n) != NULL) made = n;
+    ERR_clear_error();
+    return made;
+  }
+  EVP_PKEY *k = fsh_jwt_key(which, key, key_length, 1);
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  uint8_t der[1024];
+  size_t n = sizeof der;
+  if (k != NULL && ctx != NULL && EVP_DigestSignInit(ctx, NULL, fsh_jwt_md(which), NULL, k) == 1 && EVP_DigestSign(ctx, der, &n, data, (size_t)length) == 1) {
+    if (which != 4) { memcpy(out, der, n); made = (int64_t)n; }
+    else {
+      const uint8_t *at = der;
+      ECDSA_SIG *sig = d2i_ECDSA_SIG(NULL, &at, (long)n);
+      if (sig != NULL && BN_bn2binpad(ECDSA_SIG_get0_r(sig), out, 32) == 32 && BN_bn2binpad(ECDSA_SIG_get0_s(sig), out + 32, 32) == 32) made = 64;
+      ECDSA_SIG_free(sig);
+    }
+  }
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(k);
+  ERR_clear_error();
+  return made;
+}
+
+// Whether sig is data's signature under the key: 1 when it is, 0 when it isn't, -1 when the key
+// isn't one the algorithm takes. An HMAC is compared in constant time.
+int64_t fsh_rt_crypto_verify(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, const uint8_t *sig, int64_t sig_length) {
+  if (which <= 2) {
+    uint8_t mac[EVP_MAX_MD_SIZE];
+    unsigned int n = 0;
+    int64_t ok = HMAC(fsh_jwt_md(which), key, (int)key_length, data, (size_t)length, mac, &n) != NULL && (int64_t)n == sig_length && CRYPTO_memcmp(mac, sig, n) == 0;
+    ERR_clear_error();
+    return ok;
+  }
+  EVP_PKEY *k = fsh_jwt_key(which, key, key_length, 0);
+  if (k == NULL) { ERR_clear_error(); return -1; }
+  uint8_t der[128];
+  const uint8_t *given = sig;
+  size_t given_length = (size_t)sig_length;
+  int64_t ok = 0;
+  int shaped = 1;
+  if (which == 4) {
+    shaped = 0;
+    ECDSA_SIG *es = sig_length == 64 ? ECDSA_SIG_new() : NULL;
+    BIGNUM *r = es != NULL ? BN_bin2bn(sig, 32, NULL) : NULL;
+    BIGNUM *s = es != NULL ? BN_bin2bn(sig + 32, 32, NULL) : NULL;
+    if (r != NULL && s != NULL && ECDSA_SIG_set0(es, r, s) == 1) {
+      uint8_t *at = der;
+      int n = i2d_ECDSA_SIG(es, &at);
+      if (n > 0) { given = der; given_length = (size_t)n; shaped = 1; }
+    } else { BN_free(r); BN_free(s); }
+    ECDSA_SIG_free(es);
+  }
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  if (shaped && ctx != NULL && EVP_DigestVerifyInit(ctx, NULL, fsh_jwt_md(which), NULL, k) == 1) ok = EVP_DigestVerify(ctx, given, given_length, data, (size_t)length) == 1;
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(k);
+  ERR_clear_error();
+  return ok;
+}
+
+// A password's hash into out: argon2id (0) with a KiB of memory, b passes and c lanes, run on one
+// thread, or scrypt (1) with N = a, r = b and p = c. 1 when done, 0 when the parameters were
+// refused, -1 when this OpenSSL has no Argon2, which came in 3.2.
+int64_t fsh_rt_crypto_kdf(int64_t kind, const uint8_t *password, int64_t password_length, const uint8_t *salt, int64_t salt_length, int64_t a, int64_t b, int64_t c, uint8_t *out, int64_t out_length) {
+  int64_t ok = 0;
+  if (kind == 1) ok = EVP_PBE_scrypt((const char *)password, (size_t)password_length, salt, (size_t)salt_length, (uint64_t)a, (uint64_t)b, (uint64_t)c, (uint64_t)1 << 31, out, (size_t)out_length) == 1;
+  else {
+#if OPENSSL_VERSION_NUMBER >= 0x30200000L
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "ARGON2ID", NULL);
+    EVP_KDF_CTX *ctx = kdf != NULL ? EVP_KDF_CTX_new(kdf) : NULL;
+    if (ctx == NULL) ok = -1;
+    else {
+      uint32_t memory = (uint32_t)a, passes = (uint32_t)b, lanes = (uint32_t)c, threads = 1;
+      OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_PASSWORD, (void *)password, (size_t)password_length),
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *)salt, (size_t)salt_length),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ITER, &passes),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_THREADS, &threads),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_LANES, &lanes),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_MEMCOST, &memory),
+        OSSL_PARAM_construct_end(),
+      };
+      ok = EVP_KDF_derive(ctx, out, (size_t)out_length, params) == 1;
+    }
+    EVP_KDF_CTX_free(ctx);
+    EVP_KDF_free(kdf);
+#else
+    ok = -1;
+#endif
+  }
+  ERR_clear_error();
+  return ok;
+}
+
 // Why the crypto calls can't work: nothing, with OpenSSL linked.
 const char *fsh_rt_crypto_missing(void) {
   return "";
@@ -11747,6 +11873,18 @@ fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
 
 int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, int64_t rounds, uint8_t *out) {
   return 0;
+}
+
+int64_t fsh_rt_crypto_sign(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, uint8_t *out) {
+  return -2;
+}
+
+int64_t fsh_rt_crypto_verify(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, const uint8_t *sig, int64_t sig_length) {
+  return -2;
+}
+
+int64_t fsh_rt_crypto_kdf(int64_t kind, const uint8_t *password, int64_t password_length, const uint8_t *salt, int64_t salt_length, int64_t a, int64_t b, int64_t c, uint8_t *out, int64_t out_length) {
+  return -2;
 }
 
 const char *fsh_rt_crypto_missing(void) {
