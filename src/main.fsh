@@ -18,6 +18,7 @@ import { formatVersion, parseRange, maxSatisfying, type Version } from "./semver
 import { createPackage, type Edition, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.fsh";
 import { parse, parseWithComments, type Stmt } from "./parser.fsh";
 import type { Ids } from "./nodes.fsh";
+import { addonOf } from "./addon.fsh";
 import { bundle } from "./bundle.fsh";
 import { JS_NATIVE } from "./js_native.fsh";
 import { NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
@@ -191,7 +192,9 @@ export function runtimeNames(): Set<string> {
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
 // `<name>.h` declaring its exports beside it. Gives the warnings.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), debug = false): CompileError[] {
+// `addon` is the C glue of a Node addon, which is then built at `out` itself, finding N-API's
+// functions in the process that loads it, with no header.
+export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), debug = false, addon?: string): CompileError[] {
   const src = readFileSync(file, "utf8");
   let { core, caches } = apart(session);
   let looked: string[] = [];
@@ -216,7 +219,9 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
       const extension = darwin ? "dylib" : "so";
-      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", join(dirname(out), `lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)], ir);
+      const glue = addon === undefined ? [...none] : ["-x", "c", addon!, "-x", "none", ...(darwin ? ["-undefined", "dynamic_lookup"] : none)];
+      const written = addon === undefined ? join(dirname(out), `lib${name}.${extension}`) : out;
+      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, ...glue, "-funwind-tables", "-o", written, optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)], ir);
     } else {
       run(["clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize, ...g], ir);
       const archive = shim !== undefined ? join(dir, "fish.a") : join(dirname(out), `lib${name}.a`);
@@ -228,7 +233,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
     }
     let exported: Ref<Instance>[] = [];
     for (const i of compiledOf(checked)) if (bodyOf(checked.tables.arenas, i).exported === true) exported.push(i);
-    writeFileSync(join(dirname(out), `${name}.h`), header(name, checked.tables, exported));
+    if (addon === undefined) writeFileSync(join(dirname(out), `${name}.h`), header(name, checked.tables, exported));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1724,6 +1729,33 @@ function checkProject(dir: string, fish: boolean = false) {
   if (sources(dir, fish).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript ${fish ? "or Fish " : ""}files (.ts, .tsx or .mts${fish ? ", or .fsh" : ""}, outside node_modules)`);
 }
 
+// `fishc build --addon`: the file's exports as a Node and Bun addon, `<name>.node` beside it unless
+// `out` says where, with the `.d.ts` declaring them beside that. Gives the exit code.
+/** @throws {IoError} */
+function buildAddon(session: BuildSession, file: string, out: string | undefined, release: boolean, debug: boolean): i64 {
+  const src = readFileSync(file, "utf8");
+  const output = out ?? join(dirname(file), `${basename(file, ".fsh")}.node`);
+  const dir = mkdtempSync(join(tmpdir(), "fishc-addon-"));
+  const entry = join(dir, "addon.fsh");
+  try {
+    const from = relative(dir, resolve(file));
+    const made = addonOf(src, from.startsWith(".") ? from : `./${from}`);
+    writeFileSync(entry, made.fish);
+    writeFileSync(join(dir, "glue.c"), made.glue);
+    const warnings = buildLibrary(session, entry, resolve(output), "shared", release, "unwind", [], hostTarget(), debug, join(dir, "glue.c"));
+    for (const w of warnings) console.error(painted(w, file, src, "warning"));
+    writeFileSync(`${output.replace(/\.node$/, "")}.d.ts`, made.dts);
+    return 0;
+  } catch (e) {
+    // An error in the generated entry is shown against it; every other names its own file.
+    if (e instanceof CompileError) console.error(existsSync(entry) ? painted(e, entry, readFileSync(entry, "utf8")) : painted(e, file, src));
+    else console.error((e as { message: string }).message);
+    return 1;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /** @throws {Error | IoError | JsonError} */
 async function main(): Promise<void> {
   if (Bun.argv.length === 3 && Bun.argv[2] === "lsp") {
@@ -1747,6 +1779,7 @@ async function main(): Promise<void> {
           sysroot: { type: "string" },
           static: { type: "boolean" },
           dockerfile: { type: "boolean" },
+          addon: { type: "boolean" },
           json: { type: "boolean" },
           rank: { type: "boolean" },
           self: { type: "string" },
@@ -2208,8 +2241,12 @@ async function main(): Promise<void> {
       },
     });
   }
+  if (command === "build" && values.addon === true) {
+    if (file === undefined || lib !== undefined || llvm || values.static === true || values.target !== undefined || values.sanitize !== undefined || leaks || profile || links.length > 0) fail("usage: fishc build --addon <file.fsh> [-o <out.node>] [--release] [-g]");
+    process.exit(buildAddon(sessionFor(), file!, values.out, release, values.debug === true));
+  }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || fuzzFlag || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release] [--sim [--seed <n>] [--seeds <count>]]\n       fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]\n       fishc fix [<file.fsh>] [--dry-run] [--check]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--sanitize address|thread]\n       fishc build --addon <file.fsh> [-o <out.node>] [--release] [-g]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release] [--sim [--seed <n>] [--seeds <count>]]\n       fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]\n       fishc fix [<file.fsh>] [--dry-run] [--check]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
