@@ -111,3 +111,24 @@ async function main(): Promise<void> throws PasswordError {
     }
   }
 }
+
+// case: auth_password_sync
+// The sync forms give what the async ones give, from code with no runtime running.
+// expect: $argon2id$v=19$m=19456,t=2,p=1$ 22 43
+// expect: true false
+// expect: true
+// expect: the hash isn't an argon2id or scrypt PHC string
+import { hashPasswordSync, verifyPasswordSync, PasswordError } from "std:auth";
+
+function main(): void throws PasswordError {
+  const h = hashPasswordSync("hunter2");
+  const f = h.split("$");
+  console.log(h.slice(0, 31), f[4].length, f[5].length);
+  console.log(verifyPasswordSync("hunter2", h), verifyPasswordSync("hunter3", h));
+  console.log(verifyPasswordSync("password", "$argon2id$v=19$m=65536,t=2,p=1$c29tZXNhbHQ$CTFhFdXPJO1aFaMaO6Mm5c8y7cJHAph8ArZWb2GRPPc"));
+  try {
+    console.log(verifyPasswordSync("x", "$2b$10$abcdefghijklmnopqrstuv"));
+  } catch (e) {
+    console.log(e.message);
+  }
+}
