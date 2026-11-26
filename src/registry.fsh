@@ -11,7 +11,7 @@ import type { ClassNode, Param, Span, TypeNode } from "./parser.fsh";
 import { CLASS_ASKER, type InstancingState } from "./generics.fsh";
 import { cloneTypeNode } from "./rebuild.fsh";
 import { storable } from "./resolve.fsh";
-import { EMBEDDED, type Field, type MapType, type InterfaceType, type ObjectType, TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing, copyField } from "./typing.fsh";
+import { EMBEDDED, type Field, type MapType, type InterfaceType, type ObjectType, TypeMap, TypeSet, type ClassType, type Type, type VariantType, type Typing, copyField, isNumeric } from "./typing.fsh";
 
 // A member a class's `override` replaces: its name as shown, its parameters' types and its result.
 type Replaced = { name: string; params: (Type | undefined)[]; returns: Type | undefined };
@@ -358,10 +358,30 @@ export class Registry<H extends RegistryHost> {
     // from a generic class's type argument goes when the class is made from the lowered argument.
     const patterned = this.patterned(type);
     if (patterned !== undefined) throw unsupported("template literal pattern types in class fields", { start: spans[patterned]!.start, end: spans[patterned]!.end });
+    if (this.host.tables.typing.rec(type).c === true) {
+      const fields = this.host.tables.typing.rec(type).fields;
+      for (let i: usize = 0; i < fields.length; i++) {
+        const t = fields[i]!.type;
+        if (!this.inC(t)) throw new CompileError("E1007", `a '@c' struct's field can't be a '${this.host.tables.typing.show(t)}'; C structs hold numbers, booleans, raw pointers, fixed-size arrays of those and other '@c' structs`, spans[i]!.start, spans[i]!.end);
+      }
+    }
     this.host.registryState.laying.delete(type);
     // Before any body reads its fields, a class that contains itself holds itself in a block.
     let seen = new TypeSet<Type>();
     if (this.contains(type, type, seen)) this.holdItself(type);
+    return true;
+  }
+
+  // Whether a field of a `@c` struct can hold `t`, laid out as C lays out that field's type.
+  /** @throws {CompileError} */
+  private inC(this: Mut<this>, t: Type): boolean throws CompileError {
+    if (isNumeric(t) || t === "boolean") return true;
+    if (typeof t === "string") return false;
+    const r = this.host.tables.typing.rec(t);
+    if (r.kind === "pointer") return true;
+    if (r.kind === "fixed") return this.inC(r.element);
+    if (r.kind !== "class" || r.c !== true) return false;
+    this.layout(this.host.registryState.infoOf.get(t as ClassType)!);
     return true;
   }
 

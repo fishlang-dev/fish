@@ -192,7 +192,7 @@ type P = { x: i64 };
 declare function make(): P;
 
 function main() {}
-// error: a C function can't return a '{ x: i64 }'; C gives numbers, booleans and raw pointers
+// error: a C function can't return a '{ x: i64 }'; C gives numbers, booleans, raw pointers and '@c' structs
 // case: ffi_rest_parameter
 declare function printf(format: Ptr<u8>, ...rest: i64[]): i32;
 
@@ -202,4 +202,4 @@ function main() {}
 declare function puts(s: string): i32;
 
 function main() {}
-// error: a C function's parameter can't be a 'string'; C takes numbers, booleans and raw pointers like 'Ptr<u8>'
+// error: a C function's parameter can't be a 'string'; C takes numbers, booleans, raw pointers like 'Ptr<u8>' and '@c' structs

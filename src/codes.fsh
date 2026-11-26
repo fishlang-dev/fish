@@ -877,6 +877,7 @@ To fix it, write it the way the message says: 'let' or 'const' for 'var', a new 
   E1004: { title: "invalid Rust crate declaration or use" },
   E1005: { title: "a value that can't cross between Fish and JS" },
   E1006: { title: "invalid use of a raw pointer" },
+  E1007: { title: "invalid C struct" },
 
   E1101: { title: "comptime code that failed while compiling" },
   E1102: { title: "invalid comptime parameter or block" },

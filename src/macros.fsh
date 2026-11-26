@@ -169,10 +169,11 @@ class MacroHost implements ComptimeHost {
   }
 }
 
-// Whether a decorator is `@derive(...)`, which the compiler gives unless the program has its own.
+// Whether a decorator is `@derive(...)` or `@c`, which the compiler gives unless the program has
+// its own.
 function builtin(d: Ref<Expr>, macros: Ref<Map<string, Func>>): boolean {
   const callee: Ref<Expr> = d.kind === "call" ? d.callee : d;
-  return callee.kind === "ident" && callee.name === "derive" && !macros.has("derive");
+  return callee.kind === "ident" && (callee.name === "derive" || (callee.name === "c" && d.kind === "ident")) && !macros.has(callee.name);
 }
 
 // `@derive(Eq, Json)`: a mark on the class or enum that `===` and `JSON` read, and on a class
@@ -180,6 +181,7 @@ function builtin(d: Ref<Expr>, macros: Ref<Map<string, Func>>): boolean {
 /** @throws {CompileError | Error} */
 function derived(compilation: Mut<Compilation>, d: Ref<Stmt>, exported: boolean, pending: Ref<Pending>): Stmt[] {
   const at: Ref<Expr> = pending.decorator;
+  if (at.kind === "ident" && at.name === "c") return cStruct(compilation, d, exported, pending);
   const derivable = d.kind === "class" || d.kind === "enum";
   if (pending.where !== "own" || !derivable) throw new CompileError("E1104", "'derive' applies to a class or an enum", at.start, at.end);
   if (at.kind !== "call" || at.args.length === 0) throw new CompileError("E1104", "'derive' names what to derive, as in '@derive(Eq)'", at.start, at.end);
@@ -217,6 +219,22 @@ function derived(compilation: Mut<Compilation>, d: Ref<Stmt>, exported: boolean,
     }
     decl = { ...d, id, decorators: withoutLast(d.decorators), derives, members };
   }
+  if (!exported) return [decl];
+  const start = decl.start;
+  const end = decl.end;
+  return [{ id: nextId(compilation.ids), kind: "export", body: decl, start, end }];
+}
+
+// `@c`: a class laid out as C lays out a struct, marked `C` among what it derives, which the
+// checker reads to let it cross to C by value and to hold it to fields C has.
+/** @throws {CompileError} */
+function cStruct(compilation: Mut<Compilation>, d: Ref<Stmt>, exported: boolean, pending: Ref<Pending>): Stmt[] {
+  const at: Ref<Expr> = pending.decorator;
+  if (pending.where !== "own" || d.kind !== "class") throw new CompileError("E1104", "'@c' applies to a class, which it lays out as a C struct", at.start, at.end);
+  if (d.typeParams.length > 0) throw new CompileError("E1007", "a '@c' struct can't be generic: C structs have no type parameters; declare one for each type", d.start, d.end);
+  if (d.extends !== undefined) throw new CompileError("E1007", "a '@c' struct can't extend a class: C structs have no bases; hold the other struct in a field", d.extends.start, d.extends.end);
+  if (d.abstract) throw new CompileError("E1007", "a '@c' struct can't be abstract: C makes and reads its values", d.start, d.end);
+  const decl: Stmt = { ...d, id: nextId(compilation.ids), decorators: withoutLast(d.decorators), derives: derivesWith(d.derives, ["C"]) };
   if (!exported) return [decl];
   const start = decl.start;
   const end = decl.end;

@@ -158,7 +158,7 @@ function blockArity(which: string, name: string, std: boolean): usize | undefine
   if (which === "AbortSignal") return name === "throwIfAborted" ? 0 : undefined;
   if (which === "TaskGroup") return name === "spawn" ? 1 : undefined;
   if (which === "TcpListener" || which === "UnixListener") return name === "accept" ? 0 : name === "listenTls" && std ? 2 : undefined;
-  if (which === "TcpStream" || which === "UnixStream") return name === "read" || name === "write" ? 1 : name === "startTls" && std ? 2 : undefined;
+  if (which === "TcpStream" || which === "UnixStream") return name === "read" || name === "write" ? 1 : name === "startTls" && std ? 3 : name === "protocol" && std ? 0 : undefined;
   return undefined;
 }
 
@@ -5229,8 +5229,9 @@ export class Expressions<C extends Context> implements Union<C> {
       this.coerce(e.args[0]!, given, of, arg4897_1);
     }
     if (callee.name === "available") return { type: "i64", what: "'available'" };
-    // std's own TLS setup, `startTls(serverName, ca)` on a stream and `listenTls(cert, key)` on a
-    // listener, giving why it failed, or an empty string.
+    // std's own TLS setup, `startTls(serverName, ca, alpn)` on a stream and `listenTls(cert, key)`
+    // on a listener, giving why it failed, or an empty string; `protocol()` gives what ALPN chose.
+    if (callee.name === "protocol") return { type: "string", what: "'protocol'" };
     if (callee.name === "startTls" || callee.name === "listenTls") {
       for (const arg of e.args) {
         this.expect(arg, "string");

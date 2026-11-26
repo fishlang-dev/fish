@@ -174,6 +174,96 @@ function __arrayFilled<T>(n: i64, x: T): T[] {
 class AbortError { message: string = "This operation was aborted"; }
 // What awaiting 'handle.join()' throws when the task panicked: its panic's reason.
 class TaskPanic { message: string; constructor(message: string) { this.message = message; } }
+// What a property test draws its inputs from: SplitMix64, seeded by FISH_PROP_SEED when a run
+// replays one, else by the clock, so each run tries inputs the last didn't.
+class PropRandom {
+  state: u64;
+  constructor(seed: u64) { this.state = seed; }
+  next(this: Mut<this>): u64 {
+    this.state = this.state.wrappingAdd(0x9e3779b97f4a7c15);
+    let z = this.state;
+    z = (z ^ (z >> 30)).wrappingMul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrappingMul(0x94d049bb133111eb);
+    return z ^ (z >> 31);
+  }
+  below(this: Mut<this>, n: i64): i64 {
+    return n <= 0 ? 0 : (this.next() % (n as u64)) as i64;
+  }
+}
+declare function fsh_rt_getenv(name: Ptr<u8>): Ptr<u8>;
+function __propSeed(): u64 {
+  let given = "";
+  unsafe {
+    const p = fsh_rt_getenv(cString("FISH_PROP_SEED"));
+    if (!p.isNull()) given = fromCString(p);
+  }
+  const parsed = given === "" ? null : parseInt(given);
+  return parsed !== null ? parsed as u64 : Date.now() as u64;
+}
+// The values a property's integers start from, which a wide or narrow type reads as its own.
+const __PROP_EDGES: i64[] = [0, 1, -1, 2, 127, -128, 255, 256, 32767, -32768, 65535, 2147483647, -2147483648, 4294967295, 9223372036854775807, -9223372036854775807 - 1];
+function __propInteger(r: Mut<PropRandom>, size: i64): i64 {
+  if (r.below(8) === 0) return __PROP_EDGES[r.below(__PROP_EDGES.length as i64) as usize];
+  const bound = size + 1;
+  return r.below(2 * bound + 1) - bound;
+}
+function __propShrinkInteger(v: i64): i64[] {
+  let out: i64[] = [];
+  if (v === 0) return out;
+  out.push(0);
+  if (v < 0 && v > -9223372036854775807) out.push(-v);
+  let step = v / 2;
+  while (step !== 0 && out.length < 24) {
+    out.push(v - step);
+    step = step / 2;
+  }
+  return out;
+}
+const __PROP_FLOATS: f64[] = [0.0, -0.0, 1.0, -1.0, 0.5, 1e300, -1e-300, 1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0];
+function __propFloat(r: Mut<PropRandom>, size: i64): f64 {
+  if (r.below(8) === 0) return __PROP_FLOATS[r.below(__PROP_FLOATS.length as i64) as usize];
+  return ((r.below(2000001) - 1000000) as f64) / 1000000.0 * ((size + 1) as f64);
+}
+function __propShrinkFloat(v: f64): f64[] {
+  let out: f64[] = [];
+  if (v === 0.0 || v !== v) return out;
+  out.push(0.0);
+  const whole = Math.trunc(v);
+  if (whole !== v && whole - whole === 0.0) out.push(whole);
+  if (v - v === 0.0 && v / 2.0 !== v) out.push(v / 2.0);
+  return out;
+}
+function __propBoolean(r: Mut<PropRandom>): boolean {
+  return r.below(2) === 1;
+}
+function __propPick(r: Mut<PropRandom>, n: i64): i64 {
+  return r.below(n);
+}
+function __propLength(r: Mut<PropRandom>, size: i64): i64 {
+  return r.below(size / 4 + 2);
+}
+const __PROP_PIECES: string[] = ["a", "b", "z", "A", "Z", "0", "9", " ", "-", "_", ".", "/", "%", "é", "ß", "中", "😀", "\\u0000", "\\n"];
+function __propString(r: Mut<PropRandom>, size: i64): string {
+  const n = __propLength(r, size);
+  let s = "";
+  for (let i = 0; i < n; i++) {
+    if (r.below(3) === 0) s += __PROP_PIECES[r.below(__PROP_PIECES.length as i64) as usize];
+    else s += String.fromCharCode((32 + r.below(95)) as u16);
+  }
+  return s;
+}
+function __propShrinkString(v: Ref<string>): string[] {
+  let out: string[] = [];
+  const n = v.length as i64;
+  if (n === 0) return out;
+  out.push("");
+  if (n > 1) {
+    out.push(v.slice(0, n / 2));
+    out.push(v.slice(n / 2));
+  }
+  for (let i: i64 = 0; i < n && i < 16; i++) out.push(v.slice(0, i) + v.slice(i + 1));
+  return out;
+}
 class IoError {
   message: string;
   code: string = "";
@@ -360,7 +450,989 @@ class __FatalTextDecoder {
 `;
 
 // The Fetch API's Headers, Request and Response.
-const HTTP = `
+const HTTP2 = String.raw`
+// HTTP/2, in the server and fetch alike: frames, HPACK and flow control, per RFC 9113 and 7541.
+// A HPACK integer, or text, and the index just past it.
+type __h2Int = { value: i64; next: usize };
+type __h2Text = { value: string; next: usize };
+// What a connection's responders share with its reader: the peer's send windows by stream, the
+// connection's under 0, the largest frame and the initial window the peer's settings give, and
+// how many streams are being answered.
+type __h2State = { windows: Lock<Map<i64, i64>>; frame: Atomic<i64>; initial: Atomic<i64>; active: Atomic<i64> };
+// A response read from one stream: its status, headers, body and any trailers.
+type __h2Reply = { status: i64; headers: Headers; body: u8[]; trailers: Headers };
+
+// One connection's HPACK decoder: the dynamic table, oldest first, and the Huffman code, keyed
+// by its length times 2^32 plus its bits.
+class Http2Hpack {
+  names: string[] = [];
+  values: string[] = [];
+  sizes: i64[] = [];
+  size: i64 = 0;
+  max: i64 = 4096;
+  statics: string[];
+  codes: Map<i64, i64> = new Map();
+
+  constructor() {
+    this.statics = Http2.statics();
+    const codes = Http2.huffmanCodes();
+    const lengths = Http2.huffmanLengths();
+    for (let i: usize = 0; i < 256; i++) this.codes.set((lengths[i] << 32) | codes[i], i as i64);
+    this.codes.set((30 << 32) | 1073741823, 256);
+  }
+
+  // A header block's fields as name then value, or null when it isn't valid HPACK. A table size
+  // update may not go past limit, the size this side's settings allow.
+  decode(this: Mut<this>, block: Ref<u8[]>, limit: i64): string[] | null {
+    let out: string[] = [];
+    let at: usize = 0;
+    while (at < block.length) {
+      const b = block[at] as i64;
+      if ((b & 128) !== 0) {
+        const n = Http2.integer(block, at, 7);
+        if (n === null) return null;
+        const f = this.field(n.value);
+        if (f === null) return null;
+        out.push(f[0]);
+        out.push(f[1]);
+        at = n.next;
+      } else if ((b & 224) === 32) {
+        const n = Http2.integer(block, at, 5);
+        if (n === null || n.value > limit) return null;
+        this.max = n.value;
+        this.evict();
+        at = n.next;
+      } else {
+        const indexing = (b & 192) === 64;
+        const n = Http2.integer(block, at, indexing ? 6 : 4);
+        if (n === null) return null;
+        let name = "";
+        let next = n.next;
+        if (n.value === 0) {
+          const s = this.text(block, next);
+          if (s === null) return null;
+          name = s.value;
+          next = s.next;
+        } else {
+          const f = this.field(n.value);
+          if (f === null) return null;
+          name = f[0];
+        }
+        const v = this.text(block, next);
+        if (v === null) return null;
+        out.push(name);
+        out.push(v.value);
+        if (indexing) this.add(name, v.value);
+        at = v.next;
+      }
+    }
+    return out;
+  }
+
+  // The name and value at a table index: the static table's 61, then the dynamic table newest first.
+  field(this: Ref<this>, index: i64): string[] | null {
+    if (index <= 0) return null;
+    if (index <= 61) return [this.statics[((index - 1) * 2) as usize], this.statics[((index - 1) * 2 + 1) as usize]];
+    const back = index - 62;
+    if (back >= (this.names.length as i64)) return null;
+    const at = (this.names.length as i64 - 1 - back) as usize;
+    return [this.names[at], this.values[at]];
+  }
+
+  add(this: Mut<this>, name: string, value: string) {
+    const size = (new TextEncoder().encode(name).length + new TextEncoder().encode(value).length) as i64 + 32;
+    this.names.push(name);
+    this.values.push(value);
+    this.sizes.push(size);
+    this.size += size;
+    this.evict();
+  }
+
+  // Drops the oldest entries until the table fits its size, which empties it for an entry larger
+  // than the whole table.
+  evict(this: Mut<this>) {
+    while (this.size > this.max && this.sizes.length > 0) {
+      const gone = this.sizes.shift();
+      if (gone !== null) this.size -= gone;
+      this.names.shift();
+      this.values.shift();
+    }
+  }
+
+  // A string literal at an index: its length, then its bytes, Huffman-coded when the top bit is set.
+  text(this: Ref<this>, block: Ref<u8[]>, at: usize): __h2Text | null {
+    if (at >= block.length) return null;
+    const huffman = ((block[at] as i64) & 128) !== 0;
+    const n = Http2.integer(block, at, 7);
+    if (n === null) return null;
+    const end = n.next + (n.value as usize);
+    if (end > block.length) return null;
+    let raw: u8[] = [];
+    for (let i = n.next; i < end; i++) raw.push(block[i]);
+    if (!huffman) return { value: new TextDecoder().decode(raw), next: end };
+    const decoded = this.unhuffman(raw);
+    if (decoded === null) return null;
+    return { value: new TextDecoder().decode(decoded), next: end };
+  }
+
+  // Huffman-coded bytes decoded a bit at a time, or null when they hold the EOS code or end in
+  // anything but at most seven bits of its leading ones.
+  // ponytail: a map lookup per bit; a table walked a byte at a time would be faster for long values.
+  unhuffman(this: Ref<this>, raw: Ref<u8[]>): u8[] | null {
+    let out: u8[] = [];
+    let code: i64 = 0;
+    let length: i64 = 0;
+    for (const byte of raw) {
+      for (let bit: i64 = 7; bit >= 0; bit--) {
+        code = (code << 1) | (((byte as i64) >> bit) & 1);
+        length += 1;
+        const symbol = this.codes.get((length << 32) | code);
+        if (symbol !== null) {
+          if (symbol === 256) return null;
+          out.push(symbol as u8);
+          code = 0;
+          length = 0;
+        } else if (length >= 30) return null;
+      }
+    }
+    if (length > 7 || code !== (1 << length) - 1) return null;
+    return out;
+  }
+}
+
+// A stream a client opened on a connection the server reads: its header block until it ends,
+// then its fields, its body so far, and the signal its request carries.
+class Http2Stream {
+  id: i64;
+  block: u8[] = [];
+  fields: string[] = [];
+  body: u8[] = [];
+  headed: boolean = false;
+  ended: boolean = false;
+  client: AbortController = new AbortController();
+
+  constructor(id: i64) {
+    this.id = id;
+  }
+}
+
+class Http2 {
+  // RFC 7541's static table, name then value.
+  static statics(): string[] {
+    return [
+      ":authority", "", ":method", "GET", ":method", "POST", ":path", "/", ":path", "/index.html",
+      ":scheme", "http", ":scheme", "https", ":status", "200", ":status", "204", ":status", "206",
+      ":status", "304", ":status", "400", ":status", "404", ":status", "500", "accept-charset", "",
+      "accept-encoding", "gzip, deflate", "accept-language", "", "accept-ranges", "", "accept", "",
+      "access-control-allow-origin", "", "age", "", "allow", "", "authorization", "",
+      "cache-control", "", "content-disposition", "", "content-encoding", "", "content-language", "",
+      "content-length", "", "content-location", "", "content-range", "", "content-type", "",
+      "cookie", "", "date", "", "etag", "", "expect", "", "expires", "", "from", "", "host", "",
+      "if-match", "", "if-modified-since", "", "if-none-match", "", "if-range", "",
+      "if-unmodified-since", "", "last-modified", "", "link", "", "location", "", "max-forwards", "",
+      "proxy-authenticate", "", "proxy-authorization", "", "range", "", "referer", "", "refresh", "",
+      "retry-after", "", "server", "", "set-cookie", "", "strict-transport-security", "",
+      "transfer-encoding", "", "user-agent", "", "vary", "", "via", "", "www-authenticate", "",
+    ];
+  }
+
+  // RFC 7541's Huffman code for each byte, and its length in bits.
+  static huffmanCodes(): i64[] {
+    return [
+      8184, 8388568, 268435426, 268435427, 268435428, 268435429, 268435430, 268435431, 268435432,
+      16777194, 1073741820, 268435433, 268435434, 1073741821, 268435435, 268435436, 268435437,
+      268435438, 268435439, 268435440, 268435441, 268435442, 1073741822, 268435443, 268435444,
+      268435445, 268435446, 268435447, 268435448, 268435449, 268435450, 268435451, 20, 1016, 1017,
+      4090, 8185, 21, 248, 2042, 1018, 1019, 249, 2043, 250, 22, 23, 24, 0, 1, 2, 25, 26, 27, 28, 29,
+      30, 31, 92, 251, 32764, 32, 4091, 1020, 8186, 33, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102,
+      103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 252, 115, 253, 8187, 524272, 8188,
+      16380, 34, 32765, 3, 35, 4, 36, 5, 37, 38, 39, 6, 116, 117, 40, 41, 42, 7, 43, 118, 44, 8, 9,
+      45, 119, 120, 121, 122, 123, 32766, 2044, 16381, 8189, 268435452, 1048550, 4194258, 1048551,
+      1048552, 4194259, 4194260, 4194261, 8388569, 4194262, 8388570, 8388571, 8388572, 8388573,
+      8388574, 16777195, 8388575, 16777196, 16777197, 4194263, 8388576, 16777198, 8388577, 8388578,
+      8388579, 8388580, 2097116, 4194264, 8388581, 4194265, 8388582, 8388583, 16777199, 4194266,
+      2097117, 1048553, 4194267, 4194268, 8388584, 8388585, 2097118, 8388586, 4194269, 4194270,
+      16777200, 2097119, 4194271, 8388587, 8388588, 2097120, 2097121, 4194272, 2097122, 8388589,
+      4194273, 8388590, 8388591, 1048554, 4194274, 4194275, 4194276, 8388592, 4194277, 4194278,
+      8388593, 67108832, 67108833, 1048555, 524273, 4194279, 8388594, 4194280, 33554412, 67108834,
+      67108835, 67108836, 134217694, 134217695, 67108837, 16777201, 33554413, 524274, 2097123,
+      67108838, 134217696, 134217697, 67108839, 134217698, 16777202, 2097124, 2097125, 67108840,
+      67108841, 268435453, 134217699, 134217700, 134217701, 1048556, 16777203, 1048557, 2097126,
+      4194281, 2097127, 2097128, 8388595, 4194282, 4194283, 33554414, 33554415, 16777204, 16777205,
+      67108842, 8388596, 67108843, 134217702, 67108844, 67108845, 134217703, 134217704, 134217705,
+      134217706, 134217707, 268435454, 134217708, 134217709, 134217710, 134217711, 134217712, 67108846
+    ];
+  }
+
+  static huffmanLengths(): i64[] {
+    return [
+      13, 23, 28, 28, 28, 28, 28, 28, 28, 24, 30, 28, 28, 30, 28, 28, 28, 28, 28, 28, 28, 28, 30, 28,
+      28, 28, 28, 28, 28, 28, 28, 28, 6, 10, 10, 12, 13, 6, 8, 11, 10, 10, 8, 11, 8, 6, 6, 6, 5, 5, 5,
+      6, 6, 6, 6, 6, 6, 6, 7, 8, 15, 6, 12, 10, 13, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+      7, 7, 7, 7, 7, 7, 8, 7, 8, 13, 19, 13, 14, 6, 15, 5, 6, 5, 6, 5, 6, 6, 6, 5, 7, 7, 6, 6, 6, 5,
+      6, 7, 6, 5, 5, 6, 7, 7, 7, 7, 7, 15, 11, 14, 13, 28, 20, 22, 20, 20, 22, 22, 22, 23, 22, 23, 23,
+      23, 23, 23, 24, 23, 24, 24, 22, 23, 24, 23, 23, 23, 23, 21, 22, 23, 22, 23, 23, 24, 22, 21, 20,
+      22, 22, 23, 23, 21, 23, 22, 22, 24, 21, 22, 23, 23, 21, 21, 22, 21, 23, 22, 23, 23, 20, 22, 22,
+      22, 23, 22, 22, 23, 26, 26, 20, 19, 22, 23, 22, 25, 26, 26, 26, 27, 27, 26, 24, 25, 19, 21, 26,
+      27, 27, 26, 27, 24, 21, 21, 26, 26, 28, 27, 27, 27, 20, 24, 20, 21, 22, 21, 21, 23, 22, 22, 25,
+      25, 24, 24, 26, 23, 26, 27, 26, 26, 27, 27, 27, 27, 27, 28, 27, 27, 27, 27, 27, 26
+    ];
+  }
+
+  // A HPACK integer whose first byte keeps prefix bits for it.
+  static integer(block: Ref<u8[]>, at: usize, prefix: i64): __h2Int | null {
+    if (at >= block.length) return null;
+    const mask = (1 << prefix) - 1;
+    let value = (block[at] as i64) & mask;
+    let i = at + 1;
+    if (value < mask) return { value: value, next: i };
+    let shift: i64 = 0;
+    while (true) {
+      if (i >= block.length || shift > 28) return null;
+      const c = block[i] as i64;
+      value += (c & 127) << shift;
+      shift += 7;
+      i += 1;
+      if ((c & 128) === 0) return { value: value, next: i };
+    }
+  }
+
+  static putInteger(out: Mut<u8[]>, value: i64, prefix: i64, first: i64) {
+    const max = (1 << prefix) - 1;
+    if (value < max) {
+      out.push((first | value) as u8);
+      return;
+    }
+    out.push((first | max) as u8);
+    let left = value - max;
+    while (left >= 128) {
+      out.push(((left & 127) | 128) as u8);
+      left = left >> 7;
+    }
+    out.push(left as u8);
+  }
+
+  // A string literal as sent: never Huffman-coded, which costs a few bytes and no table.
+  static putText(out: Mut<u8[]>, text: string) {
+    const bytes = new TextEncoder().encode(text);
+    Http2.putInteger(out, bytes.length as i64, 7, 0);
+    for (const b of bytes) out.push(b);
+  }
+
+  // A field as a literal the peer doesn't add to its table, so this side keeps no encoder table.
+  static putField(out: Mut<u8[]>, name: string, value: string) {
+    out.push(0 as u8);
+    Http2.putText(out, name);
+    Http2.putText(out, value);
+  }
+
+  // :status, from the static table when it is there.
+  static putStatus(out: Mut<u8[]>, status: i64) {
+    const known = [200, 204, 206, 304, 400, 404, 500];
+    for (let i: usize = 0; i < known.length; i++) {
+      if (known[i] === status) {
+        Http2.putInteger(out, 8 + (i as i64), 7, 128);
+        return;
+      }
+    }
+    Http2.putInteger(out, 8, 4, 0);
+    Http2.putText(out, String(status));
+  }
+
+  // A frame: its 24-bit length, type, flags and stream, then the payload.
+  static frame(kind: i64, flags: i64, id: i64, payload: Ref<u8[]>): u8[] {
+    const n = payload.length as i64;
+    let out: u8[] = [];
+    out.reserve(n + 9);
+    out.push(((n >> 16) & 255) as u8);
+    out.push(((n >> 8) & 255) as u8);
+    out.push((n & 255) as u8);
+    out.push(kind as u8);
+    out.push(flags as u8);
+    Http2.putU32(out, id & 2147483647);
+    for (const b of payload) out.push(b);
+    return out;
+  }
+
+  static putU32(out: Mut<u8[]>, n: i64) {
+    out.push(((n >> 24) & 255) as u8);
+    out.push(((n >> 16) & 255) as u8);
+    out.push(((n >> 8) & 255) as u8);
+    out.push((n & 255) as u8);
+  }
+
+  static u32(b: Ref<u8[]>, at: usize): i64 {
+    return ((b[at] as i64) << 24) | ((b[at + 1] as i64) << 16) | ((b[at + 2] as i64) << 8) | (b[at + 3] as i64);
+  }
+
+  // A SETTINGS frame of identifier, value pairs.
+  static settings(pairs: Ref<i64[]>): u8[] {
+    let payload: u8[] = [];
+    for (let i: usize = 0; i + 1 < pairs.length; i += 2) {
+      payload.push(((pairs[i] >> 8) & 255) as u8);
+      payload.push((pairs[i] & 255) as u8);
+      Http2.putU32(payload, pairs[i + 1]);
+    }
+    return Http2.frame(4, 0, 0, payload);
+  }
+
+  static windowUpdate(id: i64, n: i64): u8[] {
+    let payload: u8[] = [];
+    Http2.putU32(payload, n);
+    return Http2.frame(8, 0, id, payload);
+  }
+
+  static reset(id: i64, code: i64): u8[] {
+    let payload: u8[] = [];
+    Http2.putU32(payload, code);
+    return Http2.frame(3, 0, id, payload);
+  }
+
+  static goaway(last: i64, code: i64): u8[] {
+    let payload: u8[] = [];
+    Http2.putU32(payload, last);
+    Http2.putU32(payload, code);
+    return Http2.frame(7, 0, 0, payload);
+  }
+
+  // A header block as a HEADERS frame and as many CONTINUATIONs as the peer's frame size needs.
+  static headers(id: i64, block: Ref<u8[]>, end: boolean, max: i64): u8[] {
+    let out: u8[] = [];
+    const n = block.length as i64;
+    let at: i64 = 0;
+    let first = true;
+    while (first || at < n) {
+      const take = n - at < max ? n - at : max;
+      let piece: u8[] = [];
+      for (let i = at; i < at + take; i++) piece.push(block[i as usize]);
+      at += take;
+      const flags = (at >= n ? 4 : 0) | (first && end ? 1 : 0);
+      for (const b of Http2.frame(first ? 1 : 9, flags, id, piece)) out.push(b);
+      first = false;
+    }
+    return out;
+  }
+
+  static preface(): u8[] {
+    return new TextEncoder().encode("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+  }
+
+  // Whether what a connection has sent so far is the start of the preface, up to all of it.
+  static prefaceSoFar(buffer: Ref<u8[]>): boolean {
+    const want = Http2.preface();
+    if (buffer.length === 0) return false;
+    for (let i: usize = 0; i < buffer.length && i < want.length; i++) if (buffer[i] !== want[i]) return false;
+    return true;
+  }
+
+  // A DATA or HEADERS payload without its padding, and a HEADERS one without its priority, or
+  // null when the padding is longer than the frame.
+  static unpadded(payload: u8[], flags: i64, priority: boolean): u8[] | null {
+    let from: i64 = 0;
+    let pad: i64 = 0;
+    if ((flags & 8) !== 0) {
+      if (payload.length === 0) return null;
+      pad = payload[0] as i64;
+      from = 1;
+    }
+    if (priority && (flags & 32) !== 0) from += 5;
+    const end = payload.length as i64 - pad;
+    if (end < from) return null;
+    if (from === 0 && pad === 0) return payload;
+    return payload.slice(from, end);
+  }
+
+  // The frame at the front of a buffer holding it whole: its type, flags, stream and payload.
+  static take(buffer: Mut<u8[]>): { kind: i64; flags: i64; id: i64; payload: u8[] } {
+    const length = Http2.frameLength(buffer);
+    const kind = buffer[3] as i64;
+    const flags = buffer[4] as i64;
+    const id = Http2.u32(buffer, 5) & 2147483647;
+    const rest = buffer.splice(9 + length);
+    const payload = buffer.splice(9);
+    buffer.splice(0);
+    for (const b of rest) buffer.push(b);
+    return { kind: kind, flags: flags, id: id, payload: payload };
+  }
+
+  static frameLength(buffer: Ref<u8[]>): i64 {
+    return ((buffer[0] as i64) << 16) | ((buffer[1] as i64) << 8) | (buffer[2] as i64);
+  }
+
+  // Writes what a connection's streams queue, in order, so frames never interleave. A write that
+  // fails ends the writing, though what is queued is still taken so no sender waits.
+  static async writer(conn: TcpStream, out: Channel<u8[]>): Promise<void> {
+    let failed = false;
+    while (true) {
+      const frame = await out.receive();
+      if (frame === null) return;
+      if (failed) continue;
+      try {
+        await conn.write(frame, AbortSignal.timeout(30000));
+      } catch (e) {
+        failed = true;
+      }
+    }
+  }
+
+  // Whether a frame was queued before the connection went.
+  static async queue(out: Ref<Channel<u8[]>>, frame: u8[], gone: Ref<AbortSignal>): Promise<boolean> {
+    try {
+      await out.send(frame, gone.clone());
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Sends bytes as DATA frames within the peer's windows for the connection and the stream,
+  // waiting while either is shut. False once the stream was reset or the connection went.
+  // ponytail: a shut window is polled every millisecond; a waker per stream would wake at once.
+  static async data(out: Ref<Channel<u8[]>>, state: Ref<shared<__h2State>>, id: i64, payload: Ref<u8[]>, end: boolean, gone: Ref<AbortSignal>): Promise<boolean> {
+    const n = payload.length as i64;
+    if (n === 0) {
+      if (!end) return true;
+      const sent = await Http2.queue(out, Http2.frame(0, 1, id, payload), gone);
+      return sent;
+    }
+    let at: i64 = 0;
+    while (at < n) {
+      if (gone.aborted) return false;
+      const most = state.frame.load();
+      const want = n - at < most ? n - at : most;
+      const take = state.windows.update((w): i64 => {
+        const c = w.get(0);
+        const s = w.get(id);
+        if (c === null || s === null) return -1;
+        let t = want;
+        if (c < t) t = c;
+        if (s < t) t = s;
+        if (t > 0) {
+          w.set(0, c - t);
+          w.set(id, s - t);
+        }
+        return t;
+      });
+      if (take < 0) return false;
+      if (take === 0) {
+        await sleep(1);
+        continue;
+      }
+      let chunk: u8[] = [];
+      chunk.reserve(take);
+      for (let i = at; i < at + take; i++) chunk.push(payload[i as usize]);
+      at += take;
+      const sent = await Http2.queue(out, Http2.frame(0, at === n && end ? 1 : 0, id, chunk), gone);
+      if (!sent) return false;
+    }
+    return true;
+  }
+
+  // Ends a stream's response: with its trailers as a last HEADERS when it has them, else an empty DATA.
+  static async finish(out: Ref<Channel<u8[]>>, state: Ref<shared<__h2State>>, id: i64, res: Ref<Response>, gone: Ref<AbortSignal>): Promise<void> {
+    const trailers = res.__trailers();
+    if (trailers === null) {
+      const none: u8[] = [];
+      await Http2.data(out, state, id, none, true, gone);
+      return;
+    }
+    let block: u8[] = [];
+    for (let i: usize = 0; i < trailers.names.length; i++) if (!Http2.connectionField(trailers.names[i])) Http2.putField(block, trailers.names[i], trailers.values[i]);
+    await Http2.queue(out, Http2.headers(id, block, true, state.frame.load()), gone);
+  }
+
+  // A request from a stream's fields, or null when its pseudo-headers aren't a request's.
+  static request(fields: Ref<string[]>, host: string, secure: boolean, signal: AbortSignal): Request | null {
+    let method = "";
+    let path = "";
+    let authority = "";
+    let headers = new Headers();
+    for (let i: usize = 0; i + 1 < fields.length; i += 2) {
+      const name = fields[i];
+      const value = fields[i + 1];
+      if (Http1.hasBreak(value) || name.length === 0) return null;
+      if (name === ":method") method = value;
+      else if (name === ":path") path = value;
+      else if (name === ":authority") authority = value;
+      else if (name === ":scheme") {}
+      else if (name.startsWith(":") || name !== name.toLowerCase() || !Http1.isToken(name)) return null;
+      else headers.append(name, value);
+    }
+    if (!Http1.isToken(method) || !path.startsWith("/")) return null;
+    if (authority.length === 0) {
+      const named = headers.get("host");
+      authority = named !== null ? named : host;
+    }
+    if (!Http1.isHost(authority)) return null;
+    return new Request((secure ? "https://" : "http://") + authority + path, { method: method, headers: headers, signal: signal });
+  }
+
+  // A response's header block, framing a body of bytes with its length.
+  static responseBlock(res: Ref<Response>, streamed: boolean): u8[] {
+    let block: u8[] = [];
+    Http2.putStatus(block, res.status);
+    for (let i: usize = 0; i < res.headers.names.length; i++) {
+      const name = res.headers.names[i];
+      if (!Http2.connectionField(name) && name !== "content-length" && name !== "date") Http2.putField(block, name, res.headers.values[i]);
+    }
+    for (const line of res.cookies.toSetCookieHeaders()) Http2.putField(block, "set-cookie", line);
+    if (!streamed && res.status !== 204 && res.status !== 304) Http2.putField(block, "content-length", String(res.__bytes().length as i64));
+    Http2.putField(block, "date", httpDate());
+    return block;
+  }
+
+  // The fields HTTP/2 forbids, since they belong to one HTTP/1.1 connection.
+  static connectionField(name: string): boolean {
+    return name === "connection" || name === "keep-alive" || name === "proxy-connection" || name === "transfer-encoding" || name === "upgrade" || name === "host";
+  }
+
+  // Serves one HTTP/2 connection whose client has sent the preface's first bytes: streams are
+  // read here and each request answered by a task of its own, through one writer. With no stream
+  // open the connection closes after idleTimeout; when the server stops it says GOAWAY, lets the
+  // streams being answered finish for a second, and closes.
+  static async serve(conn: TcpStream, start: u8[], handler: ServeHandler, host: string, stop: AbortSignal, limits: __serveLimits): Promise<void> throws IoError {
+    let buffer = start;
+    while ((buffer.length as i64) < 24) {
+      const got = await Http1.readBy(conn, stop, Http1.after(limits.headerTimeout));
+      if (got === null || got.length === 0) return;
+      for (const b of got) buffer.push(b);
+    }
+    if (!Http2.prefaceSoFar(buffer)) return;
+    buffer = buffer.splice(24);
+    const out = new Channel<u8[]>(64);
+    const writing = spawn(Http2.writer(conn.clone(), out.clone()));
+    let windows = new Map<i64, i64>();
+    windows.set(0, 65535);
+    const state = shared<__h2State>({ windows: new Lock(windows), frame: new Atomic(16384), initial: new Atomic(65535), active: new Atomic(0) });
+    const gone = new AbortController();
+    const going = gone.signal.clone();
+    const settings: i64[] = [3, 100];
+    await Http2.queue(out, Http2.settings(settings), going);
+    await Http2.read(conn, buffer, handler, host, stop, limits, out.clone(), state.clone(), gone.signal.clone());
+    const ended = nowMs();
+    while (state.active.load() > 0) {
+      if (nowMs() - ended > 1000) gone.abort();
+      await sleep(5);
+    }
+    gone.abort();
+    out.close();
+    await writing;
+  }
+
+  // The frames' loop, until the client goes, breaks the protocol, sits idle, or the server stops.
+  static async read(conn: Ref<TcpStream>, start: u8[], handler: ServeHandler, host: string, stop: AbortSignal, limits: __serveLimits, out: Channel<u8[]>, state: shared<__h2State>, gone: AbortSignal): Promise<void> throws IoError {
+    let buffer = start;
+    let hpack = new Http2Hpack();
+    let streams: Http2Stream[] = [];
+    let last: i64 = 0;
+    // The stream whose header block CONTINUATION frames go on, and whether its HEADERS ended it.
+    let continuing: i64 = 0;
+    let continuingEnds = false;
+    let code: i64 = 0;
+    while (true) {
+      // Streams answered and gone from the windows are dropped.
+      let kept: Http2Stream[] = [];
+      while (streams.length > 0) {
+        const s = streams.pop()!;
+        const id = s.id;
+        if (!s.ended || state.windows.update((w) => w.has(id))) kept.push(s);
+      }
+      streams = kept;
+      const idle = streams.length === 0 && state.active.load() === 0;
+      const deadline = idle ? Http1.after(limits.idleTimeout) : 0;
+      const head = await Http2.fill(conn, buffer, 9, stop, deadline);
+      if (head !== 1) break;
+      const length = Http2.frameLength(buffer);
+      if (length > 16384) {
+        code = 6;
+        break;
+      }
+      const whole = await Http2.fill(conn, buffer, 9 + length, stop, Http1.after(limits.idleTimeout));
+      if (whole !== 1) break;
+      const f = Http2.take(buffer);
+      if (continuing !== 0 && (f.kind !== 9 || f.id !== continuing)) {
+        code = 1;
+        break;
+      }
+      if (f.kind === 0) {
+        // DATA: counted against the windows whether or not its stream still wants it.
+        if (length > 0) await Http2.queue(out, Http2.windowUpdate(0, length), gone);
+        const at = Http2.find(streams, f.id);
+        const data = Http2.unpadded(f.payload, f.flags, false);
+        if (data === null) {
+          code = 1;
+          break;
+        }
+        if (at < 0 || !streams[at as usize].headed || streams[at as usize].ended) {
+          if (f.id > last || f.id === 0) {
+            code = 1;
+            break;
+          }
+          continue;
+        }
+        const end = (f.flags & 1) !== 0;
+        if ((streams[at as usize].body.length + data.length) as i64 > limits.maxBodySize) {
+          await Http2.refuse(streams, at, out, state, gone, 413);
+          continue;
+        }
+        for (const b of data) streams[at as usize].body.push(b);
+        if (end) await Http2.dispatch(streams, at, handler.clone(), host, limits, out, state, gone);
+        else if (length > 0) await Http2.queue(out, Http2.windowUpdate(f.id, length), gone);
+      } else if (f.kind === 1 || f.kind === 9) {
+        const opening = f.kind === 1;
+        if (f.id === 0 || (f.id % 2) === 0 || (!opening && continuing === 0)) {
+          code = 1;
+          break;
+        }
+        const fragment = opening ? Http2.unpadded(f.payload, f.flags, true) : f.payload;
+        if (fragment === null) {
+          code = 1;
+          break;
+        }
+        let at = Http2.find(streams, f.id);
+        if (opening) {
+          if (at < 0) {
+            if (f.id <= last) {
+              code = 1;
+              break;
+            }
+            last = f.id;
+            streams.push(new Http2Stream(f.id));
+            at = streams.length as i64 - 1;
+            const initial = state.initial.load();
+            const id = f.id;
+            state.windows.update((w) => { w.set(id, initial); });
+          }
+          continuingEnds = (f.flags & 1) !== 0;
+        }
+        for (const b of fragment) streams[at as usize].block.push(b);
+        if ((streams[at as usize].block.length as i64) > 65536) {
+          code = 11;
+          break;
+        }
+        if ((f.flags & 4) === 0) {
+          continuing = f.id;
+          continue;
+        }
+        continuing = 0;
+        const block = streams[at as usize].block.splice(0);
+        const fields = hpack.decode(block, 4096);
+        if (fields === null) {
+          code = 9;
+          break;
+        }
+        // A second header block is the request's trailers, which end it.
+        if (!streams[at as usize].headed) {
+          streams[at as usize].fields = fields;
+          streams[at as usize].headed = true;
+          if (stop.aborted || state.active.load() >= 100) {
+            streams[at as usize].ended = true;
+            const id = f.id;
+            state.windows.update((w) => { w.delete(id); });
+            await Http2.queue(out, Http2.reset(f.id, 7), gone);
+            continue;
+          }
+        } else if (!continuingEnds) {
+          code = 1;
+          break;
+        }
+        if (continuingEnds && !streams[at as usize].ended) await Http2.dispatch(streams, at, handler.clone(), host, limits, out, state, gone);
+      } else if (f.kind === 3) {
+        const at = Http2.find(streams, f.id);
+        if (at >= 0) {
+          streams[at as usize].client.abort();
+          streams[at as usize].ended = true;
+        }
+        const id = f.id;
+        state.windows.update((w) => { w.delete(id); });
+      } else if (f.kind === 4) {
+        if ((f.flags & 1) !== 0) continue;
+        if (f.id !== 0 || (length % 6) !== 0) {
+          code = 6;
+          break;
+        }
+        for (let i: usize = 0; i + 5 < f.payload.length; i += 6) {
+          const key = ((f.payload[i] as i64) << 8) | (f.payload[i + 1] as i64);
+          const value = Http2.u32(f.payload, i + 2);
+          if (key === 4) {
+            if (value > 2147483647) {
+              code = 3;
+              break;
+            }
+            const delta = value - state.initial.exchange(value);
+            state.windows.update((w) => {
+              for (const k of w.keys()) if (k !== 0) w.set(k, w.get(k)! + delta);
+            });
+          } else if (key === 5) {
+            if (value < 16384 || value > 16777215) {
+              code = 1;
+              break;
+            }
+            state.frame.store(value);
+          }
+        }
+        if (code !== 0) break;
+        await Http2.queue(out, Http2.frame(4, 1, 0, []), gone);
+      } else if (f.kind === 6) {
+        if (length !== 8) {
+          code = 6;
+          break;
+        }
+        if ((f.flags & 1) === 0) await Http2.queue(out, Http2.frame(6, 1, 0, f.payload), gone);
+      } else if (f.kind === 7) {
+        break;
+      } else if (f.kind === 8) {
+        if (length !== 4) {
+          code = 6;
+          break;
+        }
+        const n = Http2.u32(f.payload, 0) & 2147483647;
+        const id = f.id;
+        state.windows.update((w) => {
+          const now = w.get(id);
+          if (now !== null) w.set(id, now + n);
+        });
+      } else if (f.kind === 5) {
+        code = 1;
+        break;
+      }
+    }
+    // A client gone, or a protocol error, ends every stream's request; a server stopping lets
+    // those being answered finish.
+    if (code !== 0 || !stop.aborted) for (const s of streams) s.client.abort();
+    await Http2.queue(out, Http2.goaway(last, code), gone);
+  }
+
+  static find(streams: Ref<Http2Stream[]>, id: i64): i64 {
+    for (let i: usize = 0; i < streams.length; i++) if (streams[i].id === id) return i as i64;
+    return -1;
+  }
+
+  // 1 once the buffer holds need bytes, 0 when the connection ends or the server stops, and -1
+  // once the deadline passes, where 0 is none.
+  static async fill(conn: Ref<TcpStream>, buffer: Mut<u8[]>, need: i64, stop: Ref<AbortSignal>, deadline: i64): Promise<i64> throws IoError {
+    while ((buffer.length as i64) < need) {
+      const got = await Http1.readBy(conn, stop, deadline);
+      if (got === null) return -1;
+      if (got.length === 0) return 0;
+      for (const b of got) buffer.push(b);
+    }
+    return 1;
+  }
+
+  // Answers a stream at once with a bare status and ends it, as for a body over the limit.
+  static async refuse(streams: Mut<Http2Stream[]>, at: i64, out: Ref<Channel<u8[]>>, state: Ref<shared<__h2State>>, gone: Ref<AbortSignal>, status: i64): Promise<void> {
+    streams[at as usize].ended = true;
+    const id = streams[at as usize].id;
+    state.windows.update((w) => { w.delete(id); });
+    let block: u8[] = [];
+    Http2.putStatus(block, status);
+    await Http2.queue(out, Http2.headers(id, block, true, state.frame.load()), gone);
+    await Http2.queue(out, Http2.reset(id, 0), gone);
+  }
+
+  // Hands a stream whose request has ended to a task that answers it.
+  static async dispatch(streams: Mut<Http2Stream[]>, at: i64, handler: ServeHandler, host: string, limits: Ref<__serveLimits>, out: Ref<Channel<u8[]>>, state: Ref<shared<__h2State>>, gone: Ref<AbortSignal>): Promise<void> {
+    streams[at as usize].ended = true;
+    const id = streams[at as usize].id;
+    let req = Http2.request(streams[at as usize].fields, host, limits.secure, streams[at as usize].client.signal.clone());
+    if (req === null) {
+      state.windows.update((w) => { w.delete(id); });
+      await Http2.queue(out, Http2.reset(id, 1), gone);
+      return;
+    }
+    req.__setBody(streams[at as usize].body.splice(0));
+    state.active.add(1);
+    spawn(Http2.respond(handler, req, id, out.clone(), state.clone(), gone.clone(), limits.trace));
+  }
+
+  // Runs a stream's handler on a task of its own, so a panic answers only its stream with a 500,
+  // then sends the response within the windows. A streamed body stops when the client resets the
+  // stream or the connection goes.
+  static async respond(handler: ServeHandler, req: Request, id: i64, out: Channel<u8[]>, state: shared<__h2State>, gone: AbortSignal, trace: boolean): Promise<void> {
+    const head = req.method === "HEAD";
+    const client = req.signal.clone();
+    let traced: __traceRecord[] = [];
+    let outer: i64[] = [];
+    if (trace && __traceOn()) {
+      outer = __traceWords();
+      traced.push(__traceRequest(req));
+    }
+    let res: Response;
+    try {
+      const running = spawn(Http1.handle(handler, req));
+      if (traced.length > 0) __traceEnter(outer);
+      res = await running.join();
+    } catch (e) {
+      res = new Response("", { status: 500 });
+    }
+    // A response HTTP/2 can't carry, a 101 among them, goes out as a 500.
+    if (!Http1.sendable(res)) res = new Response("Internal Server Error\n", { status: 500 });
+    if (traced.length > 0) __traceServed(traced, res.status);
+    const bodiless = head || res.status === 204 || res.status === 304;
+    const byteStream = res.__byteStream();
+    const stream = res.__stream();
+    const streamed = byteStream !== null || stream !== null;
+    const block = Http2.responseBlock(res, streamed);
+    const empty = bodiless || (!streamed && res.__bytes().length === 0);
+    const started = await Http2.queue(out, Http2.headers(id, block, empty, state.frame.load()), gone);
+    if (started && !empty) {
+      const either = AbortSignal.any([client, gone.clone()]);
+      if (byteStream !== null) {
+        let chunks = byteStream.__values();
+        let open = true;
+        while (open && !either.aborted) {
+          const chunk = await Promise.race([Http1.nextBytes(chunks), Http1.abortOfBytes(either)]);
+          if (chunk === null) break;
+          open = await Http2.data(out, state, id, chunk, false, gone);
+        }
+        if (open && !either.aborted) await Http2.finish(out, state, id, res, gone);
+      } else if (stream !== null) {
+        let pieces = stream;
+        let open = true;
+        while (open && !either.aborted) {
+          const piece = await Promise.race([Http1.next(pieces), Http1.abortOf(either)]);
+          if (piece === null) break;
+          const bytes = new TextEncoder().encode(piece);
+          open = await Http2.data(out, state, id, bytes, false, gone);
+        }
+        if (open && !either.aborted) await Http2.finish(out, state, id, res, gone);
+      } else {
+        const sent = await Http2.data(out, state, id, res.__bytes(), false, gone);
+        if (sent) await Http2.finish(out, state, id, res, gone);
+      }
+    }
+    state.windows.update((w) => { w.delete(id); });
+    state.active.sub(1);
+  }
+
+  // Sends one request as stream 1 of a connection whose peer chose HTTP/2 and reads the reply
+  // whole, its trailers included: within the server's windows going out, and replenishing the
+  // windows this side gives as the body comes in.
+  static async exchange(conn: Ref<TcpStream>, scheme: string, method: string, authority: string, path: string, headers: Ref<Headers>, body: Ref<u8[]>, signal: AbortSignal): Promise<__h2Reply> throws IoError | AbortError {
+    let block: u8[] = [];
+    Http2.putField(block, ":method", method);
+    Http2.putField(block, ":scheme", scheme);
+    Http2.putField(block, ":authority", authority);
+    Http2.putField(block, ":path", path);
+    for (let i: usize = 0; i < headers.names.length; i++) {
+      const name = headers.names[i];
+      if (!Http1.isToken(name) || Http1.hasBreak(headers.values[i])) throw new IoError("can't send the request: header '" + name + "' holds a line break or isn't a header name");
+      const te = name === "te" && headers.values[i] !== "trailers";
+      if (!Http2.connectionField(name) && name !== "content-length" && !te) Http2.putField(block, name, headers.values[i]);
+    }
+    if (!headers.has("accept")) Http2.putField(block, "accept", "*/*");
+    if (!headers.has("user-agent")) Http2.putField(block, "user-agent", "fish");
+    const size = body.length as i64;
+    if (size > 0 || method === "POST" || method === "PUT" || method === "PATCH") Http2.putField(block, "content-length", String(size));
+    let opening = Http2.preface();
+    const settings: i64[] = [2, 0];
+    for (const b of Http2.settings(settings)) opening.push(b);
+    for (const b of Http2.headers(1, block, size === 0, 16384)) opening.push(b);
+    await conn.write(opening, signal.clone());
+    let sendConnection: i64 = 65535;
+    let sendStream: i64 = 65535;
+    let frameMost: i64 = 16384;
+    let initial: i64 = 65535;
+    let sent: i64 = 0;
+    let hpack = new Http2Hpack();
+    let buffer: u8[] = [];
+    let fragments: u8[] = [];
+    let status: i64 = 0;
+    let fields = new Headers();
+    let trailers = new Headers();
+    let data: u8[] = [];
+    while (true) {
+      // As much of the body as the windows allow goes out before the next frame is read.
+      while (sent < size && sendConnection > 0 && sendStream > 0) {
+        let take = size - sent;
+        if (take > frameMost) take = frameMost;
+        if (take > sendConnection) take = sendConnection;
+        if (take > sendStream) take = sendStream;
+        let chunk: u8[] = [];
+        for (let i = sent; i < sent + take; i++) chunk.push(body[i as usize]);
+        sent += take;
+        sendConnection -= take;
+        sendStream -= take;
+        await conn.write(Http2.frame(0, sent === size ? 1 : 0, 1, chunk), signal.clone());
+      }
+      await Http2.more(conn, buffer, 9, signal);
+      const length = Http2.frameLength(buffer);
+      if (length > 16384) throw new IoError("the server sent a frame over 16 KiB, which this side didn't allow");
+      await Http2.more(conn, buffer, 9 + length, signal);
+      const f = Http2.take(buffer);
+      if (f.kind === 4) {
+        if ((f.flags & 1) !== 0) continue;
+        for (let i: usize = 0; i + 5 < f.payload.length; i += 6) {
+          const key = ((f.payload[i] as i64) << 8) | (f.payload[i + 1] as i64);
+          const value = Http2.u32(f.payload, i + 2);
+          if (key === 4) {
+            sendStream += value - initial;
+            initial = value;
+          }
+          else if (key === 5 && value >= 16384 && value <= 16777215) frameMost = value;
+        }
+        await conn.write(Http2.frame(4, 1, 0, []), signal.clone());
+      } else if (f.kind === 6) {
+        if ((f.flags & 1) === 0) await conn.write(Http2.frame(6, 1, 0, f.payload), signal.clone());
+      } else if (f.kind === 8) {
+        const n = Http2.u32(f.payload, 0) & 2147483647;
+        if (f.id === 0) sendConnection += n;
+        else if (f.id === 1) sendStream += n;
+      } else if (f.kind === 7) {
+        if ((Http2.u32(f.payload, 0) & 2147483647) < 1) throw new IoError("the server went away before answering, with HTTP/2 error " + String(Http2.u32(f.payload, 4)));
+      } else if (f.kind === 3 && f.id === 1) {
+        throw new IoError("the server reset the stream with HTTP/2 error " + String(Http2.u32(f.payload, 0)));
+      } else if ((f.kind === 1 || f.kind === 9) && f.id === 1) {
+        const fragment = f.kind === 1 ? Http2.unpadded(f.payload, f.flags, true) : f.payload;
+        if (fragment === null) throw new IoError("the server's HEADERS frame is malformed");
+        for (const b of fragment) fragments.push(b);
+        if ((f.flags & 4) === 0) continue;
+        const decoded = hpack.decode(fragments.splice(0), 4096);
+        if (decoded === null) throw new IoError("the server's header block isn't valid HPACK");
+        if (status >= 200) {
+          for (let i: usize = 0; i + 1 < decoded.length; i += 2) trailers.append(decoded[i], decoded[i + 1]);
+        } else {
+          let given = new Headers();
+          let code: i64 = -1;
+          for (let i: usize = 0; i + 1 < decoded.length; i += 2) {
+            if (decoded[i] === ":status") code = Http1.digits(decoded[i + 1]);
+            else if (!decoded[i].startsWith(":")) given.append(decoded[i], decoded[i + 1]);
+          }
+          if (code < 100 || code > 999) throw new IoError("the server's response has no :status");
+          // An interim 1xx response is skipped, as HTTP/1.1's are.
+          if (code >= 200) {
+            status = code;
+            fields = given;
+          }
+        }
+        if ((f.flags & 1) !== 0) break;
+      } else if (f.kind === 0 && f.id === 1) {
+        const piece = Http2.unpadded(f.payload, f.flags, false);
+        if (piece === null) throw new IoError("the server's DATA frame is malformed");
+        for (const b of piece) data.push(b);
+        if ((f.flags & 1) !== 0) break;
+        if (length > 0) {
+          let update = Http2.windowUpdate(0, length);
+          for (const b of Http2.windowUpdate(1, length)) update.push(b);
+          await conn.write(update, signal.clone());
+        }
+      }
+    }
+    if (status < 200) throw new IoError("the server ended the stream before its response's headers");
+    return { status: status, headers: fields, body: data, trailers: trailers };
+  }
+
+  // Reads until the buffer holds need bytes, which must come before the connection ends.
+  static async more(conn: Ref<TcpStream>, buffer: Mut<u8[]>, need: i64, signal: Ref<AbortSignal>): Promise<void> throws IoError | AbortError {
+    while ((buffer.length as i64) < need) {
+      const got = await Http1.more(conn, signal, "the HTTP/2 response ended");
+      for (const b of got) buffer.push(b);
+    }
+  }
+}
+`;
+const HTTP = HTTP2 + `
 class Headers {
   names: string[] = [];
   values: string[] = [];
@@ -679,6 +1751,8 @@ class Request {
 }
 
 type ResponseInit = { status?: i64; statusText?: string; headers?: Headers };
+// A response's trailers, at most one set, filled by whatever makes its body.
+type __trailerBox = { fields: Lock<Headers[]> };
 // One server-sent event: its data, and the event type, ID and reconnection delay it may name.
 type ServerSentEvent = { data: string; event?: string; id?: string; retry?: i64 };
 
@@ -703,6 +1777,9 @@ class Response {
   url: string = "";
   // The cookies it sets and deletes, each sent as a Set-Cookie header of its own.
   cookies: CookieMap = new CookieMap();
+  // Trailers sent after the body over HTTP/2, which a streamed body may fill as it ends, as gRPC's
+  // status is; HTTP/1.1 sends none.
+  #trailers: shared<__trailerBox>;
 
   // A text or streamed body is typed 'text/plain;charset=UTF-8' unless the headers say
   // otherwise; bytes are given no type.
@@ -738,6 +1815,17 @@ class Response {
     this.#stream = new Lock(stream);
     const upgrade: __wsUpgrade[] = [];
     this.#upgrade = new Lock(upgrade);
+    const trailers: Headers[] = [];
+    this.#trailers = shared<__trailerBox>({ fields: new Lock(trailers) });
+  }
+
+  __trailersFrom(this: Mut<this>, from: shared<__trailerBox>) {
+    this.#trailers = from;
+  }
+
+  // The trailers, once the body has given them, or null.
+  __trailers(): Headers | null {
+    return this.#trailers.fields.update((f) => f.length > 0 ? f[0].clone() : null);
   }
 
   // A response whose body is the value as JSON, typed 'application/json' unless the headers
@@ -1012,6 +2100,14 @@ class HttpHead {
 async function serveConnection(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal, limits: __serveLimits): Promise<void> {
   let buffer: u8[] = [];
   try {
+    // A client speaking HTTP/2, by prior knowledge or once ALPN chose it, opens with its preface.
+    const opening = await Http1.readBy(conn, stop, Http1.sooner(Http1.after(limits.headerTimeout), Http1.after(limits.idleTimeout)));
+    if (opening === null || opening.length === 0) return;
+    buffer = opening;
+    if (Http2.prefaceSoFar(buffer)) {
+      await Http2.serve(conn, buffer, handler, host, stop, limits);
+      return;
+    }
     while (true) {
       buffer = Http1.skipBlank(buffer);
       const headBy = Http1.after(limits.headerTimeout);
@@ -2880,7 +3976,8 @@ async function __traceSend(): Promise<void> {
 
 // fetch, whose URLs the URL library's parser reads.
 const FETCH = `
-// Fetches a URL over HTTP/1.1, or HTTPS, one connection per request, as the Fetch API does: a
+// Fetches a URL over HTTP/1.1, or HTTPS, one connection per request, as the Fetch API does,
+// speaking HTTP/2 when an https: server's ALPN picks it: a
 // 4xx or 5xx is a response, not an error, and a redirect is returned rather than followed.
 async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
   const unix = init !== null ? init.unix : null;
@@ -2893,7 +3990,17 @@ async function fetch(input: string | Request | URL, init?: RequestInit): Promise
   let conn: TcpStream;
   if (unix !== null) conn = await TcpStream.unix(unix, signal.clone());
   else conn = await TcpStream.connect(to.host, to.port, signal.clone());
-  if (to.secure) await __tlsClient(conn, to.host, ca, signal.clone());
+  if (to.secure) {
+    const chosen = await __tlsClientOffering(conn, to.host, ca, "h2,http/1.1", signal.clone());
+    if (chosen === "h2") {
+      const reply = await Http2.exchange(conn, "https", req.method, to.authority, to.path, req.headers, req.__bytes(), signal.clone());
+      let body = reply.body;
+      if (req.method === "HEAD") body = [];
+      let res = new Response(body, { status: reply.status, headers: reply.headers });
+      res.url = to.url;
+      return res;
+    }
+  }
   await conn.write(sent, signal.clone());
   let res = await Http1.receive(conn, req.method === "HEAD", signal);
   res.url = to.url;
@@ -4134,7 +5241,7 @@ const STREAM_NAMES = ["ReadableStream", "WritableStream", "ReadableStreamDefault
 const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date", "RangeError", "Html"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
-export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
+export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection", "Http2", "Http2Hpack", "Http2Stream"]);
 const HTTP_NAMES = ["fetch", "serve", "Router", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
@@ -4786,9 +5893,16 @@ const TLS = String.raw`
 // Starts TLS as the client on a connected stream and finishes the handshake, so a server whose
 // certificate doesn't verify fails here: an empty write sends nothing past the handshake.
 async function __tlsClient(conn: Ref<TcpStream>, serverName: string, ca: string, signal: AbortSignal): Promise<void> throws IoError | AbortError {
-  const why = conn.startTls(serverName, ca);
+  await __tlsClientOffering(conn, serverName, ca, "", signal);
+}
+
+// __tlsClient offering ALPN the protocols named, as "h2,http/1.1", and giving the one the server
+// chose, or an empty string.
+async function __tlsClientOffering(conn: Ref<TcpStream>, serverName: string, ca: string, alpn: string, signal: AbortSignal): Promise<string> throws IoError | AbortError {
+  const why = conn.startTls(serverName, ca, alpn);
   if (why.length > 0) throw new IoError(why);
   await conn.write([], signal);
+  return conn.protocol();
 }
 `;
 
@@ -5054,7 +6168,743 @@ export function fsyncSync(fd: i64): void throws IoError {
 }
 `;
 
+// std:grpc, as a template rather than String.raw, since its macros quote with backquotes.
+const GRPC = `// gRPC over HTTP/2: messages as classes the @message macro gives protobuf encoders while
+// compiling, services as interfaces @service gives a client and a server side.
+declare function fsh_rt_bytes_copy(to: MutPtr<u8>, from: Ptr<u8>, n: i64): void;
+
+// What a call's status says went wrong: its gRPC code, as GrpcStatus names them, and its message.
+export class GrpcError extends Error {
+  code: i64;
+  constructor(code: i64, message: string) {
+    super(message);
+    this.name = "GrpcError";
+    this.code = code;
+  }
+}
+
+function pbVarint(out: Mut<u8[]>, v: u64) {
+  let left = v;
+  while (left >= 128) {
+    out.push(((left & 127) | 128) as u8);
+    left = left >> 7;
+  }
+  out.push(left as u8);
+}
+
+function pbKey(out: Mut<u8[]>, field: i64, wire: i64) {
+  pbVarint(out, ((field << 3) | wire) as u64);
+}
+
+// Each field's encoder writes nothing for proto3's default, unless always: an optional field
+// holding one, or an element of a repeated field.
+function pbInt(out: Mut<u8[]>, field: i64, v: i64, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 0);
+  pbVarint(out, v as u64);
+}
+
+function pbUint(out: Mut<u8[]>, field: i64, v: u64, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 0);
+  pbVarint(out, v);
+}
+
+function pbBool(out: Mut<u8[]>, field: i64, v: boolean, always: boolean) {
+  if (!v && !always) return;
+  pbKey(out, field, 0);
+  out.push(v ? 1 : 0);
+}
+
+function pbDouble(out: Mut<u8[]>, field: i64, v: f64, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 1);
+  let bits: u64 = 0;
+  unsafe { fsh_rt_bytes_copy(mutPtrOf(bits) as MutPtr<u8>, ptrOf(v) as Ptr<u8>, 8) };
+  for (let i: u64 = 0; i < 8; i++) out.push(((bits >> (i * 8)) & 255) as u8);
+}
+
+function pbFloat(out: Mut<u8[]>, field: i64, v: f32, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 5);
+  let bits: u32 = 0;
+  unsafe { fsh_rt_bytes_copy(mutPtrOf(bits) as MutPtr<u8>, ptrOf(v) as Ptr<u8>, 4) };
+  for (let i: u32 = 0; i < 4; i++) out.push(((bits >> (i * 8)) & 255) as u8);
+}
+
+function pbBytes(out: Mut<u8[]>, field: i64, v: Ref<u8[]>, always: boolean) {
+  if (v.length === 0 && !always) return;
+  pbKey(out, field, 2);
+  pbVarint(out, v.length as u64);
+  for (const b of v) out.push(b);
+}
+
+function pbString(out: Mut<u8[]>, field: i64, v: string, always: boolean) {
+  if (v.length === 0 && !always) return;
+  const bytes = new TextEncoder().encode(v);
+  pbBytes(out, field, bytes, true);
+}
+
+// Reads a message's fields in order, each a key, then its value as its wire type gives it.
+class PbReader {
+  bytes: u8[];
+  at: usize = 0;
+
+  constructor(bytes: u8[]) {
+    this.bytes = bytes;
+  }
+
+  more(this: Ref<this>): boolean {
+    return this.at < this.bytes.length;
+  }
+
+  varint(this: Mut<this>): u64 throws GrpcError {
+    let v: u64 = 0;
+    let shift: u64 = 0;
+    while (true) {
+      if (this.at >= this.bytes.length || shift > 63) throw new GrpcError(13, "a protobuf varint runs past the message");
+      const b = this.bytes[this.at] as u64;
+      this.at += 1;
+      v = v | ((b & 127) << shift);
+      shift += 7;
+      if ((b & 128) === 0) return v;
+    }
+  }
+
+  int64(this: Mut<this>): i64 throws GrpcError {
+    return this.varint() as i64;
+  }
+
+  bool(this: Mut<this>): boolean throws GrpcError {
+    return this.varint() !== 0;
+  }
+
+  fixed(this: Mut<this>, n: usize): u64 throws GrpcError {
+    if (this.at + n > this.bytes.length) throw new GrpcError(13, "a protobuf fixed-width value runs past the message");
+    let v: u64 = 0;
+    for (let i: usize = 0; i < n; i++) v = v | ((this.bytes[this.at + i] as u64) << ((i * 8) as u64));
+    this.at += n;
+    return v;
+  }
+
+  double(this: Mut<this>): f64 throws GrpcError {
+    const bits = this.fixed(8);
+    let x: f64 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 8) };
+    return x;
+  }
+
+  float(this: Mut<this>): f32 throws GrpcError {
+    const bits = this.fixed(4) as u32;
+    let x: f32 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 4) };
+    return x;
+  }
+
+  bytesField(this: Mut<this>): u8[] throws GrpcError {
+    const n = this.varint() as usize;
+    if (this.at + n > this.bytes.length) throw new GrpcError(13, "a protobuf length-delimited value runs past the message");
+    const out = this.bytes.slice(this.at as i64, (this.at + n) as i64);
+    this.at += n;
+    return out;
+  }
+
+  string(this: Mut<this>): string throws GrpcError {
+    return new TextDecoder().decode(this.bytesField());
+  }
+
+  pb_u64(this: Mut<this>): u64 throws GrpcError { return this.varint(); }
+  pb_u32(this: Mut<this>): u32 throws GrpcError { return this.varint() as u32; }
+  pb_u16(this: Mut<this>): u16 throws GrpcError { return this.varint() as u16; }
+  pb_u8(this: Mut<this>): u8 throws GrpcError { return this.varint() as u8; }
+  pb_i64(this: Mut<this>): i64 throws GrpcError { return this.varint() as i64; }
+  pb_i32(this: Mut<this>): i32 throws GrpcError { return (this.varint() as i64) as i32; }
+  pb_i16(this: Mut<this>): i16 throws GrpcError { return (this.varint() as i64) as i16; }
+  pb_i8(this: Mut<this>): i8 throws GrpcError { return (this.varint() as i64) as i8; }
+  pb_bool(this: Mut<this>): boolean throws GrpcError { return this.varint() !== 0; }
+  pb_f64(this: Mut<this>): f64 throws GrpcError { return this.double(); }
+  pb_f32(this: Mut<this>): f32 throws GrpcError { return this.float(); }
+  pb_string(this: Mut<this>): string throws GrpcError { return this.string(); }
+  pb_bytesField(this: Mut<this>): u8[] throws GrpcError { return this.bytesField(); }
+
+  // A length-delimited value read as a message of its own.
+  sub(this: Mut<this>): PbReader throws GrpcError {
+    return new PbReader(this.bytesField());
+  }
+
+  // Passes over a field this side doesn't know, as protobuf's readers do.
+  skip(this: Mut<this>, wire: i64) throws GrpcError {
+    if (wire === 0) this.varint();
+    else if (wire === 1) this.fixed(8);
+    else if (wire === 2) this.bytesField();
+    else if (wire === 5) this.fixed(4);
+    else throw new GrpcError(13, "a protobuf field has wire type " + String(wire) + ", which proto3 doesn't use");
+  }
+}
+
+// How a field's type is sent: its scalar's reader method, or "message" with the class's name, and
+// whether it repeats or is optional.
+type PbShape = { kind: string; name: string; repeated: boolean; optional: boolean };
+
+function pbScalar(name: string): boolean {
+  return name === "i64" || name === "i32" || name === "i16" || name === "i8" || name === "u64" || name === "u32" || name === "u16" || name === "u8" || name === "boolean" || name === "f64" || name === "number" || name === "f32" || name === "string";
+}
+
+function pbShapeOf(t: Ref<AstType>, field: string): PbShape {
+  if (t.kind === "union" && t.types.length === 2) {
+    let inner: PbShape | null = null;
+    let nulls = 0;
+    for (const u of t.types) {
+      if (pbIsNull(u)) nulls++;
+      else inner = pbShapeOf(u, field);
+    }
+    if (nulls === 1 && inner !== null && !inner.repeated && !inner.optional) return { kind: inner.kind, name: inner.name, repeated: false, optional: true };
+  }
+  if (t.kind === "array") {
+    const e = t.element.clone();
+    if (e.kind === "ref" && e.name === "u8") return { kind: "bytes", name: "", repeated: false, optional: false };
+    const inner = pbShapeOf(e, field);
+    if (!inner.repeated && !inner.optional) return { kind: inner.kind, name: inner.name, repeated: true, optional: false };
+  }
+  if (t.kind === "ref" && t.args.length === 0) {
+    if (pbScalar(t.name)) return { kind: t.name, name: "", repeated: false, optional: false };
+    return { kind: "message", name: t.name, repeated: false, optional: false };
+  }
+  assert(false, "'" + field + "' has a type protobuf can't carry: a message's fields are sized numbers, booleans, strings, u8[], other messages, arrays of these, or one of these or null");
+  return { kind: "", name: "", repeated: false, optional: false };
+}
+
+function pbIsNull(t: Ref<AstType>): boolean {
+  if (t.kind === "ref") return t.name === "null" || t.name === "undefined";
+  if (t.kind === "literal") return t.value.kind === "null";
+  return false;
+}
+
+function pbNumber(n: i64): AstExpr {
+  return { kind: "int", value: n, start: 0, end: 0 };
+}
+
+function pbFlag(b: boolean): AstExpr {
+  return { kind: "bool", value: b, start: 0, end: 0 };
+}
+
+// The statement writing one value of a field.
+function pbWriteOne(shape: Ref<PbShape>, n: i64, value: AstExpr, always: boolean): AstStmt {
+  const num = pbNumber(n);
+  const all = pbFlag(always);
+  const k = shape.kind;
+  if (k === "i64" || k === "i32" || k === "i16" || k === "i8") return quote\`pbInt(\${ident("pbOut")}, \${num}, \${value} as i64, \${all});\`;
+  if (k === "u64" || k === "u32" || k === "u16" || k === "u8") return quote\`pbUint(\${ident("pbOut")}, \${num}, \${value} as u64, \${all});\`;
+  if (k === "boolean") return quote\`pbBool(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  if (k === "f64" || k === "number") return quote\`pbDouble(\${ident("pbOut")}, \${num}, \${value} as f64, \${all});\`;
+  if (k === "f32") return quote\`pbFloat(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  if (k === "string") return quote\`pbString(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  if (k === "bytes") return quote\`pbBytes(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  return quote\`{ let inner: u8[] = []; \${value}.__pbWrite(inner); pbBytes(\${ident("pbOut")}, \${num}, inner, \${all}); }\`;
+}
+
+// The expression reading one value of a field from reader r.
+function pbReadOne(shape: Ref<PbShape>, r: string): AstExpr {
+  const k = shape.kind;
+  const reader = ident(r);
+  if (k === "message") return quote\`\${ident(shape.name)}.__pbRead(\${reader}.sub())\`;
+  const method = k === "boolean" ? "bool" : k === "number" ? "f64" : k === "bytes" ? "bytesField" : k === "string" ? "string" : k;
+  return quote\`\${reader}.\${ident("pb_" + method)}()\`;
+}
+
+// @message: the class becomes a protobuf message, its fields numbered 1, 2, 3 in the order they
+// are declared, or as an @field(n) on one says, with toBinary() and fromBinary(bytes).
+export macro function message(input: AstStmt): AstStmt {
+  let c = input;
+  assert(c.kind === "class", "'@message' applies to a class, whose fields are the message's");
+  if (c.kind !== "class") return c;
+  const className = c.name;
+  assert(className !== null, "'@message' needs a named class");
+  if (className === null) return c;
+  // The numbers @field pinned, by field name.
+  let pinnedNames: string[] = [];
+  let pinnedNumbers: i64[] = [];
+  let kept: AstClassMember[] = [];
+  for (const m of c.members) {
+    if (m.kind === "field" && typeof m.name === "string" && m.name.startsWith("__pbField_")) {
+      const v = m.init.clone();
+      if (v !== null && v.kind === "int") {
+        pinnedNames.push(m.name.slice(10));
+        pinnedNumbers.push(v.value);
+      }
+      continue;
+    }
+    kept.push(m.clone());
+  }
+  let writes: AstStmt[] = [];
+  let reads: AstStmt[] = [];
+  let next: i64 = 1;
+  let used: i64[] = [];
+  for (const m of kept) {
+    if (m.kind !== "field" || m.modifiers.length > 0) continue;
+    if (typeof m.name !== "string") continue;
+    const name = pbText(m.name);
+    const t = m.type.clone();
+    assert(t !== null, "'" + name + "' needs a written type for '@message' to encode it");
+    if (t === null) continue;
+    assert(m.init !== null || m.optional, "'" + name + "' needs a default value, as 'fromBinary' starts each field at its default");
+    let n = next;
+    for (let i: usize = 0; i < pinnedNames.length; i++) if (pinnedNames[i] === name) n = pinnedNumbers[i];
+    assert(!pbHas(used, n), "two fields of '" + className + "' have the number " + String(n));
+    used.push(n);
+    next = n + 1;
+    const shape = pbShapeOf(t, name);
+    const f = ident(name);
+    const num = pbNumber(n);
+    if (shape.repeated) {
+      writes.push(quote\`for (const \${ident("pbX")} of this.\${f.clone()}) \${pbWriteOne(shape, n, ident("pbX"), true)}\`);
+      const packable = shape.kind !== "string" && shape.kind !== "bytes" && shape.kind !== "message";
+      if (packable) reads.push(quote\`if (\${ident("pbField")} === \${num.clone()} && \${ident("pbWire")} === 2) { let \${ident("pbPacked")} = \${ident("pbR")}.sub(); while (\${ident("pbPacked")}.more()) \${ident("pbM")}.\${f.clone()}.push(\${pbReadOne(shape, "pbPacked")}); continue; }\`);
+      reads.push(quote\`if (\${ident("pbField")} === \${num.clone()}) { \${ident("pbM")}.\${f.clone()}.push(\${pbReadOne(shape, "pbR")}); continue; }\`);
+    } else if (shape.optional) {
+      const one = pbWriteOne(shape, n, quote\`this.\${f.clone()}\`, true);
+      writes.push(quote\`if (this.\${f.clone()} !== null) \${one}\`);
+      reads.push(quote\`if (\${ident("pbField")} === \${num.clone()}) { \${ident("pbM")}.\${f.clone()} = \${pbReadOne(shape, "pbR")}; continue; }\`);
+    } else {
+      writes.push(pbWriteOne(shape, n, quote\`this.\${f.clone()}\`, false));
+      reads.push(quote\`if (\${ident("pbField")} === \${num.clone()}) { \${ident("pbM")}.\${f.clone()} = \${pbReadOne(shape, "pbR")}; continue; }\`);
+    }
+  }
+  const self = ident(className);
+  const selfType: AstType = { kind: "ref", name: className, args: [], start: 0, end: 0 };
+  const k = quote\`class X {
+    __pbWrite(this: Ref<this>, \${ident("pbOut")}: Mut<u8[]>) {}
+    static __pbRead(reader: PbReader): \${selfType.clone()} throws GrpcError {
+      let \${ident("pbR")} = reader;
+      let \${ident("pbM")} = new \${self.clone()}();
+      while (\${ident("pbR")}.more()) {
+        const key = \${ident("pbR")}.pb_u64() as i64;
+        const \${ident("pbField")} = key >> 3;
+        const \${ident("pbWire")} = key & 7;
+        \${ident("pbR")}.skip(\${ident("pbWire")});
+      }
+      return \${ident("pbM")};
+    }
+    toBinary(this: Ref<this>): u8[] {
+      let out: u8[] = [];
+      this.__pbWrite(out);
+      return out;
+    }
+    static fromBinary(bytes: u8[]): \${selfType.clone()} throws GrpcError {
+      return \${self.clone()}.__pbRead(new PbReader(bytes));
+    }
+    static __pbTry(bytes: u8[]): \${selfType.clone()} | GrpcError {
+      try {
+        return \${self.clone()}.fromBinary(bytes);
+      } catch (e) {
+        return e;
+      }
+    }
+  }\`;
+  if (k.kind === "class") {
+    for (const member of k.members) {
+      let made = member.clone();
+      if (made.kind === "method" && typeof made.name === "string" && made.name === "__pbWrite") made.body = writes.clone();
+      if (made.kind === "method" && typeof made.name === "string" && made.name === "__pbRead" && made.body !== null) {
+        let body = made.body.clone();
+        let loop = body[2].clone();
+        if (loop.kind === "while") {
+          let inner: AstStmt[] = [loop.body[0].clone(), loop.body[1].clone(), loop.body[2].clone()];
+          for (const s of reads) inner.push(s.clone());
+          inner.push(loop.body[3].clone());
+          loop.body = inner;
+        }
+        body[2] = loop;
+        made.body = body;
+      }
+      kept.push(made);
+    }
+  }
+  c.members = kept;
+  return c;
+}
+
+// @field(n) on a message's field: its number on the wire, which stays as fields are added around it.
+export macro function field(input: AstStmt, member: usize, n: i64): AstStmt {
+  let c = input;
+  if (c.kind === "class") {
+    const f = c.members[member].clone();
+    if (f.kind === "field" && typeof f.name === "string") {
+      assert(n >= 1 && n <= 536870911 && (n < 19000 || n > 19999), "a protobuf field number is 1 to 536870911, outside 19000 to 19999, not " + String(n));
+      const num = pbNumber(n);
+      const k = quote\`class X { static \${ident("__pbField_" + f.name)} = \${num}; }\`;
+      if (k.kind === "class") c.members.push(k.members[0].clone());
+    }
+  }
+  return c;
+}
+
+function pbText(s: string): string {
+  return s;
+}
+
+function pbHas(xs: Ref<i64[]>, n: i64): boolean {
+  for (const x of xs) if (x === n) return true;
+  return false;
+}
+
+// A service's methods as a server runs them: its full name, as "helloworld.Greeter", and a call
+// giving each reply of a method, by its name, to a request's bytes, or the error that ended it.
+export type GrpcCall = (method: string, body: u8[]) => Dyn<AsyncGenerator<u8[] | GrpcError>>;
+export type GrpcService = { name: string; call: GrpcCall };
+
+function grpcPascal(name: string): string {
+  return name.slice(0, 1).toUpperCase() + name.slice(1);
+}
+
+function grpcTypeOf(t: Ref<AstType>, what: string): AstType {
+  assert(t.kind === "ref" && t.args.length === 0, what + " is a '@message' class, named");
+  return t.clone();
+}
+
+// The class a method returns from, unwrapped from its Promise or AsyncGenerator, and whether it streams.
+// failing says the reply may instead be a GrpcError, the status the call ends with.
+type GrpcMethod = { name: string; request: AstType; reply: AstType; streams: boolean; failing: boolean };
+
+function grpcMethodOf(m: Ref<AstTypeMember>, service: string): GrpcMethod {
+  assert(m.kind === "method", "a '@service' interface holds methods only, and '" + service + "' holds something else");
+  let out: GrpcMethod = { name: "", request: { kind: "ref", name: "", args: [], start: 0, end: 0 }, reply: { kind: "ref", name: "", args: [], start: 0, end: 0 }, streams: false, failing: false };
+  if (m.kind !== "method") return out;
+  if (typeof m.name !== "string") return out;
+  const name = pbText(m.name);
+  assert(m.params.length === 1, "'" + name + "' takes one request message, as a gRPC method does");
+  const p = m.params[0].type.clone();
+  assert(p !== null, "'" + name + "' needs its request's type written");
+  if (p === null) return out;
+  const r = m.returns.clone();
+  assert(r !== null && r.kind === "ref" && (r.name === "Promise" || r.name === "AsyncGenerator") && r.args.length === 1, "'" + name + "' returns a Promise of its reply message, or an AsyncGenerator of them to stream");
+  const given = r.args[0].clone();
+  let reply = given.clone();
+  let failing = false;
+  if (given.kind === "union" && given.types.length === 2) {
+    for (const u of given.types) {
+      if (u.kind === "ref" && u.name === "GrpcError") failing = true;
+      else reply = u.clone();
+    }
+  }
+  return { name: name, request: grpcTypeOf(p, "'" + name + "''s request"), reply: grpcTypeOf(reply, "'" + name + "''s reply"), streams: r.name === "AsyncGenerator", failing: failing };
+}
+
+// A reply as the bytes sent, or the GrpcError it is when the method may give one.
+function grpcEncoded(failing: boolean, value: AstExpr): AstExpr {
+  if (failing) return quote\`\${value.clone()} instanceof GrpcError ? \${value.clone()} : \${value}.toBinary()\`;
+  return quote\`\${value}.toBinary()\`;
+}
+
+function grpcTypeName(t: Ref<AstType>): string {
+  if (t.kind === "ref") return pbText(t.name);
+  return "";
+}
+
+// @service("helloworld.Greeter") on an interface of gRPC methods, each taking a request message
+// and giving a Promise of a reply, or an AsyncGenerator of replies for a server stream. It adds
+// <Name>Client, whose methods call a server at a URL, and <name>Service(impl), the service for a
+// GrpcServer to run on impl.
+export macro function service(input: AstStmt, fullName: string): Ast[] {
+  assert(input.kind === "interface", "'@service' applies to an interface of the service's methods");
+  if (input.kind !== "interface") return [input];
+  const name = pbText(input.name);
+  let methods: GrpcMethod[] = [];
+  for (const m of input.members) methods.push(grpcMethodOf(m, name));
+  const client = ident(name + "Client");
+  const serviceFn = ident(name.slice(0, 1).toLowerCase() + name.slice(1) + "Service");
+  const callFn = ident("__grpcCall" + name);
+  const iface: AstType = { kind: "ref", name: name, args: [], start: 0, end: 0 };
+  const full: AstExpr = { kind: "string", value: fullName, start: 0, end: 0 };
+  let members: AstClassMember[] = [];
+  let calls: AstStmt[] = [];
+  for (const m of methods) {
+    const path: AstExpr = { kind: "string", value: "/" + fullName + "/" + grpcPascal(m.name), start: 0, end: 0 };
+    const wire: AstExpr = { kind: "string", value: grpcPascal(m.name), start: 0, end: 0 };
+    const method = ident(m.name);
+    const replyClass = ident(grpcTypeName(m.reply));
+    const requestClass = ident(grpcTypeName(m.request));
+    let made: AstStmt = quote\`class X {}\`;
+    let call: AstStmt = quote\`{}\`;
+    if (m.streams) {
+      made = quote\`class X {
+        async *\${method.clone()}(this: Ref<this>, request: Ref<\${m.request.clone()}>): AsyncGenerator<\${m.reply.clone()}> throws GrpcError | IoError | AbortError {
+          const replies = await grpcServerStream(this.url, \${path.clone()}, request.toBinary());
+          for (const bytes of replies.messages) yield \${replyClass.clone()}.fromBinary(bytes.clone());
+          const status = replies.status;
+          if (status !== null) throw status;
+        }
+      }\`;
+      call = quote\`if (\${ident("grpcMethod")} === \${wire.clone()}) {
+        const request = \${requestClass.clone()}.__pbTry(\${ident("grpcBody")});
+        if (request instanceof GrpcError) {
+          yield request;
+          return;
+        }
+        let replies = \${ident("grpcImpl")}.\${method.clone()}(request);
+        while (true) {
+          const r = await replies.next();
+          if (r.done !== false) return;
+          const item: u8[] | GrpcError = \${grpcEncoded(m.failing, quote\`r.value\`)};
+          const stop = item instanceof GrpcError;
+          yield item;
+          if (stop) return;
+        }
+      }\`;
+    } else {
+      made = quote\`class X {
+        async \${method.clone()}(this: Ref<this>, request: Ref<\${m.request.clone()}>): Promise<\${m.reply.clone()}> throws GrpcError | IoError | AbortError {
+          const bytes = await grpcUnary(this.url, \${path.clone()}, request.toBinary());
+          return \${replyClass.clone()}.fromBinary(bytes);
+        }
+      }\`;
+      call = quote\`if (\${ident("grpcMethod")} === \${wire.clone()}) {
+        const request = \${requestClass.clone()}.__pbTry(\${ident("grpcBody")});
+        if (request instanceof GrpcError) {
+          yield request;
+          return;
+        }
+        const answered = await \${ident("grpcImpl")}.\${method.clone()}(request);
+        const reply: u8[] | GrpcError = \${grpcEncoded(m.failing, quote\`answered\`)};
+        yield reply;
+        return;
+      }\`;
+    }
+    if (made.kind === "class") members.push(made.members[0].clone());
+    calls.push(call);
+  }
+  let clientClass = quote\`export class \${client.clone()} {
+    url: string;
+    constructor(url: string) {
+      this.url = url;
+    }
+  }\`;
+  if (clientClass.kind === "export") {
+    let d = clientClass.body.clone();
+    if (d.kind === "class") {
+      for (const m of members) d.members.push(m.clone());
+      clientClass.body = d;
+    }
+  }
+  const serviceDecl = quote\`export function \${serviceFn}(impl: \${iface.clone()}): GrpcService {
+    return { name: \${full}, call: (method: string, body: u8[]): Dyn<AsyncGenerator<u8[] | GrpcError>> => \${callFn.clone()}(impl.clone(), method, body) };
+  }\`;
+  let callDecl = quote\`async function* \${callFn.clone()}(\${ident("grpcImpl")}: \${iface.clone()}, \${ident("grpcMethod")}: string, \${ident("grpcBody")}: u8[]): AsyncGenerator<u8[] | GrpcError> {
+    yield new GrpcError(12, "the service has no method " + \${ident("grpcMethod")});
+  }\`;
+  if (callDecl.kind === "function" && callDecl.body !== null) {
+    let body: AstStmt[] = [];
+    for (const s of calls) body.push(s.clone());
+    for (const s of callDecl.body) body.push(s.clone());
+    callDecl.body = body;
+  }
+  return [input, clientClass, serviceDecl, callDecl];
+}
+
+// GrpcError's codes, as gRPC numbers them.
+export const GrpcStatus = { OK: 0, CANCELLED: 1, UNKNOWN: 2, INVALID_ARGUMENT: 3, DEADLINE_EXCEEDED: 4, NOT_FOUND: 5, ALREADY_EXISTS: 6, PERMISSION_DENIED: 7, RESOURCE_EXHAUSTED: 8, FAILED_PRECONDITION: 9, ABORTED: 10, OUT_OF_RANGE: 11, UNIMPLEMENTED: 12, INTERNAL: 13, UNAVAILABLE: 14, DATA_LOSS: 15, UNAUTHENTICATED: 16 };
+
+// A message as gRPC frames it: uncompressed, its length, then its bytes.
+function grpcFrame(message: Ref<u8[]>): u8[] {
+  let out: u8[] = [0 as u8];
+  const n = message.length as i64;
+  out.push(((n >> 24) & 255) as u8);
+  out.push(((n >> 16) & 255) as u8);
+  out.push(((n >> 8) & 255) as u8);
+  out.push((n & 255) as u8);
+  for (const b of message) out.push(b);
+  return out;
+}
+
+// The messages a body holds, or why it can't be read: compression isn't offered, so a
+// compressed message is refused.
+function grpcFrames(body: Ref<u8[]>): u8[][] | GrpcError {
+  let out: u8[][] = [];
+  let at: usize = 0;
+  while (at < body.length) {
+    if (at + 5 > body.length) return new GrpcError(13, "a gRPC message's frame is cut short");
+    if (body[at] !== 0) return new GrpcError(12, "compressed gRPC messages aren't supported");
+    const n = (((body[at + 1] as i64) << 24) | ((body[at + 2] as i64) << 16) | ((body[at + 3] as i64) << 8) | (body[at + 4] as i64)) as usize;
+    if (at + 5 + n > body.length) return new GrpcError(13, "a gRPC message is cut short");
+    out.push(body.slice((at + 5) as i64, (at + 5 + n) as i64));
+    at += 5 + n;
+  }
+  return out;
+}
+
+// grpc-message's text, percent-decoded as gRPC sends it.
+function grpcUnescape(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let out: u8[] = [];
+  let i: usize = 0;
+  while (i < bytes.length) {
+    if (bytes[i] === 37 && i + 2 < bytes.length) {
+      const n = parseInt(new TextDecoder().decode(bytes.slice((i + 1) as i64, (i + 3) as i64)), 16);
+      if (n !== null) {
+        out.push(n as u8);
+        i += 3;
+        continue;
+      }
+    }
+    out.push(bytes[i]);
+    i += 1;
+  }
+  return new TextDecoder().decode(out);
+}
+
+// grpc-message's text percent-encoded, past printable ASCII and '%'.
+function grpcEscape(text: string): string {
+  const digits = "0123456789ABCDEF";
+  let out = "";
+  for (const b of new TextEncoder().encode(text)) {
+    if (b >= 32 && b <= 126 && b !== 37) out += String.fromCharCode(b as u16);
+    else out += "%" + digits[(b >> 4) as usize] + digits[(b & 15) as usize];
+  }
+  return out;
+}
+
+// One call to a server: the request message out, the reply messages back, and the status the
+// trailers end it with, any but OK thrown. The URL is http:// for HTTP/2 by prior knowledge or
+// https:// for TLS agreeing to h2. A connection per call.
+// ponytail: a connection per call and a stream read whole before its first message is given; a
+// pooled connection and replies handed over as their frames arrive would scale further.
+async function grpcCall(url: string, path: string, message: u8[]): Promise<GrpcReplies> throws GrpcError | IoError | AbortError {
+  const u = grpcURL(url);
+  if (u instanceof GrpcError) throw u;
+  const secure = u.protocol === "https:";
+  if (!secure && u.protocol !== "http:") throw new GrpcError(3, "a gRPC URL starts with http:// or https://, not " + u.protocol);
+  const host = u.hostname.startsWith("[") ? u.hostname.slice(1, (u.hostname.length as i64) - 1) : u.hostname;
+  const port = u.port.length === 0 ? (secure ? 443 : 80) : parseInt(u.port) ?? 80;
+  const signal = new AbortController().signal;
+  const conn = await TcpStream.connect(host, port, signal.clone());
+  if (secure) {
+    const chosen = await __tlsClientOffering(conn, host, "", "h2", signal.clone());
+    if (chosen !== "h2") throw new GrpcError(14, "the server at " + u.host + " didn't agree to HTTP/2, which gRPC needs");
+  }
+  let headers = new Headers();
+  headers.set("content-type", "application/grpc");
+  headers.set("te", "trailers");
+  const body = grpcFrame(message);
+  const reply = await Http2.exchange(conn, secure ? "https" : "http", "POST", u.host, path, headers, body, signal);
+  if (reply.status !== 200) throw new GrpcError(reply.status === 404 ? 12 : 14, "the server answered " + path + " with HTTP status " + String(reply.status));
+  const said = reply.trailers.get("grpc-status") ?? reply.headers.get("grpc-status");
+  if (said === null) throw new GrpcError(13, "the server's reply to " + path + " has no grpc-status");
+  const code = parseInt(said) ?? 2;
+  const status = code === 0 ? null : new GrpcError(code, grpcUnescape(reply.trailers.get("grpc-message") ?? reply.headers.get("grpc-message") ?? ""));
+  const frames = grpcFrames(reply.body);
+  if (frames instanceof GrpcError) throw frames;
+  return { messages: frames, status: status };
+}
+
+// A call's replies, and the status it ended with when that isn't OK.
+type GrpcReplies = { messages: u8[][]; status: GrpcError | null };
+
+function grpcURL(url: string): URL | GrpcError {
+  try {
+    return new URL(url);
+  } catch (e) {
+    return new GrpcError(3, "the gRPC URL can't be read as a URL: " + e.message);
+  }
+}
+
+async function grpcUnary(url: string, path: string, message: u8[]): Promise<u8[]> throws GrpcError | IoError | AbortError {
+  const got = await grpcCall(url, path, message);
+  const status = got.status;
+  if (status !== null) throw status;
+  let replies = got.messages;
+  if (replies.length !== 1) throw new GrpcError(13, path + " gave " + String(replies.length as i64) + " replies to a call taking one");
+  const first = replies.pop();
+  if (first === null) throw new GrpcError(13, path + " gave no reply");
+  return first;
+}
+
+async function grpcServerStream(url: string, path: string, message: u8[]): Promise<GrpcReplies> throws GrpcError | IoError | AbortError {
+  const replies = await grpcCall(url, path, message);
+  return replies;
+}
+
+type GrpcTable = { services: Lock<GrpcService[]> };
+
+// Services by their full names, served through a handler serve runs over HTTP/2. A call to a
+// method a service doesn't have, or to a service not added, ends with UNIMPLEMENTED.
+export class GrpcServer {
+  #table: shared<GrpcTable>;
+
+  constructor() {
+    const none: GrpcService[] = [];
+    this.#table = shared<GrpcTable>({ services: new Lock(none) });
+  }
+
+  add(this: Ref<this>, service: GrpcService) {
+    this.#table.services.update((s) => { s.push(service); });
+  }
+
+  // The handler for serve, sharing this server's services.
+  handler(this: Ref<this>): ServeHandler {
+    const table = this.#table.clone();
+    return async (req: Request) => {
+      const res = await grpcHandle(table.clone(), req);
+      return res;
+    };
+  }
+}
+
+function grpcFind(services: Ref<GrpcService[]>, name: string): GrpcCall | null {
+  for (const s of services) if (s.name === name) return s.call.clone();
+  return null;
+}
+
+async function grpcHandle(table: shared<GrpcTable>, req: Request): Promise<Response> {
+  const parts = req.path.split("/");
+  if (req.method !== "POST" || parts.length !== 3) return new Response("Not Found\\n", { status: 404 });
+  const kind = req.headers.get("content-type") ?? "";
+  if (!kind.startsWith("application/grpc")) return new Response("Unsupported Media Type\\n", { status: 415 });
+  const name = parts[1];
+  const call = table.services.update((s) => grpcFind(s, name));
+  const body = await req.bytes();
+  const none: Headers[] = [];
+  const box = shared<__trailerBox>({ fields: new Lock(none) });
+  let headers = new Headers();
+  headers.set("content-type", "application/grpc");
+  let res = new Response(ReadableStream.from(grpcReplies(call, parts[2], name, body, box.clone())), { status: 200, headers: headers });
+  res.__trailersFrom(box);
+  return res;
+}
+
+// A call's replies as frames, then its status in the trailers.
+async function* grpcReplies(call: GrpcCall | null, method: string, service: string, body: u8[], box: shared<__trailerBox>): AsyncGenerator<u8[]> {
+  let code: i64 = 0;
+  let message = "";
+  const frames = grpcFrames(body);
+  if (call === null) {
+    code = 12;
+    message = "the server has no service " + service;
+  } else if (frames instanceof GrpcError) {
+    code = frames.code;
+    message = frames.message;
+  } else if (frames.length !== 1) {
+    code = 12;
+    message = "a call takes one request message, as client streaming isn't supported";
+  } else {
+    let replies = call(method, frames[0].clone());
+    for await (const r of replies) {
+      if (r instanceof GrpcError) {
+        code = r.code;
+        message = r.message;
+        break;
+      }
+      yield grpcFrame(r);
+    }
+  }
+  let trailers = new Headers();
+  trailers.set("grpc-status", String(code));
+  if (message.length > 0) trailers.set("grpc-message", grpcEscape(message));
+  box.fields.update((f) => { f.push(trailers); });
+}
+`;
+
 export const STD_MODULES: Record<string, string> = {
+  grpc: GRPC,
   // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
   // they panic where they are made.
   assert: String.raw`
@@ -9210,7 +11060,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
@@ -9792,7 +11642,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // btoa, atob and Buffer call them too.
   const encoding = httpUsed || bufferUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);
   const dated = httpUsed || uses(written, dates, ["Date"]);
-  const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
+  const secure = fetchUsed || uses(written, tls, ["__tlsClient", "__tlsClientOffering"]);
   const streamed = httpUsed || uses(written, streaming, STREAM_NAMES);
   // The checker turns typed arrays' constructors and methods into calls of these helpers.
   const typing = (dataViewUsed && dataView.length > 0) || mentionsTypedArray(written);
