@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { bodyOf, type Arenas } from "./arenas.fsh";
 import { C_KEYWORDS } from "./check.fsh";
 import { codegenChecked, compiledOf, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.fsh";
-import { formatMemory, formatTimings, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Reading, type Session, type Tables } from "./compilation.fsh";
+import { formatMemory, formatTimings, formatUsage, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Peaks, type Reading, type Session, type Tables } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { cachedSession } from "./mathlib.fsh";
 import { CompileError, copyNames, formatError, movedOffset, type BorrowEvent, type Names, type Source } from "./diag.fsh";
@@ -926,6 +926,8 @@ function sessionWith(locked: boolean, timed: boolean, checking = false): BuildSe
     timings.report = timed;
     if (memory || stop !== undefined) timings.memory = new Map<string, Reading>();
     if (stop !== undefined) timings.stop = stop!;
+    // FISH_USAGE=1 records each stage's CPU time and the peaks of fishc and of clang.
+    if (process.env.FISH_USAGE === "1") timings.usage = { cpu: new Map<string, f64>(), peaks: new Map<string, Peaks>(), inner: 0 };
     made.timings = timings;
   }
   if (checking) made.checkCache = false;
@@ -1410,6 +1412,7 @@ function reportTimings(session: Ref<Session>, stages: Ref<string[]>, start: f64)
   if (session.timings === undefined) return;
   if (session.timings.report) process.stderr.write(formatTimings(session.timings, stages, performance.now() - start));
   if (session.timings.memory !== undefined) process.stderr.write(formatMemory(session.timings.memory!, stages));
+  if (session.timings.usage !== undefined) process.stderr.write(formatUsage(session.timings.usage!, stages));
   if (session.timings.tables !== undefined) process.stderr.write(session.timings.tables!);
 }
 
