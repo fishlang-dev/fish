@@ -27,7 +27,8 @@ function items(lines: Ref<string[]>): Item[] {
   for (let i: usize = 0; i < lines.length; i++) {
     const line = lines[i]!;
     if (line === "") continue;
-    if (line.startsWith("!") || line.startsWith('%"<')) continue;
+    // A comment is the C a build compiles beside the module, which it reads before splitting.
+    if (line.startsWith("!") || line.startsWith('%"<') || line.startsWith(";")) continue;
     const name = firstNameIn(line) ?? "";
     if (line.startsWith("define ")) {
       let end = i;

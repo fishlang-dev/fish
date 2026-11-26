@@ -195,7 +195,7 @@ export type ClassNode = Span & Id & {
   name: string | undefined; abstract: boolean; decorators: Expr[]; typeParams: TypeParam[];
   // An instantiation expression when written with type arguments, as in `extends Base<T>`.
   extends: Expr | undefined; implements: TypeNode[]; members: ClassMember[];
-  // What `@derive` gave it, which `JSON` reads.
+  // What `@derive` gave it, which `JSON` reads, and `C` from `@c`, which lays it out as a C struct.
   derives?: string[];
 };
 
