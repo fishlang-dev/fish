@@ -49,7 +49,7 @@ export function placeholders<R extends BoundResolver>(r: Mut<R>, params: Ref<Typ
       } catch (e) {
         if (!(e instanceof CompileError) || !perInstance(e)) throw e;
         const unbound = concrete !== undefined ? concrete.get(p.name) : undefined;
-        scope.set(p.name, unbound !== undefined ? r.tables.typing.wrapped(p.name, undefined, unbound) : r.tables.typing.typeParameter(p.name, undefined, undefined));
+        scope.set(p.name, unbound !== undefined ? unbound : r.tables.typing.typeParameter(p.name, undefined, undefined));
         continue;
       }
       const kind = typeof t === "string" ? undefined : r.tables.typing.kindOf(t);

@@ -28,7 +28,7 @@ function main(): void {
 }
 
 // case: keyof_param_wrong_key
-// error: 'nope'
+// error: type '"nope"' does not satisfy the constraint '"id"'
 type User = { id: i64 };
 function pick<T, K extends keyof T>(o: Ref<T>, k: K): T[K] {
   return o[k];

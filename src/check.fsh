@@ -1349,6 +1349,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // Whether a generic function's definition is being checked, where a type computed per instance
   // is refused rather than stood in for.
   definingGeneric: boolean;
+  // Whether that definition's check met such a type in a statement it went on past.
+  perInstanceSeen: boolean;
   // A generic definition's placeholder for each comptime argument, one per argument.
   placeholders: NodeMap<Expr, Type>;
   // The targets some `break` leaves, and the loops some `continue` repeats.
@@ -1422,6 +1424,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.querying = new Set<string>();
     this.placeholders = new NodeMap<Expr, Type>();
     this.definingGeneric = false;
+    this.perInstanceSeen = false;
     this.broken = new NodeSet<Stmt>();
     this.continued = new NodeSet<Stmt>();
     this.inProgress = new Set<InstanceId>();
@@ -1767,7 +1770,20 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   /** @throws {CompileError} */
+  // A generic function whose definition needs a type only each instance can compute: what its
+  // definition's check reported is dropped, its recorded failure with it, and each call's instance
+  // is checked instead.
+  private perInstanceOnly(this: Mut<this>, id: BodyId, reported: usize): void {
+    this.errors.splice(reported as i64);
+    this.failed.delete(id);
+    this.perInstanceSeen = false;
+  }
+
   recover(this: Mut<this>, e: CompileError): void {
+    if (this.definingGeneric && perInstance(e)) {
+      this.perInstanceSeen = true;
+      return;
+    }
     if (e.code === "E0113") this.unending = true;
     for (const x of this.errors) if (x.start === e.start && x.end === e.end && x.message === e.message) return;
     this.errors.push(e);
@@ -2077,18 +2093,20 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       }
     }
     for (const id of [...this.funcs]) {
+      const reported = this.errors.length;
       try {
         this.definingGeneric = this.instancing().generic(id);
+        this.perInstanceSeen = false;
         const definition = this.definition(id);
         this.checkBody(definition);
         this.definingGeneric = false;
+        if (this.perInstanceSeen) this.perInstanceOnly(id, reported);
       } catch (e) {
         this.definingGeneric = false;
         // `keyof T` and `T[K]` over the function's own type parameters are computed per instance,
         // so a generic function using them is checked as each call instantiates it.
-        // The failed definition's check recorded its error for every call; the calls make their own.
         if (e instanceof CompileError && perInstance(e) && this.instancing().generic(id)) {
-          this.failed.delete(id);
+          this.perInstanceOnly(id, reported);
           continue;
         }
         // A package's function Fish can't type is refused where a program calls it.
