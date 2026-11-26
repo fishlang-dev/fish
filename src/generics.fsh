@@ -443,6 +443,12 @@ export function checkBound(type: Type, bound: Type, members: Mut<Members>, at: R
   throw new CompileError("E0107", `type '${members.typingView().show(type)}' does not satisfy the constraint '${members.typingView().show(bound)}'${reason !== "" ? `: ${reason}` : ""}`, at.start, at.end);
 }
 
+// Whether `t` has no type parameter in it, as `fishc layout` asks of the instances a program has.
+export function isConcrete(typing: Ref<Typing>, t: Type): boolean {
+  let c = new Concreteness();
+  return c.concrete(typing, t);
+}
+
 // Whether a type has no type parameter in it, so its instance can be compiled. A class's
 // fields come from its type arguments and base, so those decide it, and an object type's
 // answer is kept, since its fields never change: walking nested types afresh at every level
