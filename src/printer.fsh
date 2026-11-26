@@ -1211,7 +1211,7 @@ const testCallees = new Set([
   "it", "it.only", "it.skip", "describe", "describe.only", "describe.skip", "test", "test.only", "test.skip", "test.fixme",
   "test.step", "test.describe", "test.describe.only", "test.describe.skip", "test.describe.fixme", "test.describe.parallel",
   "test.describe.parallel.only", "test.describe.serial", "test.describe.serial.only", "skip", "xit", "xdescribe", "xtest",
-  "fit", "fdescribe", "ftest",
+  "fit", "fdescribe", "ftest", "fuzz",
 ]);
 function isFunction(e: Ref<Expr>): boolean {
   return e.kind === "function" || e.kind === "arrow";

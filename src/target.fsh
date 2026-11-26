@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
 // Build targets: the four v1 platforms and Linux over musl for static binaries, named by their
@@ -138,12 +138,80 @@ function clangRuntimeDir(triple: string): string {
 // Whether clang finds the library `name` among its own for `triple`. A system may keep a runtime
 // beside the directory `-print-runtime-dir` names and still link it from there, as Ubuntu 26.04
 // does; asked for a file, clang gives its path when it has it and the bare name back when not.
-/** @throws {IoError} */
-function clangFinds(triple: string, name: string): boolean {
-  const done = Bun.spawnSync(["clang", `--target=${triple}`, `-print-file-name=${name}`]);
-  if (done.exitCode !== 0) return false;
-  const path = new TextDecoder().decode(done.stdout).trim();
-  return path !== name && existsSync(path);
+function clangFinds(triple: string, name: string, cc = "clang"): boolean {
+  try {
+    const done = Bun.spawnSync([cc, `--target=${triple}`, `-print-file-name=${name}`]);
+    if (done.exitCode !== 0) return false;
+    const path = new TextDecoder().decode(done.stdout).trim();
+    return path !== name && existsSync(path);
+  } catch (_e) {
+    return false;
+  }
+}
+
+function clangHasRuntime(cc: string, triple: string, names: Ref<string[]>): boolean {
+  try {
+    const rt = Bun.spawnSync([cc, `--target=${triple}`, "-print-runtime-dir"]);
+    if (rt.exitCode === 0) {
+      const dir = new TextDecoder().decode(rt.stdout).trim();
+      if (dir !== "" && names.some((n) => existsSync(join(dir, n)))) return true;
+    }
+  } catch (_e) {
+    return false;
+  }
+  return names.some((n) => clangFinds(triple, n, cc));
+}
+
+// Finds a clang binary that ships libFuzzer (and ASan when requested). Apple's system clang omits
+// libFuzzer, so Homebrew LLVM is probed after FISH_CLANG and PATH's clang.
+/** @throws {Error | IoError} */
+export function findFuzzerClang(asan = true, given?: string): string {
+  const triple = given ?? hostTriple();
+  if (triple === undefined || musl(triple)) {
+    throw new Error(`fishc fuzz: libFuzzer isn't available for ${triple ?? "this machine"}`);
+  }
+  const cpu = triple.split("-")[0]!;
+  const darwin = triple.includes("-apple-");
+  const fuzzerNames = darwin ? ["libclang_rt.fuzzer_osx.a"] : ["libclang_rt.fuzzer.a", `libclang_rt.fuzzer-${cpu}.a`];
+  const asanNames = darwin ? ["libclang_rt.asan_osx_dynamic.dylib"] : ["libclang_rt.asan.a", `libclang_rt.asan-${cpu}.a`];
+  let candidates: string[] = [];
+  const envCc = process.env.FISH_CLANG;
+  if (envCc !== undefined && envCc !== "") {
+    candidates.push(envCc.includes("/") ? resolve(envCc) : envCc);
+  }
+  for (const cc of ["clang", "/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang"]) {
+    if (!candidates.includes(cc)) candidates.push(cc);
+  }
+  let sawFuzzer = false;
+  for (const cc of candidates) {
+    let available = false;
+    if (cc.includes("/")) {
+      try {
+        available = existsSync(cc) && statSync(cc).isFile();
+      } catch (_e) {
+        available = false;
+      }
+    } else {
+      available = Bun.which(cc) !== null;
+    }
+    if (!available) continue;
+    if (!clangHasRuntime(cc, triple, fuzzerNames)) continue;
+    sawFuzzer = true;
+    if (!asan || clangHasRuntime(cc, triple, asanNames)) return cc;
+  }
+  if (sawFuzzer && asan) {
+    throw new Error("fishc fuzz: found libFuzzer clang without an AddressSanitizer runtime; pass --no-asan to fuzz without AddressSanitizer");
+  }
+  const hint = darwin ? "install LLVM with 'brew install llvm' or set FISH_CLANG" : "install clang with libFuzzer (e.g. 'apt install clang') or set FISH_CLANG";
+  throw new Error(`fishc fuzz: no clang with libFuzzer was found; ${hint}`);
+}
+
+// Target flags for coverage-guided fuzzing with libFuzzer (and ASan unless disabled).
+export function fuzzerTarget(asan = true): Target {
+  const compile = asan ? ["-fsanitize=fuzzer-no-link,address", "-fno-omit-frame-pointer"] : ["-fsanitize=fuzzer-no-link", "-fno-omit-frame-pointer"];
+  const link = asan ? ["-fsanitize=fuzzer,address"] : ["-fsanitize=fuzzer"];
+  if (asan) return { triple: "", compile, link, ar: "ar", sanitize: "address" };
+  return { triple: "", compile, link, ar: "ar" };
 }
 
 // `target` with every compile instrumented by clang's `kind` sanitizer and its runtime linked, so

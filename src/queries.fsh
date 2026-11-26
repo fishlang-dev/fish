@@ -16,6 +16,7 @@ import { composedMoves, loadedContents, reloaded, spillFrom, takenBodies, textIn
 import { load, type Loaded } from "./modules.fsh";
 import { movedStmt } from "./nodes.fsh";
 import type { Stmt } from "./parser.fsh";
+import { liftFuzz } from "./fuzz.fsh";
 import { liftTests } from "./tests.fsh";
 import { FILE_SPAN } from "./program.fsh";
 
@@ -245,6 +246,7 @@ export function checkedLoaded(compilation: Compilation, loaded: Loaded, taken: S
       let own: string[] = [];
       for (const m of modules.modules) if (m.pkg === first && !m.path.startsWith("std:")) own.push(m.path);
       liftTests(program, modules.modules, own);
+      liftFuzz(program, modules.modules, own);
     }
     statements = expanded(program, modules, library);
   } catch (e) {

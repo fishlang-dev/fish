@@ -6,6 +6,7 @@ import { memberKey, type Replaced } from "./edits.fsh";
 import type { CompileError } from "./diag.fsh";
 import type { Emitted } from "./codegen.fsh";
 import type { InstanceId } from "./arenas.fsh";
+import { fuzzOf } from "./fuzz.fsh";
 import { testOf } from "./tests.fsh";
 
 // What `fishc watch` keeps from one build for the next: the checked program, what its checker held
@@ -63,7 +64,7 @@ export function reloaded(kept: Mut<Kept>, index: usize, text: string): { stateme
   let statements: Stmt[] = [];
   while (parsed.statements.length > 0) {
     const s = parsed.statements.shift()!;
-    if (testOf(s) === undefined) statements.push(s);
+    if (testOf(s) === undefined && fuzzOf(s) === undefined) statements.push(s);
   }
   let linked = relinkedFile(kept.checked.tables.ids, kept.loaded, index, text, statements, false);
   if (linked.fallback !== undefined) return linked;

@@ -68,22 +68,24 @@ export type Unit = { name: string; args: string[]; stdin?: string; inputs: strin
 // `clang`: `clang --version`, which names the target as well as the compiler.
 // `digests`: each source a cached object depends on, hashed, by path, size and modification time.
 // `mathUnits`: the Math runtime's objects to compile.
-export type BuildSession = Session & { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
+export type BuildSession = Session & { clang?: string; clangCc?: string; cc?: string; digests: Map<string, string>; mathUnits?: Unit[] };
 
 // `session` given the caches building needs, keeping any it already has.
-export function buildSession(session: Session & { clang?: string; digests?: Map<string, string>; mathUnits?: Unit[] }): BuildSession {
+export function buildSession(session: Session & { clang?: string; clangCc?: string; cc?: string; digests?: Map<string, string>; mathUnits?: Unit[] }): BuildSession {
   return { ...session, digests: session.digests ?? new Map<string, string>() };
 }
 
-// `clang --version`, which names the target as well as the compiler, run once a session.
+// `clang --version`, which names the target as well as the compiler, run once a session per `cc`.
 /** @throws {Error | IoError} */
 function clangVersion(session: Mut<BuildSession>): string {
+  const cc = session.cc ?? "clang";
   const known = session.clang;
-  if (known !== undefined) return known;
-  const clang = Bun.spawnSync(["clang", "--version"]);
-  if (clang.exitCode !== 0) throw new Error(`clang failed:\n${new TextDecoder().decode(clang.stderr)}`);
+  if (known !== undefined && (session.clangCc ?? "clang") === cc) return known;
+  const clang = Bun.spawnSync([cc, "--version"]);
+  if (clang.exitCode !== 0) throw new Error(`${cc} failed:\n${new TextDecoder().decode(clang.stderr)}`);
   const version = new TextDecoder().decode(clang.stdout);
   session.clang = version;
+  session.clangCc = cc;
   return version;
 }
 
@@ -130,7 +132,7 @@ function finish(u: Ref<Unit>, code: i64 | null, stderr: string, temp: string, ou
   renameSync(temp, out);
 }
 
-const command = (u: Ref<Unit>, temp: string): string[] => ["clang", ...u.args, "-c", "-o", temp];
+const command = (cc: string, u: Ref<Unit>, temp: string): string[] => [cc, ...u.args, "-c", "-o", temp];
 const input = (u: Ref<Unit>): Uint8Array | undefined => (u.stdin === undefined ? undefined : new TextEncoder().encode(u.stdin));
 
 // Clang runs in an empty directory of its own, since a quoted include in source read from stdin
@@ -171,7 +173,7 @@ const quoted = (s: string): string => "'" + s.replaceAll("'", "'\\''") + "'";
 // and exit code in files of the unit's own, and starts the next as one ends. Throws the first
 // failure once every object that did compile is in the cache.
 /** @throws {Error | IoError} */
-function compiledTogether(units: Ref<Unit[]>, outs: Ref<string[]>, wanted: Ref<usize[]>, jobs: usize): void {
+function compiledTogether(cc: string, units: Ref<Unit[]>, outs: Ref<string[]>, wanted: Ref<usize[]>, jobs: usize): void {
   const work = mkdtempSync(join(tmpdir(), "fish-cc-"));
   const cwd = join(work, "empty");
   mkdirSync(cwd);
@@ -189,7 +191,7 @@ function compiledTogether(units: Ref<Unit[]>, outs: Ref<string[]>, wanted: Ref<u
         writeFileSync(from, u.stdin!);
       }
       let words: string[] = [];
-      for (const word of command(u, temp)) words.push(quoted(word));
+      for (const word of command(cc, u, temp)) words.push(quoted(word));
       writeFileSync(`${at}.sh`, `cd ${quoted(cwd)} && ${words.join(" ")} < ${quoted(from)} 2> ${quoted(`${at}.err`)}\necho $? > ${quoted(`${at}.code`)}\n`);
       scripts.push(`${at}.sh`);
     }
@@ -238,7 +240,7 @@ export function cachedObjects(session: Mut<BuildSession>, units: Ref<Unit[]>): s
     if (held > budget) break;
     jobs++;
   }
-  compiledTogether(units, outs, missing, jobs);
+  compiledTogether(session.cc ?? "clang", units, outs, missing, jobs);
   return outs;
 }
 
@@ -253,13 +255,13 @@ export function cachedObject(session: Mut<BuildSession>, u: Ref<Unit>): string {
 /** @throws {Error | IoError} */
 export async function cachedObjectAsync(session: Mut<BuildSession>, u: Unit): Promise<string> {
   const out = objectPath(session, u);
-  return await objectAsync(u, out);
+  return await objectAsync(u, out, session.cc ?? "clang");
 }
 
 // The object at `out`, `objectPath`'s for `u`, compiled first if the cache has none. It reads no
 // session, so builds running at once can each wait on their own.
 /** @throws {Error | IoError} */
-export async function objectAsync(u: Ref<Unit>, out: string): Promise<string> {
+export async function objectAsync(u: Ref<Unit>, out: string, cc = "clang"): Promise<string> {
   const lock = `${out}.lock`;
   while (!existsSync(out)) {
     if (!claimed(lock)) {
@@ -269,7 +271,7 @@ export async function objectAsync(u: Ref<Unit>, out: string): Promise<string> {
       continue;
     }
     try {
-      if (!existsSync(out)) await compiledAsync(u, out);
+      if (!existsSync(out)) await compiledAsync(cc, u, out);
     } catch (e) {
       rmSync(lock, { force: true });
       throw e;
@@ -298,11 +300,11 @@ function claimed(lock: string): boolean {
 }
 
 /** @throws {Error | IoError} */
-async function compiledAsync(u: Ref<Unit>, out: string): Promise<void> {
+async function compiledAsync(cc: string, u: Ref<Unit>, out: string): Promise<void> {
   const temp = partial(out);
   const cwd = emptyDir();
   try {
-    const clang = Bun.spawn(command(u, temp), { stdin: input(u), stderr: "pipe", cwd });
+    const clang = Bun.spawn(command(cc, u, temp), { stdin: input(u), stderr: "pipe", cwd });
     const errors = new Response(clang.stderr);
     const [code, stderr] = await Promise.all([clang.exited, errors.text()]);
     finish(u, code, stderr, temp, out);
@@ -339,12 +341,13 @@ export function mathObjects(session: Mut<BuildSession>, target: string[] = []): 
 // ponytail: one at a time, as Fish can't map to promises yet; Promise.all over them once it can.
 /** @throws {Error | IoError} */
 export async function mathObjectsAsync(session: Mut<BuildSession>): Promise<string[]> {
+  const cc = session.cc ?? "clang";
   const all = units(session);
   let outs: string[] = [];
   for (const u of all) outs.push(objectPath(session, u));
   let objects: string[] = [];
   for (let i: usize = 0; i < all.length; i++) {
-    const object = await objectAsync(all[i]!, outs[i]!);
+    const object = await objectAsync(all[i]!, outs[i]!, cc);
     objects.push(object);
   }
   return objects;
