@@ -3542,9 +3542,11 @@ class Codegen implements PrintHost, ComptimeHost {
       this.startBlock(done);
       return undefined;
     }
-    if (callee.name === "startTls" || callee.name === "listenTls") {
+    if (callee.name === "startTls" || callee.name === "listenTls" || callee.name === "protocol") {
       const made = this.temp();
-      const line4 = `${made} = call ptr @fsh_rt_tls_${callee.name === "startTls" ? "client" : "listen"}(ptr ${handle}, ptr ${this.value(e.args[0]!)}, ptr ${this.value(e.args[1]!)})`;
+      const named = callee.name === "startTls" ? "client" : callee.name === "listenTls" ? "listen" : "protocol";
+      const args = e.args.map((a) => `, ptr ${this.value(a)}`).join("");
+      const line4 = `${made} = call ptr @fsh_rt_tls_${named}(ptr ${handle}${args})`;
       this.emit(line4);
       if (!this.cur().types.has(e)) this.pending.push({ v: made, type: "string" });
       return made;
