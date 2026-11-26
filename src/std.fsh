@@ -4,7 +4,7 @@ import { AST } from "./ast.fsh";
 import { nextId, renumberStmts, Rewrites, someNode, walk, type AnyNode } from "./nodes.fsh";
 import { rebuiltStmts } from "./rebuild.fsh";
 import { parse, type Pattern, type Stmt, type TypeNode } from "./parser.fsh";
-import { TYPED_ARRAY_NAMES } from "./typing.fsh";
+import { SIMD_MASKS, SIMD_TYPES, TYPED_ARRAY_NAMES } from "./typing.fsh";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
 // program; the HTTP library only into one that names it.
@@ -12199,7 +12199,36 @@ class Arena<T> {
   }
 }
 `;
-export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML;
+const SIMD = `
+// SIMD vectors' load and store, which the checker turns f32x4.load(a, i) and v.store(a, i)
+// into, so the array is borrowed as by any function. The rest are LLVM vector instructions.
+// LLVM's optimizer turns these lane reads and writes into vector loads and stores.
+function __simd_f32x4_load(a: Ref<f32[]>, i: usize): f32x4 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3]]; }
+function __simd_f32x4_store(v: f32x4, a: Mut<f32[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; }
+function __simd_f32x8_load(a: Ref<f32[]>, i: usize): f32x8 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7]]; }
+function __simd_f32x8_store(v: f32x8, a: Mut<f32[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; a[i + 4] = v[4]; a[i + 5] = v[5]; a[i + 6] = v[6]; a[i + 7] = v[7]; }
+function __simd_f64x2_load(a: Ref<f64[]>, i: usize): f64x2 { return [a[i + 0], a[i + 1]]; }
+function __simd_f64x2_store(v: f64x2, a: Mut<f64[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; }
+function __simd_f64x4_load(a: Ref<f64[]>, i: usize): f64x4 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3]]; }
+function __simd_f64x4_store(v: f64x4, a: Mut<f64[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; }
+function __simd_i8x16_load(a: Ref<i8[]>, i: usize): i8x16 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7], a[i + 8], a[i + 9], a[i + 10], a[i + 11], a[i + 12], a[i + 13], a[i + 14], a[i + 15]]; }
+function __simd_i8x16_store(v: i8x16, a: Mut<i8[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; a[i + 4] = v[4]; a[i + 5] = v[5]; a[i + 6] = v[6]; a[i + 7] = v[7]; a[i + 8] = v[8]; a[i + 9] = v[9]; a[i + 10] = v[10]; a[i + 11] = v[11]; a[i + 12] = v[12]; a[i + 13] = v[13]; a[i + 14] = v[14]; a[i + 15] = v[15]; }
+function __simd_u8x16_load(a: Ref<u8[]>, i: usize): u8x16 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7], a[i + 8], a[i + 9], a[i + 10], a[i + 11], a[i + 12], a[i + 13], a[i + 14], a[i + 15]]; }
+function __simd_u8x16_store(v: u8x16, a: Mut<u8[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; a[i + 4] = v[4]; a[i + 5] = v[5]; a[i + 6] = v[6]; a[i + 7] = v[7]; a[i + 8] = v[8]; a[i + 9] = v[9]; a[i + 10] = v[10]; a[i + 11] = v[11]; a[i + 12] = v[12]; a[i + 13] = v[13]; a[i + 14] = v[14]; a[i + 15] = v[15]; }
+function __simd_i16x8_load(a: Ref<i16[]>, i: usize): i16x8 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7]]; }
+function __simd_i16x8_store(v: i16x8, a: Mut<i16[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; a[i + 4] = v[4]; a[i + 5] = v[5]; a[i + 6] = v[6]; a[i + 7] = v[7]; }
+function __simd_i32x4_load(a: Ref<i32[]>, i: usize): i32x4 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3]]; }
+function __simd_i32x4_store(v: i32x4, a: Mut<i32[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; }
+function __simd_i32x8_load(a: Ref<i32[]>, i: usize): i32x8 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7]]; }
+function __simd_i32x8_store(v: i32x8, a: Mut<i32[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; a[i + 4] = v[4]; a[i + 5] = v[5]; a[i + 6] = v[6]; a[i + 7] = v[7]; }
+function __simd_i64x2_load(a: Ref<i64[]>, i: usize): i64x2 { return [a[i + 0], a[i + 1]]; }
+function __simd_i64x2_store(v: i64x2, a: Mut<i64[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; }
+function __simd_u32x4_load(a: Ref<u32[]>, i: usize): u32x4 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3]]; }
+function __simd_u32x4_store(v: u32x4, a: Mut<u32[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; }
+function __simd_u64x2_load(a: Ref<u64[]>, i: usize): u64x2 { return [a[i + 0], a[i + 1]]; }
+function __simd_u64x2_store(v: u64x2, a: Mut<u64[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; }
+`;
+export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -12217,7 +12246,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML]) {
+  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -12245,6 +12274,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let streaming = sections.shift()!;
   let arenas = sections.shift()!;
   let htmls = sections.shift()!;
+  let simds = sections.shift()!;
   renamed(json, { kind: "json" });
   renamed(jsonName, { kind: "json" });
   let astNames: string[] = [];
@@ -12302,6 +12332,8 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   if (uses(written, arenas, ["Arena"])) chosen = chosen.concat(arenas);
   // Response.html takes an Html, so every program that serves HTTP has it.
   if (httpUsed || uses(written, htmls, HTML_NAMES)) chosen = chosen.concat(htmls);
+  // The checker turns SIMD vectors' constructors and methods into calls of these helpers.
+  if (uses(written, simds, [...SIMD_TYPES.keys(), ...SIMD_MASKS.keys()])) chosen = chosen.concat(simds);
   // A C function the program declares already, as a std module it imports may, is declared once.
   const foreign = foreignShapes(written);
   if (foreign.size > 0) chosen = chosen.filter((s) => !declaredNames(s).some((n) => sameForeign(foreign, s, n)));

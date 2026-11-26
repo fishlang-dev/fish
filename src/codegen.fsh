@@ -1823,6 +1823,145 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // `x.checkedAdd(y)` and its kin: checked gives null when the operation overflowed, and
   // overflowing pairs the wrapped value with whether it did, the intrinsic's own `{ iN, i1 }`.
+  // A SIMD vector is held as its fixed array is, an LLVM array; its operators move it into an
+  // LLVM vector lane by lane, which the optimizer folds away, and back.
+  private simdShape(type: Type): { lane: string; size: usize; vector: string; array: string; float: boolean; signed: boolean; mask: boolean } {
+    const lanes = this.tables.typing.simd(type)!;
+    const lane = this.llvm(lanes.element);
+    const signed = isInteger(lanes.element) && integerInfo(lanes.element).signed;
+    return { lane, size: lanes.size, vector: `<${lanes.size} x ${lane}>`, array: this.llvm(type), float: isFloat(lanes.element), signed, mask: lanes.element === "boolean" };
+  }
+
+  private toVector(this: Mut<this>, array: string, s: Ref<{ lane: string; size: usize; vector: string; array: string }>): string {
+    let v = "undef";
+    for (let k: usize = 0; k < s.size; k++) {
+      const part = this.temp();
+      this.emit(`${part} = extractvalue ${s.array} ${array}, ${k}`);
+      const next = this.temp();
+      this.emit(`${next} = insertelement ${s.vector} ${v}, ${s.lane} ${part}, i64 ${k}`);
+      v = next;
+    }
+    return v;
+  }
+
+  private fromVector(this: Mut<this>, vector: string, s: Ref<{ lane: string; size: usize; vector: string; array: string }>): string {
+    let a = "undef";
+    for (let k: usize = 0; k < s.size; k++) {
+      const part = this.temp();
+      this.emit(`${part} = extractelement ${s.vector} ${vector}, i64 ${k}`);
+      const next = this.temp();
+      this.emit(`${next} = insertvalue ${s.array} ${a}, ${s.lane} ${part}, ${k}`);
+      a = next;
+    }
+    return a;
+  }
+
+  // `-v`, `~v` and `!m`, lane by lane.
+  private simdUnary(this: Mut<this>, op: string, operand: string, type: Type): string {
+    const s = this.simdShape(type);
+    const v = this.toVector(operand, s);
+    const r = this.temp();
+    if (op === "-" && s.float) this.emit(`${r} = fneg ${s.vector} ${v}`);
+    else if (op === "-") this.emit(`${r} = sub ${s.vector} zeroinitializer, ${v}`);
+    else this.emit(`${r} = xor ${s.vector} ${v}, ${this.simdSplat(s, s.mask ? "true" : "-1")}`);
+    return this.fromVector(r, s);
+  }
+
+  private simdSplat(s: Ref<{ lane: string; size: usize }>, value: string): string {
+    return `<${Array.from({ length: s.size }, () => `${s.lane} ${value}`).join(", ")}>`;
+  }
+
+  // A binary operator on two vectors of one type: lane-wise arithmetic, integer lanes wrapping, or
+  // `===` and `!==` over every lane.
+  private simdBinary(this: Mut<this>, op: string, left: string, right: string, type: Type): string {
+    const s = this.simdShape(type);
+    const a = this.toVector(left, s);
+    const b = this.toVector(right, s);
+    const r = this.temp();
+    if (op === "===" || op === "!==") {
+      const lanes = this.temp();
+      this.emit(`${lanes} = ${s.float ? "fcmp oeq" : "icmp eq"} ${s.vector} ${a}, ${b}`);
+      this.intrinsics.add(`declare i1 @llvm.vector.reduce.and.v${s.size}i1(<${s.size} x i1>)`);
+      this.emit(`${r} = call i1 @llvm.vector.reduce.and.v${s.size}i1(<${s.size} x i1> ${lanes})`);
+      if (op === "===") return r;
+      const not = this.temp();
+      this.emit(`${not} = xor i1 ${r}, true`);
+      return not;
+    }
+    const float = new Map<string, string>([["+", "fadd"], ["-", "fsub"], ["*", "fmul"], ["/", "fdiv"], ["%", "frem"]]);
+    const integer = new Map<string, string>([["+", "add"], ["-", "sub"], ["*", "mul"], ["&", "and"], ["|", "or"], ["^", "xor"]]);
+    const instruction = (s.float ? float : integer).get(op)!;
+    this.emit(`${r} = ${instruction} ${s.vector} ${a}, ${b}`);
+    return this.fromVector(r, s);
+  }
+
+  // The intrinsic suffix of an LLVM vector type, as `v4f32`.
+  private vectorSuffix(s: Ref<{ lane: string; size: usize; float: boolean }>): string {
+    return `v${s.size}${s.lane === "float" ? "f32" : s.lane === "double" ? "f64" : s.lane}`;
+  }
+
+  // A SIMD constructor or method the checker recorded, by its operation.
+  private simdCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, op: string): string {
+    const type = this.cur().types.get(e)!;
+    if (op === "make" || op === "splat") {
+      const s = this.simdShape(type);
+      let lanes: string[] = [];
+      for (const a of e.args) lanes.push(this.value(a));
+      let made = "undef";
+      for (let k: usize = 0; k < s.size; k++) {
+        const next = this.temp();
+        this.emit(`${next} = insertvalue ${s.array} ${made}, ${s.lane} ${lanes[op === "make" ? k : 0]!}, ${k}`);
+        made = next;
+      }
+      return made;
+    }
+    const callee: Ref<Expr> = e.callee;
+    if (callee.kind !== "member") return "";
+    const vectorType = this.tables.typing.lower(this.valueType(callee.object));
+    const s = this.simdShape(vectorType);
+    const receiver = this.value(callee.object);
+    // A fixed array of the same lanes is laid out alike.
+    if (op === "toArray") return receiver;
+    const v = this.toVector(receiver, s);
+    const r = this.temp();
+    const suffix = this.vectorSuffix(s);
+    if (op === "any" || op === "all") {
+      const name = `llvm.vector.reduce.${op === "any" ? "or" : "and"}.${suffix}`;
+      this.intrinsics.add(`declare i1 @${name}(${s.vector})`);
+      this.emit(`${r} = call i1 @${name}(${s.vector} ${v})`);
+      return r;
+    }
+    if (op === "sum" || op === "min" || op === "max") {
+      const which = op === "sum" ? (s.float ? "fadd" : "add") : s.float ? (op === "min" ? "fmin" : "fmax") : `${s.signed ? "s" : "u"}${op}`;
+      const name = `llvm.vector.reduce.${which}.${suffix}`;
+      if (op === "sum" && s.float) {
+        this.intrinsics.add(`declare ${s.lane} @${name}(${s.lane}, ${s.vector})`);
+        this.emit(`${r} = call ${s.lane} @${name}(${s.lane} -0.0, ${s.vector} ${v})`);
+      } else {
+        this.intrinsics.add(`declare ${s.lane} @${name}(${s.vector})`);
+        this.emit(`${r} = call ${s.lane} @${name}(${s.vector} ${v})`);
+      }
+      return r;
+    }
+    if (op === "select") {
+      const chosen = this.simdShape(type);
+      const first = this.value(e.args[0]!);
+      const second = this.value(e.args[1]!);
+      const a = this.toVector(first, chosen);
+      const b = this.toVector(second, chosen);
+      this.emit(`${r} = select ${s.vector} ${v}, ${chosen.vector} ${a}, ${chosen.vector} ${b}`);
+      return this.fromVector(r, chosen);
+    }
+    const given = this.value(e.args[0]!);
+    const other = this.toVector(given, s);
+    const floats = new Map<string, string>([["lt", "olt"], ["le", "ole"], ["gt", "ogt"], ["ge", "oge"], ["eq", "oeq"], ["ne", "une"]]);
+    const ints = new Map<string, string>([["lt", "lt"], ["le", "le"], ["gt", "gt"], ["ge", "ge"]]);
+    const cond = s.float ? `fcmp ${floats.get(op)!}` : op === "eq" || op === "ne" ? `icmp ${op}` : `icmp ${s.signed ? "s" : "u"}${ints.get(op)!}`;
+    this.emit(`${r} = ${cond} ${s.vector} ${v}, ${other}`);
+    const mask = this.simdShape(type);
+    return this.fromVector(r, mask);
+  }
+
   integerMethodCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>): string {
     const callee: Ref<Expr> = e.callee;
     if (callee.kind !== "member") return "";
@@ -9694,6 +9833,8 @@ class Codegen implements PrintHost, ComptimeHost {
       const get2 = this.cur().types.get(e) as FixedType;
       return this.fixedFilled(e, get2);
     }
+    const simd = this.tables.simdCalls.get(e);
+    if (simd !== undefined) return this.simdCall(e, simd);
     if (this.tables.stringBuilds.has(e)) return this.stringBuilt(e, this.tables.stringBuilds.get(e)!);
     // A joined handle is the same task's pointer.
     if (this.tables.joinCalls.has(e)) return this.owned((e.callee as Extract<Expr, { kind: "member" }>).object);
@@ -13868,6 +14009,7 @@ class Codegen implements PrintHost, ComptimeHost {
           return isFloat(type) ? floatConstant(-(typeof written === "number" ? written : toFloat(written)), type) : typeof written === "number" ? String(-written) : String(-written);
         }
         const operand = this.value(e.operand);
+        if (this.tables.typing.simd(type) !== undefined) return this.simdUnary(e.op, operand, type);
         if (type === "bigint") {
           const result = this.temp();
           this.emit(`${result} = call ptr @fsh_rt_big_${e.op === "-" ? "neg" : "not"}(ptr ${operand})`);
@@ -13982,6 +14124,13 @@ class Codegen implements PrintHost, ComptimeHost {
           const operand8 = this.value(e.right);
           const written3 = this.written(operand8, this.valueType(e.right));
           return this.concat(written2, written3);
+        }
+        // Some operands, as `in`'s key, have no type of their own.
+        const vectorType = this.cur().coercions.get(e.left) ?? this.cur().types.get(e.left);
+        if (vectorType !== undefined && this.tables.typing.simd(vectorType) !== undefined) {
+          const a = this.operandBefore(e.left, e.right);
+          const b = this.value(e.right);
+          return this.simdBinary(e.op, a, b, vectorType!);
         }
         const empty = this.tables.jsEmptyTests.get(e);
         if (empty !== undefined) {
