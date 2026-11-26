@@ -17,7 +17,7 @@ import { STD_BASE } from "./std.fsh";
 import { EMBEDDED, LIVE, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.fsh";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.fsh";
 import { callbacksOnlyCalled, calledThrough } from "./callbacks.fsh";
-import { partEnd, partStart, type Tables } from "./compilation.fsh";
+import { fileEnd, fileStart, partEnd, partStart, type Started, type Tables } from "./compilation.fsh";
 import { allWords } from "./sizes.fsh";
 import type { Kind, Verdict } from "./narrow.fsh";
 
@@ -772,7 +772,13 @@ class Codegen implements PrintHost, ComptimeHost {
   // Where the lines of the function being emitted begin.
   let mark = this.out.length;
 
+  // Each instance's turn, timed until the next one's begins, as the share of the file holding it.
+  let turn: Started = { timing: false, outer: 0, start: 0, cpuOuter: 0, cpuStart: 0 };
+  let turnAt: usize = 0;
   for (const instance of [...this.instances]) {
+    fileEnd(this.tables.session, turnAt, "codegen", turn, true);
+    turn = fileStart(this.tables.session);
+    if (turn.timing) turnAt = this.bodyAt(instance).start;
     if (prior === undefined) {
       this.pack(mark);
       mark = this.out.length;
@@ -1024,6 +1030,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
   }
 
+  fileEnd(this.tables.session, turnAt, "codegen", turn, true);
   if (prior === undefined) this.pack(mark);
   partEnd(this.tables.session, "codegen functions", timer);
   timer = partStart(this.tables.session);

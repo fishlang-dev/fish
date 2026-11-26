@@ -1,7 +1,7 @@
 import { memberKey, type Replaced } from "./edits.fsh";
 import { cloneBody, cloneSignature, declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.fsh";
 import { crossingOf, rustClassOf } from "./rust.fsh";
-import { newDeclarations, newTables, timingEnd, timingStart, type Compilation, type Declarations, type Tables } from "./compilation.fsh";
+import { fileEnd, fileStart, newDeclarations, newTables, timingEnd, timingStart, type Compilation, type Declarations, type Tables } from "./compilation.fsh";
 import { copyNames, CompileError, compileErrors, named } from "./diag.fsh";
 import { warnings } from "./warnings.fsh";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.fsh";
@@ -3709,8 +3709,20 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     return closure !== undefined && this.within(closure.parent, root);
   }
 
+  // `instanceChecked`, its time given to the file holding the body when timing.
   /** @throws {CompileError} */
   checkInstance(this: Mut<this>, id: InstanceId, outer: Mut<BodyState> | undefined, outerSt: Mut<ContextState> | undefined, outerExprs: Mut<ExpressionsState> | undefined): void {
+    const timing = fileStart(this.tables.session);
+    const at = timing.timing ? bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(id)).start : 0;
+    try {
+      this.instanceChecked(id, outer, outerSt, outerExprs);
+    } finally {
+      fileEnd(this.tables.session, at, "check", timing);
+    }
+  }
+
+  /** @throws {CompileError} */
+  private instanceChecked(this: Mut<this>, id: InstanceId, outer: Mut<BodyState> | undefined, outerSt: Mut<ContextState> | undefined, outerExprs: Mut<ExpressionsState> | undefined): void {
     this.tables.counts.checks++;
     const f = bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(id));
     // A comptime parameter's value is the instance's own; one called from C, or kept in an async

@@ -6,7 +6,8 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CompileError, formatError } from "../../src/diag.fsh";
 import { compile } from "../../src/main.fsh";
-import { newSession, newTimings, stageEnd, stageStart, timed, type Session, type Timings } from "../../src/compilation.fsh";
+import { fileCosts, fileEnd, fileStart, newSession, newTimings, stageEnd, stageStart, timed, type Session, type Timings } from "../../src/compilation.fsh";
+import { FILE_SPAN } from "../../src/program.fsh";
 import { cachedSession } from "../../src/mathlib.fsh";
 import { removed, same, scratch } from "./support.fsh";
 
@@ -149,4 +150,31 @@ test("timed gives each stage its own time, nested stages taken out of their pare
   } catch (e) {
     assert(false, e.message);
   }
+});
+
+// A body's check counts toward its own file, less the checks it needed of other bodies, which count
+// toward theirs; files are named as loading named them and listed costliest first.
+test("each file is given its own bodies' time, the bodies their checks needed taken out", () => {
+  let t = newTimings();
+  t.manual = 0;
+  t.names.set(0, "main.fsh");
+  t.names.set(FILE_SPAN as usize, "lib.fsh");
+  let session = newSession();
+  session.timings = t;
+  const lib = FILE_SPAN as usize;
+  const parsing = fileStart(session);
+  spend(session, 2);
+  fileEnd(session, lib + 5, "parse", parsing);
+  const outer = fileStart(session);
+  spend(session, 10);
+  const inner = fileStart(session);
+  spend(session, 30);
+  fileEnd(session, lib + 40, "check", inner);
+  spend(session, 5);
+  fileEnd(session, 12, "check", outer);
+  const emitting = fileStart(session);
+  spend(session, 4);
+  fileEnd(session, 7, "codegen", emitting, true);
+  const costs = fileCosts(session.timings!);
+  same(JSON.stringify(costs), JSON.stringify([{ file: "lib.fsh", parse: 2, check: 30, codegen: 0, instances: 0 }, { file: "main.fsh", parse: 0, check: 15, codegen: 4, instances: 1 }]), "the files' costs");
 });

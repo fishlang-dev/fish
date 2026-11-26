@@ -235,10 +235,12 @@ test("fishc check reports every error, with a closing count, painted only when a
 
 type Stage = { stage: string; ms: f64; note: string | null };
 
-// Each `--timings` line as its stage, milliseconds and note; the numbers are only checked to parse.
+// Each `--timings` line as its stage, milliseconds and note, up to the table of files; the numbers
+// are only checked to parse.
 function stages(err: string): Stage[] {
   let found: Stage[] = [];
   for (const l of err.trimEnd().split("\n")) {
+    if (l.startsWith("file ")) break;
     const m = /^(\w+) +(\d+\.\d) ms(?: \((.+)\))?$/.exec(l);
     assert(m !== null, `not a timings line: ${l}`);
     const ms = parseFloat(m![2]);
@@ -264,6 +266,12 @@ test("fishc check --timings prints each front-end stage's time, then the total",
   assert(checked.code === 0, `exited with ${checked.code}`);
   same(checked.out, "", "stdout");
   same(names(checked.err), "parse,macros,check,moves,comptime,total", "check's stages");
+  assert(/\nmain\.fsh +\d+\.\d ms +\d+\.\d ms +\d+\.\d ms +\d+\n/.test(checked.err), `no line for main.fsh in the table of files: ${checked.err}`);
+  const json = join(p, "timings.json");
+  const quiet = fishcIn(p, ["check", "main.fsh", "--timings-json", json]);
+  ran(quiet, 0, "", "", "fishc check --timings-json alone");
+  const written = read(json);
+  assert(written.startsWith('{"files":[') && written.includes('"file":"main.fsh"') && written.includes('"stage":"check"') && written.includes('"version":1'), `--timings-json wrote: ${written}`);
   ran(fishcIn(p, ["check", "main.fsh"]), 0, "", "", "fishc check without --timings");
   const ir = fishcIn(p, ["build", "main.fsh", "--emit-llvm", "--timings"]);
   assert(ir.out.includes('@"fsh.main"'), "no fsh.main in the IR");

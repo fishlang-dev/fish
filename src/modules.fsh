@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { Compilation } from "./compilation.fsh";
+import { fileEnd, fileStart, type Compilation } from "./compilation.fsh";
 import { dependencyLib, dependencyOf, packageOf, resolvePackages, type Package as FishPackage } from "./dependencies.fsh";
 import { CompileError, type Source } from "./diag.fsh";
 import { NODE_MODULES } from "./survey.fsh";
@@ -67,6 +67,7 @@ export function load(compilation: Mut<Compilation>, entry: string, src: string =
     throw e;
   }
   for (const m of loader.modules) compilation.files.push({ base: m.base, file: m.base === 0 ? basename(entry) : m.file, src: m.src, std: m.path.startsWith("std:") });
+  if (compilation.session.timings !== undefined) for (const f of compilation.files) compilation.session.timings!.names.set(f.base, f.file.clone());
   // std's text sits past every file's, so it goes last, where an offset past them finds it.
   const sources = withStd(loader.sources);
   return { modules: loader.modules, sources, packages: loader.packages, rust: loader.rust };
@@ -118,7 +119,9 @@ class Loader {
     try {
       // A TS-compat file isn't compiled, whether or not it parses.
       if (!std) refuseCompat(text, this.fish !== undefined ? packageOf(this.fish, key)?.manifest.edition : undefined);
+      const parsing = fileStart(cx.session);
       parsed = parse(text, cx.ids);
+      fileEnd(cx.session, base, "parse", parsing);
     } catch (e) {
       // A parse or edition error's position is in its own file's text.
       if (e instanceof CompileError) shiftError(e, base);
