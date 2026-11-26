@@ -2907,18 +2907,29 @@ export class Typing {
     }
     for (const t of group) {
       let r = this.rec(t);
-      if (r.kind === "object" && r.tuple !== true && r.match !== true) {
+      if (r.kind === "object" && r.match !== true) {
         r.fields = r.fields.map((f): Field => ({ ...f, type: this.lower(f.type) }));
+        // A tuple's elements are its fields; its rest, and the object of its fields, are lowered
+        // with them, so a tuple held in the group stays the record its values are written as.
+        const rest = r.rest;
+        if (rest !== undefined) r.rest = this.lower(rest);
+        const shape = r.shape;
         this.setRec(t, r);
+        if (shape !== undefined) {
+          let s = this.rec(shape);
+          s.fields = s.fields.map((f): Field => ({ ...f, type: this.lower(f.type) }));
+          this.setRec(shape, s);
+        }
       } else if (r.kind === "union" && r.unknown !== true) {
-        // Objects stay the records they are. Two brands of one base become one member.
+        // Objects and tuples stay the records they are. Two brands of one base become one
+        // member, and a literal whose base is a member is that member, as `unionType` has it.
         let members: Type[] = [];
         for (const m of r.members) {
           const b = this.recOf(m);
-          const low = b?.kind === "object" && b.tuple !== true ? m : this.lower(m);
+          const low = b?.kind === "object" ? m : this.lower(m);
           if (!members.includes(low)) members.push(low);
         }
-        r.members = members;
+        r.members = members.filter((m) => typeof m === "string" || this.rec(m).kind !== "literal" || !members.includes(this.baseOf(m as LiteralType)!));
         this.setRec(t, r);
       }
     }
