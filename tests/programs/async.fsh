@@ -1329,3 +1329,29 @@ async function main() {
   console.log(v);
 }
 // expect: a1
+// case: async_generic_class_awaits_another_generic_class
+// expect: x
+class Inner<T> {
+  v: T;
+  constructor(v: T) {
+    this.v = v;
+  }
+  async get(): Promise<T> {
+    return this.v.clone();
+  }
+}
+class Outer<T> {
+  inner: Inner<T>;
+  constructor(v: T) {
+    this.inner = new Inner<T>(v);
+  }
+  async read(): Promise<T> {
+    const got = await this.inner.get();
+    return got;
+  }
+}
+async function main() {
+  const o = new Outer<string>("x");
+  const got = await o.read();
+  console.log(got);
+}
