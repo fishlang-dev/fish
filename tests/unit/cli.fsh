@@ -285,16 +285,16 @@ test("fishc check --timings prints each front-end stage's time, then the total",
 test("fishc build and run --timings print every stage, saying which objects were built or cached", () => {
   const root = scratch("fish-cli-");
   const p = dir(root, "timings-build", [["main.fsh", timedProgram()]]);
-  const all = "parse,macros,check,moves,comptime,codegen,compile,runtime,link,total";
+  const all = "parse,macros,check,moves,comptime,codegen,instrument,split,runtime,compile,link,total";
   // A cache of its own, so the first build compiles the runtime's objects and the second reuses them.
   const cache = [`FISH_CACHE_DIR=${join(p, "cache")}`];
   const first = fishcIn(p, ["build", "main.fsh", "--timings"], cache.clone());
   same(names(first.err), all, "the first build's stages");
-  const firstNote = stages(first.err)[7].note ?? "";
+  const firstNote = stages(first.err)[8].note ?? "";
   assert(/^built runtime, std, .+; 0 cached$/.test(firstNote), `the first build's runtime note: ${firstNote}`);
   const again = fishcIn(p, ["build", "main.fsh", "--timings"], cache);
   assert(again.code === 0, `the second build exited with ${again.code}`);
-  const againNote = stages(again.err)[7].note ?? "";
+  const againNote = stages(again.err)[8].note ?? "";
   assert(/^\d+ cached$/.test(againNote), `the second build's runtime note: ${againNote}`);
   same(ranOut(join(p, "main")), "55\n", "the program");
   const run = fishcIn(p, ["run", "main.fsh", "--timings", "--release"]);

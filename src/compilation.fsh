@@ -630,7 +630,8 @@ export const FRONT_END = ["parse", "macros", "check", "moves", "comptime"];
 // The stages FISH_MEM_STOP can name: those that end once in a build. `moves` and `comptime` end
 // once per body inside `check`, and flattening ends a stage named `check` before the check starts.
 export const STOP_STAGES = ["parse", "check", "codegen"];
-export const NATIVE_STAGES = ["compile", "runtime", "link"];
+// In the order a build runs them: the runtime and cached units, then the program, then the link.
+export const NATIVE_STAGES = ["runtime", "compile", "link"];
 
 export function newTimings(): Timings {
   const made: Timings = { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 }, report: true, files: new Map(), names: new Map(), fileInner: 0 };
@@ -817,9 +818,16 @@ export function stopAfter(session: Ref<Session>, stage: string): void {
   unsafe { exit(0) };
 }
 
-// Which cached objects a build made and how many it reused, as the runtime stage's note.
+// Which cached objects a build made and how many it reused, as the runtime stage's note. The
+// program's file units are counted rather than named, since a large program has hundreds.
 export function objectsNote(timings: Ref<Timings>): string {
-  const built: Ref<string[]> = timings.objects.built;
+  let named: string[] = [];
+  let files: usize = 0;
+  for (const b of timings.objects.built) {
+    if (b.startsWith("file-")) files++;
+    else named.push(b.clone());
+  }
+  if (files > 0) named.push(`${files} file unit${files === 1 ? "" : "s"}`);
   const cachedNote = `${timings.objects.cached} cached`;
-  return built.length > 0 ? `built ${built.join(", ")}; ${cachedNote}` : cachedNote;
+  return named.length > 0 ? `built ${named.join(", ")}; ${cachedNote}` : cachedNote;
 }
