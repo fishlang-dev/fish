@@ -1,5 +1,6 @@
 // The benchmark suite: Fish against Node and Rust, in release builds.
-//   fishc run benchmarks/run.fsh -- [--fishc <path>] [--runs <n>] [--record] [<pattern>]
+//   fishc run benchmarks/run.fsh -- [--fishc <path>] [--runs <n>] [--record]
+//     [--compare [<commit>]] [--fail-on-regression <pct>] [<pattern>]
 //
 // cpu: each program in benchmarks/cpu is written three times, main.fsh, main.js and main.rs, and
 // must print the same lines in all three. Each is run once to warm up and then `--runs` times
@@ -15,6 +16,12 @@
 // line of JSON to benchmarks/history.jsonl, with the commit, the machine and the tools' versions,
 // which is how the numbers are tracked over time; numbers from two machines don't compare. The
 // commit is the checkout's, so it names the fishc only when that was built from it.
+//
+// `--compare` prints each number's change in percent against an entry of the history recorded on
+// this machine: the latest, or the latest whose commit starts with `<commit>`, a hex prefix. It reads
+// the history before `--record` appends to it. `--fail-on-regression <pct>` compares too, and exits 1
+// when one of Fish's numbers is worse by more than `<pct>` percent: a longer cpu median, fewer
+// requests per second, or a higher p50 or p99. Node's and Rust's numbers are shown, never gated.
 //
 // The fishc is `--fishc`, else FISHC, else `fishc` on PATH.
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -32,6 +39,14 @@ const LIMIT = 600000;
 
 type Numbers = { [name: string]: f64 };
 type Load = { requests: i64; seconds: f64; perSecond: f64; p50: f64; p99: f64; errors: string[] };
+type Entry = {
+  date: string;
+  commit: string;
+  machine: string;
+  tools: { node: string; rustc: string };
+  cpu: { [name: string]: Numbers };
+  http: { [language: string]: { [route: string]: Load } };
+};
 
 // A command's first line of output, or "" when it can't be run.
 async function firstLine(cmd: string[], cwd: string): Promise<string> {
@@ -106,20 +121,127 @@ function row(cells: string[]): string {
   return out;
 }
 
+// The history entry to compare with: the latest from this machine, or the latest whose commit
+// starts with `commit`, which must be from this machine.
+function baseline(history: string, machine: string, commit: string): Entry throws IoError | JsonError {
+  const lines: string[] = existsSync(history) ? readFileSync(history, "utf8").split("\n").filter((l) => l.trim() !== "") : [];
+  for (const line of lines.toReversed()) {
+    const entry = JSON.parse<Entry>(line);
+    if (!entry.commit.startsWith(commit)) continue;
+    if (entry.machine === machine) return entry;
+    if (commit === "") continue;
+    console.error(`benchmarks: ${entry.commit} was recorded on ${entry.machine}, not ${machine}, so its numbers don't compare`);
+    return process.exit(2);
+  }
+  console.error(commit === "" ? `benchmarks: nothing in benchmarks/history.jsonl was recorded on ${machine}` : `benchmarks: no entry in benchmarks/history.jsonl has a commit starting with ${commit}`);
+  return process.exit(2);
+}
+
+function percent(old: f64, now: f64): f64 {
+  return ((now - old) / old) * 100.0;
+}
+
+function signed(p: f64): string {
+  return `${p >= 0.0 ? "+" : ""}${p.toFixed(1)}%`;
+}
+
+function compared(cells: string[]): string {
+  let out = cells[0].padEnd(14);
+  for (let i = 1; i < cells.length; i++) out += cells[i].padStart(12);
+  return out;
+}
+
+// Prints the run's change against `base` and gives each of Fish's numbers worse by more than
+// `threshold` percent; a negative threshold gates nothing.
+function compare(base: Ref<Entry>, cpu: Ref<{ [name: string]: Numbers }>, http: Ref<{ [language: string]: { [route: string]: Load } }>, threshold: f64): string[] {
+  let worse: string[] = [];
+  console.log(`\nchange against ${base.commit.slice(0, 12)} (${base.date}), in percent; + is slower for times, faster for req/s\n${compared(["", ...LANGUAGES])}`);
+  for (const name of Object.keys(cpu)) {
+    let cells = [name];
+    for (const language of LANGUAGES) {
+      const was = base.cpu[name];
+      const old = was === undefined ? undefined : was[language];
+      const mine = cpu[name];
+      const now = mine === undefined ? undefined : mine[language];
+      if (old === undefined || now === undefined || old <= 0.0) {
+        cells.push("-");
+        continue;
+      }
+      if (now < 0.0) {
+        cells.push("failed");
+        if (language === "fish" && threshold >= 0.0) worse.push(`${name} failed`);
+        continue;
+      }
+      const p = percent(old, now);
+      cells.push(signed(p));
+      if (language === "fish" && threshold >= 0.0 && p > threshold) worse.push(`${name} ${old.toFixed(0)} -> ${now.toFixed(0)} ms (${signed(p)})`);
+    }
+    console.log(compared(cells));
+  }
+  const metrics = ["perSecond", "p50", "p99"];
+  for (const route of ROUTES) {
+    for (const metric of metrics) {
+      let cells = [`${route} ${metric === "perSecond" ? "req/s" : metric}`];
+      let any = false;
+      for (const language of LANGUAGES) {
+        const before = base.http[language];
+        const after = http[language];
+        const old = before === undefined ? undefined : before[route];
+        const now = after === undefined ? undefined : after[route];
+        if (old === undefined || now === undefined || old.errors.length > 0) {
+          cells.push("-");
+          continue;
+        }
+        any = true;
+        if (now.errors.length > 0) {
+          cells.push("failed");
+          if (language === "fish" && threshold >= 0.0 && metric === "perSecond") worse.push(`${route} failed`);
+          continue;
+        }
+        const was = metric === "perSecond" ? old.perSecond : metric === "p50" ? old.p50 : old.p99;
+        const is = metric === "perSecond" ? now.perSecond : metric === "p50" ? now.p50 : now.p99;
+        const p = percent(was, is);
+        cells.push(signed(p));
+        const bad = metric === "perSecond" ? -p : p;
+        if (language === "fish" && threshold >= 0.0 && bad > threshold) worse.push(`${cells[0]} ${was.toFixed(0)} -> ${is.toFixed(0)} (${signed(p)})`);
+      }
+      if (any) console.log(compared(cells));
+    }
+  }
+  return worse;
+}
+
 async function main(): Promise<void> throws IoError | JsonError {
   let fishc = process.env.FISHC ?? "fishc";
   let runs = 5;
   let record = false;
   let pattern = "";
+  let comparing = false;
+  let against = "";
+  let threshold = -1.0;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--fishc" && i + 1 < args.length) fishc = args[++i];
     else if (a === "--runs" && i + 1 < args.length) runs = parseInt(args[++i]) ?? runs;
     else if (a === "--record") record = true;
+    else if (a === "--compare") {
+      comparing = true;
+      if (i + 1 < args.length && /^[0-9a-f]{4,40}$/.test(args[i + 1])) against = args[++i];
+    } else if (a === "--fail-on-regression" && i + 1 < args.length) {
+      comparing = true;
+      threshold = parseFloat(args[++i]) ?? -1.0;
+      if (threshold < 0.0) {
+        console.error(`benchmarks: --fail-on-regression takes a percentage of 0 or more, not '${args[i]}'`);
+        process.exit(2);
+      }
+    }
     else pattern = a;
   }
   const here = import.meta.dir;
+  const history = join(here, "history.jsonl");
+  const machine = `${process.platform}-${process.arch}, ${availableParallelism()} cores`;
+  const base: Entry | undefined = comparing ? baseline(history, machine, against) : undefined;
   const tmp = mkdtempSync(join(tmpdir(), "fish-benchmarks-"));
   const node = await firstLine(["node", "--version"], here);
   const rustc = await firstLine(["rustc", "--version"], here);
@@ -186,9 +308,15 @@ async function main(): Promise<void> throws IoError | JsonError {
     }
   }
 
-  if (!record) return;
-  const line = JSON.stringify({ date: new Date().toISOString(), commit, machine: `${process.platform}-${process.arch}, ${availableParallelism()} cores`, tools: { node, rustc }, cpu, http });
-  const history = join(here, "history.jsonl");
-  writeFileSync(history, (existsSync(history) ? readFileSync(history, "utf8") : "") + line + "\n");
-  console.log("\nrecorded in benchmarks/history.jsonl");
+  let worse: string[] = [];
+  if (base !== undefined) worse = compare(base, cpu, http, threshold);
+
+  if (record) {
+    const line = JSON.stringify({ date: new Date().toISOString(), commit, machine, tools: { node, rustc }, cpu, http });
+    writeFileSync(history, (existsSync(history) ? readFileSync(history, "utf8") : "") + line + "\n");
+    console.log("\nrecorded in benchmarks/history.jsonl");
+  }
+  if (worse.length === 0) return;
+  console.log(`\nworse by more than ${threshold}%:\n  ${worse.join("\n  ")}`);
+  process.exit(1);
 }
