@@ -1529,3 +1529,39 @@ function main() {
   } };
   console.log(o.a.s, o.n);
 }
+// case: borrow_destructure_assign_later_part_changes
+// error: cannot mutably lend 'xs'
+class B { s: string; constructor(s: string) { this.s = s; } }
+function clear(xs: Mut<B[]>): i64 { xs.pop(); return 1; }
+function main() {
+  let xs: B[] = [new B("x" + 1)];
+  const other: B[] = [new B("y" + 1)];
+  let a: Ref<B> = other[0];
+  let n: i64 = 0;
+  [a, n] = [xs[0], clear(xs)];
+  console.log(a.s, n);
+}
+// case: borrow_destructure_assign_object_later_part_changes
+// error: cannot mutably lend 'xs'
+class B { s: string; constructor(s: string) { this.s = s; } }
+function clear(xs: Mut<B[]>): i64 { xs.pop(); return 1; }
+function main() {
+  let xs: B[] = [new B("x" + 1)];
+  const other: B[] = [new B("y" + 1)];
+  let a: Ref<B> = other[0];
+  let n: i64 = 0;
+  ({ a, n } = { a: xs[0], n: clear(xs) });
+  console.log(a.s, n);
+}
+// case: borrow_destructure_assign_parts_of_other_places
+// expect: x1 1
+class B { s: string; constructor(s: string) { this.s = s; } }
+function clear(xs: Mut<B[]>): i64 { xs.pop(); return 1; }
+function main() {
+  let xs: B[] = [new B("y" + 1)];
+  const other: B[] = [new B("x" + 1)];
+  let a: Ref<B> = other[0];
+  let n: i64 = 0;
+  [a, n] = [other[0], clear(xs)];
+  console.log(a.s, n);
+}

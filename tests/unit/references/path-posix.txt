@@ -1,6 +1,6 @@
 script 850fa3b66e2c0f105218192a16b710a64d4b9acc5744d34507f0d1000d3ac7d8
 status 0
-stdout 3333
+stdout 3021
 "."
 "."
 ""
@@ -201,19 +201,19 @@ stdout 3333
 "/foo/bar"
 "../b"
 "a/b"
-"/Users/nate/Documents/GitHub/fishlang-dev/fish.auto-2026-11-25-986b-1001/tests/unit/a/b"
+"<dir>/a/b"
 ".."
 "a/b/a"
-"/Users/nate/Documents/GitHub/fishlang-dev/fish.auto-2026-11-25-986b-1001/tests/unit/a/b/a"
+"<dir>/a/b/a"
 ""
 "."
-"/Users/nate/Documents/GitHub/fishlang-dev/fish.auto-2026-11-25-986b-1001/tests/unit"
+"<dir>"
 ""
 "/a/a"
 "/a"
 "../../x/y"
 "a/b/c/a/x/y"
-"/Users/nate/Documents/GitHub/fishlang-dev/fish.auto-2026-11-25-986b-1001/tests/unit/a/b/c/a/x/y"
+"<dir>/a/b/c/a/x/y"
 "b"
 ""
 "b"
