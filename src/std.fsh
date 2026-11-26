@@ -838,6 +838,19 @@ class Http2 {
     return true;
   }
 
+  // Ends a stream's response: with its trailers as a last HEADERS when it has them, else an empty DATA.
+  static async finish(out: Ref<Channel<u8[]>>, state: Ref<shared<__h2State>>, id: i64, res: Ref<Response>, gone: Ref<AbortSignal>): Promise<void> {
+    const trailers = res.__trailers();
+    if (trailers === null) {
+      const none: u8[] = [];
+      await Http2.data(out, state, id, none, true, gone);
+      return;
+    }
+    let block: u8[] = [];
+    for (let i: usize = 0; i < trailers.names.length; i++) if (!Http2.connectionField(trailers.names[i])) Http2.putField(block, trailers.names[i], trailers.values[i]);
+    await Http2.queue(out, Http2.headers(id, block, true, state.frame.load()), gone);
+  }
+
   // A request from a stream's fields, or null when its pseudo-headers aren't a request's.
   static request(fields: Ref<string[]>, host: string, secure: boolean, signal: AbortSignal): Request | null {
     let method = "";
@@ -1175,7 +1188,6 @@ class Http2 {
     const started = await Http2.queue(out, Http2.headers(id, block, empty, state.frame.load()), gone);
     if (started && !empty) {
       const either = AbortSignal.any([client, gone.clone()]);
-      const none: u8[] = [];
       if (byteStream !== null) {
         let chunks = byteStream.__values();
         let open = true;
@@ -1184,7 +1196,7 @@ class Http2 {
           if (chunk === null) break;
           open = await Http2.data(out, state, id, chunk, false, gone);
         }
-        if (open && !either.aborted) await Http2.data(out, state, id, none, true, gone);
+        if (open && !either.aborted) await Http2.finish(out, state, id, res, gone);
       } else if (stream !== null) {
         let pieces = stream;
         let open = true;
@@ -1194,8 +1206,11 @@ class Http2 {
           const bytes = new TextEncoder().encode(piece);
           open = await Http2.data(out, state, id, bytes, false, gone);
         }
-        if (open && !either.aborted) await Http2.data(out, state, id, none, true, gone);
-      } else await Http2.data(out, state, id, res.__bytes(), true, gone);
+        if (open && !either.aborted) await Http2.finish(out, state, id, res, gone);
+      } else {
+        const sent = await Http2.data(out, state, id, res.__bytes(), false, gone);
+        if (sent) await Http2.finish(out, state, id, res, gone);
+      }
     }
     state.windows.update((w) => { w.delete(id); });
     state.active.sub(1);
@@ -1213,7 +1228,8 @@ class Http2 {
     for (let i: usize = 0; i < headers.names.length; i++) {
       const name = headers.names[i];
       if (!Http1.isToken(name) || Http1.hasBreak(headers.values[i])) throw new IoError("can't send the request: header '" + name + "' holds a line break or isn't a header name");
-      if (!Http2.connectionField(name) && name !== "content-length" && name !== "te") Http2.putField(block, name, headers.values[i]);
+      const te = name === "te" && headers.values[i] !== "trailers";
+      if (!Http2.connectionField(name) && name !== "content-length" && !te) Http2.putField(block, name, headers.values[i]);
     }
     if (!headers.has("accept")) Http2.putField(block, "accept", "*/*");
     if (!headers.has("user-agent")) Http2.putField(block, "user-agent", "fish");
@@ -1645,6 +1661,8 @@ class Request {
 }
 
 type ResponseInit = { status?: i64; statusText?: string; headers?: Headers };
+// A response's trailers, at most one set, filled by whatever makes its body.
+type __trailerBox = { fields: Lock<Headers[]> };
 // One server-sent event: its data, and the event type, ID and reconnection delay it may name.
 type ServerSentEvent = { data: string; event?: string; id?: string; retry?: i64 };
 
@@ -1669,6 +1687,9 @@ class Response {
   url: string = "";
   // The cookies it sets and deletes, each sent as a Set-Cookie header of its own.
   cookies: CookieMap = new CookieMap();
+  // Trailers sent after the body over HTTP/2, which a streamed body may fill as it ends, as gRPC's
+  // status is; HTTP/1.1 sends none.
+  #trailers: shared<__trailerBox>;
 
   // A text or streamed body is typed 'text/plain;charset=UTF-8' unless the headers say
   // otherwise; bytes are given no type.
@@ -1704,6 +1725,17 @@ class Response {
     this.#stream = new Lock(stream);
     const upgrade: __wsUpgrade[] = [];
     this.#upgrade = new Lock(upgrade);
+    const trailers: Headers[] = [];
+    this.#trailers = shared<__trailerBox>({ fields: new Lock(trailers) });
+  }
+
+  __trailersFrom(this: Mut<this>, from: shared<__trailerBox>) {
+    this.#trailers = from;
+  }
+
+  // The trailers, once the body has given them, or null.
+  __trailers(): Headers | null {
+    return this.#trailers.fields.update((f) => f.length > 0 ? f[0].clone() : null);
   }
 
   // A response whose body is the value as JSON, typed 'application/json' unless the headers
@@ -6046,7 +6078,743 @@ export function fsyncSync(fd: i64): void throws IoError {
 }
 `;
 
+// std:grpc, as a template rather than String.raw, since its macros quote with backquotes.
+const GRPC = `// gRPC over HTTP/2: messages as classes the @message macro gives protobuf encoders while
+// compiling, services as interfaces @service gives a client and a server side.
+declare function fsh_rt_bytes_copy(to: MutPtr<u8>, from: Ptr<u8>, n: i64): void;
+
+// What a call's status says went wrong: its gRPC code, as GrpcStatus names them, and its message.
+export class GrpcError extends Error {
+  code: i64;
+  constructor(code: i64, message: string) {
+    super(message);
+    this.name = "GrpcError";
+    this.code = code;
+  }
+}
+
+function pbVarint(out: Mut<u8[]>, v: u64) {
+  let left = v;
+  while (left >= 128) {
+    out.push(((left & 127) | 128) as u8);
+    left = left >> 7;
+  }
+  out.push(left as u8);
+}
+
+function pbKey(out: Mut<u8[]>, field: i64, wire: i64) {
+  pbVarint(out, ((field << 3) | wire) as u64);
+}
+
+// Each field's encoder writes nothing for proto3's default, unless always: an optional field
+// holding one, or an element of a repeated field.
+function pbInt(out: Mut<u8[]>, field: i64, v: i64, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 0);
+  pbVarint(out, v as u64);
+}
+
+function pbUint(out: Mut<u8[]>, field: i64, v: u64, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 0);
+  pbVarint(out, v);
+}
+
+function pbBool(out: Mut<u8[]>, field: i64, v: boolean, always: boolean) {
+  if (!v && !always) return;
+  pbKey(out, field, 0);
+  out.push(v ? 1 : 0);
+}
+
+function pbDouble(out: Mut<u8[]>, field: i64, v: f64, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 1);
+  let bits: u64 = 0;
+  unsafe { fsh_rt_bytes_copy(mutPtrOf(bits) as MutPtr<u8>, ptrOf(v) as Ptr<u8>, 8) };
+  for (let i: u64 = 0; i < 8; i++) out.push(((bits >> (i * 8)) & 255) as u8);
+}
+
+function pbFloat(out: Mut<u8[]>, field: i64, v: f32, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 5);
+  let bits: u32 = 0;
+  unsafe { fsh_rt_bytes_copy(mutPtrOf(bits) as MutPtr<u8>, ptrOf(v) as Ptr<u8>, 4) };
+  for (let i: u32 = 0; i < 4; i++) out.push(((bits >> (i * 8)) & 255) as u8);
+}
+
+function pbBytes(out: Mut<u8[]>, field: i64, v: Ref<u8[]>, always: boolean) {
+  if (v.length === 0 && !always) return;
+  pbKey(out, field, 2);
+  pbVarint(out, v.length as u64);
+  for (const b of v) out.push(b);
+}
+
+function pbString(out: Mut<u8[]>, field: i64, v: string, always: boolean) {
+  if (v.length === 0 && !always) return;
+  const bytes = new TextEncoder().encode(v);
+  pbBytes(out, field, bytes, true);
+}
+
+// Reads a message's fields in order, each a key, then its value as its wire type gives it.
+class PbReader {
+  bytes: u8[];
+  at: usize = 0;
+
+  constructor(bytes: u8[]) {
+    this.bytes = bytes;
+  }
+
+  more(this: Ref<this>): boolean {
+    return this.at < this.bytes.length;
+  }
+
+  varint(this: Mut<this>): u64 throws GrpcError {
+    let v: u64 = 0;
+    let shift: u64 = 0;
+    while (true) {
+      if (this.at >= this.bytes.length || shift > 63) throw new GrpcError(13, "a protobuf varint runs past the message");
+      const b = this.bytes[this.at] as u64;
+      this.at += 1;
+      v = v | ((b & 127) << shift);
+      shift += 7;
+      if ((b & 128) === 0) return v;
+    }
+  }
+
+  int64(this: Mut<this>): i64 throws GrpcError {
+    return this.varint() as i64;
+  }
+
+  bool(this: Mut<this>): boolean throws GrpcError {
+    return this.varint() !== 0;
+  }
+
+  fixed(this: Mut<this>, n: usize): u64 throws GrpcError {
+    if (this.at + n > this.bytes.length) throw new GrpcError(13, "a protobuf fixed-width value runs past the message");
+    let v: u64 = 0;
+    for (let i: usize = 0; i < n; i++) v = v | ((this.bytes[this.at + i] as u64) << ((i * 8) as u64));
+    this.at += n;
+    return v;
+  }
+
+  double(this: Mut<this>): f64 throws GrpcError {
+    const bits = this.fixed(8);
+    let x: f64 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 8) };
+    return x;
+  }
+
+  float(this: Mut<this>): f32 throws GrpcError {
+    const bits = this.fixed(4) as u32;
+    let x: f32 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 4) };
+    return x;
+  }
+
+  bytesField(this: Mut<this>): u8[] throws GrpcError {
+    const n = this.varint() as usize;
+    if (this.at + n > this.bytes.length) throw new GrpcError(13, "a protobuf length-delimited value runs past the message");
+    const out = this.bytes.slice(this.at as i64, (this.at + n) as i64);
+    this.at += n;
+    return out;
+  }
+
+  string(this: Mut<this>): string throws GrpcError {
+    return new TextDecoder().decode(this.bytesField());
+  }
+
+  pb_u64(this: Mut<this>): u64 throws GrpcError { return this.varint(); }
+  pb_u32(this: Mut<this>): u32 throws GrpcError { return this.varint() as u32; }
+  pb_u16(this: Mut<this>): u16 throws GrpcError { return this.varint() as u16; }
+  pb_u8(this: Mut<this>): u8 throws GrpcError { return this.varint() as u8; }
+  pb_i64(this: Mut<this>): i64 throws GrpcError { return this.varint() as i64; }
+  pb_i32(this: Mut<this>): i32 throws GrpcError { return (this.varint() as i64) as i32; }
+  pb_i16(this: Mut<this>): i16 throws GrpcError { return (this.varint() as i64) as i16; }
+  pb_i8(this: Mut<this>): i8 throws GrpcError { return (this.varint() as i64) as i8; }
+  pb_bool(this: Mut<this>): boolean throws GrpcError { return this.varint() !== 0; }
+  pb_f64(this: Mut<this>): f64 throws GrpcError { return this.double(); }
+  pb_f32(this: Mut<this>): f32 throws GrpcError { return this.float(); }
+  pb_string(this: Mut<this>): string throws GrpcError { return this.string(); }
+  pb_bytesField(this: Mut<this>): u8[] throws GrpcError { return this.bytesField(); }
+
+  // A length-delimited value read as a message of its own.
+  sub(this: Mut<this>): PbReader throws GrpcError {
+    return new PbReader(this.bytesField());
+  }
+
+  // Passes over a field this side doesn't know, as protobuf's readers do.
+  skip(this: Mut<this>, wire: i64) throws GrpcError {
+    if (wire === 0) this.varint();
+    else if (wire === 1) this.fixed(8);
+    else if (wire === 2) this.bytesField();
+    else if (wire === 5) this.fixed(4);
+    else throw new GrpcError(13, "a protobuf field has wire type " + String(wire) + ", which proto3 doesn't use");
+  }
+}
+
+// How a field's type is sent: its scalar's reader method, or "message" with the class's name, and
+// whether it repeats or is optional.
+type PbShape = { kind: string; name: string; repeated: boolean; optional: boolean };
+
+function pbScalar(name: string): boolean {
+  return name === "i64" || name === "i32" || name === "i16" || name === "i8" || name === "u64" || name === "u32" || name === "u16" || name === "u8" || name === "boolean" || name === "f64" || name === "number" || name === "f32" || name === "string";
+}
+
+function pbShapeOf(t: Ref<AstType>, field: string): PbShape {
+  if (t.kind === "union" && t.types.length === 2) {
+    let inner: PbShape | null = null;
+    let nulls = 0;
+    for (const u of t.types) {
+      if (pbIsNull(u)) nulls++;
+      else inner = pbShapeOf(u, field);
+    }
+    if (nulls === 1 && inner !== null && !inner.repeated && !inner.optional) return { kind: inner.kind, name: inner.name, repeated: false, optional: true };
+  }
+  if (t.kind === "array") {
+    const e = t.element.clone();
+    if (e.kind === "ref" && e.name === "u8") return { kind: "bytes", name: "", repeated: false, optional: false };
+    const inner = pbShapeOf(e, field);
+    if (!inner.repeated && !inner.optional) return { kind: inner.kind, name: inner.name, repeated: true, optional: false };
+  }
+  if (t.kind === "ref" && t.args.length === 0) {
+    if (pbScalar(t.name)) return { kind: t.name, name: "", repeated: false, optional: false };
+    return { kind: "message", name: t.name, repeated: false, optional: false };
+  }
+  assert(false, "'" + field + "' has a type protobuf can't carry: a message's fields are sized numbers, booleans, strings, u8[], other messages, arrays of these, or one of these or null");
+  return { kind: "", name: "", repeated: false, optional: false };
+}
+
+function pbIsNull(t: Ref<AstType>): boolean {
+  if (t.kind === "ref") return t.name === "null" || t.name === "undefined";
+  if (t.kind === "literal") return t.value.kind === "null";
+  return false;
+}
+
+function pbNumber(n: i64): AstExpr {
+  return { kind: "int", value: n, start: 0, end: 0 };
+}
+
+function pbFlag(b: boolean): AstExpr {
+  return { kind: "bool", value: b, start: 0, end: 0 };
+}
+
+// The statement writing one value of a field.
+function pbWriteOne(shape: Ref<PbShape>, n: i64, value: AstExpr, always: boolean): AstStmt {
+  const num = pbNumber(n);
+  const all = pbFlag(always);
+  const k = shape.kind;
+  if (k === "i64" || k === "i32" || k === "i16" || k === "i8") return quote\`pbInt(\${ident("pbOut")}, \${num}, \${value} as i64, \${all});\`;
+  if (k === "u64" || k === "u32" || k === "u16" || k === "u8") return quote\`pbUint(\${ident("pbOut")}, \${num}, \${value} as u64, \${all});\`;
+  if (k === "boolean") return quote\`pbBool(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  if (k === "f64" || k === "number") return quote\`pbDouble(\${ident("pbOut")}, \${num}, \${value} as f64, \${all});\`;
+  if (k === "f32") return quote\`pbFloat(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  if (k === "string") return quote\`pbString(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  if (k === "bytes") return quote\`pbBytes(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  return quote\`{ let inner: u8[] = []; \${value}.__pbWrite(inner); pbBytes(\${ident("pbOut")}, \${num}, inner, \${all}); }\`;
+}
+
+// The expression reading one value of a field from reader r.
+function pbReadOne(shape: Ref<PbShape>, r: string): AstExpr {
+  const k = shape.kind;
+  const reader = ident(r);
+  if (k === "message") return quote\`\${ident(shape.name)}.__pbRead(\${reader}.sub())\`;
+  const method = k === "boolean" ? "bool" : k === "number" ? "f64" : k === "bytes" ? "bytesField" : k === "string" ? "string" : k;
+  return quote\`\${reader}.\${ident("pb_" + method)}()\`;
+}
+
+// @message: the class becomes a protobuf message, its fields numbered 1, 2, 3 in the order they
+// are declared, or as an @field(n) on one says, with toBinary() and fromBinary(bytes).
+export macro function message(input: AstStmt): AstStmt {
+  let c = input;
+  assert(c.kind === "class", "'@message' applies to a class, whose fields are the message's");
+  if (c.kind !== "class") return c;
+  const className = c.name;
+  assert(className !== null, "'@message' needs a named class");
+  if (className === null) return c;
+  // The numbers @field pinned, by field name.
+  let pinnedNames: string[] = [];
+  let pinnedNumbers: i64[] = [];
+  let kept: AstClassMember[] = [];
+  for (const m of c.members) {
+    if (m.kind === "field" && typeof m.name === "string" && m.name.startsWith("__pbField_")) {
+      const v = m.init.clone();
+      if (v !== null && v.kind === "int") {
+        pinnedNames.push(m.name.slice(10));
+        pinnedNumbers.push(v.value);
+      }
+      continue;
+    }
+    kept.push(m.clone());
+  }
+  let writes: AstStmt[] = [];
+  let reads: AstStmt[] = [];
+  let next: i64 = 1;
+  let used: i64[] = [];
+  for (const m of kept) {
+    if (m.kind !== "field" || m.modifiers.length > 0) continue;
+    if (typeof m.name !== "string") continue;
+    const name = pbText(m.name);
+    const t = m.type.clone();
+    assert(t !== null, "'" + name + "' needs a written type for '@message' to encode it");
+    if (t === null) continue;
+    assert(m.init !== null || m.optional, "'" + name + "' needs a default value, as 'fromBinary' starts each field at its default");
+    let n = next;
+    for (let i: usize = 0; i < pinnedNames.length; i++) if (pinnedNames[i] === name) n = pinnedNumbers[i];
+    assert(!pbHas(used, n), "two fields of '" + className + "' have the number " + String(n));
+    used.push(n);
+    next = n + 1;
+    const shape = pbShapeOf(t, name);
+    const f = ident(name);
+    const num = pbNumber(n);
+    if (shape.repeated) {
+      writes.push(quote\`for (const \${ident("pbX")} of this.\${f.clone()}) \${pbWriteOne(shape, n, ident("pbX"), true)}\`);
+      const packable = shape.kind !== "string" && shape.kind !== "bytes" && shape.kind !== "message";
+      if (packable) reads.push(quote\`if (\${ident("pbField")} === \${num.clone()} && \${ident("pbWire")} === 2) { let \${ident("pbPacked")} = \${ident("pbR")}.sub(); while (\${ident("pbPacked")}.more()) \${ident("pbM")}.\${f.clone()}.push(\${pbReadOne(shape, "pbPacked")}); continue; }\`);
+      reads.push(quote\`if (\${ident("pbField")} === \${num.clone()}) { \${ident("pbM")}.\${f.clone()}.push(\${pbReadOne(shape, "pbR")}); continue; }\`);
+    } else if (shape.optional) {
+      const one = pbWriteOne(shape, n, quote\`this.\${f.clone()}\`, true);
+      writes.push(quote\`if (this.\${f.clone()} !== null) \${one}\`);
+      reads.push(quote\`if (\${ident("pbField")} === \${num.clone()}) { \${ident("pbM")}.\${f.clone()} = \${pbReadOne(shape, "pbR")}; continue; }\`);
+    } else {
+      writes.push(pbWriteOne(shape, n, quote\`this.\${f.clone()}\`, false));
+      reads.push(quote\`if (\${ident("pbField")} === \${num.clone()}) { \${ident("pbM")}.\${f.clone()} = \${pbReadOne(shape, "pbR")}; continue; }\`);
+    }
+  }
+  const self = ident(className);
+  const selfType: AstType = { kind: "ref", name: className, args: [], start: 0, end: 0 };
+  const k = quote\`class X {
+    __pbWrite(this: Ref<this>, \${ident("pbOut")}: Mut<u8[]>) {}
+    static __pbRead(reader: PbReader): \${selfType.clone()} throws GrpcError {
+      let \${ident("pbR")} = reader;
+      let \${ident("pbM")} = new \${self.clone()}();
+      while (\${ident("pbR")}.more()) {
+        const key = \${ident("pbR")}.pb_u64() as i64;
+        const \${ident("pbField")} = key >> 3;
+        const \${ident("pbWire")} = key & 7;
+        \${ident("pbR")}.skip(\${ident("pbWire")});
+      }
+      return \${ident("pbM")};
+    }
+    toBinary(this: Ref<this>): u8[] {
+      let out: u8[] = [];
+      this.__pbWrite(out);
+      return out;
+    }
+    static fromBinary(bytes: u8[]): \${selfType.clone()} throws GrpcError {
+      return \${self.clone()}.__pbRead(new PbReader(bytes));
+    }
+    static __pbTry(bytes: u8[]): \${selfType.clone()} | GrpcError {
+      try {
+        return \${self.clone()}.fromBinary(bytes);
+      } catch (e) {
+        return e;
+      }
+    }
+  }\`;
+  if (k.kind === "class") {
+    for (const member of k.members) {
+      let made = member.clone();
+      if (made.kind === "method" && typeof made.name === "string" && made.name === "__pbWrite") made.body = writes.clone();
+      if (made.kind === "method" && typeof made.name === "string" && made.name === "__pbRead" && made.body !== null) {
+        let body = made.body.clone();
+        let loop = body[2].clone();
+        if (loop.kind === "while") {
+          let inner: AstStmt[] = [loop.body[0].clone(), loop.body[1].clone(), loop.body[2].clone()];
+          for (const s of reads) inner.push(s.clone());
+          inner.push(loop.body[3].clone());
+          loop.body = inner;
+        }
+        body[2] = loop;
+        made.body = body;
+      }
+      kept.push(made);
+    }
+  }
+  c.members = kept;
+  return c;
+}
+
+// @field(n) on a message's field: its number on the wire, which stays as fields are added around it.
+export macro function field(input: AstStmt, member: usize, n: i64): AstStmt {
+  let c = input;
+  if (c.kind === "class") {
+    const f = c.members[member].clone();
+    if (f.kind === "field" && typeof f.name === "string") {
+      assert(n >= 1 && n <= 536870911 && (n < 19000 || n > 19999), "a protobuf field number is 1 to 536870911, outside 19000 to 19999, not " + String(n));
+      const num = pbNumber(n);
+      const k = quote\`class X { static \${ident("__pbField_" + f.name)} = \${num}; }\`;
+      if (k.kind === "class") c.members.push(k.members[0].clone());
+    }
+  }
+  return c;
+}
+
+function pbText(s: string): string {
+  return s;
+}
+
+function pbHas(xs: Ref<i64[]>, n: i64): boolean {
+  for (const x of xs) if (x === n) return true;
+  return false;
+}
+
+// A service's methods as a server runs them: its full name, as "helloworld.Greeter", and a call
+// giving each reply of a method, by its name, to a request's bytes, or the error that ended it.
+export type GrpcCall = (method: string, body: u8[]) => Dyn<AsyncGenerator<u8[] | GrpcError>>;
+export type GrpcService = { name: string; call: GrpcCall };
+
+function grpcPascal(name: string): string {
+  return name.slice(0, 1).toUpperCase() + name.slice(1);
+}
+
+function grpcTypeOf(t: Ref<AstType>, what: string): AstType {
+  assert(t.kind === "ref" && t.args.length === 0, what + " is a '@message' class, named");
+  return t.clone();
+}
+
+// The class a method returns from, unwrapped from its Promise or AsyncGenerator, and whether it streams.
+// failing says the reply may instead be a GrpcError, the status the call ends with.
+type GrpcMethod = { name: string; request: AstType; reply: AstType; streams: boolean; failing: boolean };
+
+function grpcMethodOf(m: Ref<AstTypeMember>, service: string): GrpcMethod {
+  assert(m.kind === "method", "a '@service' interface holds methods only, and '" + service + "' holds something else");
+  let out: GrpcMethod = { name: "", request: { kind: "ref", name: "", args: [], start: 0, end: 0 }, reply: { kind: "ref", name: "", args: [], start: 0, end: 0 }, streams: false, failing: false };
+  if (m.kind !== "method") return out;
+  if (typeof m.name !== "string") return out;
+  const name = pbText(m.name);
+  assert(m.params.length === 1, "'" + name + "' takes one request message, as a gRPC method does");
+  const p = m.params[0].type.clone();
+  assert(p !== null, "'" + name + "' needs its request's type written");
+  if (p === null) return out;
+  const r = m.returns.clone();
+  assert(r !== null && r.kind === "ref" && (r.name === "Promise" || r.name === "AsyncGenerator") && r.args.length === 1, "'" + name + "' returns a Promise of its reply message, or an AsyncGenerator of them to stream");
+  const given = r.args[0].clone();
+  let reply = given.clone();
+  let failing = false;
+  if (given.kind === "union" && given.types.length === 2) {
+    for (const u of given.types) {
+      if (u.kind === "ref" && u.name === "GrpcError") failing = true;
+      else reply = u.clone();
+    }
+  }
+  return { name: name, request: grpcTypeOf(p, "'" + name + "''s request"), reply: grpcTypeOf(reply, "'" + name + "''s reply"), streams: r.name === "AsyncGenerator", failing: failing };
+}
+
+// A reply as the bytes sent, or the GrpcError it is when the method may give one.
+function grpcEncoded(failing: boolean, value: AstExpr): AstExpr {
+  if (failing) return quote\`\${value.clone()} instanceof GrpcError ? \${value.clone()} : \${value}.toBinary()\`;
+  return quote\`\${value}.toBinary()\`;
+}
+
+function grpcTypeName(t: Ref<AstType>): string {
+  if (t.kind === "ref") return pbText(t.name);
+  return "";
+}
+
+// @service("helloworld.Greeter") on an interface of gRPC methods, each taking a request message
+// and giving a Promise of a reply, or an AsyncGenerator of replies for a server stream. It adds
+// <Name>Client, whose methods call a server at a URL, and <name>Service(impl), the service for a
+// GrpcServer to run on impl.
+export macro function service(input: AstStmt, fullName: string): Ast[] {
+  assert(input.kind === "interface", "'@service' applies to an interface of the service's methods");
+  if (input.kind !== "interface") return [input];
+  const name = pbText(input.name);
+  let methods: GrpcMethod[] = [];
+  for (const m of input.members) methods.push(grpcMethodOf(m, name));
+  const client = ident(name + "Client");
+  const serviceFn = ident(name.slice(0, 1).toLowerCase() + name.slice(1) + "Service");
+  const callFn = ident("__grpcCall" + name);
+  const iface: AstType = { kind: "ref", name: name, args: [], start: 0, end: 0 };
+  const full: AstExpr = { kind: "string", value: fullName, start: 0, end: 0 };
+  let members: AstClassMember[] = [];
+  let calls: AstStmt[] = [];
+  for (const m of methods) {
+    const path: AstExpr = { kind: "string", value: "/" + fullName + "/" + grpcPascal(m.name), start: 0, end: 0 };
+    const wire: AstExpr = { kind: "string", value: grpcPascal(m.name), start: 0, end: 0 };
+    const method = ident(m.name);
+    const replyClass = ident(grpcTypeName(m.reply));
+    const requestClass = ident(grpcTypeName(m.request));
+    let made: AstStmt = quote\`class X {}\`;
+    let call: AstStmt = quote\`{}\`;
+    if (m.streams) {
+      made = quote\`class X {
+        async *\${method.clone()}(this: Ref<this>, request: Ref<\${m.request.clone()}>): AsyncGenerator<\${m.reply.clone()}> throws GrpcError | IoError | AbortError {
+          const replies = await grpcServerStream(this.url, \${path.clone()}, request.toBinary());
+          for (const bytes of replies.messages) yield \${replyClass.clone()}.fromBinary(bytes.clone());
+          const status = replies.status;
+          if (status !== null) throw status;
+        }
+      }\`;
+      call = quote\`if (\${ident("grpcMethod")} === \${wire.clone()}) {
+        const request = \${requestClass.clone()}.__pbTry(\${ident("grpcBody")});
+        if (request instanceof GrpcError) {
+          yield request;
+          return;
+        }
+        let replies = \${ident("grpcImpl")}.\${method.clone()}(request);
+        while (true) {
+          const r = await replies.next();
+          if (r.done !== false) return;
+          const item: u8[] | GrpcError = \${grpcEncoded(m.failing, quote\`r.value\`)};
+          const stop = item instanceof GrpcError;
+          yield item;
+          if (stop) return;
+        }
+      }\`;
+    } else {
+      made = quote\`class X {
+        async \${method.clone()}(this: Ref<this>, request: Ref<\${m.request.clone()}>): Promise<\${m.reply.clone()}> throws GrpcError | IoError | AbortError {
+          const bytes = await grpcUnary(this.url, \${path.clone()}, request.toBinary());
+          return \${replyClass.clone()}.fromBinary(bytes);
+        }
+      }\`;
+      call = quote\`if (\${ident("grpcMethod")} === \${wire.clone()}) {
+        const request = \${requestClass.clone()}.__pbTry(\${ident("grpcBody")});
+        if (request instanceof GrpcError) {
+          yield request;
+          return;
+        }
+        const answered = await \${ident("grpcImpl")}.\${method.clone()}(request);
+        const reply: u8[] | GrpcError = \${grpcEncoded(m.failing, quote\`answered\`)};
+        yield reply;
+        return;
+      }\`;
+    }
+    if (made.kind === "class") members.push(made.members[0].clone());
+    calls.push(call);
+  }
+  let clientClass = quote\`export class \${client.clone()} {
+    url: string;
+    constructor(url: string) {
+      this.url = url;
+    }
+  }\`;
+  if (clientClass.kind === "export") {
+    let d = clientClass.body.clone();
+    if (d.kind === "class") {
+      for (const m of members) d.members.push(m.clone());
+      clientClass.body = d;
+    }
+  }
+  const serviceDecl = quote\`export function \${serviceFn}(impl: \${iface.clone()}): GrpcService {
+    return { name: \${full}, call: (method: string, body: u8[]): Dyn<AsyncGenerator<u8[] | GrpcError>> => \${callFn.clone()}(impl.clone(), method, body) };
+  }\`;
+  let callDecl = quote\`async function* \${callFn.clone()}(\${ident("grpcImpl")}: \${iface.clone()}, \${ident("grpcMethod")}: string, \${ident("grpcBody")}: u8[]): AsyncGenerator<u8[] | GrpcError> {
+    yield new GrpcError(12, "the service has no method " + \${ident("grpcMethod")});
+  }\`;
+  if (callDecl.kind === "function" && callDecl.body !== null) {
+    let body: AstStmt[] = [];
+    for (const s of calls) body.push(s.clone());
+    for (const s of callDecl.body) body.push(s.clone());
+    callDecl.body = body;
+  }
+  return [input, clientClass, serviceDecl, callDecl];
+}
+
+// GrpcError's codes, as gRPC numbers them.
+export const GrpcStatus = { OK: 0, CANCELLED: 1, UNKNOWN: 2, INVALID_ARGUMENT: 3, DEADLINE_EXCEEDED: 4, NOT_FOUND: 5, ALREADY_EXISTS: 6, PERMISSION_DENIED: 7, RESOURCE_EXHAUSTED: 8, FAILED_PRECONDITION: 9, ABORTED: 10, OUT_OF_RANGE: 11, UNIMPLEMENTED: 12, INTERNAL: 13, UNAVAILABLE: 14, DATA_LOSS: 15, UNAUTHENTICATED: 16 };
+
+// A message as gRPC frames it: uncompressed, its length, then its bytes.
+function grpcFrame(message: Ref<u8[]>): u8[] {
+  let out: u8[] = [0 as u8];
+  const n = message.length as i64;
+  out.push(((n >> 24) & 255) as u8);
+  out.push(((n >> 16) & 255) as u8);
+  out.push(((n >> 8) & 255) as u8);
+  out.push((n & 255) as u8);
+  for (const b of message) out.push(b);
+  return out;
+}
+
+// The messages a body holds, or why it can't be read: compression isn't offered, so a
+// compressed message is refused.
+function grpcFrames(body: Ref<u8[]>): u8[][] | GrpcError {
+  let out: u8[][] = [];
+  let at: usize = 0;
+  while (at < body.length) {
+    if (at + 5 > body.length) return new GrpcError(13, "a gRPC message's frame is cut short");
+    if (body[at] !== 0) return new GrpcError(12, "compressed gRPC messages aren't supported");
+    const n = (((body[at + 1] as i64) << 24) | ((body[at + 2] as i64) << 16) | ((body[at + 3] as i64) << 8) | (body[at + 4] as i64)) as usize;
+    if (at + 5 + n > body.length) return new GrpcError(13, "a gRPC message is cut short");
+    out.push(body.slice((at + 5) as i64, (at + 5 + n) as i64));
+    at += 5 + n;
+  }
+  return out;
+}
+
+// grpc-message's text, percent-decoded as gRPC sends it.
+function grpcUnescape(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let out: u8[] = [];
+  let i: usize = 0;
+  while (i < bytes.length) {
+    if (bytes[i] === 37 && i + 2 < bytes.length) {
+      const n = parseInt(new TextDecoder().decode(bytes.slice((i + 1) as i64, (i + 3) as i64)), 16);
+      if (n !== null) {
+        out.push(n as u8);
+        i += 3;
+        continue;
+      }
+    }
+    out.push(bytes[i]);
+    i += 1;
+  }
+  return new TextDecoder().decode(out);
+}
+
+// grpc-message's text percent-encoded, past printable ASCII and '%'.
+function grpcEscape(text: string): string {
+  const digits = "0123456789ABCDEF";
+  let out = "";
+  for (const b of new TextEncoder().encode(text)) {
+    if (b >= 32 && b <= 126 && b !== 37) out += String.fromCharCode(b as u16);
+    else out += "%" + digits[(b >> 4) as usize] + digits[(b & 15) as usize];
+  }
+  return out;
+}
+
+// One call to a server: the request message out, the reply messages back, and the status the
+// trailers end it with, any but OK thrown. The URL is http:// for HTTP/2 by prior knowledge or
+// https:// for TLS agreeing to h2. A connection per call.
+// ponytail: a connection per call and a stream read whole before its first message is given; a
+// pooled connection and replies handed over as their frames arrive would scale further.
+async function grpcCall(url: string, path: string, message: u8[]): Promise<GrpcReplies> throws GrpcError | IoError | AbortError {
+  const u = grpcURL(url);
+  if (u instanceof GrpcError) throw u;
+  const secure = u.protocol === "https:";
+  if (!secure && u.protocol !== "http:") throw new GrpcError(3, "a gRPC URL starts with http:// or https://, not " + u.protocol);
+  const host = u.hostname.startsWith("[") ? u.hostname.slice(1, (u.hostname.length as i64) - 1) : u.hostname;
+  const port = u.port.length === 0 ? (secure ? 443 : 80) : parseInt(u.port) ?? 80;
+  const signal = new AbortController().signal;
+  const conn = await TcpStream.connect(host, port, signal.clone());
+  if (secure) {
+    const chosen = await __tlsClientOffering(conn, host, "", "h2", signal.clone());
+    if (chosen !== "h2") throw new GrpcError(14, "the server at " + u.host + " didn't agree to HTTP/2, which gRPC needs");
+  }
+  let headers = new Headers();
+  headers.set("content-type", "application/grpc");
+  headers.set("te", "trailers");
+  const body = grpcFrame(message);
+  const reply = await Http2.exchange(conn, secure ? "https" : "http", "POST", u.host, path, headers, body, signal);
+  if (reply.status !== 200) throw new GrpcError(reply.status === 404 ? 12 : 14, "the server answered " + path + " with HTTP status " + String(reply.status));
+  const said = reply.trailers.get("grpc-status") ?? reply.headers.get("grpc-status");
+  if (said === null) throw new GrpcError(13, "the server's reply to " + path + " has no grpc-status");
+  const code = parseInt(said) ?? 2;
+  const status = code === 0 ? null : new GrpcError(code, grpcUnescape(reply.trailers.get("grpc-message") ?? reply.headers.get("grpc-message") ?? ""));
+  const frames = grpcFrames(reply.body);
+  if (frames instanceof GrpcError) throw frames;
+  return { messages: frames, status: status };
+}
+
+// A call's replies, and the status it ended with when that isn't OK.
+type GrpcReplies = { messages: u8[][]; status: GrpcError | null };
+
+function grpcURL(url: string): URL | GrpcError {
+  try {
+    return new URL(url);
+  } catch (e) {
+    return new GrpcError(3, "the gRPC URL can't be read as a URL: " + e.message);
+  }
+}
+
+async function grpcUnary(url: string, path: string, message: u8[]): Promise<u8[]> throws GrpcError | IoError | AbortError {
+  const got = await grpcCall(url, path, message);
+  const status = got.status;
+  if (status !== null) throw status;
+  let replies = got.messages;
+  if (replies.length !== 1) throw new GrpcError(13, path + " gave " + String(replies.length as i64) + " replies to a call taking one");
+  const first = replies.pop();
+  if (first === null) throw new GrpcError(13, path + " gave no reply");
+  return first;
+}
+
+async function grpcServerStream(url: string, path: string, message: u8[]): Promise<GrpcReplies> throws GrpcError | IoError | AbortError {
+  const replies = await grpcCall(url, path, message);
+  return replies;
+}
+
+type GrpcTable = { services: Lock<GrpcService[]> };
+
+// Services by their full names, served through a handler serve runs over HTTP/2. A call to a
+// method a service doesn't have, or to a service not added, ends with UNIMPLEMENTED.
+export class GrpcServer {
+  #table: shared<GrpcTable>;
+
+  constructor() {
+    const none: GrpcService[] = [];
+    this.#table = shared<GrpcTable>({ services: new Lock(none) });
+  }
+
+  add(this: Ref<this>, service: GrpcService) {
+    this.#table.services.update((s) => { s.push(service); });
+  }
+
+  // The handler for serve, sharing this server's services.
+  handler(this: Ref<this>): ServeHandler {
+    const table = this.#table.clone();
+    return async (req: Request) => {
+      const res = await grpcHandle(table.clone(), req);
+      return res;
+    };
+  }
+}
+
+function grpcFind(services: Ref<GrpcService[]>, name: string): GrpcCall | null {
+  for (const s of services) if (s.name === name) return s.call.clone();
+  return null;
+}
+
+async function grpcHandle(table: shared<GrpcTable>, req: Request): Promise<Response> {
+  const parts = req.path.split("/");
+  if (req.method !== "POST" || parts.length !== 3) return new Response("Not Found\\n", { status: 404 });
+  const kind = req.headers.get("content-type") ?? "";
+  if (!kind.startsWith("application/grpc")) return new Response("Unsupported Media Type\\n", { status: 415 });
+  const name = parts[1];
+  const call = table.services.update((s) => grpcFind(s, name));
+  const body = await req.bytes();
+  const none: Headers[] = [];
+  const box = shared<__trailerBox>({ fields: new Lock(none) });
+  let headers = new Headers();
+  headers.set("content-type", "application/grpc");
+  let res = new Response(ReadableStream.from(grpcReplies(call, parts[2], name, body, box.clone())), { status: 200, headers: headers });
+  res.__trailersFrom(box);
+  return res;
+}
+
+// A call's replies as frames, then its status in the trailers.
+async function* grpcReplies(call: GrpcCall | null, method: string, service: string, body: u8[], box: shared<__trailerBox>): AsyncGenerator<u8[]> {
+  let code: i64 = 0;
+  let message = "";
+  const frames = grpcFrames(body);
+  if (call === null) {
+    code = 12;
+    message = "the server has no service " + service;
+  } else if (frames instanceof GrpcError) {
+    code = frames.code;
+    message = frames.message;
+  } else if (frames.length !== 1) {
+    code = 12;
+    message = "a call takes one request message, as client streaming isn't supported";
+  } else {
+    let replies = call(method, frames[0].clone());
+    for await (const r of replies) {
+      if (r instanceof GrpcError) {
+        code = r.code;
+        message = r.message;
+        break;
+      }
+      yield grpcFrame(r);
+    }
+  }
+  let trailers = new Headers();
+  trailers.set("grpc-status", String(code));
+  if (message.length > 0) trailers.set("grpc-message", grpcEscape(message));
+  box.fields.update((f) => { f.push(trailers); });
+}
+`;
+
 export const STD_MODULES: Record<string, string> = {
+  grpc: GRPC,
   // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
   // they panic where they are made.
   assert: String.raw`
@@ -10107,7 +10875,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
@@ -10689,7 +11457,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // btoa, atob and Buffer call them too.
   const encoding = httpUsed || bufferUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);
   const dated = httpUsed || uses(written, dates, ["Date"]);
-  const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
+  const secure = fetchUsed || uses(written, tls, ["__tlsClient", "__tlsClientOffering"]);
   const streamed = httpUsed || uses(written, streaming, STREAM_NAMES);
   // The checker turns typed arrays' constructors and methods into calls of these helpers.
   const typing = (dataViewUsed && dataView.length > 0) || mentionsTypedArray(written);
