@@ -5,8 +5,10 @@
 religion/
 .claude/
 .agents/
+.agent/
 AGENTS.md
 CLAUDE.md
+GEMINI.md
 
 
 # fishc as scripts/build.fsh builds it
