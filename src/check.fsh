@@ -2272,24 +2272,48 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     return { instances: compiledIds, warnings: found };
   }
 
-  // A call checked before its callee was gets the generator the callee's definition gives. Once
-  // every body is checked, each reads the one its callee compiles to, and so does each caller of
-  // a function returning it, which takes a pass per call between them.
+  // A call checked before its callee was gets the generator or future the callee's definition
+  // gives. Once every body is checked, each reads the one its callee compiles to, and so does each
+  // caller of a function returning it, which takes a pass per call between them.
   /** @throws {CompileError} */
   private settleGenerators(this: Mut<this>, ids: Mut<InstanceId[]>): void {
+    // The instance each generator and future type is made by, for a callee bound to one.
+    let makers = new TypeMap<Type, InstanceId>();
+    for (const made of this.instancingState.instances.values()) {
+      for (const i of made.values()) {
+        const x = this.tables.arenas.instanceOf(i);
+        if (x.generator !== undefined) makers.set(x.generator, i);
+        if (x.future !== undefined) makers.set(x.future, i);
+      }
+    }
     // ponytail: passes bounded by the instance count, enough for any chain of returns.
     for (let pass: usize = 0; pass <= ids.length; pass++) {
       let changed = false;
       for (let at: usize = 0; at < ids.length; at++) {
         const id = ids[at]!;
         let swap = new TypeMap<Type, Type>();
-        const instance = this.tables.arenas.instanceOf(id);
-        for (const [e, target] of instance.calls) {
-          const had = instance.types.getById(e.id);
-          const callee = this.tables.arenas.instanceOf(target);
+        const concrete = this.tables.arenas.instanceOf(id).concrete;
+        let calls: [usize, InstanceId][] = [];
+        for (const [e, target] of this.tables.arenas.instanceOf(id).calls) calls.push([e.id, target]);
+        for (const [site, target] of calls) {
+          const had = this.tables.arenas.instanceOf(id).types.getById(site);
+          const callee = this.tables.arenas.instanceOf(target).clone();
           const gives: Type = callee.generator !== undefined ? callee.generator : callee.returns;
+          // A callee no class owns, as the helper a spread collects through, may be bound to the
+          // generator of an instance never compiled; it takes the compiled counterpart's.
+          if (!callee.concrete && concrete) {
+            for (const t of callee.bindings.values()) {
+              const maker = makers.get(t);
+              if (maker === undefined || swap.has(t)) continue;
+              const counterpart = this.counterpart(maker);
+              const theirs = this.tables.arenas.instanceOf(counterpart);
+              const replacing = theirs.generator !== undefined ? theirs.generator : theirs.future;
+              if (counterpart !== maker && theirs.concrete && replacing !== undefined && replacing !== t) swap.set(t, replacing);
+            }
+          }
           if (had === undefined || had === gives || swap.has(had)) continue;
-          if (this.kindOf(had) === "generator" && this.kindOf(gives) === "generator") swap.set(had, gives);
+          const kinds = [this.kindOf(had), this.kindOf(gives)];
+          if ((kinds[0] === "generator" && kinds[1] === "generator") || (kinds[0] === "future" && kinds[1] === "future")) swap.set(had, gives);
         }
         if (swap.size === 0) continue;
         changed = true;
@@ -2345,6 +2369,14 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     }
     const returned = this.tables.arenas.instanceOf(id).returns;
     const returns = this.replaced(returned, swap);
+    // Its frame holds what it awaits and loops over, laid out when its check ended.
+    const own = this.tables.arenas.instanceOf(id);
+    const framed: GeneratorType | FutureType | undefined = own.generator !== undefined ? own.generator : own.future;
+    if (framed !== undefined) {
+      let frame = this.tables.typing.rec(framed).frame.slice();
+      for (let i: usize = 0; i < frame.length; i++) frame[i] = { ...frame[i]!, type: this.replaced(frame[i]!.type, swap) };
+      this.tables.typing.setFrame(framed, frame);
+    }
     let instance = this.tables.arenas.instanceMut(id);
     for (const [k, t] of types) instance.types.setValueById(k, t);
     for (const [k, t] of coercions) instance.coercions.setValueById(k, t);

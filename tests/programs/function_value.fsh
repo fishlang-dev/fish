@@ -120,3 +120,26 @@ function main() { function helper(x: i64): i64 { return x + 1; } console.log([1,
 // error: type '(s: string) => i64' is not assignable to type '(x: i64) => i64'
 function take(s: string): i64 { return 0; }
 function main() { const f: (x: i64) => i64 = take; }
+// case: function_value_optional_stored_callable_unwrapped
+// expect: fired
+// expect: INT
+// expect: handled
+class E {
+  listener?: () => void;
+  fire(): void {
+    this.listener!();
+  }
+}
+function on(signal: string, listener?: () => void): () => void {
+  return () => {
+    console.log(signal);
+    listener!();
+  };
+}
+function main() {
+  let e = new E();
+  e.listener = () => console.log("fired");
+  e.fire();
+  const h = on("INT", () => console.log("handled"));
+  h();
+}
