@@ -35,6 +35,7 @@ import { compare, formatComparison, formatReport, readReport, sources, survey, t
 import { explain } from "./codes.fsh";
 import { explainBorrows, functionsIn } from "./explain.fsh";
 import { openapiOf } from "./openapi.fsh";
+import { bindHeader } from "./bindc.fsh";
 import { complete, entries, program, REPL_VALUE, shown, thrownBy, type Entry, type ReplState } from "./repl.fsh";
 import { comptimeBody } from "./comptime.fsh";
 import type { InstanceId } from "./arenas.fsh";
@@ -1667,6 +1668,20 @@ function explainFile(file: string, only: string | undefined): never {
   return process.exit(0);
 }
 
+// `fishc bind c`: a header's bindings written to `out`, or printed, and what was left out listed
+// on stderr.
+function bindFile(header: string, out: string | undefined, flags: string[]): never {
+  try {
+    const bound = bindHeader(header, process.env.CC ?? "clang", flags);
+    if (out === undefined) process.stdout.write(bound.source);
+    else writeFileSync(out!, bound.source);
+    for (const line of bound.skipped) console.error(`skipped ${line}`);
+  } catch (e) {
+    fail(`fishc bind: ${e instanceof Error ? e.message : (e as { message: string }).message}`);
+  }
+  return process.exit(0);
+}
+
 // `fishc openapi`: prints the OpenAPI document of the routes `file`'s program adds to std's
 // routers, or writes it to `out`, and names on stderr each route the document leaves out. Its
 // title and version are the package's, or the file's name and 0.0.0 for a file in no package.
@@ -1842,6 +1857,10 @@ async function main(): Promise<void> {
     if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "out")) fail("usage: fishc openapi <file.fsh> [-o <out>]");
     openapiFile(named!, values.out);
   }
+  if (command === "bind") {
+    if (positionals.length < 3 || positionals[1] !== "c" || flags.some((k) => k !== "panic" && k !== "out")) fail("usage: fishc bind c <header.h> [-o <out.fsh>] [-- <clang flags>...]");
+    bindFile(positionals[2]!, values.out, positionals.slice(3));
+  }
   if (command === "survey") {
     const dirs = positionals.slice(1);
     const usage = "usage: fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]";
@@ -1978,7 +1997,7 @@ async function main(): Promise<void> {
   }
   if (command === "test") {
     // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
-    const usage = "usage: fishc test [<filter>] [--release] [--timeout <ms>] [--jobs <n>] [--sim [--seed <n>] [--seeds <count>]]";
+    const usage = "usage: fishc test [<filter>] [--release] [--timeout <ms>] [--jobs <n>] [--seed <n>] [--sim [--seed <n>] [--seeds <count>]]";
     if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "timeout" && k !== "jobs" && k !== "sim" && k !== "seed" && k !== "seeds") || values.panic !== "unwind") fail(usage);
     let options = runDefaults();
     if (values.timeout !== undefined) options.timeout = wholeNumber(values.timeout) ?? fail(`fishc test: --timeout takes a whole number of milliseconds above 0, not '${values.timeout}'`);
@@ -1989,8 +2008,11 @@ async function main(): Promise<void> {
       if (values.seeds !== undefined) options.seeds = wholeNumber(values.seeds) ?? fail(`fishc test: --seeds takes a whole number above 0, not '${values.seeds}'`);
       const u64Max: u64 = (1844674407370955161 as u64) * (10 as u64) + (5 as u64);
       if (u64Max - options.seed < ((options.seeds - 1) as u64)) fail("fishc test: --seed + --seeds overflows unsigned 64-bit range");
-    } else if (values.seed !== undefined || values.seeds !== undefined) {
-      fail("fishc test: --seed and --seeds require --sim");
+    } else if (values.seeds !== undefined) {
+      fail("fishc test: --seeds requires --sim");
+    } else if (values.seed !== undefined) {
+      // Without --sim, the seed is the one every property draws its inputs from.
+      options.propSeed = parseSimSeed(values.seed) ?? fail(`fishc test: --seed takes an unsigned 64-bit integer, not '${values.seed}'`);
     }
     const found = findManifest(process.cwd()) ?? fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
     const code = await testPackage(sessionFor(), dirname(found!), file, values.release === true, options);
@@ -2219,7 +2241,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || fuzzFlag || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release] [--sim [--seed <n>] [--seeds <count>]]\n       fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]\n       fishc fix [<file.fsh>] [--dry-run] [--check]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--sanitize address|thread]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release] [--seed <n>] [--sim [--seed <n>] [--seeds <count>]]\n       fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]\n       fishc fix [<file.fsh>] [--dry-run] [--check]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc bind c <header.h> [-o <out.fsh>] [-- <clang flags>...]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
