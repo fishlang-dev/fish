@@ -1,10 +1,6 @@
 // Programs type-checked against npm packages' declarations, built by the
 // native fishc with `--emit-llvm`, which stops before clang. A compile error is what fishc
 // prints, as `formatError` gives it.
-// Four tests are left out until the native fishc stops crashing on what they build, where Bun's
-// run of the compiler gives its answer: importing a function a declaration file declares more than
-// once (two tests), a class passed where an interface names itself through an array, and an
-// interface whose method takes and returns itself, made in one file and passed in another.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fishc, removed, same, scratch } from "./support.fsh";
@@ -127,6 +123,17 @@ function whole(main: string): [string, string][] {
   ];
 }
 
+function ov(): string {
+  return "export declare function format(d: number): string;\nexport declare function format(d: string, pattern: string): string;\nexport declare function format(d: boolean[]): number;\n";
+}
+
+test("each signature of a function declared more than once is tried in order", () => {
+  checks(stops([["node_modules/ov/index.d.ts", ov()], ["main.fsh", "import { format } from \"ov\";\nfunction main() {\n  const a: string = format(1.5);\n  const b: string = format(\"x\", \"yyyy\");\n  const c: f64 = format([true]);\n}\n"]]), "each signature");
+  has(stops([["node_modules/ov/index.d.ts", ov()], ["main.fsh", "import { format } from \"ov\";\nfunction main() { const a = format(true); }\n"]]), "error[E0507]: no signature of 'format' takes (boolean); it takes (d: number), (d: string, pattern: string), (d: boolean[])", "no signature");
+  // The first that takes the arguments gives the result.
+  has(stops([["node_modules/ov/index.d.ts", ov()], ["main.fsh", "import { format } from \"ov\";\nfunction main() { const a: f64 = format(1.5); }\n"]]), "error[E0101]: type 'string' is not assignable to type 'number'", "the first signature's result");
+});
+
 test("default, namespace and export = imports reach a package's declarations", () => {
   checks(stops(whole("import slug from \"dflt\";\nimport * as ns from \"ns\";\nimport _ from \"lodashy\";\nimport { chunk } from \"lodashy\";\nfunction main() {\n  const s: string = slug(\"Hello World\");\n  const t: string = ns.a(1.5);\n  const u: boolean = ns.b;\n  const c: string[][] = _.chunk([\"a\", \"b\"], 1);\n  const v: string = _.VERSION;\n  const d: f64[][] = chunk([1.5], 1);\n}\n")), "the program");
   has(stops(whole("import * as ns from \"ns\";\nfunction main() { const x = ns.nope; }\n")), "main.fsh:2:29: error[E0902]: 'ns' has no export 'nope'", "a missing namespace member");
@@ -161,6 +168,22 @@ test("a Fish value made a JsValue stops the program, and an import not called bu
   same(stops([["node_modules/p/index.d.ts", p()], ["main.fsh", "import { f } from \"p\";\nfunction main() { console.log(\"hi\"); }\n"]]), "built", "an import not called");
 });
 
+test("overloads imported in two files keep their signatures apart", () => {
+  checks(first(stops([
+    ["node_modules/p/index.d.ts", p()],
+    ["lib.fsh", "import { format } from \"p\";\nexport function show(): string { return format(1.5); }\n"],
+    ["main.fsh", "import { format } from \"p\";\nimport { show } from \"./lib\";\nfunction main() { const a = format(\"x\"); console.log(show()); }\n"],
+  ])), "overloads in two files");
+});
+
+test("a package imported twice is one set of types, and a borrowed handle passes as the handle", () => {
+  checks(first(stops([
+    ["node_modules/p/index.d.ts", "export interface R { with(o: R): R; put<T>(x: T): T; n: number }\nexport declare function f(): R;\nexport declare function g(r: R): void;\nexport declare function rs(): R[];\n"],
+    ["lib.fsh", "import { f } from \"p\";\nexport function make() { return f(); }\n"],
+    ["main.fsh", "import { g, rs } from \"p\";\nimport { make } from \"./lib\";\nfunction main() { g(make()); for (const r of rs()) g(r); }\n"],
+  ])), "a handle made in another file");
+});
+
 function pRefused(body: string): string {
   return first(stops([["node_modules/p/index.d.ts", p()], ["main.fsh", `import { getA, takeB, s, VERSION, child, K2 } from "p";\nfunction main() { ${body} }\n`]]));
 }
@@ -191,6 +214,13 @@ function uRefused(arg: string): string {
 test("a nested Fish value is checked against a recursive shape, part by part", () => {
   same(uRefused(`{ v: "a", child: { v: 5 } }`), "argument of type '{ child: { v: i64 }; v: string }' is not assignable to parameter of type 'U': property 'child' is a '{ v: i64 }', not a 'null | U'", "a wrong nested field");
   checks(uRefused(`{ v: "a", child: { v: "b" } }`), "a nested value that fits");
+});
+
+test("a Fish class whose type refers to itself through an array is refused, not followed forever", () => {
+  same(first(stops([
+    ["node_modules/p/index.d.ts", "export interface L { items: L[]; v: string }\nexport declare function takeL(l: L): void;\n"],
+    ["main.fsh", "import { takeL } from \"p\";\nclass K { v: string = \"a\"; items: K[] = []; }\nfunction main() { takeL(new K()); takeL({ v: \"a\", items: [{ v: \"b\", items: [] }] }); }\n"],
+  ])), "argument of type 'K' is not assignable to parameter of type 'L': property 'items' is a 'K[]', not a 'L[]'", "a class referring to itself");
 });
 
 test("a package's JSDoc @throws tags don't make its functions throw in Fish", () => {
