@@ -664,10 +664,9 @@ export function leavesOf(typing: Ref<Typing>, t: Type): Leaf[] {
 }
 
 // Up to how many scalar parts a member is moved into and out of a union word by word, with no
-// slot; a larger one goes through a slot, which takes fewer lines.
-function splitLimit(): usize {
-  return (parseInt(process.env.FISH_SPLIT_LIMIT ?? "4") ?? 4) as usize;
-}
+// slot; a larger one goes through a slot, which takes fewer lines. Measured on src: 2, 4 and 8
+// gave the same clang -O0 time, and 2 the least text.
+const SPLIT_LIMIT: usize = 2;
 
 // Whether values of a type compare part by part rather than as one word.
 export const compound = (typing: Ref<Typing>, t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(typing.kindOf(t));
@@ -1593,7 +1592,7 @@ export class Conversions<H extends Slots> {
 
   // Whether parts go into and out of a union word by word: few enough of them, each a scalar.
   split(leaves: Ref<Leaf[]>): boolean {
-    return leaves.length > 0 && leaves.length <= splitLimit() && leaves[0]!.ll !== "";
+    return leaves.length > 0 && leaves.length <= SPLIT_LIMIT && leaves[0]!.ll !== "";
   }
 
   // A scalar as the bits of a payload word, in its low bits.

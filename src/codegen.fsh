@@ -10944,7 +10944,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const object = shared as ObjectType | ClassType;
     let result = this.temp();
     // A field of somewhere a value lives is read from there, without loading the rest of it.
-    const storedObject = this.lendable(e) ? this.stored(e.object) : undefined;
+    const storedObject = this.lendable(e) && this.ownPlace(e) ? this.stored(e.object) : undefined;
     const holder = storedObject !== undefined ? this.referent(storedObject) : undefined;
     if (holder !== undefined && this.tables.typing.lower(this.tables.typing.unfold(holder)) === this.tables.typing.lower(object)) {
       const place = this.address(e);
@@ -10967,6 +10967,27 @@ class Codegen implements PrintHost, ComptimeHost {
     const convert2 = this.convert(result, field, declared);
     const get11 = this.cur().types.get(e)!;
     return this.convert(convert2, declared, get11);
+  }
+
+
+  // Whether an expression names a variable, or a field of one reached with no reference on the
+  // way, so its place holds it as the variable's type lays it out. A reference may point at a
+  // union a check narrowed, whose member sits in the payload rather than where it points.
+  ownPlace(this: Mut<this>, eGiven: Ref<Expr>): boolean {
+    const e = bare(eGiven);
+    // A value worked out ahead, as a guarded test's left operand is, may no longer be what its
+    // place holds.
+    if (this.known.has(e)) return false;
+    if (e.kind === "member") {
+      if (this.cur().narrowedFields?.has(e) === true || !this.cur().types.has(e.object)) return false;
+      const held = this.stored(e.object);
+      const seen = this.cur().types.get(e.object)!;
+      if (this.isRef(held) || this.isRef(seen) || this.kindOf(this.referent(held)) === "recursive") return false;
+      return this.ownPlace(e.object);
+    }
+    if (e.kind !== "ident") return false;
+    const local = this.localAt(e);
+    return local !== undefined && !this.isRef(this.loc(local).type) && this.kindOf(this.loc(local).type) !== "recursive";
   }
 
 
@@ -11620,7 +11641,8 @@ class Codegen implements PrintHost, ComptimeHost {
   // What the statement made so far, and what the scopes left own, are dropped on the way; in a
   // match arm's block, so are the values pending in the expressions it leaves.
   route(this: Mut<this>, error: string, to: Type): void {
-    const at = this.finallies.length - 1;
+    // The innermost `finally`, when there is one; with none, `at` is never read.
+    const at = this.finallies.length > 0 ? this.finallies.length - 1 : 0;
     const toRegion = this.finallies.length > 0 && this.handlers.length <= this.finallies[at]!.handlers;
     const kept = toRegion ? this.finallies[at]!.floor : this.handlers.length > 0 ? this.handlers[this.handlers.length - 1]!.floor : 0;
     let reversed = this.pending.slice(kept as i64);
