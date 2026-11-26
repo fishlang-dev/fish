@@ -77,6 +77,7 @@ const SOURCES: string[] = [
   "src/jsx.fsh",
   "src/keys.fsh",
   "src/layout.fsh",
+  "src/learn.fsh",
   "src/lexer.fsh",
   "src/locals.fsh",
   "src/lsp.fsh",
@@ -364,6 +365,7 @@ test("src/js_native.fsh formats keeping its comments, parses back to the same tr
 test("src/jsx.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/jsx.fsh"));
 test("src/keys.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/keys.fsh"));
 test("src/layout.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/layout.fsh"));
+test("src/learn.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/learn.fsh"));
 test("src/lexer.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/lexer.fsh"));
 test("src/locals.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/locals.fsh"));
 test("src/lsp.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/lsp.fsh"));

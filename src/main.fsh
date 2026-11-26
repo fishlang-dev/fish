@@ -26,6 +26,7 @@ import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, obje
 import { RUNTIME } from "./runtime.fsh";
 import { copyTarget, dockerfile, dockerfilePath, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
+import { EXERCISES, exerciseText, FOLDER } from "./learn.fsh";
 import { displayFixPath, fixProgram } from "./fix.fsh";
 import { formatReproducer, fuzzHarnessImports, fuzzHarnessMain, liftFuzz, shellQuote, type FuzzTarget } from "./fuzz.fsh";
 import { serveLsp } from "./lsp.fsh";
@@ -1755,6 +1756,57 @@ function checkProject(dir: string, fish: boolean = false) {
   if (sources(dir, fish).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript ${fish ? "or Fish " : ""}files (.ts, .tsx or .mts${fish ? ", or .fsh" : ""}, outside node_modules)`);
 }
 
+// The first exercise in `dir`, from `from` on, that doesn't compile, and its error as fishc check
+// prints it; undefined when they all do.
+/** @throws {IoError} */
+function unsolved(dir: string, from: usize): { at: usize; error: string } | undefined {
+  for (let i = from; i < EXERCISES.length; i++) {
+    const path = join(dir, EXERCISES[i]!.file);
+    const shown = join(FOLDER, EXERCISES[i]!.file);
+    try {
+      checkedFile(sessionWith(false, false, true), path);
+    } catch (e) {
+      if (e instanceof CompileError) return { at: i, error: painted(e, shown, readFileSync(path, "utf8")) };
+      return { at: i, error: (e as { message: string }).message };
+    }
+  }
+  return undefined;
+}
+
+// `fishc learn`: writes the exercises missing from `fish-learn/`, then shows the first that doesn't
+// compile and waits for it to be saved, going on to the next once it compiles, until all do. With
+// `hint`, the hint of the first that doesn't; with `once`, the first that doesn't, without waiting.
+// Gives the exit code: 0 once every exercise compiles.
+/** @throws {IoError} */
+async function learn(hint: boolean, once: boolean): Promise<i64> {
+  const dir = join(process.cwd(), FOLDER);
+  mkdirSync(dir, { recursive: true });
+  for (let i: usize = 0; i < EXERCISES.length; i++) {
+    const path = join(dir, EXERCISES[i]!.file);
+    if (!existsSync(path)) writeFileSync(path, exerciseText(i, EXERCISES[i]!));
+  }
+  const done = `every one of the ${EXERCISES.length} exercises compiles; you've finished the tutorial`;
+  let found = unsolved(dir, 0);
+  if (hint) {
+    console.log(found === undefined ? done : `${join(FOLDER, EXERCISES[found!.at]!.file)}: ${EXERCISES[found!.at]!.hint}`);
+    return 0;
+  }
+  while (found !== undefined) {
+    const at = found!.at;
+    const path = join(dir, EXERCISES[at]!.file);
+    console.log(`exercise ${at + 1} of ${EXERCISES.length}: ${join(FOLDER, EXERCISES[at]!.file)}\n`);
+    console.error(found!.error);
+    if (once) return 1;
+    console.log("fix it and save the file; 'fishc learn hint' gives a hint\n");
+    const seen = statSync(path).mtimeMs;
+    while (statSync(path).mtimeMs === seen) await Bun.sleep(300);
+    found = unsolved(dir, at);
+    if (found === undefined || found!.at !== at) console.log(`exercise ${at + 1} compiles\n`);
+  }
+  console.log(done);
+  return 0;
+}
+
 // `fishc build --addon`: the file's exports as a Node and Bun addon, `<name>.node` beside it unless
 // `out` says where, with the `.d.ts` declaring them beside that. Gives the exit code.
 /** @throws {IoError} */
@@ -1922,6 +1974,12 @@ async function main(): Promise<void> {
   if (command === "explain-borrows") {
     if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "fn")) fail("usage: fishc explain-borrows <file.fsh> [--fn <name>]");
     explainFile(named!, values.fn);
+  }
+  if (command === "learn") {
+    const sub = positionals.length > 1 ? positionals[1] : undefined;
+    if (positionals.length > 2 || (sub !== undefined && sub !== "hint") || flags.some((k) => k !== "panic" && k !== "check")) fail("usage: fishc learn [hint] [--check]");
+    const code = await learn(sub === "hint", values.check === true);
+    process.exit(code);
   }
   if (command === "openapi") {
     if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "out")) fail("usage: fishc openapi <file.fsh> [-o <out>]");
@@ -2311,7 +2369,7 @@ async function main(): Promise<void> {
     process.exit(buildAddon(sessionFor(), file!, values.out, release, values.debug === true));
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || fuzzFlag || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--sanitize address|thread]\n       fishc build --addon <file.fsh> [-o <out.node>] [--release] [-g]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc <file.fsh> [<args>...]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release] [--seed <n>] [--sim [--seed <n>] [--seeds <count>]]\n       fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]\n       fishc fix [<file.fsh>] [--dry-run] [--check]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc bind c <header.h> [-o <out.fsh>] [-- <clang flags>...]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--sanitize address|thread]\n       fishc build --addon <file.fsh> [-o <out.node>] [--release] [-g]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache]\n       fishc <file.fsh> [<args>...]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release] [--seed <n>] [--sim [--seed <n>] [--seeds <count>]]\n       fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]\n       fishc fix [<file.fsh>] [--dry-run] [--check]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc learn [hint] [--check]\n       fishc bind c <header.h> [-o <out.fsh>] [-- <clang flags>...]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
