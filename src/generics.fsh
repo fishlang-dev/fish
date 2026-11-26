@@ -8,6 +8,7 @@ import { unsupported } from "./unsupported.fsh";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.fsh";
 import type { ClassNode, Expr, Id, Param, Span, TypeMember, TypeNode, TypeParam } from "./parser.fsh";
 import { paramName, unboxedClosure } from "./resolve.fsh";
+import { perInstance } from "./typefns.fsh";
 import { INTERIORS, ITERATOR, TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.fsh";
 import { NodeMap, NodeSet, forEachChild, nextId, renumberTypeNode, Rewrites, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
 import { cloneClassNode, cloneTypeNode, cloneTypeParam, rebuiltTypeNode } from "./rebuild.fsh";
@@ -40,7 +41,17 @@ export function placeholders<R extends BoundResolver>(r: Mut<R>, params: Ref<Typ
       let seen = new Map<string, Type>();
       if (around !== undefined) for (const [n, t] of around) seen.set(n, t);
       for (const [n, t] of scope) seen.set(n, t);
-      const t = r.resolveIn(seen, p.constraint);
+      // A bound such as `keyof T` over another parameter is known only per instance; the
+      // definition's placeholder goes unbounded, and each instance checks the bound.
+      let t: Type = "never";
+      try {
+        t = r.resolveIn(seen, p.constraint);
+      } catch (e) {
+        if (!(e instanceof CompileError) || !perInstance(e)) throw e;
+        const unbound = concrete !== undefined ? concrete.get(p.name) : undefined;
+        scope.set(p.name, unbound !== undefined ? r.tables.typing.wrapped(p.name, undefined, unbound) : r.tables.typing.typeParameter(p.name, undefined, undefined));
+        continue;
+      }
       const kind = typeof t === "string" ? undefined : r.tables.typing.kindOf(t);
       if (kind === "interface" || kind === "object") bound = t as ObjectType | InterfaceType;
       else if (valueBound(r.tables.typing, t)) within = t;
@@ -1040,7 +1051,7 @@ export class Instancing<H extends InstancingHost> {
   }
 
   /** @throws {CompileError} */
-  private generic(this: Mut<this>, id: BodyId): boolean {
+  generic(this: Mut<this>, id: BodyId): boolean {
     const f = this.host.tables.arenas.bodyOf(id);
     const own = f.typeParams !== undefined && f.typeParams.some((p) => !isLifetime(p));
     const comptime = f.params.some((p) => p.comptime);

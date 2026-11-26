@@ -56,6 +56,12 @@ export function standIn(typing: Ref<Typing>, types: Ref<Type[]>, what: string, a
   return undefined;
 }
 
+// Whether `e` is `keyof` or an indexed access refused over a type parameter, which a generic
+// function's definition can't compute but each instance, its type arguments known, can.
+export function perInstance(e: Ref<CompileError>): boolean {
+  return e.code === "E0114" && (e.message.startsWith("'keyof' of the type parameter") || e.message.startsWith("an indexed access type of the type parameter"));
+}
+
 // What the type-level functions ask of the code using them: whether a class's fields are known,
 // laying it out when first asked; whether a generic alias is being checked before any use; and
 // whether a type fits another, an interface by shape, as `extends` asks.

@@ -21,7 +21,7 @@ import { CLASS_ASKER, comptimeName, infer, GenericClasses, GenericClassesState, 
 import { unsatisfied, type Members, type Refused } from "./interfaces.fsh";
 import { Registry, RegistryState, type RegistryHost } from "./registry.fsh";
 import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost } from "./resolve.fsh";
-import { openParam } from "./typefns.fsh";
+import { openParam, perInstance } from "./typefns.fsh";
 import { lowerDefaults, writtenName } from "./defaults.fsh";
 import { ASYNC_DISPOSE, DISPOSE, LIVE, idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
 import { unsupported, unsupportedDeclaration } from "./unsupported.fsh";
@@ -2069,6 +2069,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         const definition = this.definition(id);
         this.checkBody(definition);
       } catch (e) {
+        // `keyof T` and `T[K]` over the function's own type parameters are computed per instance,
+        // so a generic function using them is checked as each call instantiates it.
+        if (e instanceof CompileError && perInstance(e) && this.instancing().generic(id)) continue;
         // A package's function Fish can't type is refused where a program calls it.
         if (this.tables.arenas.bodyOf(id).js === undefined || !(e instanceof CompileError)) {
           // A bad signature fails before the body's check does, and fails each call of it as well.

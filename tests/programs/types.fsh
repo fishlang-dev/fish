@@ -484,11 +484,15 @@ function main() {}
 type Bad = { [K in string]: i64 };
 function main() {}
 // case: types_mapped_param
-// error: 'keyof' of the type parameter 'T' isn't supported yet
-// Inside generic function code, a mapped type over the function's own type parameter can't be
-// computed, since T is only known per instance.
+// expect: 1
+// A mapped type over the function's own type parameter is computed per instance, T known then.
+type P = { a: i64 };
 function f<T>(x: T, y: { [K in keyof T]: T[K] }): i64 { return 1; }
-function main() {}
+function main() {
+  const p: P = { a: 1 };
+  const q: P = { a: 2 };
+  console.log(f(p, q));
+}
 // case: types_mapped_readonly
 // error: cannot assign to 'born' because it is a read-only property
 type User = { id: i64; born: i64 };
