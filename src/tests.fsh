@@ -199,10 +199,13 @@ export function hideMains(compilation: Mut<Compilation>, modules: Mut<Module[]>)
 // How long a test may run when neither it nor the run names a limit, in milliseconds.
 export const LIMIT: usize = 10_000;
 
-// How a run goes: the limit for a test that names none, and how many tests run at once.
-export type RunOptions = { timeout: usize; jobs: usize };
+// How a run goes: the limit for a test that names none, how many tests run at once, and whether
+// deterministic simulation mode is enabled with its starting seed and seed count.
+export type RunOptions = { timeout: usize; jobs: usize; sim: boolean; seed: u64; seeds: usize };
 
 type Outcome = { passed: boolean; output: string };
+
+type RunCase = { testAt: usize; seed: u64 | undefined };
 
 // Ends every test running now, along with anything it started: `running` holds the process
 // groups of a run's tests while they run.
@@ -228,8 +231,14 @@ type Event = { kind: "exit"; at: usize; code: i64 } | { kind: "timeout"; at: usi
 
 // Starts `test` in a process group of its own, noted in `running`, its output read as it runs.
 /** @throws {IoError} */
-function started(running: Mut<Set<i32>>, binary: string, test: Ref<Test>, cwd: string, at: usize, timeout: usize): Running {
-  const child = Bun.spawn([binary, String(test.index)], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
+function started(running: Mut<Set<i32>>, binary: string, test: Ref<Test>, cwd: string, at: usize, timeout: usize, seed: u64 | undefined): Running {
+  const child = (() => {
+    if (seed === undefined) return Bun.spawn([binary, String(test.index)], { cwd, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
+    let env: { [name: string]: string } = {};
+    for (const [k, v] of Object.entries(process.env)) env[k] = v;
+    env["FISH_SIM_SEED"] = String(seed!);
+    return Bun.spawn([binary, String(test.index)], { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe", detached: true });
+  })();
   const group = child.pid as i32;
   running.add(group);
   const output: Promise<string> = outputOf(new Response(child.stdout), new Response(child.stderr));
@@ -279,7 +288,7 @@ function shownLimit(ms: usize): string {
 
 // The run's defaults: the standard limit, and a test per core.
 export function runDefaults(): RunOptions {
-  return { timeout: LIMIT, jobs: availableParallelism() as usize };
+  return { timeout: LIMIT, jobs: availableParallelism() as usize, sim: false, seed: 1 as u64, seeds: 1 };
 }
 
 // A test fails when it exits with anything but 0 or runs past the limit.
@@ -297,34 +306,47 @@ function outcome(text: string, code: i64, late: boolean, signal: string | null, 
 // would otherwise hold its output open, and the verdict is the test's own. Gives the exit code, 1
 // when any failed.
 export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Ref<Test[]>, cwd: string, options: Ref<RunOptions>): Promise<i64> {
-  const width = Math.min(options.jobs as i64, tests.length as i64);
+  let cases: RunCase[] = [];
+  if (options.sim) {
+    for (let ti: usize = 0; ti < tests.length; ti++) {
+      for (let k: usize = 0; k < options.seeds; k++) {
+        cases.push({ testAt: ti, seed: options.seed + (k as u64) });
+      }
+    }
+  } else {
+    for (let ti: usize = 0; ti < tests.length; ti++) cases.push({ testAt: ti, seed: undefined });
+  }
+  const width = Math.min(options.jobs as i64, cases.length as i64);
   let flight: Running[] = [];
   let done: (Outcome | undefined)[] = [];
-  for (let at: usize = 0; at < tests.length; at++) done.push(undefined);
+  for (let at: usize = 0; at < cases.length; at++) done.push(undefined);
   let next: usize = 0;
   let shown: usize = 0;
   let failed = 0;
   while (true) {
-    while (next < tests.length && (flight.length as i64) < width) {
+    while (next < cases.length && (flight.length as i64) < width) {
       const at = next;
       next++;
+      const c: Ref<RunCase> = cases[at]!;
       try {
         // Started before the push, so `flight` is lent to it only once nothing can throw.
-        const r = started(running, binary, tests[at]!, cwd, at, options.timeout);
+        const r = started(running, binary, tests[c.testAt]!, cwd, at, options.timeout, c.seed);
         flight.push(r);
       } catch (e) {
         done[at] = { passed: false, output: `the test couldn't be run: ${e instanceof Error ? e.message : (e as IoError).message}\n` };
       }
     }
-    while (shown < tests.length) {
+    while (shown < cases.length) {
       const o: Ref<Outcome | undefined> = done[shown];
       if (o === undefined) break;
-      const test: Ref<Test> = tests[shown]!;
+      const c: Ref<RunCase> = cases[shown]!;
+      const test: Ref<Test> = tests[c.testAt]!;
       if (!o.passed) failed++;
-      process.stdout.write(`${o.passed ? "ok" : "FAIL"} ${test.module.file} > ${test.name}\n${o.passed ? "" : o.output}`);
+      const seedTag = c.seed !== undefined ? ` (seed ${c.seed!})` : "";
+      process.stdout.write(`${o.passed ? "ok" : "FAIL"} ${test.module.file} > ${test.name}${seedTag}\n${o.passed ? "" : o.output}`);
       shown++;
     }
-    if (shown === tests.length) break;
+    if (shown === cases.length) break;
     const event = await nextEvent(flight);
     if (event.kind === "timeout") {
       for (let i: usize = 0; i < flight.length; i++) {
@@ -348,6 +370,6 @@ export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Re
     const signal = exited.child.signalCode;
     done[event.at] = outcome(text, event.code, exited.late, signal === null ? null : `${signal}`, exited.limit);
   }
-  console.log(`${tests.length - failed} passed, ${failed} failed`);
+  console.log(`${cases.length - failed} passed, ${failed} failed`);
   return failed > 0 ? 1 : 0;
 }

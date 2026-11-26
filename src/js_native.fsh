@@ -645,7 +645,9 @@ int32_t fsh_rt_js_await(fsh_js *b, int32_t *waiting, fsh_task *task, fsh_js **ou
       JS_FreeValue(cx, then);
       JS_FreeValue(cx, handlers[0]);
       JS_FreeValue(cx, handlers[1]);
+      break;
   }
+  if (outcome == 0) fsh_task_wait(task, "js.promise", 0);
   fsh_js_leave();
   return outcome;
 }
@@ -948,7 +950,7 @@ static JSValue fsh_host_file(JSContext *cx, JSValueConst self, int argc, JSValue
     fsh_js_file_settled(cx, &f, outcome, &out, parts);
     return promise;
   }
-  fsh_task *task = fsh_rt_spawn(fsh_js_file_poll, fsh_js_file_drop, fsh_js_nothing, &f, sizeof f, 0);
+  fsh_task *task = fsh_rt_spawn(fsh_js_file_poll, fsh_js_file_drop, fsh_js_nothing, &f, sizeof f, 0, "js.fs", NULL);
   fsh_rt_handle_drop(task);
   return promise;
 }

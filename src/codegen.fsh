@@ -343,7 +343,7 @@ const PAIR = "{ ptr, ptr }";
 // `prior` is what the last build's codegen made, and `rechecked` the instances checked again since,
 // which `fishc watch` gives so a function nothing changed takes its last define; `keep` asks for
 // what this build made, for the next.
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; debug?: boolean; failed?: string[]; prior?: Emitted; rechecked?: Set<InstanceId>; keep?: boolean };
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; fuzz?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; profile?: boolean; debug?: boolean; failed?: string[]; prior?: Emitted; rechecked?: Set<InstanceId>; keep?: boolean };
 
 // The owner a generated symbol is made for, when that is a type.
 const typeOwner = (t: Type): string => `type ${idOf(t)}`;
@@ -378,7 +378,9 @@ class Codegen implements PrintHost, ComptimeHost {
   // Why a function's last define wasn't taken, with how many times each.
   refusals: Map<string, usize>;
   harness: boolean;
+  fuzz: boolean;
   leaks: boolean;
+  profile: boolean;
   // Whether the check is kept for the next build, as `fishc watch` keeps it.
   keepsCheck: boolean;
   debug: boolean;
@@ -495,7 +497,9 @@ class Codegen implements PrintHost, ComptimeHost {
     this.newlines = new Map<string, usize[]>();
     this.refusals = new Map<string, usize>();
     this.harness = options.harness ?? false;
+    this.fuzz = options.fuzz ?? false;
     this.leaks = options.leaks ?? false;
+    this.profile = options.profile ?? false;
     this.keepsCheck = options.keep === true;
     this.debug = options.debug ?? false;
     this.collecting = options.failed !== undefined;
@@ -830,7 +834,7 @@ class Codegen implements PrintHost, ComptimeHost {
       // hides std's internals; nor do the arrows the checker wraps around a callback.
       const from = sourceOf(this.src, this.file, this.bodyAt(instance).start, this.sources).file;
       const ours = this.bodyAt(instance).start < STD_BASE && !BUILT_IN.test(from) && !(this.harness && from === this.file) && this.bodyAt(instance).closure?.made !== true;
-      this.framingOn = (!this.release || this.leaks) && !this.library && ours;
+      this.framingOn = (!this.release || this.leaks || this.profile || this.fuzz) && (!this.library || this.fuzz) && ours;
       this.site = undefined;
       this.debuggingOn = this.debug && this.bodyAt(instance).start < STD_BASE && !BUILT_IN.test(from);
       this.marked = undefined;
@@ -1065,7 +1069,7 @@ class Codegen implements PrintHost, ComptimeHost {
   // has the same place among them whatever the program around it.
   // The runtime reads which way a panic goes. A library leaves it to the runtime's default, so
   // two libraries in one program don't both define it; its exports abort on a panic anyway.
-  const abort: string[] = this.library ? [] : [`@fsh_panic_abort = constant i32 ${this.panic === "abort" ? 1 : 0}`];
+  const abort: string[] = this.library && !this.fuzz ? [] : [`@fsh_panic_abort = constant i32 ${this.panic === "abort" || this.fuzz ? 1 : 0}`];
   const module = [
     ...this.globals.toSorted(),
     ...abort,
@@ -1296,13 +1300,26 @@ class Codegen implements PrintHost, ComptimeHost {
       const written = this.bodyAt(i);
       this.noted(written.start, this.placeOf({ start: written.start, end: written.end }));
     }
+    const name = this.cString(this.frameName(i));
+    if (this.profile) {
+      return [
+        `  %fsh.site = alloca ${FRAME}`,
+        `  %fsh.name = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 1`,
+        `  %fsh.link = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`,
+        '  %fsh.prev = load atomic ptr, ptr @fsh_rt_frames syncscope("singlethread") monotonic, align 8',
+        "  store volatile ptr null, ptr %fsh.site",
+        `  store volatile ptr ${name}, ptr %fsh.name`,
+        "  store volatile ptr %fsh.prev, ptr %fsh.link",
+        '  store atomic ptr %fsh.site, ptr @fsh_rt_frames syncscope("singlethread") release, align 8',
+      ];
+    }
     return [
       `  %fsh.site = alloca ${FRAME}`,
       `  %fsh.name = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 1`,
       `  %fsh.link = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`,
       "  %fsh.prev = load ptr, ptr @fsh_rt_frames",
       "  store ptr null, ptr %fsh.site",
-      `  store ptr ${this.cString(this.frameName(i))}, ptr %fsh.name`,
+      `  store ptr ${name}, ptr %fsh.name`,
       "  store ptr %fsh.prev, ptr %fsh.link",
       "  store ptr %fsh.site, ptr @fsh_rt_frames",
     ];
@@ -1313,9 +1330,13 @@ class Codegen implements PrintHost, ComptimeHost {
   popFrame(lines: Ref<string[]>): string[] {
     if (!this.framingOn) return [...lines];
     let n = 0;
+    const profiled = this.profile;
     return lines.flatMap((line) => {
       if (!line.startsWith("  ret ")) return [line];
       const [link, prev] = [`%fsh.link${n}`, `%fsh.prev${n++}`];
+      if (profiled) {
+        return [`  ${link} = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`, `  ${prev} = load volatile ptr, ptr ${link}`, `  store atomic ptr ${prev}, ptr @fsh_rt_frames syncscope("singlethread") seq_cst, align 8`, line];
+      }
       return [`  ${link} = getelementptr ${FRAME}, ptr %fsh.site, i32 0, i32 2`, `  ${prev} = load ptr, ptr ${link}`, `  store ptr ${prev}, ptr @fsh_rt_frames`, line];
     });
   }
@@ -3013,7 +3034,8 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${heldAt} = getelementptr { ${DYN}, ptr }, ptr ${frame}, i32 0, i32 1`);
       this.emit(`store ptr ${settle}, ptr ${heldAt}`);
       const [poll, drop] = this.jsSettler(type as DynType, this.jsSiteNow()!);
-      this.unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr @"fsh.js.settled.output", ptr ${frame}, i64 ${this.sizeOf(`{ ${DYN}, ptr }`)}, i64 8)`, task);
+      const jsTask = this.cString("js.promise");
+      this.unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr @"fsh.js.settled.output", ptr ${frame}, i64 ${this.sizeOf(`{ ${DYN}, ptr }`)}, i64 8, ptr ${jsTask}, ptr null)`, task);
       this.emit(`call void @fsh_rt_handle_drop(ptr ${task})`);
       return box;
     }
@@ -3448,7 +3470,8 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(line6);
       const raised = this.cur().raises.get(e);
       const fail = raised !== undefined ? this.groupFail(future, raised.from, raised.to) : "null";
-      this.unwinding(`call void @fsh_rt_group_spawn(ptr ${handle}, ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${fail}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))})`);
+      const [taskName, taskSite] = [this.taskName(future), this.taskSite({ start: e.start, end: e.end })];
+      this.unwinding(`call void @fsh_rt_group_spawn(ptr ${handle}, ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${fail}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))}, ptr ${taskName}, ptr ${taskSite})`);
       return undefined;
     }
     if (callee.name === "abort") {
@@ -9922,7 +9945,8 @@ class Codegen implements PrintHost, ComptimeHost {
         const [poll, drop, dropOutput] = this.taskGlue(loop);
         const [frame, task] = [this.alloca(this.llvm(loop)), this.temp()];
         this.emit(`store ${this.llvm(loop)} ${held}, ptr ${frame}`);
-        this.unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(loop))}, i64 ${this.sizeOf(this.pollType(loop))})`, task);
+        const loopTask = this.cString("__timerLoop");
+        this.unwinding(`call ptr @fsh_rt_spawn(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(loop))}, i64 ${this.sizeOf(this.pollType(loop))}, ptr ${loopTask}, ptr null)`, task);
         this.emit(`call void @fsh_rt_timeouts_task(ptr ${task})`);
         this.emit(`br label %${done}`);
         this.startBlock(skip);
@@ -10016,7 +10040,8 @@ class Codegen implements PrintHost, ComptimeHost {
         this.emit(line9);
         const how = e.callee.name;
         const spawning = how === "spawn" ? "fsh_rt_spawn" : how === "timer spawn" ? "fsh_rt_spawn_now" : how === "blocking spawn" ? "fsh_rt_spawn_blocking" : undefined;
-        this.unwinding(`call ptr @${spawning!}(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))})`, task);
+        const [taskName, taskSite] = [this.taskName(future), this.taskSite({ start: e.start, end: e.end })];
+        this.unwinding(`call ptr @${spawning!}(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(this.pollType(future))}, ptr ${taskName}, ptr ${taskSite})`, task);
         if (!this.cur().types.has(e)) {
           const part = { v: task, type: this.tables.typing.handleType(this.tables.typing.rec(future).gives, this.tables.typing.rec(future).throws) };
           this.pending.push(part);
@@ -12881,7 +12906,8 @@ class Codegen implements PrintHost, ComptimeHost {
     this.allocas.push(`  store ${this.llvm(future)} zeroinitializer, ptr ${frame}`);
     this.allocas.push(`  ${out} = alloca ${type}`);
     this.emit("call void @fsh_rt_args(i32 %argc, ptr %argv)");
-    this.emit(`${outcome} = call i32 @fsh_rt_run(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(type)}, ptr ${out})`);
+    const mainName = this.taskName(future);
+    this.emit(`${outcome} = call i32 @fsh_rt_run(ptr ${poll}, ptr ${drop}, ptr ${dropOutput}, ptr ${frame}, i64 ${this.sizeOf(this.llvm(future))}, i64 ${this.sizeOf(type)}, ptr ${out}, ptr ${mainName}, ptr null)`);
     this.emit(`${failed} = icmp eq i32 ${outcome}, 2`);
     this.emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
     this.startBlock(ok);
@@ -12961,6 +12987,26 @@ class Codegen implements PrintHost, ComptimeHost {
     return made;
   }
 
+
+  // A task's name and user spawn site for the task inspector. Std spawns pass null as site so
+  // the runtime inherits the enclosing user frame's site.
+  taskName(this: Mut<this>, future: FutureType): string {
+    const inst = this.futureOf.get(future)!;
+    const written = this.bodyAt(inst);
+    if (written.closure !== undefined && written.closure.self === undefined) {
+      const place = this.placeOf({ start: written.start, end: written.end });
+      this.noted(written.start, place);
+    }
+    return this.cString(this.frameName(inst));
+  }
+
+  taskSite(this: Mut<this>, at: Ref<Span>): string {
+    if (at.start >= STD_BASE) return "null";
+    const from = sourceOf(this.src, this.file, at.start, this.sources).file;
+    if (BUILT_IN.test(from)) return "null";
+    const place = this.where(at);
+    return this.cString(place);
+  }
 
   // The size of an LLVM type in bytes, as a constant.
   sizeOf(type: string): string {

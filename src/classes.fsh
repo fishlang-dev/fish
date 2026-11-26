@@ -46,7 +46,7 @@ export type Body = Span & Id & {
   scope?: Map<string, Type>;
   // `owned`: a method declared `this: Own<this>` takes its object over. `interior`: one of std's
   // declared `this: Cell<this>` changes its object while a caller lends it read-only.
-  self?: { type: ClassType; constructor: boolean; mutable: boolean; owned?: boolean; interior?: boolean };
+  self?: { type: ClassType; constructor: boolean; mutable: boolean; owned?: boolean; interior?: boolean; explicit?: boolean; refAt?: usize };
   // An overloaded function's signatures, in the order a call tries them.
   overloads?: BodyId[];
   overloadNames?: string[];
@@ -426,6 +426,12 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
   if (isStatic) classParamIn(node, m);
   // A disposer gives nothing, written or not, so its body can't return a value a drop would lose.
   const nothing: TypeNode | undefined = name === DISPOSE ? { id: nextId(tables.ids), kind: "ref", name: "void", args: [], start: m.start, end: m.end } : name === ASYNC_DISPOSE ? { id: nextId(tables.ids), kind: "ref", name: "Promise", args: [{ id: nextId(tables.ids), kind: "ref", name: "void", args: [], start: m.start, end: m.end }], start: m.start, end: m.end } : undefined;
+  const selfRefAt = receiver !== undefined && receiver.type !== undefined && receiver.type.kind === "ref" && receiver.type.name === "Ref" ? receiver.type.start : undefined;
+  let selfInfo: Body["self"] = isStatic ? undefined : { type: d.type, constructor: false, mutable: receiver !== undefined ? mutates(receiver) : false, owned: receiver !== undefined ? owns(receiver) : false, interior: receiver !== undefined ? changesWithin(receiver) : false };
+  if (selfInfo !== undefined && receiver !== undefined) {
+    selfInfo.explicit = true;
+    if (selfRefAt !== undefined) selfInfo.refAt = selfRefAt;
+  }
   const body = tables.arenas.addBody({
     id: nextId(tables.ids),
     // A static method has its own symbol, since an instance method may share its name.
@@ -435,7 +441,7 @@ function method(tables: Mut<Tables>, node: Ref<ClassNode & { name?: string }>, d
     body: m.body.map((s) => cloneStmt(s)),
     returnType: m.returnType !== undefined ? cloneTypeNode(m.returnType) : nothing,
     typeParams: m.typeParams.map((p) => cloneTypeParam(p)),
-    self: isStatic ? undefined : { type: d.type, constructor: false, mutable: receiver !== undefined ? mutates(receiver) : false, owned: receiver !== undefined ? owns(receiver) : false, interior: receiver !== undefined ? changesWithin(receiver) : false },
+    self: selfInfo,
     owner: d.type,
     access,
     start: m.start,
@@ -1201,6 +1207,8 @@ function receiverFor(self: Ref<NonNullable<Body["self"]>>, type: ClassType): Non
   let out: NonNullable<Body["self"]> = { type, constructor: self.constructor, mutable: self.mutable };
   if (self.owned !== undefined) out.owned = self.owned;
   if (self.interior === true) out.interior = true;
+  if (self.explicit === true) out.explicit = true;
+  if (self.refAt !== undefined) out.refAt = self.refAt;
   return out;
 }
 

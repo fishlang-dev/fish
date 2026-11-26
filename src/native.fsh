@@ -22,6 +22,7 @@ export const NATIVE = String.raw`
 #endif
 #include <math.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -642,6 +643,11 @@ static _Thread_local int32_t fsh_token = 0;
 // is making. A release build never touches it.
 typedef struct fsh_frame { const char *site; const char *name; struct fsh_frame *prev; } fsh_frame;
 _Thread_local fsh_frame *fsh_rt_frames = NULL;
+#ifdef FSH_PROFILE
+static int fsh_prof_register(void);
+static void fsh_prof_unregister(int slot);
+static int fsh_prof_is_active(void);
+#endif
 // Where the task this thread is polling was spawned, and the panic's "panicked at" line.
 static _Thread_local const char *fsh_spawned_at = NULL;
 static _Thread_local const char *fsh_panic_line = NULL;
@@ -974,12 +980,97 @@ typedef struct {
   void (*drop_value)(void *);
 } fsh_map;
 
+// Deterministic simulation mode: activated when FISH_SIM_SEED is set in the environment.
+// Drives map seeding, PRNG, virtual monotonic/wall clocks, single-threaded task scheduling,
+// and an in-memory virtual TCP network with fault injection. Zero overhead when unset.
+static int32_t fsh_sim_inited = 0;
+static int32_t fsh_sim_active = 0;
+static uint64_t fsh_sim_seed_val = 0;
+static uint64_t fsh_sim_user_rng[4];
+static uint64_t fsh_sim_sched_rng[4];
+static int64_t fsh_sim_now_ns = 0;
+static const int64_t FSH_SIM_EPOCH_MS = 1704067200000LL; // 2024-01-01T00:00:00.000Z
+
+static uint64_t fsh_sim_splitmix64(uint64_t *state) {
+  uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+  return z ^ (z >> 31);
+}
+
+static uint64_t fsh_sim_rotl64(uint64_t x, int k) {
+  return (x << k) | (x >> (64 - k));
+}
+
+static uint64_t fsh_sim_next_u64(uint64_t s[4]) {
+  const uint64_t result = fsh_sim_rotl64(s[1] * 5, 7) * 9;
+  const uint64_t t = s[1] << 17;
+  s[2] ^= s[0];
+  s[3] ^= s[1];
+  s[1] ^= s[2];
+  s[0] ^= s[3];
+  s[2] ^= t;
+  s[3] = fsh_sim_rotl64(s[3], 45);
+  return result;
+}
+
+static double fsh_sim_next_f64(uint64_t s[4]) {
+  return (double)(fsh_sim_next_u64(s) >> 11) * 0x1.0p-53;
+}
+
+static void fsh_sim_init(void) {
+  if (fsh_sim_inited) return;
+  fsh_sim_inited = 1;
+  const char *env = getenv("FISH_SIM_SEED");
+  if (!env || !env[0]) return;
+  const char *p = env;
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+  if (!*p || *p == '-' || *p == '+') {
+    fprintf(stderr, "fish sim: invalid FISH_SIM_SEED '%s' (expected unsigned 64-bit integer)\n", env);
+    fsh_abandoned = 1;
+    exit(2);
+  }
+  errno = 0;
+  char *end = NULL;
+  unsigned long long parsed = strtoull(p, &end, 10);
+  if (errno == ERANGE || end == p) {
+    fprintf(stderr, "fish sim: invalid FISH_SIM_SEED '%s' (expected unsigned 64-bit integer)\n", env);
+    fsh_abandoned = 1;
+    exit(2);
+  }
+  while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
+  if (*end != '\0') {
+    fprintf(stderr, "fish sim: invalid FISH_SIM_SEED '%s' (expected unsigned 64-bit integer)\n", env);
+    fsh_abandoned = 1;
+    exit(2);
+  }
+  fsh_sim_active = 1;
+  fsh_sim_seed_val = (uint64_t)parsed;
+  fsh_sim_now_ns = 0;
+  uint64_t su = fsh_sim_seed_val ^ 0x9e3779b97f4a7c15ULL;
+  uint64_t ss = fsh_sim_seed_val ^ 0xbf58476d1ce4e5b9ULL;
+  for (int i = 0; i < 4; i++) {
+    fsh_sim_user_rng[i] = fsh_sim_splitmix64(&su);
+    fsh_sim_sched_rng[i] = fsh_sim_splitmix64(&ss);
+  }
+}
+
+__attribute__((constructor)) static void fsh_sim_boot(void) {
+  fsh_sim_init();
+}
+
 // Set once before main, so every thread hashes with the same seed. A top-level const's table is
 // made by another constructor, which may run first, so whichever comes first seeds it.
 static uint64_t fsh_map_seed = 0;
 
 __attribute__((constructor)) static void fsh_map_seeding(void) {
+  fsh_sim_init();
   if (fsh_map_seed != 0) return;
+  if (fsh_sim_active) {
+    uint64_t st = fsh_sim_seed_val ^ 0x243f6a8885a308d3ULL;
+    fsh_map_seed = fsh_sim_splitmix64(&st) | 1;
+    return;
+  }
   if (getentropy(&fsh_map_seed, sizeof fsh_map_seed) != 0) fsh_map_seed = (uint64_t)(intptr_t)&fsh_map_seed;
   fsh_map_seed |= 1;
 }
@@ -1630,6 +1721,8 @@ void fsh_rt_dyn_free(char *p) {
 
 // Milliseconds on the monotonic clock.
 int64_t fsh_rt_now_ms(void) {
+  fsh_sim_init();
+  if (fsh_sim_active) return fsh_sim_now_ns / 1000000;
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
@@ -1637,7 +1730,8 @@ int64_t fsh_rt_now_ms(void) {
 
 // The time now as an HTTP Date header writes it, like "Sun, 06 Nov 1994 08:49:37 GMT".
 fsh_str *fsh_rt_http_date(void) {
-  time_t now = time(NULL);
+  fsh_sim_init();
+  time_t now = fsh_sim_active ? (time_t)(FSH_SIM_EPOCH_MS / 1000 + fsh_sim_now_ns / 1000000000) : time(NULL);
   struct tm at;
   gmtime_r(&now, &at);
   char text[64];
@@ -3017,6 +3111,8 @@ const char *fsh_rt_env_at(int64_t i) {
 
 // Date.now(): the wall clock's milliseconds since the Unix epoch.
 int64_t fsh_rt_date_now(void) {
+  fsh_sim_init();
+  if (fsh_sim_active) return FSH_SIM_EPOCH_MS + fsh_sim_now_ns / 1000000;
   struct timespec t;
   clock_gettime(CLOCK_REALTIME, &t);
   return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
@@ -3024,6 +3120,11 @@ int64_t fsh_rt_date_now(void) {
 
 // The wall clock's nanoseconds since the Unix epoch, as OTLP writes a span's times.
 int64_t fsh_rt_unix_nanos(void) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    int64_t base = FSH_SIM_EPOCH_MS * 1000000LL;
+    return fsh_sim_now_ns > INT64_MAX - base ? INT64_MAX : base + fsh_sim_now_ns;
+  }
   struct timespec t;
   clock_gettime(CLOCK_REALTIME, &t);
   return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
@@ -3032,6 +3133,17 @@ int64_t fsh_rt_unix_nanos(void) {
 // Fills count bytes from the OS's secure random source: arc4random_buf on macOS, which can't fail,
 // and getrandom(2) on Linux, which blocks only until the pool is first seeded at boot.
 void fsh_rt_random_fill(uint8_t *at, int64_t count) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    while (count > 0) {
+      uint64_t w = fsh_sim_next_u64(fsh_sim_user_rng);
+      int64_t n = count < 8 ? count : 8;
+      memcpy(at, &w, (size_t)n);
+      at += n;
+      count -= n;
+    }
+    return;
+  }
 #ifdef __APPLE__
   arc4random_buf(at, (size_t)count);
 #else
@@ -3223,6 +3335,8 @@ __attribute__((constructor)) static void fsh_start_clock(void) {
 }
 
 double fsh_rt_performance_now(void) {
+  fsh_sim_init();
+  if (fsh_sim_active) return (double)fsh_sim_now_ns / 1e6;
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (double)(t.tv_sec - fsh_started.tv_sec) * 1e3 + (double)(t.tv_nsec - fsh_started.tv_nsec) / 1e6;
@@ -4376,6 +4490,17 @@ struct fsh_task {
   // In a debug build, the call that spawned it, which its backtraces end with: for a task std
   // spawned with none of the program's frames below, the call that spawned the task doing so.
   const char *spawned;
+  // Task inspector metadata: immutable fields set before linking onto fsh_alive; polls and
+  // awaiting* updated atomically on the worker polling this task.
+  int64_t id;
+  const char *name;
+  const char *spawn_site;
+  int64_t created_ns;
+  int64_t polls;
+  uint32_t wait_seq;
+  const char *awaiting;
+  const char *await_site;
+  int64_t await_target;
   // The task group it was spawned into, which it holds a count on, and the glue that moves the
   // error it threw out of its output into the group, as the type the group's await throws.
   struct fsh_group *group;
@@ -4386,7 +4511,24 @@ struct fsh_task {
   char memory[];
 };
 
+static int64_t fsh_now(void);
+static int64_t fsh_next_task_id = 0;
+
 static void *fsh_output(fsh_task *t) { return t->memory + t->frame_size; }
+
+// Records what a task is about to park on, with the active user await site when frames are on.
+// Uses an even/odd seqlock so concurrent snapshots never read a torn tuple across polls.
+static void fsh_task_wait(fsh_task *t, const char *what, int64_t target) {
+  if (!t) return;
+  uint32_t seq = __atomic_load_n(&t->wait_seq, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 1, __ATOMIC_RELAXED);
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  const char *site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
+  __atomic_store_n(&t->await_site, site, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->await_target, target, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->awaiting, what, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 2, __ATOMIC_RELEASE);
+}
 
 // A worker's queue: a ring of tasks, guarded by its own lock, which other workers steal from.
 typedef struct {
@@ -4459,9 +4601,25 @@ static fsh_task *fsh_pop(fsh_queue *q) {
 
 static void fsh_pool_task(fsh_task *t);
 
+static fsh_task **fsh_sim_ready = NULL;
+static int64_t fsh_sim_ready_count = 0, fsh_sim_ready_cap = 0;
+
+static void fsh_sim_ready_push(fsh_task *t) {
+  if (fsh_sim_ready_count == fsh_sim_ready_cap) {
+    int64_t cap = fsh_sim_ready_cap ? fsh_sim_ready_cap * 2 : 64;
+    fsh_sim_ready = realloc(fsh_sim_ready, (size_t)cap * sizeof(fsh_task *));
+    fsh_sim_ready_cap = cap;
+  }
+  fsh_sim_ready[fsh_sim_ready_count++] = t;
+}
+
 // Queues a task: on the waking worker's own queue, or from any other thread on the shared
 // one, then lets a parked worker know. A blocking task goes to the blocking pool instead.
 static void fsh_schedule(fsh_task *t) {
+  if (fsh_sim_active) {
+    fsh_sim_ready_push(t);
+    return;
+  }
   if (t->blocking) return fsh_pool_task(t);
   fsh_push(fsh_worker >= 0 ? &fsh_queues[fsh_worker] : &fsh_injected, t);
   pthread_mutex_lock(&fsh_park);
@@ -4507,6 +4665,14 @@ static void fsh_unlink(fsh_task *t) {
 // where it stopped and its reason kept for whoever awaits it, as tokio's tasks do.
 static void fsh_run(fsh_task *t) {
   __atomic_store_n(&t->state, FSH_RUNNING, __ATOMIC_RELEASE);
+  __atomic_fetch_add(&t->polls, 1, __ATOMIC_RELAXED);
+  uint32_t seq = __atomic_load_n(&t->wait_seq, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 1, __ATOMIC_RELAXED);
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  __atomic_store_n(&t->await_site, NULL, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->await_target, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->awaiting, NULL, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 2, __ATOMIC_RELEASE);
   // A task's stack starts at its own root, whoever polls it, and a panic it unwound with leaves
   // its frames behind for this reset to drop.
   fsh_frame *frames = fsh_rt_frames;
@@ -4570,6 +4736,9 @@ static fsh_task *fsh_next_task(int64_t me) {
 
 static void *fsh_work(void *arg) {
   fsh_worker = (int64_t)arg;
+#ifdef FSH_PROFILE
+  int prof_slot = fsh_prof_register();
+#endif
   // A stopping runtime runs nothing more, however much is queued.
   while (!__atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) {
     fsh_task *t = fsh_next_task(fsh_worker);
@@ -4581,6 +4750,9 @@ static void *fsh_work(void *arg) {
     while (__atomic_load_n(&fsh_queued, __ATOMIC_RELAXED) <= 0 && !fsh_stopping) pthread_cond_wait(&fsh_parked, &fsh_park);
     pthread_mutex_unlock(&fsh_park);
   }
+#ifdef FSH_PROFILE
+  fsh_prof_unregister(prof_slot);
+#endif
   pthread_mutex_lock(&fsh_park);
   fsh_stopped++;
   pthread_cond_broadcast(&fsh_left);
@@ -4590,7 +4762,7 @@ static void *fsh_work(void *arg) {
 
 // A new task for a future's frame, which it takes over: alive, and with one more reference for
 // whoever made it. Not yet queued.
-static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
+static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site, int32_t blocking) {
   fsh_task *t = fsh_rt_alloc(sizeof(fsh_task) + frame_size + output_size);
   memcpy(t->memory, frame, frame_size);
   t->frame_size = frame_size;
@@ -4599,7 +4771,7 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   t->drop = drop;
   t->drop_output = drop_output;
   t->outcome = 0;
-  t->blocking = 0;
+  t->blocking = blocking;
   t->refs = 2;
   t->joiner = NULL;
   t->panic = NULL;
@@ -4607,6 +4779,15 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   t->fail = NULL;
   t->state = FSH_QUEUED;
   t->spawned = fsh_rt_frames ? fsh_rt_frames->site : fsh_spawned_at;
+  t->id = __atomic_add_fetch(&fsh_next_task_id, 1, __ATOMIC_RELAXED);
+  t->name = name ? name : "";
+  t->spawn_site = site ? site : t->spawned;
+  t->created_ns = fsh_now();
+  t->polls = 0;
+  t->wait_seq = 0;
+  t->awaiting = NULL;
+  t->await_site = NULL;
+  t->await_target = 0;
   if (fsh_timeouts_starting) memset(t->trace, 0, sizeof t->trace);
   else memcpy(t->trace, fsh_current ? fsh_current->trace : fsh_trace_root, sizeof t->trace);
   fsh_timeouts_starting = 0;
@@ -4620,17 +4801,16 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
 }
 
 // The same, queued.
-fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 0);
   fsh_schedule(t);
   return t;
 }
 
 // The same, every poll run on the blocking pool, so it may block or compute for long without
 // holding up a worker.
-fsh_task *fsh_rt_spawn_blocking(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
-  t->blocking = 1;
+fsh_task *fsh_rt_spawn_blocking(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 1);
   __atomic_add_fetch(&fsh_blocking_live, 1, __ATOMIC_RELAXED);
   fsh_schedule(t);
   return t;
@@ -4638,8 +4818,8 @@ fsh_task *fsh_rt_spawn_blocking(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn 
 
 // The same, its first poll run here and now, as a JS callback's first part runs where it is
 // called; the task is queued only if that poll waits.
-fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 0);
   fsh_run(t);
   return t;
 }
@@ -4694,7 +4874,9 @@ int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out, const char *at, fs
     __atomic_fetch_add(&waiter->refs, 1, __ATOMIC_RELAXED);
     t->joiner = waiter;
   }
+  int64_t target_id = t->id;
   pthread_mutex_unlock(&fsh_alive_lock);
+  fsh_task_wait(waiter, "join", target_id);
   return 0;
 }
 
@@ -4702,20 +4884,27 @@ int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out, const char *at, fs
 // deadline passes. Each entry holds a reference to its task.
 // A timer wakes a sleeping task, or with a signal, aborts it for 'AbortSignal.timeout'.
 // A sleep's timer is tagged with the sleep's frame, so cancelling one leaves its task's others.
-typedef struct { int64_t deadline; fsh_task *task; struct fsh_signal *signal; void *tag; } fsh_timer;
+typedef struct { int64_t deadline; uint64_t seq; fsh_task *task; struct fsh_signal *signal; void *tag; } fsh_timer;
 void fsh_rt_signal_abort(struct fsh_signal *s);
 void fsh_rt_signal_release(struct fsh_signal *s);
 static pthread_mutex_t fsh_timer_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fsh_timer_changed = PTHREAD_COND_INITIALIZER;
 static fsh_timer *fsh_timers = NULL;
 static int64_t fsh_timer_count = 0, fsh_timer_capacity = 0;
+static uint64_t fsh_timer_seq = 0;
 static int32_t fsh_timers_stopping = 0;
 static pthread_t fsh_timer_thread;
 
 static int64_t fsh_now(void) {
+  fsh_sim_init();
+  if (fsh_sim_active) return fsh_sim_now_ns;
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   return (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
+}
+
+static int fsh_timer_before(fsh_timer a, fsh_timer b) {
+  return a.deadline < b.deadline || (a.deadline == b.deadline && a.seq < b.seq);
 }
 
 static void fsh_timer_swap(int64_t a, int64_t b) {
@@ -4731,12 +4920,12 @@ static void fsh_timer_add(int64_t deadline, fsh_task *task, struct fsh_signal *s
     fsh_timers = realloc(fsh_timers, fsh_timer_capacity * sizeof(fsh_timer));
   }
   int64_t at = fsh_timer_count++;
-  fsh_timers[at] = (fsh_timer){ deadline, task, signal, tag };
-  while (at > 0 && fsh_timers[(at - 1) / 2].deadline > fsh_timers[at].deadline) {
+  fsh_timers[at] = (fsh_timer){ deadline, ++fsh_timer_seq, task, signal, tag };
+  while (at > 0 && fsh_timer_before(fsh_timers[at], fsh_timers[(at - 1) / 2])) {
     fsh_timer_swap(at, (at - 1) / 2);
     at = (at - 1) / 2;
   }
-  pthread_cond_signal(&fsh_timer_changed);
+  if (!fsh_sim_active) pthread_cond_signal(&fsh_timer_changed);
   pthread_mutex_unlock(&fsh_timer_lock);
 }
 
@@ -4745,8 +4934,8 @@ static fsh_timer fsh_timer_take(void) {
   fsh_timers[0] = fsh_timers[--fsh_timer_count];
   for (int64_t at = 0;;) {
     int64_t least = at, left = at * 2 + 1, right = left + 1;
-    if (left < fsh_timer_count && fsh_timers[left].deadline < fsh_timers[least].deadline) least = left;
-    if (right < fsh_timer_count && fsh_timers[right].deadline < fsh_timers[least].deadline) least = right;
+    if (left < fsh_timer_count && fsh_timer_before(fsh_timers[left], fsh_timers[least])) least = left;
+    if (right < fsh_timer_count && fsh_timer_before(fsh_timers[right], fsh_timers[least])) least = right;
     if (least == at) break;
     fsh_timer_swap(at, least);
     at = least;
@@ -4757,14 +4946,14 @@ static fsh_timer fsh_timer_take(void) {
 // Takes the timer at a place in the heap out of it, under the timers' lock.
 static void fsh_timer_remove(int64_t at) {
   fsh_timers[at] = fsh_timers[--fsh_timer_count];
-  while (at > 0 && fsh_timers[(at - 1) / 2].deadline > fsh_timers[at].deadline) {
+  while (at > 0 && fsh_timer_before(fsh_timers[at], fsh_timers[(at - 1) / 2])) {
     fsh_timer_swap(at, (at - 1) / 2);
     at = (at - 1) / 2;
   }
   for (;;) {
     int64_t least = at, left = at * 2 + 1, right = left + 1;
-    if (left < fsh_timer_count && fsh_timers[left].deadline < fsh_timers[least].deadline) least = left;
-    if (right < fsh_timer_count && fsh_timers[right].deadline < fsh_timers[least].deadline) least = right;
+    if (left < fsh_timer_count && fsh_timer_before(fsh_timers[left], fsh_timers[least])) least = left;
+    if (right < fsh_timer_count && fsh_timer_before(fsh_timers[right], fsh_timers[least])) least = right;
     if (least == at) break;
     fsh_timer_swap(at, least);
     at = least;
@@ -4898,7 +5087,9 @@ int64_t fsh_rt_timeout_set(void *block, void **vtable, int64_t ms, int32_t repea
   if (ms < 1 || ms > 2147483647) ms = 1;
   pthread_mutex_lock(&fsh_timeouts_lock);
   int64_t id = ++fsh_timeout_ids;
-  fsh_timeout_insert((fsh_timeout){ fsh_now() + ms * 1000000, id, repeat ? ms : 0, block, vtable, 0 });
+  int64_t now = fsh_now();
+  int64_t dl = ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000;
+  fsh_timeout_insert((fsh_timeout){ dl, id, repeat ? ms : 0, block, vtable, 0 });
   fsh_task *waiter = fsh_timeouts_changed();
   pthread_mutex_unlock(&fsh_timeouts_lock);
   fsh_timeouts_wake(waiter);
@@ -4950,7 +5141,7 @@ int32_t fsh_rt_timeout_next(fsh_task *task, void **out) {
     out[1] = t.vtable;
     if (t.every) {
       out[0] = ((void *(*)(void *))t.vtable[1])(t.block);
-      t.deadline = now + t.every * 1000000;
+      t.deadline = t.every > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + t.every * 1000000;
       fsh_timeout_insert(t);
     }
     result = 1;
@@ -4968,6 +5159,7 @@ int32_t fsh_rt_timeout_next(fsh_task *task, void **out) {
     __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
     fsh_timer_add(arm, task, NULL, &fsh_timeouts);
   }
+  if (result == 0) fsh_task_wait(task, "timer_loop", 0);
   return result;
 }
 
@@ -4992,14 +5184,20 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
     *state = 1;
     __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
     fsh_timer_add(*deadline, task, NULL, frame);
+    fsh_task_wait(task, "sleep", 0);
     return 0;
   }
-  if (*state != 0) return fsh_now() >= *deadline;
+  if (*state != 0) {
+    if (fsh_now() >= *deadline) return 1;
+    fsh_task_wait(task, "sleep", 0);
+    return 0;
+  }
   *state = 1;
   int64_t ms = *deadline > 0 ? *deadline : 0, now = fsh_now();
   *deadline = ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000;
   __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
   fsh_timer_add(*deadline, task, NULL, frame);
+  fsh_task_wait(task, "sleep", 0);
   return 0;
 }
 
@@ -5323,7 +5521,10 @@ int32_t fsh_rt_semaphore_acquire(fsh_semaphore *s, fsh_task *task, fsh_permit **
   else fsh_wait_on(&s->waiting, task, tag);
   pthread_mutex_unlock(&s->lock);
   if (mine) fsh_task_release(mine);
-  if (!taken) return 0;
+  if (!taken) {
+    fsh_task_wait(task, "semaphore", 0);
+    return 0;
+  }
   fsh_rt_block_retain(&s->count);
   fsh_permit *p = fsh_rt_alloc(sizeof(fsh_permit));
   p->count = 1;
@@ -5404,6 +5605,7 @@ int32_t fsh_rt_channel_send(fsh_channel *c, void *value, fsh_task *task, void *t
   if (c->length == c->capacity) {
     fsh_wait_on(&c->senders, task, tag);
     pthread_mutex_unlock(&c->lock);
+    fsh_task_wait(task, "channel.send", 0);
     return 0;
   }
   memcpy(c->ring + (c->head + c->length) % c->capacity * c->size, value, c->size);
@@ -5427,6 +5629,7 @@ int32_t fsh_rt_channel_receive(fsh_channel *c, void *out, fsh_task *task, void *
     if (closed) memset(out, 0, c->size);
     else fsh_wait_on(&c->receivers, task, tag);
     pthread_mutex_unlock(&c->lock);
+    if (!closed) fsh_task_wait(task, "channel.receive", 0);
     return closed ? 2 : 0;
   }
   memcpy(out, c->ring + c->head * c->size, c->size);
@@ -5725,8 +5928,8 @@ void fsh_rt_group_drop(fsh_group *g) {
 
 // Starts a future as a task of the group, which waits for it and gives no handle to it: the
 // runtime's reference is the task's only one, and the task holds a count on the group.
-void fsh_rt_group_spawn(fsh_group *g, fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void (*fail)(void *, void *), void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+void fsh_rt_group_spawn(fsh_group *g, fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void (*fail)(void *, void *), void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 0);
   t->refs = 1;
   __atomic_fetch_add(&g->count, 1, __ATOMIC_RELAXED);
   t->group = g;
@@ -5804,6 +6007,7 @@ int32_t fsh_rt_group_wait(fsh_group *g, fsh_task *waiter, void *out, const char 
     fsh_panic_reason(reason, n < (int)sizeof reason ? (size_t)n : sizeof reason - 1);
     fsh_rt_panic("\ncatch what can fail inside the group's tasks, or 'spawn' one and await 'handle.join()' to catch its panic\n");
   }
+  if (result == 0 && !running) fsh_task_wait(waiter, "task_group", 0);
   return result;
 }
 
@@ -5878,9 +6082,13 @@ static void fsh_shutdown_waiters_free(void) {
 }
 
 static void fsh_shutdown_start(void) {
+  fsh_sim_init();
   fsh_shutdown.count = 1;
   pthread_mutex_init(&fsh_shutdown.lock, NULL);
   fsh_shutdown_end = fsh_shutdown_waiters_free;
+  // In deterministic simulation mode, never spawn a background signal-watcher thread that would
+  // race on fsh_sim_ready; leave default SIGINT/SIGTERM process termination in place.
+  if (fsh_sim_active) return;
   const char *failed = "fish: the shutdown signal couldn't be set up, so SIGINT and SIGTERM end the program at once\n";
   if (pipe(fsh_shutdown_pipe) != 0) return (void)fputs(failed, stderr);
   fcntl(fsh_shutdown_pipe[0], F_SETFD, FD_CLOEXEC);
@@ -5944,6 +6152,9 @@ static void fsh_signals_start(void) {
 // Starts counting signal n, giving how many have arrived so far, or -1 when it can't be caught.
 int64_t fsh_rt_signal_listen(int64_t n) {
   if (n < 1 || n > 64 || n == SIGKILL || n == SIGSTOP) return -1;
+#ifdef FSH_PROFILE
+  if (n == SIGPROF && fsh_prof_is_active()) return -1;
+#endif
   pthread_once(&fsh_signals_once, fsh_signals_start);
   if (!fsh_signals_ready) return -1;
   struct sigaction caught;
@@ -6124,7 +6335,9 @@ void fsh_rt_file_job_release(struct fsh_file_job *job);
 // whose connections are, also has its TLS state and the TLS runtime's calls for it, which only
 // that runtime sets, so a program without TLS links no TLS library.
 struct fsh_tls_ops;
-typedef struct { int64_t count; int fd; int32_t tried; int64_t deadline; struct fsh_file_job *lookup; void *tls; const struct fsh_tls_ops *tls_ops; } fsh_socket;
+struct fsh_sim_sock;
+static void fsh_sim_sock_close(struct fsh_sim_sock *s);
+typedef struct { int64_t count; int fd; int32_t tried; int64_t deadline; struct fsh_file_job *lookup; void *tls; const struct fsh_tls_ops *tls_ops; struct fsh_sim_sock *sim; } fsh_socket;
 typedef struct fsh_tls_ops {
   int32_t (*read)(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *out, fsh_str **message);
   int32_t (*write)(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_task *task, fsh_str **message);
@@ -6159,12 +6372,14 @@ static fsh_socket *fsh_socket_new(int fd) {
   s->lookup = NULL;
   s->tls = NULL;
   s->tls_ops = NULL;
+  s->sim = NULL;
   return s;
 }
 
 void fsh_rt_socket_release(fsh_socket *s) {
   if (!s || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
   if (s->tls) s->tls_ops->release(s);
+  if (s->sim) fsh_sim_sock_close(s->sim);
   if (s->fd >= 0) {
     if (fsh_poller >= 0) fsh_io_forget(s->fd);
     close(s->fd);
@@ -7729,6 +7944,9 @@ static void fsh_pool_run(fsh_file_job *job) {
 
 static void *fsh_pool_work(void *arg) {
   (void)arg;
+#ifdef FSH_PROFILE
+  int prof_slot = fsh_prof_register();
+#endif
   pthread_mutex_lock(&fsh_pool_lock);
   for (;;) {
     while (!fsh_pool_head) {
@@ -7741,6 +7959,9 @@ static void *fsh_pool_work(void *arg) {
       if (waited == ETIMEDOUT && !fsh_pool_head) {
         fsh_pool_threads--;
         pthread_mutex_unlock(&fsh_pool_lock);
+#ifdef FSH_PROFILE
+        fsh_prof_unregister(prof_slot);
+#endif
         return NULL;
       }
     }
@@ -7755,14 +7976,16 @@ static void *fsh_pool_work(void *arg) {
       continue;
     }
 #ifdef FSH_LEAK_SITES
-    fsh_frame submitter = { job->site, job->name, NULL };
-    fsh_rt_frames = job->name ? &submitter : NULL;
+    volatile fsh_frame submitter = { job->site, job->name, NULL };
+    __atomic_signal_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&fsh_rt_frames, job->name ? (fsh_frame *)&submitter : NULL, __ATOMIC_RELAXED);
 #endif
     if (job->op == 0) fsh_file_read(job);
     else if (job->op == 1) fsh_file_write(job);
     else fsh_host_lookup(job);
 #ifdef FSH_LEAK_SITES
-    fsh_rt_frames = NULL;
+    __atomic_store_n(&fsh_rt_frames, NULL, __ATOMIC_RELAXED);
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
 #endif
     // Under the pool's lock, so a poll from another task can't hand the job over meanwhile.
     pthread_mutex_lock(&fsh_pool_lock);
@@ -7803,6 +8026,17 @@ static void fsh_pool_enqueue(fsh_file_job *job) {
 }
 
 static void fsh_pool_submit(fsh_file_job *job) {
+  if (fsh_sim_active) {
+    if (job->op == 0) fsh_file_read(job);
+    else if (job->op == 1) fsh_file_write(job);
+    else fsh_host_lookup(job);
+    fsh_task *task = job->task;
+    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    fsh_rt_wake(task);
+    fsh_task_release(task);
+    fsh_rt_file_job_release(job);
+    return;
+  }
   pthread_mutex_lock(&fsh_pool_lock);
 #ifdef FSH_LEAK_SITES
   job->site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
@@ -7862,9 +8096,13 @@ int32_t fsh_rt_file_poll(fsh_str *path, fsh_array *bytes, fsh_file_job **job_at,
     job->task = task;
     *job_at = job;
     fsh_pool_submit(job);
+    fsh_task_wait(task, op == 0 ? "file.read" : "file.write", 0);
     return 0;
   }
-  if (!fsh_job_done(job, task)) return 0;
+  if (!fsh_job_done(job, task)) {
+    fsh_task_wait(task, op == 0 ? "file.read" : "file.write", 0);
+    return 0;
+  }
   if (job->error) return fsh_fs_failed(error, job->error, job->syscall, strcmp(job->syscall, "open") == 0 ? job->path : NULL);
   if (op == 0) {
     *out = job->data;
@@ -7899,8 +8137,544 @@ static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_storage *at,
   return !reason[0];
 }
 
+// In-memory virtual TCP network and fault injection for deterministic simulation mode.
+// Active only when FISH_SIM_SEED is set; zero impact on real sockets.
+enum {
+  FSH_SIM_EV_ACCEPT = 1,
+  FSH_SIM_EV_CONN_FAIL = 2,
+  FSH_SIM_EV_DATA = 3,
+  FSH_SIM_EV_EOF = 4,
+  FSH_SIM_EV_RESET = 5,
+};
+
+typedef struct fsh_sim_sock {
+  int64_t refs;
+  int32_t kind; // 0 listener, 1 stream
+  int32_t closed;
+  int32_t peer_eof;
+  int32_t peer_reset;
+  int32_t connect_state; // 0 connected, 1 connecting, 2 failed
+  int connect_errno;
+  char host[64];
+  uint16_t port;
+  char peer_host[64];
+  uint16_t peer_port;
+  int64_t last_deliver_at;
+  struct fsh_sim_sock *peer;
+  fsh_waiters waiters;
+  // Listener pending accepted connections.
+  fsh_socket **accept_q;
+  int64_t accept_head, accept_count, accept_cap;
+  // Stream receive buffer.
+  uint8_t *rx;
+  int64_t rx_head, rx_len, rx_cap;
+} fsh_sim_sock;
+
+typedef struct {
+  int64_t deliver_at;
+  uint64_t seq;
+  int32_t kind;
+  int err;
+  fsh_sim_sock *dst;
+  fsh_socket *conn;
+  uint8_t *data;
+  int64_t len;
+} fsh_sim_event;
+
+typedef struct {
+  char a[96];
+  char b[96];
+} fsh_sim_partition_rule;
+
+static fsh_sim_sock **fsh_sim_listeners = NULL;
+static int64_t fsh_sim_listener_count = 0, fsh_sim_listener_cap = 0;
+static fsh_sim_event *fsh_sim_events = NULL;
+static int64_t fsh_sim_event_count = 0, fsh_sim_event_cap = 0;
+static fsh_sim_partition_rule *fsh_sim_partitions = NULL;
+static int64_t fsh_sim_partition_count = 0, fsh_sim_partition_cap = 0;
+static int64_t fsh_sim_delay_min_ms = 0, fsh_sim_delay_max_ms = 0;
+static double fsh_sim_drop_rate = 0.0;
+static uint16_t fsh_sim_next_port = 10000;
+static int32_t fsh_sim_stopping = 0;
+
+static void fsh_sim_sock_retain(fsh_sim_sock *s) {
+  if (s) s->refs++;
+}
+
+static void fsh_sim_sock_release(fsh_sim_sock *s) {
+  if (!s || --s->refs > 0) return;
+  fsh_waiters_free(&s->waiters);
+  free(s->accept_q);
+  free(s->rx);
+  fsh_rt_free(s);
+}
+
+static void fsh_sim_wake_all(fsh_waiters *w) {
+  fsh_waiters list = *w;
+  *w = (fsh_waiters){ NULL, 0, 0 };
+  for (int64_t i = 0; i < list.count; i++) {
+    if (fsh_sim_stopping) fsh_task_release(list.tasks[i].task);
+    else fsh_wake_waiter(list.tasks[i].task);
+  }
+  fsh_rt_free(list.tasks);
+}
+
+static int fsh_sim_event_before(fsh_sim_event a, fsh_sim_event b) {
+  return a.deliver_at < b.deliver_at || (a.deliver_at == b.deliver_at && a.seq < b.seq);
+}
+
+static void fsh_sim_event_swap(int64_t a, int64_t b) {
+  fsh_sim_event t = fsh_sim_events[a];
+  fsh_sim_events[a] = fsh_sim_events[b];
+  fsh_sim_events[b] = t;
+}
+
+static void fsh_sim_event_push(fsh_sim_event ev) {
+  if (fsh_sim_event_count == fsh_sim_event_cap) {
+    int64_t cap = fsh_sim_event_cap ? fsh_sim_event_cap * 2 : 64;
+    fsh_sim_events = realloc(fsh_sim_events, (size_t)cap * sizeof(fsh_sim_event));
+    fsh_sim_event_cap = cap;
+  }
+  ev.seq = ++fsh_timer_seq;
+  int64_t at = fsh_sim_event_count++;
+  fsh_sim_events[at] = ev;
+  while (at > 0 && fsh_sim_event_before(fsh_sim_events[at], fsh_sim_events[(at - 1) / 2])) {
+    fsh_sim_event_swap(at, (at - 1) / 2);
+    at = (at - 1) / 2;
+  }
+}
+
+static fsh_sim_event fsh_sim_event_pop(void) {
+  fsh_sim_event taken = fsh_sim_events[0];
+  fsh_sim_events[0] = fsh_sim_events[--fsh_sim_event_count];
+  for (int64_t at = 0;;) {
+    int64_t least = at, left = at * 2 + 1, right = left + 1;
+    if (left < fsh_sim_event_count && fsh_sim_event_before(fsh_sim_events[left], fsh_sim_events[least])) least = left;
+    if (right < fsh_sim_event_count && fsh_sim_event_before(fsh_sim_events[right], fsh_sim_events[least])) least = right;
+    if (least == at) break;
+    fsh_sim_event_swap(at, least);
+    at = least;
+  }
+  return taken;
+}
+
+static int64_t fsh_sim_sample_delay_ns(void) {
+  if (fsh_sim_delay_max_ms <= 0) return 0;
+  uint64_t span = (uint64_t)(fsh_sim_delay_max_ms - fsh_sim_delay_min_ms);
+  int64_t ms = fsh_sim_delay_min_ms;
+  if (span > 0) {
+    uint64_t range = span + 1ULL;
+    uint64_t off = range == 0 ? fsh_sim_next_u64(fsh_sim_sched_rng) : (fsh_sim_next_u64(fsh_sim_sched_rng) % range);
+    if (off > (uint64_t)(INT64_MAX - ms)) ms = INT64_MAX;
+    else ms += (int64_t)off;
+  }
+  if (ms > (INT64_MAX - fsh_sim_now_ns) / 1000000) return INT64_MAX - fsh_sim_now_ns;
+  return ms * 1000000LL;
+}
+
+static int64_t fsh_sim_next_deliver_at(fsh_sim_sock *sender) {
+  int64_t d = fsh_sim_sample_delay_ns();
+  int64_t at = fsh_sim_now_ns + d;
+  if (sender && at < sender->last_deliver_at) at = sender->last_deliver_at;
+  if (sender) sender->last_deliver_at = at;
+  return at;
+}
+
+static int fsh_sim_should_drop(void) {
+  if (fsh_sim_drop_rate <= 0.0) return 0;
+  if (fsh_sim_drop_rate >= 1.0) return 1;
+  return fsh_sim_next_f64(fsh_sim_sched_rng) < fsh_sim_drop_rate;
+}
+
+static int fsh_sim_endpoint_match(const char *rule, const char *host, uint16_t port) {
+  if (strcmp(rule, "*") == 0) return 1;
+  if (strcmp(rule, host) == 0) return 1;
+  char full[96];
+  snprintf(full, sizeof full, "%s:%u", host, (unsigned)port);
+  if (strcmp(rule, full) == 0) return 1;
+  if (strchr(host, ':') != NULL) {
+    snprintf(full, sizeof full, "[%s]:%u", host, (unsigned)port);
+    if (strcmp(rule, full) == 0) return 1;
+  }
+  return 0;
+}
+
+static int fsh_sim_is_partitioned(const char *h1, uint16_t p1, const char *h2, uint16_t p2) {
+  for (int64_t i = 0; i < fsh_sim_partition_count; i++) {
+    const char *a = fsh_sim_partitions[i].a;
+    const char *b = fsh_sim_partitions[i].b;
+    if ((fsh_sim_endpoint_match(a, h1, p1) && fsh_sim_endpoint_match(b, h2, p2)) ||
+        (fsh_sim_endpoint_match(a, h2, p2) && fsh_sim_endpoint_match(b, h1, p1))) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int fsh_sim_host_matches(const char *listener_host, const char *target_host) {
+  if (strcmp(listener_host, target_host) == 0) return 1;
+  if (strcmp(listener_host, "::") == 0) return 1;
+  if (strcmp(listener_host, "0.0.0.0") == 0 && strchr(target_host, ':') == NULL) return 1;
+  return 0;
+}
+
+static int fsh_sim_port_in_use(const char *host, uint16_t port) {
+  for (int64_t i = 0; i < fsh_sim_listener_count; i++) {
+    fsh_sim_sock *l = fsh_sim_listeners[i];
+    if (!l->closed && l->port == port && (fsh_sim_host_matches(l->host, host) || fsh_sim_host_matches(host, l->host))) return 1;
+  }
+  return 0;
+}
+
+static uint16_t fsh_sim_alloc_port(const char *host) {
+  for (int tries = 0; tries < 50000; tries++) {
+    uint16_t p = fsh_sim_next_port++;
+    if (fsh_sim_next_port > 60000) fsh_sim_next_port = 10000;
+    if (!fsh_sim_port_in_use(host, p)) return p;
+  }
+  return 0;
+}
+
+static fsh_socket *fsh_sim_socket_new(int32_t kind, const char *host, uint16_t port) {
+  fsh_sim_sock *sim = fsh_rt_alloc(sizeof(fsh_sim_sock));
+  memset(sim, 0, sizeof *sim);
+  sim->refs = 1;
+  sim->kind = kind;
+  snprintf(sim->host, sizeof sim->host, "%s", host);
+  sim->port = port;
+  fsh_socket *s = fsh_rt_alloc(sizeof(fsh_socket));
+  memset(s, 0, sizeof *s);
+  s->count = 1;
+  s->fd = -1;
+  s->sim = sim;
+  return s;
+}
+
+static void fsh_sim_listener_add(fsh_sim_sock *l) {
+  if (fsh_sim_listener_count == fsh_sim_listener_cap) {
+    int64_t cap = fsh_sim_listener_cap ? fsh_sim_listener_cap * 2 : 16;
+    fsh_sim_listeners = realloc(fsh_sim_listeners, (size_t)cap * sizeof(fsh_sim_sock *));
+    fsh_sim_listener_cap = cap;
+  }
+  fsh_sim_listeners[fsh_sim_listener_count++] = l;
+}
+
+static void fsh_sim_listener_remove(fsh_sim_sock *l) {
+  for (int64_t i = 0; i < fsh_sim_listener_count; i++) {
+    if (fsh_sim_listeners[i] == l) {
+      fsh_sim_listeners[i] = fsh_sim_listeners[--fsh_sim_listener_count];
+      return;
+    }
+  }
+}
+
+static fsh_sim_sock *fsh_sim_listener_find(const char *host, uint16_t port) {
+  for (int64_t i = 0; i < fsh_sim_listener_count; i++) {
+    fsh_sim_sock *l = fsh_sim_listeners[i];
+    if (!l->closed && l->port == port && fsh_sim_host_matches(l->host, host)) return l;
+  }
+  return NULL;
+}
+
+static void fsh_sim_sock_close(fsh_sim_sock *s) {
+  s->closed = 1;
+  if (s->kind == 0) {
+    fsh_sim_listener_remove(s);
+    while (s->accept_count > 0) {
+      fsh_socket *conn = s->accept_q[s->accept_head];
+      s->accept_head = (s->accept_head + 1) % s->accept_cap;
+      s->accept_count--;
+      fsh_rt_socket_release(conn);
+    }
+    fsh_sim_wake_all(&s->waiters);
+  } else {
+    fsh_sim_wake_all(&s->waiters);
+    fsh_sim_sock *peer = s->peer;
+    s->peer = NULL;
+    if (peer) {
+      if (!peer->closed && !fsh_sim_stopping) {
+        int64_t at = fsh_sim_next_deliver_at(s);
+        fsh_sim_sock_retain(peer);
+        fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_EOF, 0, peer, NULL, NULL, 0 });
+      }
+      fsh_sim_sock_release(peer);
+    }
+  }
+  fsh_sim_sock_release(s);
+}
+
+static void fsh_sim_deliver_event(fsh_sim_event ev) {
+  if (ev.kind == FSH_SIM_EV_ACCEPT) {
+    fsh_sim_sock *l = ev.dst;
+    fsh_socket *srv_sock = ev.conn;
+    fsh_sim_sock *srv = srv_sock->sim;
+    fsh_sim_sock *cli = srv->peer;
+    int part = cli ? (fsh_sim_is_partitioned(cli->host, cli->port, l->host, l->port) || fsh_sim_is_partitioned(cli->host, cli->port, srv->host, srv->port)) : 0;
+    if (l->closed || part || !cli || cli->closed) {
+      if (cli && !cli->closed && cli->connect_state == 1) {
+        cli->connect_state = 2;
+        cli->connect_errno = l->closed ? ECONNREFUSED : EHOSTUNREACH;
+        fsh_sim_wake_all(&cli->waiters);
+      }
+      fsh_rt_socket_release(srv_sock);
+    } else {
+      if (l->accept_count == l->accept_cap) {
+        int64_t cap = l->accept_cap ? l->accept_cap * 2 : 16;
+        fsh_socket **q = malloc((size_t)cap * sizeof(fsh_socket *));
+        for (int64_t i = 0; i < l->accept_count; i++) q[i] = l->accept_q[(l->accept_head + i) % l->accept_cap];
+        free(l->accept_q);
+        l->accept_q = q;
+        l->accept_head = 0;
+        l->accept_cap = cap;
+      }
+      l->accept_q[(l->accept_head + l->accept_count) % l->accept_cap] = srv_sock;
+      l->accept_count++;
+      cli->connect_state = 0;
+      fsh_sim_wake_all(&l->waiters);
+      fsh_sim_wake_all(&cli->waiters);
+    }
+    fsh_sim_sock_release(l);
+  } else if (ev.kind == FSH_SIM_EV_CONN_FAIL) {
+    fsh_sim_sock *cli = ev.dst;
+    if (!cli->closed && cli->connect_state == 1) {
+      cli->connect_state = 2;
+      cli->connect_errno = ev.err;
+      fsh_sim_wake_all(&cli->waiters);
+    }
+    fsh_sim_sock_release(cli);
+  } else if (ev.kind == FSH_SIM_EV_DATA) {
+    fsh_sim_sock *dst = ev.dst;
+    if (!dst->closed && !dst->peer_reset && ev.len > 0) {
+      if (fsh_sim_is_partitioned(dst->peer_host, dst->peer_port, dst->host, dst->port)) {
+        dst->peer_reset = 1;
+        fsh_sim_wake_all(&dst->waiters);
+      } else {
+        if (dst->rx_head + dst->rx_len + ev.len > dst->rx_cap) {
+          if (dst->rx_head > 0 && dst->rx_len > 0) memmove(dst->rx, dst->rx + dst->rx_head, (size_t)dst->rx_len);
+          dst->rx_head = 0;
+          if (dst->rx_len + ev.len > dst->rx_cap) {
+            int64_t cap = dst->rx_cap ? dst->rx_cap * 2 : 4096;
+            while (cap < dst->rx_len + ev.len) cap *= 2;
+            dst->rx = realloc(dst->rx, (size_t)cap);
+            dst->rx_cap = cap;
+          }
+        }
+        memcpy(dst->rx + dst->rx_head + dst->rx_len, ev.data, (size_t)ev.len);
+        dst->rx_len += ev.len;
+        fsh_sim_wake_all(&dst->waiters);
+      }
+    }
+    free(ev.data);
+    fsh_sim_sock_release(dst);
+  } else if (ev.kind == FSH_SIM_EV_EOF) {
+    fsh_sim_sock *dst = ev.dst;
+    if (!dst->closed) {
+      dst->peer_eof = 1;
+      fsh_sim_wake_all(&dst->waiters);
+    }
+    fsh_sim_sock_release(dst);
+  } else if (ev.kind == FSH_SIM_EV_RESET) {
+    fsh_sim_sock *dst = ev.dst;
+    if (!dst->closed) {
+      dst->peer_reset = 1;
+      fsh_sim_wake_all(&dst->waiters);
+    }
+    fsh_sim_sock_release(dst);
+  }
+}
+
+static void fsh_sim_fire_due(void) {
+  for (;;) {
+    int has_t = fsh_timer_count > 0 && fsh_timers[0].deadline <= fsh_sim_now_ns;
+    int has_e = fsh_sim_event_count > 0 && fsh_sim_events[0].deliver_at <= fsh_sim_now_ns;
+    if (!has_t && !has_e) break;
+    int take_t = 0;
+    if (has_t && !has_e) take_t = 1;
+    else if (has_t && has_e) {
+      take_t = fsh_timers[0].deadline < fsh_sim_events[0].deliver_at ||
+        (fsh_timers[0].deadline == fsh_sim_events[0].deliver_at && fsh_timers[0].seq < fsh_sim_events[0].seq);
+    }
+    if (take_t) {
+      fsh_timer due = fsh_timer_take();
+      fsh_timer_fire(due, 1);
+    } else {
+      fsh_sim_event ev = fsh_sim_event_pop();
+      fsh_sim_deliver_event(ev);
+    }
+  }
+}
+
+static int fsh_sim_next_event_ns(int64_t *out) {
+  int found = 0;
+  int64_t best = 0;
+  if (fsh_timer_count > 0) {
+    best = fsh_timers[0].deadline;
+    found = 1;
+  }
+  if (fsh_sim_event_count > 0 && (!found || fsh_sim_events[0].deliver_at < best)) {
+    best = fsh_sim_events[0].deliver_at;
+    found = 1;
+  }
+  if (found) *out = best;
+  return found;
+}
+
+static void fsh_sim_drain_events(void) {
+  while (fsh_sim_event_count > 0) {
+    fsh_sim_event ev = fsh_sim_event_pop();
+    free(ev.data);
+    if (ev.conn) fsh_rt_socket_release(ev.conn);
+    if (ev.dst) fsh_sim_sock_release(ev.dst);
+  }
+  free(fsh_sim_events);
+  fsh_sim_events = NULL;
+  fsh_sim_event_cap = 0;
+}
+
+static void fsh_sim_free_globals(void) {
+  free(fsh_sim_ready);
+  fsh_sim_ready = NULL;
+  fsh_sim_ready_count = fsh_sim_ready_cap = 0;
+  free(fsh_sim_listeners);
+  fsh_sim_listeners = NULL;
+  fsh_sim_listener_count = fsh_sim_listener_cap = 0;
+  free(fsh_sim_partitions);
+  fsh_sim_partitions = NULL;
+  fsh_sim_partition_count = fsh_sim_partition_cap = 0;
+}
+
+static int fsh_sim_normalize_host(fsh_str *host, int64_t port, char out[64], int allow_localhost, fsh_str **message) {
+  char *text = fsh_rt_str_cstring(host);
+  if (allow_localhost && text && strcmp(text, "localhost") == 0) {
+    fsh_rt_free(text);
+    if (port < 0 || port > 65535) {
+      struct sockaddr_storage dummy;
+      fsh_address(host, port, &dummy, message);
+      return 0;
+    }
+    snprintf(out, 64, "127.0.0.1");
+    return 1;
+  }
+  fsh_rt_free(text);
+  struct sockaddr_storage at;
+  if (!fsh_address(host, port, &at, message)) return 0;
+  if (at.ss_family == AF_INET) {
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&at)->sin_addr, out, 64);
+  } else {
+    inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&at)->sin6_addr, out, 64);
+  }
+  return 1;
+}
+
+// Public C entry points for the std:sim module.
+int32_t fsh_rt_sim_enabled(void) {
+  fsh_sim_init();
+  return fsh_sim_active;
+}
+
+uint64_t fsh_rt_sim_seed(void) {
+  fsh_sim_init();
+  return fsh_sim_seed_val;
+}
+
+int64_t fsh_rt_sim_now(void) {
+  fsh_sim_init();
+  return fsh_sim_active ? fsh_sim_now_ns / 1000000 : fsh_rt_now_ms();
+}
+
+void fsh_rt_sim_advance(int64_t ms) {
+  fsh_sim_init();
+  if (!fsh_sim_active || ms <= 0) return;
+  if (ms > (INT64_MAX - fsh_sim_now_ns) / 1000000) fsh_sim_now_ns = INT64_MAX;
+  else fsh_sim_now_ns += ms * 1000000LL;
+  fsh_sim_fire_due();
+}
+
+void fsh_rt_sim_partition(const char *a, const char *b) {
+  fsh_sim_init();
+  if (!fsh_sim_active || !a || !b) return;
+  char ka[96], kb[96];
+  snprintf(ka, sizeof ka, "%s", a);
+  snprintf(kb, sizeof kb, "%s", b);
+  for (int64_t i = 0; i < fsh_sim_partition_count; i++) {
+    if ((strcmp(fsh_sim_partitions[i].a, ka) == 0 && strcmp(fsh_sim_partitions[i].b, kb) == 0) ||
+        (strcmp(fsh_sim_partitions[i].a, kb) == 0 && strcmp(fsh_sim_partitions[i].b, ka) == 0)) {
+      return;
+    }
+  }
+  if (fsh_sim_partition_count == fsh_sim_partition_cap) {
+    int64_t cap = fsh_sim_partition_cap ? fsh_sim_partition_cap * 2 : 8;
+    fsh_sim_partitions = realloc(fsh_sim_partitions, (size_t)cap * sizeof(fsh_sim_partition_rule));
+    fsh_sim_partition_cap = cap;
+  }
+  snprintf(fsh_sim_partitions[fsh_sim_partition_count].a, sizeof fsh_sim_partitions[0].a, "%s", ka);
+  snprintf(fsh_sim_partitions[fsh_sim_partition_count].b, sizeof fsh_sim_partitions[0].b, "%s", kb);
+  fsh_sim_partition_count++;
+}
+
+void fsh_rt_sim_heal(const char *a, const char *b) {
+  fsh_sim_init();
+  if (!fsh_sim_active || !a || !b) return;
+  char ka[96], kb[96];
+  snprintf(ka, sizeof ka, "%s", a);
+  snprintf(kb, sizeof kb, "%s", b);
+  for (int64_t i = 0; i < fsh_sim_partition_count;) {
+    if ((strcmp(fsh_sim_partitions[i].a, ka) == 0 && strcmp(fsh_sim_partitions[i].b, kb) == 0) ||
+        (strcmp(fsh_sim_partitions[i].a, kb) == 0 && strcmp(fsh_sim_partitions[i].b, ka) == 0)) {
+      fsh_sim_partitions[i] = fsh_sim_partitions[--fsh_sim_partition_count];
+    } else {
+      i++;
+    }
+  }
+}
+
+void fsh_rt_sim_set_delay(int64_t min_ms, int64_t max_ms) {
+  fsh_sim_init();
+  if (!fsh_sim_active) return;
+  if (min_ms < 0) min_ms = 0;
+  if (max_ms < min_ms) max_ms = min_ms;
+  fsh_sim_delay_min_ms = min_ms;
+  fsh_sim_delay_max_ms = max_ms;
+}
+
+void fsh_rt_sim_set_drop_rate(double rate) {
+  fsh_sim_init();
+  if (!fsh_sim_active) return;
+  if (isnan(rate) || rate < 0.0) rate = 0.0;
+  if (rate > 1.0) rate = 1.0;
+  fsh_sim_drop_rate = rate;
+}
+
+void fsh_rt_sim_reset_faults(void) {
+  fsh_sim_init();
+  if (!fsh_sim_active) return;
+  fsh_sim_partition_count = 0;
+  fsh_sim_delay_min_ms = 0;
+  fsh_sim_delay_max_ms = 0;
+  fsh_sim_drop_rate = 0.0;
+}
+
 // 'TcpListener.bind(host, port)': listening at once, or 5 with the reason.
 int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    char norm[64];
+    if (!fsh_sim_normalize_host(host, port, norm, 0, message)) return 5;
+    uint16_t bound = (uint16_t)port;
+    if (bound == 0) {
+      bound = fsh_sim_alloc_port(norm);
+      if (bound == 0) {
+        errno = EADDRNOTAVAIL;
+        return fsh_io_failed(message, "can't listen there", "listen");
+      }
+    } else if (fsh_sim_port_in_use(norm, bound)) {
+      errno = EADDRINUSE;
+      return fsh_io_failed(message, "can't listen there", "listen");
+    }
+    *out = fsh_sim_socket_new(0, norm, bound);
+    fsh_sim_listener_add((*out)->sim);
+    return 1;
+  }
   struct sockaddr_storage at;
   if (!fsh_address(host, port, &at, message)) return 5;
   int fd = socket(at.ss_family, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
@@ -7919,6 +8693,7 @@ int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str *
 }
 
 int64_t fsh_rt_tcp_port(fsh_socket *s) {
+  if (s->sim) return (int64_t)s->sim->port;
   struct sockaddr_storage at;
   socklen_t size = sizeof at;
   if (getsockname(s->fd, (struct sockaddr *)&at, &size) < 0) return -1;
@@ -7929,6 +8704,22 @@ int64_t fsh_rt_tcp_port(fsh_socket *s) {
 // Polls 'accept()': a new connection, a wait for one, or 5 with the reason.
 // A client that gave up before it was accepted is skipped, as servers expect.
 int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out, fsh_str **message) {
+  if (listener->sim) {
+    fsh_sim_sock *l = listener->sim;
+    if (l->accept_count > 0) {
+      *out = l->accept_q[l->accept_head];
+      l->accept_head = (l->accept_head + 1) % l->accept_cap;
+      l->accept_count--;
+      return 1;
+    }
+    if (l->closed) {
+      errno = EBADF;
+      return fsh_io_failed(message, "can't accept a connection", "accept");
+    }
+    fsh_wait_on(&l->waiters, task, listener);
+    fsh_task_wait(task, "tcp.accept", 0);
+    return 0;
+  }
   int fd;
   while ((fd = FSH_ACCEPT(listener->fd)) < 0 && (errno == EINTR || errno == ECONNABORTED || errno == EPROTO)) {}
   if (fd >= 0) {
@@ -7941,6 +8732,7 @@ int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out
   }
   if (errno == EAGAIN || errno == EWOULDBLOCK) {
     fsh_io_wait(listener->fd, 0, task);
+    fsh_task_wait(task, "tcp.accept", 0);
     return 0;
   }
   return fsh_io_failed(message, "can't accept a connection", "accept");
@@ -7951,6 +8743,15 @@ int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out
 void fsh_rt_socket_leave(fsh_socket *s, fsh_task *task) {
   if (!s) return;
   fsh_connect_untimed(s, task);
+  if (s->sim) {
+    fsh_waiters *w = &s->sim->waiters;
+    for (int64_t i = 0; i < w->count;) {
+      if (w->tasks[i].task != task) { i++; continue; }
+      memmove(w->tasks + i, w->tasks + i + 1, (size_t)(--w->count - i) * sizeof(fsh_waiter));
+      fsh_task_release(task);
+    }
+    return;
+  }
   pthread_mutex_lock(&fsh_io_lock);
   fsh_task **left = NULL;
   int64_t count = 0;
@@ -7972,7 +8773,35 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
     snprintf(text, sizeof text, "'read' needs room for at least 1 byte, not %lld", (long long)max);
     return fsh_io_parts(message, text, "EINVAL", "read", NULL);
   }
-  if (s->tls) return s->tls_ops->read(s, max, task, out, message);
+  if (s->tls) {
+    int32_t r = s->tls_ops->read(s, max, task, out, message);
+    if (r == 0) fsh_task_wait(task, "tcp.read", 0);
+    return r;
+  }
+  if (s->sim) {
+    fsh_sim_sock *st = s->sim;
+    if (st->rx_len > 0) {
+      int64_t n = st->rx_len < max ? st->rx_len : max;
+      char *data = fsh_rt_alloc(n);
+      memcpy(data, st->rx + st->rx_head, (size_t)n);
+      st->rx_head += n;
+      st->rx_len -= n;
+      if (st->rx_len == 0) st->rx_head = 0;
+      *out = (fsh_array){ data, n, n };
+      return 1;
+    }
+    if (st->peer_reset) {
+      errno = ECONNRESET;
+      return fsh_io_failed(message, "can't read", "read");
+    }
+    if (st->peer_eof || !st->peer) {
+      *out = (fsh_array){ NULL, 0, 0 };
+      return 1;
+    }
+    fsh_wait_on(&st->waiters, task, s);
+    fsh_task_wait(task, "tcp.read", 0);
+    return 0;
+  }
   // Received onto the stack, so the array holds just what came, however much room was asked for.
   char buffer[65536];
   ssize_t n = recv(s->fd, buffer, (size_t)(max < (int64_t)sizeof buffer ? max : (int64_t)sizeof buffer), 0);
@@ -7988,6 +8817,7 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
   }
   if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
     fsh_io_wait(s->fd, 0, task);
+    fsh_task_wait(task, "tcp.read", 0);
     return 0;
   }
   return fsh_io_failed(message, "can't read", "read");
@@ -7995,7 +8825,46 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
 
 // Polls 'write(bytes)': sends what is left past *written, waiting while the socket is full.
 int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_task *task, fsh_str **message) {
-  if (s->tls) return s->tls_ops->write(s, bytes, written, task, message);
+  if (s->tls) {
+    int32_t r = s->tls_ops->write(s, bytes, written, task, message);
+    if (r == 0) fsh_task_wait(task, "tcp.write", 0);
+    return r;
+  }
+  if (s->sim) {
+    fsh_sim_sock *st = s->sim;
+    if (st->closed || st->peer_reset) {
+      errno = ECONNRESET;
+      return fsh_io_failed(message, "can't write", "write");
+    }
+    if (!st->peer || st->peer->closed) {
+      errno = EPIPE;
+      return fsh_io_failed(message, "can't write", "write");
+    }
+    if (*written < bytes->length) {
+      int64_t len = bytes->length - *written;
+      int64_t at = fsh_sim_next_deliver_at(st);
+      if (fsh_sim_is_partitioned(st->host, st->port, st->peer->host, st->peer->port)) {
+        st->peer_reset = 1;
+        fsh_sim_sock_retain(st->peer);
+        fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_RESET, 0, st->peer, NULL, NULL, 0 });
+        errno = EHOSTUNREACH;
+        return fsh_io_failed(message, "can't write", "write");
+      }
+      if (fsh_sim_should_drop()) {
+        st->peer_reset = 1;
+        fsh_sim_sock_retain(st->peer);
+        fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_RESET, 0, st->peer, NULL, NULL, 0 });
+        errno = ECONNRESET;
+        return fsh_io_failed(message, "can't write", "write");
+      }
+      uint8_t *buf = malloc((size_t)len);
+      memcpy(buf, bytes->data + *written, (size_t)len);
+      fsh_sim_sock_retain(st->peer);
+      fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_DATA, 0, st->peer, NULL, buf, len });
+      *written = bytes->length;
+    }
+    return 1;
+  }
   while (*written < bytes->length) {
 #ifdef MSG_NOSIGNAL
     ssize_t n = send(s->fd, bytes->data + *written, (size_t)(bytes->length - *written), MSG_NOSIGNAL);
@@ -8009,6 +8878,7 @@ int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_
     if (errno == EINTR) continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       fsh_io_wait(s->fd, 1, task);
+      fsh_task_wait(task, "tcp.write", 0);
       return 0;
     }
     return fsh_io_failed(message, "can't write", "write");
@@ -8065,6 +8935,80 @@ static int32_t fsh_connect_from(fsh_socket **socket_at, fsh_file_job *job, int32
 // next. ponytail: sequential Happy Eyeballs; RFC 8305 keeps the slow attempt going alongside the
 // next, so a slow but working first address can lose to the second here.
 int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, fsh_task *task, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    fsh_socket *s = *socket_at;
+    if (!s) {
+      char target_host[64];
+      char *raw_host = fsh_rt_str_cstring(host);
+      int is_localhost = raw_host && strcmp(raw_host, "localhost") == 0;
+      fsh_rt_free(raw_host);
+      if (!fsh_sim_normalize_host(host, port, target_host, 1, message)) return 5;
+      fsh_sim_sock *l = port > 0 ? fsh_sim_listener_find(target_host, (uint16_t)port) : NULL;
+      if (!l && is_localhost && port > 0) {
+        fsh_sim_sock *l6 = fsh_sim_listener_find("::1", (uint16_t)port);
+        if (l6) {
+          l = l6;
+          snprintf(target_host, sizeof target_host, "::1");
+        }
+      }
+      const char *local_host = strchr(target_host, ':') != NULL ? "::1" : "127.0.0.1";
+      uint16_t local_port = fsh_sim_alloc_port(local_host);
+      if (local_port == 0) {
+        errno = EADDRNOTAVAIL;
+        return fsh_io_failed(message, "can't connect", "connect");
+      }
+      s = *socket_at = fsh_sim_socket_new(1, local_host, local_port);
+      fsh_sim_sock *cli = s->sim;
+      snprintf(cli->peer_host, sizeof cli->peer_host, "%s", target_host);
+      cli->peer_port = (uint16_t)port;
+      cli->connect_state = 1;
+      int64_t delay_ns = fsh_sim_sample_delay_ns();
+      int64_t at = fsh_sim_now_ns + delay_ns;
+      int64_t min_fail_at = fsh_sim_now_ns > INT64_MAX - 1000000LL ? INT64_MAX : fsh_sim_now_ns + 1000000LL;
+      int part = l && (fsh_sim_is_partitioned(cli->host, cli->port, l->host, l->port) || fsh_sim_is_partitioned(cli->host, cli->port, target_host, (uint16_t)port));
+      if (!l) {
+        fsh_sim_sock_retain(cli);
+        fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_CONN_FAIL, ECONNREFUSED, cli, NULL, NULL, 0 });
+      } else if (part) {
+        int64_t fail_at = delay_ns > 0 ? at : min_fail_at;
+        fsh_sim_sock_retain(cli);
+        fsh_sim_event_push((fsh_sim_event){ fail_at, 0, FSH_SIM_EV_CONN_FAIL, EHOSTUNREACH, cli, NULL, NULL, 0 });
+      } else if (fsh_sim_should_drop()) {
+        int64_t fail_at = delay_ns > 0 ? at : min_fail_at;
+        fsh_sim_sock_retain(cli);
+        fsh_sim_event_push((fsh_sim_event){ fail_at, 0, FSH_SIM_EV_CONN_FAIL, ECONNRESET, cli, NULL, NULL, 0 });
+      } else {
+        fsh_socket *srv_sock = fsh_sim_socket_new(1, target_host, l->port);
+        fsh_sim_sock *srv = srv_sock->sim;
+        snprintf(srv->peer_host, sizeof srv->peer_host, "%s", cli->host);
+        srv->peer_port = cli->port;
+        srv->connect_state = 0;
+        cli->peer = srv;
+        fsh_sim_sock_retain(srv);
+        srv->peer = cli;
+        fsh_sim_sock_retain(cli);
+        fsh_sim_sock_retain(l);
+        fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_ACCEPT, 0, l, srv_sock, NULL, 0 });
+      }
+      fsh_wait_on(&cli->waiters, task, s);
+      fsh_task_wait(task, "tcp.connect", 0);
+      return 0;
+    }
+    fsh_sim_sock *cli = s->sim;
+    if (cli->connect_state == 1) {
+      fsh_wait_on(&cli->waiters, task, s);
+      fsh_task_wait(task, "tcp.connect", 0);
+      return 0;
+    }
+    if (cli->connect_state == 2) {
+      errno = cli->connect_errno;
+      return fsh_io_failed(message, "can't connect", "connect");
+    }
+    *out = s;
+    *socket_at = NULL;
+    return 1;
+  }
   fsh_socket *s = *socket_at;
   if (!s) {
     struct sockaddr_storage at;
@@ -8090,11 +9034,15 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
       s->fd = -1;
       s->lookup = job;
       fsh_pool_submit(job);
+      fsh_task_wait(task, "dns", 0);
       return 0;
     }
   } else if (s->fd < 0) {
     fsh_file_job *job = s->lookup;
-    if (!fsh_job_done(job, task)) return 0;
+    if (!fsh_job_done(job, task)) {
+      fsh_task_wait(task, "dns", 0);
+      return 0;
+    }
     if (job->error) {
       // A name with no address is ENOTFOUND, a resolver that couldn't answer EAI_AGAIN.
       const char *code = job->error == EAI_AGAIN ? "EAI_AGAIN" : "ENOTFOUND";
@@ -8119,6 +9067,7 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
       if (getpeername(s->fd, (struct sockaddr *)&peer, &peer_size) == 0) break;
       if (errno == ENOTCONN && (!s->deadline || fsh_now() < s->deadline)) {
         fsh_io_wait(s->fd, 1, task);
+        fsh_task_wait(task, "tcp.connect", 0);
         return 0;
       }
       // Past its deadline the attempt gives way to the next address. A refusal that lands after
@@ -8175,6 +9124,11 @@ static char *fsh_unix_address(fsh_str *path, struct sockaddr_un *at, const char 
 // 'UnixListener.bind(path)': listening at once, or 5 with the reason. A file already at the path
 // is the system's EADDRINUSE: it is never removed to make room.
 int32_t fsh_rt_unix_bind(fsh_str *path, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    errno = ENOTSUP;
+    return fsh_io_failed(message, "Unix sockets are not supported in simulation mode", "listen");
+  }
   struct sockaddr_un at;
   char *text = fsh_unix_address(path, &at, "listen", message);
   if (!text) return 5;
@@ -8194,6 +9148,11 @@ int32_t fsh_rt_unix_bind(fsh_str *path, fsh_socket **out, fsh_str **message) {
 // Polls 'UnixStream.connect(path)': the frame keeps the socket while it connects. A listener with
 // a full backlog is the system's EAGAIN on Linux, given as is.
 int32_t fsh_rt_unix_connect(fsh_socket **socket_at, fsh_str *path, fsh_task *task, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    errno = ENOTSUP;
+    return fsh_io_failed(message, "Unix sockets are not supported in simulation mode", "connect");
+  }
   fsh_socket *s = *socket_at;
   struct sockaddr_un at;
   char *text = fsh_unix_address(path, &at, "connect", message);
@@ -8207,6 +9166,7 @@ int32_t fsh_rt_unix_connect(fsh_socket **socket_at, fsh_str *path, fsh_task *tas
       if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0) {
         if (errno == EINPROGRESS || errno == EINTR) {
           fsh_io_wait(fd, 1, task);
+          fsh_task_wait(task, "unix.connect", 0);
           fsh_rt_free(text);
           return 0;
         }
@@ -8259,6 +9219,11 @@ static int fsh_udp_address(fsh_socket *s, fsh_str *host, int64_t port, struct so
 
 // 'UdpSocket.bind(host, port)': bound at once, or 5 with the reason.
 int32_t fsh_rt_udp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    errno = ENOTSUP;
+    return fsh_io_failed(message, "UDP sockets are not supported in simulation mode", "bind");
+  }
   struct sockaddr_storage at;
   if (!fsh_udp_address(NULL, host, port, &at, "bind", message)) return 5;
   int fd = socket(at.ss_family, SOCK_DGRAM | FSH_SOCK_CLOEXEC, 0);
@@ -8297,6 +9262,7 @@ int32_t fsh_rt_udp_send(fsh_socket *s, fsh_array *bytes, fsh_str *host, int64_t 
     if (errno == EINTR) continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       fsh_io_wait(s->fd, 1, task);
+      fsh_task_wait(task, "udp.send", 0);
       return 0;
     }
     return fsh_io_failed(message, "can't send", "send");
@@ -8328,6 +9294,7 @@ int32_t fsh_rt_udp_receive(fsh_socket *s, fsh_task *task, fsh_array *out, fsh_st
     if (errno == EINTR) continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       fsh_io_wait(s->fd, 0, task);
+      fsh_task_wait(task, "udp.receive", 0);
       return 0;
     }
     return fsh_io_failed(message, "can't receive", "recvfrom");
@@ -8344,18 +9311,1203 @@ void fsh_rt_handle_drop(fsh_task *t) {
   if (t) fsh_task_release(t);
 }
 
+// Task inspector: thread-safe live snapshots of active tasks formatted as JSON, plain text, or
+// HTML. Every internal buffer uses malloc/free so inspecting never triggers runtime leak counts.
+typedef struct {
+  int64_t id;
+  const char *name;
+  int32_t state;
+  int32_t blocking;
+  const char *awaiting;
+  const char *await_site;
+  int64_t await_target;
+  int64_t age_ms;
+  const char *spawn_site;
+  int64_t polls;
+} fsh_task_snap;
+
+typedef struct { char *data; size_t len, cap; int failed; } fsh_buf;
+
+static void fsh_buf_grow(fsh_buf *b, size_t need) {
+  if (b->failed) return;
+  if (need > SIZE_MAX - b->len - 1) {
+    free(b->data);
+    b->data = NULL;
+    b->len = b->cap = 0;
+    b->failed = 1;
+    return;
+  }
+  size_t required = b->len + need + 1;
+  if (required <= b->cap) return;
+  size_t cap = b->cap ? b->cap : 256;
+  while (cap < required) {
+    if (cap > SIZE_MAX / 2) { cap = required; break; }
+    cap *= 2;
+  }
+  char *next = realloc(b->data, cap);
+  if (!next) {
+    free(b->data);
+    b->data = NULL;
+    b->len = b->cap = 0;
+    b->failed = 1;
+    return;
+  }
+  b->data = next;
+  b->cap = cap;
+}
+
+static void fsh_buf_putn(fsh_buf *b, const char *s, size_t n) {
+  fsh_buf_grow(b, n);
+  if (b->failed || !b->data) return;
+  memcpy(b->data + b->len, s, n);
+  b->len += n;
+  b->data[b->len] = 0;
+}
+
+static void fsh_buf_puts(fsh_buf *b, const char *s) {
+  if (s) fsh_buf_putn(b, s, strlen(s));
+}
+
+static void fsh_buf_printf(fsh_buf *b, const char *fmt, ...) {
+  char tmp[256];
+  va_list ap, ap2;
+  va_start(ap, fmt);
+  va_copy(ap2, ap);
+  int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+  va_end(ap);
+  if (n >= 0 && (size_t)n < sizeof tmp) {
+    fsh_buf_putn(b, tmp, (size_t)n);
+  } else if (n > 0) {
+    char *big = malloc((size_t)n + 1);
+    if (big) {
+      vsnprintf(big, (size_t)n + 1, fmt, ap2);
+      fsh_buf_putn(b, big, (size_t)n);
+      free(big);
+    }
+  }
+  va_end(ap2);
+}
+
+static void fsh_buf_json(fsh_buf *b, const char *s) {
+  fsh_buf_putn(b, "\"", 1);
+  if (s) {
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+      if (*p == '"') fsh_buf_putn(b, "\\\"", 2);
+      else if (*p == '\\') fsh_buf_putn(b, "\\\\", 2);
+      else if (*p == '\n') fsh_buf_putn(b, "\\n", 2);
+      else if (*p == '\r') fsh_buf_putn(b, "\\r", 2);
+      else if (*p == '\t') fsh_buf_putn(b, "\\t", 2);
+      else if (*p < 0x20) fsh_buf_printf(b, "\\u%04x", (unsigned)*p);
+      else fsh_buf_putn(b, (const char *)p, 1);
+    }
+  }
+  fsh_buf_putn(b, "\"", 1);
+}
+
+static void fsh_buf_html(fsh_buf *b, const char *s) {
+  if (!s) return;
+  for (const char *p = s; *p; p++) {
+    if (*p == '&') fsh_buf_puts(b, "&amp;");
+    else if (*p == '<') fsh_buf_puts(b, "&lt;");
+    else if (*p == '>') fsh_buf_puts(b, "&gt;");
+    else if (*p == '"') fsh_buf_puts(b, "&quot;");
+    else fsh_buf_putn(b, p, 1);
+  }
+}
+
+static int fsh_snap_cmp(const void *a, const void *b) {
+  int64_t x = ((const fsh_task_snap *)a)->id;
+  int64_t y = ((const fsh_task_snap *)b)->id;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static const char *fsh_state_label(int32_t state) {
+  switch (state) {
+    case FSH_RUNNING: return "running";
+    case FSH_QUEUED:
+    case FSH_NOTIFIED: return "runnable";
+    case FSH_IDLE: return "waiting";
+    default: return "done";
+  }
+}
+
+static void fsh_await_label(char *out, size_t size, const fsh_task_snap *s) {
+  if (!s->awaiting || !s->awaiting[0]) {
+    out[0] = 0;
+    return;
+  }
+  if (s->await_target > 0) snprintf(out, size, "%s #%lld", s->awaiting, (long long)s->await_target);
+  else snprintf(out, size, "%s", s->awaiting);
+}
+
+// Copies every alive task's metadata under fsh_alive_lock, then sorts by task id.
+static fsh_task_snap *fsh_tasks_snapshot(int64_t *count_out) {
+  pthread_mutex_lock(&fsh_alive_lock);
+  int64_t n = 0;
+  for (fsh_task *t = fsh_alive; t; t = t->next) n++;
+  fsh_task_snap *snaps = n > 0 ? malloc((size_t)n * sizeof(fsh_task_snap)) : NULL;
+  int64_t now = fsh_now();
+  int64_t i = 0;
+  if (snaps) {
+    for (fsh_task *t = fsh_alive; t && i < n; t = t->next, i++) {
+      int32_t state = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
+      const char *awaiting = NULL;
+      const char *await_site = NULL;
+      int64_t target = 0;
+      if (state == FSH_IDLE) {
+        for (int tries = 0; tries < 8; tries++) {
+          uint32_t s1 = __atomic_load_n(&t->wait_seq, __ATOMIC_ACQUIRE);
+          if (s1 & 1u) continue;
+          const char *w = __atomic_load_n(&t->awaiting, __ATOMIC_RELAXED);
+          const char *as = __atomic_load_n(&t->await_site, __ATOMIC_RELAXED);
+          int64_t tg = __atomic_load_n(&t->await_target, __ATOMIC_RELAXED);
+          __atomic_thread_fence(__ATOMIC_ACQUIRE);
+          uint32_t s2 = __atomic_load_n(&t->wait_seq, __ATOMIC_RELAXED);
+          if (s1 == s2) {
+            awaiting = w;
+            await_site = as;
+            target = tg;
+            break;
+          }
+        }
+      }
+      int64_t age = now >= t->created_ns ? (now - t->created_ns) / 1000000 : 0;
+      snaps[i] = (fsh_task_snap){
+        t->id,
+        t->name ? t->name : "",
+        state,
+        t->blocking,
+        awaiting,
+        await_site,
+        target,
+        age,
+        t->spawn_site,
+        __atomic_load_n(&t->polls, __ATOMIC_RELAXED),
+      };
+    }
+  }
+  pthread_mutex_unlock(&fsh_alive_lock);
+  if (snaps && i > 1) qsort(snaps, (size_t)i, sizeof(fsh_task_snap), fsh_snap_cmp);
+  *count_out = i;
+  return snaps;
+}
+
+char *fsh_rt_tasks_json(void) {
+  int64_t n = 0;
+  fsh_task_snap *snaps = fsh_tasks_snapshot(&n);
+  fsh_buf b = { NULL, 0, 0 };
+  fsh_buf_puts(&b, "[");
+  for (int64_t i = 0; i < n; i++) {
+    if (i > 0) fsh_buf_puts(&b, ",");
+    char await_text[96];
+    fsh_await_label(await_text, sizeof await_text, &snaps[i]);
+    fsh_buf_printf(&b, "{\"id\":%lld,\"name\":", (long long)snaps[i].id);
+    fsh_buf_json(&b, snaps[i].name);
+    fsh_buf_puts(&b, ",\"state\":");
+    fsh_buf_json(&b, fsh_state_label(snaps[i].state));
+    fsh_buf_puts(&b, ",\"awaiting\":");
+    fsh_buf_json(&b, await_text);
+    fsh_buf_puts(&b, ",\"awaitSite\":");
+    fsh_buf_json(&b, snaps[i].await_site ? snaps[i].await_site : "");
+    fsh_buf_printf(&b, ",\"ageMs\":%lld,\"spawnSite\":", (long long)snaps[i].age_ms);
+    fsh_buf_json(&b, snaps[i].spawn_site ? snaps[i].spawn_site : "");
+    fsh_buf_printf(&b, ",\"blocking\":%s,\"polls\":%lld}", snaps[i].blocking ? "true" : "false", (long long)snaps[i].polls);
+  }
+  fsh_buf_puts(&b, "]");
+  free(snaps);
+  return b.data;
+}
+
+char *fsh_rt_tasks_table(void) {
+  int64_t n = 0;
+  fsh_task_snap *snaps = fsh_tasks_snapshot(&n);
+  fsh_buf b = { NULL, 0, 0 };
+  if (n == 0) {
+    fsh_buf_puts(&b, "no live tasks\n");
+    free(snaps);
+    return b.data;
+  }
+  fsh_buf_printf(&b, "%-6s %-9s %-10s %-7s %-18s %-24s %s\n", "ID", "STATE", "AGE", "POLLS", "AWAITING", "NAME", "SPAWN SITE");
+  for (int64_t i = 0; i < n; i++) {
+    char await_text[96];
+    fsh_await_label(await_text, sizeof await_text, &snaps[i]);
+    char age_text[32];
+    snprintf(age_text, sizeof age_text, "%lldms", (long long)snaps[i].age_ms);
+    const char *what = await_text[0] ? await_text : "-";
+    const char *name = snaps[i].name[0] ? snaps[i].name : "-";
+    const char *site = snaps[i].spawn_site && snaps[i].spawn_site[0] ? snaps[i].spawn_site : "-";
+    fsh_buf_printf(&b, "%-6lld %-9s %-10s %-7lld %-18s %-24s %s\n",
+      (long long)snaps[i].id, fsh_state_label(snaps[i].state), age_text, (long long)snaps[i].polls, what, name, site);
+  }
+  free(snaps);
+  return b.data;
+}
+
+void fsh_rt_tasks_free(char *p) {
+  free(p);
+}
+
+static char *fsh_tasks_html(void) {
+  int64_t n = 0;
+  fsh_task_snap *snaps = fsh_tasks_snapshot(&n);
+  fsh_buf b = { NULL, 0, 0 };
+  fsh_buf_puts(&b,
+    "<!doctype html><html><head><meta charset=\"utf-8\">"
+    "<title>Fish Task Inspector</title>"
+    "<noscript><meta http-equiv=\"refresh\" content=\"1\"></noscript>"
+    "<style>"
+    "body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin:20px;color:#111;background:#fafafa}"
+    "h1{font-size:16px;margin:0 0 8px}p{font-size:12px;color:#555;margin:0 0 12px}"
+    "table{border-collapse:collapse;width:100%;font-size:13px;background:#fff}"
+    "th,td{border:1px solid #ddd;padding:6px 8px;text-align:left;vertical-align:top}"
+    "th{background:#f0f0f0}"
+    "</style></head><body>"
+    "<h1>Fish Task Inspector</h1>"
+    "<p id=\"meta\">");
+  fsh_buf_printf(&b, "%lld live task%s</p>", (long long)n, n == 1 ? "" : "s");
+  fsh_buf_puts(&b,
+    "<table><thead><tr>"
+    "<th>ID</th><th>State</th><th>Age</th><th>Polls</th><th>Awaiting</th><th>Await Site</th><th>Name</th><th>Spawn Site</th><th>Pool</th>"
+    "</tr></thead><tbody id=\"rows\">");
+  for (int64_t i = 0; i < n; i++) {
+    char await_text[96];
+    fsh_await_label(await_text, sizeof await_text, &snaps[i]);
+    fsh_buf_printf(&b, "<tr><td>%lld</td><td>", (long long)snaps[i].id);
+    fsh_buf_html(&b, fsh_state_label(snaps[i].state));
+    fsh_buf_printf(&b, "</td><td>%lldms</td><td>%lld</td><td>", (long long)snaps[i].age_ms, (long long)snaps[i].polls);
+    fsh_buf_html(&b, await_text[0] ? await_text : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_html(&b, snaps[i].await_site && snaps[i].await_site[0] ? snaps[i].await_site : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_html(&b, snaps[i].name[0] ? snaps[i].name : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_html(&b, snaps[i].spawn_site && snaps[i].spawn_site[0] ? snaps[i].spawn_site : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_puts(&b, snaps[i].blocking ? "blocking" : "worker");
+    fsh_buf_puts(&b, "</td></tr>");
+  }
+  fsh_buf_puts(&b,
+    "</tbody></table>"
+    "<script>"
+    "function cell(tr,v){var td=document.createElement('td');td.textContent=v;tr.appendChild(td);}"
+    "function tick(){fetch('/tasks.json').then(function(r){return r.json();}).then(function(ts){"
+    "var tb=document.getElementById('rows');tb.textContent='';"
+    "document.getElementById('meta').textContent=ts.length+' live task'+(ts.length===1?'':'s');"
+    "for(var i=0;i<ts.length;i++){var t=ts[i],tr=document.createElement('tr');"
+    "cell(tr,String(t.id));cell(tr,t.state);cell(tr,t.ageMs+'ms');cell(tr,String(t.polls));"
+    "cell(tr,t.awaiting||'-');cell(tr,t.awaitSite||'-');cell(tr,t.name||'-');"
+    "cell(tr,t.spawnSite||'-');cell(tr,t.blocking?'blocking':'worker');tb.appendChild(tr);}"
+    "}).catch(function(){});}"
+    "setInterval(tick,500);"
+    "</script></body></html>\n");
+  free(snaps);
+  return b.data;
+}
+
+static int fsh_inspect_fd = -1;
+static int fsh_inspect_pipe[2] = { -1, -1 };
+static pthread_t fsh_inspect_thread;
+static int fsh_inspect_running = 0;
+static int32_t fsh_inspect_stopping = 0;
+static char fsh_inspect_host[64] = "127.0.0.1";
+
+static void fsh_inspect_write_all(int fd, const char *data, size_t len, int64_t deadline) {
+  size_t off = 0;
+  while (off < len && !__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE) && fsh_now() < deadline) {
+#ifdef MSG_NOSIGNAL
+    ssize_t n = send(fd, data + off, len - off, MSG_NOSIGNAL);
+#else
+    ssize_t n = send(fd, data + off, len - off, 0);
+#endif
+    if (n > 0) { off += (size_t)n; continue; }
+    if (n < 0 && errno == EINTR) continue;
+    break;
+  }
+}
+
+static void fsh_inspect_reply(int fd, const char *status, const char *type, const char *body, size_t len) {
+  char head[256];
+  int hlen = snprintf(head, sizeof head,
+    "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+    status, type, len);
+  int64_t deadline = fsh_now() + 2000000000LL;
+  if (hlen > 0 && (size_t)hlen < sizeof head) fsh_inspect_write_all(fd, head, (size_t)hlen, deadline);
+  if (body && len > 0) fsh_inspect_write_all(fd, body, len, deadline);
+}
+
+static int fsh_ascii_ieq(const char *a, const char *b, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    unsigned char ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+    if (ca >= 'A' && ca <= 'Z') ca += 32;
+    if (cb >= 'A' && cb <= 'Z') cb += 32;
+    if (ca != cb) return 0;
+  }
+  return 1;
+}
+
+// Guards against DNS rebinding from untrusted browser origins by requiring Host to match
+// loopback or the configured bind host.
+static int fsh_inspect_host_ok(const char *req) {
+  const char *p = strchr(req, '\n');
+  while (p) {
+    p++;
+    if (*p == '\r' || *p == '\n' || !*p) break;
+    if (fsh_ascii_ieq(p, "host:", 5)) {
+      const char *v = p + 5;
+      while (*v == ' ' || *v == '\t') v++;
+      const char *e = v;
+      while (*e && *e != '\r' && *e != '\n') e++;
+      while (e > v && (e[-1] == ' ' || e[-1] == '\t')) e--;
+      // Strip optional :port (handling bracketed IPv6 [::1]:port).
+      const char *host_end = e;
+      if (v < e && *v == '[') {
+        const char *rb = memchr(v, ']', (size_t)(e - v));
+        if (rb) host_end = rb + 1;
+      } else {
+        for (const char *c = v; c < e; c++) if (*c == ':') { host_end = c; break; }
+      }
+      size_t hlen = (size_t)(host_end - v);
+      if (hlen == 9 && fsh_ascii_ieq(v, "localhost", 9)) return 1;
+      if (hlen == 9 && memcmp(v, "127.0.0.1", 9) == 0) return 1;
+      if (hlen == 5 && memcmp(v, "[::1]", 5) == 0) return 1;
+      size_t blen = strlen(fsh_inspect_host);
+      if (blen > 0 && hlen == blen && fsh_ascii_ieq(v, fsh_inspect_host, blen)) return 1;
+      return 0;
+    }
+    p = strchr(p, '\n');
+  }
+  return 0;
+}
+
+static void fsh_inspect_handle(int c) {
+  struct timeval tv = { 1, 0 };
+  setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+#ifdef SO_NOSIGPIPE
+  int on = 1;
+  setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
+#endif
+  char req[8192];
+  size_t total = 0;
+  int complete = 0;
+  int64_t deadline = fsh_now() + 1000000000LL;
+  while (total < sizeof req - 1 && !__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE) && fsh_now() < deadline) {
+    ssize_t n = recv(c, req + total, sizeof req - 1 - total, 0);
+    if (n > 0) {
+      if (memchr(req + total, 0, (size_t)n) != NULL) {
+        const char *msg = "bad request\n";
+        fsh_inspect_reply(c, "400 Bad Request", "text/plain; charset=utf-8", msg, strlen(msg));
+        return;
+      }
+      total += (size_t)n;
+      req[total] = 0;
+      if (strstr(req, "\r\n\r\n") || strstr(req, "\n\n")) {
+        complete = 1;
+        break;
+      }
+      continue;
+    }
+    if (n < 0 && errno == EINTR) continue;
+    break;
+  }
+  if (total == 0) return;
+  if (!complete) {
+    if (total == sizeof req - 1) {
+      const char *msg = "request header fields too large\n";
+      fsh_inspect_reply(c, "431 Request Header Fields Too Large", "text/plain; charset=utf-8", msg, strlen(msg));
+    }
+    return;
+  }
+  req[total] = 0;
+  if (!fsh_inspect_host_ok(req)) {
+    const char *msg = "forbidden host\n";
+    fsh_inspect_reply(c, "403 Forbidden", "text/plain; charset=utf-8", msg, strlen(msg));
+    return;
+  }
+  if (strncmp(req, "GET ", 4) != 0) {
+    const char *msg = "method not allowed\n";
+    fsh_inspect_reply(c, "405 Method Not Allowed", "text/plain; charset=utf-8", msg, strlen(msg));
+    return;
+  }
+  char *path = req + 4;
+  char *end = path;
+  while (*end && *end != ' ' && *end != '?' && *end != '\r' && *end != '\n') end++;
+  *end = 0;
+  if (strcmp(path, "/") == 0) {
+    char *html = fsh_tasks_html();
+    fsh_inspect_reply(c, "200 OK", "text/html; charset=utf-8", html ? html : "", html ? strlen(html) : 0);
+    free(html);
+  } else if (strcmp(path, "/tasks.json") == 0 || strcmp(path, "/json") == 0) {
+    char *json = fsh_rt_tasks_json();
+    fsh_inspect_reply(c, "200 OK", "application/json", json ? json : "[]", json ? strlen(json) : 2);
+    free(json);
+  } else if (strcmp(path, "/tasks") == 0 || strcmp(path, "/text") == 0) {
+    char *text = fsh_rt_tasks_table();
+    fsh_inspect_reply(c, "200 OK", "text/plain; charset=utf-8", text ? text : "", text ? strlen(text) : 0);
+    free(text);
+  } else {
+    const char *msg = "not found\n";
+    fsh_inspect_reply(c, "404 Not Found", "text/plain; charset=utf-8", msg, strlen(msg));
+  }
+}
+
+// Runs on a dedicated thread outside the worker pool so the inspector stays reachable even when
+// every Fish worker is blocked.
+static void *fsh_inspector_loop(void *arg) {
+  (void)arg;
+  while (!__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE)) {
+    struct pollfd fds[2];
+    fds[0].fd = fsh_inspect_fd;
+    fds[0].events = POLLIN;
+    fds[0].revents = 0;
+    fds[1].fd = fsh_inspect_pipe[0];
+    fds[1].events = POLLIN;
+    fds[1].revents = 0;
+    int r = poll(fds, 2, -1);
+    if (r < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) break;
+    if (fds[0].revents & POLLIN) {
+      while (!__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE)) {
+        int c = FSH_ACCEPT(fsh_inspect_fd);
+        if (c < 0) {
+          if (errno == EINTR || errno == ECONNABORTED || errno == EPROTO) continue;
+          break;
+        }
+        int fl = fcntl(c, F_GETFL, 0);
+        if (fl >= 0) fcntl(c, F_SETFL, fl & ~O_NONBLOCK);
+        fcntl(c, F_SETFD, FD_CLOEXEC);
+        fsh_inspect_handle(c);
+        shutdown(c, SHUT_WR);
+        close(c);
+      }
+    }
+  }
+  return NULL;
+}
+
+static int fsh_inspect_parse_port(const char *s, int *out) {
+  if (!s || !s[0]) return 0;
+  long v = 0;
+  for (const char *p = s; *p; p++) {
+    if (*p < '0' || *p > '9') return 0;
+    v = v * 10 + (*p - '0');
+    if (v > 65535) return 0;
+  }
+  *out = (int)v;
+  return 1;
+}
+
+static void fsh_inspector_start(void) {
+  const char *spec = getenv("FISH_INSPECT");
+  if (!spec || !spec[0] || strcmp(spec, "0") == 0 || strcmp(spec, "false") == 0) return;
+  char host[64] = "127.0.0.1";
+  int port = 9229;
+  if (strcmp(spec, "1") == 0 || strcmp(spec, "true") == 0) {
+    // Default loopback address and port.
+  } else if (fsh_inspect_parse_port(spec, &port)) {
+    // Port-only shorthand binds loopback.
+  } else {
+    const char *colon = strrchr(spec, ':');
+    if (!colon || colon == spec || (size_t)(colon - spec) >= sizeof host || !fsh_inspect_parse_port(colon + 1, &port)) {
+      fprintf(stderr, "fish inspector: invalid FISH_INSPECT '%s' (expected 1, <port>, or <host>:<port>)\n", spec);
+      return;
+    }
+    memcpy(host, spec, (size_t)(colon - spec));
+    host[colon - spec] = 0;
+    if (strcmp(host, "localhost") == 0) strcpy(host, "127.0.0.1");
+  }
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof addr);
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((uint16_t)port);
+  if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+    fprintf(stderr, "fish inspector: invalid FISH_INSPECT host '%s'\n", host);
+    return;
+  }
+  if (pipe(fsh_inspect_pipe) != 0) {
+    fprintf(stderr, "fish inspector: failed to create wakeup pipe\n");
+    return;
+  }
+  fcntl(fsh_inspect_pipe[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_inspect_pipe[1], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_inspect_pipe[0], F_SETFL, O_NONBLOCK);
+  fcntl(fsh_inspect_pipe[1], F_SETFL, O_NONBLOCK);
+  int fd = socket(AF_INET, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
+  if (fd < 0) {
+    fprintf(stderr, "fish inspector: failed to create socket\n");
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+    return;
+  }
+  fcntl(fd, F_SETFD, FD_CLOEXEC);
+  fcntl(fd, F_SETFL, O_NONBLOCK);
+  int on = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+  if (bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(fd, 16) != 0) {
+    fprintf(stderr, "fish inspector: failed to listen on %s:%d (%s)\n", host, port, strerror(errno));
+    close(fd);
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+    return;
+  }
+  socklen_t alen = sizeof addr;
+  int bound = port;
+  if (getsockname(fd, (struct sockaddr *)&addr, &alen) == 0) bound = ntohs(addr.sin_port);
+  snprintf(fsh_inspect_host, sizeof fsh_inspect_host, "%s", host);
+  __atomic_store_n(&fsh_inspect_stopping, 0, __ATOMIC_RELEASE);
+  fsh_inspect_fd = fd;
+  if (pthread_create(&fsh_inspect_thread, NULL, fsh_inspector_loop, NULL) != 0) {
+    close(fd);
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_fd = fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+    return;
+  }
+  fsh_inspect_running = 1;
+  if ((ntohl(addr.sin_addr.s_addr) >> 24) != 127) {
+    fprintf(stderr, "fish inspector: warning: binding non-loopback address %s:%d without authentication\n", host, bound);
+  }
+  fprintf(stderr, "fish inspector listening on http://%s:%d\n", host, bound);
+  fflush(stderr);
+}
+
+static void fsh_inspector_stop(int detach) {
+  if (!fsh_inspect_running) return;
+  __atomic_store_n(&fsh_inspect_stopping, 1, __ATOMIC_RELEASE);
+  char b = 1;
+  ssize_t ignored = write(fsh_inspect_pipe[1], &b, 1);
+  (void)ignored;
+  if (detach) {
+    pthread_detach(fsh_inspect_thread);
+  } else {
+    pthread_join(fsh_inspect_thread, NULL);
+    close(fsh_inspect_fd);
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_fd = fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+  }
+  fsh_inspect_running = 0;
+}
+
+#ifdef FSH_PROFILE
+// Sampling profiler: a dedicated sampler thread sends SIGPROF to registered threads (main,
+// async workers, and blocking pool threads). Each target's async-signal-safe handler walks its
+// own fsh_rt_frames shadow stack into a lock-free ring buffer; the sampler drains the ring into
+// an aggregated stack table and writes a folded-stack or interactive SVG flame graph on exit.
+#define FSH_PROF_MAX_THREADS 1024
+#define FSH_PROF_MAX_DEPTH 64
+#define FSH_PROF_RING 4096
+
+typedef struct {
+  pthread_t tid;
+  int32_t active;
+} fsh_prof_slot;
+
+typedef struct {
+  int32_t depth;
+  const char *names[FSH_PROF_MAX_DEPTH];
+} fsh_prof_sample;
+
+typedef struct {
+  char *stack;
+  uint64_t hash;
+  uint64_t count;
+} fsh_prof_entry;
+
+static pthread_mutex_t fsh_prof_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fsh_prof_cond = PTHREAD_COND_INITIALIZER;
+static fsh_prof_slot fsh_prof_slots[FSH_PROF_MAX_THREADS];
+// Separate 16 KB state array so fsh_prof_drain avoids scanning 2+ MB of sample payloads per tick.
+static int32_t fsh_prof_states[FSH_PROF_RING];
+static fsh_prof_sample fsh_prof_ring[FSH_PROF_RING];
+static uint64_t fsh_prof_write = 0;
+static int32_t fsh_prof_enabled = 0;
+static int32_t fsh_prof_stopping = 0;
+static int32_t fsh_prof_in_flight = 0;
+static int32_t fsh_prof_started = 0;
+static int fsh_prof_main_slot = -1;
+static int64_t fsh_prof_hz = 997;
+static int64_t fsh_prof_threads_seen = 0;
+static char fsh_prof_out[1024] = "fish-profile.svg";
+static pthread_t fsh_prof_thread;
+static fsh_prof_entry *fsh_prof_entries = NULL;
+static size_t fsh_prof_cap = 0;
+static size_t fsh_prof_count = 0;
+static uint64_t fsh_prof_total = 0;
+
+static int fsh_prof_is_active(void) {
+  return __atomic_load_n(&fsh_prof_enabled, __ATOMIC_ACQUIRE) != 0;
+}
+
+static int fsh_prof_register(void) {
+  if (!__atomic_load_n(&fsh_prof_started, __ATOMIC_ACQUIRE) && !__atomic_load_n(&fsh_prof_enabled, __ATOMIC_ACQUIRE)) {
+    // Allow main thread registration during constructor before fsh_prof_started flips to 1.
+    if (fsh_prof_main_slot != -2) return -1;
+  }
+  // Force macOS Mach-O lazy TLV allocation on this thread before SIGPROF can arrive here.
+  (void)__atomic_load_n(&fsh_rt_frames, __ATOMIC_RELAXED);
+  pthread_mutex_lock(&fsh_prof_lock);
+  int found = -1;
+  for (int i = 0; i < FSH_PROF_MAX_THREADS; i++) {
+    if (!fsh_prof_slots[i].active) {
+      fsh_prof_slots[i].tid = pthread_self();
+      fsh_prof_slots[i].active = 1;
+      __atomic_fetch_add(&fsh_prof_threads_seen, 1, __ATOMIC_RELAXED);
+      found = i;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&fsh_prof_lock);
+  return found;
+}
+
+static void fsh_prof_unregister(int slot) {
+  if (slot < 0 || slot >= FSH_PROF_MAX_THREADS) return;
+  pthread_mutex_lock(&fsh_prof_lock);
+  fsh_prof_slots[slot].active = 0;
+  pthread_mutex_unlock(&fsh_prof_lock);
+}
+
+static void fsh_prof_handler(int sig) {
+  (void)sig;
+  int saved_errno = errno;
+  __atomic_fetch_add(&fsh_prof_in_flight, 1, __ATOMIC_SEQ_CST);
+  if (__atomic_load_n(&fsh_prof_enabled, __ATOMIC_SEQ_CST)) {
+    fsh_frame *f = __atomic_load_n(&fsh_rt_frames, __ATOMIC_RELAXED);
+    __atomic_signal_fence(__ATOMIC_ACQUIRE);
+    if (f) {
+      const char *tmp[FSH_PROF_MAX_DEPTH];
+      int32_t depth = 0;
+      while (f && depth < FSH_PROF_MAX_DEPTH) {
+        tmp[depth++] = f->name ? f->name : "<unknown>";
+        f = f->prev;
+      }
+      if (depth > 0) {
+        uint64_t idx = __atomic_fetch_add(&fsh_prof_write, 1, __ATOMIC_RELAXED) & (FSH_PROF_RING - 1);
+        int32_t expected = 0;
+        if (__atomic_compare_exchange_n(&fsh_prof_states[idx], &expected, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+          fsh_prof_ring[idx].depth = depth;
+          for (int32_t i = 0; i < depth; i++) fsh_prof_ring[idx].names[i] = tmp[depth - 1 - i];
+          __atomic_store_n(&fsh_prof_states[idx], 2, __ATOMIC_RELEASE);
+        }
+      }
+    }
+  }
+  __atomic_fetch_sub(&fsh_prof_in_flight, 1, __ATOMIC_SEQ_CST);
+  errno = saved_errno;
+}
+
+static uint64_t fsh_prof_hash(const char *s) {
+  uint64_t h = 14695981039346656037ULL;
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    h ^= (uint64_t)*p;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+static void fsh_prof_table_grow(void) {
+  size_t new_cap = fsh_prof_cap ? fsh_prof_cap * 2 : 256;
+  fsh_prof_entry *next = calloc(new_cap, sizeof(fsh_prof_entry));
+  if (!next) return;
+  for (size_t i = 0; i < fsh_prof_cap; i++) {
+    if (!fsh_prof_entries[i].stack) continue;
+    size_t mask = new_cap - 1;
+    size_t pos = (size_t)(fsh_prof_entries[i].hash & mask);
+    while (next[pos].stack) pos = (pos + 1) & mask;
+    next[pos] = fsh_prof_entries[i];
+  }
+  free(fsh_prof_entries);
+  fsh_prof_entries = next;
+  fsh_prof_cap = new_cap;
+}
+
+static void fsh_prof_record(const char *const *names, int32_t depth) {
+  size_t len = 0;
+  for (int32_t i = 0; i < depth; i++) len += strlen(names[i]) + (i > 0 ? 1 : 0);
+  char *stack = malloc(len + 1);
+  if (!stack) return;
+  char *w = stack;
+  for (int32_t i = 0; i < depth; i++) {
+    if (i > 0) *w++ = ';';
+    size_t n = strlen(names[i]);
+    memcpy(w, names[i], n);
+    w += n;
+  }
+  *w = 0;
+  uint64_t h = fsh_prof_hash(stack);
+  if (fsh_prof_count * 2 >= fsh_prof_cap) fsh_prof_table_grow();
+  if (!fsh_prof_entries || fsh_prof_cap == 0) { free(stack); return; }
+  size_t mask = fsh_prof_cap - 1;
+  size_t pos = (size_t)(h & mask);
+  size_t checked = 0;
+  while (fsh_prof_entries[pos].stack) {
+    if (fsh_prof_entries[pos].hash == h && strcmp(fsh_prof_entries[pos].stack, stack) == 0) {
+      fsh_prof_entries[pos].count++;
+      fsh_prof_total++;
+      free(stack);
+      return;
+    }
+    if (++checked >= fsh_prof_cap) { free(stack); return; }
+    pos = (pos + 1) & mask;
+  }
+  if (fsh_prof_count + 1 >= fsh_prof_cap) { free(stack); return; }
+  fsh_prof_entries[pos].stack = stack;
+  fsh_prof_entries[pos].hash = h;
+  fsh_prof_entries[pos].count = 1;
+  fsh_prof_count++;
+  fsh_prof_total++;
+}
+
+static void fsh_prof_drain(void) {
+  for (size_t i = 0; i < FSH_PROF_RING; i++) {
+    if (__atomic_load_n(&fsh_prof_states[i], __ATOMIC_ACQUIRE) == 2) {
+      int32_t d = fsh_prof_ring[i].depth;
+      const char *names[FSH_PROF_MAX_DEPTH];
+      if (d > FSH_PROF_MAX_DEPTH) d = FSH_PROF_MAX_DEPTH;
+      for (int32_t k = 0; k < d; k++) names[k] = fsh_prof_ring[i].names[k];
+      __atomic_store_n(&fsh_prof_states[i], 0, __ATOMIC_RELEASE);
+      if (d > 0) fsh_prof_record(names, d);
+    }
+  }
+}
+
+static void *fsh_prof_sampler(void *arg) {
+  (void)arg;
+  sigset_t mask;
+  sigemptyset(&mask);
+  sigaddset(&mask, SIGPROF);
+  pthread_sigmask(SIG_BLOCK, &mask, NULL);
+  int64_t step_ns = 1000000000LL / fsh_prof_hz;
+  if (step_ns < 100000LL) step_ns = 100000LL;
+  for (;;) {
+    pthread_mutex_lock(&fsh_prof_lock);
+    if (fsh_prof_stopping) {
+      pthread_mutex_unlock(&fsh_prof_lock);
+      break;
+    }
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_nsec += (long)step_ns;
+    until.tv_sec += until.tv_nsec / 1000000000L;
+    until.tv_nsec %= 1000000000L;
+    pthread_cond_timedwait(&fsh_prof_cond, &fsh_prof_lock, &until);
+    if (fsh_prof_stopping) {
+      pthread_mutex_unlock(&fsh_prof_lock);
+      break;
+    }
+    // Hold fsh_prof_lock while sending SIGPROF so no registered thread can unregister and exit
+    // before pthread_kill runs; the handler never acquires fsh_prof_lock.
+    for (int i = 0; i < FSH_PROF_MAX_THREADS; i++) {
+      if (fsh_prof_slots[i].active) pthread_kill(fsh_prof_slots[i].tid, SIGPROF);
+    }
+    pthread_mutex_unlock(&fsh_prof_lock);
+    fsh_prof_drain();
+  }
+  return NULL;
+}
+
+// Orders '\0' < ';' < all other bytes so children ("foo;bar") always sort immediately after their
+// parent ("foo") rather than being split by sibling names like "foo2" or "foo.bar".
+static int fsh_prof_entry_cmp(const void *a, const void *b) {
+  const unsigned char *p = (const unsigned char *)((const fsh_prof_entry *)a)->stack;
+  const unsigned char *q = (const unsigned char *)((const fsh_prof_entry *)b)->stack;
+  while (*p && *p == *q) { p++; q++; }
+  int ca = *p == 0 ? 0 : *p == ';' ? 1 : (int)*p + 2;
+  int cb = *q == 0 ? 0 : *q == ';' ? 1 : (int)*q + 2;
+  return ca < cb ? -1 : ca > cb ? 1 : 0;
+}
+
+static void fsh_buf_xml(fsh_buf *b, const char *s) {
+  if (!s) return;
+  for (const char *p = s; *p; p++) {
+    if (*p == '&') fsh_buf_puts(b, "&amp;");
+    else if (*p == '<') fsh_buf_puts(b, "&lt;");
+    else if (*p == '>') fsh_buf_puts(b, "&gt;");
+    else if (*p == '"') fsh_buf_puts(b, "&quot;");
+    else if (*p == '\'') fsh_buf_puts(b, "&apos;");
+    else fsh_buf_putn(b, p, 1);
+  }
+}
+
+typedef struct {
+  int32_t depth;
+  uint64_t x_start;
+  uint64_t samples;
+  char *name;
+} fsh_fg_rect;
+
+typedef struct {
+  char *name;
+  uint64_t x_start;
+  uint64_t samples;
+} fsh_fg_open;
+
+static void fsh_fg_push_rect(fsh_fg_rect **rects, size_t *count, size_t *cap, int32_t depth, uint64_t x_start, uint64_t samples, const char *name) {
+  if (!name) return;
+  if (*count == *cap) {
+    size_t ncap = *cap ? *cap * 2 : 128;
+    fsh_fg_rect *next = realloc(*rects, ncap * sizeof(fsh_fg_rect));
+    if (!next) return;
+    *rects = next;
+    *cap = ncap;
+  }
+  char *copy = strdup(name);
+  if (!copy) return;
+  (*rects)[(*count)++] = (fsh_fg_rect){ depth, x_start, samples, copy };
+}
+
+static int fsh_prof_write_svg(FILE *fp, const fsh_prof_entry *sorted, size_t n, uint64_t total) {
+  fsh_fg_rect *rects = NULL;
+  size_t rcount = 0, rcap = 0;
+  fsh_fg_open open[FSH_PROF_MAX_DEPTH];
+  int32_t open_depth = 0;
+  int32_t max_depth = 0;
+  uint64_t cursor = 0;
+
+  if (total > 0) {
+    fsh_fg_push_rect(&rects, &rcount, &rcap, 0, 0, total, "all");
+  }
+  for (size_t i = 0; i < n; i++) {
+    const char *parts[FSH_PROF_MAX_DEPTH];
+    size_t plen[FSH_PROF_MAX_DEPTH];
+    int32_t depth = 0;
+    const char *p = sorted[i].stack;
+    while (*p && depth < FSH_PROF_MAX_DEPTH) {
+      const char *semi = strchr(p, ';');
+      parts[depth] = p;
+      plen[depth] = semi ? (size_t)(semi - p) : strlen(p);
+      depth++;
+      if (!semi) break;
+      p = semi + 1;
+    }
+    if (depth > max_depth) max_depth = depth;
+    int32_t common = 0;
+    while (common < open_depth && common < depth &&
+           strlen(open[common].name) == plen[common] &&
+           memcmp(open[common].name, parts[common], plen[common]) == 0) {
+      common++;
+    }
+    for (int32_t d = open_depth - 1; d >= common; d--) {
+      fsh_fg_push_rect(&rects, &rcount, &rcap, d + 1, open[d].x_start, open[d].samples, open[d].name);
+      free(open[d].name);
+    }
+    for (int32_t d = 0; d < common; d++) open[d].samples += sorted[i].count;
+    int32_t opened = common;
+    for (int32_t d = common; d < depth; d++) {
+      char *copy = malloc(plen[d] + 1);
+      if (!copy) break;
+      memcpy(copy, parts[d], plen[d]);
+      copy[plen[d]] = 0;
+      open[d] = (fsh_fg_open){ copy, cursor, sorted[i].count };
+      opened = d + 1;
+    }
+    open_depth = opened;
+    cursor += sorted[i].count;
+  }
+  for (int32_t d = open_depth - 1; d >= 0; d--) {
+    fsh_fg_push_rect(&rects, &rcount, &rcap, d + 1, open[d].x_start, open[d].samples, open[d].name);
+    free(open[d].name);
+  }
+
+  int width = 1200;
+  int pad = 10;
+  int frame_h = 18;
+  int header_h = 46;
+  int footer_h = 26;
+  int inner_w = width - pad * 2;
+  int height = header_h + footer_h + (max_depth + 2) * frame_h;
+  int base_y = height - footer_h;
+
+  fsh_buf b = { NULL, 0, 0, 0 };
+  fsh_buf_printf(&b,
+    "<?xml version=\"1.0\" standalone=\"no\"?>\n"
+    "<svg version=\"1.1\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\" xmlns=\"http://www.w3.org/2000/svg\">\n"
+    "<style>"
+    "text{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;fill:#111}"
+    ".fg{cursor:pointer}.fg:hover rect{stroke:#111;stroke-width:0.8}"
+    "</style>\n"
+    "<rect width=\"100%%\" height=\"100%%\" fill=\"#f8f8f5\"/>\n"
+    "<text x=\"%d\" y=\"24\" style=\"font-size:16px;font-weight:bold\">Fish Flame Graph (%llu sample%s)</text>\n"
+    "<text id=\"reset\" x=\"%d\" y=\"24\" text-anchor=\"end\" style=\"cursor:pointer;fill:#444;display:none\">Reset Zoom</text>\n",
+    width, height, width, height, pad, (unsigned long long)total, total == 1 ? "" : "s", width - pad);
+
+  if (total == 0) {
+    fsh_buf_printf(&b, "<text x=\"%d\" y=\"%d\">No stack samples collected.</text>\n", pad, header_h + 18);
+  } else {
+    for (size_t i = 0; i < rcount; i++) {
+      double x = pad + ((double)rects[i].x_start / (double)total) * inner_w;
+      double w = ((double)rects[i].samples / (double)total) * inner_w;
+      if (w < 0.1) continue;
+      int y = base_y - (rects[i].depth + 1) * frame_h;
+      double pct = 100.0 * (double)rects[i].samples / (double)total;
+      uint64_t h = fsh_prof_hash(rects[i].name);
+      int cr = rects[i].depth == 0 ? 225 : (int)(205 + (h % 50));
+      int cg = rects[i].depth == 0 ? 190 : (int)(85 + ((h >> 8) % 125));
+      int cb = rects[i].depth == 0 ? 140 : (int)(25 + ((h >> 16) % 55));
+      fsh_buf_printf(&b, "<g class=\"fg\" data-x=\"%.6f\" data-w=\"%.6f\" data-d=\"%d\"><title>",
+        (double)rects[i].x_start / (double)total, (double)rects[i].samples / (double)total, rects[i].depth);
+      fsh_buf_xml(&b, rects[i].name);
+      fsh_buf_printf(&b, " (%llu sample%s, %.2f%%)</title>", (unsigned long long)rects[i].samples, rects[i].samples == 1 ? "" : "s", pct);
+      fsh_buf_printf(&b, "<rect x=\"%.2f\" y=\"%d\" width=\"%.2f\" height=\"%d\" rx=\"2\" fill=\"rgb(%d,%d,%d)\"/>",
+        x, y, w > 1.0 ? w - 0.5 : w, frame_h - 1, cr, cg, cb);
+      int max_chars = (int)((w - 6.0) / 7.2);
+      fsh_buf_printf(&b, "<text x=\"%.2f\" y=\"%d\">", x + 3.0, y + 13);
+      if (max_chars >= 3) {
+        size_t nlen = strlen(rects[i].name);
+        if ((int)nlen <= max_chars) {
+          fsh_buf_xml(&b, rects[i].name);
+        } else {
+          char cut[128];
+          int keep = max_chars - 2;
+          if (keep > (int)sizeof cut - 4) keep = (int)sizeof cut - 4;
+          if (keep < 1) keep = 1;
+          while (keep > 0 && ((unsigned char)rects[i].name[keep] & 0xC0) == 0x80) keep--;
+          memcpy(cut, rects[i].name, (size_t)keep);
+          cut[keep] = '.';
+          cut[keep + 1] = '.';
+          cut[keep + 2] = 0;
+          fsh_buf_xml(&b, cut);
+        }
+      }
+      fsh_buf_puts(&b, "</text></g>\n");
+    }
+  }
+
+  fsh_buf_printf(&b,
+    "<script><![CDATA[\n"
+    "(function(){\n"
+    "var pad=%d,iw=%d,gs=document.getElementsByClassName('fg'),rst=document.getElementById('reset');\n"
+    "function zoom(zx,zw){\n"
+    "  rst.style.display=(zx>0||zw<1)?'block':'none';\n"
+    "  for(var i=0;i<gs.length;i++){\n"
+    "    var g=gs[i],x=parseFloat(g.getAttribute('data-x')),w=parseFloat(g.getAttribute('data-w'));\n"
+    "    var x0=Math.max(x,zx),x1=Math.min(x+w,zx+zw);\n"
+    "    if(x1<=x0){g.style.display='none';continue;}\n"
+    "    g.style.display='';\n"
+    "    var px=pad+((x0-zx)/zw)*iw,pw=((x1-x0)/zw)*iw;\n"
+    "    var r=g.getElementsByTagName('rect')[0],t=g.getElementsByTagName('text')[0];\n"
+    "    r.setAttribute('x',px.toFixed(2));r.setAttribute('width',Math.max(0.5,pw-0.5).toFixed(2));\n"
+    "    t.setAttribute('x',(px+3).toFixed(2));\n"
+    "  }\n"
+    "}\n"
+    "for(var i=0;i<gs.length;i++){gs[i].addEventListener('click',function(){zoom(parseFloat(this.getAttribute('data-x')),parseFloat(this.getAttribute('data-w')));});}\n"
+    "rst.addEventListener('click',function(){zoom(0,1);});\n"
+    "})();\n"
+    "]]></script>\n</svg>\n", pad, inner_w);
+
+  int ok = !b.failed && b.data != NULL && fwrite(b.data, 1, b.len, fp) == b.len;
+  free(b.data);
+  for (size_t i = 0; i < rcount; i++) free(rects[i].name);
+  free(rects);
+  return ok;
+}
+
+static int fsh_prof_is_folded(const char *path) {
+  size_t len = strlen(path);
+  return (len >= 7 && strcmp(path + len - 7, ".folded") == 0) ||
+         (len >= 4 && strcmp(path + len - 4, ".txt") == 0);
+}
+
+__attribute__((constructor)) static void fsh_prof_init(void) {
+  const char *out = getenv("FISH_PROFILE");
+  if (out && (strcmp(out, "0") == 0 || strcmp(out, "off") == 0 || strcmp(out, "false") == 0)) return;
+  if (out && out[0] && strcmp(out, "1") != 0 && strcmp(out, "true") != 0) {
+    int n = snprintf(fsh_prof_out, sizeof fsh_prof_out, "%s", out);
+    if (n < 0 || (size_t)n >= sizeof fsh_prof_out) {
+      fprintf(stderr, "fish profile: FISH_PROFILE path is too long (max %zu bytes)\n", sizeof fsh_prof_out - 1);
+      return;
+    }
+  }
+  const char *hz_env = getenv("FISH_PROFILE_HZ");
+  if (hz_env && hz_env[0]) {
+    char *end = NULL;
+    long v = strtol(hz_env, &end, 10);
+    if (end && *end == '\0' && v >= 10 && v <= 10000) fsh_prof_hz = v;
+  }
+  fsh_prof_main_slot = -2;
+  fsh_prof_main_slot = fsh_prof_register();
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = fsh_prof_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  if (sigaction(SIGPROF, &sa, NULL) != 0) {
+    fsh_prof_unregister(fsh_prof_main_slot);
+    fsh_prof_main_slot = -1;
+    return;
+  }
+  __atomic_store_n(&fsh_prof_enabled, 1, __ATOMIC_SEQ_CST);
+  if (pthread_create(&fsh_prof_thread, NULL, fsh_prof_sampler, NULL) != 0) {
+    __atomic_store_n(&fsh_prof_enabled, 0, __ATOMIC_SEQ_CST);
+    fsh_prof_unregister(fsh_prof_main_slot);
+    fsh_prof_main_slot = -1;
+    return;
+  }
+  __atomic_store_n(&fsh_prof_started, 1, __ATOMIC_RELEASE);
+}
+
+__attribute__((destructor)) static void fsh_prof_fini(void) {
+  if (!__atomic_load_n(&fsh_prof_started, __ATOMIC_ACQUIRE)) return;
+  __atomic_store_n(&fsh_prof_started, 0, __ATOMIC_RELEASE);
+  pthread_mutex_lock(&fsh_prof_lock);
+  fsh_prof_stopping = 1;
+  pthread_cond_broadcast(&fsh_prof_cond);
+  pthread_mutex_unlock(&fsh_prof_lock);
+  pthread_join(fsh_prof_thread, NULL);
+  __atomic_store_n(&fsh_prof_enabled, 0, __ATOMIC_SEQ_CST);
+  for (int i = 0; i < 500 && __atomic_load_n(&fsh_prof_in_flight, __ATOMIC_SEQ_CST) > 0; i++) {
+    struct timespec ts = { 0, 100000 };
+    nanosleep(&ts, NULL);
+  }
+  signal(SIGPROF, SIG_IGN);
+  fsh_prof_unregister(fsh_prof_main_slot);
+  fsh_prof_drain();
+
+  fsh_prof_entry *sorted = fsh_prof_count > 0 ? malloc(fsh_prof_count * sizeof(fsh_prof_entry)) : NULL;
+  size_t n = 0;
+  if (sorted) {
+    for (size_t i = 0; i < fsh_prof_cap; i++) {
+      if (fsh_prof_entries[i].stack) sorted[n++] = fsh_prof_entries[i];
+    }
+    if (n > 1) qsort(sorted, n, sizeof(fsh_prof_entry), fsh_prof_entry_cmp);
+  }
+
+  FILE *fp = fopen(fsh_prof_out, "wb");
+  if (!fp) {
+    fprintf(stderr, "fish profile: failed to write '%s' (%s)\n", fsh_prof_out, strerror(errno));
+  } else {
+    int ok = 1;
+    if (fsh_prof_is_folded(fsh_prof_out)) {
+      for (size_t i = 0; i < n; i++) {
+        if (fprintf(fp, "%s %llu\n", sorted[i].stack, (unsigned long long)sorted[i].count) < 0) { ok = 0; break; }
+      }
+    } else {
+      ok = fsh_prof_write_svg(fp, sorted, n, fsh_prof_total);
+    }
+    if (ferror(fp)) ok = 0;
+    if (fclose(fp) != 0) ok = 0;
+    if (!ok) {
+      fprintf(stderr, "fish profile: failed to write '%s'\n", fsh_prof_out);
+    } else {
+      int64_t threads = __atomic_load_n(&fsh_prof_threads_seen, __ATOMIC_RELAXED);
+      fprintf(stderr, "fish profile: %llu samples across %lld thread%s written to %s\n",
+        (unsigned long long)fsh_prof_total, (long long)threads, threads == 1 ? "" : "s", fsh_prof_out);
+    }
+  }
+
+  free(sorted);
+  for (size_t i = 0; i < fsh_prof_cap; i++) free(fsh_prof_entries[i].stack);
+  free(fsh_prof_entries);
+  fsh_prof_entries = NULL;
+  fsh_prof_cap = fsh_prof_count = 0;
+}
+#endif
+
+// Single-threaded deterministic simulation executor: no worker, timer, reactor, or pool threads.
+static int32_t fsh_sim_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, void *out, const char *name, const char *site) {
+  fsh_sim_stopping = 0;
+  fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size, name, site);
+  for (int phase = 0; phase < 2; phase++) {
+    if (phase == 1) {
+      if (fsh_panicked || fsh_main_task->outcome == 2) break;
+      fsh_timeouts_main_returned();
+    }
+    for (;;) {
+      if (fsh_panicked) break;
+      if (phase == 0 && __atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) == FSH_DONE) break;
+      if (phase == 1) {
+        int32_t claimed = __atomic_load_n(&fsh_timeouts_claimed, __ATOMIC_ACQUIRE);
+        if (fsh_timeouts_task ? __atomic_load_n(&fsh_timeouts_task->state, __ATOMIC_ACQUIRE) == FSH_DONE : !claimed) break;
+      }
+      fsh_sim_fire_due();
+      if (fsh_sim_ready_count > 0) {
+        int64_t idx = (int64_t)(fsh_sim_next_u64(fsh_sim_sched_rng) % (uint64_t)fsh_sim_ready_count);
+        fsh_task *t = fsh_sim_ready[idx];
+        fsh_sim_ready[idx] = fsh_sim_ready[--fsh_sim_ready_count];
+        fsh_run(t);
+        continue;
+      }
+      int64_t next_ns = 0;
+      if (fsh_sim_next_event_ns(&next_ns)) {
+        if (next_ns > fsh_sim_now_ns) fsh_sim_now_ns = next_ns;
+        fsh_sim_fire_due();
+        continue;
+      }
+      if (phase == 0 && __atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) == FSH_DONE) break;
+      if (phase == 1) {
+        int32_t claimed = __atomic_load_n(&fsh_timeouts_claimed, __ATOMIC_ACQUIRE);
+        if (fsh_timeouts_task ? __atomic_load_n(&fsh_timeouts_task->state, __ATOMIC_ACQUIRE) == FSH_DONE : !claimed) break;
+      }
+      fprintf(stderr, "fish sim deadlock (seed %llu) at %lldms: no runnable tasks, timers, or network events\n",
+        (unsigned long long)fsh_sim_seed_val, (long long)(fsh_sim_now_ns / 1000000));
+      for (fsh_task *a = fsh_alive; a; a = a->next) {
+        const char *aw = a->awaiting ? a->awaiting : "idle";
+        fprintf(stderr, "  task #%lld (%s): awaiting %s\n", (long long)a->id, a->name && a->name[0] ? a->name : "<anonymous>", aw);
+      }
+      fflush(stderr);
+      fsh_abandoned = 1;
+      exit(101);
+    }
+  }
+  fsh_sim_stopping = 1;
+  fsh_sim_drain_events();
+  while (fsh_timer_count > 0) fsh_timer_fire(fsh_timer_take(), 0);
+  free(fsh_timers);
+  fsh_timers = NULL;
+  fsh_timer_capacity = 0;
+  for (;;) {
+    fsh_task *t = fsh_alive;
+    if (!t) break;
+    fsh_unlink(t);
+    __atomic_store_n(&t->state, FSH_DONE, __ATOMIC_RELEASE);
+    t->drop(t->memory);
+    if (t->joiner) fsh_task_release(t->joiner);
+    t->joiner = NULL;
+    fsh_task_release(t);
+  }
+  while (fsh_timeout_count > 0) {
+    fsh_timeout t = fsh_timeout_take(0);
+    ((void (*)(void *))t.vtable[0])(t.block);
+  }
+  free(fsh_timeouts);
+  fsh_timeouts = NULL;
+  fsh_timeout_capacity = 0;
+  if (fsh_timeouts_waiter) fsh_task_release(fsh_timeouts_waiter);
+  if (fsh_timeouts_task) fsh_task_release(fsh_timeouts_task);
+  fsh_timeouts_waiter = fsh_timeouts_task = NULL;
+  fsh_sim_free_globals();
+  if (fsh_panicked) {
+    fsh_task_release(fsh_main_task);
+    exit(101);
+  }
+  int32_t outcome = fsh_main_task->outcome;
+  memcpy(out, fsh_output(fsh_main_task), output_size);
+  fsh_main_task->outcome = 0;
+  fsh_task_release(fsh_main_task);
+  return outcome;
+}
+
 // Runs an async main: starts the workers, runs main as the first task until it is done or a
 // task panics, stops them, drops every task still alive, and gives main's outcome, its poll
 // result copied to out.
-int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, void *out) {
+int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, void *out, const char *name, const char *site) {
+  fsh_sim_init();
+  if (fsh_sim_active) return fsh_sim_run(poll, drop, drop_output, frame, frame_size, output_size, out, name, site);
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
   fsh_workers = cores > 0 ? cores : 1;
   fsh_queues = calloc(fsh_workers, sizeof(fsh_queue));
   fsh_threads = calloc(fsh_workers, sizeof(pthread_t));
   for (int64_t i = 0; i < fsh_workers; i++) pthread_mutex_init(&fsh_queues[i].lock, NULL);
-  fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size);
+  fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size, name, site);
   // The reactor is ready before any task can wait on a socket.
   fsh_io_start();
+  fsh_inspector_start();
   // Workers get 64 MiB stacks, since main's calls run on them: deep recursion, as a compiler's
   // over a program's tree, goes as far as it does under a JavaScript engine. Only the pages a
   // thread touches are ever committed.
@@ -8402,6 +10554,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
     for (int64_t i = 0; i < fsh_workers; i++) pthread_detach(fsh_threads[i]);
     pthread_detach(fsh_timer_thread);
     pthread_detach(fsh_io_thread);
+    fsh_inspector_stop(1);
     if (fsh_panicked) exit(101);
     memcpy(out, fsh_output(fsh_main_task), output_size);
     return fsh_main_task->outcome;
@@ -8415,6 +10568,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_mutex_unlock(&fsh_timer_lock);
   pthread_join(fsh_timer_thread, NULL);
   fsh_io_stop();
+  fsh_inspector_stop(0);
   while (fsh_timer_count > 0) fsh_timer_fire(fsh_timer_take(), 0);
   free(fsh_timers);
   // Every task not done is dropped where it stopped; one dropping may release another.
@@ -9378,6 +11532,7 @@ static int fsh_tls_host_name(const char *host) {
 // host name or an IP address, against the PEM certificates in ca, or the system's when ca is
 // empty, as the ca option takes it. Gives why it can't, or an empty string.
 fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
+  if (s->sim) return fsh_tls_said("TLS is not supported in simulation mode (FISH_SIM_SEED)");
   // A second session would replace the first, leaking it and racing a read through a clone.
   if (s->tls) return fsh_tls_said("the stream already speaks TLS");
   char *host = fsh_rt_str_cstring(name);
@@ -9447,6 +11602,7 @@ fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
 // Has a listener's connections speak TLS as the server, with the PEM certificate chain in cert
 // and its private key in key. Gives why it can't, or an empty string.
 fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
+  if (listener->sim) return fsh_tls_said("TLS is not supported in simulation mode (FISH_SIM_SEED)");
   SSL_CTX *ctx = fsh_tls_context(1);
   if (!ctx) return fsh_tls_said("can't set up TLS");
   const char *why = NULL;

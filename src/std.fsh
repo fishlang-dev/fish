@@ -8313,6 +8313,118 @@ export async function flushTraces(): Promise<void> {
   await __traceSend();
 }
 `,
+  // Live snapshot of active async tasks, imported as std:inspect.
+  inspect: String.raw`
+declare function fsh_rt_tasks_json(): Ptr<u8>;
+declare function fsh_rt_tasks_table(): Ptr<u8>;
+declare function fsh_rt_tasks_free(p: Ptr<u8>): void;
+
+// One active task in the async runtime at the moment of the snapshot.
+export type TaskInfo = {
+  id: i64;
+  name: string;
+  state: string;
+  awaiting: string;
+  awaitSite: string;
+  ageMs: i64;
+  spawnSite: string;
+  blocking: boolean;
+  polls: i64;
+};
+
+// A JSON array of every live task, matching TaskInfo[].
+export function tasksJson(): string {
+  let text = "[]";
+  unsafe {
+    const p = fsh_rt_tasks_json();
+    if (!p.isNull()) {
+      text = fromCString(p);
+      fsh_rt_tasks_free(p);
+    }
+  }
+  return text;
+}
+
+// A human-readable table of every live task for logging or terminal output.
+export function formatTasks(): string {
+  let text = "";
+  unsafe {
+    const p = fsh_rt_tasks_table();
+    if (!p.isNull()) {
+      text = fromCString(p);
+      fsh_rt_tasks_free(p);
+    }
+  }
+  return text;
+}
+
+// Live snapshot of every active task, sorted by task id.
+export function tasks(): TaskInfo[] {
+  const raw = tasksJson();
+  try {
+    return JSON.parse<TaskInfo[]>(raw);
+  } catch (_e) {
+    return [];
+  }
+}
+`,
+  // Deterministic simulation controls, imported as std:sim. Active when FISH_SIM_SEED is set.
+  sim: String.raw`
+declare function fsh_rt_sim_enabled(): i32;
+declare function fsh_rt_sim_seed(): u64;
+declare function fsh_rt_sim_now(): i64;
+declare function fsh_rt_sim_advance(ms: i64): void;
+declare function fsh_rt_sim_partition(a: Ptr<u8>, b: Ptr<u8>): void;
+declare function fsh_rt_sim_heal(a: Ptr<u8>, b: Ptr<u8>): void;
+declare function fsh_rt_sim_set_delay(minMs: i64, maxMs: i64): void;
+declare function fsh_rt_sim_set_drop_rate(rate: f64): void;
+declare function fsh_rt_sim_reset_faults(): void;
+
+// Whether the runtime is executing in deterministic simulation mode (FISH_SIM_SEED set).
+export function enabled(): boolean {
+  return unsafe { fsh_rt_sim_enabled() !== 0 };
+}
+
+// The active simulation seed (0 when simulation mode is not enabled).
+export function seed(): u64 {
+  return unsafe { fsh_rt_sim_seed() };
+}
+
+// Current virtual monotonic clock in milliseconds (or real monotonic ms outside sim mode).
+export function now(): i64 {
+  return unsafe { fsh_rt_sim_now() };
+}
+
+// Advances the virtual clock by ms milliseconds and fires any newly due timers and network events.
+export function advance(ms: i64): void {
+  unsafe { fsh_rt_sim_advance(ms) };
+}
+
+// Injects a symmetric network partition between endpoints a and b (host, host:port, or "*").
+export function partition(a: string, b: string): void {
+  unsafe { fsh_rt_sim_partition(cString(a), cString(b)) };
+}
+
+// Removes a symmetric network partition between endpoints a and b.
+export function heal(a: string, b: string): void {
+  unsafe { fsh_rt_sim_heal(cString(a), cString(b)) };
+}
+
+// Sets simulated network latency range in milliseconds for virtual TCP delivery.
+export function setDelay(minMs: i64, maxMs: i64 = minMs): void {
+  unsafe { fsh_rt_sim_set_delay(minMs, maxMs) };
+}
+
+// Sets simulated network drop/reset probability in [0.0, 1.0] for virtual TCP operations.
+export function setDropRate(rate: f64): void {
+  unsafe { fsh_rt_sim_set_drop_rate(rate) };
+}
+
+// Clears all partitions, delays, and drop-rate faults.
+export function resetFaults(): void {
+  unsafe { fsh_rt_sim_reset_faults() };
+}
+`,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
   // buffer so readers can be mixed.
   stdin: String.raw`
@@ -9003,7 +9115,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.

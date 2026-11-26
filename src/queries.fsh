@@ -3,7 +3,7 @@
 // rebuild whose files all read as they did is not checked again, and one after an edit checks only
 // the bodies that changed. `fishc build`, `fishc check` and `fishc watch` all drive it; the
 // language server holds one per program, and the cache on disk reads and writes one here.
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import type { InstanceId } from "./arenas.fsh";
 import { expanded, sourced } from "./analysis.fsh";
@@ -16,6 +16,7 @@ import { composedMoves, loadedContents, reloaded, spillFrom, takenBodies, textIn
 import { load, type Loaded } from "./modules.fsh";
 import { movedStmt } from "./nodes.fsh";
 import type { Stmt } from "./parser.fsh";
+import { liftFuzz } from "./fuzz.fsh";
 import { liftTests } from "./tests.fsh";
 import { FILE_SPAN } from "./program.fsh";
 
@@ -245,6 +246,7 @@ export function checkedLoaded(compilation: Compilation, loaded: Loaded, taken: S
       let own: string[] = [];
       for (const m of modules.modules) if (m.pkg === first && !m.path.startsWith("std:")) own.push(m.path);
       liftTests(program, modules.modules, own);
+      liftFuzz(program, modules.modules, own);
     }
     statements = expanded(program, modules, library);
   } catch (e) {
@@ -265,7 +267,15 @@ function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, lo
   let held = new Map<string, string>();
   for (const [path, text] of open) held.set(path, text);
   try {
-    return load(compilation, file, src, move (path) => held.get(resolve(path)));
+    return load(compilation, file, src, move (path): string | undefined => {
+      let out = held.get(resolve(path));
+      if (out === undefined) {
+        try {
+          out = held.get(realpathSync(path));
+        } catch (_e) {}
+      }
+      return out;
+    });
   } finally {
     stageEnd(compilation.session, "parse", started);
     for (const f of compilation.looked) looked.push(f);
