@@ -3060,14 +3060,14 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     for (let i: usize = 0; i < f.params.length; i++) {
       const p: Ref<Param> = f.params[i]!;
       if (p.rest || p.optional || p.default !== undefined) throw unsupported("rest, optional and default parameters on C functions", p);
-      if (!this.crossesToC(params[i]!, f.start)) throw new CompileError("E1002", `a C function's parameter can't be a '${this.tables.typing.show(params[i]!)}'; C takes numbers, booleans and raw pointers like 'Ptr<u8>'`, p.start, p.end);
+      if (!this.crossesToC(params[i]!, f.start)) throw new CompileError("E1002", `a C function's parameter can't be a '${this.tables.typing.show(params[i]!)}'; C takes numbers, booleans, raw pointers like 'Ptr<u8>' and '@c' structs`, p.start, p.end);
     }
     {
       let made = this.tables.arenas.instanceMut(id);
       made.signature = [...params];
     }
     const returns = this.resolver().resolveType(f.returnType);
-    if (returns !== "void" && !this.crossesToC(returns, f.start)) throw new CompileError("E1002", `a C function can't return a '${this.tables.typing.show(returns)}'; C gives numbers, booleans and raw pointers`, f.returnType.start, f.returnType.end);
+    if (returns !== "void" && !this.crossesToC(returns, f.start)) throw new CompileError("E1002", `a C function can't return a '${this.tables.typing.show(returns)}'; C gives numbers, booleans, raw pointers and '@c' structs`, f.returnType.start, f.returnType.end);
     {
       let record = this.tables.arenas.instanceMut(id);
       record.returns = returns;
@@ -3078,8 +3078,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // Whether a value crosses to C as it is: a number, a boolean or a raw pointer. std's FileHandle
   // hands its counted descriptor to the runtime, which is a pointer to C; only std may, as a
   // program could otherwise make one that closes a descriptor it doesn't own.
-  private crossesToC(t: Type, at: usize): boolean {
+  /** @throws {CompileError} */
+  private crossesToC(this: Mut<this>, t: Type, at: usize): boolean throws CompileError {
     if (isNumeric(t) || t === "boolean" || this.kindOf(t) === "pointer") return true;
+    // A `@c` struct crosses by value, laid out as C lays it out.
+    if (this.recOf(t)?.kind === "class" && this.tables.typing.rec(t as ClassType).c === true) {
+      const c = this.registry().classIdOf(t as ClassType);
+      this.registry().layout(c);
+      return true;
+    }
     if (stdModuleAt(this.tables.files, at) === undefined) return false;
     const r = this.recOf(t);
     const held = r?.kind === "ref" ? this.recOf(r.to) : r;
@@ -4095,6 +4102,9 @@ class BodyChecker implements Context, GuardHost {
 
   checking(): InstanceId {
     return this.state.instanceId;
+  }
+  library(): boolean {
+    return this.cx.library;
   }
   macroBody(id: BodyId): boolean {
     return this.cx.macroBodies.has(id);

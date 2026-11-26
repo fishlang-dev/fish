@@ -19,7 +19,7 @@ import { EXPRESSION_FORMS, IMPORT_META_MEMBERS, unsupported } from "./unsupporte
 import { isAsyncDisposeKey, isDisposeKey, isIteratorKey, keyParts, leafOf, unknownKey } from "./keys.fsh";
 import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex.fsh";
 import { BUFFER_ENCODINGS, BUFFER_READS, BUFFER_REFUSED, BUFFER_STATICS, JSON_VALUE_NAME, STD_BASE } from "./std.fsh";
-import { parseArgsArgs } from "./parseargs.fsh";
+import { parseArgsArgs, typedParseArgs, writtenFields } from "./parseargs.fsh";
 import { parseExpression } from "./parser.fsh";
 import { holesOf, quoted, type Category } from "./quote.fsh";
 import { holdsNull } from "./defaults.fsh";
@@ -158,7 +158,7 @@ function blockArity(which: string, name: string, std: boolean): usize | undefine
   if (which === "AbortSignal") return name === "throwIfAborted" ? 0 : undefined;
   if (which === "TaskGroup") return name === "spawn" ? 1 : undefined;
   if (which === "TcpListener" || which === "UnixListener") return name === "accept" ? 0 : name === "listenTls" && std ? 2 : undefined;
-  if (which === "TcpStream" || which === "UnixStream") return name === "read" || name === "write" ? 1 : name === "startTls" && std ? 2 : undefined;
+  if (which === "TcpStream" || which === "UnixStream") return name === "read" || name === "write" ? 1 : name === "startTls" && std ? 3 : name === "protocol" && std ? 0 : undefined;
   return undefined;
 }
 
@@ -215,6 +215,8 @@ export interface Context {
   macroBody(id: BodyId): boolean;
   // The instance being checked.
   checking(): InstanceId;
+  // Whether the program is a library, whose runtime its first spawn starts, so a sync export may.
+  library(): boolean;
   tables(this: Mut<this>): Mut<Tables>;
   // The typing, for reading records from a method that changes nothing.
   typing(): Ref<Typing>;
@@ -2073,7 +2075,7 @@ export class Expressions<C extends Context> implements Union<C> {
     // what `spawnBlocking` becomes.
     const spawning = callee.kind === "ident" && callee.name === "blocking spawn" ? "spawnBlocking" : "spawn";
     if (callee.kind === "ident" && ((callee.name === "spawn" && (!this.ctx.byName().has("spawn") || inStd)) || (callee.name === "timer spawn" && inStd) || callee.name === "blocking spawn")) {
-      if (!this.ctx.st.async) throw new CompileError("E0301", "'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
+      if (!this.ctx.st.async && !(spawning === "spawn" && this.ctx.library())) throw new CompileError("E0301", "'spawn' can only be used inside an 'async' function, where the runtime is running", callee.start, callee.end);
       if (e.args.length !== 1) throw new CompileError("E0305", "'spawn' takes the Promise to run, like 'spawn(save(user))'", e.start, e.end);
       // `spawn(async () => ...)` runs the arrow's body as the task: its call is what is spawned.
       const given: Ref<Expr> = e.args[0]!;
@@ -2278,6 +2280,16 @@ export class Expressions<C extends Context> implements Union<C> {
       this.shown(e.args);
       this.ctx.tables().inspectCalls.add(cloneExpr(e));
       return { type: "string", what: "'inspect'" };
+    }
+    // `parseArgs<T>()` reads the arguments into T, through std's port with specs from its fields.
+    if (util === "parseArgs" && e.typeArgs.length === 1 && !this.ctx.view().parsedArgs.has(e)) {
+      if (e.optional) throw new CompileError("E0505", "'parseArgs' is always there, so it is called without '?.'", e.start, e.end);
+      const members = writtenFields(e.typeArgs[0]!, this.ctx.decls());
+      const tb = this.ctx.tables();
+      const typed = typedParseArgs(tb.ids, e, members, tb.files, target!.name);
+      tb.parsedArgs.add(typed.inner);
+      const made = this.ctx.tables().rewrites.replace(e, typed.call);
+      return { type: this.value(made), what: "'parseArgs'" };
     }
     // `parseArgs(config)` calls std's port with the arguments its literal says, once.
     if (util === "parseArgs" && !this.ctx.view().parsedArgs.has(e)) {
@@ -5219,8 +5231,9 @@ export class Expressions<C extends Context> implements Union<C> {
       this.coerce(e.args[0]!, given, of, arg4897_1);
     }
     if (callee.name === "available") return { type: "i64", what: "'available'" };
-    // std's own TLS setup, `startTls(serverName, ca)` on a stream and `listenTls(cert, key)` on a
-    // listener, giving why it failed, or an empty string.
+    // std's own TLS setup, `startTls(serverName, ca, alpn)` on a stream and `listenTls(cert, key)`
+    // on a listener, giving why it failed, or an empty string; `protocol()` gives what ALPN chose.
+    if (callee.name === "protocol") return { type: "string", what: "'protocol'" };
     if (callee.name === "startTls" || callee.name === "listenTls") {
       for (const arg of e.args) {
         this.expect(arg, "string");
