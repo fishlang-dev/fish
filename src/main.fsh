@@ -42,6 +42,7 @@ import type { Type, Typing } from "./typing.fsh";
 import { rustShim, type Shim } from "./rustshim.fsh";
 import { split } from "./split.fsh";
 import { allocators, allocs, allocsJson, formatAllocs } from "./allocs.fsh";
+import { formatLayouts, layoutsJson, layoutsOf, probing } from "./typelayout.fsh";
 import { binaryFunctions, bloat, bloatJson, formatBloat, irFunctions, type Sized } from "./bloat.fsh";
 import { withDebugInfo } from "./debuginfo.fsh";
 import { watchProgram, type Rebuilt } from "./watch.fsh";
@@ -1553,6 +1554,26 @@ function allocsReport(file: string, release: boolean, top: string | undefined, j
   return process.exit(0);
 }
 
+// `fishc layout`: a type's layout, as `layoutsOf` gives it.
+/** @throws {Error | IoError} */
+function layoutTypes(file: string, named: string, json: boolean): never {
+  if (!file.endsWith(".fsh")) fail(`fishc layout: '${file}' isn't a .fsh file; a type is laid out as the program that names it compiles it`);
+  if (!existsSync(file)) fail(`fishc layout: '${file}' doesn't exist`);
+  if (named.trim() === "") fail("fishc layout: name a type, as in fishc layout main.fsh Shape or 'Box<i64>'");
+  let src = "";
+  try {
+    src = readFileSync(file, "utf8");
+    const layouts = layoutsOf(file, src, named);
+    process.stdout.write(json ? layoutsJson(layouts) : formatLayouts(layouts));
+  } catch (e) {
+    // An error in the type named is shown under the line the probe gives it.
+    if (e instanceof CompileError) console.error(painted(e, file, probing(src, named)));
+    else console.error(`fishc layout: ${(e as { message: string }).message}`);
+    process.exit(1);
+  }
+  return process.exit(0);
+}
+
 // A directory `fishc survey` can read, holding TypeScript.
 /** @throws {IoError} */
 function checkProject(dir: string, fish: boolean = false) {
@@ -1679,6 +1700,10 @@ async function main(): Promise<void> {
   if (command === "demangle") {
     if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "names")) fail("usage: fishc demangle [<binary>] [--names <file.fshnames>]");
     demangleReport(named, values.names);
+  }
+  if (command === "layout") {
+    if (positionals.length !== 3 || flags.some((k) => k !== "panic" && k !== "json")) fail("usage: fishc layout <file.fsh> <type> [--json]");
+    layoutTypes(named!, positionals[2]!, values.json === true);
   }
   if (command === "survey") {
     const dirs = positionals.slice(1);
@@ -1931,7 +1956,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
