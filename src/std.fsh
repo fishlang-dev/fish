@@ -2,8 +2,9 @@ import type { Compilation } from "./compilation.fsh";
 import type { CompileError, Source } from "./diag.fsh";
 import { AST } from "./ast.fsh";
 import { nextId, renumberStmts, Rewrites, someNode, walk, type AnyNode } from "./nodes.fsh";
-import { rebuiltStmts } from "./rebuild.fsh";
+import { cloneStmt, rebuiltStmts } from "./rebuild.fsh";
 import { parse, type Pattern, type Stmt } from "./parser.fsh";
+import { programShape } from "./printer.fsh";
 import { TYPED_ARRAY_NAMES } from "./typing.fsh";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
@@ -9613,8 +9614,8 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // Response.html takes an Html, so every program that serves HTTP has it.
   if (httpUsed || uses(written, htmls, HTML_NAMES)) chosen = chosen.concat(htmls);
   // A C function the program declares already, as a std module it imports may, is declared once.
-  const foreign = foreignNames(written);
-  if (foreign.size > 0) chosen = chosen.filter((s) => !cDeclaration(s) || !declaredNames(s).some((n) => foreign.has(n)));
+  const foreign = foreignShapes(written);
+  if (foreign.size > 0) chosen = chosen.filter((s) => !declaredNames(s).some((n) => sameForeign(foreign, s, n)));
   if (own.size > 0) renamed(chosen, { kind: "own", names: own });
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.
@@ -9729,9 +9730,9 @@ function fromPackage(s: Ref<Stmt>): boolean {
 function uses(written: Ref<Stmt[]>, library: Ref<Stmt[]>, wanted: Ref<string[]>): boolean {
   let declared = new Set<string>();
   for (const s of written) for (const n of declaredNames(s)) declared.add(n);
-  // A C function both declare is one function, as a std module and a section may each need it.
-  const foreign = foreignNames(written);
-  for (const s of library) for (const n of declaredNames(s)) if (declared.has(n) && !(foreign.has(n) && cDeclaration(s))) return false;
+  // A C function both declare alike is one function, as a std module and a section may each need it.
+  const foreign = foreignShapes(written);
+  for (const s of library) for (const n of declaredNames(s)) if (declared.has(n) && !sameForeign(foreign, s, n)) return false;
   // A name the program declares is its own, not the library's.
   return someNode({ of: "stmts", node: written }, (n) => {
     const name = nameOf(n);
@@ -9744,11 +9745,21 @@ function cDeclaration(s: Ref<Stmt>): boolean {
   return s.kind === "declare" && s.body.kind === "function" && s.body.body === undefined;
 }
 
-// The C functions these statements declare.
-function foreignNames(statements: Ref<Stmt[]>): Set<string> {
-  let out = new Set<string>();
-  for (const s of statements) if (cDeclaration(s)) for (const n of declaredNames(s)) out.add(n);
+// The C functions these statements declare, each with its declaration's shape.
+function foreignShapes(statements: Ref<Stmt[]>): Map<string, string> {
+  let out = new Map<string, string>();
+  for (const s of statements) {
+    if (!cDeclaration(s)) continue;
+    const shape = programShape([cloneStmt(s)]);
+    for (const n of declaredNames(s)) out.set(n, shape);
+  }
   return out;
+}
+
+// Whether `s` declares the C function `n` exactly as the program does.
+function sameForeign(foreign: Ref<Map<string, string>>, s: Ref<Stmt>, n: string): boolean {
+  const theirs = foreign.get(n);
+  return theirs !== undefined && cDeclaration(s) && programShape([cloneStmt(s)]) === theirs;
 }
 
 // The top-level names a statement binds: a declaration's, each name its `let` or `const`
