@@ -70,7 +70,22 @@ export type Session = {
   // the tables of instances that are never compiled as each one's check ends.
   plain?: boolean;
   borrows?: BorrowEvent[];
+  // What `std:build` tells a program: the target, whether the build is a release one, and each
+  // `--flag`; undefined is a dev build for the host with no flags.
+  build?: BuildInfo;
 };
+
+// A `--flag name` or `--flag name=value` given to a build.
+export type BuildFlag = { name: string; value: string | null };
+// `triple` is the one `--target` gave, or empty for the host.
+export type BuildInfo = { triple: string; release: boolean; flags: BuildFlag[] };
+
+// The build `given` describes, made a release one or not, and for `triple` when one is given.
+export function buildFor(given: Ref<BuildInfo | undefined>, triple: string | undefined, release: boolean): BuildInfo {
+  let flags: BuildFlag[] = [];
+  if (given !== undefined) for (const f of given.flags) flags.push({ name: f.name, value: f.value });
+  return { triple: triple ?? (given !== undefined ? given.triple : ""), release, flags };
+}
 
 export function newSession(): Session {
   return { locking: { locked: false }, engineHook: false, std: { tree: [], cached: false, parses: 0 } };
@@ -97,7 +112,7 @@ export function macroCompilation(c: Ref<Compilation>): Compilation {
     fileNames = copied;
   }
   return {
-    session: { locking: { locked: false }, engineHook: c.session.engineHook, std: { tree: [], cached: false, parses: 0 } },
+    session: { locking: { locked: false }, engineHook: c.session.engineHook, std: { tree: [], cached: false, parses: 0 }, build: c.session.build === undefined ? undefined : buildFor(c.session.build, undefined, c.session.build!.release) },
     ids: { last: c.ids.last },
     rewrites: new Rewrites(),
     names: copyNames(c.names),

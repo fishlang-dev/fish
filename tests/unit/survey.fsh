@@ -703,7 +703,7 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
   list(described(depsOf(dir)), sorted([
     "constructor: unknown undefined false", "toString: unknown undefined false",
     "bench: pure undefined false", "utils: pure undefined false", "crypto: native undefined false", "shared: pure undefined false",
-    "async-mutex: std Semaphore false", "bcryptjs: planned Auth primitives false", "query-string: std URL and URLSearchParams false", "socket.io: pure undefined true",
+    "async-mutex: std Semaphore false", "bcryptjs: std std:auth's hashPassword, which hashes with argon2id rather than bcrypt false", "query-string: std URL and URLSearchParams false", "socket.io: pure undefined true",
   ]), "the dependencies");
   done(dir);
   const listed = project([["package.json", '{"dependencies":["express"]}'], ["a.ts", "const x = 1;\n"]]);

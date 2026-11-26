@@ -2006,8 +2006,10 @@ type ServeInfo = { hostname: string; port: i64 };
 // Body sizes are in bytes and timeouts in milliseconds; a timeout of 0 is none.
 // unix is a socket path to serve on in place of a port, removed when serve stops. tls has the
 // server speak HTTPS with a PEM certificate chain and its private key. trace: false
-// keeps the server's requests out of the program's traces, when tracing is on.
-type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64; trace?: boolean };
+// keeps the server's requests out of the program's traces, when tracing is on. restart: true has
+// SIGUSR2 start the program again, handing it the listener: once it listens, this one stops
+// accepting and drains, and if it fails to, this one keeps serving.
+type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64; trace?: boolean; restart?: boolean };
 type ServeHandler = (req: Request) => Promise<Response>;
 // What serve's options settle for each connection, under a name no program can write.
 type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64; secure: boolean; trace: boolean };
@@ -2039,9 +2041,13 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     secure: options.tls !== null,
     trace: options.trace !== false,
   };
-  // With no signal of its own, the server stops at the first SIGINT or SIGTERM.
+  const restart = options.restart === true;
+  if (restart && unix !== null) throw new IoError("serve's restart option hands over a TCP listener; a unix socket can't be restarted yet");
+  // With no signal of its own, the server stops at the first SIGINT or SIGTERM, or once a restart
+  // has a new process listening.
   const given = options.signal;
-  const stop = given ?? shutdownSignal();
+  const restarted = new AbortController();
+  const stop = AbortSignal.any([given ?? shutdownSignal(), restarted.signal]);
   const live = shared({ count: new Atomic(0) });
   {
     // The listener closes as this block ends, so no one new waits while connections drain.
@@ -2057,6 +2063,8 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     const bound = listener.port;
     const listen = options.onListen;
     if (listen !== null) listen({ hostname: unix ?? hostname, port: bound });
+    unsafe { fsh_rt_restart_ready() };
+    if (restart) spawn(__serveRestarts(bound, restarted, stop.clone()));
     const boxed: ServeHandler = handler;
     // A request with no Host header gets the server's address, an IPv6 one bracketed as in a URL,
     // or localhost, as curl sends over a socket.
@@ -2078,6 +2086,43 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   while (live.count.load() > 0) await sleep(10);
   // The last requests' spans go out before serve returns, since the program may end right after.
   if (limits.trace && __traceOn()) await __traceSend();
+}
+
+declare function fsh_rt_restart_ready(): void;
+declare function fsh_rt_restart_spawn(port: i64): i64;
+declare function fsh_rt_restart_wait(fd: i64, ms: i64): i64;
+declare function fsh_rt_signal_listen(n: i64): i64;
+declare function fsh_rt_signal_count(n: i64): i64;
+declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
+
+// Each SIGUSR2 while the server runs starts the program again on its listener, and once the new
+// process listens, stops this one's accepting through done.
+// ponytail: looks for the signal every 100 ms; a wake from the signal's thread would be sooner.
+async function __serveRestarts(port: i64, done: AbortController, stop: AbortSignal): Promise<void> {
+  let usr2: i64 = 0;
+  for (let n: i64 = 1; n < 65; n++) if (unsafe { !fsh_rt_signal_name(n).isNull() && fromCString(fsh_rt_signal_name(n)) === "SIGUSR2" }) usr2 = n;
+  let seen = unsafe { fsh_rt_signal_listen(usr2) };
+  while (true) {
+    try {
+      await sleep(100, stop);
+    } catch (e) {
+      return;
+    }
+    const now = unsafe { fsh_rt_signal_count(usr2) };
+    if (now <= seen) continue;
+    seen = now;
+    const ready = unsafe { fsh_rt_restart_spawn(port) };
+    if (ready < 0) {
+      console.error("serve: the program couldn't be started again for a restart, so this one keeps serving");
+      continue;
+    }
+    const said = await spawnBlocking(() => unsafe { fsh_rt_restart_wait(ready, 60000) });
+    if (said === 1) {
+      done.abort();
+      return;
+    }
+    console.error(said === 0 ? "serve: the new process ended before it listened, so this one keeps serving" : "serve: the new process didn't listen within a minute and was stopped, so this one keeps serving");
+  }
 }
 
 // What a request's head says: its request line and headers.
@@ -6906,6 +6951,8 @@ async function* grpcReplies(call: GrpcCall | null, method: string, service: stri
 
 export const STD_MODULES: Record<string, string> = {
   grpc: GRPC,
+  // What a build is for, made per build from its target, release mode and flags by the loader.
+  build: "",
   // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
   // they panic where they are made.
   assert: String.raw`
@@ -9005,6 +9052,260 @@ export class Pool {
 `,
   // Redis over RESP2, as node-redis's createClient shapes it: commands on a pool of connections,
   // and publish and subscribe.
+  // JSON Web Tokens and password hashes over OpenSSL, whose calls live in the TLS half of the
+  // runtime: signJwt, verifyJwt, hashPassword and verifyPassword.
+  auth: String.raw`import { randomBytes } from "crypto";
+
+declare function fsh_rt_crypto_sign(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, out: MutPtr<u8>): i64;
+declare function fsh_rt_crypto_verify(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, sig: Ptr<u8>, sigLength: i64): i64;
+declare function fsh_rt_crypto_kdf(kind: i64, password: Ptr<u8>, passwordLength: i64, salt: Ptr<u8>, saltLength: i64, a: i64, b: i64, c: i64, out: MutPtr<u8>, outLength: i64): i64;
+declare function fsh_rt_crypto_missing(): Ptr<u8>;
+
+export type JwtAlgorithm = "HS256" | "HS384" | "HS512" | "RS256" | "ES256" | "EdDSA";
+
+// Why a token was refused, with a code to branch on: "malformed", "algorithm", "key",
+// "signature", "expired", "notBefore", "audience", "issuer" or "claims".
+export class JwtError {
+  name: string = "JwtError";
+  message: string;
+  code: string;
+  constructor(code: string, message: string) {
+    this.code = code;
+    this.message = message;
+  }
+}
+
+// A stored password hash that can't be read, or a hash this OpenSSL can't make.
+export class PasswordError {
+  name: string = "PasswordError";
+  message: string;
+  constructor(message: string) {
+    this.message = message;
+  }
+}
+
+export type SignJwtOptions = { alg?: JwtAlgorithm; expiresIn?: i64; notBefore?: i64; audience?: string; issuer?: string; subject?: string };
+export type VerifyJwtOptions = { algorithms: JwtAlgorithm[]; audience?: string; issuer?: string; clockTolerance?: i64 };
+
+const __JWT_ALGORITHMS: JwtAlgorithm[] = ["HS256", "HS384", "HS512", "RS256", "ES256", "EdDSA"];
+
+function __jwtNumber(alg: JwtAlgorithm): i64 {
+  return __JWT_ALGORITHMS.indexOf(alg);
+}
+
+function __b64url(bytes: Ref<u8[]>): string {
+  return bytes.toBase64({ alphabet: "base64url", omitPadding: true });
+}
+
+function __unb64url(text: string, what: string): u8[] throws JwtError {
+  if (!/^[A-Za-z0-9_-]*$/.test(text)) throw new JwtError("malformed", "the token's " + what + " isn't base64url");
+  try {
+    return u8.fromBase64(text, { alphabet: "base64url" });
+  } catch (e) {
+    throw new JwtError("malformed", "the token's " + what + " isn't base64url");
+  }
+}
+
+// A pointer is taken to an element, so an empty input is passed as one byte of length 0.
+function __bytesOrOne(b: Ref<u8[]>): u8[] {
+  return b.length === 0 ? [0 as u8] : b.clone();
+}
+
+function __cryptoMissing(): string {
+  return unsafe { fromCString(fsh_rt_crypto_missing()) };
+}
+
+function __objectOf(text: string, what: string): Map<string, Json> throws JwtError {
+  let v: Json = null;
+  try {
+    v = JSON.parse(text);
+  } catch (e) {
+    throw new JwtError(what === "claims" ? "claims" : "malformed", "the token's " + what + " isn't JSON: " + e.message);
+  }
+  if (v instanceof Map) return v;
+  throw new JwtError(what === "claims" ? "claims" : "malformed", "the token's " + what + " must be a JSON object");
+}
+
+// Each claim the options give, set where the claims don't already have it.
+function __withClaim(m: Mut<Map<string, Json>>, name: string, value: Json): void throws JwtError {
+  if (m.has(name)) throw new JwtError("claims", "the claims already hold '" + name + "', which the options set too; give it in one place");
+  m.set(name, value);
+}
+
+// A signed token for the claims, which serialize as a JSON object. HS algorithms take the shared
+// secret; RS256, ES256 and EdDSA take a PEM private key.
+export function signJwt<T>(claims: Ref<T>, key: string | u8[], options?: SignJwtOptions): string throws JwtError {
+  const alg: JwtAlgorithm = options?.alg ?? "HS256";
+  let m = __objectOf(JSON.stringify(claims), "claims");
+  const now = Date.now() / 1000;
+  if (!m.has("iat")) m.set("iat", now as f64);
+  const expiresIn = options?.expiresIn;
+  if (expiresIn !== undefined) __withClaim(m, "exp", (now + expiresIn) as f64);
+  const notBefore = options?.notBefore;
+  if (notBefore !== undefined) __withClaim(m, "nbf", (now + notBefore) as f64);
+  const audience = options?.audience;
+  if (audience !== undefined) __withClaim(m, "aud", audience);
+  const issuer = options?.issuer;
+  if (issuer !== undefined) __withClaim(m, "iss", issuer);
+  const subject = options?.subject;
+  if (subject !== undefined) __withClaim(m, "sub", subject);
+  const enc = new TextEncoder();
+  const input = __b64url(enc.encode('{"alg":"' + alg + '","typ":"JWT"}')) + "." + __b64url(enc.encode(JSON.stringify(m)));
+  const k: u8[] = typeof key === "string" ? enc.encode(key) : key;
+  if (k.length === 0) throw new JwtError("key", "signJwt needs a non-empty key");
+  const data = enc.encode(input);
+  let out: u8[] = new Array(1024).fill(0 as u8);
+  const n = unsafe { fsh_rt_crypto_sign(__jwtNumber(alg), ptrOf(k[0]), k.length as i64, ptrOf(data[0]), data.length as i64, mutPtrOf(out[0])) };
+  if (n === -2) throw new JwtError("key", "JWT signing needs OpenSSL: " + __cryptoMissing());
+  if (n < 0) throw new JwtError("key", alg.startsWith("HS") ? "OpenSSL couldn't sign with the secret" : "the key isn't a PEM private key " + alg + " signs with (" + (alg === "RS256" ? "RSA of 2048 bits or more" : alg === "ES256" ? "EC on P-256" : "Ed25519") + ")");
+  return input + "." + __b64url(out.slice(0, n));
+}
+
+function __numberClaim(m: Ref<Map<string, Json>>, name: string): f64 | null throws JwtError {
+  const v = m.get(name);
+  if (v === null) return null;
+  if (typeof v === "number") return v;
+  throw new JwtError("claims", "the token's '" + name + "' claim isn't a number of seconds");
+}
+
+// The token's claims as T, once its signature checks under the key with one of the algorithms
+// given, it hasn't expired, and its audience and issuer are the ones asked for. HS algorithms
+// take the shared secret; RS256, ES256 and EdDSA a PEM public key.
+export function verifyJwt<T>(token: string, key: string | u8[], options: VerifyJwtOptions): T throws JwtError {
+  const parts = token.split(".");
+  if (parts.length !== 3) throw new JwtError("malformed", "a JWT has three parts separated by '.', this has " + String(parts.length));
+  const dec = new TextDecoder();
+  const header = __objectOf(dec.decode(__unb64url(parts[0], "header")), "header");
+  const named = header.get("alg");
+  if (typeof named !== "string") throw new JwtError("malformed", "the token's header names no 'alg'");
+  let alg: JwtAlgorithm | null = null;
+  for (const a of options.algorithms) if (a === named) alg = a;
+  if (alg === null) throw new JwtError("algorithm", "the token is signed with '" + named + "', which isn't one of the algorithms allowed: " + options.algorithms.join(", "));
+  if (header.has("crit")) throw new JwtError("malformed", "the token's header has critical extensions, which verifyJwt doesn't know");
+  const enc = new TextEncoder();
+  const k: u8[] = typeof key === "string" ? enc.encode(key) : key;
+  if (k.length === 0) throw new JwtError("key", "verifyJwt needs a non-empty key");
+  const data = enc.encode(parts[0] + "." + parts[1]);
+  const raw = __unb64url(parts[2], "signature");
+  const sig = __bytesOrOne(raw);
+  const ok = unsafe { fsh_rt_crypto_verify(__jwtNumber(alg!), ptrOf(k[0]), k.length as i64, ptrOf(data[0]), data.length as i64, ptrOf(sig[0]), raw.length as i64) };
+  if (ok === -2) throw new JwtError("key", "JWT verification needs OpenSSL: " + __cryptoMissing());
+  if (ok === -1) throw new JwtError("key", "the key isn't a PEM public key " + alg! + " verifies with");
+  if (ok !== 1) throw new JwtError("signature", "the token's signature doesn't match");
+  const payload = dec.decode(__unb64url(parts[1], "payload"));
+  const claims = __objectOf(payload, "claims");
+  const now = (Date.now() as f64) / 1000.0;
+  const tolerance = (options.clockTolerance ?? 0) as f64;
+  const exp = __numberClaim(claims, "exp");
+  if (exp !== null && now >= exp + tolerance) throw new JwtError("expired", "the token expired at " + String(exp));
+  const nbf = __numberClaim(claims, "nbf");
+  if (nbf !== null && now + tolerance < nbf) throw new JwtError("notBefore", "the token isn't valid before " + String(nbf));
+  const audience = options.audience;
+  if (audience !== undefined) {
+    const aud = claims.get("aud");
+    let found = false;
+    if (typeof aud === "string") found = aud === audience;
+    else if (Array.isArray(aud)) for (const a of aud) if (typeof a === "string" && a === audience) found = true;
+    if (!found) throw new JwtError("audience", "the token isn't for the audience '" + audience + "'");
+  }
+  const issuer = options.issuer;
+  if (issuer !== undefined) {
+    const iss = claims.get("iss");
+    if (typeof iss !== "string" || iss !== issuer) throw new JwtError("issuer", "the token wasn't issued by '" + issuer + "'");
+  }
+  try {
+    return JSON.parse<T>(payload);
+  } catch (e) {
+    throw new JwtError("claims", "the token's claims don't fit the type asked for: " + e.message);
+  }
+}
+
+function __kdf(kind: i64, password: string, salt: Ref<u8[]>, a: i64, b: i64, c: i64, length: i64): u8[] throws PasswordError {
+  const pw = new TextEncoder().encode(password);
+  const p = __bytesOrOne(pw);
+  let out: u8[] = new Array(length).fill(0 as u8);
+  const ok = unsafe { fsh_rt_crypto_kdf(kind, ptrOf(p[0]), pw.length as i64, ptrOf(salt[0]), salt.length as i64, a, b, c, mutPtrOf(out[0]), length) };
+  if (ok === -2) throw new PasswordError("password hashing needs OpenSSL: " + __cryptoMissing());
+  if (ok === -1) throw new PasswordError("argon2id needs OpenSSL 3.2 or newer; upgrade it and build the program again");
+  if (ok !== 1) throw new PasswordError("OpenSSL refused the hash's parameters");
+  return out;
+}
+
+// An argon2id hash of the password as a PHC string, with OWASP's minimum parameters (19 MiB, two
+// passes, one lane) and a random 16-byte salt. It runs on the blocking pool.
+export async function hashPassword(password: string): Promise<string> throws PasswordError {
+  const made = await spawnBlocking(() => __hashPassword(password));
+  return made;
+}
+
+function __hashPassword(password: string): string throws PasswordError {
+  const salt = randomBytes(16);
+  const hash = __kdf(0, password, salt, 19456, 2, 1, 32);
+  return "$argon2id$v=19$m=19456,t=2,p=1$" + salt.toBase64({ omitPadding: true }) + "$" + hash.toBase64({ omitPadding: true });
+}
+
+// Whether the password is the one hashed, for argon2id and scrypt PHC strings. Run on the
+// blocking pool, the comparison taking the same time wherever the bytes differ.
+export async function verifyPassword(password: string, hash: string): Promise<boolean> throws PasswordError {
+  const same = await spawnBlocking(() => __verifyPassword(password, hash));
+  return same;
+}
+
+function __phcParams(text: string, names: string[]): i64[] throws PasswordError {
+  let out: i64[] = [];
+  const parts = text.split(",");
+  if (parts.length !== names.length) throw new PasswordError("the hash's parameters aren't " + names.join(", "));
+  for (let i: usize = 0; i < names.length; i++) {
+    const kv = parts[i].split("=");
+    const n = kv.length === 2 && kv[0] === names[i] && /^[0-9]{1,10}$/.test(kv[1]) ? parseInt(kv[1]) : null;
+    if (n === null) throw new PasswordError("the hash's parameters aren't " + names.join(", "));
+    out.push(n);
+  }
+  return out;
+}
+
+function __phcBytes(text: string): u8[] throws PasswordError {
+  if (!/^[A-Za-z0-9+/]+$/.test(text)) throw new PasswordError("the hash's salt or digest isn't base64");
+  try {
+    return u8.fromBase64(text);
+  } catch (e) {
+    throw new PasswordError("the hash's salt or digest isn't base64");
+  }
+}
+
+function __verifyPassword(password: string, hash: string): boolean throws PasswordError {
+  const f = hash.split("$");
+  let kind: i64 = 0;
+  let a: i64 = 0;
+  let b: i64 = 0;
+  let c: i64 = 0;
+  let salt: u8[] = [];
+  let want: u8[] = [];
+  if (f.length === 6 && f[0] === "" && f[1] === "argon2id" && f[2] === "v=19") {
+    const p = __phcParams(f[3], ["m", "t", "p"]);
+    if (p[0] < 8 || p[0] > 4194304 || p[1] < 1 || p[1] > 1000 || p[2] < 1 || p[2] > 255) throw new PasswordError("the argon2id hash's parameters are out of range");
+    a = p[0];
+    b = p[1];
+    c = p[2];
+    salt = __phcBytes(f[4]);
+    want = __phcBytes(f[5]);
+  } else if (f.length === 5 && f[0] === "" && f[1] === "scrypt") {
+    kind = 1;
+    const p = __phcParams(f[2], ["ln", "r", "p"]);
+    if (p[0] < 1 || p[0] > 24 || p[1] < 1 || p[1] > 64 || p[2] < 1 || p[2] > 64) throw new PasswordError("the scrypt hash's parameters are out of range");
+    a = 1 << p[0];
+    b = p[1];
+    c = p[2];
+    salt = __phcBytes(f[3]);
+    want = __phcBytes(f[4]);
+  } else throw new PasswordError("the hash isn't an argon2id or scrypt PHC string");
+  if (salt.length < 8 || want.length < 16 || want.length > 128) throw new PasswordError("the hash's salt or digest is too short");
+  const got = __kdf(kind, password, salt, a, b, c, want.length as i64);
+  let diff: u8 = 0;
+  for (let i: usize = 0; i < want.length; i++) diff = diff | (got[i] ^ want[i]);
+  return diff === 0;
+}
+`,
   redis: String.raw`// A reply as the server gives it: a status or bulk string, an integer, an array, or nil.
 export type RedisReply = null | string | i64 | RedisReply[];
 
@@ -11392,7 +11693,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
