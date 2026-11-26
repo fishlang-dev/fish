@@ -1172,13 +1172,6 @@ export function copyFor(tables: Mut<Tables>, classId: ClassId, bodyId: BodyId): 
     const there = f.scope !== undefined ? f.scope.get(n) : undefined;
     scope.set(to, there !== undefined ? there : c.globals!.get(n)!);
   }
-  let defaults: [usize, { name: string; empty: boolean }][] = [];
-  for (let i: usize = 0; i < f.params.length; i++) {
-    const declared = tables.defaulted.get(f.params[i]!);
-    if (declared !== undefined) defaults.push([i, declared]);
-  }
-  let prologue: boolean[] = [];
-  for (const st of f.body) prologue.push(tables.prologues.has(st));
   let copy = cloneBody(f);
   copy.name = `${tables.typing.rec(c.type).name}.${f.name}`;
   copy.self = receiverFor(f.self, c.type);
@@ -1188,19 +1181,38 @@ export function copyFor(tables: Mut<Tables>, classId: ClassId, bodyId: BodyId): 
   copy.template = undefined;
   copy.copyOf = bodyId;
   copy.id = nextId(tables.ids);
-  if (names.size > 0) {
-    copy.body = apartStmts(tables.ids, f.body, names);
-    let params: Param[] = [];
-    for (const p of f.params) params.push(apartParam(tables.ids, p, names));
-    copy.params = params;
-    if (f.returnType !== undefined) copy.returnType = apartTypeNode(tables.ids, f.returnType, names);
-    for (const d of defaults) tables.defaulted.set(cloneParam(copy.params[d[0]]!), { name: d[1].name, empty: d[1].empty });
-    for (let i: usize = 0; i < copy.body.length; i++) if (prologue[i] === true) tables.prologues.add(cloneStmt(copy.body[i]!));
-  }
+  if (names.size > 0) renumbered(tables.ids, tables.defaulted, tables.prologues, f, copy, names);
   const added = tables.arenas.addBody(copy).bodyId;
   let info = tables.arenas.classMut(classId);
   info.copies.set(bodyId, added);
   return added;
+}
+
+// Gives `copy` its own nodes, made from `f`'s with fresh ids and each type `names` maps renamed,
+// keeping which parameters had defaults and which statements are prologue.
+function renumbered(ids: Mut<Ids>, defaulted: Mut<Tables["defaulted"]>, prologues: Mut<Tables["prologues"]>, f: Ref<Body>, copy: Mut<Body>, names: Ref<Map<string, string>>): void {
+  copy.body = apartStmts(ids, f.body, names);
+  let params: Param[] = [];
+  for (const p of f.params) params.push(apartParam(ids, p, names));
+  copy.params = params;
+  if (f.returnType !== undefined) copy.returnType = apartTypeNode(ids, f.returnType, names);
+  for (let i: usize = 0; i < f.params.length; i++) {
+    const declared = defaulted.get(f.params[i]!);
+    if (declared !== undefined) defaulted.set(cloneParam(copy.params[i]!), { name: declared.name, empty: declared.empty });
+  }
+  for (let i: usize = 0; i < f.body.length; i++) if (prologues.has(f.body[i]!)) prologues.add(cloneStmt(copy.body[i]!));
+}
+
+// A generic function's body for one instance alone, with nodes of its own, so what the instance's
+// check lowers differently from another's, as `o[k]` reading the field its own `K` names, is kept
+// apart from theirs.
+export function instanceCopy(tables: Mut<Tables>, bodyId: BodyId): BodyId {
+  const f = tables.arenas.bodyOf(bodyId);
+  let copy = cloneBody(f);
+  copy.copyOf = bodyId;
+  copy.id = nextId(tables.ids);
+  renumbered(tables.ids, tables.defaulted, tables.prologues, f, copy, new Map<string, string>());
+  return tables.arenas.addBody(copy).bodyId;
 }
 
 // A copy of a body as written, keeping its nodes' ids.

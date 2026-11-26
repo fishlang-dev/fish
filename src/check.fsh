@@ -1,5 +1,5 @@
 import { memberKey, type Replaced } from "./edits.fsh";
-import { cloneBody, cloneSignature, declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.fsh";
+import { cloneBody, cloneSignature, declareClass, extend, inherited, instanceCopy, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.fsh";
 import { crossingOf, rustClassOf } from "./rust.fsh";
 import { newDeclarations, newTables, timingEnd, timingStart, type Compilation, type Declarations, type Tables } from "./compilation.fsh";
 import { copyNames, CompileError, compileErrors, named, withFixes, type Fix } from "./diag.fsh";
@@ -21,7 +21,7 @@ import { CLASS_ASKER, comptimeName, infer, GenericClasses, GenericClassesState, 
 import { unsatisfied, type Members, type Refused } from "./interfaces.fsh";
 import { Registry, RegistryState, type RegistryHost } from "./registry.fsh";
 import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost } from "./resolve.fsh";
-import { openParam } from "./typefns.fsh";
+import { openParam, perInstance } from "./typefns.fsh";
 import { lowerDefaults, writtenName } from "./defaults.fsh";
 import { ASYNC_DISPOSE, DISPOSE, LIVE, idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
 import { unsupported, unsupportedDeclaration } from "./unsupported.fsh";
@@ -1346,6 +1346,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   demanded: usize;
   instancingState: InstancingState;
   querying: Set<string>;
+  // Whether a generic function's definition is being checked, where a type computed per instance
+  // is refused rather than stood in for.
+  definingGeneric: boolean;
+  // Whether that definition's check met such a type in a statement it went on past.
+  perInstanceSeen: boolean;
   // A generic definition's placeholder for each comptime argument, one per argument.
   placeholders: NodeMap<Expr, Type>;
   // The targets some `break` leaves, and the loops some `continue` repeats.
@@ -1418,6 +1423,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.instancingState = new InstancingState();
     this.querying = new Set<string>();
     this.placeholders = new NodeMap<Expr, Type>();
+    this.definingGeneric = false;
+    this.perInstanceSeen = false;
     this.broken = new NodeSet<Stmt>();
     this.continued = new NodeSet<Stmt>();
     this.inProgress = new Set<InstanceId>();
@@ -1763,7 +1770,27 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   /** @throws {CompileError} */
+  // A generic function whose definition needs a type only each instance can compute: what its
+  // definition's check reported is dropped, its recorded failure with it, and each call's instance
+  // is checked instead.
+  private perInstanceOnly(this: Mut<this>, id: BodyId, reported: usize): void {
+    this.errors.splice(reported as i64);
+    this.failed.delete(id);
+    this.perInstanceSeen = false;
+    // Its definition's own instance, left queued by a signature that failed before its body was
+    // checked, stands for no call; checked with its placeholders, it would fail the same way.
+    this.instancingState.perInstance.add(id);
+    const made = this.instancingState.definitions.get(id);
+    if (made !== undefined) this.instancingState.pending = this.instancingState.pending.filter((p) => p !== made);
+  }
+
   recover(this: Mut<this>, e: CompileError): void {
+    const checking = this.beingChecked;
+    const placeholder = checking !== undefined && !this.tables.arenas.instanceOf(checking).concrete;
+    if ((this.definingGeneric || placeholder) && perInstance(e)) {
+      this.perInstanceSeen = true;
+      return;
+    }
     if (e.code === "E0113") this.unending = true;
     for (const x of this.errors) if (x.start === e.start && x.end === e.end && x.message === e.message) return;
     this.errors.push(e);
@@ -1844,7 +1871,15 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
 
   /** @throws {CompileError} */
   resolveIn(this: Mut<this>, scope: Ref<Map<string, Type>> | undefined, t: Ref<TypeNode>): Type {
-    return this.resolver().resolveIn(scope, t);
+    try {
+      return this.resolver().resolveIn(scope, t);
+    } catch (e) {
+      // A call inferring its callee's type arguments reads a `T[K]` over placeholders as a
+      // placeholder of its own; the instance it makes computes it. A generic definition still
+      // refuses it, which its check below takes as checking per instance.
+      if (this.definingGeneric || !(e instanceof CompileError) || !perInstance(e)) throw e;
+      return this.tables.typing.typeParameter("per instance", undefined, undefined);
+    }
   }
 
   /** @throws {CompileError} */
@@ -2065,10 +2100,22 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       }
     }
     for (const id of [...this.funcs]) {
+      const reported = this.errors.length;
       try {
+        this.definingGeneric = this.instancing().generic(id);
+        this.perInstanceSeen = false;
         const definition = this.definition(id);
         this.checkBody(definition);
+        this.definingGeneric = false;
+        if (this.perInstanceSeen) this.perInstanceOnly(id, reported);
       } catch (e) {
+        this.definingGeneric = false;
+        // `keyof T` and `T[K]` over the function's own type parameters are computed per instance,
+        // so a generic function using them is checked as each call instantiates it.
+        if (e instanceof CompileError && perInstance(e) && this.instancing().generic(id)) {
+          this.perInstanceOnly(id, reported);
+          continue;
+        }
         // A package's function Fish can't type is refused where a program calls it.
         if (this.tables.arenas.bodyOf(id).js === undefined || !(e instanceof CompileError)) {
           // A bad signature fails before the body's check does, and fails each call of it as well.
@@ -2208,7 +2255,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     for (const id of this.instancing().all()) {
       const i = this.tables.arenas.instanceOf(id);
       const b = bodyOf(this.tables.arenas, i);
-      if (i.concrete && compiled.has(b.id) && b.js === undefined && !checkedOnly(this.tables, i)) compiledIds.push(id);
+      // An instance's own copy of a function checked per instance is compiled as its original is.
+      const as = b.copyOf !== undefined && this.instancingState.perInstance.has(b.copyOf) ? this.tables.arenas.bodyOf(b.copyOf).id : b.id;
+      if (i.concrete && compiled.has(as) && b.js === undefined && !checkedOnly(this.tables, i)) compiledIds.push(id);
     }
     for (const c of this.closures) {
       const i = this.tables.arenas.instanceOf(c);
@@ -3457,6 +3506,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           return;
         }
         expected = copy;
+      }
+      // A function checked only per instance lowers its body by its own types, so each instance
+      // is checked and compiled from a copy of its own.
+      const shared = this.tables.arenas.instanceOf(id).body;
+      if (this.tables.arenas.instanceOf(id).concrete && this.instancingState.perInstance.has(shared)) {
+        const apart = instanceCopy(this.tables, shared);
+        this.tables.arenas.instanceMut(id).body = apart;
       }
       // A pass whose body made a new demand is thrown away, whatever it concluded, and the body
       // is checked again with the demanded types; each pass adds one, so this ends.

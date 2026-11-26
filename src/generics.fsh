@@ -8,6 +8,7 @@ import { unsupported } from "./unsupported.fsh";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.fsh";
 import type { ClassNode, Expr, Id, Param, Span, TypeMember, TypeNode, TypeParam } from "./parser.fsh";
 import { paramName, unboxedClosure } from "./resolve.fsh";
+import { perInstance } from "./typefns.fsh";
 import { INTERIORS, ITERATOR, TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.fsh";
 import { NodeMap, NodeSet, forEachChild, nextId, renumberTypeNode, Rewrites, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
 import { cloneClassNode, cloneTypeNode, cloneTypeParam, rebuiltTypeNode } from "./rebuild.fsh";
@@ -40,7 +41,17 @@ export function placeholders<R extends BoundResolver>(r: Mut<R>, params: Ref<Typ
       let seen = new Map<string, Type>();
       if (around !== undefined) for (const [n, t] of around) seen.set(n, t);
       for (const [n, t] of scope) seen.set(n, t);
-      const t = r.resolveIn(seen, p.constraint);
+      // A bound such as `keyof T` over another parameter is known only per instance; the
+      // definition's placeholder goes unbounded, and each instance checks the bound.
+      let t: Type = "never";
+      try {
+        t = r.resolveIn(seen, p.constraint);
+      } catch (e) {
+        if (!(e instanceof CompileError) || !perInstance(e)) throw e;
+        const unbound = concrete !== undefined ? concrete.get(p.name) : undefined;
+        scope.set(p.name, unbound !== undefined ? unbound : r.tables.typing.typeParameter(p.name, undefined, undefined));
+        continue;
+      }
       const kind = typeof t === "string" ? undefined : r.tables.typing.kindOf(t);
       if (kind === "interface" || kind === "object") bound = t as ObjectType | InterfaceType;
       else if (valueBound(r.tables.typing, t)) within = t;
@@ -561,6 +572,9 @@ export class InstancingState {
   // Which implicit parameters are references to their type, and how.
   lent = new Map<BodyId, Map<usize, RefType>>();
   definitions = new Map<BodyId, InstanceId>();
+  // Generic functions whose definitions need types only an instance can compute, as `T[K]` with
+  // `K extends keyof T` does, so each instance's body sees its concrete types themselves.
+  perInstance = new Set<BodyId>();
   // Instances still to check.
   pending: InstanceId[] = [];
   // What a call made inside an instance passed for each type parameter, where that was one of
@@ -973,7 +987,7 @@ export class Instancing<H extends InstancingHost> {
 
   // What a concrete instance's body sees: each of its type parameters, and those of a generic
   // class it belongs to, offering only its bound, as at the definition, while holding the
-  // concrete type for codegen.
+  // concrete type for codegen. A function checked only per instance sees the concrete types.
   /** @throws {CompileError} */
   scopeOf(this: Mut<this>, id: InstanceId): Map<string, Type> {
     const f = cloneSignature(bodyOf(this.host.tables.arenas, this.host.tables.arenas.instanceOf(id)));
@@ -1001,6 +1015,7 @@ export class Instancing<H extends InstancingHost> {
       }
       return scope;
     }
+    if (outerCount === 0 && this.host.instancingState.perInstance.has(f.copyOf ?? f.bodyId)) return bindings;
     for (const [name, t] of placeholders(this.host, typeParamsOf(f), merged(scope, undefined), merged(bindings, undefined))) scope.set(name, t);
     for (const [i, bound] of this.implicitOf(f.bodyId)) {
       const shown = this.host.tables.typing.show(bound);
@@ -1040,7 +1055,7 @@ export class Instancing<H extends InstancingHost> {
   }
 
   /** @throws {CompileError} */
-  private generic(this: Mut<this>, id: BodyId): boolean {
+  generic(this: Mut<this>, id: BodyId): boolean {
     const f = this.host.tables.arenas.bodyOf(id);
     const own = f.typeParams !== undefined && f.typeParams.some((p) => !isLifetime(p));
     const comptime = f.params.some((p) => p.comptime);
@@ -1053,6 +1068,9 @@ export class Instancing<H extends InstancingHost> {
   // callers get a copy they may add to.
   /** @throws {CompileError} */
   private explicitPlaceholders(this: Mut<this>, id: BodyId): Map<string, Type> {
+    // An instance's own copy of a function checked per instance has its original's parameters.
+    const original = this.host.tables.arenas.bodyOf(id).copyOf;
+    if (original !== undefined && this.host.instancingState.perInstance.has(original)) return this.explicitPlaceholders(original);
     let made = this.host.instancingState.explicit.get(id);
     if (made === undefined) {
       const f = cloneSignature(this.host.tables.arenas.bodyOf(id));
