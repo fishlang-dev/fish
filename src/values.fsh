@@ -5,7 +5,7 @@ import { abstractIn, cloneSignature, copyFor, inherited, inheritedId, selfTyped,
 import { openParam } from "./typefns.fsh";
 import { unsatisfied, type Members } from "./interfaces.fsh";
 import type { Direct } from "./overloads.fsh";
-import { CompileError } from "./diag.fsh";
+import { CompileError, withFixes, type Fix } from "./diag.fsh";
 import { didYouMean } from "./suggest.fsh";
 import { binaryType, SUPPORTED_OPERATORS } from "./operators.fsh";
 import type { AssignOp, BinaryOp, Expr, Func, Id, Interface, MatchArm, ObjectProp, Param, PropertyName, Pattern, Span, Stmt, TypeMember, TypeNode, TypeParam } from "./parser.fsh";
@@ -7551,7 +7551,13 @@ export class Expressions<C extends Context> implements Union<C> {
   private mutates(this: Mut<this>, object: Ref<Expr>, name: string): void {
     const type = this.ctx.held().types.get(object);
     if (type !== undefined && this.isRefType(type) && !this.ctx.typing().rec(type).mutable) {
-      throw new CompileError("E0206", `cannot call '${name}' on '${this.placeText(object)}' because it is a shared reference ('Ref'), which only reads`, object.start, object.end);
+      let fixes: Fix[] = [];
+      const bare = this.bare(object);
+      if (bare.kind === "ident") {
+        const lid = this.localOfId(bare.id)?.localId;
+        if (lid !== undefined) fixes = this.paramRefToMutFix(lid);
+      }
+      throw withFixes(new CompileError("E0206", `cannot call '${name}' on '${this.placeText(object)}' because it is a shared reference ('Ref'), which only reads`, object.start, object.end), fixes);
     }
     if (object.kind === "conditional") {
       throw new CompileError("E0212", `can't call '${name}' on a '?:', which would change a copy; call it in each branch`, object.start, object.end);
@@ -7964,7 +7970,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const mutable = flags.mutable;
     const owned = flags.owned === true;
     if (mutable && !this.ctx.st.self!.mutable) {
-      throw new CompileError("E0206", `cannot call '${callee.name}' on 'super' because 'this' is read-only here; declare 'this: Mut<this>'`, callee.start, callee.end);
+      throw withFixes(new CompileError("E0206", `cannot call '${callee.name}' on 'super' because 'this' is read-only here; declare 'this: Mut<this>'`, callee.start, callee.end), this.thisMutFix());
     }
     // It may change any of this object's fields, as a method called on `this` may.
     if (mutable) this.changesThis("", `call '${callee.name}' on`, callee.object);
@@ -9627,7 +9633,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (this.isRefType(type) && tk !== "ref" && lent === undefined) {
       const target = this.ctx.typing().rec(type).to;
       if (!this.ctx.typing().isCopy(target) && this.ctx.tables().typing.fits(target, to)) {
-        throw new CompileError("E0202", `can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy`, e.start, e.end);
+        throw withFixes(new CompileError("E0202", `can't move a value out of a reference to it, which only borrows it; use '.clone()' to hand over a copy`, e.start, e.end), this.cloneExprFix(e, target));
       }
       this.ctx.coercions().set(e, target);
       this.coerce(e, target, to, message);
@@ -10613,7 +10619,12 @@ export class Expressions<C extends Context> implements Union<C> {
       else if (typeof holder !== "string" && this.kindOf(holder) === "ref") {
         const sharedRoot = this.bare(root.object);
         const shownRoot = this.placeText(sharedRoot);
-        throw new CompileError("E0206", `cannot ${action} '${this.placeText(target)}' because '${shownRoot}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
+        let fixes: Fix[] = [];
+        if (sharedRoot.kind === "ident") {
+          const lid = this.localOfId(sharedRoot.id)?.localId;
+          if (lid !== undefined) fixes = this.paramRefToMutFix(lid);
+        }
+        throw withFixes(new CompileError("E0206", `cannot ${action} '${this.placeText(target)}' because '${shownRoot}' is a shared reference ('Ref'), which only reads`, target.start, target.end), fixes);
       }
       // A rest tuple's element is named by its place in the tuple, its array left unsaid.
       if (root.kind === "index" && root.index.kind === "int" && this.ctx.view().restStarts.has(root.object)) path = `[${BigInt(this.ctx.view().restStarts.get(root.object)!) + root.index.value}]${path}`;
@@ -10665,14 +10676,14 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     const low = this.ctx.tables().typing.lower(type);
     if (this.relaying(low, to)) {
-      if (this.isRefType(this.ctx.held().types.get(e)!)) throw new CompileError("E0202", "can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
+      if (this.isRefType(this.ctx.held().types.get(e)!)) throw withFixes(new CompileError("E0202", "can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end), this.cloneExprFix(e, low));
       const lowTo = this.ctx.tables().typing.lower(to);
       this.ctx.tables().dynMembers.set(`${this.ctx.typing().keyOf(low)} ${this.ctx.typing().keyOf(lowTo)}`, { methods: [], fields: [], clone: "copy" });
       this.ctx.coercions().set(e, to);
       return;
     }
     if (this.ctx.typing().callableOf.has(this.ctx.typing().rec(to).of)) this.storing(e, low, to, message);
-    else if (this.isRefType(this.ctx.held().types.get(e)!)) throw new CompileError("E0202", "can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end);
+    else if (this.isRefType(this.ctx.held().types.get(e)!)) throw withFixes(new CompileError("E0202", "can't move a value out of a reference to it into a Dyn, since the reference only borrows it; use '.clone()' to hand over a copy", e.start, e.end), this.cloneExprFix(e, low));
     const held = this.ctx.tables().typing.lower(type);
     if (typeof held !== "string" && this.ctx.typing().kindOf(held) === "dyn") throw new CompileError("E0801", `a '${this.ctx.typing().show(held)}' can't become a '${this.ctx.typing().show(to)}' yet; box the value it was made from`, e.start, e.end);
     let rust: RustClass | undefined = undefined;
@@ -11138,7 +11149,101 @@ export class Expressions<C extends Context> implements Union<C> {
       return;
     }
     if (this.ctx.st.self?.mutable === true) return;
-    throw new CompileError("E0206", `cannot ${action} 'this${shownPath(path)}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end);
+    throw withFixes(new CompileError("E0206", `cannot ${action} 'this${shownPath(path)}' because 'this' is read-only here; declare 'this: Mut<this>'`, target.start, target.end), this.thisMutFix());
+  }
+
+  // Machine-applicable edit turning a `Ref<T>` parameter of the current body into `Mut<T>`.
+  private paramRefToMutFix(this: Mut<this>, id: LocalId): Fix[] {
+    const local = this.lc(id);
+    if (!local.param) return [];
+    const arenas = this.ctx.view().arenas;
+    const body = bodyOf(arenas, arenas.instanceOf(this.ctx.checking()));
+    if (body.start >= STD_BASE || body.foreign === true || body.rust !== undefined) return [];
+    for (const p of body.params) {
+      if (p.pattern.kind === "ident" && p.pattern.name === local.name && p.type !== undefined && p.type.kind === "ref" && p.type.name === "Ref") {
+        return [{ kind: "mut", message: `change parameter '${local.name}' from 'Ref' to 'Mut'`, edits: [{ start: p.type.start, end: p.type.start + 3, text: "Mut" }] }];
+      }
+    }
+    return [];
+  }
+
+  // Machine-applicable edit changing a single-declarator `const` local to `let`.
+  private constToLetFix(this: Mut<this>, id: LocalId): Fix[] {
+    const at = this.lc(id).constAt;
+    if (at === undefined || at >= STD_BASE) return [];
+    return [{ kind: "mut", message: `change 'const' to 'let' on '${this.lc(id).name}'`, edits: [{ start: at, end: at + 5, text: "let" }] }];
+  }
+
+  // Machine-applicable edit adding `this: Mut<this>` (or upgrading `this: Ref<this>`) on the current method.
+  private thisMutFix(this: Mut<this>): Fix[] {
+    const arenas = this.ctx.view().arenas;
+    const body = bodyOf(arenas, arenas.instanceOf(this.ctx.checking()));
+    if (body.self === undefined || body.self.constructor || body.start >= STD_BASE || body.foreign === true) return [];
+    if (body.params.length > 0) {
+      const first: Ref<Param> = body.params[0]!;
+      if (first.pattern.kind === "ident" && first.pattern.name === "this") {
+        if (first.type !== undefined && first.type.kind === "ref" && first.type.name === "Ref") {
+          return [{ kind: "mut", message: "change 'this: Ref<this>' to 'this: Mut<this>'", edits: [{ start: first.type.start, end: first.type.start + 3, text: "Mut" }] }];
+        }
+        return [];
+      }
+    }
+    let fileSrc = "";
+    let fileBase: usize = 0;
+    let found = false;
+    const fileCount = this.ctx.view().files.length;
+    for (let fi: usize = 0; fi < fileCount; fi++) {
+      const fBase = this.ctx.view().files[fi]!.base;
+      const fLen = this.ctx.view().files[fi]!.src.length;
+      if (body.start >= fBase && body.start < fBase + fLen) {
+        fileSrc = this.ctx.view().files[fi]!.src;
+        fileBase = fBase;
+        found = true;
+        break;
+      }
+    }
+    if (!found) return [];
+    const relStart = body.start - fileBase;
+    const relEnd = body.end > fileBase && body.end - fileBase <= fileSrc.length ? body.end - fileBase : fileSrc.length;
+    let depth: i64 = 0;
+    let i = relStart;
+    while (i < relEnd) {
+      const ch = fileSrc.charAt(i as i64);
+      if (ch === "/" && i + 1 < relEnd && fileSrc.charAt((i + 1) as i64) === "/") {
+        while (i < relEnd && fileSrc.charAt(i as i64) !== "\n") i++;
+        continue;
+      }
+      if (ch === "/" && i + 1 < relEnd && fileSrc.charAt((i + 1) as i64) === "*") {
+        i += 2;
+        while (i + 1 < relEnd && !(fileSrc.charAt(i as i64) === "*" && fileSrc.charAt((i + 1) as i64) === "/")) i++;
+        i += 2;
+        continue;
+      }
+      if (ch === "<") depth++;
+      else if (ch === ">" && depth > 0) depth--;
+      else if (ch === "(" && depth === 0) {
+        const at = fileBase + i + 1;
+        const text = body.params.length > 0 ? "this: Mut<this>, " : "this: Mut<this>";
+        return [{ kind: "mut", message: "declare 'this: Mut<this>' on method", edits: [{ start: at, end: at, text }] }];
+      }
+      i++;
+    }
+    return [];
+  }
+
+  // Machine-applicable `.clone()` fallback for moving out of a reference.
+  private cloneExprFix(this: Ref<this>, e: Ref<Expr>, type: Type): Fix[] {
+    if (e.start >= STD_BASE) return [];
+    const nonCloneable = this.ctx.typing().holdsHandle(type, true) || this.ctx.typing().holdsPart(type, (u) => {
+      const r = this.recOf(u);
+      return (r?.kind === "block" && (r.which === "Semaphore" || r.which === "Permit")) || r?.kind === "future" || r?.kind === "generator";
+    }, true);
+    if (nonCloneable) return [];
+    const parens = e.kind === "binary" || e.kind === "conditional" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unary" || e.kind === "assign";
+    const edits = parens
+      ? [{ start: e.start, end: e.start, text: "(" }, { start: e.end, end: e.end, text: ").clone()" }]
+      : [{ start: e.end, end: e.end, text: ".clone()" }];
+    return [{ kind: "clone", message: "clone value out of reference", edits }];
   }
 
   // Whether a variable may change here, at `path` inside it, possibly through a mutable
@@ -11162,7 +11267,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const lr = this.recOf(declaredType);
     if ((path !== "" || action !== "assign to") && lr?.kind === "ref") {
       if (lr.mutable) return;
-      throw new CompileError("E0206", `cannot ${action} '${local.name}${shownPath(path)}' because '${local.name}' is a shared reference ('Ref'), which only reads`, target.start, target.end);
+      throw withFixes(new CompileError("E0206", `cannot ${action} '${local.name}${shownPath(path)}' because '${local.name}' is a shared reference ('Ref'), which only reads`, target.start, target.end), this.paramRefToMutFix(id));
     }
     if (local.param && local.mutable) this.ctx.st.changedParams.add(id);
     if (local.param && !local.mutable) {
@@ -11174,7 +11279,7 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     if (!local.mutable) {
       const what = path !== "" ? `'${local.name}${shownPath(path)}' because '${local.name}'` : `'${local.name}' because it`;
-      throw new CompileError("E0207", `cannot ${action} ${what} is a constant`, target.start, target.end);
+      throw withFixes(new CompileError("E0207", `cannot ${action} ${what} is a constant`, target.start, target.end), this.constToLetFix(id));
     }
   }
 
@@ -11278,7 +11383,7 @@ export class Expressions<C extends Context> implements Union<C> {
     // A reference widened or narrowed to what it points to would be a copy nobody wrote.
     const read = this.ctx.held().types.get(e.expr) ?? from;
     const lowFrom = this.isRefType(from) || this.isRefType(read) ? this.ctx.tables().typing.lower(from) : undefined;
-    if (lowFrom !== undefined && !this.ctx.typing().isCopy(lowFrom) && !this.isRefType(to) && (this.ctx.typing().optionRef(to) === undefined)) throw new CompileError("E0202", `'as' can't take the value out of '${this.ctx.typing().show(read)}', which only borrows it; use '.clone()' for a copy`, e.start, e.end);
+    if (lowFrom !== undefined && !this.ctx.typing().isCopy(lowFrom) && !this.isRefType(to) && (this.ctx.typing().optionRef(to) === undefined)) throw withFixes(new CompileError("E0202", `'as' can't take the value out of '${this.ctx.typing().show(read)}', which only borrows it; use '.clone()' for a copy`, e.start, e.end), this.cloneExprFix(e.expr, lowFrom));
     // A brand is made and taken apart with 'as', between its base and what converts to it.
     const fb = this.ctx.typing().unbranded(from);
     const tb = this.ctx.typing().unbranded(to);
