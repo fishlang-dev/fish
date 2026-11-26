@@ -6906,6 +6906,8 @@ async function* grpcReplies(call: GrpcCall | null, method: string, service: stri
 
 export const STD_MODULES: Record<string, string> = {
   grpc: GRPC,
+  // What a build is for, made per build from its target, release mode and flags by the loader.
+  build: "",
   // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
   // they panic where they are made.
   assert: String.raw`
@@ -11392,7 +11394,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "build"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.

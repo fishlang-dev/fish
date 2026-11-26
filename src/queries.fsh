@@ -87,7 +87,10 @@ function checkedAfresh(session: Session, file: string, looked: Mut<string[]>, ma
   stopAfter(compilation.session, "parse");
   // Every file the load read, which is what the cached check is keyed by.
   const contents = loadedContents(loaded, looked, manifest, manifestText, open);
-  const key = cached(compilation.session) ? checkKey(compilerDigest(), file, editing, false, contents) : "";
+  // std:build's text is made from the build's target and flags rather than read, so it keys too.
+  let entry = file;
+  for (const m of loaded.modules) if (m.path === "std:build") entry = `${file}\0${m.src}`;
+  const key = cached(compilation.session) ? checkKey(compilerDigest(), entry, editing, false, contents) : "";
   // The check on disk is looked for before this one is made, since restoring it is what the cache
   // is for. Until it carries the state, a hit is only noted and the check still runs.
   const found = key !== "" ? readCheck(checkPath(key), key) : undefined;
