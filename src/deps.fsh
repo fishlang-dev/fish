@@ -64,7 +64,7 @@ function equivalents(): Map<string, Equivalent> {
   m.set("eventemitter3", PLANNED("EventTarget and EventEmitter"));
   add(m, ["inquirer", "prompts"], PLANNED("Interactive prompts"));
   add(m, ["jest", "vitest", "mocha"], PLANNED("Jest-style test API"));
-  m.set("@grpc/grpc-js", PLANNED("gRPC"));
+  m.set("@grpc/grpc-js", IN_STD("std:grpc, with messages and services as @message classes and @service interfaces"));
   m.set("@aws-sdk/client-s3", PLANNED("S3-compatible storage client"));
   add(m, ["bcryptjs", "bcrypt", "argon2", "jsonwebtoken", "jose"], PLANNED("Auth primitives"));
   return m;
