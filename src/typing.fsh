@@ -2907,18 +2907,29 @@ export class Typing {
     }
     for (const t of group) {
       let r = this.rec(t);
-      if (r.kind === "object" && r.tuple !== true && r.match !== true) {
+      if (r.kind === "object" && r.match !== true) {
         r.fields = r.fields.map((f): Field => ({ ...f, type: this.lower(f.type) }));
+        // A tuple's elements are its fields; its rest, and the object of its fields, are lowered
+        // with them, so a tuple held in the group stays the record its values are written as.
+        const rest = r.rest;
+        if (rest !== undefined) r.rest = this.lower(rest);
+        const shape = r.shape;
         this.setRec(t, r);
+        if (shape !== undefined) {
+          let s = this.rec(shape);
+          s.fields = s.fields.map((f): Field => ({ ...f, type: this.lower(f.type) }));
+          this.setRec(shape, s);
+        }
       } else if (r.kind === "union" && r.unknown !== true) {
-        // Objects stay the records they are. Two brands of one base become one member.
+        // Objects and tuples stay the records they are. Two brands of one base become one
+        // member, and a literal whose base is a member is that member, as `unionType` has it.
         let members: Type[] = [];
         for (const m of r.members) {
           const b = this.recOf(m);
-          const low = b?.kind === "object" && b.tuple !== true ? m : this.lower(m);
+          const low = b?.kind === "object" ? m : this.lower(m);
           if (!members.includes(low)) members.push(low);
         }
-        r.members = members;
+        r.members = members.filter((m) => typeof m === "string" || this.rec(m).kind !== "literal" || !members.includes(this.baseOf(m as LiteralType)!));
         this.setRec(t, r);
       }
     }
@@ -3034,6 +3045,20 @@ export class Typing {
     const found = swap.get(t);
     if (found !== undefined) return found;
     if (typeof t === "string") return t;
+    // A future made of others, as `Promise.all` makes, is made again of theirs replaced, and an
+    // async generator's `next()` of its generator replaced.
+    const combined = this.combinedOf.get(t as FutureType);
+    if (combined !== undefined) {
+      const futures = combined.futures.map((f) => this.replaced(f, swap) as FutureType | HandleType | DynType);
+      const array = combined.array === undefined ? undefined : (this.replaced(combined.array, swap) as ArrayType);
+      if (!futures.some((f, i) => f !== combined.futures[i as usize]) && array === combined.array) return t;
+      return this.combinedFuture({ ...combined, futures, array });
+    }
+    const leaf = this.leafOf.get(t as FutureType);
+    if (leaf !== undefined && leaf.method === "next") {
+      const of = this.replaced(leaf.of, swap);
+      return of === leaf.of ? t : this.leafFuture("next", of, undefined, leaf.signal);
+    }
     if (this.unswappable(t) && [...swap.keys()].every((k) => this.kindOf(k) === "param")) return t;
     const r = this.rec(t);
     if (r.kind === "class") {

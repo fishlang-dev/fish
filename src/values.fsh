@@ -533,6 +533,8 @@ export class ExpressionsState {
   awaitedAs = new NodeMap<Expr, Type>();
   // The pairs of JS shapes being compared, each taken to fit while it is.
   comparing = new TypeMap<Type, TypeSet<Type>>();
+  // The pairs `passesJs` is comparing, by their ids, which a type referring to itself meets again.
+  passing = new Set<string>();
   // Arrows checked to own what they capture, being stored.
   owning = new NodeSet<Expr>();
   // Array literals written where a tuple is expected, which are that tuple, and those passed where
@@ -4042,6 +4044,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const a: Ref<Expr> = e.args[0]!;
     const f64: TypeNode = { id: nextId(this.ctx.tables().ids), kind: "ref", name: "f64", args: [], start: a.start, end: a.end };
     const arg: Expr = { id: nextId(this.ctx.tables().ids), kind: "as", expr: cloneExpr(a), type: f64, start: a.start, end: a.end };
+    this.ctx.tables().numericAs.add(cloneExpr(arg));
     const by = this.stdHelper(`Number.${callee.name}`, NUMBER_PREDICATES[callee.name]!, [arg], e);
     const made = this.ctx.tables().rewrites.replace(e, by);
     return this.callMade(made);
@@ -5926,7 +5929,8 @@ export class Expressions<C extends Context> implements Union<C> {
   private missingField(this: Mut<this>, from: Type, shape: InterfaceType | ObjectType): string | undefined {
     // A borrowed handle is the handle, counted again where it goes.
     if (this.isRefType(from) && (this.ctx.typing().jsShape(this.ctx.typing().rec(from).to) !== undefined)) from = this.ctx.typing().rec(from).to;
-    const own = this.ctx.typing().jsShape(from);
+    // A package's interface met inside a handle's shape is that handle's, as a JsValue of it is.
+    const own: InterfaceType | ObjectType | undefined = this.ctx.typing().jsShape(from) ?? (this.isInterface(from) ? from : undefined);
     if (own === shape) return undefined;
     // A pair of types met again while it is compared: handles' shapes referring to themselves
     // fit; a Fish type referring to itself has no value JS could take yet. Object types are
@@ -6013,6 +6017,31 @@ export class Expressions<C extends Context> implements Union<C> {
   // Whether a value passes where a package declares a type: as it fits it, or as a value JS takes
   // for it, inside unions and arrays too.
   private passesJs(this: Mut<this>, from: Type, to: Type): boolean {
+    // A pair met again while it is compared: a handle referring to itself fits, as in
+    // `with(o: R): R`; a Fish value referring to itself has no value JS could take yet.
+    const key = `${this.ctx.typing().keyOf(from)} ${this.ctx.typing().keyOf(to)}`;
+    if (this.ctx.exprsState.passing.has(key)) {
+      return this.handleHeld(from);
+    }
+    this.ctx.exprsState.passing.add(key);
+    try {
+      return this.passesJsOnce(from, to);
+    } finally {
+      this.ctx.exprsState.passing.delete(key);
+    }
+  }
+  // Whether a value is a package's handle, or arrays and unions of them: inside a handle's shape
+  // its fields are the package's interfaces themselves, which no Fish value is typed as.
+  private handleHeld(this: Mut<this>, t: Type): boolean {
+    const held = this.isRefType(t) ? this.ctx.typing().rec(t).to : t;
+    if (held === "null") return true;
+    if (this.ctx.typing().jsShape(held) !== undefined || this.isInterface(held)) return true;
+    const r = this.recOf(held);
+    if (r?.kind === "array") return this.handleHeld(r.element);
+    if (r?.kind === "union") return r.members.every((m) => this.handleHeld(m));
+    return false;
+  }
+  private passesJsOnce(this: Mut<this>, from: Type, to: Type): boolean {
     const referred = this.isRefType(from) ? this.recOf(this.ctx.typing().rec(from).to) : undefined;
     if (this.isRefType(from) && referred?.kind === "block" && referred.which === "JsValue") from = this.ctx.typing().rec(from).to;
     if (this.ctx.tables().typing.fits(from, to)) return true;

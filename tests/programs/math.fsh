@@ -440,3 +440,39 @@ function main() {
 function main() {
   console.log(Number.isNaN());
 }
+// case: number_predicates_on_a_number_narrowed_from_a_union
+// expect: int
+// expect: frac
+// expect: text
+// expect: true false
+function check(p: i64 | f64 | string): string {
+  if (typeof p === "number") return Number.isInteger(p) ? "int" : "frac";
+  return "text";
+}
+function finite(p: i64 | f64 | boolean): boolean {
+  if (typeof p === "number") return Number.isFinite(p);
+  return false;
+}
+function main() {
+  console.log(check(3));
+  console.log(check(2.5));
+  console.log(check("x"));
+  console.log(finite(4), finite(true));
+}
+// case: number_predicates_on_a_union_holding_a_literal_or_an_enum
+// expect: true
+// expect: true false
+enum Color { Red, Green }
+function lit(p: f64 | 3 | string): boolean {
+  if (typeof p === "number") return Number.isInteger(p);
+  return false;
+}
+function shade(p: Color | f64 | string): boolean {
+  if (typeof p === "number") return Number.isInteger(p);
+  return false;
+}
+function main() {
+  const k: 3 = 3;
+  console.log(lit(k));
+  console.log(shade(Color.Green), shade(0.5));
+}

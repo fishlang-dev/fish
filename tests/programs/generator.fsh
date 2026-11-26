@@ -1103,3 +1103,20 @@ function main() {
 // expect: [ 'a1' ]
 // expect: b2#
 // expect: c3#
+// case: generator_spread_in_a_generic_class_method
+// expect: a,b
+class Box<V> {
+  items: V[] = [];
+  *entries(): Generator<V> {
+    for (const x of this.items) yield x.clone();
+  }
+  copy(): V[] {
+    return [...this.entries()];
+  }
+}
+function main() {
+  let b = new Box<string>();
+  b.items.push("a");
+  b.items.push("b");
+  console.log(b.copy().join(","));
+}

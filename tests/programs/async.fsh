@@ -1329,3 +1329,46 @@ async function main() {
   console.log(v);
 }
 // expect: a1
+// case: async_generic_class_awaits_another_generic_class
+// expect: x
+class Inner<T> {
+  v: T;
+  constructor(v: T) {
+    this.v = v;
+  }
+  async get(): Promise<T> {
+    return this.v.clone();
+  }
+}
+class Outer<T> {
+  inner: Inner<T>;
+  constructor(v: T) {
+    this.inner = new Inner<T>(v);
+  }
+  async read(): Promise<T> {
+    const got = await this.inner.get();
+    return got;
+  }
+}
+async function main() {
+  const o = new Outer<string>("x");
+  const got = await o.read();
+  console.log(got);
+}
+// case: async_promise_all_in_a_generic_class
+// expect: p+q
+class Inner<T> { v: T; constructor(v: T) { this.v = v; } async get(): Promise<T> { return this.v.clone(); } }
+class Outer<T> { a: Inner<T>; b: Inner<T>; constructor(x: T, y: T) { this.a = new Inner<T>(x); this.b = new Inner<T>(y); }
+  async both(): Promise<T[]> { const [p, q] = await Promise.all([this.a.get(), this.b.get()]); return [p, q]; } }
+async function main() { const o = new Outer<string>("p", "q"); { const __r = await o.both(); console.log(__r.join("+")); } }
+// case: async_promise_race_in_a_generic_class
+// expect: p
+class Inner<T> { v: T; constructor(v: T) { this.v = v; } async get(): Promise<T> { return this.v.clone(); } }
+class Outer<T> { a: Inner<T>; b: Inner<T>; constructor(x: T, y: T) { this.a = new Inner<T>(x); this.b = new Inner<T>(y); }
+  async first(): Promise<T> { const r = await Promise.race([this.a.get(), this.b.get()]); return r; } }
+async function main() { const o = new Outer<string>("p", "q"); const r = await o.first(); console.log(r); }
+// case: async_promise_all_in_a_generic_function
+// expect: p q
+class Inner<T> { v: T; constructor(v: T) { this.v = v; } async get(): Promise<T> { return this.v.clone(); } }
+async function both<T>(a: Ref<Inner<T>>, b: Ref<Inner<T>>): Promise<[T, T]> { const r = await Promise.all([a.get(), b.get()]); return r; }
+async function main() { const a = new Inner<string>("p"); const b = new Inner<string>("q"); const r = await both(a, b); console.log(r[0], r[1]); }
