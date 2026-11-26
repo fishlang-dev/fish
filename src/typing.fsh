@@ -79,10 +79,11 @@ export type ObjectType = Brand<usize, "object">;
 // A class is nominal: one per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
 // An instance of a generic class also records the class it came from and its type arguments.
-// `disposes`: the class declares a disposer, a `[Symbol.dispose]` method.
+// `disposes`: the class declares a disposer, a `[Symbol.dispose]` method. `c`: `@c` lays it out
+// as a C struct, its fields in declaration order with C's alignment, and lets it cross to C by value.
 // `rust`: the Rust type a class a Rust module declares stands for. An abstract class only ever
 // exists embedded in a concrete one, so it is never a value's type.
-export type ClassRecord = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true; disposes?: true };
+export type ClassRecord = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true; disposes?: true; c?: true };
 export type ClassType = Brand<usize, "class">;
 
 // An interface is a trait: fields and method signatures that any value with those members

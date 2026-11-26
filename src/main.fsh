@@ -1405,7 +1405,17 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
   const engine: Unit[] = js ? engineSources().map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(engineDir()) })) : [];
   const zlib: Unit[] = callsZlib(ir) ? [{ name: "zlib", args: ["-x", "c", "-", ...flags], stdin: ZLIB_NATIVE, inputs: [] }] : [];
   const sqlite: Unit[] = callsSqlite(ir) ? [{ name: "sqlite", args: ["-x", "c", "-", ...flags], stdin: SQLITE_NATIVE, inputs: [] }] : [];
-  return [runtime, ...engine, ...zlib, ...sqlite];
+  const shim = cShimLines(ir);
+  const c: Unit[] = shim.length > 0 ? [{ name: "cshim", args: ["-x", "c", "-", ...flags, "-w", "-fno-builtin"], stdin: ["#include <stddef.h>", "#include <stdint.h>", ...shim, ""].join("\n"), inputs: [] }] : [];
+  return [runtime, ...engine, ...zlib, ...sqlite, ...c];
+}
+
+// The C the module carries for its C functions taking or giving `@c` structs, which clang
+// compiles so that each struct is passed as the target's C ABI passes it.
+function cShimLines(ir: string): string[] {
+  let out: string[] = [];
+  for (const line of linesWith(ir, "; fsh.c ")) if (line.startsWith("; fsh.c ")) out.push(line.slice(8));
+  return out;
 }
 
 // A build's optimization level. A sanitized dev build is optimized a little, as clang advises for
