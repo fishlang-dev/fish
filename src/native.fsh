@@ -3121,7 +3121,10 @@ int64_t fsh_rt_date_now(void) {
 // The wall clock's nanoseconds since the Unix epoch, as OTLP writes a span's times.
 int64_t fsh_rt_unix_nanos(void) {
   fsh_sim_init();
-  if (fsh_sim_active) return FSH_SIM_EPOCH_MS * 1000000LL + fsh_sim_now_ns;
+  if (fsh_sim_active) {
+    int64_t base = FSH_SIM_EPOCH_MS * 1000000LL;
+    return fsh_sim_now_ns > INT64_MAX - base ? INT64_MAX : base + fsh_sim_now_ns;
+  }
   struct timespec t;
   clock_gettime(CLOCK_REALTIME, &t);
   return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
@@ -5084,7 +5087,9 @@ int64_t fsh_rt_timeout_set(void *block, void **vtable, int64_t ms, int32_t repea
   if (ms < 1 || ms > 2147483647) ms = 1;
   pthread_mutex_lock(&fsh_timeouts_lock);
   int64_t id = ++fsh_timeout_ids;
-  fsh_timeout_insert((fsh_timeout){ fsh_now() + ms * 1000000, id, repeat ? ms : 0, block, vtable, 0 });
+  int64_t now = fsh_now();
+  int64_t dl = ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000;
+  fsh_timeout_insert((fsh_timeout){ dl, id, repeat ? ms : 0, block, vtable, 0 });
   fsh_task *waiter = fsh_timeouts_changed();
   pthread_mutex_unlock(&fsh_timeouts_lock);
   fsh_timeouts_wake(waiter);
@@ -5136,7 +5141,7 @@ int32_t fsh_rt_timeout_next(fsh_task *task, void **out) {
     out[1] = t.vtable;
     if (t.every) {
       out[0] = ((void *(*)(void *))t.vtable[1])(t.block);
-      t.deadline = now + t.every * 1000000;
+      t.deadline = t.every > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + t.every * 1000000;
       fsh_timeout_insert(t);
     }
     result = 1;
@@ -6077,9 +6082,13 @@ static void fsh_shutdown_waiters_free(void) {
 }
 
 static void fsh_shutdown_start(void) {
+  fsh_sim_init();
   fsh_shutdown.count = 1;
   pthread_mutex_init(&fsh_shutdown.lock, NULL);
   fsh_shutdown_end = fsh_shutdown_waiters_free;
+  // In deterministic simulation mode, never spawn a background signal-watcher thread that would
+  // race on fsh_sim_ready; leave default SIGINT/SIGTERM process termination in place.
+  if (fsh_sim_active) return;
   const char *failed = "fish: the shutdown signal couldn't be set up, so SIGINT and SIGTERM end the program at once\n";
   if (pipe(fsh_shutdown_pipe) != 0) return (void)fputs(failed, stderr);
   fcntl(fsh_shutdown_pipe[0], F_SETFD, FD_CLOEXEC);
@@ -6567,18 +6576,6 @@ static void fsh_file_write(fsh_file_job *job) {
 // A host name's IPv6 and IPv4 addresses, in the order getaddrinfo gives them, into the job's data
 // as sockaddr_storage, or getaddrinfo's error code.
 static void fsh_host_lookup(fsh_file_job *job) {
-  if (fsh_sim_active && strcmp(job->path, "localhost") == 0) {
-    struct sockaddr_storage *at = fsh_rt_alloc(sizeof *at);
-    memset(at, 0, sizeof *at);
-    struct sockaddr_in *v4 = (struct sockaddr_in *)at;
-    v4->sin_family = AF_INET;
-    inet_pton(AF_INET, "127.0.0.1", &v4->sin_addr);
-    job->data.data = (char *)at;
-    job->data.length = job->data.capacity = sizeof *at;
-    job->error = 0;
-    job->syscall = "getaddrinfo";
-    return;
-  }
   struct addrinfo hints, *found = NULL;
   memset(&hints, 0, sizeof hints);
   hints.ai_family = AF_UNSPEC;
@@ -8263,9 +8260,14 @@ static fsh_sim_event fsh_sim_event_pop(void) {
 
 static int64_t fsh_sim_sample_delay_ns(void) {
   if (fsh_sim_delay_max_ms <= 0) return 0;
-  int64_t span = fsh_sim_delay_max_ms - fsh_sim_delay_min_ms;
+  uint64_t span = (uint64_t)(fsh_sim_delay_max_ms - fsh_sim_delay_min_ms);
   int64_t ms = fsh_sim_delay_min_ms;
-  if (span > 0) ms += (int64_t)(fsh_sim_next_u64(fsh_sim_sched_rng) % (uint64_t)(span + 1));
+  if (span > 0) {
+    uint64_t range = span + 1ULL;
+    uint64_t off = range == 0 ? fsh_sim_next_u64(fsh_sim_sched_rng) : (fsh_sim_next_u64(fsh_sim_sched_rng) % range);
+    if (off > (uint64_t)(INT64_MAX - ms)) ms = INT64_MAX;
+    else ms += (int64_t)off;
+  }
   if (ms > (INT64_MAX - fsh_sim_now_ns) / 1000000) return INT64_MAX - fsh_sim_now_ns;
   return ms * 1000000LL;
 }
@@ -8407,7 +8409,7 @@ static void fsh_sim_deliver_event(fsh_sim_event ev) {
     fsh_socket *srv_sock = ev.conn;
     fsh_sim_sock *srv = srv_sock->sim;
     fsh_sim_sock *cli = srv->peer;
-    int part = cli ? fsh_sim_is_partitioned(cli->host, cli->port, l->host, l->port) : 0;
+    int part = cli ? (fsh_sim_is_partitioned(cli->host, cli->port, l->host, l->port) || fsh_sim_is_partitioned(cli->host, cli->port, srv->host, srv->port)) : 0;
     if (l->closed || part || !cli || cli->closed) {
       if (cli && !cli->closed && cli->connect_state == 1) {
         cli->connect_state = 2;
@@ -8443,19 +8445,24 @@ static void fsh_sim_deliver_event(fsh_sim_event ev) {
   } else if (ev.kind == FSH_SIM_EV_DATA) {
     fsh_sim_sock *dst = ev.dst;
     if (!dst->closed && !dst->peer_reset && ev.len > 0) {
-      if (dst->rx_head + dst->rx_len + ev.len > dst->rx_cap) {
-        if (dst->rx_head > 0 && dst->rx_len > 0) memmove(dst->rx, dst->rx + dst->rx_head, (size_t)dst->rx_len);
-        dst->rx_head = 0;
-        if (dst->rx_len + ev.len > dst->rx_cap) {
-          int64_t cap = dst->rx_cap ? dst->rx_cap * 2 : 4096;
-          while (cap < dst->rx_len + ev.len) cap *= 2;
-          dst->rx = realloc(dst->rx, (size_t)cap);
-          dst->rx_cap = cap;
+      if (fsh_sim_is_partitioned(dst->peer_host, dst->peer_port, dst->host, dst->port)) {
+        dst->peer_reset = 1;
+        fsh_sim_wake_all(&dst->waiters);
+      } else {
+        if (dst->rx_head + dst->rx_len + ev.len > dst->rx_cap) {
+          if (dst->rx_head > 0 && dst->rx_len > 0) memmove(dst->rx, dst->rx + dst->rx_head, (size_t)dst->rx_len);
+          dst->rx_head = 0;
+          if (dst->rx_len + ev.len > dst->rx_cap) {
+            int64_t cap = dst->rx_cap ? dst->rx_cap * 2 : 4096;
+            while (cap < dst->rx_len + ev.len) cap *= 2;
+            dst->rx = realloc(dst->rx, (size_t)cap);
+            dst->rx_cap = cap;
+          }
         }
+        memcpy(dst->rx + dst->rx_head + dst->rx_len, ev.data, (size_t)ev.len);
+        dst->rx_len += ev.len;
+        fsh_sim_wake_all(&dst->waiters);
       }
-      memcpy(dst->rx + dst->rx_head + dst->rx_len, ev.data, (size_t)ev.len);
-      dst->rx_len += ev.len;
-      fsh_sim_wake_all(&dst->waiters);
     }
     free(ev.data);
     fsh_sim_sock_release(dst);
@@ -8586,9 +8593,12 @@ void fsh_rt_sim_advance(int64_t ms) {
 void fsh_rt_sim_partition(const char *a, const char *b) {
   fsh_sim_init();
   if (!fsh_sim_active || !a || !b) return;
+  char ka[96], kb[96];
+  snprintf(ka, sizeof ka, "%s", a);
+  snprintf(kb, sizeof kb, "%s", b);
   for (int64_t i = 0; i < fsh_sim_partition_count; i++) {
-    if ((strcmp(fsh_sim_partitions[i].a, a) == 0 && strcmp(fsh_sim_partitions[i].b, b) == 0) ||
-        (strcmp(fsh_sim_partitions[i].a, b) == 0 && strcmp(fsh_sim_partitions[i].b, a) == 0)) {
+    if ((strcmp(fsh_sim_partitions[i].a, ka) == 0 && strcmp(fsh_sim_partitions[i].b, kb) == 0) ||
+        (strcmp(fsh_sim_partitions[i].a, kb) == 0 && strcmp(fsh_sim_partitions[i].b, ka) == 0)) {
       return;
     }
   }
@@ -8597,17 +8607,20 @@ void fsh_rt_sim_partition(const char *a, const char *b) {
     fsh_sim_partitions = realloc(fsh_sim_partitions, (size_t)cap * sizeof(fsh_sim_partition_rule));
     fsh_sim_partition_cap = cap;
   }
-  snprintf(fsh_sim_partitions[fsh_sim_partition_count].a, sizeof fsh_sim_partitions[0].a, "%s", a);
-  snprintf(fsh_sim_partitions[fsh_sim_partition_count].b, sizeof fsh_sim_partitions[0].b, "%s", b);
+  snprintf(fsh_sim_partitions[fsh_sim_partition_count].a, sizeof fsh_sim_partitions[0].a, "%s", ka);
+  snprintf(fsh_sim_partitions[fsh_sim_partition_count].b, sizeof fsh_sim_partitions[0].b, "%s", kb);
   fsh_sim_partition_count++;
 }
 
 void fsh_rt_sim_heal(const char *a, const char *b) {
   fsh_sim_init();
   if (!fsh_sim_active || !a || !b) return;
+  char ka[96], kb[96];
+  snprintf(ka, sizeof ka, "%s", a);
+  snprintf(kb, sizeof kb, "%s", b);
   for (int64_t i = 0; i < fsh_sim_partition_count;) {
-    if ((strcmp(fsh_sim_partitions[i].a, a) == 0 && strcmp(fsh_sim_partitions[i].b, b) == 0) ||
-        (strcmp(fsh_sim_partitions[i].a, b) == 0 && strcmp(fsh_sim_partitions[i].b, a) == 0)) {
+    if ((strcmp(fsh_sim_partitions[i].a, ka) == 0 && strcmp(fsh_sim_partitions[i].b, kb) == 0) ||
+        (strcmp(fsh_sim_partitions[i].a, kb) == 0 && strcmp(fsh_sim_partitions[i].b, ka) == 0)) {
       fsh_sim_partitions[i] = fsh_sim_partitions[--fsh_sim_partition_count];
     } else {
       i++;
@@ -8634,6 +8647,7 @@ void fsh_rt_sim_set_drop_rate(double rate) {
 
 void fsh_rt_sim_reset_faults(void) {
   fsh_sim_init();
+  if (!fsh_sim_active) return;
   fsh_sim_partition_count = 0;
   fsh_sim_delay_min_ms = 0;
   fsh_sim_delay_max_ms = 0;
@@ -8830,8 +8844,11 @@ int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_
       int64_t len = bytes->length - *written;
       int64_t at = fsh_sim_next_deliver_at(st);
       if (fsh_sim_is_partitioned(st->host, st->port, st->peer->host, st->peer->port)) {
-        *written = bytes->length;
-        return 1;
+        st->peer_reset = 1;
+        fsh_sim_sock_retain(st->peer);
+        fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_RESET, 0, st->peer, NULL, NULL, 0 });
+        errno = EHOSTUNREACH;
+        return fsh_io_failed(message, "can't write", "write");
       }
       if (fsh_sim_should_drop()) {
         st->peer_reset = 1;
@@ -8923,7 +8940,18 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
     fsh_socket *s = *socket_at;
     if (!s) {
       char target_host[64];
+      char *raw_host = fsh_rt_str_cstring(host);
+      int is_localhost = raw_host && strcmp(raw_host, "localhost") == 0;
+      fsh_rt_free(raw_host);
       if (!fsh_sim_normalize_host(host, port, target_host, 1, message)) return 5;
+      fsh_sim_sock *l = port > 0 ? fsh_sim_listener_find(target_host, (uint16_t)port) : NULL;
+      if (!l && is_localhost && port > 0) {
+        fsh_sim_sock *l6 = fsh_sim_listener_find("::1", (uint16_t)port);
+        if (l6) {
+          l = l6;
+          snprintf(target_host, sizeof target_host, "::1");
+        }
+      }
       const char *local_host = strchr(target_host, ':') != NULL ? "::1" : "127.0.0.1";
       uint16_t local_port = fsh_sim_alloc_port(local_host);
       if (local_port == 0) {
@@ -8935,22 +8963,23 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
       snprintf(cli->peer_host, sizeof cli->peer_host, "%s", target_host);
       cli->peer_port = (uint16_t)port;
       cli->connect_state = 1;
-      fsh_sim_sock *l = port > 0 ? fsh_sim_listener_find(target_host, (uint16_t)port) : NULL;
       int64_t delay_ns = fsh_sim_sample_delay_ns();
       int64_t at = fsh_sim_now_ns + delay_ns;
+      int64_t min_fail_at = fsh_sim_now_ns > INT64_MAX - 1000000LL ? INT64_MAX : fsh_sim_now_ns + 1000000LL;
+      int part = l && (fsh_sim_is_partitioned(cli->host, cli->port, l->host, l->port) || fsh_sim_is_partitioned(cli->host, cli->port, target_host, (uint16_t)port));
       if (!l) {
         fsh_sim_sock_retain(cli);
         fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_CONN_FAIL, ECONNREFUSED, cli, NULL, NULL, 0 });
-      } else if (fsh_sim_is_partitioned(cli->host, cli->port, l->host, l->port)) {
-        int64_t fail_at = delay_ns > 0 ? at : fsh_sim_now_ns + 1000000LL;
+      } else if (part) {
+        int64_t fail_at = delay_ns > 0 ? at : min_fail_at;
         fsh_sim_sock_retain(cli);
         fsh_sim_event_push((fsh_sim_event){ fail_at, 0, FSH_SIM_EV_CONN_FAIL, EHOSTUNREACH, cli, NULL, NULL, 0 });
       } else if (fsh_sim_should_drop()) {
-        int64_t fail_at = delay_ns > 0 ? at : fsh_sim_now_ns + 1000000LL;
+        int64_t fail_at = delay_ns > 0 ? at : min_fail_at;
         fsh_sim_sock_retain(cli);
         fsh_sim_event_push((fsh_sim_event){ fail_at, 0, FSH_SIM_EV_CONN_FAIL, ECONNRESET, cli, NULL, NULL, 0 });
       } else {
-        fsh_socket *srv_sock = fsh_sim_socket_new(1, l->host, l->port);
+        fsh_socket *srv_sock = fsh_sim_socket_new(1, target_host, l->port);
         fsh_sim_sock *srv = srv_sock->sim;
         snprintf(srv->peer_host, sizeof srv->peer_host, "%s", cli->host);
         srv->peer_port = cli->port;
@@ -9095,6 +9124,11 @@ static char *fsh_unix_address(fsh_str *path, struct sockaddr_un *at, const char 
 // 'UnixListener.bind(path)': listening at once, or 5 with the reason. A file already at the path
 // is the system's EADDRINUSE: it is never removed to make room.
 int32_t fsh_rt_unix_bind(fsh_str *path, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    errno = ENOTSUP;
+    return fsh_io_failed(message, "Unix sockets are not supported in simulation mode", "listen");
+  }
   struct sockaddr_un at;
   char *text = fsh_unix_address(path, &at, "listen", message);
   if (!text) return 5;
@@ -9114,6 +9148,11 @@ int32_t fsh_rt_unix_bind(fsh_str *path, fsh_socket **out, fsh_str **message) {
 // Polls 'UnixStream.connect(path)': the frame keeps the socket while it connects. A listener with
 // a full backlog is the system's EAGAIN on Linux, given as is, as Node does.
 int32_t fsh_rt_unix_connect(fsh_socket **socket_at, fsh_str *path, fsh_task *task, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    errno = ENOTSUP;
+    return fsh_io_failed(message, "Unix sockets are not supported in simulation mode", "connect");
+  }
   fsh_socket *s = *socket_at;
   struct sockaddr_un at;
   char *text = fsh_unix_address(path, &at, "connect", message);
@@ -9180,6 +9219,11 @@ static int fsh_udp_address(fsh_socket *s, fsh_str *host, int64_t port, struct so
 
 // 'UdpSocket.bind(host, port)': bound at once, or 5 with the reason.
 int32_t fsh_rt_udp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    errno = ENOTSUP;
+    return fsh_io_failed(message, "UDP sockets are not supported in simulation mode", "bind");
+  }
   struct sockaddr_storage at;
   if (!fsh_udp_address(NULL, host, port, &at, "bind", message)) return 5;
   int fd = socket(at.ss_family, SOCK_DGRAM | FSH_SOCK_CLOEXEC, 0);
@@ -11488,6 +11532,7 @@ static int fsh_tls_host_name(const char *host) {
 // host name or an IP address, against the PEM certificates in ca, or the system's when ca is
 // empty, as Node's ca option does. Gives why it can't, or an empty string.
 fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
+  if (s->sim) return fsh_tls_said("TLS is not supported in simulation mode (FISH_SIM_SEED)");
   // A second session would replace the first, leaking it and racing a read through a clone.
   if (s->tls) return fsh_tls_said("the stream already speaks TLS");
   char *host = fsh_rt_str_cstring(name);
@@ -11557,6 +11602,7 @@ fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
 // Has a listener's connections speak TLS as the server, with the PEM certificate chain in cert
 // and its private key in key. Gives why it can't, or an empty string.
 fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
+  if (listener->sim) return fsh_tls_said("TLS is not supported in simulation mode (FISH_SIM_SEED)");
   SSL_CTX *ctx = fsh_tls_context(1);
   if (!ctx) return fsh_tls_said("can't set up TLS");
   const char *why = NULL;

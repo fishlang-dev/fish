@@ -340,3 +340,69 @@ async function main(): Promise<void> throws Error | IoError | AbortError {
     removed(dir);
   }
 }, { timeout: 60_000 });
+
+test("simulation supports AbortSignal.timeout, setTimeout drain, spawnBlocking, and rejects UDP/Unix cleanly", () => {
+  const dir = scratch("fish-sim-edge-");
+  try {
+    const file = join(dir, "edge.fsh");
+    write(
+      file,
+      `import { now } from "fish:sim";
+
+async function main(): Promise<void> throws IoError | AbortError {
+  // AbortSignal.timeout cancels virtual accept cleanly with zero leaks.
+  const listener = await TcpListener.bind("0.0.0.0", 0);
+  let aborted = false;
+  try {
+    const _conn = await listener.accept(AbortSignal.timeout(50));
+  } catch (e) {
+    aborted = e instanceof AbortError;
+  }
+  console.log("aborted", aborted, now());
+
+  // spawnBlocking runs deterministically on the single simulation thread.
+  const bh = spawnBlocking(() => 21 * 2);
+  const val = await bh;
+  console.log("blocking", val);
+
+  // UDP and Unix sockets fail fast with ENOTSUP instead of deadlocking.
+  let udpErr = "";
+  try {
+    const _u = await UdpSocket.bind("127.0.0.1", 0);
+  } catch (e) {
+    udpErr = e.code;
+  }
+  let unixErr = "";
+  try {
+    const _x = await UnixListener.bind("/tmp/fish-sim-unused.sock");
+  } catch (e) {
+    unixErr = e.code;
+  }
+  console.log("unsupported", udpErr, unixErr);
+
+  // Phase 2 setTimeout drains after main returns via virtual clock.
+  setTimeout(() => {
+    console.log("timeout-fired", now());
+  }, 5000);
+}
+`,
+    );
+    const bin = join(dir, "edge");
+    const built = fishc(dir, ["build", file, "-o", bin]);
+    assert(built.code === 0, `edge build failed: ${built.err}`);
+    const ran = runBin(bin, dir, [["FISH_SIM_SEED", "55"], ["FISH_LEAKS", "1"]]);
+    assert(ran.code === 0, `sim edge failed: ${ran.err}`);
+    assert(ran.err === "", `expected 0 leaks in sim edge, got:\n${ran.err}`);
+    assert(ran.out.includes("aborted true 50"), `unexpected abort output:\n${ran.out}`);
+    assert(ran.out.includes("blocking 42"), `unexpected blocking output:\n${ran.out}`);
+    assert(ran.out.includes("unsupported ENOTSUP ENOTSUP"), `expected ENOTSUP for UDP/Unix:\n${ran.out}`);
+    assert(ran.out.includes("timeout-fired 5050"), `expected virtual setTimeout drain:\n${ran.out}`);
+
+    // Overflow guard on --seed + --seeds.
+    write(join(dir, "fish.toml"), `[package]\nname = "simovf"\nversion = "0.1.0"\n`);
+    const ovf = fishc(dir, ["test", "--sim", "--seed", "18446744073709551615", "--seeds", "2"]);
+    assert(ovf.code === 2, `expected exit 2 on u64 seed overflow, got ${ovf.code}`);
+  } finally {
+    removed(dir);
+  }
+}, { timeout: 60_000 });
