@@ -15,24 +15,14 @@
 //   fishc run scripts/build.fsh -- [-o <fishc>] [--stage0 <fishc>|<tarball>] [--record] [--source <tree>] [--leaks]
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { hostKey, pinned, stage0Digest, tarballName, written, type Pinned } from "./stage0.fsh";
+import { cacheDir, hostKey, pinned, stage0Digest, tarballName, written, type Pinned } from "./stage0.fsh";
 
 // The value after `flag` in the arguments, or undefined.
 function option(args: Ref<string[]>, flag: string): string | undefined {
   for (let i: usize = 0; i + 1 < args.length; i++) if (args[i]! === flag) return args[i + 1]!.clone();
   return undefined;
-}
-
-// Where fishc keeps what it caches, as the compiler's own cacheDir finds it.
-function cacheDir(): string {
-  const given = process.env.FISH_CACHE_DIR ?? "";
-  if (given !== "") return given;
-  const xdg = process.env.XDG_CACHE_HOME ?? "";
-  const home = homedir();
-  return join(xdg !== "" ? xdg : home !== "" ? join(home, ".cache") : tmpdir(), "fish");
 }
 
 // Where the pinned stage 0 is cached: its release unpacked, bin/fishc beside the share/fishc it

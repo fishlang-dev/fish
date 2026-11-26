@@ -537,8 +537,15 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
 // `manual`, when set, is the clock: a test sets it and moves it by hand.
 // `report` prints the times; `memory`, kept when FISH_MEM=1 asks, is what the process held as each
 // stage ended, the most a stage ended at when it runs more than once. `stop`, from FISH_MEM_STOP, is
-// the stage the process ends after.
-export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading>; tables?: string; stop?: string };
+// the stage the process ends after. `usage`, kept when FISH_USAGE=1 asks, is each stage's CPU time
+// and peaks, read from getrusage alone, since FISH_MEM's `ps` at each body's end would skew the times.
+export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading>; tables?: string; stop?: string; usage?: Usage };
+
+// Each stage's own CPU time in ms, fishc's and its children's, left out of the stage around it as
+// `ms` is; the most fishc and the largest of its children had been resident as it last ended, in
+// bytes; and `inner`, as Timings' own.
+export type Usage = { cpu: Map<string, f64>; peaks: Map<string, Peaks>; inner: f64 };
+export type Peaks = { own: i64; children: i64 };
 
 // The process's memory as a stage ended, in bytes: resident now and the most it has been resident.
 // -1 where the system can't say.
@@ -549,15 +556,47 @@ export type Reading = { rss: i64; peak: i64 };
 declare function getrusage(who: i32, usage: MutPtr<u8>): i32;
 declare function getpid(): i32;
 
-// The most the process has been resident: struct rusage's ru_maxrss, after its two timevals, in
-// bytes on macOS and KiB on Linux.
-function peakResident(): i64 {
+const SELF: i32 = 0;
+const CHILDREN: i32 = -1;
+
+// struct rusage for `who`, or undefined when the system can't say.
+function rusage(who: i32): u8[] | undefined {
   let usage: u8[] = new Array(144).fill(0 as u8);
-  const ok = unsafe { getrusage(0, mutPtrOf(usage[0])) };
-  if (ok !== 0) return -1;
+  const ok = unsafe { getrusage(who, mutPtrOf(usage[0])) };
+  return ok === 0 ? usage : undefined;
+}
+
+// The little-endian word at `at`, `bytes` long.
+function word(usage: Ref<u8[]>, at: usize, bytes: usize): i64 {
   let n: i64 = 0;
-  for (let i: usize = 0; i < 8; i++) n = n | ((usage[32 + i]! as i64) << ((8 * i) as i64));
+  for (let i: usize = 0; i < bytes; i++) n = n | ((usage[at + i]! as i64) << ((8 * i) as i64));
+  return n;
+}
+
+// The most `who` has been resident: ru_maxrss, after its two timevals, in bytes on macOS and KiB on
+// Linux.
+function peakOf(who: i32): i64 {
+  const usage = rusage(who);
+  if (usage === undefined) return -1;
+  const n = word(usage!, 32, 8);
   return process.platform === "darwin" ? n : n * 1024;
+}
+
+function peakResident(): i64 {
+  return peakOf(SELF);
+}
+
+// The user and system time fishc and the children it has waited for have taken, in ms: ru_utime
+// and ru_stime, each a 64-bit tv_sec and a tv_usec read as 32 bits, as both macOS and Linux lay
+// them out.
+function cpuNow(): f64 {
+  let total: f64 = 0;
+  for (const who of [SELF, CHILDREN]) {
+    const usage = rusage(who);
+    if (usage === undefined) continue;
+    for (const at of [0 as usize, 16 as usize]) total += (word(usage!, at, 8) as f64) * 1000 + (word(usage!, at + 8, 4) as f64) / 1000;
+  }
+  return total;
 }
 
 // What the process is resident at now: Linux's /proc/self/statm in pages, or what ps reports in KiB.
@@ -605,7 +644,7 @@ export function newDeclarations(): Declarations {
 }
 
 // When a timed stage started, and the time stages inside the one around it had taken by then.
-export type Started = { timing: boolean; outer: f64; start: f64 };
+export type Started = { timing: boolean; outer: f64; start: f64; cpuOuter: f64; cpuStart: f64 };
 
 // Starts timing a stage of a compilation, when it is timed.
 export function timingStart(tables: Mut<Tables>): Started {
@@ -619,10 +658,17 @@ export function timingEnd(tables: Mut<Tables>, name: string, started: Ref<Starte
 
 // `timingStart` and `timingEnd` for a stage outside a check, timed on the session itself.
 export function stageStart(session: Mut<Session>): Started {
-  if (session.timings === undefined) return { timing: false, outer: 0, start: 0 };
+  if (session.timings === undefined) return { timing: false, outer: 0, start: 0, cpuOuter: 0, cpuStart: 0 };
   const outer = session.timings.inner;
   session.timings.inner = 0;
-  return { timing: true, outer, start: now(session.timings) };
+  let cpuOuter: f64 = 0;
+  let cpuStart: f64 = 0;
+  if (session.timings.usage !== undefined) {
+    cpuOuter = session.timings.usage.inner;
+    session.timings.usage.inner = 0;
+    cpuStart = cpuNow();
+  }
+  return { timing: true, outer, start: now(session.timings), cpuOuter, cpuStart };
 }
 
 export function stageEnd(session: Mut<Session>, name: string, started: Ref<Started>) {
@@ -636,12 +682,20 @@ export function stageEnd(session: Mut<Session>, name: string, started: Ref<Start
     const kept: Reading = was === undefined ? now : { rss: Math.max(was!.rss, now.rss), peak: now.peak };
     session.timings.memory.set(name, kept);
   }
+  if (session.timings.usage !== undefined) {
+    const spent = cpuNow() - started.cpuStart;
+    session.timings.usage.cpu.set(name, (session.timings.usage.cpu.get(name) ?? 0) + spent - session.timings.usage.inner);
+    session.timings.usage.inner = started.cpuOuter + spent;
+    const was = session.timings.usage.peaks.get(name);
+    const own = peakOf(SELF);
+    session.timings.usage.peaks.set(name, { own: was === undefined ? own : Math.max(was!.own, own), children: peakOf(CHILDREN) });
+  }
 }
 
 // A part of a stage, timed apart while the stage keeps all of its own time.
 export function partStart(session: Ref<Session>): Started {
-  if (session.timings === undefined) return { timing: false, outer: 0, start: 0 };
-  return { timing: true, outer: 0, start: now(session.timings) };
+  if (session.timings === undefined) return { timing: false, outer: 0, start: 0, cpuOuter: 0, cpuStart: 0 };
+  return { timing: true, outer: 0, start: now(session.timings), cpuOuter: 0, cpuStart: 0 };
 }
 
 export function partEnd(session: Mut<Session>, name: string, started: Ref<Started>) {
@@ -681,6 +735,17 @@ export function formatMemory(memory: Ref<Map<string, Reading>>, stages: Ref<stri
   }
   const end = reading();
   return out + `${"end".padEnd(12)}${mib(end.rss)}${mib(end.peak)}\n`;
+}
+
+// FISH_USAGE's table: for each stage that ran, in order, its own CPU time and the peaks as it ended.
+export function formatUsage(usage: Ref<Usage>, stages: Ref<string[]>): string {
+  const mib = (n: i64) => (n < 0 ? "?" : `${((n as f64) / 1048576).toFixed(1)} MiB`).padStart(14);
+  let out = `${"stage".padEnd(12)}${"cpu".padStart(14)}${"peak".padStart(14)}${"children".padStart(14)}\n`;
+  for (const s of stages) {
+    const p = usage.peaks.get(s);
+    if (p !== undefined) out += `${s.padEnd(12)}${`${(usage.cpu.get(s) ?? 0).toFixed(1)} ms`.padStart(14)}${mib(p!.own)}${mib(p!.children)}\n`;
+  }
+  return out;
 }
 
 // libc's `exit`, not `process.exit`: that marks the program abandoned, and a `--leaks` build's
