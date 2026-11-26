@@ -3,7 +3,7 @@ import assert from "node:assert";
 import { category, ofKind, typeofTest, type Kind, type Verdict } from "./narrow.fsh";
 import type { Expr } from "./parser.fsh";
 import { rustClassOf } from "./rust.fsh";
-import { byteSize, words } from "./sizes.fsh";
+import { byteSize, placedParts, sizeOf, words } from "./sizes.fsh";
 import type { Tables } from "./compilation.fsh";
 import { idOf, integerInfo, isInteger, isLock, isNumeric, literalText, TypeMap, type ArrayType, type ClassType, type Field, type LiteralType, type ObjectType, type Type, type UnionType, type Typing } from "./typing.fsh";
 
@@ -584,12 +584,89 @@ export const DYN = "{ ptr, ptr }";
 // and `valueType` its type.
 export interface Slots extends Builder {
   tables: Tables;
+  // Each union member's scalar parts as `leavesOf` found them, asked for at every use.
+  leaves: TypeMap<Type, Leaf[]>;
+  // The block code is emitted into.
+  block: string;
   text(this: Mut<this>, value: string): string;
   deep(this: Mut<this>, a: string, b: string, type: Type): string;
   inspect(this: Mut<this>, v: string, type: Type): string;
   operandOf(this: Mut<this>, x: Ref<Expr>, test: Ref<Expr>, guarded: boolean): string;
   valueType(this: Mut<this>, e: Ref<Expr>): Type;
 }
+
+// A scalar part of a value: the indices that reach it, for `extractvalue` and `insertvalue`, its
+// LLVM type and its byte offset. A type whose parts can't each sit inside one 64-bit word, such as
+// an i128, has the one leaf `UNSPLIT`.
+export type Leaf = { path: string; ll: string; at: usize };
+const UNSPLIT: Leaf = { path: "", ll: "", at: 0 };
+const SCALARS = ["i1", "i8", "i16", "i32", "i64", "float", "double", "ptr"];
+
+function scalarBytes(ll: string): usize {
+  if (ll === "i1" || ll === "i8") return 1;
+  if (ll === "i16") return 2;
+  if (ll === "i32" || ll === "float") return 4;
+  return 8;
+}
+
+function deeper(path: string, i: usize): string {
+  return path === "" ? `${i}` : `${path}, ${i}`;
+}
+
+// Pushes the scalar parts of a `t` laid out at byte `at` onto `out`, giving false when one of them
+// spans two words or isn't a scalar this splits.
+function leavesInto(typing: Ref<Typing>, t: Type, at: usize, path: string, out: Mut<Leaf[]>): boolean {
+  const ll = llvmOf(typing, t);
+  if (SCALARS.includes(ll)) {
+    if ((at % 8) + scalarBytes(ll) > 8) return false;
+    out.push({ path, ll, at });
+    return true;
+  }
+  if (ll === "{}") return true;
+  if (ll === ARRAY) {
+    out.push({ path: deeper(path, 0), ll: "ptr", at });
+    out.push({ path: deeper(path, 1), ll: "i64", at: at + 8 });
+    out.push({ path: deeper(path, 2), ll: "i64", at: at + 16 });
+    return true;
+  }
+  if (ll === DYN) {
+    out.push({ path: deeper(path, 0), ll: "ptr", at });
+    out.push({ path: deeper(path, 1), ll: "ptr", at: at + 8 });
+    return true;
+  }
+  if (typeof t === "string") return false;
+  const r = typing.rec(t);
+  if (r.kind === "brand") return leavesInto(typing, r.base, at, path, out);
+  if (r.kind === "union") {
+    if (at % 8 !== 0) return false;
+    out.push({ path: deeper(path, 0), ll: "i32", at });
+    const n = words(typing, t as UnionType);
+    for (let k: usize = 0; k < n; k++) out.push({ path: `${deeper(path, 1)}, ${k}`, ll: "i64", at: at + 8 + 8 * k });
+    return true;
+  }
+  if (r.kind === "fixed") {
+    const [bytes, align] = sizeOf(typing, r.element);
+    const stride = (Math.ceil((bytes as f64) / (align as f64)) as usize) * align;
+    for (let i: usize = 0; i < r.size; i++) if (!leavesInto(typing, r.element, at + i * stride, deeper(path, i), out)) return false;
+    return true;
+  }
+  if (r.kind === "interior" && !isLock(r)) return leavesInto(typing, r.of, at, path, out);
+  if (!ll.startsWith("%") && !ll.startsWith("{")) return false;
+  const parts = placedParts(typing, t);
+  for (let i: usize = 0; i < parts.length; i++) if (!leavesInto(typing, parts[i]!.type, at + parts[i]!.offset, deeper(path, i), out)) return false;
+  return true;
+}
+
+// The scalar parts of a `t`, or `[UNSPLIT]`.
+export function leavesOf(typing: Ref<Typing>, t: Type): Leaf[] {
+  let out: Leaf[] = [];
+  return leavesInto(typing, t, 0, "", out) ? out : [UNSPLIT.clone()];
+}
+
+// Up to how many scalar parts a member is moved into and out of a union word by word, with no
+// slot; a larger one goes through a slot, which takes fewer lines. Measured on src: 2, 4 and 8
+// gave the same clang -O0 time, and 2 the least text.
+const SPLIT_LIMIT: usize = 2;
 
 // Whether values of a type compare part by part rather than as one word.
 export const compound = (typing: Ref<Typing>, t: Type): boolean => typeof t !== "string" && ["object", "class", "array", "fixed", "recursive", "variant"].includes(typing.kindOf(t));
@@ -603,8 +680,10 @@ export type Wanted =
   | { by: "present" }
   | { by: "gives"; type: Type; unknown: boolean };
 
-// A branch per member of a union, each storing its result where the branches join.
-export type Branch = { result: string; cases: string[]; end: string; members: Type[] };
+// A branch per member of a union, each giving its result to the `phi` where the branches join:
+// `incoming` holds each value with the block it comes from, the switch's own block first, for
+// a tag no case takes.
+export type Branch = { incoming: string[]; cases: string[]; end: string; members: Type[] };
 
 // The operand a kind test looks at.
 function testedOf(e: Ref<Expr>): Ref<Expr> {
@@ -757,7 +836,7 @@ export class Conversions<H extends Slots> {
       let both = false;
       for (const m of this.membersOf(type)) if (this.verdict(test, m) === "both") both = true;
       if (!both) return this.holdsWhere(v, type, { by: "key", test });
-      const b = this.branch(v, type as UnionType, "boolean");
+      let b = this.branch(v, type as UnionType, "boolean");
       for (let i: usize = 0; i < b.members.length; i++) {
         const part = this.arm(b, i, v, type as UnionType);
         const made = this.hasKey(part, b.members[i]!, test, key);
@@ -792,7 +871,27 @@ export class Conversions<H extends Slots> {
       // An unknown holds JavaScript's numbers, which are equal across the kinds Fish has.
       const unknown = this.host.tables.typing.rec(aType as UnionType).unknown === true;
       const other = literalOf(this.host.tables.typing, bType) ?? b;
-      const u = this.branch(a, aType as UnionType, "boolean");
+      // Two values of one union are equal when they hold the same member, equal as that member.
+      if (!unknown && aType === bType && this.apart(aType as UnionType)) return this.sameMember(a, b, aType as UnionType);
+      const byTag = unknown ? undefined : this.tagsEqual(aType as UnionType, bType);
+      if (byTag !== undefined) {
+        if (byTag.length === 0) return "false";
+        const tag = this.host.temp();
+        this.host.emit(`${tag} = extractvalue ${this.ll(aType)} ${a}, 0`);
+        let result = "";
+        for (const i of byTag) {
+          const same = this.host.temp();
+          this.host.emit(`${same} = icmp eq i32 ${tag}, ${i}`);
+          if (result === "") result = same;
+          else {
+            const either = this.host.temp();
+            this.host.emit(`${either} = or i1 ${result}, ${same}`);
+            result = either;
+          }
+        }
+        return result;
+      }
+      let u = this.branch(a, aType as UnionType, "boolean");
       for (let i: usize = 0; i < u.members.length; i++) {
         const m = u.members[i]!;
         const part = this.arm(u, i, a, aType as UnionType);
@@ -838,6 +937,75 @@ export class Conversions<H extends Slots> {
     return result;
   }
 
+  // Whether no value of one member of `union` can equal a value of another: no two literals hold
+  // one value, and no literal's base type is a member too.
+  apart(u: UnionType): boolean {
+    const members = this.membersOf(u);
+    let seen: string[] = [];
+    for (const m of members) {
+      const text = literalOf(this.host.tables.typing, m);
+      if (text === undefined) continue;
+      if (seen.includes(text) || members.includes(baseOf(this.host.tables.typing, m))) return false;
+      seen.push(text);
+    }
+    return true;
+  }
+
+  // Whether two values of `union` hold the same member and are equal as it. The payloads are read
+  // only once the tags agree, as a member's payload words mean nothing as another member's.
+  sameMember(this: Mut<this>, a: string, b: string, union: UnionType): string {
+    const [ta, tb, same] = [this.host.temp(), this.host.temp(), this.host.temp()];
+    this.host.emit(`${ta} = extractvalue ${this.ll(union)} ${a}, 0`);
+    this.host.emit(`${tb} = extractvalue ${this.ll(union)} ${b}, 0`);
+    this.host.emit(`${same} = icmp eq i32 ${ta}, ${tb}`);
+    const [parts, differ, end] = [this.host.label(), this.host.label(), this.host.label()];
+    this.host.emit(`br i1 ${same}, label %${parts}, label %${differ}`);
+    this.host.startBlock(parts);
+    let u = this.branch(a, union, "boolean");
+    for (let i: usize = 0; i < u.members.length; i++) {
+      const m = u.members[i]!;
+      this.host.startBlock(u.cases[i]!);
+      if (this.kindOf(m) === "literal" || this.ll(m) === "{}") {
+        this.armDone(u, "boolean", "true");
+        continue;
+      }
+      const pa = this.payload(a, union, m);
+      const pb = this.payload(b, union, m);
+      const made = this.equals(pa, m, pb, m);
+      this.armDone(u, "boolean", made);
+    }
+    const found = this.joined(u, "boolean");
+    const foundIn = this.host.block;
+    this.host.emit(`br label %${end}`);
+    this.host.startBlock(differ);
+    this.host.emit(`br label %${end}`);
+    this.host.startBlock(end);
+    const out = this.host.temp();
+    this.host.emit(`${out} = phi i1 [ ${found}, %${foundIn} ], [ false, %${differ} ]`);
+    return out;
+  }
+
+  // When a union's members are all literals or null, compared with a literal `b`: the indices of
+  // the members equal to it, so the tag alone decides. Undefined otherwise.
+  tagsEqual(u: UnionType, b: Type): usize[] | undefined {
+    const empty = b === "null";
+    if (!empty && literalOf(this.host.tables.typing, b) === undefined) return undefined;
+    let out: usize[] = [];
+    const members = this.membersOf(u);
+    for (let i: usize = 0; i < members.length; i++) {
+      const m = members[i]!;
+      if (m === "null") {
+        if (empty) out.push(i);
+        continue;
+      }
+      // Compared with null, a value of any of these kinds is never equal.
+      if (empty && (typeof m === "string" || ["object", "class", "array", "literal", "fixed", "map", "dyn"].includes(this.kindOf(m)))) continue;
+      if (empty || literalOf(this.host.tables.typing, m) === undefined) return undefined;
+      if (this.sameLiteral(m, b)) out.push(i);
+    }
+    return out;
+  }
+
   // Whether two literal types hold one value.
   sameLiteral(a: Type, b: Type): boolean {
     const x = this.host.tables.typing.rec(a as LiteralType);
@@ -847,13 +1015,46 @@ export class Conversions<H extends Slots> {
 
   // A field every member of the union has, read from whichever member it holds.
   unionField(this: Mut<this>, v: string, union: UnionType, name: string, to: Type): string {
-    const b = this.branch(v, union, to);
+    let b = this.branch(v, union, to);
     for (let i: usize = 0; i < b.members.length; i++) {
+      const member = b.members[i]!;
+      if (this.blockOf(member) === undefined) {
+        this.host.startBlock(b.cases[i]!);
+        const read = this.fieldInPayload(v, union, member, name);
+        if (read !== undefined) {
+          const made = this.convert(read, this.host.tables.typing.field(member as ObjectType | ClassType, name)!.type, to);
+          this.armDone(b, to, made);
+          continue;
+        }
+        const part = this.payload(v, union, member);
+        const made = this.memberField(part, member, name, to);
+        this.armDone(b, to, made);
+        continue;
+      }
       const part = this.arm(b, i, v, union);
-      const made = this.memberField(part, b.members[i]!, name, to);
+      const made = this.memberField(part, member, name, to);
       this.armDone(b, to, made);
     }
     return this.joined(b, to);
+  }
+
+  // A field of the object or instance a union holds, read from the payload words it sits in
+  // without the rest of the member, or undefined when its parts can't be read word by word.
+  fieldInPayload(this: Mut<this>, v: string, union: UnionType, member: Type, name: string): string | undefined {
+    const holder = member as ObjectType | ClassType;
+    const type = this.host.tables.typing.field(holder, name)!.type;
+    if (this.kindOf(type) === "literal" || this.ll(type) === "{}") return "zeroinitializer";
+    let at: usize = 0;
+    let within: Type = member;
+    for (const i of this.host.tables.typing.fieldPath(holder, name)) {
+      const parts = placedParts(this.host.tables.typing, within);
+      at += parts[i as usize]!.offset;
+      within = parts[i as usize]!.type;
+    }
+    const leaves = this.leaves(type);
+    if (!this.split(leaves)) return undefined;
+    for (const leaf of leaves) if (((leaf.at + at) % 8) + scalarBytes(leaf.ll) > 8) return undefined;
+    return this.readWords(v, union, type, leaves, at);
   }
 
   memberField(this: Mut<this>, part: string, member: Type, name: string, to: Type): string {
@@ -878,8 +1079,7 @@ export class Conversions<H extends Slots> {
   // Starts a value of `to` made from whichever member the union holds, branching on its tag.
   // The caller makes each member's value between `arm` and `armDone`, then reads it with
   // `joined`. This also reads an enum, a union of integer literals, as an i64.
-  branch(this: Mut<this>, v: string, union: UnionType, to: Type): Branch {
-    const result = this.host.alloca(this.ll(to));
+  branch(this: Mut<this>, v: string, union: UnionType, _to: Type): Branch {
     const tag = this.host.temp();
     this.host.emit(`${tag} = extractvalue ${this.ll(union)} ${v}, 0`);
     const members = this.membersOf(union);
@@ -887,7 +1087,7 @@ export class Conversions<H extends Slots> {
     for (let i: usize = 0; i < members.length; i++) cases.push(this.host.label());
     const end = this.host.label();
     this.host.emit(`switch i32 ${tag}, label %${end} [ ${cases.map((c, i) => `i32 ${i}, label %${c}`).join(" ")} ]`);
-    return { result, cases, end, members };
+    return { incoming: [`[ undef, %${this.host.block} ]`], cases, end, members };
   }
 
   // Enters the branch for member `i`, giving that member's payload.
@@ -896,15 +1096,15 @@ export class Conversions<H extends Slots> {
     return this.payload(v, union, b.members[i]!);
   }
 
-  armDone(this: Mut<this>, b: Ref<Branch>, to: Type, value: string): void {
-    this.host.emit(`store ${this.ll(to)} ${value}, ptr ${b.result}`);
+  armDone(this: Mut<this>, b: Mut<Branch>, _to: Type, value: string): void {
+    b.incoming.push(`[ ${value}, %${this.host.block} ]`);
     this.host.emit(`br label %${b.end}`);
   }
 
   joined(this: Mut<this>, b: Ref<Branch>, to: Type): string {
     this.host.startBlock(b.end);
     const out = this.host.temp();
-    this.host.emit(`${out} = load ${this.ll(to)}, ptr ${b.result}`);
+    this.host.emit(`${out} = phi ${this.ll(to)} ${b.incoming.join(", ")}`);
     return out;
   }
 
@@ -1148,11 +1348,18 @@ export class Conversions<H extends Slots> {
     }
     if (fk === "union") {
       if (this.within(to, from)) return this.payload(v, from as UnionType, to);
-      const b = this.branch(v, from as UnionType, to);
+      let b = this.branch(v, from as UnionType, to);
       for (let i: usize = 0; i < b.members.length; i++) {
         const member = b.members[i]!;
+        // A member narrowing left out needs nothing of its payload.
+        if (this.absent(member, to)) {
+          this.host.startBlock(b.cases[i]!);
+          const gone = "undef";
+          this.armDone(b, to, gone);
+          continue;
+        }
         const part = this.arm(b, i, v, from as UnionType);
-        const made = this.absent(member, to) ? "undef" : this.convert(part, member, to);
+        const made = this.convert(part, member, to);
         this.armDone(b, to, made);
       }
       return this.joined(b, to);
@@ -1289,23 +1496,60 @@ export class Conversions<H extends Slots> {
     const found = this.host.tables.typing.membersFor(from, to);
     assert(found.length > 0, `internal error: '${this.host.tables.typing.show(from)}' has no member in '${this.host.tables.typing.show(to)}' to go into`);
     const member = found[0]!;
-    const slot = this.host.alloca(this.ll(to));
-    this.host.emit(`store i32 ${this.membersOf(to).indexOf(member)}, ptr ${slot}`);
+    const tag = this.membersOf(to).indexOf(member);
     const value = this.convert(v, from, member);
-    if (this.kindOf(member) !== "literal") {
-      const at = this.host.temp();
-      this.host.emit(`${at} = getelementptr ${this.ll(to)}, ptr ${slot}, i32 0, i32 1`);
-      // The payload is i64 words, aligned to 8 however wide a member is.
-      this.host.emit(`store ${this.ll(member)} ${value}, ptr ${at}, align 8`);
+    // A member with no payload is a constant: its tag, then zero words.
+    let result = `{ i32 ${tag}, [${words(this.host.tables.typing, to)} x i64] zeroinitializer }`;
+    if (this.kindOf(member) === "literal" || this.ll(member) === "{}") return result;
+    const leaves = this.leaves(member);
+    if (this.split(leaves)) {
+      // Each payload word is the parts that sit in it, shifted to their offsets and joined.
+      let i: usize = 0;
+      while (i < leaves.length) {
+        const word = leaves[i]!.at / 8;
+        let joined = "";
+        for (; i < leaves.length && leaves[i]!.at / 8 === word; i++) {
+          const leaf = leaves[i]!.clone();
+          let part = value.clone();
+          if (leaf.path !== "") {
+            part = this.host.temp();
+            this.host.emit(`${part} = extractvalue ${this.ll(member)} ${value}, ${leaf.path}`);
+          }
+          let bits = this.toWord(part, leaf.ll);
+          if (leaf.at % 8 !== 0) {
+            const shifted = this.host.temp();
+            this.host.emit(`${shifted} = shl i64 ${bits}, ${(leaf.at % 8) * 8}`);
+            bits = shifted;
+          }
+          if (joined === "") joined = bits;
+          else {
+            const both = this.host.temp();
+            this.host.emit(`${both} = or i64 ${joined}, ${bits}`);
+            joined = both;
+          }
+        }
+        const next = this.host.temp();
+        this.host.emit(`${next} = insertvalue ${this.ll(to)} ${result}, i64 ${joined}, 1, ${word}`);
+        result = next;
+      }
+      return result;
     }
-    const result = this.host.temp();
-    this.host.emit(`${result} = load ${this.ll(to)}, ptr ${slot}`);
-    return result;
+    const slot = this.host.alloca(this.ll(to));
+    this.host.emit(`store i32 ${tag}, ptr ${slot}`);
+    const at = this.host.temp();
+    this.host.emit(`${at} = getelementptr ${this.ll(to)}, ptr ${slot}, i32 0, i32 1`);
+    // The payload is i64 words, aligned to 8 however wide a member is.
+    this.host.emit(`store ${this.ll(member)} ${value}, ptr ${at}, align 8`);
+    const loaded = this.host.temp();
+    this.host.emit(`${loaded} = load ${this.ll(to)}, ptr ${slot}`);
+    return loaded;
   }
 
   // The payload of a union known to hold a member of type `to`, or a union of some members.
   payload(this: Mut<this>, v: string, from: UnionType, to: Type): string {
-    if (this.kindOf(to) === "literal") return "zeroinitializer";
+    if (this.kindOf(to) === "literal" || this.ll(to) === "{}") return "zeroinitializer";
+    const leaves = this.leaves(to);
+    if (this.split(leaves)) return this.readWords(v, from, to, leaves, 0);
     const slot = this.host.alloca(this.ll(from));
     this.host.emit(`store ${this.ll(from)} ${v}, ptr ${slot}`);
     const at = this.host.temp();
@@ -1313,6 +1557,70 @@ export class Conversions<H extends Slots> {
     const result = this.host.temp();
     this.host.emit(`${result} = load ${this.ll(to)}, ptr ${at}, align 8`);
     return result;
+  }
+
+  // A `to` whose parts `leaves` sit `at` bytes into the payload of `v`, each read from the word
+  // it sits in, as the payload's memory would give it.
+  readWords(this: Mut<this>, v: string, from: UnionType, to: Type, leaves: Ref<Leaf[]>, at: usize): string {
+    let result = "undef";
+    for (const leaf of leaves) {
+      const offset = leaf.at + at;
+      let bits = this.host.temp();
+      this.host.emit(`${bits} = extractvalue ${this.ll(from)} ${v}, 1, ${offset / 8}`);
+      if (offset % 8 !== 0) {
+        const shifted = this.host.temp();
+        this.host.emit(`${shifted} = lshr i64 ${bits}, ${(offset % 8) * 8}`);
+        bits = shifted;
+      }
+      const part = this.fromWord(bits, leaf.ll);
+      if (leaf.path === "") return part;
+      const next = this.host.temp();
+      this.host.emit(`${next} = insertvalue ${this.ll(to)} ${result}, ${leaf.ll} ${part}, ${leaf.path}`);
+      result = next;
+    }
+    return result;
+  }
+
+  // A type's scalar parts, found once per type.
+  leaves(this: Mut<this>, t: Type): Leaf[] {
+    const known = this.host.leaves.get(t);
+    if (known !== undefined) return known.clone();
+    const found = leavesOf(this.host.tables.typing, t);
+    this.host.leaves.set(t, found.clone());
+    return found;
+  }
+
+  // Whether parts go into and out of a union word by word: few enough of them, each a scalar.
+  split(leaves: Ref<Leaf[]>): boolean {
+    return leaves.length > 0 && leaves.length <= SPLIT_LIMIT && leaves[0]!.ll !== "";
+  }
+
+  // A scalar as the bits of a payload word, in its low bits.
+  toWord(this: Mut<this>, x: string, ll: string): string {
+    if (ll === "i64") return x;
+    const out = this.host.temp();
+    if (ll === "ptr") this.host.emit(`${out} = ptrtoint ptr ${x} to i64`);
+    else if (ll === "double") this.host.emit(`${out} = bitcast double ${x} to i64`);
+    else if (ll === "float") {
+      const raw = this.host.temp();
+      this.host.emit(`${raw} = bitcast float ${x} to i32`);
+      this.host.emit(`${out} = zext i32 ${raw} to i64`);
+    } else this.host.emit(`${out} = zext ${ll} ${x} to i64`);
+    return out;
+  }
+
+  // A scalar read from the low bits of a payload word.
+  fromWord(this: Mut<this>, w: string, ll: string): string {
+    if (ll === "i64") return w;
+    const out = this.host.temp();
+    if (ll === "ptr") this.host.emit(`${out} = inttoptr i64 ${w} to ptr`);
+    else if (ll === "double") this.host.emit(`${out} = bitcast i64 ${w} to double`);
+    else if (ll === "float") {
+      const raw = this.host.temp();
+      this.host.emit(`${raw} = trunc i64 ${w} to i32`);
+      this.host.emit(`${out} = bitcast i32 ${raw} to float`);
+    } else this.host.emit(`${out} = trunc i64 ${w} to ${ll}`);
+    return out;
   }
 
   // Whether a member that holds itself, which narrowing opened up, gives a member `to` holds
@@ -1329,34 +1637,90 @@ export class Conversions<H extends Slots> {
   // member for it, which may sit at another index. Narrowing to fewer members leaves some
   // that can't be held here, and those get no case.
   retag(this: Mut<this>, v: string, from: UnionType, to: UnionType): string {
-    const result = this.host.alloca(this.ll(to));
     const tag = this.host.temp();
     this.host.emit(`${tag} = extractvalue ${this.ll(from)} ${v}, 0`);
     const members = this.membersOf(from);
+    const targets = this.membersOf(to);
     let held: Type[] = [];
     let open: boolean[] = [];
+    // A member that goes into the target as itself keeps its payload words: only its tag changes.
+    let same: boolean[] = [];
     for (const m of members) {
-      const direct = this.host.tables.typing.membersFor(m, to).length > 0;
+      const into = this.host.tables.typing.membersFor(m, to);
+      const direct = into.length > 0;
       const through = !direct && this.opened(m, to);
       if (!direct && !through) continue;
       held.push(m);
       open.push(through);
+      same.push(direct && into[0]! === m);
+    }
+    if (held.length > 0 && same.every((x) => x)) {
+      let kept = true;
+      for (const m of held) if (targets.indexOf(m) !== members.indexOf(m)) kept = false;
+      let moved = tag;
+      if (!kept) {
+        let cases: string[] = [];
+        for (let i: usize = 0; i < held.length; i++) cases.push(this.host.label());
+        const end = this.host.label();
+        this.host.emit(`switch i32 ${tag}, label %${end} [ ${held.map((m, i) => `i32 ${members.indexOf(m)}, label %${cases[i as usize]}`).join(" ")} ]`);
+        let incoming = [`[ undef, %${this.host.block} ]`];
+        for (let i: usize = 0; i < held.length; i++) {
+          this.host.startBlock(cases[i]!);
+          incoming.push(`[ ${targets.indexOf(held[i]!)}, %${this.host.block} ]`);
+          this.host.emit(`br label %${end}`);
+        }
+        this.host.startBlock(end);
+        moved = this.host.temp();
+        this.host.emit(`${moved} = phi i32 ${incoming.join(", ")}`);
+      }
+      return this.reworded(v, from, to, moved);
     }
     let cases: string[] = [];
     for (let i: usize = 0; i < held.length; i++) cases.push(this.host.label());
     const end = this.host.label();
     this.host.emit(`switch i32 ${tag}, label %${end} [ ${held.map((m, i) => `i32 ${members.indexOf(m)}, label %${cases[i as usize]}`).join(" ")} ]`);
+    let incoming = [`[ undef, %${this.host.block} ]`];
     for (let i: usize = 0; i < held.length; i++) {
       const member = held[i]!;
       this.host.startBlock(cases[i]!);
-      const part = this.payload(v, from, member);
-      const made = open[i]! ? this.convert(part, member, to) : this.inject(part, member, to);
-      this.host.emit(`store ${this.ll(to)} ${made}, ptr ${result}`);
+      let made = "";
+      if (same[i]!) made = this.reworded(v, from, to, `${targets.indexOf(member)}`);
+      else {
+        const part = this.payload(v, from, member);
+        made = open[i]! ? this.convert(part, member, to) : this.inject(part, member, to);
+      }
+      incoming.push(`[ ${made}, %${this.host.block} ]`);
       this.host.emit(`br label %${end}`);
     }
     this.host.startBlock(end);
     const out = this.host.temp();
-    this.host.emit(`${out} = load ${this.ll(to)}, ptr ${result}`);
+    this.host.emit(`${out} = phi ${this.ll(to)} ${incoming.join(", ")}`);
+    return out;
+  }
+
+  // A `to` holding the payload words of `v` under the tag `tag`: all of them when the two unions
+  // have as many, else as many as the smaller has, the rest zero.
+  reworded(this: Mut<this>, v: string, from: UnionType, to: UnionType, tag: string): string {
+    const n = words(this.host.tables.typing, from);
+    const m = words(this.host.tables.typing, to);
+    let result = `{ i32 0, [${m} x i64] zeroinitializer }`;
+    if (n === m && n > 0) {
+      const all = this.host.temp();
+      this.host.emit(`${all} = extractvalue ${this.ll(from)} ${v}, 1`);
+      const next = this.host.temp();
+      this.host.emit(`${next} = insertvalue ${this.ll(to)} ${result}, [${n} x i64] ${all}, 1`);
+      result = next;
+    } else {
+      for (let k: usize = 0; k < (n < m ? n : m); k++) {
+        const word = this.host.temp();
+        this.host.emit(`${word} = extractvalue ${this.ll(from)} ${v}, 1, ${k}`);
+        const next = this.host.temp();
+        this.host.emit(`${next} = insertvalue ${this.ll(to)} ${result}, i64 ${word}, 1, ${k}`);
+        result = next;
+      }
+    }
+    const out = this.host.temp();
+    this.host.emit(`${out} = insertvalue ${this.ll(to)} ${result}, i32 ${tag}, 0`);
     return out;
   }
 }
