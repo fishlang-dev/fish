@@ -533,6 +533,8 @@ export class ExpressionsState {
   awaitedAs = new NodeMap<Expr, Type>();
   // The pairs of JS shapes being compared, each taken to fit while it is.
   comparing = new TypeMap<Type, TypeSet<Type>>();
+  // The pairs `passesJs` is comparing, by their ids, which a type referring to itself meets again.
+  passing = new Set<string>();
   // Arrows checked to own what they capture, being stored.
   owning = new NodeSet<Expr>();
   // Array literals written where a tuple is expected, which are that tuple, and those passed where
@@ -6013,6 +6015,21 @@ export class Expressions<C extends Context> implements Union<C> {
   // Whether a value passes where a package declares a type: as it fits it, or as a value JS takes
   // for it, inside unions and arrays too.
   private passesJs(this: Mut<this>, from: Type, to: Type): boolean {
+    // A pair met again while it is compared: a handle referring to itself fits, as in
+    // `with(o: R): R`; a Fish value referring to itself has no value JS could take yet.
+    const key = `${this.ctx.typing().keyOf(from)} ${this.ctx.typing().keyOf(to)}`;
+    if (this.ctx.exprsState.passing.has(key)) {
+      const held = this.isRefType(from) ? this.ctx.typing().rec(from).to : from;
+      return this.ctx.typing().jsShape(held) !== undefined;
+    }
+    this.ctx.exprsState.passing.add(key);
+    try {
+      return this.passesJsOnce(from, to);
+    } finally {
+      this.ctx.exprsState.passing.delete(key);
+    }
+  }
+  private passesJsOnce(this: Mut<this>, from: Type, to: Type): boolean {
     const referred = this.isRefType(from) ? this.recOf(this.ctx.typing().rec(from).to) : undefined;
     if (this.isRefType(from) && referred?.kind === "block" && referred.which === "JsValue") from = this.ctx.typing().rec(from).to;
     if (this.ctx.tables().typing.fits(from, to)) return true;
