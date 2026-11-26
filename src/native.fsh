@@ -8998,6 +8998,151 @@ void fsh_rt_sim_reset_faults(void) {
   fsh_sim_drop_rate = 0.0;
 }
 
+// A restart: serve's TCP listener handed to a new copy of the program, named to it in
+// FISH_LISTEN_FDS, with FISH_READY_FD the pipe it says on that it listens. The old process stops
+// accepting only once it has, so no connection is refused in between.
+
+// The port a descriptor listens on for TCP, or -1 when it isn't a listening TCP socket.
+static int64_t fsh_listening_port(int fd) {
+  int listening = 0;
+  socklen_t n = sizeof listening;
+  struct sockaddr_storage at;
+  socklen_t size = sizeof at;
+  // macOS answers SO_ACCEPTCONN with ENOPROTOOPT; there, a stream socket with no peer listens.
+  if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &listening, &n) < 0) {
+    int type = 0;
+    socklen_t typed = sizeof type;
+    struct sockaddr_storage peer;
+    socklen_t peer_size = sizeof peer;
+    listening = getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &typed) == 0 && type == SOCK_STREAM && getpeername(fd, (struct sockaddr *)&peer, &peer_size) < 0 && errno == ENOTCONN;
+  }
+  if (!listening) return -1;
+  if (getsockname(fd, (struct sockaddr *)&at, &size) < 0 || (at.ss_family != AF_INET && at.ss_family != AF_INET6)) return -1;
+  return ntohs(at.ss_family == AF_INET6 ? ((struct sockaddr_in6 *)&at)->sin6_port : ((struct sockaddr_in *)&at)->sin_port);
+}
+
+// Whether a listener was handed over and taken, the only case in which this process says it is
+// ready: one that bound a socket of its own isn't serving where the old one was.
+static int32_t fsh_adopted = 0;
+
+// The listener the process that started this one handed over, for a bind on its port, taken once.
+static int fsh_inherited_listener(int64_t port) {
+  const char *named = getenv("FISH_LISTEN_FDS");
+  if (named == NULL) return -1;
+  char *end = NULL;
+  long fd = strtol(named, &end, 10);
+  unsetenv("FISH_LISTEN_FDS");
+  if (end == named || *end != 0 || fd < 3 || fd > INT_MAX) return -1;
+  int64_t bound = fsh_listening_port((int)fd);
+  if (bound < 0) return -1;
+  if (port != 0 && bound != port) {
+    close((int)fd);
+    return -1;
+  }
+  fsh_adopted = 1;
+  return (int)fd;
+}
+
+// Tells the process that started this one for a restart that it listens, once; closing the pipe
+// unwritten tells it the handover failed.
+void fsh_rt_restart_ready(void) {
+  const char *named = getenv("FISH_READY_FD");
+  if (named == NULL) return;
+  long fd = strtol(named, NULL, 10);
+  unsetenv("FISH_READY_FD");
+  if (fd < 3 || fd > INT_MAX) return;
+  if (fsh_adopted) {
+    char one = 1;
+    ssize_t wrote = write((int)fd, &one, 1);
+    (void)wrote;
+  }
+  close((int)fd);
+}
+
+static pid_t fsh_restart_pid = 0;
+
+// Starts this program again, with its arguments and environment, handing it the listener on
+// port: the reading end of the pipe it says it listens on, or -1 with errno.
+int64_t fsh_rt_restart_spawn(int64_t port) {
+  int listener = -1;
+  // ponytail: scans descriptors for the listener; a handle passed from serve would skip it.
+  for (int i = 3; i < 65536 && listener < 0; i++) if (fcntl(i, F_GETFD) >= 0 && fsh_listening_port(i) == port) listener = i;
+  if (listener < 0) {
+    errno = EBADF;
+    return -1;
+  }
+  // A copy without close-on-exec is handed over: macOS's spawn closes a close-on-exec descriptor
+  // even when it is dup2'd onto itself.
+  listener = dup(listener);
+  if (listener < 0) return -1;
+  int ready[2];
+  if (pipe(ready) < 0) {
+    close(listener);
+    return -1;
+  }
+  fcntl(ready[0], F_SETFD, FD_CLOEXEC);
+  extern char **environ;
+  int64_t count = 0;
+  while (environ[count] != NULL) count++;
+  char **envp = fsh_rt_alloc((count + 3) * sizeof(char *));
+  int64_t at = 0;
+  for (int64_t i = 0; i < count; i++) if (strncmp(environ[i], "FISH_LISTEN_FDS=", 16) != 0 && strncmp(environ[i], "FISH_READY_FD=", 14) != 0) envp[at++] = environ[i];
+  char listen_var[48], ready_var[48];
+  snprintf(listen_var, sizeof listen_var, "FISH_LISTEN_FDS=%d", listener);
+  snprintf(ready_var, sizeof ready_var, "FISH_READY_FD=%d", ready[1]);
+  envp[at++] = listen_var;
+  envp[at++] = ready_var;
+  envp[at] = NULL;
+  char **argv = fsh_rt_alloc((fsh_argc + 2) * sizeof(char *));
+  argv[0] = fsh_exe;
+  for (int32_t i = 1; i < fsh_argc; i++) argv[i] = fsh_argv[i];
+  argv[fsh_argc > 0 ? fsh_argc : 1] = NULL;
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  // A descriptor dup2'd onto itself is kept by POSIX_SPAWN_CLOEXEC_DEFAULT.
+  for (int fd = 0; fd < 3; fd++) posix_spawn_file_actions_adddup2(&actions, fd, fd);
+  posix_spawn_file_actions_adddup2(&actions, listener, listener);
+  posix_spawn_file_actions_adddup2(&actions, ready[1], ready[1]);
+  posix_spawnattr_t attributes;
+  posix_spawnattr_init(&attributes);
+#ifdef __APPLE__
+  posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+#endif
+  fflush(NULL);
+  pid_t pid = 0;
+  int failure = posix_spawn(&pid, fsh_exe, &actions, &attributes, argv, envp);
+  posix_spawnattr_destroy(&attributes);
+  posix_spawn_file_actions_destroy(&actions);
+  fsh_rt_free(envp);
+  fsh_rt_free(argv);
+  close(ready[1]);
+  close(listener);
+  if (failure) {
+    close(ready[0]);
+    errno = failure;
+    return -1;
+  }
+  fsh_restart_pid = pid;
+  return ready[0];
+}
+
+// Waits up to ms for the new process to say it listens: 1 when it did, 0 when it ended first, -1
+// when it took too long, and is stopped.
+int64_t fsh_rt_restart_wait(int64_t fd, int64_t ms) {
+  struct pollfd p = { (int)fd, POLLIN, 0 };
+  int r;
+  do r = poll(&p, 1, (int)ms); while (r < 0 && errno == EINTR);
+  int64_t said = -1;
+  char one = 0;
+  if (r > 0) said = read((int)fd, &one, 1) == 1 ? 1 : 0;
+  close((int)fd);
+  if (said == -1 && fsh_restart_pid > 0) kill(fsh_restart_pid, SIGKILL);
+  // A new process that ended or was stopped is reaped; one that listens lives on past this one.
+  if (said != 1 && fsh_restart_pid > 0) waitpid(fsh_restart_pid, NULL, 0);
+  fsh_restart_pid = 0;
+  return said;
+}
+
 // 'TcpListener.bind(host, port)': listening at once, or 5 with the reason.
 int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
   fsh_sim_init();
@@ -9017,6 +9162,12 @@ int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str *
     }
     *out = fsh_sim_socket_new(0, norm, bound);
     fsh_sim_listener_add((*out)->sim);
+    return 1;
+  }
+  // A restart hands over the listener before its old process stops accepting.
+  int inherited = fsh_inherited_listener(port);
+  if (inherited >= 0) {
+    *out = fsh_socket_new(inherited);
     return 1;
   }
   struct sockaddr_storage at;
@@ -11683,6 +11834,10 @@ export const TLS_NATIVE = String.raw`
 #include <openssl/x509v3.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/core_names.h>
+#include <openssl/kdf.h>
+#include <openssl/params.h>
+#include <openssl/ecdsa.h>
 
 // A stream's SSL object, or a listener's context its connections are made from. A clone of a
 // stream may read on one thread while another writes, and OpenSSL's calls on one SSL object
@@ -12064,6 +12219,128 @@ int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_leng
   return ok;
 }
 
+// std:auth's JWT algorithms by number: HS256 (0), HS384 (1), HS512 (2), RS256 (3), ES256 (4) and
+// EdDSA (5), whose Ed25519 hashes inside the signature.
+static const EVP_MD *fsh_jwt_md(int64_t which) {
+  return which == 1 ? EVP_sha384() : which == 2 ? EVP_sha512() : which == 5 ? NULL : EVP_sha256();
+}
+
+// A PEM key of the kind the algorithm signs with: RSA, P-256 or Ed25519, or NULL.
+static EVP_PKEY *fsh_jwt_key(int64_t which, const uint8_t *key, int64_t length, int private) {
+  BIO *b = BIO_new_mem_buf(key, (int)length);
+  if (b == NULL) return NULL;
+  EVP_PKEY *k = private ? PEM_read_bio_PrivateKey(b, NULL, NULL, NULL) : PEM_read_bio_PUBKEY(b, NULL, NULL, NULL);
+  BIO_free(b);
+  if (k == NULL) return NULL;
+  char group[32] = "";
+  size_t n = 0;
+  int fits = which == 3 ? EVP_PKEY_is_a(k, "RSA") && EVP_PKEY_get_bits(k) >= 2048
+    : which == 4 ? EVP_PKEY_is_a(k, "EC") && EVP_PKEY_get_utf8_string_param(k, OSSL_PKEY_PARAM_GROUP_NAME, group, sizeof group, &n) == 1 && strcmp(group, "prime256v1") == 0
+    : EVP_PKEY_is_a(k, "ED25519");
+  if (!fits) { EVP_PKEY_free(k); return NULL; }
+  return k;
+}
+
+// Signs data with the key into out, which holds 1024 bytes, giving the signature's length; -1
+// when the key isn't one the algorithm takes. ES256's is JWS's 64 bytes of r then s, not DER.
+int64_t fsh_rt_crypto_sign(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, uint8_t *out) {
+  int64_t made = -1;
+  if (which <= 2) {
+    unsigned int n = 0;
+    if (HMAC(fsh_jwt_md(which), key, (int)key_length, data, (size_t)length, out, &n) != NULL) made = n;
+    ERR_clear_error();
+    return made;
+  }
+  EVP_PKEY *k = fsh_jwt_key(which, key, key_length, 1);
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  uint8_t der[1024];
+  size_t n = sizeof der;
+  if (k != NULL && ctx != NULL && EVP_DigestSignInit(ctx, NULL, fsh_jwt_md(which), NULL, k) == 1 && EVP_DigestSign(ctx, der, &n, data, (size_t)length) == 1) {
+    if (which != 4) { memcpy(out, der, n); made = (int64_t)n; }
+    else {
+      const uint8_t *at = der;
+      ECDSA_SIG *sig = d2i_ECDSA_SIG(NULL, &at, (long)n);
+      if (sig != NULL && BN_bn2binpad(ECDSA_SIG_get0_r(sig), out, 32) == 32 && BN_bn2binpad(ECDSA_SIG_get0_s(sig), out + 32, 32) == 32) made = 64;
+      ECDSA_SIG_free(sig);
+    }
+  }
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(k);
+  ERR_clear_error();
+  return made;
+}
+
+// Whether sig is data's signature under the key: 1 when it is, 0 when it isn't, -1 when the key
+// isn't one the algorithm takes. An HMAC is compared in constant time.
+int64_t fsh_rt_crypto_verify(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, const uint8_t *sig, int64_t sig_length) {
+  if (which <= 2) {
+    uint8_t mac[EVP_MAX_MD_SIZE];
+    unsigned int n = 0;
+    int64_t ok = HMAC(fsh_jwt_md(which), key, (int)key_length, data, (size_t)length, mac, &n) != NULL && (int64_t)n == sig_length && CRYPTO_memcmp(mac, sig, n) == 0;
+    ERR_clear_error();
+    return ok;
+  }
+  EVP_PKEY *k = fsh_jwt_key(which, key, key_length, 0);
+  if (k == NULL) { ERR_clear_error(); return -1; }
+  uint8_t der[128];
+  const uint8_t *given = sig;
+  size_t given_length = (size_t)sig_length;
+  int64_t ok = 0;
+  int shaped = 1;
+  if (which == 4) {
+    shaped = 0;
+    ECDSA_SIG *es = sig_length == 64 ? ECDSA_SIG_new() : NULL;
+    BIGNUM *r = es != NULL ? BN_bin2bn(sig, 32, NULL) : NULL;
+    BIGNUM *s = es != NULL ? BN_bin2bn(sig + 32, 32, NULL) : NULL;
+    if (r != NULL && s != NULL && ECDSA_SIG_set0(es, r, s) == 1) {
+      uint8_t *at = der;
+      int n = i2d_ECDSA_SIG(es, &at);
+      if (n > 0) { given = der; given_length = (size_t)n; shaped = 1; }
+    } else { BN_free(r); BN_free(s); }
+    ECDSA_SIG_free(es);
+  }
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  if (shaped && ctx != NULL && EVP_DigestVerifyInit(ctx, NULL, fsh_jwt_md(which), NULL, k) == 1) ok = EVP_DigestVerify(ctx, given, given_length, data, (size_t)length) == 1;
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(k);
+  ERR_clear_error();
+  return ok;
+}
+
+// A password's hash into out: argon2id (0) with a KiB of memory, b passes and c lanes, run on one
+// thread, or scrypt (1) with N = a, r = b and p = c. 1 when done, 0 when the parameters were
+// refused, -1 when this OpenSSL has no Argon2, which came in 3.2.
+int64_t fsh_rt_crypto_kdf(int64_t kind, const uint8_t *password, int64_t password_length, const uint8_t *salt, int64_t salt_length, int64_t a, int64_t b, int64_t c, uint8_t *out, int64_t out_length) {
+  int64_t ok = 0;
+  if (kind == 1) ok = EVP_PBE_scrypt((const char *)password, (size_t)password_length, salt, (size_t)salt_length, (uint64_t)a, (uint64_t)b, (uint64_t)c, (uint64_t)1 << 31, out, (size_t)out_length) == 1;
+  else {
+#if OPENSSL_VERSION_NUMBER >= 0x30200000L
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "ARGON2ID", NULL);
+    EVP_KDF_CTX *ctx = kdf != NULL ? EVP_KDF_CTX_new(kdf) : NULL;
+    if (ctx == NULL) ok = -1;
+    else {
+      uint32_t memory = (uint32_t)a, passes = (uint32_t)b, lanes = (uint32_t)c, threads = 1;
+      OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_PASSWORD, (void *)password, (size_t)password_length),
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *)salt, (size_t)salt_length),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ITER, &passes),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_THREADS, &threads),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_LANES, &lanes),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_MEMCOST, &memory),
+        OSSL_PARAM_construct_end(),
+      };
+      ok = EVP_KDF_derive(ctx, out, (size_t)out_length, params) == 1;
+    }
+    EVP_KDF_CTX_free(ctx);
+    EVP_KDF_free(kdf);
+#else
+    ok = -1;
+#endif
+  }
+  ERR_clear_error();
+  return ok;
+}
+
 // Why the crypto calls can't work: nothing, with OpenSSL linked.
 const char *fsh_rt_crypto_missing(void) {
   return "";
@@ -12088,6 +12365,18 @@ fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
 
 int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, int64_t rounds, uint8_t *out) {
   return 0;
+}
+
+int64_t fsh_rt_crypto_sign(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, uint8_t *out) {
+  return -2;
+}
+
+int64_t fsh_rt_crypto_verify(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, const uint8_t *sig, int64_t sig_length) {
+  return -2;
+}
+
+int64_t fsh_rt_crypto_kdf(int64_t kind, const uint8_t *password, int64_t password_length, const uint8_t *salt, int64_t salt_length, int64_t a, int64_t b, int64_t c, uint8_t *out, int64_t out_length) {
+  return -2;
 }
 
 const char *fsh_rt_crypto_missing(void) {
