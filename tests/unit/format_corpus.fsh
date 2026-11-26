@@ -47,6 +47,7 @@ const SOURCES: string[] = [
   "src/check.fsh",
   "src/checkcache.fsh",
   "src/classes.fsh",
+  "src/client.fsh",
   "src/codegen.fsh",
   "src/codes.fsh",
   "src/comments.fsh",
@@ -59,6 +60,7 @@ const SOURCES: string[] = [
   "src/deps.fsh",
   "src/diag.fsh",
   "src/doc.fsh",
+  "src/docs.fsh",
   "src/edits.fsh",
   "src/enums.fsh",
   "src/explain.fsh",
@@ -68,6 +70,7 @@ const SOURCES: string[] = [
   "src/fmt.fsh",
   "src/fuzz.fsh",
   "src/generics.fsh",
+  "src/heap.fsh",
   "src/git.fsh",
   "src/ids.fsh",
   "src/incremental.fsh",
@@ -336,6 +339,7 @@ test("src/casemap.fsh formats keeping its comments, parses back to the same tree
 test("src/check.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/check.fsh"));
 test("src/checkcache.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/checkcache.fsh"));
 test("src/classes.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/classes.fsh"));
+test("src/client.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/client.fsh"));
 test("src/codes.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/codes.fsh"));
 test("src/comments.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/comments.fsh"));
 test("src/compilation.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/compilation.fsh"));
@@ -347,6 +351,7 @@ test("src/dependencies.fsh formats keeping its comments, parses back to the same
 test("src/deps.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/deps.fsh"));
 test("src/diag.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/diag.fsh"));
 test("src/doc.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/doc.fsh"));
+test("src/docs.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/docs.fsh"));
 test("src/edits.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/edits.fsh"));
 test("src/enums.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/enums.fsh"));
 test("src/explain.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/explain.fsh"));
@@ -356,6 +361,7 @@ test("src/flow.fsh formats keeping its comments, parses back to the same tree an
 test("src/fmt.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/fmt.fsh"));
 test("src/fuzz.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/fuzz.fsh"));
 test("src/generics.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/generics.fsh"));
+test("src/heap.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/heap.fsh"));
 test("src/git.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/git.fsh"));
 test("src/ids.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/ids.fsh"));
 test("src/incremental.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/incremental.fsh"));

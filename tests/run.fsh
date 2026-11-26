@@ -18,6 +18,7 @@
 //   // mode: abort      build with --panic=abort: a panic aborts (SIGABRT) instead of exiting 101
 //   // mode: parse      only parse; passing means it parsed
 //   // link: <name>     link the C library <name>, as `--link <name>` does
+//   // flag: <flag>     build with `--flag <flag>`, a name or name=value std:build reads
 //   // stdin: "<text>"  what the program reads on stdin, a JSON string; several are joined
 // A program spanning several files is a directory holding `main.fsh`, whose comments say what
 // to expect, and the files it imports.
@@ -81,6 +82,10 @@ async function outcome(fishc: string, tmp: string, p: Program): Promise<Outcome>
       for (const l of directive(p.src, "link")) {
         args.push("--link");
         args.push(l.split(" ")[0]!);
+      }
+      for (const f of directive(p.src, "flag")) {
+        args.push("--flag");
+        args.push(f.split(" ")[0]!);
       }
     }
     const built = await ran(args, dirname(p.file), buildEnv, null, 300000);

@@ -7,7 +7,7 @@ import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.fsh";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.fsh";
 import { placeholders } from "./generics.fsh";
 import { cloneEnumMember, cloneParam, cloneStmt, cloneTypeAlias, cloneTypeMember, cloneTypeNode, cloneTypeParam } from "./rebuild.fsh";
-import { unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, typedNamed, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, type BrandHow, type FamilyNode, type BlockRecord, type ArrayType, type FutureType, type RefType, type ClosureType, copyField, copyMethod } from "./typing.fsh";
+import { SIMD_MASKS, SIMD_TYPES, simdTypeNamed, unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, typedNamed, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, type BrandHow, type FamilyNode, type BlockRecord, type ArrayType, type FutureType, type RefType, type ClosureType, copyField, copyMethod } from "./typing.fsh";
 import { typeForm, unsupported } from "./unsupported.fsh";
 import { symbolKey } from "./keys.fsh";
 import { byteSize } from "./sizes.fsh";
@@ -867,6 +867,11 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
       return this.array(element, t);
     }
     if (t.name === "FixedArray") return this.fixedArray(t);
+    const simd = simdTypeNamed(this.host.tables.typing, t.name);
+    if (simd !== undefined) {
+      if (t.args.length > 0) throw new CompileError("E0106", `type '${t.name}' is not generic`, t.start, t.end);
+      return simd;
+    }
     if (t.name === "Array" || t.name === "ReadonlyArray") throw unsupported(t.name === "Array" ? "'Array' without one type argument" : "'ReadonlyArray' types", t);
     if (t.name === "Ref" || t.name === "Mut") return this.reference(t);
     if (t.name === "never" && t.args.length === 0) return "never";
@@ -2430,7 +2435,7 @@ export function collection(typing: Mut<Typing>, key: Type, value: Type, set: boo
 const ITERATORS = ["Iterator", "IterableIterator", "Iterable"];
 
 const INTEGER_NAMES = ["i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize"];
-const BUILT_IN_TYPES = new Set(["Map", "Set", ...INTEGER_NAMES, "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TaskGroup", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined", "unknown"]);
+const BUILT_IN_TYPES = new Set([...SIMD_TYPES.keys(), ...SIMD_MASKS.keys(), "Map", "Set", ...INTEGER_NAMES, "f32", "f64", "boolean", "void", "number", "string", "bigint", "Ref", "Mut", "Lifetime", "Option", "Generator", "AsyncGenerator", "Promise", "JoinHandle", "Ptr", "MutPtr", "Atomic", "Lock", "RwLock", "Cell", "shared", "Rc", "Weak", "Semaphore", "Permit", "Channel", "AbortController", "AbortSignal", "TaskGroup", "TcpListener", "TcpStream", "UnixListener", "UnixStream", "UdpSocket", "JsValue", "Dyn", "RegExp", "null", "undefined", "unknown"]);
 
 // What each kind of object type member besides a property is called when rejected.
 const MEMBER_FORMS = new Map<string, string>([
