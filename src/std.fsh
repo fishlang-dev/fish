@@ -2006,8 +2006,10 @@ type ServeInfo = { hostname: string; port: i64 };
 // Body sizes are in bytes and timeouts in milliseconds; a timeout of 0 is none.
 // unix is a socket path to serve on in place of a port, removed when serve stops. tls has the
 // server speak HTTPS with a PEM certificate chain and its private key. trace: false
-// keeps the server's requests out of the program's traces, when tracing is on.
-type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64; trace?: boolean };
+// keeps the server's requests out of the program's traces, when tracing is on. restart: true has
+// SIGUSR2 start the program again, handing it the listener: once it listens, this one stops
+// accepting and drains, and if it fails to, this one keeps serving.
+type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64; trace?: boolean; restart?: boolean };
 type ServeHandler = (req: Request) => Promise<Response>;
 // What serve's options settle for each connection, under a name no program can write.
 type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64; secure: boolean; trace: boolean };
@@ -2039,9 +2041,13 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     secure: options.tls !== null,
     trace: options.trace !== false,
   };
-  // With no signal of its own, the server stops at the first SIGINT or SIGTERM.
+  const restart = options.restart === true;
+  if (restart && unix !== null) throw new IoError("serve's restart option hands over a TCP listener; a unix socket can't be restarted yet");
+  // With no signal of its own, the server stops at the first SIGINT or SIGTERM, or once a restart
+  // has a new process listening.
   const given = options.signal;
-  const stop = given ?? shutdownSignal();
+  const restarted = new AbortController();
+  const stop = AbortSignal.any([given ?? shutdownSignal(), restarted.signal]);
   const live = shared({ count: new Atomic(0) });
   {
     // The listener closes as this block ends, so no one new waits while connections drain.
@@ -2057,6 +2063,8 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     const bound = listener.port;
     const listen = options.onListen;
     if (listen !== null) listen({ hostname: unix ?? hostname, port: bound });
+    unsafe { fsh_rt_restart_ready() };
+    if (restart) spawn(__serveRestarts(bound, restarted, stop.clone()));
     const boxed: ServeHandler = handler;
     // A request with no Host header gets the server's address, an IPv6 one bracketed as in a URL,
     // or localhost, as curl sends over a socket.
@@ -2078,6 +2086,43 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   while (live.count.load() > 0) await sleep(10);
   // The last requests' spans go out before serve returns, since the program may end right after.
   if (limits.trace && __traceOn()) await __traceSend();
+}
+
+declare function fsh_rt_restart_ready(): void;
+declare function fsh_rt_restart_spawn(port: i64): i64;
+declare function fsh_rt_restart_wait(fd: i64, ms: i64): i64;
+declare function fsh_rt_signal_listen(n: i64): i64;
+declare function fsh_rt_signal_count(n: i64): i64;
+declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
+
+// Each SIGUSR2 while the server runs starts the program again on its listener, and once the new
+// process listens, stops this one's accepting through done.
+// ponytail: looks for the signal every 100 ms; a wake from the signal's thread would be sooner.
+async function __serveRestarts(port: i64, done: AbortController, stop: AbortSignal): Promise<void> {
+  let usr2: i64 = 0;
+  for (let n: i64 = 1; n < 65; n++) if (unsafe { !fsh_rt_signal_name(n).isNull() && fromCString(fsh_rt_signal_name(n)) === "SIGUSR2" }) usr2 = n;
+  let seen = unsafe { fsh_rt_signal_listen(usr2) };
+  while (true) {
+    try {
+      await sleep(100, stop);
+    } catch (e) {
+      return;
+    }
+    const now = unsafe { fsh_rt_signal_count(usr2) };
+    if (now <= seen) continue;
+    seen = now;
+    const ready = unsafe { fsh_rt_restart_spawn(port) };
+    if (ready < 0) {
+      console.error("serve: the program couldn't be started again for a restart, so this one keeps serving");
+      continue;
+    }
+    const said = await spawnBlocking(() => unsafe { fsh_rt_restart_wait(ready, 60000) });
+    if (said === 1) {
+      done.abort();
+      return;
+    }
+    console.error(said === 0 ? "serve: the new process ended before it listened, so this one keeps serving" : "serve: the new process didn't listen within a minute and was stopped, so this one keeps serving");
+  }
 }
 
 // What a request's head says: its request line and headers.

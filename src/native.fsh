@@ -8657,6 +8657,151 @@ void fsh_rt_sim_reset_faults(void) {
   fsh_sim_drop_rate = 0.0;
 }
 
+// A restart: serve's TCP listener handed to a new copy of the program, named to it in
+// FISH_LISTEN_FDS, with FISH_READY_FD the pipe it says on that it listens. The old process stops
+// accepting only once it has, so no connection is refused in between.
+
+// The port a descriptor listens on for TCP, or -1 when it isn't a listening TCP socket.
+static int64_t fsh_listening_port(int fd) {
+  int listening = 0;
+  socklen_t n = sizeof listening;
+  struct sockaddr_storage at;
+  socklen_t size = sizeof at;
+  // macOS answers SO_ACCEPTCONN with ENOPROTOOPT; there, a stream socket with no peer listens.
+  if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &listening, &n) < 0) {
+    int type = 0;
+    socklen_t typed = sizeof type;
+    struct sockaddr_storage peer;
+    socklen_t peer_size = sizeof peer;
+    listening = getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &typed) == 0 && type == SOCK_STREAM && getpeername(fd, (struct sockaddr *)&peer, &peer_size) < 0 && errno == ENOTCONN;
+  }
+  if (!listening) return -1;
+  if (getsockname(fd, (struct sockaddr *)&at, &size) < 0 || (at.ss_family != AF_INET && at.ss_family != AF_INET6)) return -1;
+  return ntohs(at.ss_family == AF_INET6 ? ((struct sockaddr_in6 *)&at)->sin6_port : ((struct sockaddr_in *)&at)->sin_port);
+}
+
+// Whether a listener was handed over and taken, the only case in which this process says it is
+// ready: one that bound a socket of its own isn't serving where the old one was.
+static int32_t fsh_adopted = 0;
+
+// The listener the process that started this one handed over, for a bind on its port, taken once.
+static int fsh_inherited_listener(int64_t port) {
+  const char *named = getenv("FISH_LISTEN_FDS");
+  if (named == NULL) return -1;
+  char *end = NULL;
+  long fd = strtol(named, &end, 10);
+  unsetenv("FISH_LISTEN_FDS");
+  if (end == named || *end != 0 || fd < 3 || fd > INT_MAX) return -1;
+  int64_t bound = fsh_listening_port((int)fd);
+  if (bound < 0) return -1;
+  if (port != 0 && bound != port) {
+    close((int)fd);
+    return -1;
+  }
+  fsh_adopted = 1;
+  return (int)fd;
+}
+
+// Tells the process that started this one for a restart that it listens, once; closing the pipe
+// unwritten tells it the handover failed.
+void fsh_rt_restart_ready(void) {
+  const char *named = getenv("FISH_READY_FD");
+  if (named == NULL) return;
+  long fd = strtol(named, NULL, 10);
+  unsetenv("FISH_READY_FD");
+  if (fd < 3 || fd > INT_MAX) return;
+  if (fsh_adopted) {
+    char one = 1;
+    ssize_t wrote = write((int)fd, &one, 1);
+    (void)wrote;
+  }
+  close((int)fd);
+}
+
+static pid_t fsh_restart_pid = 0;
+
+// Starts this program again, with its arguments and environment, handing it the listener on
+// port: the reading end of the pipe it says it listens on, or -1 with errno.
+int64_t fsh_rt_restart_spawn(int64_t port) {
+  int listener = -1;
+  // ponytail: scans descriptors for the listener; a handle passed from serve would skip it.
+  for (int i = 3; i < 65536 && listener < 0; i++) if (fcntl(i, F_GETFD) >= 0 && fsh_listening_port(i) == port) listener = i;
+  if (listener < 0) {
+    errno = EBADF;
+    return -1;
+  }
+  // A copy without close-on-exec is handed over: macOS's spawn closes a close-on-exec descriptor
+  // even when it is dup2'd onto itself.
+  listener = dup(listener);
+  if (listener < 0) return -1;
+  int ready[2];
+  if (pipe(ready) < 0) {
+    close(listener);
+    return -1;
+  }
+  fcntl(ready[0], F_SETFD, FD_CLOEXEC);
+  extern char **environ;
+  int64_t count = 0;
+  while (environ[count] != NULL) count++;
+  char **envp = fsh_rt_alloc((count + 3) * sizeof(char *));
+  int64_t at = 0;
+  for (int64_t i = 0; i < count; i++) if (strncmp(environ[i], "FISH_LISTEN_FDS=", 16) != 0 && strncmp(environ[i], "FISH_READY_FD=", 14) != 0) envp[at++] = environ[i];
+  char listen_var[48], ready_var[48];
+  snprintf(listen_var, sizeof listen_var, "FISH_LISTEN_FDS=%d", listener);
+  snprintf(ready_var, sizeof ready_var, "FISH_READY_FD=%d", ready[1]);
+  envp[at++] = listen_var;
+  envp[at++] = ready_var;
+  envp[at] = NULL;
+  char **argv = fsh_rt_alloc((fsh_argc + 2) * sizeof(char *));
+  argv[0] = fsh_exe;
+  for (int32_t i = 1; i < fsh_argc; i++) argv[i] = fsh_argv[i];
+  argv[fsh_argc > 0 ? fsh_argc : 1] = NULL;
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  // A descriptor dup2'd onto itself is kept by POSIX_SPAWN_CLOEXEC_DEFAULT.
+  for (int fd = 0; fd < 3; fd++) posix_spawn_file_actions_adddup2(&actions, fd, fd);
+  posix_spawn_file_actions_adddup2(&actions, listener, listener);
+  posix_spawn_file_actions_adddup2(&actions, ready[1], ready[1]);
+  posix_spawnattr_t attributes;
+  posix_spawnattr_init(&attributes);
+#ifdef __APPLE__
+  posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+#endif
+  fflush(NULL);
+  pid_t pid = 0;
+  int failure = posix_spawn(&pid, fsh_exe, &actions, &attributes, argv, envp);
+  posix_spawnattr_destroy(&attributes);
+  posix_spawn_file_actions_destroy(&actions);
+  fsh_rt_free(envp);
+  fsh_rt_free(argv);
+  close(ready[1]);
+  close(listener);
+  if (failure) {
+    close(ready[0]);
+    errno = failure;
+    return -1;
+  }
+  fsh_restart_pid = pid;
+  return ready[0];
+}
+
+// Waits up to ms for the new process to say it listens: 1 when it did, 0 when it ended first, -1
+// when it took too long, and is stopped.
+int64_t fsh_rt_restart_wait(int64_t fd, int64_t ms) {
+  struct pollfd p = { (int)fd, POLLIN, 0 };
+  int r;
+  do r = poll(&p, 1, (int)ms); while (r < 0 && errno == EINTR);
+  int64_t said = -1;
+  char one = 0;
+  if (r > 0) said = read((int)fd, &one, 1) == 1 ? 1 : 0;
+  close((int)fd);
+  if (said == -1 && fsh_restart_pid > 0) kill(fsh_restart_pid, SIGKILL);
+  // A new process that ended or was stopped is reaped; one that listens lives on past this one.
+  if (said != 1 && fsh_restart_pid > 0) waitpid(fsh_restart_pid, NULL, 0);
+  fsh_restart_pid = 0;
+  return said;
+}
+
 // 'TcpListener.bind(host, port)': listening at once, or 5 with the reason.
 int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
   fsh_sim_init();
@@ -8676,6 +8821,12 @@ int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str *
     }
     *out = fsh_sim_socket_new(0, norm, bound);
     fsh_sim_listener_add((*out)->sim);
+    return 1;
+  }
+  // A restart hands over the listener before its old process stops accepting.
+  int inherited = fsh_inherited_listener(port);
+  if (inherited >= 0) {
+    *out = fsh_socket_new(inherited);
     return 1;
   }
   struct sockaddr_storage at;
