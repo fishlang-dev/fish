@@ -11,7 +11,7 @@ import { CompileError, locate, sourceOf, type Source } from "./diag.fsh";
 import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, isMember, memberOf, toFloat, type ComptimeHost, type Value } from "./comptime.fsh";
 import { Printer, RUNTIME, type PrintHost } from "./runtime.fsh";
 import type { ArithmeticOp, AssignOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.fsh";
-import { ARRAY, DYN, atNamesIn, compound, Conversions, llvmOf, nameAt, structNames, textOf, typeDefinitions } from "./layout.fsh";
+import { ARRAY, DYN, atNamesIn, compound, Conversions, llvmOf, nameAt, structNames, textOf, typeDefinitions, type Leaf } from "./layout.fsh";
 import { made, type PatternInfo } from "./match.fsh";
 import { STD_BASE } from "./std.fsh";
 import { EMBEDDED, LIVE, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.fsh";
@@ -456,6 +456,7 @@ class Codegen implements PrintHost, ComptimeHost {
   groupFails: Map<string, string>;
   cancelled: Set<InstanceId>;
   stringers: TypeMap<Type, string>;
+  leaves: TypeMap<Type, Leaf[]>;
   constantGlobals: Map<InstanceId, string>;
   uncopyable: Set<string>;
   settledOutput: boolean;
@@ -658,6 +659,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
     // The functions writing String(x) of a value with parts, by its type.
     this.stringers = new TypeMap<Type, string>();
+    this.leaves = new TypeMap<Type, Leaf[]>();
 
     // The global each top-level const holding an aggregate lives in.
     this.constantGlobals = new Map<InstanceId, string>();
@@ -3008,7 +3010,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     if (r?.kind === "union") {
       const box = this.tables.typing.blockType("JsValue");
-      const b = this.conversions().branch(v, type as UnionType, box);
+      let b = this.conversions().branch(v, type as UnionType, box);
       for (let i: usize = 0; i < b.members.length; i++) {
         const part = this.conversions().arm(b, i, v, type as UnionType);
         const member = b.members[i]!;
@@ -10940,9 +10942,19 @@ class Codegen implements PrintHost, ComptimeHost {
       return this.convert(tupleLength2, "usize", get9);
     }
     const object = shared as ObjectType | ClassType;
-    const result = this.temp();
-    const line3 = `${result} = extractvalue ${this.llvm(object)} ${this.value(e.object)}, ${this.tables.typing.fieldPath(object, e.name).join(", ")}`;
-    this.emit(line3);
+    let result = this.temp();
+    // A field of somewhere a value lives is read from there, without loading the rest of it.
+    const storedObject = this.lendable(e) ? this.stored(e.object) : undefined;
+    const holder = storedObject !== undefined ? this.referent(storedObject) : undefined;
+    if (holder !== undefined && this.tables.typing.lower(this.tables.typing.unfold(holder)) === this.tables.typing.lower(object)) {
+      const place = this.address(e);
+      const held = this.stored(e);
+      this.emit(`${result} = load ${this.llvm(held)}, ptr ${place}`);
+      if (this.inPayload(e)) return this.convert(result, held, this.cur().types.get(e)!);
+    } else {
+      const line3 = `${result} = extractvalue ${this.llvm(object)} ${this.value(e.object)}, ${this.tables.typing.fieldPath(object, e.name).join(", ")}`;
+      this.emit(line3);
+    }
     // A field read through an interface or object parameter takes the type its bound declares. A
     // class's field keeps its type as written, `?` markers included, which lowering drops. One a
     // check narrowed is read as declared first.
