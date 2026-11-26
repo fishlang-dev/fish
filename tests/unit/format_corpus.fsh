@@ -69,6 +69,7 @@ const SOURCES: string[] = [
   "src/fmt.fsh",
   "src/fuzz.fsh",
   "src/generics.fsh",
+  "src/heap.fsh",
   "src/git.fsh",
   "src/ids.fsh",
   "src/incremental.fsh",
@@ -357,6 +358,7 @@ test("src/flow.fsh formats keeping its comments, parses back to the same tree an
 test("src/fmt.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/fmt.fsh"));
 test("src/fuzz.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/fuzz.fsh"));
 test("src/generics.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/generics.fsh"));
+test("src/heap.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/heap.fsh"));
 test("src/git.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/git.fsh"));
 test("src/ids.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/ids.fsh"));
 test("src/incremental.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/incremental.fsh"));

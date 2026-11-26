@@ -28,6 +28,8 @@ export const ASSIGNMENTS: Partial<Record<AssignOp, BinaryOp | "=">> = {
 export function binaryType(typing: Mut<Typing>, op: BinaryOp, left: Type, right: Type, at: Span): Type {
   // A value of no type is in code an instance never reaches, where anything goes.
   if (left === "never" || right === "never") return ["===", "!==", "<", "<=", ">", ">=", "&&", "||"].includes(op) ? "boolean" : "never";
+  const vector = typing.simd(left) !== undefined || typing.simd(right) !== undefined ? simdType(typing, op, left, right, { start: at.start, end: at.end }) : undefined;
+  if (vector !== undefined) return vector;
   const branded = brandedType(typing, op, left, right, { start: at.start, end: at.end });
   if (branded !== undefined) return branded;
   // Value equality comes through Eq, which objects don't have yet. A literal's value is known.
@@ -77,6 +79,25 @@ export function binaryType(typing: Mut<Typing>, op: BinaryOp, left: Type, right:
     throw new CompileError("E0103", `operator '${op}' cannot be applied to types '${typing.show(left)}' and '${typing.show(right)}'`, at.start, at.end);
   }
   return op === "<" || op === "<=" || op === ">" || op === ">=" ? "boolean" : left;
+}
+
+// A SIMD vector's operators work lane by lane on two of one type, giving that type, as Rust's
+// std::simd does: integer lanes wrap. `===` compares whole vectors.
+/** @throws {CompileError} */
+function simdType(typing: Mut<Typing>, op: BinaryOp, left: Type, right: Type, at: Span): Type {
+  if (left !== right) throw new CompileError("E0111", `operator '${op}' takes two '${typing.show(left)}' vectors; '${typing.show(right)}' isn't one`, at.start, at.end);
+  const lane = typing.simd(left)!.element;
+  if (op === "===" || op === "!==") return "boolean";
+  if (op === "<" || op === "<=" || op === ">" || op === ">=") throw new CompileError("E0103", `operator '${op}' doesn't compare vectors; compare their lanes with 'lt', 'le', 'gt' or 'ge', which give a mask`, at.start, at.end);
+  if (lane === "boolean") {
+    if (op === "&" || op === "|" || op === "^") return left;
+    throw new CompileError("E0103", `operator '${op}' cannot be applied to the mask '${typing.show(left)}'; masks take '&', '|' and '^'`, at.start, at.end);
+  }
+  if (op === "+" || op === "-" || op === "*") return left;
+  if ((op === "/" || op === "%") && isFloat(lane)) return left;
+  if (op === "/" || op === "%") throw unsupported("lane-wise integer division", at);
+  if ((op === "&" || op === "|" || op === "^") && isInteger(lane)) return left;
+  throw new CompileError("E0103", `operator '${op}' cannot be applied to the vector '${typing.show(left)}'`, at.start, at.end);
 }
 
 // The operators only integers have.
