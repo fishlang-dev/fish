@@ -2040,7 +2040,7 @@ function quotedShape(v: Ref<QuoteValue>): string {
 }
 
 // Moves an error raised while parsing a file to where the file sits in the program.
-function shiftError(e: Mut<CompileError>, by: usize): void {
+export function shiftError(e: Mut<CompileError>, by: usize): void {
   e.start += by;
   e.end += by;
   if (e.note !== undefined) {

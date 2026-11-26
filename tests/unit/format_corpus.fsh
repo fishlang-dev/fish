@@ -59,6 +59,7 @@ const SOURCES: string[] = [
   "src/deps.fsh",
   "src/diag.fsh",
   "src/doc.fsh",
+  "src/docs.fsh",
   "src/edits.fsh",
   "src/enums.fsh",
   "src/explain.fsh",
@@ -346,6 +347,7 @@ test("src/dependencies.fsh formats keeping its comments, parses back to the same
 test("src/deps.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/deps.fsh"));
 test("src/diag.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/diag.fsh"));
 test("src/doc.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/doc.fsh"));
+test("src/docs.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/docs.fsh"));
 test("src/edits.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/edits.fsh"));
 test("src/enums.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/enums.fsh"));
 test("src/explain.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/explain.fsh"));
