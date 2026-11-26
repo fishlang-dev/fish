@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { Compilation } from "./compilation.fsh";
+import { buildFor, type BuildInfo, type Compilation } from "./compilation.fsh";
 import { dependencyLib, dependencyOf, packageOf, resolvePackages, type Package as FishPackage } from "./dependencies.fsh";
 import { CompileError, type Source } from "./diag.fsh";
 import { NODE_MODULES } from "./survey.fsh";
@@ -14,10 +14,11 @@ import { HANDLE, RUST_NAME, rustSymbol, type RustTables } from "./rust.fsh";
 import { ENGINE_HOOK, STD, STD_MODULES, STD_ONLY, STD_VALUES, stdModule, stdModuleNames } from "./std.fsh";
 import { refuseCompat } from "./migrate.fsh";
 import { unsupported } from "./unsupported.fsh";
-import { dup, forEachChild, nextId, nodeIdOf, NodeMap, Rewrites, shiftSpansStmt, shiftSpansStmts, walk, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
+import { dup, forEachChild, nextId, someNode, nodeIdOf, NodeMap, Rewrites, shiftSpansStmt, shiftSpansStmts, walk, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
 import { cloneClassMember, cloneExpr, cloneStmt, rebuiltStmts, type Replacements } from "./rebuild.fsh";
 import { forEachNamedChild, quoteTree, type QuoteValue } from "./walk.fsh";
 import { FILE_SPAN } from "./program.fsh";
+import { buildFacts, buildModule } from "./target.fsh";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
 // offset range, so a position anywhere in the program says which file it is in.
@@ -100,6 +101,10 @@ class Loader {
 
   /** @throws {CompileError | Error | IoError} */
   std(this: Mut<this>, cx: Mut<Compilation>, read: Ref<Reader>, name: string): Module {
+    if (name === "build") {
+      const info: BuildInfo = cx.session.build !== undefined ? buildFor(cx.session.build, undefined, cx.session.build!.release) : { triple: "", release: false, flags: [] };
+      return this.visit(cx, read, "std:build", buildModule(info), "std:build");
+    }
     const text = STD_MODULES[name];
     return this.visit(cx, read, `std:${name}`, text !== undefined ? text : "", name === "Bun" ? "bun" : `std:${name}`);
   }
@@ -126,6 +131,7 @@ class Loader {
     }
     if (base > 0) shiftSpansStmts(parsed, base);
     if (!std) lowerImportMeta(cx.ids, parsed, key, this.modules.length === 0);
+    if (!std) foldBuildConditions(cx.ids, parsed, cx.session.build);
     // A Rust crate's declarations are reached by importing `rust:<crate>`, not as this file's own.
     let statements: Stmt[] = [];
     let blocks: Namespace[] = [];
@@ -1618,6 +1624,93 @@ function stdValues(): Map<string, Map<string, "value" | "table">> {
 // keeps as Bun's compiled executables do, its name and directory, its file URL, and whether it is
 // the entry file. They are read as members, by a literal key, or by destructuring `import.meta`
 // in a declaration; any other use is left for the checker to refuse.
+// What a `comptime` condition over `std:build` comes to while loading: a string, a boolean or
+// null, or undefined when it reads anything else.
+type Decided = { value: string | boolean | null } | undefined;
+
+// An `if` whose condition reads what `std:build` gives under `comptime`, as in
+// `if (comptime target.os === "linux")`, decided as the file is loaded: the branch not taken is
+// dropped unchecked, as Zig does, so code for one platform may call what only that platform has.
+// A condition reading anything else is an ordinary one, both branches checked.
+function foldBuildConditions(ids: Mut<Ids>, statements: Mut<Stmt[]>, build: Ref<BuildInfo | undefined>): void {
+  // Each name this file imports from std:build, as `target`, `flags` or `*` for the namespace.
+  let names = new Map<string, string>();
+  for (const s of statements) {
+    if (s.kind !== "import" || s.module !== "std:build") continue;
+    if (s.namespace !== undefined) names.set(s.namespace!, "*");
+    if (s.named !== undefined) for (const sp of s.named!) if (sp.name === "target" || sp.name === "flags") names.set(sp.alias ?? sp.name, sp.name);
+  }
+  if (names.size === 0) return;
+  const info: BuildInfo = build !== undefined ? buildFor(build, undefined, build.release) : { triple: "", release: false, flags: [] };
+  let rewrites = new Rewrites();
+  walk({ of: "stmts", node: statements }, (x) => {
+    if (x.of !== "stmt" || x.node.kind !== "if" || !someNode({ of: "expr", node: x.node.cond }, (n) => n.of === "expr" && n.node.kind === "comptime")) return;
+    const decided = decide(x.node.cond, names, info);
+    if (decided === undefined || typeof decided.value !== "boolean") return;
+    const taken: Ref<Stmt[] | undefined> = decided.value ? x.node.then : x.node.else;
+    const at = { start: x.node.start, end: x.node.end };
+    if (taken === undefined) rewrites.replaceStmt(x.node, { id: nextId(ids), kind: "empty", ...at });
+    else rewrites.replaceStmt(x.node, { id: nextId(ids), kind: "block", body: taken.map((s) => cloneStmt(s)), ...at });
+  });
+  rebuiltStmts(statements, rewrites);
+}
+
+// Which of `target` and `flags` an expression names: by the name imported, or through the namespace.
+function buildName(e: Ref<Expr>, names: Ref<Map<string, string>>): string | undefined {
+  if (e.kind === "ident") {
+    const named = names.get(e.name);
+    return named === "*" ? undefined : named;
+  }
+  if (e.kind === "member" && e.object.kind === "ident" && names.get(e.object.name) === "*" && (e.name === "target" || e.name === "flags")) return e.name;
+  return undefined;
+}
+
+function decide(e: Ref<Expr>, names: Ref<Map<string, string>>, info: Ref<BuildInfo>): Decided {
+  switch (e.kind) {
+    case "comptime":
+      return decide(e.expr, names, info);
+    case "bool":
+      return { value: e.value };
+    case "string":
+      return { value: e.value };
+    case "null":
+      return { value: null };
+    case "unary": {
+      if (e.op !== "!") return undefined;
+      const inner = decide(e.operand, names, info);
+      return inner !== undefined && typeof inner.value === "boolean" ? { value: !inner.value } : undefined;
+    }
+    case "binary": {
+      const left = decide(e.left, names, info);
+      const right = decide(e.right, names, info);
+      if (left === undefined || right === undefined) return undefined;
+      if (e.op === "===" || e.op === "!==") return { value: (left.value === right.value) === (e.op === "===") };
+      if ((e.op === "&&" || e.op === "||") && typeof left.value === "boolean" && typeof right.value === "boolean") return { value: e.op === "&&" ? left.value && right.value : left.value || right.value };
+      return undefined;
+    }
+    case "member": {
+      if (buildName(e.object, names) !== "target") return undefined;
+      const facts = buildFacts(info);
+      if (e.name === "os") return { value: facts.os };
+      if (e.name === "arch") return { value: facts.arch };
+      if (e.name === "libc") return { value: facts.libc };
+      if (e.name === "release") return { value: info.release };
+      return undefined;
+    }
+    case "call": {
+      if (e.callee.kind !== "member" || buildName(e.callee.object, names) !== "flags" || e.args.length !== 1 || e.args[0]!.kind !== "string") return undefined;
+      const arg: Ref<Expr> = e.args[0]!;
+      const name = arg.kind === "string" ? arg.value : "";
+      const found = info.flags.find((f) => f.name === name);
+      if (e.callee.name === "has") return { value: found !== null };
+      if (e.callee.name === "get") return { value: found !== null ? found.value : null };
+      return undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
 function lowerImportMeta(ids: Mut<Ids>, statements: Mut<Stmt[]>, path: string, entry: boolean): void {
   // A script's `if (import.meta.main) main();`, as Bun runs one, says only what a native program
   // does anyway, so it goes.
@@ -2040,7 +2133,7 @@ function quotedShape(v: Ref<QuoteValue>): string {
 }
 
 // Moves an error raised while parsing a file to where the file sits in the program.
-function shiftError(e: Mut<CompileError>, by: usize): void {
+export function shiftError(e: Mut<CompileError>, by: usize): void {
   e.start += by;
   e.end += by;
   if (e.note !== undefined) {

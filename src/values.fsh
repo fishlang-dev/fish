@@ -29,7 +29,7 @@ import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./nar
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, applyShape, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.fsh";
 import { forEachChild, nextId, NodeMap, NodeSet, reborrowNode, renumberExpr, respanExpr, Rewrites, someNode, walk, walkWhile, type AnyNode, type Ids, type SiteTable } from "./nodes.fsh";
 import { cloneExpr, cloneJsName, cloneObjectProp, cloneParam, clonePattern, cloneTypeMember, cloneTypeNode, idOfExpr, idOfObjectProp, rebuiltExpr, withIdExpr } from "./rebuild.fsh";
-import { typedNamed } from "./typing.fsh";
+import { SIMD_MASKS, SIMD_TYPES, simdTypeNamed, typedNamed } from "./typing.fsh";
 
 // Expression checking inside one function body: every value gets a type, every name its
 // binding, and every value meeting a narrower declared type its coercion.
@@ -1793,6 +1793,8 @@ export class Expressions<C extends Context> implements Union<C> {
       if (which !== undefined) return this.socketStatic(e, callee, which);
     }
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "FixedArray" && (this.ctx.lookup("FixedArray", undefined) === undefined) && !this.ctx.classes().has("FixedArray")) return this.filled(e, callee);
+    const simdNamed = callee.kind === "ident" ? callee.name : callee.kind === "member" && callee.object.kind === "ident" ? callee.object.name : undefined;
+    if (simdNamed !== undefined && (SIMD_TYPES.has(simdNamed) || SIMD_MASKS.has(simdNamed)) && (this.ctx.lookup(simdNamed, undefined) === undefined) && !this.ctx.classes().has(simdNamed) && !this.ctx.byName().has(simdNamed)) return this.simdStatic(e, callee, simdNamed);
     if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "Array" && (this.ctx.lookup("Array", undefined) === undefined) && !this.ctx.classes().has("Array")) return this.arrayStatic(e, callee);
     if (callee.kind === "member" && callee.object.kind === "ident") {
       const typed = typedNamed(callee.object.name);
@@ -1948,6 +1950,9 @@ export class Expressions<C extends Context> implements Union<C> {
       const other = this.ctx.tables().typing.lower(receiver!) !== rx;
       return this.regexCall(e, callee, rx, other);
     }
+    const lowered = receiver !== undefined ? this.ctx.tables().typing.lower(receiver) : undefined;
+    const vector = callee.kind === "member" && lowered !== undefined ? this.ctx.typing().simd(lowered) : undefined;
+    if (callee.kind === "member" && vector !== undefined) return this.simdMethod(e, callee, lowered!, vector);
     if (callee.kind === "member" && receiver !== undefined && this.isFixed(receiver)) {
       throw new CompileError("E0502", `a FixedArray has no method '${callee.name}' yet; loop over it with 'for...of', or read 'length'`, callee.start, callee.end);
     }
@@ -3715,6 +3720,82 @@ export class Expressions<C extends Context> implements Union<C> {
       for (const p of e.props) out.push(p.kind === "property" ? cloneExpr(p.value) : undefined);
     }
     return out;
+  }
+
+  // A SIMD type's constructor, `f32x4(a, b, c, d)`, and its statics `splat(x)` and `load(a, i)`;
+  // `load` is std's helper, which borrows the array as any function does.
+  /** @throws {CompileError} */
+  private simdStatic(this: Mut<this>, e: Ref<Call>, callee: Ref<Expr>, name: string): { type: Type; what: string } {
+    const type = simdTypeNamed(this.ctx.tables().typing, name)!;
+    const lanes = this.ctx.typing().simd(type)!;
+    if (e.typeArgs.length > 0) throw new CompileError("E0106", `'${name}' takes no type argument`, e.start, e.end);
+    const op = callee.kind === "member" ? callee.name : "make";
+    const mask = lanes.element === "boolean";
+    if (op === "load" && !mask) {
+      const tables = this.ctx.tables();
+      const helper: Expr = { id: nextId(tables.ids), kind: "ident", name: `__simd_${name}_load`, start: callee.start, end: callee.end };
+      let args: Expr[] = [];
+      for (const a of e.args) args.push(cloneExpr(a));
+      const made = tables.rewrites.replace(e, { ...callNode(e), callee: helper, args });
+      if (made.kind === "call") return this.callNamed(made);
+    }
+    if (op !== "make" && op !== "splat") throw new CompileError("E0502", `'${name}' has no '${op}'; make one with '${name}(...)' with its ${lanes.size} lanes, '${name}.splat(x)'${mask ? "" : ` or '${name}.load(array, index)'`}`, callee.start, callee.end);
+    const count: usize = op === "make" ? lanes.size : 1;
+    if (e.args.length !== count) throw new CompileError("E0504", op === "make" ? `'${name}' takes its ${lanes.size} lanes, each a '${this.ctx.typing().show(lanes.element)}'` : `'${name}.splat' takes the '${this.ctx.typing().show(lanes.element)}' every lane holds`, e.start, e.end);
+    for (const a of e.args) this.simdLane(a, lanes.element, `'${name}'`);
+    this.ctx.tables().simdCalls.set(cloneExpr(e), op);
+    return { type, what: `'${name}'` };
+  }
+
+  // An argument giving one lane's value, its literal taking the lane's type.
+  /** @throws {CompileError} */
+  private simdLane(this: Mut<this>, a: Ref<Expr>, lane: Type, what: string) {
+    this.expect(a, lane);
+    const t = this.read(a);
+    if (t !== lane && !this.adapt(a, lane)) throw new CompileError("E0111", `${what} takes a '${this.ctx.typing().show(lane)}' here, not '${this.ctx.typing().show(t)}'; convert it with 'as', as in 'x as ${this.ctx.typing().show(lane)}'`, a.start, a.end);
+  }
+
+  // A SIMD vector's or mask's methods, lane by lane: reductions, comparisons giving a mask, a
+  // mask's select, any and all, and `store`, std's helper, which borrows the array mutably.
+  /** @throws {CompileError} */
+  private simdMethod(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>, type: Type, lanes: { element: Type; size: usize }): { type: Type; what: string } {
+    const name = this.ctx.typing().show(type);
+    const what = `'${name}.${callee.name}'`;
+    if (callee.optional || this.linked(callee)) throw new CompileError("E0801", `${what} can't be called through an optional chain yet; check for null first`, callee.start, callee.end);
+    if (e.typeArgs.length > 0) throw new CompileError("E0106", `${what} takes no type argument`, e.start, e.end);
+    const mask = lanes.element === "boolean";
+    const methods = mask ? ["any", "all", "select", "toArray"] : ["sum", "min", "max", "lt", "le", "gt", "ge", "eq", "ne", "store", "toArray"];
+    if (!methods.includes(callee.name)) throw new CompileError("E0502", `'${name}' has no method '${callee.name}'${didYouMean(callee.name, methods.clone())}; it has ${methods.map((m) => `'${m}'`).join(", ")}`, callee.start, callee.end);
+    if (callee.name === "store") {
+      const tables = this.ctx.tables();
+      const helper: Expr = { id: nextId(tables.ids), kind: "ident", name: `__simd_${name}_store`, start: callee.start, end: callee.end };
+      let args: Expr[] = [cloneExpr(callee.object)];
+      for (const a of e.args) args.push(cloneExpr(a));
+      const made = tables.rewrites.replace(e, { ...callNode(e), callee: helper, args });
+      if (made.kind === "call") return this.callNamed(made);
+    }
+    const arg3568_1 = this.ctx.held().types.get(callee.object)!;
+    this.loaded(callee.object, arg3568_1);
+    let result: Type = type;
+    if (callee.name === "sum" || callee.name === "min" || callee.name === "max" || callee.name === "any" || callee.name === "all" || callee.name === "toArray") {
+      if (e.args.length !== 0) throw new CompileError("E0504", `${what} takes no argument`, e.start, e.end);
+      result = callee.name === "toArray" ? this.ctx.tables().typing.fixedType(lanes.element, lanes.size) : callee.name === "any" || callee.name === "all" ? "boolean" : lanes.element;
+    } else if (callee.name === "select") {
+      if (e.args.length !== 2) throw new CompileError("E0504", `${what} takes the vector whose lanes it takes where the mask is true, then the one for where it is false`, e.start, e.end);
+      const a = this.read(e.args[0]!);
+      const b = this.read(e.args[1]!);
+      const chosen = this.ctx.typing().simd(a);
+      if (chosen === undefined || chosen.element === "boolean" || chosen.size !== lanes.size || a !== b) throw new CompileError("E0111", `${what} takes two vectors of one type with ${lanes.size} lanes, not '${this.ctx.typing().show(a)}' and '${this.ctx.typing().show(b)}'`, e.start, e.end);
+      result = a;
+    } else {
+      if (e.args.length !== 1) throw new CompileError("E0504", `${what} takes the '${name}' to compare with`, e.start, e.end);
+      this.expect(e.args[0]!, type);
+      const other = this.read(e.args[0]!);
+      if (other !== type) throw new CompileError("E0111", `${what} compares with another '${name}', not '${this.ctx.typing().show(other)}'`, e.args[0]!.start, e.args[0]!.end);
+      result = this.ctx.tables().typing.fixedType("boolean", lanes.size, true);
+    }
+    this.ctx.tables().simdCalls.set(cloneExpr(e), callee.name);
+    return { type: result, what };
   }
 
   // `FixedArray.filled<T, N>(v)`: N copies of `v`, its type written or the one expected.
@@ -8543,6 +8624,13 @@ export class Expressions<C extends Context> implements Union<C> {
         const type = this.ctx.typing().unbranded(operand);
         // The smallest i64 is written as the negation of a literal one past the largest.
         if (e.op === "-" && e.operand.kind === "int" && e.operand.value === I64_MAX + 1n) this.ctx.exprsState.fitted.add(cloneExpr(e.operand));
+        // A vector negates lane by lane, wrapping as its other operators do; a mask takes '!'.
+        const lanes = this.ctx.typing().simd(type);
+        if (lanes !== undefined) {
+          const lane = lanes.element;
+          if (lane === "boolean" ? e.op === "!" : e.op === "-" ? isFloat(lane) || (isInteger(lane) && integerInfo(lane).signed) : e.op === "~" && isInteger(lane)) return type;
+          throw new CompileError("E0103", `operator '${e.op}' cannot be applied to '${this.ctx.typing().show(type)}'`, e.start, e.end);
+        }
         if (e.op === "!" ? type !== "boolean" : type !== "bigint" && (e.op === "~" ? !isInteger(type) : !isNumeric(type))) {
           throw new CompileError("E0103", `operator '${e.op}' cannot be applied to type '${this.ctx.typing().show(type)}'`, e.start, e.end);
         }

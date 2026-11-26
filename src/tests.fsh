@@ -3,9 +3,10 @@ import type { Subprocess } from "bun";
 import { relative } from "node:path";
 import type { Compilation } from "./compilation.fsh";
 import { CompileError } from "./diag.fsh";
-import { renameIn, type Loaded, type Module } from "./modules.fsh";
-import { nextId, respanFunc, type Ids } from "./nodes.fsh";
-import { parse, type Expr, type Func, type ObjectProp, type Param, type Span, type Stmt, type TypeNode } from "./parser.fsh";
+import { examplesIn, exampleTest, type Example } from "./docs.fsh";
+import { renameIn, shiftError, type Loaded, type Module } from "./modules.fsh";
+import { nextId, respanFunc, shiftSpansStmts, type Ids } from "./nodes.fsh";
+import { parse, parseWithComments, type Expr, type Func, type ObjectProp, type Param, type Span, type Stmt, type TypeNode } from "./parser.fsh";
 
 // Top-level `test("name", () => { ... })` blocks, and `property("name", (x: T, ...) => { ... })`
 // ones run over inputs generated from their parameters' types: left out of a build, lifted into
@@ -16,7 +17,8 @@ type Body = Extract<Expr, { kind: "arrow" | "function" }>;
 // `index` is the test's place in the harness's numbering; `module` is the file declaring it, by
 // its name and its path.
 // A test's `timeout` is the limit its options gave it, in milliseconds, or undefined for the run's.
-export type Test = { name: string; module: { file: string; path: string }; index: usize; async: boolean; timeout: usize | undefined };
+// A doc example's `expect` holds the stdout lines it must print, when it names any.
+export type Test = { name: string; module: { file: string; path: string }; index: usize; async: boolean; timeout: usize | undefined; expect?: string[] };
 
 const SHAPE = `a test is written as 'test("name", () => { ... })' at the top level of a file, its name a string literal, with '{ timeout: <ms> }' after the body for a limit of its own`;
 
@@ -105,7 +107,8 @@ function testSymbol(name: string): string {
 // `test "name"`, which no program can write. A test's function throws Error, so a body may throw,
 // and is async when the body is. Names are unique across the files; a second use of one is refused.
 /** @throws {CompileError | Error} */
-export function liftTests(compilation: Mut<Compilation>, modules: Mut<Module[]>, paths: Ref<string[]>): Test[] {
+// With `docs`, each ```fsh example in a file's doc comments is a test too, run in that file.
+export function liftTests(compilation: Mut<Compilation>, modules: Mut<Module[]>, paths: Ref<string[]>, docs = false): Test[] {
   let tests: Test[] = [];
   for (const path of paths) {
     const at = modules.findIndex((m) => m.path === path);
@@ -145,9 +148,36 @@ export function liftTests(compilation: Mut<Compilation>, modules: Mut<Module[]>,
         while (lifted.length > 0) statements.push(lifted.shift()!);
       } else statements.push(liftedTest(compilation.ids, symbol, s));
     }
+    if (docs) {
+      const comments = parseWithComments(module.src, compilation.ids).comments;
+      for (const e of examplesIn(module.src, comments)) {
+        const name = `doc example at ${module.file}:${e.line}`;
+        tests.push({ name, module: { file: module.file, path: module.path }, index: tests.length, async: e.async, timeout: undefined, expect: e.expect.length > 0 ? e.expect.clone() : undefined });
+        const symbol = testSymbol(name);
+        compilation.names.madeUp.set(symbol, `the ${name}`);
+        const example = exampleStatement(compilation.ids, e, module.base);
+        statements.push(liftedTest(compilation.ids, symbol, example));
+      }
+    }
     module.statements = statements;
   }
   return tests;
+}
+
+// A doc example's `test(...)` statement, its code at its offsets in the file at `base`.
+/** @throws {CompileError} */
+function exampleStatement(ids: Mut<Ids>, e: Ref<Example>, base: usize): Stmt {
+  const made = exampleTest(e);
+  const by = base - made.before;
+  let parsed: Stmt[] = [];
+  try {
+    parsed = parse(made.text, ids);
+  } catch (err) {
+    if (err instanceof CompileError) shiftError(err, by);
+    throw err;
+  }
+  shiftSpansStmts(parsed, by);
+  return parsed.shift()!;
 }
 
 // The function a test's statement becomes, `testOf` having found it to be one.
@@ -417,7 +447,8 @@ export const LIMIT: usize = 10_000;
 // How a run goes: the limit for a test that names none, how many tests run at once, and whether
 // deterministic simulation mode is enabled with its starting seed and seed count.
 // `propSeed`, given with `--seed` and no `--sim`, is the seed every property draws its inputs from.
-export type RunOptions = { timeout: usize; jobs: usize; sim: boolean; seed: u64; seeds: usize; propSeed?: u64 };
+// `docs` runs the examples in doc comments as tests too.
+export type RunOptions = { timeout: usize; jobs: usize; sim: boolean; seed: u64; seeds: usize; propSeed?: u64; docs: boolean };
 
 type Outcome = { passed: boolean; output: string };
 
@@ -440,7 +471,7 @@ function ended(running: Mut<Set<i32>>, group: i32) {
 
 // A test running now: its place in the run, its child and the child's process group, its output
 // as it is read, its limit, when it runs past it, and whether it has.
-type Running = { at: usize; child: Subprocess; group: i32; output: Promise<string>; limit: usize; deadline: f64; late: boolean };
+type Running = { at: usize; child: Subprocess; group: i32; output: Promise<[string, string]>; limit: usize; deadline: f64; late: boolean };
 
 // What a round of waiting saw first: the test at `at` exiting, or running past the limit.
 type Event = { kind: "exit"; at: usize; code: i64 } | { kind: "timeout"; at: usize };
@@ -458,14 +489,22 @@ function started(running: Mut<Set<i32>>, binary: string, test: Ref<Test>, cwd: s
   })();
   const group = child.pid as i32;
   running.add(group);
-  const output: Promise<string> = outputOf(new Response(child.stdout), new Response(child.stderr));
+  const output: Promise<[string, string]> = outputOf(new Response(child.stdout), new Response(child.stderr));
   const limit = test.timeout ?? timeout;
   return { at, child, group, output, limit, deadline: performance.now() + (limit as f64), late: false };
 }
 
-async function outputOf(stdout: Response, stderr: Response): Promise<string> {
+async function outputOf(stdout: Response, stderr: Response): Promise<[string, string]> {
   const [out, err] = await Promise.all([stdout.text(), stderr.text()]);
-  return out + err;
+  return [out, err];
+}
+
+// A doc example passes when it printed its expect lines, in order and no others.
+function printed(out: string, expect: Ref<string[]>): Outcome {
+  const got = out.endsWith("\n") ? out.slice(0, -1) : out;
+  const want = expect.join("\n");
+  if (got === want) return { passed: true, output: "" };
+  return { passed: false, output: `--- expected\n${want}\n--- printed\n${got}\n` };
 }
 
 // The first of the running tests to exit, or the one soonest past the limit to get there. Fish
@@ -505,7 +544,7 @@ function shownLimit(ms: usize): string {
 
 // The run's defaults: the standard limit, and a test per core.
 export function runDefaults(): RunOptions {
-  return { timeout: LIMIT, jobs: availableParallelism() as usize, sim: false, seed: 1 as u64, seeds: 1 };
+  return { timeout: LIMIT, jobs: availableParallelism() as usize, sim: false, seed: 1 as u64, seeds: 1, docs: true };
 }
 
 // A test fails when it exits with anything but 0 or runs past the limit.
@@ -583,9 +622,11 @@ export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Re
     flight = still;
     if (exited === undefined) continue;
     ended(running, exited.group);
-    const text = await exited.output;
+    const both = await exited.output;
     const signal = exited.child.signalCode;
-    done[event.at] = outcome(text, event.code, exited.late, signal === null ? null : `${signal}`, exited.limit);
+    const o = outcome(both[0] + both[1], event.code, exited.late, signal === null ? null : `${signal}`, exited.limit);
+    const ran: Ref<Test> = tests[cases[event.at]!.testAt]!;
+    done[event.at] = o.passed && ran.expect !== undefined ? printed(both[0], ran.expect!) : o;
   }
   console.log(`${cases.length - failed} passed, ${failed} failed`);
   return failed > 0 ? 1 : 0;
