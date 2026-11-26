@@ -598,3 +598,17 @@ function main() {
   const t: [string, string] = ["p" + 1, "q" + 1];
   f(t, { x: "x" + 1, y: 2 });
 }
+// case: destructure_assign_nested_literal_read_in_order
+// expect: 7 2
+function clear(xs: Mut<i64[]>): i64 {
+  const n = xs.length as i64;
+  while (xs.length > 0) xs.pop();
+  return n;
+}
+function main() {
+  let xs: i64[] = [7, 8];
+  let a: i64 = 0;
+  let n: i64 = 0;
+  [[a], n] = [[xs[0]!], clear(xs)];
+  console.log(a, n);
+}
