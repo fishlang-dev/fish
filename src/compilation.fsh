@@ -208,6 +208,9 @@ export type Tables = {
   pairs: NodeSet<Expr>;
   // The `FixedArray.filled` calls, by the fixed array each makes.
   fixedFills: NodeSet<Expr>;
+  // SIMD constructors and methods, by the operation each lowers to: make, splat, a reduction,
+  // a lane comparison, select, any, all or toArray.
+  simdCalls: NodeMap<Expr, string>;
   // `String.fromCharCode(...)` and `String.fromCodePoint(...)`, by their call, their arguments
   // gathered into one array.
   stringBuilds: NodeMap<Expr, "units" | "points">;
@@ -445,6 +448,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     packed: new NodeSet<Expr>(),
     pairs: new NodeSet<Expr>(),
     fixedFills: new NodeSet<Expr>(),
+    simdCalls: new NodeMap<Expr, string>(),
     stringBuilds: new NodeMap<Expr, "units" | "points">(),
     namedParams: new NodeMap<Param, { fn: string; names: string[]; clones: boolean[] }>(),
     presetParams: new NodeMap<Param, Type>(),

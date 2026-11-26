@@ -158,7 +158,9 @@ export type ArrayType = Brand<usize, "array">;
 
 // `FixedArray<T, N>`: exactly `size` elements stored inline, laid out as `[size x T]`; interned,
 // so `===` is identity.
-export type FixedRecord = { kind: "fixed"; element: Type; size: usize; fields: Field[] };
+// `simd` marks a SIMD vector, `f32x4` and the like, or a mask of its lanes when they are boolean:
+// held as the fixed array is, with lane-wise operators lowered to LLVM vectors.
+export type FixedRecord = { kind: "fixed"; element: Type; size: usize; fields: Field[]; simd?: boolean };
 export type FixedType = Brand<usize, "fixed">;
 // `Map<K, V>` and `Set<T>` (a Set's value is `void`): a pointer to an owned hash table in the
 // runtime, its entries kept in insertion order. A dictionary, `{ [k: string]: V }`, is a Map with
@@ -302,6 +304,27 @@ export function splitTemplate(s: string, quasis: Ref<string[]>): string[] | unde
   }
   parts.push(s.slice(pos, end));
   return parts;
+}
+
+// The SIMD vector types, by name, and their lanes: Rust's std::simd shapes that fit 128 or 256 bits.
+export const SIMD_TYPES = new Map<string, [Numeric, usize]>([
+  ["f32x4", ["f32", 4]], ["f32x8", ["f32", 8]], ["f64x2", ["f64", 2]], ["f64x4", ["f64", 4]],
+  ["i8x16", ["i8", 16]], ["u8x16", ["u8", 16]], ["i16x8", ["i16", 8]], ["i32x4", ["i32", 4]],
+  ["i32x8", ["i32", 8]], ["i64x2", ["i64", 2]], ["u32x4", ["u32", 4]], ["u64x2", ["u64", 2]],
+]);
+// The masks lane comparisons give, by their lane count.
+export const SIMD_MASKS = new Map<string, usize>([["mask2", 2], ["mask4", 4], ["mask8", 8], ["mask16", 16]]);
+
+// The SIMD vector or mask type `name` names, or undefined for any other name.
+export function simdTypeNamed(typing: Mut<Typing>, name: string): FixedType | undefined {
+  const lanes = SIMD_TYPES.get(name);
+  if (lanes !== undefined) return typing.fixedType(lanes[0], lanes[1], true);
+  const mask = SIMD_MASKS.get(name);
+  return mask !== undefined ? typing.fixedType("boolean", mask, true) : undefined;
+}
+
+export function simdName(element: Type, size: usize): string {
+  return typeof element !== "string" ? "" : element === "boolean" ? `mask${size}` : `${element}x${size}`;
 }
 
 export const isFloat = (t: Type): t is "f32" | "f64" => t === "f32" || t === "f64";
@@ -2540,16 +2563,23 @@ export class Typing {
 
   private refs = new Map<string, RefType>();
 
-  fixedType(this: Mut<this>, element: Type, size: usize): FixedType {
-    const key = `fixed ${size} ${this.keyOf(element)}`;
+  fixedType(this: Mut<this>, element: Type, size: usize, simd = false): FixedType {
+    const key = `${simd ? "simd" : "fixed"} ${size} ${this.keyOf(element)}`;
     let t = this.fixeds.get(key);
     if (t === undefined) {
-      t = this.made<FixedType>({ kind: "fixed", element, size, fields: [] }, key);
+      t = this.made<FixedType>(simd ? { kind: "fixed", element, size, fields: [], simd: true } : { kind: "fixed", element, size, fields: [] }, key);
       this.fixeds.set(key, t);
     }
     return t;
   }
   private fixeds = new Map<string, FixedType>();
+
+  // A SIMD vector's or mask's lane type and count, or undefined for any other type.
+  simd(t: Type | undefined): { element: Type; size: usize } | undefined {
+    if (t === undefined || typeof t === "string") return undefined;
+    const r = this.rec(t);
+    return r.kind === "fixed" && r.simd === true ? { element: r.element, size: r.size } : undefined;
+  }
 
   arrayType(this: Mut<this>, element: Type, typed?: TypedName): ArrayType {
     // An element's key nests the keys of everything inside it, so building and hashing it on every
@@ -3320,7 +3350,7 @@ export class Typing {
       if (r.kind === "object" && r.tuple === true) found = `${this.readonlyTuple(t as ObjectType) ? "readonly " : ""}[${this.elementsOf(t as ObjectType).map((t) => this.shapeKey(t)).join(",")}${r.required === undefined ? "" : `?${r.required}`}${r.rest === undefined ? "" : `...${this.shapeKey(r.rest)}`}]`;
       else if (r.kind === "object") found = `{${r.fields.map((f) => `${f.readonly === true ? "readonly " : ""}${JSON.stringify(f.name)}:${this.shapeKey(f.type)}`).join(",")}}`;
       else if (r.kind === "array") found = `${this.shapeKey(r.element)}[]`;
-      else if (r.kind === "fixed") found = `FixedArray<${this.shapeKey(r.element)},${r.size}>`;
+      else if (r.kind === "fixed") found = r.simd === true ? simdName(r.element, r.size) : `FixedArray<${this.shapeKey(r.element)},${r.size}>`;
       else if (r.kind === "map") found = r.set ? `Set<${this.shapeKey(r.key)}>` : `${r.dict === true ? "Dict" : "Map"}<${this.shapeKey(r.key)},${this.shapeKey(r.value)}>`;
       else if (r.kind === "union") found = `(${r.members.map((t) => this.shapeKey(t)).join("|")})`;
       else if (r.kind === "ref") found = `${r.mutable ? "mut" : "ref"} ${this.shapeKey(r.to)}${r.life !== undefined ? ` ${r.life}` : ""}`;
@@ -3507,7 +3537,7 @@ export class Typing {
     if (r.kind === "regex") return "RegExp";
     if (r.kind === "array" && r.typed !== undefined) return r.typed;
     if (r.kind === "array") return this.showArray(r.element);
-    if (r.kind === "fixed") return `FixedArray<${this.show(r.element)}, ${r.size}>`;
+    if (r.kind === "fixed") return r.simd === true ? simdName(r.element, r.size) : `FixedArray<${this.show(r.element)}, ${r.size}>`;
     if (r.kind === "map") return r.set ? `Set<${this.show(r.key)}>` : r.dict === true ? `{ [key: string]: ${this.show(r.value)} }` : `Map<${this.show(r.key)}, ${this.show(r.value)}>`;
     if (r.kind === "generator") return `${r.async === true ? "Async" : ""}Generator<${this.show(r.yields)}>${r.throws !== undefined ? ` throws ${this.show(r.throws)}` : ""}`;
     if (r.kind === "future") return `Promise<${this.show(r.gives)}>${r.throws !== undefined ? ` throws ${this.show(r.throws)}` : ""}${this.describing ? ` ${r.name}(${r.frame.map((f) => this.show(f.type)).join(", ")})` : ""}`;
