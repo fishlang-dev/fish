@@ -44,7 +44,7 @@ function equivalents(): Map<string, Equivalent> {
   add(m, ["tar", "tar-stream", "tar-fs"], IN_STD("the std:tar module"));
   add(m, ["adm-zip", "jszip", "yauzl", "yazl", "unzipper", "extract-zip"], IN_STD("the std:zip module"));
   m.set("archiver", IN_STD("the std:zip and std:tar modules"));
-  add(m, ["ioredis", "redis"], PLANNED("Redis client"));
+  add(m, ["ioredis", "redis"], IN_STD("std:redis's createClient"));
   add(m, ["glob", "fast-glob", "globby"], PLANNED("Glob"));
   m.set("fs-extra", PLANNED("Directory operations"));
   m.set("chokidar", PLANNED("File watching"));
