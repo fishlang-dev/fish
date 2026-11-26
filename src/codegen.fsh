@@ -376,7 +376,7 @@ const PAIR = "{ ptr, ptr }";
 // `prior` is what the last build's codegen made, and `rechecked` the instances checked again since,
 // which `fishc watch` gives so a function nothing changed takes its last define; `keep` asks for
 // what this build made, for the next.
-export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; fuzz?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; profile?: boolean; debug?: boolean; failed?: string[]; prior?: Emitted; rechecked?: Set<InstanceId>; keep?: boolean };
+export type Options = { src: string; file: string; release: boolean; panic: "unwind" | "abort"; library?: boolean; fuzz?: boolean; sources?: Source[]; harness?: boolean; leaks?: boolean; profile?: boolean | "heap"; debug?: boolean; failed?: string[]; prior?: Emitted; rechecked?: Set<InstanceId>; keep?: boolean };
 
 // The owner a generated symbol is made for, when that is a type.
 const typeOwner = (t: Type): string => `type ${idOf(t)}`;
@@ -414,6 +414,7 @@ class Codegen implements PrintHost, ComptimeHost {
   fuzz: boolean;
   leaks: boolean;
   profile: boolean;
+  heapProfile: boolean;
   // Whether the check is kept for the next build, as `fishc watch` keeps it.
   keepsCheck: boolean;
   debug: boolean;
@@ -537,7 +538,8 @@ class Codegen implements PrintHost, ComptimeHost {
     this.harness = options.harness ?? false;
     this.fuzz = options.fuzz ?? false;
     this.leaks = options.leaks ?? false;
-    this.profile = options.profile ?? false;
+    this.profile = options.profile === true;
+    this.heapProfile = options.profile === "heap";
     this.keepsCheck = options.keep === true;
     this.debug = options.debug ?? false;
     this.collecting = options.failed !== undefined;
@@ -879,7 +881,7 @@ class Codegen implements PrintHost, ComptimeHost {
       // hides std's internals; nor do the arrows the checker wraps around a callback.
       const from = sourceOf(this.src, this.file, this.bodyAt(instance).start, this.sources).file;
       const ours = this.bodyAt(instance).start < STD_BASE && !BUILT_IN.test(from) && !(this.harness && from === this.file) && this.bodyAt(instance).closure?.made !== true;
-      this.framingOn = (!this.release || this.leaks || this.profile || this.fuzz) && (!this.library || this.fuzz) && ours;
+      this.framingOn = (!this.release || this.leaks || this.profile || this.heapProfile || this.fuzz) && (!this.library || this.fuzz) && ours;
       this.site = undefined;
       this.debuggingOn = this.debug && this.bodyAt(instance).start < STD_BASE && !BUILT_IN.test(from);
       this.marked = undefined;

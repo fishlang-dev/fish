@@ -9053,7 +9053,7 @@ export class Pool {
   // Redis over RESP2, as node-redis's createClient shapes it: commands on a pool of connections,
   // and publish and subscribe.
   // JSON Web Tokens and password hashes over OpenSSL, whose calls live in the TLS half of the
-  // runtime: signJwt, verifyJwt, hashPassword and verifyPassword.
+  // runtime: signJwt, verifyJwt, hashPassword and verifyPassword, with sync forms of the last two.
   auth: String.raw`import { randomBytes } from "crypto";
 
 declare function fsh_rt_crypto_sign(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, out: MutPtr<u8>): i64;
@@ -9238,6 +9238,12 @@ export async function hashPassword(password: string): Promise<string> throws Pas
   return made;
 }
 
+// The same hash made on the calling thread, for code with no runtime running, such as a CLI tool;
+// in an async function it holds its worker for the whole hash, so use hashPassword there.
+export function hashPasswordSync(password: string): string throws PasswordError {
+  return __hashPassword(password);
+}
+
 function __hashPassword(password: string): string throws PasswordError {
   const salt = randomBytes(16);
   const hash = __kdf(0, password, salt, 19456, 2, 1, 32);
@@ -9249,6 +9255,12 @@ function __hashPassword(password: string): string throws PasswordError {
 export async function verifyPassword(password: string, hash: string): Promise<boolean> throws PasswordError {
   const same = await spawnBlocking(() => __verifyPassword(password, hash));
   return same;
+}
+
+// The same check made on the calling thread, for code with no runtime running; in an async
+// function use verifyPassword.
+export function verifyPasswordSync(password: string, hash: string): boolean throws PasswordError {
+  return __verifyPassword(password, hash);
 }
 
 function __phcParams(text: string, names: string[]): i64[] throws PasswordError {

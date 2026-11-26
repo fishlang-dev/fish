@@ -84,6 +84,14 @@ static int32_t fsh_abandoned = 0;
 // File jobs the blocking pool holds, whose memory is still live when a program ends mid-read.
 static int64_t fsh_pool_busy = 0;
 
+#ifdef FSH_HEAP_PROFILE
+// A --heap-profile build's blocks each start with a header saying how big the block is and, for
+// the sampled few, which stack the profile charged it to, so a free can take it back.
+typedef struct fsh_hblock { int64_t stack; int64_t size; } fsh_hblock;
+static void fsh_heap_alloc(fsh_hblock *h);
+static void fsh_heap_free(fsh_hblock *h);
+#endif
+
 #ifdef FSH_LEAK_SITES
 // A --leaks build's blocks each start with a header naming the allocation's site, on one list
 // the report walks at exit. Its size keeps the block after it 16-byte aligned, as malloc's is.
@@ -98,6 +106,13 @@ void *fsh_rt_alloc(int64_t size) {
   // A size the header would overflow fails as one malloc can't give.
   fsh_block *b = size < 0 || size > INT64_MAX - (int64_t)sizeof(fsh_block) ? NULL : malloc(sizeof(fsh_block) + size);
   void *p = b ? b + 1 : NULL;
+#elif defined(FSH_HEAP_PROFILE)
+  fsh_hblock *h = size < 0 || size > INT64_MAX - (int64_t)sizeof(fsh_hblock) ? NULL : malloc(sizeof(fsh_hblock) + size);
+  void *p = h ? h + 1 : NULL;
+  if (h) {
+    h->size = size;
+    fsh_heap_alloc(h);
+  }
 #else
   void *p = malloc(size);
 #endif
@@ -129,6 +144,10 @@ void fsh_rt_free(void *p) {
   b->next->prev = b->prev;
   pthread_mutex_unlock(&fsh_blocks_lock);
   p = b;
+#elif defined(FSH_HEAP_PROFILE)
+  fsh_hblock *h = (fsh_hblock *)p - 1;
+  if (h->stack != 0) fsh_heap_free(h);
+  p = h;
 #endif
   free(p);
 }
@@ -730,6 +749,328 @@ static void fsh_leak_report(void) {
     else fprintf(stderr, "in %s\n", g->name);
   }
   free(all);
+}
+#endif
+
+#ifdef FSH_HEAP_PROFILE
+// The heap profiler: about one allocation in each 512 KiB allocated is sampled, by a countdown of
+// bytes each thread draws from an exponential distribution, as Go's and tcmalloc's are, so a
+// sample stands for 1 / (1 - e^(-size / 512 KiB)) allocations of its size. A sample charges the
+// program's frames at that moment to a stack; its free takes back the live share. SIGUSR1 and the
+// program's exit each write the profile, in pprof's format, to heap.<pid>.<n>.pb, or to the path
+// FISH_HEAP_PROFILE names with .<n> added.
+#define FSH_HEAP_RATE 524288.0
+#define FSH_HEAP_DEPTH 64
+
+typedef struct {
+  int32_t depth;
+  const char *names[FSH_HEAP_DEPTH];
+  const char *sites[FSH_HEAP_DEPTH];
+  uint64_t hash;
+  double alloc_n, alloc_b, live_n, live_b;
+} fsh_heap_stack;
+
+static pthread_mutex_t fsh_heap_lock = PTHREAD_MUTEX_INITIALIZER;
+static fsh_heap_stack *fsh_heap_stacks = NULL;
+static int64_t fsh_heap_count = 0, fsh_heap_cap = 0;
+// Open addressing over the stacks by hash: each slot holds a stack's index + 1.
+static int64_t *fsh_heap_index = NULL;
+static int64_t fsh_heap_slots = 0;
+static _Thread_local double fsh_heap_left = -1;
+static _Thread_local uint64_t fsh_heap_seed = 0;
+static int32_t fsh_heap_snapshots = 0;
+
+static double fsh_heap_draw(void) {
+  if (fsh_heap_seed == 0) fsh_heap_seed = ((uint64_t)(uintptr_t)&fsh_heap_seed) ^ ((uint64_t)time(NULL) << 20) ^ 0x9E3779B97F4A7C15ULL;
+  fsh_heap_seed ^= fsh_heap_seed << 13;
+  fsh_heap_seed ^= fsh_heap_seed >> 7;
+  fsh_heap_seed ^= fsh_heap_seed << 17;
+  double u = ((double)(fsh_heap_seed >> 11) + 1.0) / 9007199254740993.0;
+  return -log(u) * FSH_HEAP_RATE;
+}
+
+static double fsh_heap_scale(int64_t size) {
+  double p = 1.0 - exp(-(double)size / FSH_HEAP_RATE);
+  return p > 0 ? 1.0 / p : 1.0;
+}
+
+static void fsh_heap_grow(void) {
+  int64_t slots = fsh_heap_slots ? fsh_heap_slots * 2 : 1024;
+  int64_t *index = calloc((size_t)slots, sizeof(int64_t));
+  if (!index) return;
+  for (int64_t i = 0; i < fsh_heap_count; i++) {
+    int64_t at = (int64_t)(fsh_heap_stacks[i].hash & (uint64_t)(slots - 1));
+    while (index[at]) at = (at + 1) & (slots - 1);
+    index[at] = i + 1;
+  }
+  free(fsh_heap_index);
+  fsh_heap_index = index;
+  fsh_heap_slots = slots;
+}
+
+// The stack the frames running now are, made if it's new; -1 when there's no room.
+static int64_t fsh_heap_stack_now(void) {
+  fsh_heap_stack s;
+  s.depth = 0;
+  s.hash = 1469598103934665603ULL;
+  for (fsh_frame *f = fsh_rt_frames; f && s.depth < FSH_HEAP_DEPTH; f = f->prev) {
+    s.names[s.depth] = f->name;
+    s.sites[s.depth] = f->site;
+    s.hash = (s.hash ^ (uint64_t)(uintptr_t)f->name) * 1099511628211ULL;
+    s.hash = (s.hash ^ (uint64_t)(uintptr_t)f->site) * 1099511628211ULL;
+    s.depth++;
+  }
+  if (fsh_heap_count * 2 >= fsh_heap_slots) fsh_heap_grow();
+  if (!fsh_heap_slots) return -1;
+  int64_t at = (int64_t)(s.hash & (uint64_t)(fsh_heap_slots - 1));
+  while (fsh_heap_index[at]) {
+    fsh_heap_stack *o = &fsh_heap_stacks[fsh_heap_index[at] - 1];
+    if (o->hash == s.hash && o->depth == s.depth && memcmp(o->names, s.names, sizeof(char *) * s.depth) == 0 && memcmp(o->sites, s.sites, sizeof(char *) * s.depth) == 0) return fsh_heap_index[at] - 1;
+    at = (at + 1) & (fsh_heap_slots - 1);
+  }
+  if (fsh_heap_count == fsh_heap_cap) {
+    int64_t cap = fsh_heap_cap ? fsh_heap_cap * 2 : 256;
+    fsh_heap_stack *grown = realloc(fsh_heap_stacks, (size_t)cap * sizeof *grown);
+    if (!grown) return -1;
+    fsh_heap_stacks = grown;
+    fsh_heap_cap = cap;
+  }
+  s.alloc_n = s.alloc_b = s.live_n = s.live_b = 0;
+  fsh_heap_stacks[fsh_heap_count] = s;
+  fsh_heap_index[at] = fsh_heap_count + 1;
+  return fsh_heap_count++;
+}
+
+static void fsh_heap_alloc(fsh_hblock *h) {
+  h->stack = 0;
+  if (fsh_heap_left < 0) fsh_heap_left = fsh_heap_draw();
+  fsh_heap_left -= (double)h->size;
+  if (fsh_heap_left >= 0) return;
+  fsh_heap_left = fsh_heap_draw();
+  double scale = fsh_heap_scale(h->size);
+  pthread_mutex_lock(&fsh_heap_lock);
+  int64_t i = fsh_heap_stack_now();
+  if (i >= 0) {
+    fsh_heap_stack *s = &fsh_heap_stacks[i];
+    s->alloc_n += scale;
+    s->alloc_b += scale * (double)h->size;
+    s->live_n += scale;
+    s->live_b += scale * (double)h->size;
+    h->stack = i + 1;
+  }
+  pthread_mutex_unlock(&fsh_heap_lock);
+}
+
+static void fsh_heap_free(fsh_hblock *h) {
+  double scale = fsh_heap_scale(h->size);
+  pthread_mutex_lock(&fsh_heap_lock);
+  fsh_heap_stack *s = &fsh_heap_stacks[h->stack - 1];
+  s->live_n -= scale;
+  s->live_b -= scale * (double)h->size;
+  pthread_mutex_unlock(&fsh_heap_lock);
+}
+
+// pprof's protobuf, written by hand: varints, and messages built into buffers of their own so
+// their lengths are known before they are written.
+typedef struct { uint8_t *data; size_t length, capacity; } fsh_pb;
+
+static void fsh_pb_bytes(fsh_pb *b, const void *data, size_t n) {
+  if (b->length + n > b->capacity) {
+    size_t cap = b->capacity ? b->capacity : 256;
+    while (cap < b->length + n) cap *= 2;
+    uint8_t *grown = realloc(b->data, cap);
+    if (!grown) return;
+    b->data = grown;
+    b->capacity = cap;
+  }
+  memcpy(b->data + b->length, data, n);
+  b->length += n;
+}
+
+static void fsh_pb_varint(fsh_pb *b, uint64_t v) {
+  uint8_t out[10];
+  size_t n = 0;
+  do {
+    out[n] = (uint8_t)(v & 0x7F);
+    v >>= 7;
+    if (v) out[n] |= 0x80;
+    n++;
+  } while (v);
+  fsh_pb_bytes(b, out, n);
+}
+
+static void fsh_pb_int(fsh_pb *b, int field, uint64_t v) {
+  fsh_pb_varint(b, (uint64_t)field << 3);
+  fsh_pb_varint(b, v);
+}
+
+static void fsh_pb_sub(fsh_pb *b, int field, fsh_pb *inner) {
+  fsh_pb_varint(b, ((uint64_t)field << 3) | 2);
+  fsh_pb_varint(b, inner->length);
+  fsh_pb_bytes(b, inner->data, inner->length);
+  inner->length = 0;
+}
+
+// The string table, deduplicated by a linear scan.
+// ponytail: linear lookups; a hash would matter only for profiles with tens of thousands of names.
+typedef struct { const char **items; int64_t count, capacity; } fsh_pb_strings;
+
+static int64_t fsh_pb_string(fsh_pb_strings *t, const char *s, size_t n) {
+  for (int64_t i = 0; i < t->count; i++) if (strlen(t->items[i]) == n && memcmp(t->items[i], s, n) == 0) return i;
+  if (t->count == t->capacity) {
+    int64_t cap = t->capacity ? t->capacity * 2 : 64;
+    const char **grown = realloc(t->items, (size_t)cap * sizeof(char *));
+    if (!grown) return 0;
+    t->items = grown;
+    t->capacity = cap;
+  }
+  char *copy = malloc(n + 1);
+  if (!copy) return 0;
+  memcpy(copy, s, n);
+  copy[n] = 0;
+  t->items[t->count] = copy;
+  return t->count++;
+}
+
+// A frame's site, "file:line:col", split into its file and line; a frame with none is line 0.
+static void fsh_heap_site(const char *site, const char **file, size_t *file_length, int64_t *line) {
+  *file = "";
+  *file_length = 0;
+  *line = 0;
+  if (!site) return;
+  const char *col = strrchr(site, ':');
+  const char *at = col;
+  while (at && at > site && at[-1] != ':') at--;
+  if (!col || at == site) {
+    *file = site;
+    *file_length = strlen(site);
+    return;
+  }
+  *file = site;
+  *file_length = (size_t)(at - 1 - site);
+  *line = atoll(at);
+}
+
+static void fsh_heap_write(void) {
+  pthread_mutex_lock(&fsh_heap_lock);
+  int32_t n = ++fsh_heap_snapshots;
+  char path[1100];
+  const char *named = getenv("FISH_HEAP_PROFILE");
+  if (named && named[0]) snprintf(path, sizeof path, "%s.%d", named, n);
+  else snprintf(path, sizeof path, "heap.%d.%d.pb", (int)getpid(), n);
+  fsh_pb out = { 0 }, msg = { 0 }, inner = { 0 }, line = { 0 };
+  fsh_pb_strings strings = { 0 };
+  fsh_pb_string(&strings, "", 0);
+  const char *types[4][2] = { { "alloc_objects", "count" }, { "alloc_space", "bytes" }, { "inuse_objects", "count" }, { "inuse_space", "bytes" } };
+  for (int i = 0; i < 4; i++) {
+    fsh_pb_int(&msg, 1, (uint64_t)fsh_pb_string(&strings, types[i][0], strlen(types[i][0])));
+    fsh_pb_int(&msg, 2, (uint64_t)fsh_pb_string(&strings, types[i][1], strlen(types[i][1])));
+    fsh_pb_sub(&out, 1, &msg);
+  }
+  // A location and a function for each frame of each stack: their ids are the frame's place
+  // across the stacks, so nothing needs deduplicating but the strings.
+  uint64_t next = 1;
+  double total = 0;
+  for (int64_t i = 0; i < fsh_heap_count; i++) {
+    fsh_heap_stack *s = &fsh_heap_stacks[i];
+    uint64_t first = next;
+    for (int32_t d = 0; d < s->depth; d++, next++) {
+      const char *file;
+      size_t file_length;
+      int64_t at;
+      fsh_heap_site(s->sites[d], &file, &file_length, &at);
+      const char *name = s->names[d] ? s->names[d] : "<runtime>";
+      int64_t named_at = fsh_pb_string(&strings, name, strlen(name));
+      int64_t file_at = fsh_pb_string(&strings, file, file_length);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_int(&msg, 2, (uint64_t)named_at);
+      fsh_pb_int(&msg, 3, (uint64_t)named_at);
+      fsh_pb_int(&msg, 4, (uint64_t)file_at);
+      fsh_pb_sub(&out, 5, &msg);
+      fsh_pb_int(&line, 1, next);
+      fsh_pb_int(&line, 2, (uint64_t)at);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_sub(&msg, 4, &line);
+      fsh_pb_sub(&out, 4, &msg);
+    }
+    if (s->depth == 0) {
+      int64_t named_at = fsh_pb_string(&strings, "<runtime>", 9);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_int(&msg, 2, (uint64_t)named_at);
+      fsh_pb_int(&msg, 3, (uint64_t)named_at);
+      fsh_pb_sub(&out, 5, &msg);
+      fsh_pb_int(&line, 1, next);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_sub(&msg, 4, &line);
+      fsh_pb_sub(&out, 4, &msg);
+      next++;
+    }
+    for (uint64_t id = first; id < next; id++) fsh_pb_varint(&inner, id);
+    fsh_pb_sub(&msg, 1, &inner);
+    double values[4] = { s->alloc_n, s->alloc_b, s->live_n, s->live_b };
+    for (int v = 0; v < 4; v++) fsh_pb_varint(&inner, (uint64_t)(int64_t)(values[v] + 0.5));
+    fsh_pb_sub(&msg, 2, &inner);
+    fsh_pb_sub(&out, 2, &msg);
+    total += s->live_b;
+  }
+  fsh_pb_int(&msg, 1, (uint64_t)fsh_pb_string(&strings, "space", 5));
+  fsh_pb_int(&msg, 2, (uint64_t)fsh_pb_string(&strings, "bytes", 5));
+  fsh_pb_sub(&out, 11, &msg);
+  for (int64_t i = 0; i < strings.count; i++) {
+    size_t length = strlen(strings.items[i]);
+    fsh_pb_varint(&out, (6 << 3) | 2);
+    fsh_pb_varint(&out, length);
+    fsh_pb_bytes(&out, strings.items[i], length);
+  }
+  int64_t stacks = fsh_heap_count;
+  pthread_mutex_unlock(&fsh_heap_lock);
+  fsh_pb_int(&out, 12, (uint64_t)FSH_HEAP_RATE);
+  FILE *f = fopen(path, "wb");
+  if (!f || fwrite(out.data, 1, out.length, f) != out.length) fprintf(stderr, "fish heap profile: can't write '%s' (%s)\n", path, strerror(errno));
+  else fprintf(stderr, "fish heap profile: %lld stacks, %.0f bytes live, written to %s\n", (long long)stacks, total, path);
+  if (f) fclose(f);
+  for (int64_t i = 0; i < strings.count; i++) free((void *)strings.items[i]);
+  free(strings.items);
+  free(out.data);
+  free(msg.data);
+  free(inner.data);
+  free(line.data);
+}
+
+// SIGUSR1 wakes a thread of the profiler's own, which writes the profile outside the handler.
+static int fsh_heap_pipe[2] = { -1, -1 };
+
+static void fsh_heap_signal(int n) {
+  (void)n;
+  char one = 1;
+  ssize_t wrote = write(fsh_heap_pipe[1], &one, 1);
+  (void)wrote;
+}
+
+static void *fsh_heap_waiter(void *unused) {
+  (void)unused;
+  char one;
+  while (read(fsh_heap_pipe[0], &one, 1) == 1 || errno == EINTR) fsh_heap_write();
+  return NULL;
+}
+
+__attribute__((constructor)) static void fsh_heap_start(void) {
+  if (pipe(fsh_heap_pipe) != 0) return;
+  fcntl(fsh_heap_pipe[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_heap_pipe[1], F_SETFD, FD_CLOEXEC);
+  pthread_t waiter;
+  if (pthread_create(&waiter, NULL, fsh_heap_waiter, NULL) != 0) return;
+  pthread_detach(waiter);
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = fsh_heap_signal;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  sigaction(SIGUSR1, &sa, NULL);
+}
+
+__attribute__((destructor)) static void fsh_heap_end(void) {
+  fsh_heap_write();
 }
 #endif
 
