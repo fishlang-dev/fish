@@ -1862,6 +1862,41 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // The number type a member of a union of numbers is held as: its own, or an integer literal's
+  // and an enum member's `i64`.
+  private numberBase(this: Mut<this>, t: Type): Numeric | undefined {
+    if (isNumeric(t)) return t as Numeric;
+    if (typeof t !== "string" && this.tables.typing.kindOf(t) === "literal" && this.tables.typing.baseOf(t as LiteralType) === "i64") return "i64";
+    return undefined;
+  }
+
+  // A union of numbers as one number type: whichever it holds, converted.
+  private numberOf(this: Mut<this>, v: string, union: UnionType, to: Numeric): string {
+    const members = this.tables.typing.rec(union).members.slice();
+    const tag = this.temp();
+    this.emit(`${tag} = extractvalue ${this.llvm(union)} ${v}, 0`);
+    const done = this.label();
+    let arms: string[] = [];
+    for (let i: usize = 0; i < members.length; i++) {
+      const [here, next, is] = [this.label(), this.label(), this.temp()];
+      this.emit(`${is} = icmp eq i32 ${tag}, ${i}`);
+      this.emit(`br i1 ${is}, label %${here}, label %${next}`);
+      this.startBlock(here);
+      const m = members[i]!;
+      const held = this.convert(v, union, m);
+      const base = this.numberBase(m)!;
+      const n = this.cast(held, base, to);
+      arms.push(`[ ${n}, %${this.block} ]`);
+      this.emit(`br label %${done}`);
+      this.startBlock(next);
+    }
+    this.emit("unreachable");
+    this.startBlock(done);
+    const result = this.temp();
+    this.emit(`${result} = phi ${this.llvm(to)} ${arms.join(", ")}`);
+    return result;
+  }
+
   startBlock(this: Mut<this>, name: string) {
     this.body.push(`${name}:`);
     this.block = name;
@@ -13294,6 +13329,10 @@ class Codegen implements PrintHost, ComptimeHost {
         const [from, to] = [this.cur().coercions.get(e.expr) ?? this.cur().types.get(e.expr)!, this.cur().types.get(e)!];
         // A widening 'as' is its operand, converted by the coercion the checker gave it.
         if (this.widens(e)) return this.value(e.expr, true);
+        if (this.kindOf(from) === "union" && this.tables.numericAs.has(e) && isNumeric(to) && this.tables.typing.rec(from as UnionType).members.every((m) => this.numberBase(m) !== undefined)) {
+          const held = this.value(e.expr);
+          return this.numberOf(held, from as UnionType, to as Numeric);
+        }
         if (this.kindOf(from) === "union") {
           const v = this.value(e.expr);
           const declared = this.recOf(to);

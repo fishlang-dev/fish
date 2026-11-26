@@ -4042,6 +4042,7 @@ export class Expressions<C extends Context> implements Union<C> {
     const a: Ref<Expr> = e.args[0]!;
     const f64: TypeNode = { id: nextId(this.ctx.tables().ids), kind: "ref", name: "f64", args: [], start: a.start, end: a.end };
     const arg: Expr = { id: nextId(this.ctx.tables().ids), kind: "as", expr: cloneExpr(a), type: f64, start: a.start, end: a.end };
+    this.ctx.tables().numericAs.add(cloneExpr(arg));
     const by = this.stdHelper(`Number.${callee.name}`, NUMBER_PREDICATES[callee.name]!, [arg], e);
     const made = this.ctx.tables().rewrites.replace(e, by);
     return this.callMade(made);
