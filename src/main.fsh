@@ -40,6 +40,7 @@ import type { Checked, Instance } from "./check.fsh";
 import type { Type, Typing } from "./typing.fsh";
 import { rustShim, type Shim } from "./rustshim.fsh";
 import { split } from "./split.fsh";
+import { allocators, allocs, allocsJson, formatAllocs } from "./allocs.fsh";
 import { binaryFunctions, bloat, bloatJson, formatBloat, irFunctions, type Sized } from "./bloat.fsh";
 import { withDebugInfo } from "./debuginfo.fsh";
 import { watchProgram, type Rebuilt } from "./watch.fsh";
@@ -1440,26 +1441,38 @@ function timingsJson(timings: Ref<Timings>, stages: Ref<string[]>, total: f64): 
   return JSON.stringify({ version: 1, total, stages: staged, usage, files: fileCosts(timings) }) + "\n";
 }
 
+// A report's `--top`, 20 rows unless given.
+function rowsOf(command: string, top: string | undefined): i64 {
+  const rows = top === undefined ? 20 : parseInt(top);
+  if (rows === undefined || rows < 1 || (top !== undefined && `${rows}` !== top)) fail(`fishc ${command}: '--top' takes a count of rows, as in --top 30`);
+  return rows!;
+}
+
+// A .fsh file's IR as `build --emit-llvm` gives it, for the reports that read it. A compile error
+// ends the process.
+/** @throws {Error | IoError} */
+function reportedIr(file: string, release: boolean): string {
+  let src = "";
+  try {
+    src = readFileSync(file, "utf8");
+    let looked: string[] = [];
+    return compiledIn(newCompilation(plain(sessionWith(false, false))), src, file, release, "unwind", false, false, false, looked).ir;
+  } catch (e) {
+    if (e instanceof CompileError) console.error(painted(e, file, src));
+    else console.error((e as { message: string }).message);
+    return process.exit(1);
+  }
+}
+
 // `fishc bloat`: a .fsh file's IR by function and generic body, or a binary's machine code.
 /** @throws {Error | IoError} */
 function bloatReport(file: string, release: boolean, top: string | undefined, json: boolean): never {
-  const rows = top === undefined ? 20 : parseInt(top);
-  if (rows === undefined || rows < 1 || (top !== undefined && `${rows}` !== top)) fail("fishc bloat: '--top' takes a count of rows, as in --top 30");
+  const rows = rowsOf("bloat", top);
   if (!existsSync(file)) fail(`fishc bloat: '${file}' doesn't exist`);
   let sized: Sized[] = [];
   let unit = "IR text";
   if (file.endsWith(".fsh")) {
-    let src = "";
-    try {
-      src = readFileSync(file, "utf8");
-      let looked: string[] = [];
-      const made = compiledIn(newCompilation(plain(sessionWith(false, false))), src, file, release, "unwind", false, false, false, looked);
-      sized = irFunctions(made.ir);
-    } catch (e) {
-      if (e instanceof CompileError) console.error(painted(e, file, src));
-      else console.error((e as { message: string }).message);
-      process.exit(1);
-    }
+    sized = irFunctions(reportedIr(file, release));
   } else {
     if (release) fail("fishc bloat: '--release' chooses how a .fsh file is compiled, and a binary is measured as it was built; leave it out");
     if (Bun.which("nm") === null) fail("fishc bloat: reading a binary's symbols needs nm, which isn't on PATH; install the Xcode command line tools or binutils");
@@ -1469,7 +1482,19 @@ function bloatReport(file: string, release: boolean, top: string | undefined, js
     unit = "machine code";
   }
   const report = bloat(unit, sized);
-  process.stdout.write(json ? bloatJson(report) : formatBloat(report, rows!));
+  process.stdout.write(json ? bloatJson(report) : formatBloat(report, rows));
+  return process.exit(0);
+}
+
+// `fishc allocs`: the heap allocation sites in a .fsh file's IR, through the runtime functions
+// that may allocate, by function and generic body.
+/** @throws {Error | IoError} */
+function allocsReport(file: string, release: boolean, top: string | undefined, json: boolean): never {
+  const rows = rowsOf("allocs", top);
+  if (!file.endsWith(".fsh")) fail(`fishc allocs: '${file}' isn't a .fsh file; allocation sites are read from the IR a program compiles to`);
+  if (!existsSync(file)) fail(`fishc allocs: '${file}' doesn't exist`);
+  const report = allocs(reportedIr(file, release), allocators([NATIVE, TLS_NATIVE, ZLIB_NATIVE, SQLITE_NATIVE, JS_NATIVE].join("\n")));
+  process.stdout.write(json ? allocsJson(report) : formatAllocs(report, rows));
   return process.exit(0);
 }
 
@@ -1590,6 +1615,10 @@ async function main(): Promise<void> {
   if (command === "bloat") {
     if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "top" && k !== "json")) fail("usage: fishc bloat <file.fsh> [--release] [--top <n>] [--json]\n       fishc bloat <binary> [--top <n>] [--json]");
     bloatReport(named!, values.release === true, values.top, values.json === true);
+  }
+  if (command === "allocs") {
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "top" && k !== "json")) fail("usage: fishc allocs <file.fsh> [--release] [--top <n>] [--json]");
+    allocsReport(named!, values.release === true, values.top, values.json === true);
   }
   if (command === "survey") {
     const dirs = positionals.slice(1);
@@ -1842,7 +1871,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
