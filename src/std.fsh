@@ -174,6 +174,96 @@ function __arrayFilled<T>(n: i64, x: T): T[] {
 class AbortError { message: string = "This operation was aborted"; }
 // What awaiting 'handle.join()' throws when the task panicked: its panic's reason.
 class TaskPanic { message: string; constructor(message: string) { this.message = message; } }
+// What a property test draws its inputs from: SplitMix64, seeded by FISH_PROP_SEED when a run
+// replays one, else by the clock, so each run tries inputs the last didn't.
+class PropRandom {
+  state: u64;
+  constructor(seed: u64) { this.state = seed; }
+  next(this: Mut<this>): u64 {
+    this.state = this.state.wrappingAdd(0x9e3779b97f4a7c15);
+    let z = this.state;
+    z = (z ^ (z >> 30)).wrappingMul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrappingMul(0x94d049bb133111eb);
+    return z ^ (z >> 31);
+  }
+  below(this: Mut<this>, n: i64): i64 {
+    return n <= 0 ? 0 : (this.next() % (n as u64)) as i64;
+  }
+}
+declare function fsh_rt_getenv(name: Ptr<u8>): Ptr<u8>;
+function __propSeed(): u64 {
+  let given = "";
+  unsafe {
+    const p = fsh_rt_getenv(cString("FISH_PROP_SEED"));
+    if (!p.isNull()) given = fromCString(p);
+  }
+  const parsed = given === "" ? null : parseInt(given);
+  return parsed !== null ? parsed as u64 : Date.now() as u64;
+}
+// The values a property's integers start from, which a wide or narrow type reads as its own.
+const __PROP_EDGES: i64[] = [0, 1, -1, 2, 127, -128, 255, 256, 32767, -32768, 65535, 2147483647, -2147483648, 4294967295, 9223372036854775807, -9223372036854775807 - 1];
+function __propInteger(r: Mut<PropRandom>, size: i64): i64 {
+  if (r.below(8) === 0) return __PROP_EDGES[r.below(__PROP_EDGES.length as i64) as usize];
+  const bound = size + 1;
+  return r.below(2 * bound + 1) - bound;
+}
+function __propShrinkInteger(v: i64): i64[] {
+  let out: i64[] = [];
+  if (v === 0) return out;
+  out.push(0);
+  if (v < 0 && v > -9223372036854775807) out.push(-v);
+  let step = v / 2;
+  while (step !== 0 && out.length < 24) {
+    out.push(v - step);
+    step = step / 2;
+  }
+  return out;
+}
+const __PROP_FLOATS: f64[] = [0.0, -0.0, 1.0, -1.0, 0.5, 1e300, -1e-300, 1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0];
+function __propFloat(r: Mut<PropRandom>, size: i64): f64 {
+  if (r.below(8) === 0) return __PROP_FLOATS[r.below(__PROP_FLOATS.length as i64) as usize];
+  return ((r.below(2000001) - 1000000) as f64) / 1000000.0 * ((size + 1) as f64);
+}
+function __propShrinkFloat(v: f64): f64[] {
+  let out: f64[] = [];
+  if (v === 0.0 || v !== v) return out;
+  out.push(0.0);
+  const whole = Math.trunc(v);
+  if (whole !== v && whole - whole === 0.0) out.push(whole);
+  if (v - v === 0.0 && v / 2.0 !== v) out.push(v / 2.0);
+  return out;
+}
+function __propBoolean(r: Mut<PropRandom>): boolean {
+  return r.below(2) === 1;
+}
+function __propPick(r: Mut<PropRandom>, n: i64): i64 {
+  return r.below(n);
+}
+function __propLength(r: Mut<PropRandom>, size: i64): i64 {
+  return r.below(size / 4 + 2);
+}
+const __PROP_PIECES: string[] = ["a", "b", "z", "A", "Z", "0", "9", " ", "-", "_", ".", "/", "%", "é", "ß", "中", "😀", "\\u0000", "\\n"];
+function __propString(r: Mut<PropRandom>, size: i64): string {
+  const n = __propLength(r, size);
+  let s = "";
+  for (let i = 0; i < n; i++) {
+    if (r.below(3) === 0) s += __PROP_PIECES[r.below(__PROP_PIECES.length as i64) as usize];
+    else s += String.fromCharCode((32 + r.below(95)) as u16);
+  }
+  return s;
+}
+function __propShrinkString(v: Ref<string>): string[] {
+  let out: string[] = [];
+  const n = v.length as i64;
+  if (n === 0) return out;
+  out.push("");
+  if (n > 1) {
+    out.push(v.slice(0, n / 2));
+    out.push(v.slice(n / 2));
+  }
+  for (let i: i64 = 0; i < n && i < 16; i++) out.push(v.slice(0, i) + v.slice(i + 1));
+  return out;
+}
 class IoError {
   message: string;
   code: string = "";

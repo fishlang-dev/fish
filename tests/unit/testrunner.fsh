@@ -295,7 +295,7 @@ test("a diagnostic names a test as the test, and --panic=abort is refused", () =
   assert(named.err.includes("which isn't the 'Error' that the test 'throws its own' throws"), `stderr:\n${named.err}`);
   const aborting = fishcTest(dir, ["--panic=abort"]);
   assert(aborting.code === 2, `--panic=abort exited with ${aborting.code}`);
-  same(aborting.err, "usage: fishc test [<filter>] [--release] [--timeout <ms>] [--jobs <n>] [--sim [--seed <n>] [--seeds <count>]]\n", "--panic=abort's stderr");
+  same(aborting.err, "usage: fishc test [<filter>] [--release] [--timeout <ms>] [--jobs <n>] [--seed <n>] [--sim [--seed <n>] [--seeds <count>]]\n", "--panic=abort's stderr");
   removed(root);
 }, { timeout: 30_000 });
 
@@ -324,3 +324,59 @@ test("fishc test --release builds the tests optimized and runs them", () => {
   assert(plain.code === 0, `fishc test exited with ${plain.code}`);
   removed(root);
 }, { timeout: 30_000 });
+
+// Properties: each run over generated inputs, a failing one shrunk to its smallest and printed with
+// the seed that replays it.
+function properties(): string {
+  return `function main() {}
+type Point = { x: i64; y: i64 };
+property("reversing twice gives the array back", (xs: i64[]) => {
+  let ys = xs.toReversed().toReversed();
+  assert(ys.length === xs.length);
+  for (let i = 0; i < xs.length; i++) assert(ys[i] === xs[i]);
+});
+property("points add either way round", (a: Point, b: Point, flip: boolean) => {
+  const one = flip ? a.x.wrappingAdd(b.x) : b.x.wrappingAdd(a.x);
+  assert(one === a.x.wrappingAdd(b.x));
+});
+property("strings and unions", (s: string, k: "a" | "b" | null, t: [u8, f64]) => {
+  assert(s.length >= 0);
+  assert(k === null || k === "a" || k === "b");
+  assert(t[0] <= 255);
+});
+property("no number is over 50", (n: i64) => {
+  assert(n <= 50, "too big");
+});
+`;
+}
+
+test("a property runs over generated inputs and a failure is shrunk to the smallest", () => {
+  const root = scratch("fish-props-");
+  try {
+    const dir = pkg(root, "props", [["src/main.fsh", properties()]]);
+    const got = fishcTest(dir, ["--seed", "7"]);
+    assert(got.code === 1, `the run's exit code: ${shown(got)}`);
+    for (const name of ["reversing twice gives the array back", "points add either way round", "strings and unions"]) assert(got.out.includes(`ok src/main.fsh > ${name}\n`), `'${name}' passes:\n${shown(got)}`);
+    assert(got.out.includes("FAIL src/main.fsh > no number is over 50\n"), `the failing property:\n${shown(got)}`);
+    assert(got.out.includes("'fishc test --seed 7' runs it again"), `the seed is printed:\n${shown(got)}`);
+    assert(got.out.includes("  n = 51\n"), `the failure shrinks to 51:\n${shown(got)}`);
+    // The same seed draws the same inputs.
+    const again = fishcTest(dir, ["--seed", "7", "over 50"]);
+    const line = (out: string) => out.split("\n").find((l) => l.startsWith("property ")) ?? "";
+    same(line(again.out), line(got.out), "the replay's failure");
+  } finally {
+    removed(root);
+  }
+});
+
+test("a property's parameters need their types written, as types it can generate", () => {
+  const root = scratch("fish-props-");
+  try {
+    const untyped = pkg(root, "untyped", [["src/main.fsh", `function main() {}\nproperty("p", (n) => {});\n`]]);
+    assert(fishcTest(untyped, []).err.includes("a property is written as 'property(\"name\", (x: T, ...) => { ... })'"), "an untyped parameter");
+    const map = pkg(root, "map", [["src/main.fsh", `function main() {}\nproperty("p", (m: Map<string, i64>) => {});\n`]]);
+    assert(fishcTest(map, []).err.includes("a property's parameter can't be a 'Map<string, i64>' yet"), "a type with no generator");
+  } finally {
+    removed(root);
+  }
+});
