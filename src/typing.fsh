@@ -1635,7 +1635,7 @@ export class Typing {
     }
     if (r.kind === "fixed") {
       const element = this.stored(r.element);
-      return this.fixedType(element, r.size);
+      return this.fixedType(element, r.size, r.simd === true);
     }
     if (r.kind === "map") {
       const value = this.stored(r.value);
@@ -2862,7 +2862,7 @@ export class Typing {
         found = this.arrayType(element);
       } else if (r.kind === "fixed") {
         const element = this.lower(r.element);
-        found = this.fixedType(element, r.size);
+        found = this.fixedType(element, r.size, r.simd === true);
       } else if (r.kind === "variant") {
         const loweredArgs = r.args.map((t) => this.lower(t));
         found = r.args.some((a, i) => loweredArgs[i as usize] !== a) ? this.instanceVariant(t as VariantType, loweredArgs) : t;
@@ -2996,7 +2996,7 @@ export class Typing {
     }
     if (r.kind === "fixed") {
       const element = this.lowerKeepingBrands(r.element);
-      return this.fixedType(element, r.size);
+      return this.fixedType(element, r.size, r.simd === true);
     }
     if (r.kind === "ref") {
       const to = this.lowerKeepingBrands(r.to);
@@ -3141,7 +3141,7 @@ export class Typing {
     }
     if (r.kind === "fixed") {
       const element = this.replaced(r.element, swap);
-      return this.fixedType(element, r.size);
+      return this.fixedType(element, r.size, r.simd === true);
     }
     if (r.kind === "map") {
       const key = this.replaced(r.key, swap);
