@@ -1,5 +1,5 @@
 import { memberKey, type Replaced } from "./edits.fsh";
-import { cloneBody, cloneSignature, declareClass, extend, inherited, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.fsh";
+import { cloneBody, cloneSignature, declareClass, extend, inherited, instanceCopy, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.fsh";
 import { crossingOf, rustClassOf } from "./rust.fsh";
 import { newDeclarations, newTables, timingEnd, timingStart, type Compilation, type Declarations, type Tables } from "./compilation.fsh";
 import { copyNames, CompileError, compileErrors, named, withFixes, type Fix } from "./diag.fsh";
@@ -1777,6 +1777,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.errors.splice(reported as i64);
     this.failed.delete(id);
     this.perInstanceSeen = false;
+    // Its definition's own instance, left queued by a signature that failed before its body was
+    // checked, stands for no call; checked with its placeholders, it would fail the same way.
+    this.instancingState.perInstance.add(id);
+    const made = this.instancingState.definitions.get(id);
+    if (made !== undefined) this.instancingState.pending = this.instancingState.pending.filter((p) => p !== made);
   }
 
   recover(this: Mut<this>, e: CompileError): void {
@@ -2250,7 +2255,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     for (const id of this.instancing().all()) {
       const i = this.tables.arenas.instanceOf(id);
       const b = bodyOf(this.tables.arenas, i);
-      if (i.concrete && compiled.has(b.id) && b.js === undefined && !checkedOnly(this.tables, i)) compiledIds.push(id);
+      // An instance's own copy of a function checked per instance is compiled as its original is.
+      const as = b.copyOf !== undefined && this.instancingState.perInstance.has(b.copyOf) ? this.tables.arenas.bodyOf(b.copyOf).id : b.id;
+      if (i.concrete && compiled.has(as) && b.js === undefined && !checkedOnly(this.tables, i)) compiledIds.push(id);
     }
     for (const c of this.closures) {
       const i = this.tables.arenas.instanceOf(c);
@@ -3499,6 +3506,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           return;
         }
         expected = copy;
+      }
+      // A function checked only per instance lowers its body by its own types, so each instance
+      // is checked and compiled from a copy of its own.
+      const shared = this.tables.arenas.instanceOf(id).body;
+      if (this.tables.arenas.instanceOf(id).concrete && this.instancingState.perInstance.has(shared)) {
+        const apart = instanceCopy(this.tables, shared);
+        this.tables.arenas.instanceMut(id).body = apart;
       }
       // A pass whose body made a new demand is thrown away, whatever it concluded, and the body
       // is checked again with the demanded types; each pass adds one, so this ends.
