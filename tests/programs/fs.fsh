@@ -194,3 +194,44 @@ function main(): void throws IoError {
   closeSync(r);
   rmSync(dir, { recursive: true });
 }
+// case: fs_handle_read_overflow_release
+// mode: release
+// expect: overflow: ERR_OUT_OF_RANGE
+// expect: past: ERR_OUT_OF_RANGE
+// expect: min: ERR_OUT_OF_RANGE
+// expect: ok: 5 hello
+// FileHandle.read must not overflow offset + length in release builds (F-2393).
+import { open } from "node:fs/promises";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function main(): Promise<void> throws IoError {
+  const dir = mkdtempSync(join(tmpdir(), "fish-f2393-"));
+  const file = join(dir, "data.txt");
+  writeFileSync(file, "hello world from fish");
+  const fh = await open(file, "r");
+  let buf: u8[] = new Array(16).fill(0 as u8);
+  try {
+    const _r = await fh.read(buf, 1, 9223372036854775807, 0);
+    console.log("overflow: allowed");
+  } catch (e) {
+    console.log("overflow:", e.code);
+  }
+  try {
+    const _r = await fh.read(buf, 100, 1, 0);
+    console.log("past: allowed");
+  } catch (e) {
+    console.log("past:", e.code);
+  }
+  try {
+    const _r = await fh.read(buf, -9223372036854775807 - 1, null, 0);
+    console.log("min: allowed");
+  } catch (e) {
+    console.log("min:", e.code);
+  }
+  const got = await fh.read(buf, 0, 5, 0);
+  console.log("ok:", got.bytesRead, new TextDecoder().decode(buf.slice(0, got.bytesRead)));
+  await fh.close();
+  rmSync(dir, { recursive: true });
+}
