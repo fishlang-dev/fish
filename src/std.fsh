@@ -7148,6 +7148,56 @@ class ParsedArgs {
   flagListOr(i: i64, fallback: boolean[]): boolean[] {
     return this.flagList(i) ?? fallback;
   }
+
+  // parseArgs<T>()'s reads, which end the program with the usage on a missing or bad value.
+  textGiven(i: i64, flag: string, usage: string): string {
+    const given = this.text(i);
+    if (given === null) __argsFailed("missing " + flag, usage);
+    return given!;
+  }
+
+  // An integer option's value, in the field's type's range, written in decimal.
+  integer(i: i64, flag: string, usage: string, required: boolean, min: i64, max: i64): i64 | null {
+    return __argInteger(this.text(i), flag, usage, required, min, max);
+  }
+
+  integers(i: i64, flag: string, usage: string, min: i64, max: i64): i64[] {
+    let out: i64[] = [];
+    for (const g of this.strings[i as usize]) out.push(__argInteger(g, flag, usage, true, min, max)!);
+    return out;
+  }
+
+  float(i: i64, flag: string, usage: string, required: boolean): f64 | null {
+    return __argFloat(this.text(i), flag, usage, required);
+  }
+
+  floats(i: i64, flag: string, usage: string): f64[] {
+    let out: f64[] = [];
+    for (const g of this.strings[i as usize]) out.push(__argFloat(g, flag, usage, true)!);
+    return out;
+  }
+}
+
+function __argInteger(given: string | null, flag: string, usage: string, required: boolean, min: i64, max: i64): i64 | null {
+  if (given === null) {
+    if (required) __argsFailed("missing " + flag, usage);
+    return null;
+  }
+  const text = given!;
+  const n = /^[+-]?[0-9]+$/.test(text) ? parseInt(text) : null;
+  if (n === null || n! < min || n! > max) __argsFailed(flag + " takes an integer from " + String(min) + " to " + String(max) + ", not '" + text + "'", usage);
+  return n;
+}
+
+function __argFloat(given: string | null, flag: string, usage: string, required: boolean): f64 | null {
+  if (given === null) {
+    if (required) __argsFailed("missing " + flag, usage);
+    return null;
+  }
+  const text = given!;
+  const n = text.trim() === "" ? null : Number(text);
+  if (n === null || Number.isNaN(n!)) __argsFailed(flag + " takes a number, not '" + text + "'", usage);
+  return n;
 }
 
 function size(s: string): i64 {
@@ -7295,6 +7345,51 @@ export function parseArgs<V>(given: string[] | null, specs: ParseArgsSpec[], all
   const values = build(p);
   return { values, positionals: p.positionals };
 }
+
+declare function fsh_rt_exit(code: i64): void;
+
+function __argsExit(code: i64): never {
+  unsafe { fsh_rt_exit(code) };
+  // The C call never returns.
+  while (true) {}
+}
+
+// parseArgs<T>(): the usage line and its options, as the checker wrote them, after the program's name.
+function __argsUsage(usage: string): string {
+  const n = unsafe { fsh_rt_argc() };
+  const path = n > 1 ? unsafe { fromCString(fsh_rt_arg(1)) } : "program";
+  return "Usage: " + path.slice(path.lastIndexOf("/") + 1) + usage;
+}
+
+function __argsFailed(message: string, usage: string): never {
+  console.error("error: " + message + "\n\n" + __argsUsage(usage));
+  unsafe { fsh_rt_exit(2) };
+  // The C call never returns.
+  while (true) {}
+}
+
+// What parseArgs<T>() is rewritten to: -h or --help before any "--" prints the usage and ends the
+// program with 0, and an argument the options don't take, its message and the usage, with 2.
+function __typedArgs<V>(usage: string, run: () => V throws ParseArgsError): V {
+  for (const a of programArgs()) {
+    if (a === "--") break;
+    if (a === "-h" || a === "--help") {
+      console.log(__argsUsage(usage));
+      __argsExit(0);
+    }
+  }
+  let message = "";
+  try {
+    return run();
+  } catch (e) {
+    message = e.message;
+  }
+  console.error("error: " + message + "\n\n" + __argsUsage(usage));
+  unsafe { fsh_rt_exit(2) };
+  // The C call never returns.
+  while (true) {}
+}
+
 `,
   // A port of Node's path.posix for the functions Fish has.
   path: String.raw`
