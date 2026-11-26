@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
-import { CompileError, locate, sourceOf, type Fix, type FixKind, type Source, type TextEdit } from "./diag.fsh";
+import { CompileError, copyNames, locate, sourceOf, type Fix, type FixKind, type Source, type TextEdit } from "./diag.fsh";
 import { parse, type Stmt } from "./parser.fsh";
 import { Queries } from "./queries.fsh";
 import { STD_BASE } from "./std.fsh";
@@ -22,7 +22,7 @@ export type FixReport = {
 type FileEdit = { path: string; start: usize; end: usize; text: string };
 type SpanRange = { start: usize; end: usize };
 
-const MAX_ROUNDS: usize = 32;
+const MAX_ROUNDS: usize = 128;
 
 function copyMap(src: Ref<Map<string, string>>): Map<string, string> {
   let out = new Map<string, string>();
@@ -30,7 +30,15 @@ function copyMap(src: Ref<Map<string, string>>): Map<string, string> {
   return out;
 }
 
-// Flattens a CompileError (or grouped CompileErrors) into individual errors carrying sources.
+function isNonProjectSource(file: string): boolean {
+  return file === "<std>" || file === "bun" || file.startsWith("std:") || file.startsWith("node:") || file.startsWith("fish:");
+}
+
+function isOwnershipCode(code: string): boolean {
+  return code === "E0201" || code === "E0202" || code === "E0206" || code === "E0207" || code === "E0214" || code === "E0215";
+}
+
+// Flattens a CompileError (or grouped CompileErrors) into individual errors carrying sources and names.
 function flattenErrors(err: CompileError): CompileError[] {
   if (err.errors.length === 0) return [err];
   let out: CompileError[] = [];
@@ -41,6 +49,7 @@ function flattenErrors(err: CompileError): CompileError[] {
       for (const s of err.sources) sources.push({ base: s.base, src: s.src, file: s.file });
       copy.sources = sources;
     }
+    if (copy.names.local.size === 0 && copy.names.madeUp.size === 0) copy.names = copyNames(err.names);
     out.push(copy);
   }
   return out;
@@ -62,25 +71,72 @@ function checkBuffers(entry: string, manifest: string | undefined, open: Ref<Map
   }
 }
 
-function enclosingInStmt(s: Ref<Stmt>, offset: usize): SpanRange | undefined {
-  if (s.kind === "export") return enclosingInStmt(s.body, offset);
-  if (s.kind === "function") return { start: s.start, end: s.end };
-  if (s.kind === "class") {
-    for (const m of s.members) {
-      if (offset >= m.start && offset <= m.end) return { start: m.start, end: m.end };
-    }
-  }
-  return undefined;
-}
-
-// Finds the enclosing top-level function or class method span containing `offset` in a parsed AST.
-function enclosingCallable(stmts: Ref<Stmt[]>, offset: usize): SpanRange | undefined {
+function enclosingInList(stmts: Ref<Stmt[]>, offset: usize): SpanRange | undefined {
   for (const s of stmts) {
     if (offset < s.start || offset > s.end) continue;
     const hit = enclosingInStmt(s, offset);
     if (hit !== undefined) return hit;
   }
   return undefined;
+}
+
+function enclosingInStmt(s: Ref<Stmt>, offset: usize): SpanRange | undefined {
+  if (s.kind === "export") return enclosingInStmt(s.body, offset);
+  if (s.kind === "exportDefault") {
+    if (s.declaration !== undefined) return enclosingInStmt(s.declaration!, offset);
+    return undefined;
+  }
+  if (s.kind === "function") {
+    if (s.body !== undefined) {
+      const nested = enclosingInList(s.body!, offset);
+      if (nested !== undefined) return nested;
+    }
+    return { start: s.start, end: s.end };
+  }
+  if (s.kind === "class") {
+    for (const m of s.members) {
+      if (offset >= m.start && offset <= m.end) {
+        if (m.kind === "method" && m.body !== undefined) {
+          const nested = enclosingInList(m.body!, offset);
+          if (nested !== undefined) return nested;
+        }
+        return { start: m.start, end: m.end };
+      }
+    }
+    return undefined;
+  }
+  if (s.kind === "block" || s.kind === "comptime" || s.kind === "unsafe") return enclosingInList(s.body, offset);
+  if (s.kind === "namespace" && s.body !== undefined) return enclosingInList(s.body!, offset);
+  if (s.kind === "if") {
+    const thenHit = enclosingInList(s.then, offset);
+    if (thenHit !== undefined) return thenHit;
+    if (s.else !== undefined) return enclosingInList(s.else!, offset);
+    return undefined;
+  }
+  if (s.kind === "while" || s.kind === "for" || s.kind === "forIn" || s.kind === "forOf") return enclosingInList(s.body, offset);
+  if (s.kind === "try") {
+    const tryHit = enclosingInList(s.block, offset);
+    if (tryHit !== undefined) return tryHit;
+    if (s.handler !== undefined) {
+      const catchHit = enclosingInList(s.handler!, offset);
+      if (catchHit !== undefined) return catchHit;
+    }
+    if (s.finalizer !== undefined) return enclosingInList(s.finalizer!, offset);
+    return undefined;
+  }
+  if (s.kind === "switch") {
+    for (const c of s.cases) {
+      const caseHit = enclosingInList(c.body, offset);
+      if (caseHit !== undefined) return caseHit;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+// Finds the innermost enclosing function or class method span containing `offset` in a parsed AST.
+function enclosingCallable(stmts: Ref<Stmt[]>, offset: usize): SpanRange | undefined {
+  return enclosingInList(stmts, offset);
 }
 
 // Resolves a single program-space TextEdit into a validated file-local edit inside `projectRoot`.
@@ -100,7 +156,7 @@ function resolveFileEdit(
   const s = sourceOf(entrySrc, entry, start, sources);
   const e = sourceOf(entrySrc, entry, end, sources);
   if (s.file !== e.file || s.offset > e.offset) return undefined;
-  if (s.file === "<std>" || s.file.startsWith("std:") || s.file.startsWith("node:") || s.file.startsWith("fish:")) return undefined;
+  if (isNonProjectSource(s.file)) return undefined;
   const rawPath = s.file === entry ? entry : resolve(dirname(entry), s.file);
   if (!existsSync(rawPath)) return undefined;
   let path = rawPath;
@@ -109,7 +165,8 @@ function resolveFileEdit(
   } catch (_e) {
     return undefined;
   }
-  if (path !== projectRoot && !path.startsWith(projectRoot + sep)) return undefined;
+  const rootPrefix = projectRoot.endsWith(sep) ? projectRoot : projectRoot + sep;
+  if (path !== projectRoot && !path.startsWith(rootPrefix)) return undefined;
   if (path.includes(`${sep}node_modules${sep}`)) return undefined;
   const current = open.get(path) ?? readFileSync(path, "utf8");
   if (e.offset > current.length) return undefined;
@@ -122,9 +179,34 @@ function resolveFileEdit(
 type TrialApplied = {
   next: Map<string, string>;
   primaryFile: string;
+  primaryOffset: usize;
   primaryLine: usize;
   calleeSpan?: SpanRange;
+  edits: FileEdit[];
 };
+
+// Adjusts a file offset after applying a set of non-overlapping edits to the same file.
+function shiftedOffset(offset: usize, edits: Ref<FileEdit[]>, filePath: string): usize {
+  let delta: i64 = 0;
+  for (const ed of edits) {
+    if (ed.path !== filePath) continue;
+    if (ed.end <= offset) delta += (ed.text.length as i64) - ((ed.end - ed.start) as i64);
+  }
+  const shifted = (offset as i64) + delta;
+  return shifted > 0 ? (shifted as usize) : 0;
+}
+
+// Re-parses `filePath` from `open` and finds the enclosing callable at `offset`.
+/** @throws {IoError} */
+function callableAt(open: Ref<Map<string, string>>, filePath: string, offset: usize): SpanRange | undefined {
+  const text = open.get(filePath) ?? readFileSync(filePath, "utf8");
+  try {
+    const parsed = parse(text, { last: 0 });
+    return enclosingCallable(parsed, offset);
+  } catch (_e) {
+    return undefined;
+  }
+}
 
 // Applies a Fix's edits onto a copy of `open`, verifying no overlaps and clean re-parse.
 /** @throws {IoError} */
@@ -138,6 +220,7 @@ function applyFixCandidate(
   if (fix.edits.length === 0) return undefined;
   const entrySrc = open.get(entry) ?? readFileSync(entry, "utf8");
   let byFile = new Map<string, FileEdit[]>();
+  let allEdits: FileEdit[] = [];
   let primaryFile = "";
   let primaryOffset: usize = 0;
   let primaryLine: usize = 1;
@@ -152,6 +235,7 @@ function applyFixCandidate(
       const cur = open.get(editPath) ?? readFileSync(editPath, "utf8");
       primaryLine = locate(cur, resolved.start).line;
     }
+    allEdits.push({ path: resolved.path, start: resolved.start, end: resolved.end, text: resolved.text });
     const existing = byFile.get(editPath);
     if (existing === undefined) byFile.set(editPath, [resolved]);
     else {
@@ -183,13 +267,13 @@ function applyFixCandidate(
     if (path === primaryFile) calleeSpan = enclosingCallable(parsed, primaryOffset);
     next.set(path, text);
   }
-  return { next, primaryFile, primaryLine, calleeSpan };
+  return { next, primaryFile, primaryOffset, primaryLine, calleeSpan, edits: allEdits };
 }
 
 function errorFileAndOffset(entry: string, entrySrc: string, e: Ref<CompileError>): { path: string; offset: usize; line: usize } | undefined {
   if (e.start >= STD_BASE) return undefined;
   const loc = sourceOf(entrySrc, entry, e.start, e.sources);
-  if (loc.file === "<std>" || loc.file.startsWith("std:") || loc.file.startsWith("node:") || loc.file.startsWith("fish:")) return undefined;
+  if (isNonProjectSource(loc.file)) return undefined;
   const raw = loc.file === entry ? entry : resolve(dirname(entry), loc.file);
   if (!existsSync(raw)) return undefined;
   let path = raw;
@@ -205,6 +289,11 @@ function errorKey(entry: string, entrySrc: string, e: Ref<CompileError>): string
   const loc = sourceOf(entrySrc, entry, e.start, e.sources);
   const pos = locate(loc.src, loc.offset);
   return `${loc.file}:${pos.line}:${e.code}:${e.message}`;
+}
+
+function errorTag(entry: string, entrySrc: string, e: Ref<CompileError>): string {
+  const loc = sourceOf(entrySrc, entry, e.start, e.sources);
+  return `${loc.file}:${e.code}:${e.message}`;
 }
 
 /** @throws {IoError} */
@@ -224,6 +313,50 @@ function hasErrorInCallable(entry: string, open: Ref<Map<string, string>>, error
     if (loc !== undefined && loc.path === filePath && loc.offset >= span.start && loc.offset <= span.end) return true;
   }
   return false;
+}
+
+// Checks whether an equal-count callee-borrow trial introduced a regression (such as breaking a
+// typed callback, subclass override, or interface implementation) by comparing against `.clone()`.
+/** @throws {Error | IoError} */
+function borrowSafeWithClone(
+  entry: string,
+  beforeOpen: Ref<Map<string, string>>,
+  beforeErrors: Ref<CompileError[]>,
+  trialOpen: Ref<Map<string, string>>,
+  trialErrors: Ref<CompileError[]>,
+  cloneOpen: Ref<Map<string, string>>,
+  cloneErrors: Ref<CompileError[]>,
+): boolean {
+  if (cloneErrors.length < trialErrors.length) return false;
+  const beforeSrc = beforeOpen.get(entry) ?? readFileSync(entry, "utf8");
+  const trialSrc = trialOpen.get(entry) ?? readFileSync(entry, "utf8");
+  const cloneSrc = cloneOpen.get(entry) ?? readFileSync(entry, "utf8");
+  let allowed = new Set<string>();
+  for (const e of beforeErrors) allowed.add(errorTag(entry, beforeSrc, e));
+  for (const e of cloneErrors) allowed.add(errorTag(entry, cloneSrc, e));
+  for (const e of trialErrors) {
+    if (!allowed.has(errorTag(entry, trialSrc, e))) return false;
+  }
+  return true;
+}
+
+// When no `.clone()` fallback exists, reject if the borrow introduced a non-ownership error.
+/** @throws {Error | IoError} */
+function borrowSafeWithoutClone(
+  entry: string,
+  beforeOpen: Ref<Map<string, string>>,
+  beforeErrors: Ref<CompileError[]>,
+  trialOpen: Ref<Map<string, string>>,
+  trialErrors: Ref<CompileError[]>,
+): boolean {
+  const beforeSrc = beforeOpen.get(entry) ?? readFileSync(entry, "utf8");
+  const trialSrc = trialOpen.get(entry) ?? readFileSync(entry, "utf8");
+  let beforeTags = new Set<string>();
+  for (const e of beforeErrors) beforeTags.add(errorTag(entry, beforeSrc, e));
+  for (const e of trialErrors) {
+    if (!beforeTags.has(errorTag(entry, trialSrc, e)) && !isOwnershipCode(e.code)) return false;
+  }
+  return true;
 }
 
 function stateSignature(open: Ref<Map<string, string>>): string {
@@ -268,7 +401,7 @@ export function fixProgram(
   let editing = false;
   let errors = checkBuffers(entry, manifest, open, editing);
   // If a standalone file has no `main`, switch to editing mode so library modules and tests fix too.
-  if (errors.length === 1 && errors[0]!.code === "E0908") {
+  if (errors.length === 1 && errors[0]!.code === "E0405" && errors[0]!.start === 0 && errors[0]!.end === 0) {
     editing = true;
     errors = checkBuffers(entry, manifest, open, editing);
   }
@@ -285,6 +418,10 @@ export function fixProgram(
       if (err.fixes.length === 0) continue;
       const key = errorKey(entry, entrySrc, err);
       const directMut = err.code === "E0206" || err.code === "E0207";
+      // Lazy `.clone()` baseline for comparing equal-count callee-borrow trials against regressions.
+      let cloneChecked = false;
+      let cloneOpen: Map<string, string> | undefined = undefined;
+      let cloneErrors: CompileError[] | undefined = undefined;
       // Try fixes in exact preference order: borrow -> mut -> clone.
       for (let fi: usize = 0; fi < err.fixes.length && nextErrors === undefined; fi++) {
         const candidate: Ref<Fix> = err.fixes[fi]!;
@@ -303,9 +440,32 @@ export function fixProgram(
           continue;
         }
 
-        // Accept immediately when total errors drop, or when a direct mutability fix or safe
-        // borrow/clone unblocks checking of a later unrelated error without increasing error count.
-        if (after.length < errors.length || (after.length <= errors.length && (!calleeBorrow || candidate.kind === "borrow"))) {
+        // Accept immediately when total errors drop, or when a direct mutability fix or verified
+        // borrow/clone unblocks checking of a later unrelated error without introducing regressions.
+        let acceptDirect = after.length < errors.length;
+        if (!acceptDirect && after.length === errors.length && (!calleeBorrow || candidate.kind === "borrow")) {
+          if (!calleeBorrow) {
+            acceptDirect = true;
+          } else if (trial.calleeSpan !== undefined) {
+            if (!cloneChecked) {
+              cloneChecked = true;
+              for (const cf of err.fixes) {
+                if (cf.kind !== "clone") continue;
+                const ct = applyFixCandidate(entry, root, open, err.sources, cf);
+                if (ct !== undefined) {
+                  cloneErrors = checkBuffers(entry, manifest, ct.next, editing);
+                  cloneOpen = ct.next;
+                }
+                break;
+              }
+            }
+            acceptDirect =
+              cloneOpen !== undefined && cloneErrors !== undefined
+                ? borrowSafeWithClone(entry, open, errors, trial.next, after, cloneOpen!, cloneErrors!)
+                : borrowSafeWithoutClone(entry, open, errors, trial.next, after);
+          }
+        }
+        if (acceptDirect) {
           seen.add(sig);
           commitMap(open, originals, trial.next);
           applied.push({ file: trial.primaryFile, line: trial.primaryLine, kind: candidate.kind, message: candidate.message });
@@ -315,7 +475,7 @@ export function fixProgram(
 
         // 1-step mut lookahead: upgrading a callee param to `Mut<T>` may reveal `const x` -> `let x`
         // or `Ref<T>` -> `Mut<T>` at a caller; accept both together if the callee stays clean and
-        // error count drops (or progresses past the caller).
+        // error count drops (or progresses cleanly without introducing regressions).
         if (calleeBorrow && candidate.kind === "mut" && after.length === errors.length) {
           let paired = false;
           for (let ai: usize = 0; ai < after.length && !paired; ai++) {
@@ -327,9 +487,30 @@ export function fixProgram(
               const sig2 = stateSignature(trial2.next);
               if (seen.has(sig2)) continue;
               const after2 = checkBuffers(entry, manifest, trial2.next, editing);
-              if (trial.calleeSpan !== undefined && hasErrorInCallable(entry, trial2.next, after2, trial.primaryFile, trial.calleeSpan!)) continue;
+              const calleeOffset2 = shiftedOffset(trial.primaryOffset, trial2.edits, trial.primaryFile);
+              const calleeSpan2 = callableAt(trial2.next, trial.primaryFile, calleeOffset2);
+              if (calleeSpan2 !== undefined && hasErrorInCallable(entry, trial2.next, after2, trial.primaryFile, calleeSpan2!)) continue;
               const followKey = errorKey(entry, trial.next.get(entry) ?? entryOrig, follow);
-              if (after2.length < errors.length || (after2.length <= errors.length && !hasErrorKey(entry, trial2.next, after2, followKey))) {
+              let acceptPair = after2.length < errors.length;
+              if (!acceptPair && after2.length === errors.length && calleeSpan2 !== undefined && !hasErrorKey(entry, trial2.next, after2, followKey)) {
+                if (!cloneChecked) {
+                  cloneChecked = true;
+                  for (const cf of err.fixes) {
+                    if (cf.kind !== "clone") continue;
+                    const ct = applyFixCandidate(entry, root, open, err.sources, cf);
+                    if (ct !== undefined) {
+                      cloneErrors = checkBuffers(entry, manifest, ct.next, editing);
+                      cloneOpen = ct.next;
+                    }
+                    break;
+                  }
+                }
+                acceptPair =
+                  cloneOpen !== undefined && cloneErrors !== undefined
+                    ? borrowSafeWithClone(entry, open, errors, trial2.next, after2, cloneOpen!, cloneErrors!)
+                    : borrowSafeWithoutClone(entry, open, errors, trial2.next, after2);
+              }
+              if (acceptPair) {
                 seen.add(sig2);
                 commitMap(open, originals, trial2.next);
                 applied.push({ file: trial.primaryFile, line: trial.primaryLine, kind: candidate.kind, message: candidate.message });
@@ -357,6 +538,12 @@ export function fixProgram(
 
 // Formats a relative file display path for CLI output.
 export function displayFixPath(path: string, cwd: string): string {
-  const rel = relative(cwd, path);
+  let base = cwd;
+  try {
+    base = realpathSync(cwd);
+  } catch (_e) {
+    base = cwd;
+  }
+  const rel = relative(base, path);
   return rel !== "" ? rel : path;
 }

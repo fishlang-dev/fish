@@ -3,7 +3,7 @@
 // rebuild whose files all read as they did is not checked again, and one after an edit checks only
 // the bodies that changed. `fishc build`, `fishc check` and `fishc watch` all drive it; the
 // language server holds one per program, and the cache on disk reads and writes one here.
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import type { InstanceId } from "./arenas.fsh";
 import { expanded, sourced } from "./analysis.fsh";
@@ -267,7 +267,15 @@ function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, lo
   let held = new Map<string, string>();
   for (const [path, text] of open) held.set(path, text);
   try {
-    return load(compilation, file, src, move (path) => held.get(resolve(path)));
+    return load(compilation, file, src, move (path): string | undefined => {
+      let out = held.get(resolve(path));
+      if (out === undefined) {
+        try {
+          out = held.get(realpathSync(path));
+        } catch (_e) {}
+      }
+      return out;
+    });
   } finally {
     stageEnd(compilation.session, "parse", started);
     for (const f of compilation.looked) looked.push(f);

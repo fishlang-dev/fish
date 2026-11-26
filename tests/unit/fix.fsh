@@ -1,7 +1,7 @@
 // `fishc fix`: machine-applicable edits on borrow, move, and mutability errors, preferring
 // borrows (`Ref<T>`, `Mut<T>`) over `.clone()` via trial-verified re-checking.
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fishc, removed, scratch, text } from "./support.fsh";
 
@@ -27,6 +27,14 @@ function makeDir(path: string): void {
     mkdirSync(path, { recursive: true });
   } catch (e) {
     assert(false, `can't mkdir ${path}: ${e.message}`);
+  }
+}
+
+function link(target: string, at: string): void {
+  try {
+    symlinkSync(target, at);
+  } catch (e) {
+    assert(false, `can't symlink ${at}: ${e.message}`);
   }
 }
 
@@ -214,6 +222,153 @@ function main() {
     assert(fishc(dir, ["build", entry, "-o", bin]).code === 0, "build after multi-file fix failed");
     const ran = spawnSync(bin, [], { cwd: dir });
     assert(ran.status === 0 && text(ran.stdout).trim() === "2 2 5", `unexpected output: ${text(ran.stdout)}`);
+  } finally {
+    removed(dir);
+  }
+}, { timeout: 60_000 });
+
+test("fishc fix handles standalone library without main and upgrades this: Ref<this> to this: Mut<this>", () => {
+  const dir = scratch("fish-fix-lib-");
+  try {
+    const file = join(dir, "lib.fsh");
+    write(
+      file,
+      `export class Acc {
+  total: i64 = 0;
+
+  add(this: Ref<this>, delta: i64): i64 {
+    this.total += delta;
+    return this.total;
+  }
+}
+
+export function sizeOf(xs: i64[]): usize {
+  return xs.length;
+}
+
+export function demo(): usize {
+  const nums = [1, 2, 3];
+  const n = sizeOf(nums);
+  return n + nums.length;
+}
+`,
+    );
+    const fixed = fishc(dir, ["fix", file]);
+    assert(fixed.code === 0, `standalone library fix failed: ${fixed.out}\n${fixed.err}`);
+    const after = read(file);
+    assert(after.includes("add(this: Mut<this>, delta: i64): i64"), `expected this: Ref<this> upgraded to Mut:\n${after}`);
+    assert(after.includes("sizeOf(xs: Ref<i64[]>): usize"), `expected Ref<i64[]> on library function:\n${after}`);
+  } finally {
+    removed(dir);
+  }
+}, { timeout: 60_000 });
+
+test("fishc fix avoids breaking typed callbacks and export default callees, falling back to .clone()", () => {
+  const dir = scratch("fish-fix-cb-");
+  try {
+    makeDir(join(dir, "src"));
+    write(join(dir, "fish.toml"), `[package]\nname = "fixcb"\nversion = "0.1.0"\n`);
+    const exp = join(dir, "src", "wrap.fsh");
+    write(
+      exp,
+      `export class Holder {
+  items: i64[];
+  constructor(items: i64[]) {
+    this.items = items;
+  }
+}
+
+export default function keep(xs: i64[]): Holder {
+  return new Holder(xs);
+}
+`,
+    );
+    const entry = join(dir, "src", "main.fsh");
+    write(
+      entry,
+      `import keep from "./wrap.fsh";
+
+function takeOwned(xs: i64[]): usize {
+  return xs.length;
+}
+
+function main() {
+  const cb: (xs: i64[]) => usize = takeOwned;
+  const nums = [1, 2, 3];
+  const a = takeOwned(nums);
+  const b = cb(nums);
+  const h = keep(nums);
+  console.log(a, b, h.items.length, nums.length);
+}
+`,
+    );
+    const fixed = fishc(dir, ["fix"]);
+    assert(fixed.code === 0, `callback/default fix failed: ${fixed.out}\n${fixed.err}`);
+    const entryAfter = read(entry);
+    const expAfter = read(exp);
+    assert(entryAfter.includes("function takeOwned(xs: i64[]): usize"), `callback-typed callee signature must stay owned:\n${entryAfter}`);
+    assert(expAfter.includes("export default function keep(xs: i64[]): Holder"), `export default owning callee signature must stay owned:\n${expAfter}`);
+    assert(entryAfter.includes("takeOwned(nums.clone())"), `expected .clone() at callback-constrained call:\n${entryAfter}`);
+
+    const bin = join(dir, "app");
+    assert(fishc(dir, ["build", entry, "-o", bin]).code === 0, "build after callback/default fix failed");
+    const ran = spawnSync(bin, [], { cwd: dir });
+    assert(ran.status === 0 && text(ran.stdout).trim() === "3 3 3 3", `unexpected output: ${text(ran.stdout)}`);
+  } finally {
+    removed(dir);
+  }
+}, { timeout: 60_000 });
+
+test("fishc fix handles intra-project symlinked imports and parenthesizes lower-precedence clone expressions", () => {
+  const dir = scratch("fish-fix-sym-");
+  try {
+    makeDir(join(dir, "src"));
+    write(join(dir, "fish.toml"), `[package]\nname = "fixsym"\nversion = "0.1.0"\n`);
+    const real = join(dir, "src", "real.fsh");
+    write(
+      real,
+      `export function count(xs: i64[]): usize {
+  return xs.length;
+}
+`,
+    );
+    link(real, join(dir, "src", "link.fsh"));
+    const entry = join(dir, "src", "main.fsh");
+    write(
+      entry,
+      `import { count } from "./link.fsh";
+
+class Wrap {
+  vals: i64[];
+  constructor(vals: i64[]) {
+    this.vals = vals;
+  }
+}
+
+function pickOr(maybe: Ref<i64[]> | undefined, w: Ref<Wrap>): i64[] {
+  return maybe ?? w.vals;
+}
+
+function main() {
+  const nums = [7, 8];
+  const n = count(nums);
+  const w = new Wrap([1, 2, 3]);
+  const picked = pickOr(undefined, w);
+  console.log(n, nums.length, picked.length);
+}
+`,
+    );
+    const fixed = fishc(dir, ["fix"]);
+    assert(fixed.code === 0, `symlink/parens fix failed: ${fixed.out}\n${fixed.err}`);
+    const realAfter = read(real);
+    const entryAfter = read(entry);
+    assert(realAfter.includes("count(xs: Ref<i64[]>): usize"), `expected Ref<i64[]> through intra-project symlink:\n${realAfter}`);
+    assert(entryAfter.includes("(maybe ?? w.vals).clone()"), `expected parenthesized clone on binary expression:\n${entryAfter}`);
+
+    const bin = join(dir, "app");
+    assert(fishc(dir, ["build", entry, "-o", bin]).code === 0, "build after symlink/parens fix failed");
+    const ran = spawnSync(bin, [], { cwd: dir });
+    assert(ran.status === 0 && text(ran.stdout).trim() === "2 2 3", `unexpected output: ${text(ran.stdout)}`);
   } finally {
     removed(dir);
   }

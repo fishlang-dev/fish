@@ -3,7 +3,7 @@ import assert from "node:assert";
 import { bodyOf, type Arenas, type InstanceId, type LocalId } from "./arenas.fsh";
 import type { Instance, Local, Origin } from "./check.fsh";
 import type { Body } from "./classes.fsh";
-import { CompileError, withFixes, type BorrowEvent, type Fix } from "./diag.fsh";
+import { CompileError, copyFixes, withFixes, type BorrowEvent, type Fix } from "./diag.fsh";
 import { STD_BASE } from "./std.fsh";
 import type { Declarator, Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode } from "./parser.fsh";
 import { bindings } from "./match.fsh";
@@ -1119,7 +1119,11 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // Arguments are handed over, or lent for the call, in order.
   /** @throws {CompileError} */
   handOver(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, args: Ref<Expr[]>, name: string, call: Ref<Expr>): void {
-    for (let i: usize = 0; i < args.length; i++) this.handOverOne(cx, args[i]!, name, call, i === 0, i);
+    let spreadSeen = false;
+    for (let i: usize = 0; i < args.length; i++) {
+      if (args[i]!.kind === "spread") spreadSeen = true;
+      this.handOverOne(cx, args[i]!, name, call, i === 0, spreadSeen ? undefined : i);
+    }
   }
 
   /** @throws {CompileError} */
@@ -1349,7 +1353,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         this.usable(cx, at, place);
       } catch (err) {
         // The variable isn't written at the call, so the message says the function uses it.
-        if (err instanceof CompileError && !cx.tables.selfCalls.has(e)) throw new CompileError(err.code, `${name} uses '${aliasName}', and ${err.message}`, err.start, err.end, err.note);
+        if (err instanceof CompileError && !cx.tables.selfCalls.has(e)) throw withFixes(new CompileError(err.code, `${name} uses '${aliasName}', and ${err.message}`, err.start, err.end, err.note), copyFixes(err.fixes));
         throw err;
       }
       this.lend(cx, place, false, at, undefined, name, e.id, at.start, c.key);
@@ -1560,7 +1564,23 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // Provenance recorded when an expression is moved, used to build borrow-first fixes.
   moveFixFor(cx: Ref<MoveCx<T, B, I>>, e: Ref<Named>, type: Type): MoveFix {
     const isShorthand = e.kind === "shorthand";
-    const needsParens = !isShorthand && (e.kind === "binary" || e.kind === "conditional" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unary" || e.kind === "assign");
+    const needsParens = !isShorthand && (
+      e.kind === "binary" ||
+      e.kind === "conditional" ||
+      e.kind === "as" ||
+      e.kind === "satisfies" ||
+      e.kind === "unary" ||
+      e.kind === "assign" ||
+      e.kind === "pipe" ||
+      e.kind === "assertion" ||
+      e.kind === "unsafe" ||
+      e.kind === "comptime" ||
+      e.kind === "yield" ||
+      e.kind === "sequence" ||
+      e.kind === "arrow" ||
+      e.kind === "function" ||
+      (e.kind === "new" && e.args === undefined)
+    );
     const call: MoveCall | undefined = this.callArg !== undefined && this.callArg!.argId === e.id ? { target: this.callArg!.target, param: this.callArg!.param } : undefined;
     let out: MoveFix = { start: e.start, end: e.end, name: this.text(cx, e), cloneable: this.cloneable(cx, type) };
     if (isShorthand) out.shorthand = true;
@@ -1575,7 +1595,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     let out: Fix[] = [];
     if (info.call !== undefined) {
       const body = bodyOf(cx.tables.arenas, cx.tables.arenas.instanceOf(info.call!.target));
-      const userOwned = body.start < STD_BASE && body.foreign !== true && body.rust === undefined && body.js === undefined && body.self?.constructor !== true && body.generator !== true && !cx.tables.generated.has(body);
+      const userOwned = body.start < STD_BASE && body.foreign !== true && body.rust === undefined && body.js === undefined && body.self?.constructor !== true && body.generator !== true && body.signature !== true && body.async !== true && !cx.tables.generated.has(body);
       if (userOwned) {
         let hasThis = false;
         if (body.params.length > 0) {

@@ -11178,15 +11178,12 @@ export class Expressions<C extends Context> implements Union<C> {
   private thisMutFix(this: Mut<this>): Fix[] {
     const arenas = this.ctx.view().arenas;
     const body = bodyOf(arenas, arenas.instanceOf(this.ctx.checking()));
-    if (body.self === undefined || body.self.constructor || body.start >= STD_BASE || body.foreign === true) return [];
-    if (body.params.length > 0) {
-      const first: Ref<Param> = body.params[0]!;
-      if (first.pattern.kind === "ident" && first.pattern.name === "this") {
-        if (first.type !== undefined && first.type.kind === "ref" && first.type.name === "Ref") {
-          return [{ kind: "mut", message: "change 'this: Ref<this>' to 'this: Mut<this>'", edits: [{ start: first.type.start, end: first.type.start + 3, text: "Mut" }] }];
-        }
-        return [];
+    if (body.self === undefined || body.self.constructor || body.accessor === true || body.signature === true || body.start >= STD_BASE || body.foreign === true) return [];
+    if (body.self.explicit === true) {
+      if (body.self.refAt !== undefined && body.self.refAt < STD_BASE) {
+        return [{ kind: "mut", message: "change 'this: Ref<this>' to 'this: Mut<this>'", edits: [{ start: body.self.refAt, end: body.self.refAt + 3, text: "Mut" }] }];
       }
+      return [];
     }
     let fileSrc = "";
     let fileBase: usize = 0;
@@ -11219,6 +11216,24 @@ export class Expressions<C extends Context> implements Union<C> {
         i += 2;
         continue;
       }
+      if (ch === "\"" || ch === "'" || ch === "`") {
+        const quote = ch;
+        i++;
+        while (i < relEnd) {
+          const qc = fileSrc.charAt(i as i64);
+          if (qc === "\\") {
+            i += 2;
+            continue;
+          }
+          i++;
+          if (qc === quote) break;
+        }
+        continue;
+      }
+      if (ch === "=" && i + 1 < relEnd && fileSrc.charAt((i + 1) as i64) === ">") {
+        i += 2;
+        continue;
+      }
       if (ch === "<") depth++;
       else if (ch === ">" && depth > 0) depth--;
       else if (ch === "(" && depth === 0) {
@@ -11239,7 +11254,22 @@ export class Expressions<C extends Context> implements Union<C> {
       return (r?.kind === "block" && (r.which === "Semaphore" || r.which === "Permit")) || r?.kind === "future" || r?.kind === "generator";
     }, true);
     if (nonCloneable) return [];
-    const parens = e.kind === "binary" || e.kind === "conditional" || e.kind === "as" || e.kind === "satisfies" || e.kind === "unary" || e.kind === "assign";
+    const parens =
+      e.kind === "binary" ||
+      e.kind === "conditional" ||
+      e.kind === "as" ||
+      e.kind === "satisfies" ||
+      e.kind === "unary" ||
+      e.kind === "assign" ||
+      e.kind === "pipe" ||
+      e.kind === "assertion" ||
+      e.kind === "unsafe" ||
+      e.kind === "comptime" ||
+      e.kind === "yield" ||
+      e.kind === "sequence" ||
+      e.kind === "arrow" ||
+      e.kind === "function" ||
+      (e.kind === "new" && e.args === undefined);
     const edits = parens
       ? [{ start: e.start, end: e.start, text: "(" }, { start: e.end, end: e.end, text: ").clone()" }]
       : [{ start: e.end, end: e.end, text: ".clone()" }];

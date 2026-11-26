@@ -1912,6 +1912,7 @@ async function main(): Promise<void> {
       const report = fixProgram(entry!, manifest, projectRoot);
       const cwd = process.cwd();
       let writeFailed = false;
+      let failedPaths = new Set<string>();
       if (!dryRun && !checkOnly) {
         for (const [path, text] of report.edited) {
           const orig = report.originals.get(path) ?? "";
@@ -1919,20 +1920,24 @@ async function main(): Promise<void> {
           if (failed !== undefined) {
             console.error(`fishc fix: can't write '${displayFixPath(path, cwd)}': ${failed}`);
             writeFailed = true;
+            failedPaths.add(path);
           }
         }
       }
+      let reportedCount: usize = 0;
       for (const a of report.applied) {
+        if (failedPaths.has(a.file)) continue;
         const verb = dryRun || checkOnly ? "would fix" : "fixed";
         console.log(`${verb} [${a.kind}] ${displayFixPath(a.file, cwd)}:${a.line}: ${a.message}`);
+        reportedCount++;
       }
       const entryText = report.edited.get(realpathSync(resolve(entry!))) ?? report.originals.get(realpathSync(resolve(entry!))) ?? "";
       for (const rem of report.remaining) {
         console.error(painted(rem, displayFixPath(realpathSync(resolve(entry!)), cwd), entryText));
       }
-      const count = report.applied.length;
-      const fileCount = report.edited.size;
-      if (count === 0 && report.remaining.length === 0) {
+      const count = dryRun || checkOnly ? report.applied.length : reportedCount;
+      const fileCount = dryRun || checkOnly ? report.edited.size : report.edited.size - failedPaths.size;
+      if (count === 0 && report.remaining.length === 0 && !writeFailed) {
         console.log("nothing to fix");
       } else {
         const prefix = dryRun || checkOnly ? "would apply" : "applied";
