@@ -1765,7 +1765,7 @@ async function main(): Promise<void> {
       const start = performance.now();
       let looked: string[] = [];
       const made = built(sessionFor(), target, binary, release, panic, [...links], hostTarget(), leaks, values.debug === true, looked);
-      reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
+      reportTimings(made.session, [...FRONT_END, "codegen", "instrument", "split", ...NATIVE_STAGES], start);
       for (const w of made.warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
       const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
       // A signal ends it with 128 plus the signal's number, as a shell reports it.
@@ -1842,7 +1842,7 @@ async function main(): Promise<void> {
           const start = performance.now();
           let looked: string[] = [];
           const made = built(sessionFor(), target!, binary, release, panic, [...links], copyTarget(platform), leaks, debug, looked);
-          reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
+          reportTimings(made.session, [...FRONT_END, "codegen", "instrument", "split", ...NATIVE_STAGES], start);
           warnings = made.warnings;
         }
         if (image !== undefined) writeFileSync(image, dockerfile(binary));
