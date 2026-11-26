@@ -2086,7 +2086,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.definingGeneric = false;
         // `keyof T` and `T[K]` over the function's own type parameters are computed per instance,
         // so a generic function using them is checked as each call instantiates it.
-        if (e instanceof CompileError && perInstance(e) && this.instancing().generic(id)) continue;
+        // The failed definition's check recorded its error for every call; the calls make their own.
+        if (e instanceof CompileError && perInstance(e) && this.instancing().generic(id)) {
+          this.failed.delete(id);
+          continue;
+        }
         // A package's function Fish can't type is refused where a program calls it.
         if (this.tables.arenas.bodyOf(id).js === undefined || !(e instanceof CompileError)) {
           // A bad signature fails before the body's check does, and fails each call of it as well.
