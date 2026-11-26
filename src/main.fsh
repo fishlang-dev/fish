@@ -36,7 +36,8 @@ import { formatRanking, rank, readPlan, type Plan } from "./rank.fsh";
 import { compare, formatComparison, formatReport, readReport, sources, survey, type Report as SurveyReport } from "./survey.fsh";
 import { explain } from "./codes.fsh";
 import { explainBorrows, functionsIn } from "./explain.fsh";
-import { openapiOf } from "./openapi.fsh";
+import { openapiOf, type LeftOut } from "./openapi.fsh";
+import { clientOf, typesOf } from "./client.fsh";
 import { bindHeader } from "./bindc.fsh";
 import { heapDiffFiles } from "./heap.fsh";
 import { complete, entries, program, REPL_VALUE, shown, thrownBy, type Entry, type ReplState } from "./repl.fsh";
@@ -1721,13 +1722,14 @@ function bindFile(header: string, out: string | undefined, flags: string[]): nev
 // `fishc openapi`: prints the OpenAPI document of the routes `file`'s program adds to std's
 // routers, or writes it to `out`, and names on stderr each route the document leaves out. Its
 // title and version are the package's, or the file's name and 0.0.0 for a file in no package.
+// With `client`, `fishc client`: the TypeScript client of the same routes in its place.
 /** @throws {Error | IoError} */
-function openapiFile(file: string, out: string | undefined): never {
+function openapiFile(file: string, out: string | undefined, client = false): never {
   let src = "";
   try {
     src = readFileSync(file, "utf8");
   } catch (e) {
-    fail(`fishc openapi: can't read '${file}': ${(e as { message: string }).message}`);
+    fail(`fishc ${client ? "client" : "openapi"}: can't read '${file}': ${(e as { message: string }).message}`);
   }
   let title = basename(file);
   let version = "0.0.0";
@@ -1748,12 +1750,21 @@ function openapiFile(file: string, out: string | undefined): never {
     let queries = new Queries(file, undefined, new Map<string, string>());
     // A check read back from the cache would hold no routes.
     const kept = queries.checked(sessionWith(false, false, true), looked, undefined);
-    const made = openapiOf(kept.checked.tables, title, version);
-    for (const l of made.left) {
-      const skipped = sourced(new CompileError("W0003", `this route is left out of the document: ${l.why}`, l.start, l.end), undefined, kept.loaded.sources);
+    let text = "";
+    let left: LeftOut[] = [];
+    if (client) {
+      const made = clientOf(kept.checked.tables, basename(file));
+      text = made.code.trimEnd();
+      left = made.left;
+    } else {
+      const made = openapiOf(kept.checked.tables, title, version);
+      text = indented(made.document);
+      left = made.left;
+    }
+    for (const l of left) {
+      const skipped = sourced(new CompileError("W0003", `this route is left out of the ${client ? "client" : "document"}: ${l.why}`, l.start, l.end), undefined, kept.loaded.sources);
       console.error(painted(skipped, file, src, "warning"));
     }
-    const text = indented(made.document);
     if (out === undefined) console.log(text);
     else writeFileSync(out!, `${text}\n`);
   } catch (e) {
@@ -1783,6 +1794,29 @@ function checkProject(dir: string, fish: boolean = false) {
     fail(`fishc survey: '${dir}' can't be read: ${(e as { message: string }).message}`);
   }
   if (sources(dir, fish).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript ${fish ? "or Fish " : ""}files (.ts, .tsx or .mts${fish ? ", or .fsh" : ""}, outside node_modules)`);
+}
+
+// `fishc client --types`: the `.d.ts` declarations of a file's exported types, printed or written
+// to `out`.
+/** @throws {IoError} */
+function typesFile(file: string, out: string | undefined): never {
+  let src = "";
+  try {
+    src = readFileSync(file, "utf8");
+  } catch (e) {
+    fail(`fishc client: can't read '${file}': ${(e as { message: string }).message}`);
+  }
+  try {
+    const parsed = parseWithComments(src, { last: 0 });
+    const text = typesOf(src, parsed.program, basename(file));
+    if (out === undefined) process.stdout.write(text);
+    else writeFileSync(out!, text);
+  } catch (e) {
+    if (!(e instanceof CompileError)) throw e;
+    console.error(painted(e, file, src));
+    process.exit(1);
+  }
+  return process.exit(0);
 }
 
 // `fishc doc`: the package's files, or the one named, as HTML pages and an index in `out`,
@@ -1904,6 +1938,7 @@ async function main(): Promise<void> {
           static: { type: "boolean" },
           dockerfile: { type: "boolean" },
           addon: { type: "boolean" },
+          types: { type: "boolean" },
           json: { type: "boolean" },
           rank: { type: "boolean" },
           self: { type: "string" },
@@ -1988,6 +2023,11 @@ async function main(): Promise<void> {
   if (command === "explain-borrows") {
     if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "fn")) fail("usage: fishc explain-borrows <file.fsh> [--fn <name>]");
     explainFile(named!, values.fn);
+  }
+  if (command === "client") {
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "out" && k !== "types")) fail("usage: fishc client <file.fsh> [-o <out.ts>]\n       fishc client --types <file.fsh> [-o <out.d.ts>]");
+    if (values.types === true) typesFile(named!, values.out);
+    openapiFile(named!, values.out, true);
   }
   if (command === "doc") {
     if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "out")) fail("usage: fishc doc [<file.fsh>] [-o <dir>]");
@@ -2393,7 +2433,7 @@ async function main(): Promise<void> {
     process.exit(buildAddon(sessionFor(), file!, values.out, release, values.debug === true));
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || fuzzFlag || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--heap-profile] [--sanitize address|thread] [--flag <name>[=<value>]]...\n       fishc build --addon <file.fsh> [-o <out.node>] [--release] [-g]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache] [--flag <name>[=<value>]]...\n       fishc <file.fsh> [<args>...]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--heap-profile] [--timings] [--flag <name>[=<value>]]... [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--heap-profile] [--timings] [--flag <name>[=<value>]]... [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release] [--no-doc] [--seed <n>] [--sim [--seed <n>] [--seeds <count>]]\n       fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]\n       fishc fix [<file.fsh>] [--dry-run] [--check]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc doc [<file.fsh>] [-o <dir>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc bind c <header.h> [-o <out.fsh>] [-- <clang flags>...]\n       fishc heap diff <before.pb> <after.pb>\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--heap-profile] [--sanitize address|thread] [--flag <name>[=<value>]]...\n       fishc build --addon <file.fsh> [-o <out.node>] [--release] [-g]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache] [--flag <name>[=<value>]]...\n       fishc <file.fsh> [<args>...]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--heap-profile] [--timings] [--flag <name>[=<value>]]... [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--heap-profile] [--timings] [--flag <name>[=<value>]]... [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release] [--no-doc] [--seed <n>] [--sim [--seed <n>] [--seeds <count>]]\n       fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]\n       fishc fix [<file.fsh>] [--dry-run] [--check]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc doc [<file.fsh>] [-o <dir>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc client [--types] <file.fsh> [-o <out>]\n       fishc bind c <header.h> [-o <out.fsh>] [-- <clang flags>...]\n       fishc heap diff <before.pb> <after.pb>\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.

@@ -47,6 +47,7 @@ const SOURCES: string[] = [
   "src/check.fsh",
   "src/checkcache.fsh",
   "src/classes.fsh",
+  "src/client.fsh",
   "src/codegen.fsh",
   "src/codes.fsh",
   "src/comments.fsh",
@@ -337,6 +338,7 @@ test("src/casemap.fsh formats keeping its comments, parses back to the same tree
 test("src/check.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/check.fsh"));
 test("src/checkcache.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/checkcache.fsh"));
 test("src/classes.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/classes.fsh"));
+test("src/client.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/client.fsh"));
 test("src/codes.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/codes.fsh"));
 test("src/comments.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/comments.fsh"));
 test("src/compilation.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/compilation.fsh"));
