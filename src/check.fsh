@@ -1780,7 +1780,9 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   }
 
   recover(this: Mut<this>, e: CompileError): void {
-    if (this.definingGeneric && perInstance(e)) {
+    const checking = this.beingChecked;
+    const placeholder = checking !== undefined && !this.tables.arenas.instanceOf(checking).concrete;
+    if ((this.definingGeneric || placeholder) && perInstance(e)) {
       this.perInstanceSeen = true;
       return;
     }

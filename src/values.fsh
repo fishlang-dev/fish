@@ -8329,7 +8329,10 @@ export class Expressions<C extends Context> implements Union<C> {
   }
   /** @throws {CompileError} */
   private keyLeaf(this: Mut<this>, leaf: Ref<Expr>): string {
-    const t = this.value(leaf);
+    const given = this.value(leaf);
+    // A type parameter an instance bound to a literal, as `K extends keyof T` is, names its key.
+    const bound = this.recOf(given);
+    const t = bound?.kind === "param" && bound.concrete !== undefined ? bound.concrete : given;
     const r = this.recOf(t);
     if (r?.kind === "literal") return literalKey(r.value);
     // A const holding a number is typed by its number type, so its name comes from its value.
