@@ -49,7 +49,7 @@ const RULES: Rule[] = [
   { id: "G8", action: "guided", title: "isNaN after parsing: Fish's parsing gives an Option to check" },
   { id: "G9", action: "guided", title: ".call, .apply and .bind: pass the receiver explicitly or use a closure" },
   { id: "G10", action: "guided", title: "an async callback passed to forEach: use for...of with await, or spawned tasks" },
-  { id: "G11", action: "guided", title: "a value aliased and changed from two names: Rc<T> in one thread, shared<T> across tasks, a .clone(), or restructuring" },
+  { id: "G11", action: "guided", title: "a value aliased and changed from two names: the reference-counted edition for the file, Rc<T> in one thread, shared<T> across tasks, a .clone(), or restructuring" },
   { id: "G12", action: "guided", title: "DisposableStack, and Symbol.dispose and Symbol.asyncDispose beyond a class's methods: give a class a [Symbol.dispose]() method, which runs when an instance is dropped, or an async [Symbol.asyncDispose]() one for 'await using'" },
   { id: "A1", action: "auto", title: "var: const or let" },
   { id: "A2", action: "auto", title: "null, undefined and ?: Option" },

@@ -12,7 +12,7 @@ export type Dependency = { name: string; start: usize; end: usize; capabilities?
 // A package as its `fish.toml` describes it, `dir` being where that file was found; `lib` is
 // what a package depending on it imports, `entry` the program it builds.
 // `edition`: "ts-compat" marks TypeScript not yet migrated, which a build refuses and `fishc lint`
-// reads.
+// reads; "rc" holds objects reference-counted, as `src/refcounted.fsh` lowers them.
 // `rustDependencies` is the `[rust-dependencies]` table, when the manifest has one.
 // `capabilities` is what the package says it uses of what a dependency must be granted.
 // `reads`: the globs `[comptime] reads` lists, the package's files comptime may read.
@@ -21,7 +21,7 @@ export type Manifest = { name: string; version: string; entry: string; lib: stri
 export type RustDependency = {
   name: string; start: usize; end: usize; version?: string; features?: string[]; defaultFeatures?: boolean; path?: string; git?: string; rev?: string; tag?: string; branch?: string;
 };
-export type Edition = "native" | "ts-compat";
+export type Edition = "native" | "ts-compat" | "rc";
 // What a dependency's code may reach beyond computing: the network, files, C and other native
 // code, `unsafe`, and other programs.
 export type Capability = "net" | "fs" | "ffi" | "unsafe" | "spawn";
@@ -300,8 +300,8 @@ export function readManifest(src: string, dir: string): Manifest {
   const entry = packageFile(pkg, "entry", "src/main.fsh");
   const lib = packageFile(pkg, "lib", "src/lib.fsh");
   const edition = textIn(pkg.keys, "edition", true);
-  if (edition !== undefined && edition.value !== "native" && edition.value !== "ts-compat") throw new CompileError("E0905", `'${edition.value}' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated`, edition.start, edition.end);
-  const chosen: Edition = edition !== undefined && edition.value === "ts-compat" ? "ts-compat" : "native";
+  if (edition !== undefined && edition.value !== "native" && edition.value !== "ts-compat" && edition.value !== "rc") throw new CompileError("E0905", `'${edition.value}' isn't an edition; it is "native", the default, "rc" for reference-counted objects, or "ts-compat" for TypeScript not yet migrated`, edition.start, edition.end);
+  const chosen: Edition = edition !== undefined && edition.value === "ts-compat" ? "ts-compat" : edition !== undefined && edition.value === "rc" ? "rc" : "native";
   let dependencies: Dependency[] = [];
   const listed = tables.get("dependencies");
   if (listed !== undefined && !Array.isArray(listed)) for (const e of listed.keys.values()) dependencies.push(dependency(e.key, e.value));

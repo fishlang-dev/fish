@@ -2452,7 +2452,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     this.tables.typing.closeUnknown();
     this.unknownJson();
     this.tables.typing.layOutForCodegen();
-    const found = warnings(this.tables, compiledIds, (b) => required.has(b.bodyId));
+    let found = warnings(this.tables, compiledIds, (b) => required.has(b.bodyId));
+    if (this.tables.editionWarnings !== undefined) for (const w of this.tables.editionWarnings!) found.push(w.clone());
     return { instances: compiledIds, warnings: found };
   }
 
