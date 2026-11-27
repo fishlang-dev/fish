@@ -158,7 +158,7 @@ const EXPRESSIONS: [string, string, string][] = [
   ["function* () {}", "generator function expressions", ""],
   ["class {}", "class expressions", ""],
   ["true[0]", "indexed access expressions", ""],
-  ["f<i64>", "instantiation expressions", ""],
+  ["f<i64>", "instantiation expressions of anything but a generic function's name", ""],
   ["import.meta", "meta properties", "; 'import.meta' is read through its members path, file, dir, url, main, dirname, filename, or destructured into them"],
   ["import('m')", "dynamic imports", ""],
   ["f?.()", "optional calls", ""],

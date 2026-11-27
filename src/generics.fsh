@@ -489,7 +489,7 @@ function literalIs(v: Ref<Expr>, value: string | bigint | boolean): boolean {
 // parameters given.
 // The copy is renumbered before its names are replaced, so what the replacing records is the
 // copy's, never the alias's own nodes.
-function substituted(ids: Mut<Ids>, node: Ref<TypeNode>, given: Ref<Map<string, TypeNode>>): TypeNode {
+export function substituted(ids: Mut<Ids>, node: Ref<TypeNode>, given: Ref<Map<string, TypeNode>>): TypeNode {
   const copy = renumberTypeNode(cloneTypeNode(node), () => nextId(ids));
   let rewrites = new Rewrites();
   walkWhile({ of: "typeNode", node: copy }, (n) => {

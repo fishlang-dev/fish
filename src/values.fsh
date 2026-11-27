@@ -11,7 +11,7 @@ import { binaryType, SUPPORTED_OPERATORS } from "./operators.fsh";
 import type { AssignOp, BinaryOp, Expr, Func, Id, Interface, MatchArm, ObjectProp, Param, PropertyName, Pattern, Span, Stmt, TypeMember, TypeNode, TypeParam } from "./parser.fsh";
 import { bindings, literalOf, made, missing, objectFields, uncovered, type PatternInfo, type PatternTest, type Shape } from "./match.fsh";
 import { channel, collection, fields, COUNTED_UNLOCKED, counted, interior, shareable, tagStrings } from "./resolve.fsh";
-import { infer } from "./generics.fsh";
+import { infer, substituted } from "./generics.fsh";
 import { ASYNC_DISPOSE, DISPOSE, EMBEDDED, ITERATOR, LIVE, MAP_METHODS, SET_METHODS, TypeMap, tupleElements, type ParamRecord, type FunctionRecord, type FutureType, type ParamType, type InteriorRecord, TypeSet, SLEEP, YIELD_NOW, integerInfo, isFloat, isInteger, isNumeric, redundantBang, bare as bareOf, type Bang, range, type DynType, type HandleType, type BlockType, type SharedType, INTERIORS, type InteriorType, type InterfaceType, type Method, type Typing, TYPED_ARRAYS, isTypedName, typedSize, type TypedName } from "./typing.fsh";
 import type { DynRecord, Access, ArrayType, FixedType, MapType, GeneratorType, LiteralType, PointerType, VariantType, Bound, Integer, Numeric, UnionType, ClassType, ClosureType, Field, FunctionType, ObjectType, RefType, RegexType, Type } from "./typing.fsh";
 import type { EnumInfo, EnumInstance } from "./enums.fsh";
@@ -29,7 +29,7 @@ import type { Instance, Local } from "./check.fsh";
 import { isEmpty, literalValue, typeofTest, type Facts, type Guard } from "./narrow.fsh";
 import { bothSides, comparable, holdsArgument, objectsMeet, instanceofCheck, intoMember, intoUnion, keyCheck, applyShape, literalShape, typeofComparison, unionComparison, unionField, type Union } from "./unions.fsh";
 import { forEachChild, nextId, NodeMap, NodeSet, reborrowNode, renumberExpr, respanExpr, Rewrites, someNode, walk, walkWhile, type AnyNode, type Ids, type SiteTable } from "./nodes.fsh";
-import { cloneExpr, cloneJsName, cloneObjectProp, cloneParam, clonePattern, cloneTypeMember, cloneTypeNode, idOfExpr, idOfObjectProp, rebuiltExpr, withIdExpr } from "./rebuild.fsh";
+import { cloneExpr, cloneJsName, cloneObjectProp, cloneParam, clonePattern, cloneTypeMember, cloneTypeNode, cloneTypeParam, idOfExpr, idOfObjectProp, rebuiltExpr, withIdExpr } from "./rebuild.fsh";
 import { SIMD_MASKS, SIMD_TYPES, simdTypeNamed, typedNamed } from "./typing.fsh";
 
 // Expression checking inside one function body: every value gets a type, every name its
@@ -2722,6 +2722,25 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private identArrow(this: Mut<this>, e: Ref<Expr>): Expr | undefined {
     if (e.kind !== "ident") return undefined;
+    const name = this.genericNamed(e);
+    const named = name === undefined ? undefined : this.bodyNamed(name);
+    if (named === undefined) return undefined;
+    const f = cloneSignature(named);
+    const at = { start: e.start, end: e.end };
+    this.plainParams(f, e);
+    // Its parameters keep the names it declares, unless one would hide it.
+    const names = f.params.map((p, i) => (p.pattern.kind === "ident" && p.pattern.name !== name ? p.pattern.name : `arg${i}`));
+    const params: Param[] = names.map((n): Param => ({ ...at, id: nextId(this.ctx.tables().ids), pattern: { id: nextId(this.ctx.tables().ids), kind: "ident", name: n, ...at }, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
+    const call: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: { id: nextId(this.ctx.tables().ids), kind: "ident", name: name!, ...at }, typeArgs: [], args: names.map((n): Expr => ({ id: nextId(this.ctx.tables().ids), kind: "ident", name: n, ...at })), optional: false, ...at };
+    const tables = this.ctx.tables();
+    const arrow = tables.rewrites.replace(e, { id: 0, kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call, ...at });
+    this.ctx.tables().madeArrows.add(cloneExpr(arrow));
+    return arrow;
+  }
+
+  // The generic function a name used as a value stands for: a top-level one, or a generic
+  // arrow or nested function lifted out of its body, under the name it was lifted to.
+  private genericNamed(this: Mut<this>, e: Ref<Extract<Expr, { kind: "ident" }>>): string | undefined {
     const local = this.ctx.lookup(e.name, undefined);
     const written = local === undefined ? undefined : this.lc(local).type;
     const held = this.heldBy(written);
@@ -2730,22 +2749,58 @@ export class Expressions<C extends Context> implements Union<C> {
     let name: string | undefined = local !== undefined ? this.ctx.view().arenas.bodyOf(generic)?.name : undefined;
     if (name === undefined && r?.kind === "closure") name = r.generic;
     if (name === undefined && local === undefined && genericIn(this.bodyNamed(e.name))) name = e.name;
-    const named = name === undefined ? undefined : this.bodyNamed(name);
-    if (named === undefined) return undefined;
-    const f = cloneSignature(named);
-    const at = { start: e.start, end: e.end };
+    return name;
+  }
+
+  // An arrow passes each of its arguments on, so a parameter a call may leave out or spread
+  // into has nothing to take it from.
+  /** @throws {CompileError} */
+  private plainParams(this: Mut<this>, f: Ref<Body>, e: Ref<Expr>): void {
     let oddAt: i64 = -1;
     for (let k: usize = 0; k < f.params.length; k++) if (oddAt < 0 && (this.ctx.view().defaulted.has(f.params[k]!) || f.params[k]!.comptime || f.params[k]!.rest)) oddAt = k as i64;
     if (oddAt >= 0) {
       const odd: Ref<Param> = f.params[oddAt as usize]!;
       throw unsupported(odd.comptime ? "generic functions with comptime parameters used as values" : odd.rest ? "generic functions with rest parameters used as values" : "generic functions with defaulted parameters used as values", e);
     }
-    // Its parameters keep the names it declares, unless one would hide it.
+  }
+
+  // `f<T>` as a value: an arrow taking f's parameters with its type arguments put in, calling
+  // `f<T>` with them, so it is the one instance of f those arguments make.
+  /** @throws {CompileError} */
+  private instantiationArrow(this: Mut<this>, e: Ref<Extract<Expr, { kind: "instantiation" }>>): Expr {
+    const base: Ref<Expr> = e.expr;
+    const name = base.kind === "ident" ? this.genericNamed(base) : undefined;
+    const named = name === undefined ? undefined : this.bodyNamed(name);
+    if (named === undefined) throw unsupported("instantiation expressions of anything but a generic function's name", e);
+    const f = cloneSignature(named!);
+    this.plainParams(f, e);
+    let typeParams: TypeParam[] = [];
+    if (f.typeParams !== undefined) for (const p of f.typeParams!) if (!isLifetime(p)) typeParams.push(cloneTypeParam(p));
+    const counted = `expected ${typeParams.length} type argument${typeParams.length === 1 ? "" : "s"}, but got ${e.typeArgs.length}`;
+    if (e.typeArgs.length > typeParams.length) throw new CompileError("E0106", counted, e.start, e.end);
+    let given = new Map<string, TypeNode>();
+    for (let k: usize = 0; k < typeParams.length; k++) {
+      const p: Ref<TypeParam> = typeParams[k]!;
+      if (k < e.typeArgs.length) given.set(p.name, cloneTypeNode(e.typeArgs[k]!));
+      else if (p.default !== undefined) given.set(p.name, cloneTypeNode(p.default!));
+      else throw new CompileError("E0106", counted, e.start, e.end);
+    }
+    const at = { start: e.start, end: e.end };
     const names = f.params.map((p, i) => (p.pattern.kind === "ident" && p.pattern.name !== name ? p.pattern.name : `arg${i}`));
-    const params: Param[] = names.map((n): Param => ({ ...at, id: nextId(this.ctx.tables().ids), pattern: { id: nextId(this.ctx.tables().ids), kind: "ident", name: n, ...at }, type: undefined, optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false }));
-    const call: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: { id: nextId(this.ctx.tables().ids), kind: "ident", name: name!, ...at }, typeArgs: [], args: names.map((n): Expr => ({ id: nextId(this.ctx.tables().ids), kind: "ident", name: n, ...at })), optional: false, ...at };
+    let params: Param[] = [];
+    for (let k: usize = 0; k < f.params.length; k++) {
+      const written: Ref<Param> = f.params[k]!;
+      const type = written.type === undefined ? undefined : substituted(this.ctx.tables().ids, written.type!, given);
+      params.push({ ...at, id: nextId(this.ctx.tables().ids), pattern: { id: nextId(this.ctx.tables().ids), kind: "ident", name: names[k]!, ...at }, type, optional: written.optional, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false });
+    }
+    let typeArgs: TypeNode[] = [];
+    for (const t of e.typeArgs) typeArgs.push(cloneTypeNode(t));
+    const call: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: { id: nextId(this.ctx.tables().ids), kind: "ident", name: name!, ...at }, typeArgs, args: names.map((n): Expr => ({ id: nextId(this.ctx.tables().ids), kind: "ident", name: n, ...at })), optional: false, ...at };
+    const returnType = f.returnType === undefined ? undefined : substituted(this.ctx.tables().ids, f.returnType!, given);
+    let made: Extract<Expr, { kind: "arrow" }> = { id: 0, kind: "arrow", move: false, async: false, typeParams: [], params, returnType, body: call, ...at };
+    if (f.throws !== undefined) made.throws = substituted(this.ctx.tables().ids, f.throws!, given);
     const tables = this.ctx.tables();
-    const arrow = tables.rewrites.replace(e, { id: 0, kind: "arrow", move: false, async: false, typeParams: [], params, returnType: undefined, body: call, ...at });
+    const arrow = tables.rewrites.replace(e, made);
     this.ctx.tables().madeArrows.add(cloneExpr(arrow));
     return arrow;
   }
@@ -8802,6 +8857,10 @@ export class Expressions<C extends Context> implements Union<C> {
       // A spread anywhere but in an array literal or a call filling a rest parameter.
       case "spread":
         throw new CompileError("E0408", "'...' spreads into an array literal, or as an argument into a rest parameter, as in 'function f(...xs: T[])'; it can't be used here yet", e.start, e.end);
+      // Checked as the arrow it is rewritten to, which `value` reads in its place.
+      case "instantiation":
+        this.instantiationArrow(e);
+        return this.value(e);
       case "meta":
         if (e.name === "import.meta") throw new CompileError("E0801", `meta properties are not supported yet; 'import.meta' is read through its members ${IMPORT_META_MEMBERS.join(", ")}, or destructured into them`, e.start, e.end);
         throw unsupported(EXPRESSION_FORMS.meta, e);
