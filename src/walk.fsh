@@ -8551,6 +8551,9 @@ function fieldsOfFunc_function(n: Ref<Extract<Func, { kind: "function" }>>): Quo
   if (n.signature !== undefined) {
     out.push({ name: "signature", value: { kind: "boolean", value: n.signature } });
   }
+  if (n.blocking !== undefined) {
+    out.push({ name: "blocking", value: { kind: "boolean", value: n.blocking } });
+  }
   return out;
 }
 
