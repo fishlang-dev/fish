@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { copyTarget, dockerfile, dockerfilePath, HOST_TARGET, hostTarget, hostTriple, resolveTarget, runsOnMusl, staticTarget, type Target } from "../../src/target.fsh";
+import { copyTarget, dockerfile, dockerfilePath, HOST_TARGET, hostTarget, hostTriple, linkerFlags, resolveTarget, runsOnMusl, staticTarget, type Target } from "../../src/target.fsh";
 import { fishcPath, removed, same, scratch, text } from "./support.fsh";
 
 const mac = "aarch64-apple-darwin";
@@ -115,6 +115,34 @@ test("from a Linux host", () => {
   throwsWith(() => resolveTarget(arm, undefined, linux, none), "install it with your package manager's lld package");
   throwsWith(() => resolveTarget(mac, undefined, linux, has), "needs a macOS SDK");
   throwsWith(() => resolveTarget(mac, "/sdk", linux, (t) => (t === "ld64.lld" ? null : "/x")), "'ld64.lld' isn't on PATH");
+});
+
+// The flags `target` links with when `found` names the linkers on PATH, or the message thrown.
+function linkedWith(target: Ref<Target>, host: string, found: string[]): string {
+  try {
+    return linkerFlags(target, host, (t) => (found.includes(t) ? `/bin/${t}` : null)).join(" ");
+  } catch (e) {
+    return `error: ${e.message}`;
+  }
+}
+
+test("the fastest linker found links, else the platform's", () => {
+  const host = hostTarget();
+  assert(linkedWith(host, linux, ["ld.mold", "ld.lld"]) === "-fuse-ld=mold", "mold first on Linux");
+  assert(linkedWith(host, linux, ["ld.lld"]) === "-fuse-ld=lld", "then lld");
+  assert(linkedWith(host, linux, []) === "", "the platform's when neither is found");
+  assert(linkedWith(host, mac, ["ld64.lld", "ld64.mold"]) === "", "Apple's linker on macOS");
+  const system: Target = { ...hostTarget(), linker: "system" };
+  assert(linkedWith(system, linux, ["ld.mold"]) === "", "--linker system");
+  const lld: Target = { ...hostTarget(), linker: "lld" };
+  assert(linkedWith(lld, mac, ["ld64.lld"]) === "-fuse-ld=lld", "--linker lld on macOS");
+  assert(linkedWith(lld, linux, []).includes("'--linker lld' links with 'ld.lld', which isn't on PATH"), `missing: ${linkedWith(lld, linux, [])}`);
+  const odd: Target = { ...hostTarget(), linker: "gold" };
+  assert(linkedWith(odd, linux, ["ld.gold"]).includes("unknown linker 'gold'"), "unknown");
+  const cross: Target = { triple: linux, compile: [], link: ["-fuse-ld=lld"], ar: "llvm-ar", linker: "mold" };
+  assert(linkedWith(cross, mac, ["ld.mold"]) === "", "a target's own linker is kept");
+  const toLinux: Target = { ...hostTarget(), triple: linux };
+  assert(linkedWith(toLinux, mac, ["ld.mold", "ld64.lld"]) === "-fuse-ld=mold", "the target's OS decides");
 });
 
 test("a relative sysroot is made absolute", () => {

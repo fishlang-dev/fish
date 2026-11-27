@@ -9,8 +9,9 @@ export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-
 // `compile` goes to every clang compile, and `compile` then `link` to the final link. The host's
 // own target has both empty, so its builds and cache keys are what they were before targets.
 // `ar` archives a static library: the host's own can't index another OS's objects. `sanitize`
-// names the sanitizer a build is instrumented with, if any.
-export type Target = { triple: string; compile: string[]; link: string[]; ar: string; sanitize?: string };
+// names the sanitizer a build is instrumented with, if any. `linker` is the one `--linker` chose,
+// `system` for the platform's own; left out, the fastest found is used.
+export type Target = { triple: string; compile: string[]; link: string[]; ar: string; sanitize?: string; linker?: string };
 
 export const HOST_TARGET: Target = { triple: "", compile: [], link: [], ar: "ar" };
 
@@ -21,7 +22,34 @@ export function hostTarget(): Target {
 
 // A copy of `target` for a caller to own.
 export function copyTarget(target: Ref<Target>): Target {
-  return { triple: target.triple, compile: [...target.compile], link: [...target.link], ar: target.ar, sanitize: target.sanitize };
+  return { triple: target.triple, compile: [...target.compile], link: [...target.link], ar: target.ar, sanitize: target.sanitize, linker: target.linker };
+}
+
+export const LINKERS = ["system", "lld", "mold"];
+
+// The linkers searched for when none is chosen, fastest first, by OS. On macOS Apple's own links
+// faster than lld, so none is.
+const faster = (os: string): string[] => (os === "Linux" ? ["mold", "lld"] : []);
+
+// The flags choosing the linker for `target`'s final link: nothing when its own link flags already
+// pick one or the platform's is chosen; for a linker chosen, the flag, or an Error when it isn't on
+// PATH; for none chosen, the first of the faster ones on PATH, else nothing.
+/** @throws {Error} */
+export function linkerFlags(target: Ref<Target>, given?: string, which?: (tool: string) => string | null): string[] {
+  const none: string[] = [];
+  if (target.linker === "system" || target.link.some((f) => f.startsWith("-fuse-ld="))) return none;
+  const host = given ?? hostTriple();
+  const triple = target.triple !== "" ? target.triple : host;
+  const os = triple === undefined ? "Linux" : osOf(triple);
+  const binary = (l: string) => (os === "macOS" ? `ld64.${l}` : `ld.${l}`);
+  const found = (l: string) => (which === undefined ? Bun.which(binary(l)) : which(binary(l))) !== null;
+  if (target.linker !== undefined) {
+    if (!LINKERS.includes(target.linker)) throw new Error(`fishc: unknown linker '${target.linker}'; use one of ${LINKERS.join(", ")}`);
+    if (!found(target.linker)) throw new Error(`fishc: '--linker ${target.linker}' links with '${binary(target.linker)}', which isn't on PATH; install ${target.linker}, or leave out '--linker' to use the fastest linker found`);
+    return [`-fuse-ld=${target.linker}`];
+  }
+  for (const l of faster(os)) if (found(l)) return [`-fuse-ld=${l}`];
+  return none;
 }
 
 const osOf = (triple: string) => (triple.includes("-apple-") ? "macOS" : "Linux");

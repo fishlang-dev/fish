@@ -24,7 +24,7 @@ import { JS_NATIVE } from "./js_native.fsh";
 import { NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
 import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, mathUnits, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
-import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.fsh";
+import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, linkerFlags, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
 import { serveLsp } from "./lsp.fsh";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.fsh";
@@ -218,7 +218,7 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
       const extension = darwin ? "dylib" : "so";
-      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", join(dirname(out), `lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)], ir);
+      run(["clang", ...target.compile, ...target.link, ...linkerFlags(target), "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", join(dirname(out), `lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)], ir);
     } else {
       run(["clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize, ...g], ir);
       const archive = shim !== undefined ? join(dir, "fish.a") : join(dirname(out), `lib${name}.a`);
@@ -1184,9 +1184,10 @@ function withoutGlobalIsel(release: boolean, target: Ref<Target>): boolean {
 
 // Clang's command line for a program, its IR read from stdin unless `program` names it compiled
 // already, linked with `objects`.
+/** @throws {Error} */
 function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = hostTarget(), program: string[] = ["-x", "ir", "-"]): string[] {
   const none: string[] = [];
-  return ["clang", ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, ...optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)];
+  return ["clang", ...target.compile, ...target.link, ...linkerFlags(target), ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, ...optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)];
 }
 
 // What computes a checked program's top-level consts for the repl: every function is checked.
@@ -1648,6 +1649,7 @@ async function main(): Promise<void> {
           fn: { type: "string" },
           top: { type: "string" },
           names: { type: "string" },
+          linker: { type: "string" },
         },
       });
     } catch (e) {
@@ -1658,6 +1660,16 @@ async function main(): Promise<void> {
   let flags: string[] = [];
   for (const [k, v] of Object.entries(values)) if (v !== undefined) flags.push(k);
   const links: string[] = values.link === undefined ? [] : [...values.link];
+  // The target with `--linker`'s choice, checked before anything is built.
+  const linking = (t: Target): Target => {
+    const chosen: Target = { ...t, linker: values.linker };
+    try {
+      linkerFlags(chosen);
+    } catch (e) {
+      fail((e as { message: string }).message);
+    }
+    return chosen;
+  };
   // Each build compiles within a session of its own, since a check uses up the one it is given.
   const locked = values.locked === true;
   const timed = values.timings === true;
@@ -1931,7 +1943,7 @@ async function main(): Promise<void> {
     try {
       const start = performance.now();
       let looked: string[] = [];
-      const made = built(sessionFor(), target, binary, release, panic, [...links], hostTarget(), leaks, values.debug === true, looked);
+      const made = built(sessionFor(), target, binary, release, panic, [...links], linking(hostTarget()), leaks, values.debug === true, looked);
       reportTimings(made.session, [...FRONT_END, "codegen", "instrument", "split", ...NATIVE_STAGES], start);
       for (const w of made.warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
       const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
@@ -1970,7 +1982,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--linker system|lld|mold] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
@@ -1997,7 +2009,7 @@ async function main(): Promise<void> {
       const resolved = resolveTarget(values.target, sysroot);
       const base = values.static === true ? staticTarget(resolved) : resolved;
       const sanitized = sanitize !== undefined;
-      const platform = sanitize !== undefined ? sanitizedTarget(base, sanitize) : base;
+      const platform = linking(sanitize !== undefined ? sanitizedTarget(base, sanitize) : base);
       // A sanitizer's report names .fsh lines only when the program carries line tables.
       const debug = values.debug === true || sanitized;
       const binary = out ?? basename(target!, ".fsh");
