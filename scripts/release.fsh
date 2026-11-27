@@ -90,6 +90,13 @@ function bumped(version: string): string throws IoError {
   return text.replace(/^version = "[^"]*"$/m, `version = "${version}"`);
 }
 
+// src/commands.fsh with the VERSION `fishc --version` prints set to `version`.
+function versioned(version: string): string throws IoError {
+  const text = readFileSync(join(ROOT, "src", "commands.fsh"), "utf8");
+  if (!/^export const VERSION = "[^"]*";$/m.test(text)) fail("src/commands.fsh has no VERSION line to bump");
+  return text.replace(/^export const VERSION = "[^"]*";$/m, `export const VERSION = "${version}";`);
+}
+
 function fishc(): string {
   const given = process.env.FISHC ?? "";
   const path = given !== "" ? given : join(ROOT, "build", "fishc");
@@ -142,8 +149,9 @@ async function main(): Promise<void> throws IoError {
   if (run("git", ["status", "--porcelain"]) !== "") fail("the working tree has changes; commit or stash them first");
   if (spawnSync("git", ["rev-parse", "-q", "--verify", `refs/tags/${tag}`], { cwd: ROOT }).status === 0) fail(`${tag} is already tagged`);
   writeFileSync(join(ROOT, "fish.toml"), bumped(version));
+  writeFileSync(join(ROOT, "src", "commands.fsh"), versioned(version));
   writeFileSync(join(ROOT, "CHANGELOG.md"), changelog(section(version, lastTag(), date)));
-  run("git", ["add", "fish.toml", "CHANGELOG.md"]);
+  run("git", ["add", "fish.toml", "src/commands.fsh", "CHANGELOG.md"]);
   run("git", ["commit", "-q", "-m", `chore: release ${version}`]);
   run("git", ["tag", "-a", tag, "-m", `fishc ${version}`]);
   console.log(`committed and tagged ${tag}; nothing was pushed`);

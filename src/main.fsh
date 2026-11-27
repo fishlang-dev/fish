@@ -27,6 +27,7 @@ import { RUNTIME } from "./runtime.fsh";
 import { copyTarget, dockerfile, dockerfilePath, findBrotli, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, instrumented, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, staticTarget, withFlags, type Target } from "./target.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
 import { EXERCISES, exerciseText, FOLDER } from "./learn.fsh";
+import { commandNamed, helpOf, overview, usageOf, VERSION } from "./commands.fsh";
 import { documented, indexPage, modulePage, pageName, type Documented } from "./docs.fsh";
 import { displayFixPath, fixProgram } from "./fix.fsh";
 import { formatReproducer, fuzzHarnessImports, fuzzHarnessMain, liftFuzz, shellQuote, type FuzzTarget } from "./fuzz.fsh";
@@ -1982,6 +1983,27 @@ async function main(): Promise<void> {
   // `fishc script.fsh args...`, as a `#!/usr/bin/env fishc` line runs it: every argument after the
   // file is the script's, so none of them is read as fishc's own flag.
   if (Bun.argv.length > 2 && Bun.argv[2]!.endsWith(".fsh") && existsSync(Bun.argv[2]!)) process.exit(runScript(Bun.argv[2]!, Bun.argv.slice(3)));
+  if (Bun.argv.length === 2) fail(overview());
+  // Help and the version are looked for only before `--`, since what follows is the program's.
+  let own: string[] = [];
+  for (const a of Bun.argv.slice(2)) {
+    if (a === "--") break;
+    own.push(a);
+  }
+  if (own.length === 1 && (own[0]! === "--version" || own[0]! === "-V")) {
+    console.log(`fishc ${VERSION}`);
+    process.exit(0);
+  }
+  if (own.length > 0 && (own[0]! === "help" || own.some((a) => a === "--help" || a === "-h"))) {
+    // `fishc help --help` asks about help itself; `fishc --help` and `fishc help` for the list.
+    let name: string | undefined = undefined;
+    if (own[0]! !== "help") {
+      if (!own[0]!.startsWith("-")) name = own[0];
+    } else if (own.length > 1) name = own[1]!.startsWith("-") ? "help" : own[1];
+    if (name === undefined) console.log(overview());
+    else console.log(helpOf(name!) ?? fail(`fishc help: '${name!}' isn't a command; run 'fishc help' for the list`));
+    process.exit(0);
+  }
   // A bare `--lib` builds the default kind, a static library.
   const { values, positionals } = (() => {
     try {
@@ -2060,12 +2082,12 @@ async function main(): Promise<void> {
   const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
   if (command === "repl") {
-    if (positionals.length !== 1 || flags.some((k) => k !== "panic")) fail("usage: fishc repl");
+    if (positionals.length !== 1 || flags.some((k) => k !== "panic")) fail(usageOf("repl"));
     runRepl(locked, timed, checking);
   }
   // Parses a file without checking it, for test programs that only have to parse.
   if (command === "parse") {
-    if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail("usage: fishc parse <file.fsh>");
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail(usageOf("parse"));
     let src = "";
     try {
       src = readFileSync(named!, "utf8");
@@ -2078,37 +2100,37 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (command === "explain") {
-    if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail("usage: fishc explain <code>");
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail(usageOf("explain"));
     const text = explain(named!);
     if (text === undefined) fail(`fishc explain: '${named ?? ""}' isn't an error code; a code looks like E0201 or W0001, as an error shows it`);
     console.log(text);
     process.exit(0);
   }
   if (command === "explain-borrows") {
-    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "fn")) fail("usage: fishc explain-borrows <file.fsh> [--fn <name>]");
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "fn")) fail(usageOf("explain-borrows"));
     explainFile(named!, values.fn);
   }
   if (command === "learn") {
     const sub = positionals.length > 1 ? positionals[1] : undefined;
-    if (positionals.length > 2 || (sub !== undefined && sub !== "hint") || flags.some((k) => k !== "panic" && k !== "check")) fail("usage: fishc learn [hint] [--check]");
+    if (positionals.length > 2 || (sub !== undefined && sub !== "hint") || flags.some((k) => k !== "panic" && k !== "check")) fail(usageOf("learn"));
     const code = await learn(sub === "hint", values.check === true);
     process.exit(code);
   }
   if (command === "client") {
-    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "out" && k !== "types")) fail("usage: fishc client <file.fsh> [-o <out.ts>]\n       fishc client --types <file.fsh> [-o <out.d.ts>]");
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "out" && k !== "types")) fail(usageOf("client"));
     if (values.types === true) typesFile(named!, values.out);
     openapiFile(named!, values.out, true);
   }
   if (command === "doc") {
-    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "out")) fail("usage: fishc doc [<file.fsh>] [-o <dir>]");
+    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "out")) fail(usageOf("doc"));
     process.exit(docSite(file, values.out));
   }
   if (command === "openapi") {
-    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "out")) fail("usage: fishc openapi <file.fsh> [-o <out>]");
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "out")) fail(usageOf("openapi"));
     openapiFile(named!, values.out);
   }
   if (command === "heap") {
-    if (positionals.length !== 4 || positionals[1] !== "diff" || flags.some((k) => k !== "panic")) fail("usage: fishc heap diff <before.pb> <after.pb>");
+    if (positionals.length !== 4 || positionals[1] !== "diff" || flags.some((k) => k !== "panic")) fail(usageOf("heap"));
     try {
       for (const line of heapDiffFiles(positionals[2]!, positionals[3]!)) console.log(line);
     } catch (e) {
@@ -2117,12 +2139,12 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (command === "bind") {
-    if (positionals.length < 3 || positionals[1] !== "c" || flags.some((k) => k !== "panic" && k !== "out")) fail("usage: fishc bind c <header.h> [-o <out.fsh>] [-- <clang flags>...]");
+    if (positionals.length < 3 || positionals[1] !== "c" || flags.some((k) => k !== "panic" && k !== "out")) fail(usageOf("bind"));
     bindFile(positionals[2]!, values.out, positionals.slice(3));
   }
   if (command === "survey") {
     const dirs = positionals.slice(1);
-    const usage = "usage: fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]";
+    const usage = usageOf("survey");
     const extra = values.self !== undefined || values.plan !== undefined;
     if (dirs.length === 0 || (values.rank !== true && (dirs.length > 1 || extra))) fail(usage);
     if (values.rank === true && values.compare !== undefined) fail("fishc survey: --compare compares one project's survey; rankings can't be compared yet");
@@ -2162,7 +2184,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (command === "fmt") {
-    const usage = "usage: fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]";
+    const usage = usageOf("fmt");
     let paths = positionals.slice(1);
     if (flags.some((k) => k !== "check" && k !== "panic") || (paths.includes("-") && paths.length > 1)) fail(usage);
     const check = values.check === true;
@@ -2175,7 +2197,7 @@ async function main(): Promise<void> {
   }
   if (command === "lint") {
     let paths = positionals.slice(1);
-    if (flags.some((k) => k !== "panic" && k !== "fix") || values.panic !== "unwind") fail("usage: fishc lint [<path>...] [--fix]");
+    if (flags.some((k) => k !== "panic" && k !== "fix") || values.panic !== "unwind") fail(usageOf("lint"));
     if (paths.length === 0) {
       const found = findManifest(process.cwd()) ?? fail(`fishc lint: no ${MANIFEST} here or in any directory above; name the files to lint, or run it inside a package`);
       paths.push(dirname(found!));
@@ -2183,7 +2205,7 @@ async function main(): Promise<void> {
     process.exit(lintPaths(paths, values.fix === true));
   }
   if (command === "fix") {
-    const usage = "usage: fishc fix [<file.fsh>] [--dry-run] [--check]";
+    const usage = usageOf("fix");
     const allowed = new Set(["panic", "dry-run", "check"]);
     if (positionals.length > 2 || flags.some((k) => !allowed.has(k)) || values.panic !== "unwind") fail(usage);
     const dryRun = values["dry-run"] === true;
@@ -2256,7 +2278,7 @@ async function main(): Promise<void> {
   }
   if (command === "test") {
     // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
-    const usage = "usage: fishc test [<filter>] [--release] [--timeout <ms>] [--jobs <n>] [--no-doc] [--seed <n>] [--sim [--seed <n>] [--seeds <count>]]";
+    const usage = usageOf("test");
     if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "timeout" && k !== "jobs" && k !== "sim" && k !== "seed" && k !== "seeds" && k !== "no-doc" && k !== "flag") || values.panic !== "unwind") fail(usage);
     let options = runDefaults();
     if (values["no-doc"] === true) options.docs = false;
@@ -2279,7 +2301,7 @@ async function main(): Promise<void> {
     process.exit(code);
   }
   if (command === "fuzz") {
-    const usage = "usage: fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]";
+    const usage = usageOf("fuzz");
     const allowed = new Set(["panic", "runs", "max-time", "corpus", "artifacts", "replay", "no-asan", "list"]);
     if (positionals.length > 3 || flags.some((k) => !allowed.has(k)) || values.panic !== "unwind") fail(usage);
     let options: FuzzOptions = { asan: values["no-asan"] !== true, list: values.list === true };
@@ -2322,7 +2344,7 @@ async function main(): Promise<void> {
     }
   }
   if (command === "publish") {
-    const usage = "usage: fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]";
+    const usage = usageOf("publish");
     const allowed = new Set(["panic", "dry-run", "allow-dirty", "submit", "fork", "yes"]);
     const submitting = values.submit === true;
     if (positionals.length > 1 || flags.some((k) => !allowed.has(k)) || ((values.fork !== undefined || values.yes === true) && !submitting) || (submitting && values["dry-run"] === true)) fail(usage);
@@ -2356,7 +2378,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (command === "add" || command === "update") {
-    const usage = "usage: fishc add <name>[@<range>]\n       fishc update [<name>]";
+    const usage = usageOf(command!);
     if (positionals.length > 2 || (command === "add" && file === undefined) || flags.some((k) => k !== "panic")) fail(usage);
     const found = findManifest(process.cwd()) ?? fail(`fishc ${command ?? ""}: no ${MANIFEST} here or in any directory above; make a package with 'fishc new <name>' or 'fishc init'`);
     try {
@@ -2398,7 +2420,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (command === "new" || command === "init") {
-    const usage = "usage: fishc new <name>\n       fishc init [<name>]";
+    const usage = usageOf(command!);
     const extra = flags.some((k) => k !== "panic");
     if (positionals.length > 2 || extra || (command === "new" && file === undefined)) fail(usage);
     const dir = command === "new" ? join(process.cwd(), file!) : process.cwd();
@@ -2500,12 +2522,13 @@ async function main(): Promise<void> {
     });
   }
   if (command === "build" && values.addon === true) {
-    if (file === undefined || lib !== undefined || llvm || values.static === true || values.target !== undefined || values.sanitize !== undefined || values["pgo-instrument"] === true || values.pgo !== undefined || leaks || profile !== false || links.length > 0) fail("usage: fishc build --addon <file.fsh> [-o <out.node>] [--release] [-g]");
+    if (file === undefined || lib !== undefined || llvm || values.static === true || values.target !== undefined || values.sanitize !== undefined || values["pgo-instrument"] === true || values.pgo !== undefined || leaks || profile !== false || links.length > 0) fail(usageOf("build"));
     process.exit(buildAddon(sessionFor(), file!, values.out, release, values.debug === true));
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || fuzzFlag || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--heap-profile] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--flag <name>[=<value>]]...\n       fishc build --addon <file.fsh> [-o <out.node>] [--release] [-g]\n       fishc check [<file.fsh>] [--timings] [--no-check-cache] [--flag <name>[=<value>]]...\n       fishc <file.fsh> [<args>...]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--heap-profile] [--timings] [--flag <name>[=<value>]]... [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--heap-profile] [--timings] [--flag <name>[=<value>]]... [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release] [--no-doc] [--seed <n>] [--sim [--seed <n>] [--seeds <count>]]\n       fishc fuzz [<file.fsh>] [<filter>] [--runs <n>] [--max-time <sec>] [--corpus <dir>] [--artifacts <dir>] [--replay <file>] [--no-asan] [--list]\n       fishc fix [<file.fsh>] [--dry-run] [--check]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc doc [<file.fsh>] [-o <dir>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc learn [hint] [--check]\n       fishc client [--types] <file.fsh> [-o <out>]\n       fishc bind c <header.h> [-o <out.fsh>] [-- <clang flags>...]\n       fishc heap diff <before.pb> <after.pb>\n       fishc parse <file.fsh>\n       fishc lsp");
-    process.exit(2);
+    if (command !== undefined && command!.endsWith(".fsh")) fail(`fishc: can't find '${command!}'`);
+    if (command !== undefined && commandNamed(command!) === undefined) fail(`fishc: '${command!}' isn't a command; run 'fishc help' for the list`);
+    fail(command === undefined ? overview() : usageOf(command!));
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
   if (values.timings === true && lib !== undefined) fail("fishc build: '--timings' times an executable's build; leave out '--lib' to time the program it would be built from");
