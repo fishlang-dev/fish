@@ -8,10 +8,11 @@ export type Command = { name: string; summary: string; usage: string[] };
 export const COMMANDS: Command[] = [
   {
     name: "build",
-    summary: "compile a program, a library or a Node addon",
+    summary: "compile a program, a library, a Node addon or a mobile module",
     usage: [
       "fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--heap-profile] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--flag <name>[=<value>]]...",
       "fishc build --addon <file.fsh> [-o <out.node>] [--release] [-g]",
+      "fishc build --mobile ios|android|react-native <file.fsh> [-o <dir>] [--release] [-g] [--sysroot <ndk>]",
     ],
   },
   { name: "check", summary: "check a program without building it", usage: ["fishc check [<file.fsh>] [--timings] [--no-check-cache] [--flag <name>[=<value>]]..."] },
