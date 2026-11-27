@@ -18,7 +18,7 @@ import { EMBEDDED, LIVE, idOf, type RecordOf, type Typing, type ArrayRecord, typ
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.fsh";
 import { callbacksOnlyCalled, calledThrough } from "./callbacks.fsh";
 import { fileEnd, fileStart, partEnd, partStart, type Started, type Tables } from "./compilation.fsh";
-import { allWords } from "./sizes.fsh";
+import { allWords, byteSize } from "./sizes.fsh";
 import type { Kind, Verdict } from "./narrow.fsh";
 
 // Every instance to compile, as records.
@@ -343,6 +343,21 @@ const rustGiven = (typing: Ref<Typing>, arenas: Ref<Arenas>, i: Ref<Instance>): 
 // address and code, and the closure body each of this instance's calls of them runs.
 type Share = { template: InstanceId; at: Set<usize>; code: Map<usize, InstanceId | undefined> };
 const PAIR = "{ ptr, ptr }";
+
+// Values larger than this many bytes go between Fish functions through pointers: a parameter as
+// the address of the caller's copy, which the callee owns and uses as its slot, and a result
+// written where the caller's pointer says. Measured on src against 16, 32 and 64: each cut clang's
+// -O2 time by about a tenth and left -O0 and the compiled code's speed as they were, and 128 grew
+// the binary least, since passing fewer values by pointer leaves LLVM's inlining most as it was.
+const BY_POINTER: usize = 128;
+
+// Which parameters of a function, by place among its body's, and whether its result, go through
+// pointers, as the LLVM types they have as values; "" for a parameter passed as a value.
+type Pointers = { params: string[]; result: string | undefined; any: boolean };
+
+// The name of a function's body taking its large values through pointers; its symbol names the
+// entry taking them as values, for callers reaching it through a pointer.
+export const pointerSymbol = (symbol: string): string => `${symbol.slice(0, -1)}:ptr"`;
 // `prior` is what the last build's codegen made, and `rechecked` the instances checked again since,
 // which `fishc watch` gives so a function nothing changed takes its last define; `keep` asks for
 // what this build made, for the next.
@@ -421,6 +436,9 @@ class Codegen implements PrintHost, ComptimeHost {
   reserved: NodeMap<Expr, string>;
   resuming: { type: GeneratorType | FutureType; frame: string; resumes: string[]; start: string; done: string } | undefined;
   framed: Set<string>;
+  pointed: Map<InstanceId, Pointers>;
+  // The functions taking large values through pointers whose entry taking them as values the IR names.
+  wanted: Set<InstanceId>;
   arms: NodeMap<Stmt, { slot: string; type: Type; } | undefined>;
   scopes: Scope[];
   spills: { slot: string; type: Type; v: string }[];
@@ -598,6 +616,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
     // Slots that are fields of a generator's frame: they outlive one `next()` and start empty.
     this.framed = new Set<string>();
+    this.pointed = new Map<InstanceId, Pointers>();
+    this.wanted = new Set<InstanceId>();
 
     // Where a `return` in each match arm's block puts the value it gives, when the match gives one.
     this.arms = new NodeMap<Stmt, { slot: string; type: Type } | undefined>();
@@ -899,6 +919,8 @@ class Codegen implements PrintHost, ComptimeHost {
       // What each parameter is, read before anything is emitted, which changes the generator.
       if (this.bodyAt(instance).params.some((p) => p.comptime)) this.ranComptime.add(instance);
       const written = this.bodyAt(instance).params.map((p) => ({ local: this.resolved(p), comptime: p.comptime, value: p.comptime ? comptimeParameter(this.tables, this.inst(instance), p) : null }));
+      const none: Pointers = { params: [], result: undefined, any: false };
+      const pointers: Pointers = this.resuming === undefined ? this.pointers(instance) : none;
       let params = written.flatMap((p, k) => {
         const local = p.local;
         if (shared !== undefined && shared.at.has(k as usize)) {
@@ -911,11 +933,20 @@ class Codegen implements PrintHost, ComptimeHost {
           this.pairs.set(local, at);
           return [`${PAIR} %"${this.loc(local).name}.arg"`];
         }
+        // A large one is the caller's copy, where it already is.
+        const pointed = pointers.params.length > 0 ? pointers.params[k as usize]! : "";
+        if (pointed !== "") {
+          const slot = this.slot(local);
+          this.framed.add(slot);
+        }
         this.reserve(local);
         const slot2 = this.slot(local);
         const part3 = this.loc(local).type;
         this.own(slot2, part3);
         if (this.resuming !== undefined) return [""];
+        if (pointed !== "") {
+          return [`ptr noalias ${slot2}`];
+        }
         // A comptime parameter isn't passed: its instance knows its value.
         if (p.comptime) {
           const part4 = this.loc(local).type;
@@ -934,6 +965,7 @@ class Codegen implements PrintHost, ComptimeHost {
       // it captured.
       if (this.bodyAt(instance).self !== undefined) params.unshift("ptr %this");
       if (this.bodyAt(instance).closure !== undefined) params.unshift("ptr %env");
+      if (pointers.result !== undefined) params.unshift("ptr noalias %sret");
       // A method owning its object drops it, unless the object moves out first.
       if (this.bodyAt(instance).self?.owned === true) {
         const owner = this.bodyAt(instance).self!.type;
@@ -1019,7 +1051,8 @@ class Codegen implements PrintHost, ComptimeHost {
         continue;
       }
       // Fish's own functions stay inside this module, so two libraries never clash over them.
-      const line7 = `define internal ${this.resultType(instance)} ${this.symbol(instance)}(${params.join(", ")}) ${this.unwinds} {`;
+      const named = pointers.any ? pointerSymbol(this.symbol(instance)) : this.symbol(instance);
+      const line7 = `define internal ${pointers.result !== undefined ? "void" : this.resultType(instance)} ${named}(${params.join(", ")}) ${this.unwinds} {`;
       const frame = this.pushFrame(instance);
       this.out.push(line7);
       this.out.push("entry:");
@@ -1066,6 +1099,9 @@ class Codegen implements PrintHost, ComptimeHost {
   this.start = this.library ? this.instances.filter((i) => this.bodyAt(i).exported === true).flatMap(((i) => this.exported(i))) : this.entry();
 
   this.filled = this.fillConstants();
+  const entries = this.out.length;
+  for (const i of [...this.wanted].toSorted((a, b) => (a as i64) - (b as i64))) this.valueEntry(i);
+  if (prior === undefined) this.pack(entries);
   // Last, so what the entry and the fillers made is not taken from the last build as well.
   if (prior !== undefined) this.pullKept(prior!);
   partEnd(this.tables.session, "codegen tail", timer);
@@ -1151,6 +1187,87 @@ class Codegen implements PrintHost, ComptimeHost {
   symbol(this: Mut<this>, i: InstanceId): string {
     if (!this.names.has(i)) this.names = symbolNames(this.tables.arenas);
     return symbolIn(this.tables.arenas, this.inst(i), this.names);
+  }
+
+  // The entry of a function taking its large values through pointers that takes every value as
+  // one, under its symbol: a callable reaching it through a pointer, a vtable and an export call it.
+  valueEntry(this: Mut<this>, i: InstanceId): void {
+    const pointers = this.pointers(i);
+    const share = this.shares.get(i);
+    const result = this.resultType(i);
+    let taken: string[] = [];
+    let given: string[] = [];
+    let lines: string[] = [];
+    if (pointers.result !== undefined) {
+      lines.push(`  %sret = alloca ${result}`);
+      given.push("ptr %sret");
+    }
+    if (this.bodyAt(i).closure !== undefined) taken.push("ptr %env");
+    if (this.bodyAt(i).self !== undefined) taken.push("ptr %this");
+    for (const t of taken) given.push(t);
+    let k: usize = 0;
+    for (let p: usize = 0; p < this.bodyAt(i).params.length; p++) {
+      if (this.bodyAt(i).params[p]!.comptime) continue;
+      k++;
+      const local = this.loc(this.inst(i).locals.get(this.bodyAt(i).params[p]!)!);
+      const value = `${share !== undefined && share.at.has(p) ? PAIR : this.llvm(local.type)} %"${local.name}.arg"`;
+      taken.push(value);
+      const pointed = pointers.params[p]!;
+      if (pointed === "") {
+        given.push(value);
+        continue;
+      }
+      const at = `%"arg.${k}"`;
+      lines.push(`  ${at} = alloca ${pointed}`);
+      lines.push(`  store ${value}, ptr ${at}`);
+      given.push(`ptr ${at}`);
+    }
+    const call = `${pointerSymbol(this.symbol(i))}(${given.join(", ")})`;
+    const symbol = this.symbol(i);
+    this.out.push(`define internal ${result} ${symbol}(${taken.join(", ")}) ${this.unwinds} {`);
+    this.out.push("entry:");
+    for (const line of lines) this.out.push(line);
+    if (pointers.result !== undefined) {
+      this.out.push(`  call void ${call}`);
+      this.out.push(`  %r = load ${result}, ptr %sret`);
+      this.out.push(`  ret ${result} %r`);
+    } else if (result === "void") {
+      this.out.push(`  call void ${call}`);
+      this.out.push("  ret void");
+    } else {
+      this.out.push(`  %r = call ${result} ${call}`);
+      this.out.push(`  ret ${result} %r`);
+    }
+    this.out.push("}");
+    this.out.push("");
+  }
+
+  // A function's symbol as code that reaches it other than by a direct call names it: the entry
+  // taking every value as one, made for it when its body takes some through pointers.
+  valueSymbol(this: Mut<this>, i: InstanceId): string {
+    if (this.pointers(i).any) this.wanted.add(i);
+    return this.symbol(i);
+  }
+
+  // What of a function goes through pointers: nothing for C and Rust functions, generators and
+  // futures, comptime parameters or closures a shared body is given as pairs.
+  pointers(this: Mut<this>, i: InstanceId): Pointers {
+    if (!this.pointed.has(i)) {
+      const x = this.inst(i);
+      const b = this.bodyAt(i);
+      const plain = b.foreign !== true && b.comptime === undefined && x.generator === undefined && x.future === undefined;
+      const share = this.shares.get(i);
+      const big = (t: Type): boolean => t !== "void" && byteSize(this.tables.typing, t) > BY_POINTER;
+      const params = b.params.map((p, k): string => {
+        if (!plain || p.comptime || (share !== undefined && share.at.has(k as usize))) return "";
+        const t = this.loc(x.locals.get(p)!).type;
+        return big(t) ? this.llvm(t) : "";
+      });
+      const bytes = (x.returns === "void" ? 0 : byteSize(this.tables.typing, x.returns)) + (x.throws !== undefined ? 8 + byteSize(this.tables.typing, x.throws) : 0);
+      const result = plain && bytes > BY_POINTER ? this.resultType(i) : undefined;
+      this.pointed.set(i, { result, any: result !== undefined || params.some((p) => p !== ""), params });
+    }
+    return this.pointed.get(i)!.clone();
   }
 
   recOf<T extends Type>(t: T | undefined): RecordOf<Exclude<T, string>> | undefined {
@@ -3880,7 +3997,7 @@ class Codegen implements PrintHost, ComptimeHost {
       if (m.throws !== undefined && cg.inst(target).throws !== undefined) {
         const shape = cg.resultType(target);
         const raw = cg.temp();
-        const line = `call ${shape} ${cg.symbol(target)}(${[`ptr ${self}`, ...args].join(", ")})`;
+        const line = `call ${shape} ${cg.valueSymbol(target)}(${[`ptr ${self}`, ...args].join(", ")})`;
         const chosen = owning ? (cg: Mut<Codegen>) => cg.giveUp(target, type, upcasts, owner) : undefined;
         cg.unwinding(line, raw, chosen);
         if (owning) cg.giveUp(target, type, upcasts, owner);
@@ -5676,7 +5793,7 @@ class Codegen implements PrintHost, ComptimeHost {
     let c: ClassType | undefined = type;
     while (c !== undefined) {
       const own = this.tables.disposers.get(c);
-      if (own !== undefined) out += ` ${this.symbol(own)}`;
+      if (own !== undefined) out += ` ${this.valueSymbol(own)}`;
       c = this.tables.typing.rec(c).base;
     }
     return out;
@@ -6835,7 +6952,7 @@ class Codegen implements PrintHost, ComptimeHost {
     if (iso !== undefined) {
       const [self, text, node] = [this.alloca(this.llvm(t)), this.temp(), this.temp()];
       this.emit(`store ${this.llvm(t)} ${v}, ptr ${self}`);
-      const line3 = `${text} = call ptr ${this.symbol(iso)}(ptr ${self})`;
+      const line3 = `${text} = call ptr ${this.valueSymbol(iso)}(ptr ${self})`;
       this.emit(line3);
       this.emit(`${node} = call ptr @fsh_rt_insp_raw(ptr ${text})`);
       return node;
@@ -10310,7 +10427,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const [half, both] = [this.temp(), this.temp()];
       this.emit(`${half} = insertvalue ${PAIR} undef, ptr ${slot}, 0`);
       const named = code === undefined ? undefined : this.tables.arenas.instanceOf(code).id;
-      const line24 = `${both} = insertvalue ${PAIR} ${half}, ptr ${named === undefined ? "null" : this.symbol(named)}, 1`;
+      const line24 = `${both} = insertvalue ${PAIR} ${half}, ptr ${named === undefined ? "null" : this.valueSymbol(named)}, 1`;
       this.emit(line24);
       values[k] = `${PAIR} ${both}`;
       lent.push({ slot, type });
@@ -10325,7 +10442,7 @@ class Codegen implements PrintHost, ComptimeHost {
         cg.dispose(unstash3, type);
       }
     };
-    const chosen2 = (share !== undefined ? this.symbol(share.template) : undefined);
+    const chosen2 = (share !== undefined ? this.valueSymbol(share.template) : undefined);
     const result = this.invoke(target, pointer, values, exprKey(e), { after: leftovers }, chosen2);
     // A call through a type parameter returns what its bound's method declares.
     if ((result !== undefined && result !== "") && this.cur().types.has(e)) {
@@ -10621,8 +10738,11 @@ class Codegen implements PrintHost, ComptimeHost {
     let queue: string[] = [];
     for (const made of prior.made.values()) {
       if (faces.get(made.symbol) === made.face || stale.has(made.symbol)) continue;
-      queue.push(made.symbol);
-      stale.add(made.symbol);
+      // Its callers may name its body taking large values through pointers instead.
+      for (const name of [made.symbol, pointerSymbol(made.symbol)]) {
+        queue.push(name);
+        stale.add(name);
+      }
     }
     if (queue.length === 0) return stale;
     let users = new Map<string, string[]>();
@@ -10679,13 +10799,16 @@ class Codegen implements PrintHost, ComptimeHost {
     if (symbol !== made.symbol) return this.refused("renamed");
     if (made.shared !== this.sharedKey(instance)) return this.refused("shared");
     if (this.stale.has(symbol)) return this.refused("stale");
-    const define = prior.defines.get(symbol);
+    // A function taking large values through pointers is its body; its entry taking them as values
+    // is made again or taken as what names it asks.
+    const named = prior.defines.has(pointerSymbol(symbol)) ? pointerSymbol(symbol) : symbol;
+    const define = prior.defines.get(named);
     if (define === undefined) return this.refused("no define");
     for (const p of made.places) if (this.placeOf({ start: p.at, end: p.at }) !== p.shown) return this.refused("moved");
     this.current = instance;
     this.out.push(define);
     this.out.push("");
-    this.takenNames.push(symbol);
+    this.takenNames.push(named);
     this.wheres.set(instance, [...made.places]);
     for (const c of made.reads) this.constantGlobal(c);
     if (made.awaits.length > 0) this.awaitsOf.set(instance, [...made.awaits]);
@@ -11211,14 +11334,20 @@ class Codegen implements PrintHost, ComptimeHost {
     const values = (pointer !== undefined && pointer !== "") ? [`ptr ${pointer}`, ...args] : args;
     // A narrow value crosses to C widened, both ways.
     const passed = this.bodyAt(target).foreign === true ? values.map((v, i) => v.replace(/^\S+ /, `${crossing(this.tables.typing, this.inst(target).signature![i as usize]!)} `)) : values;
-    const call = `call ${this.bodyAt(target).foreign === true ? crossed(this.tables.typing, type) : this.resultType(target)} ${via ?? this.symbol(target)}(${passed.join(", ")})`;
+    const pointed = via === undefined ? this.byPointers(target, passed, args.length) : undefined;
+    const call = pointed !== undefined ? pointed.call : `call ${this.bodyAt(target).foreign === true ? crossed(this.tables.typing, type) : this.resultType(target)} ${via ?? this.valueSymbol(target)}(${passed.join(", ")})`;
     if (type === "void" && this.inst(target).throws === undefined) {
       this.unwindingWith(call, undefined, hooks);
       hooks.after?.(this);
       return undefined;
     }
-    const result = this.temp();
-    this.unwindingWith(call, result, hooks);
+    let result = this.temp();
+    const sret = pointed === undefined ? undefined : pointed.sret;
+    if (sret !== undefined) {
+      this.unwindingWith(call, undefined, hooks);
+      const shape = this.resultType(target);
+      this.emit(`${result} = load ${shape}, ptr ${sret}`);
+    } else this.unwindingWith(call, result, hooks);
     if (this.inst(target).throws === undefined) {
       hooks.after?.(this);
       return result;
@@ -11226,6 +11355,40 @@ class Codegen implements PrintHost, ComptimeHost {
     const resultType2 = this.resultType(target);
     const part = this.bodyAt(target).self?.constructor !== true;
     return this.unpacked(resultType2, result, type, at!, hooks, part);
+  }
+
+
+  // A call of a function's body taking its large values through pointers: each such argument
+  // stored in a slot of its own, which the callee takes over, and a slot for its result. None when
+  // the function takes every value as one, or when the arguments don't read as its parameters.
+  byPointers(this: Mut<this>, target: InstanceId, passed: Ref<string[]>, given: usize): { call: string; sret: string | undefined } | undefined {
+    const pointers = this.pointers(target);
+    if (!pointers.any) return undefined;
+    const params = this.bodyAt(target).params;
+    const first = passed.length - given;
+    // Each argument's place among those passed, with what its parameter takes through a pointer.
+    let at: [usize, string][] = [];
+    let k: usize = 0;
+    for (let p: usize = 0; p < params.length; p++) {
+      if (params[p]!.comptime) continue;
+      const pointed = pointers.params[p]!;
+      if (pointed !== "") {
+        if (first + k >= passed.length || !passed[first + k]!.startsWith(`${pointed} `)) return undefined;
+        at.push([first + k, pointed]);
+      }
+      k++;
+    }
+    if (k !== given) return undefined;
+    let sent = [...passed];
+    for (const [i, pointed] of at) {
+      const slot = this.alloca(pointed);
+      const line = `store ${passed[i]!}, ptr ${slot}`;
+      this.emit(line);
+      sent[i] = `ptr ${slot}`;
+    }
+    const sret = pointers.result !== undefined ? this.alloca(pointers.result) : undefined;
+    if (sret !== undefined) sent.unshift(`ptr ${sret}`);
+    return { call: `call ${sret !== undefined ? "void" : this.resultType(target)} ${pointerSymbol(this.symbol(target))}(${sent.join(", ")})`, sret };
   }
 
 
@@ -11600,7 +11763,8 @@ class Codegen implements PrintHost, ComptimeHost {
         chosen2 = "ret void";
       } else {
         const part2 = this.cur().returns;
-        chosen2 = `ret ${this.llvm(part2)} ${v}`;
+        this.returned(this.llvm(part2), v);
+        return;
       }
       this.emit(chosen2);
       return;
@@ -11615,7 +11779,17 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(line2);
       result = next;
     }
-    this.emit(`ret ${type} ${result}`);
+    this.returned(type, result);
+  }
+
+  // Returns a value from the function being emitted, or writes it where its caller's pointer says.
+  returned(this: Mut<this>, type: string, v: string): void {
+    if (this.pointers(this.current).result === undefined) {
+      this.emit(`ret ${type} ${v}`);
+      return;
+    }
+    this.emit(`store ${type} ${v}, ptr %sret`);
+    this.emit("ret void");
   }
 
 
@@ -11686,7 +11860,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const [a, b] = [this.temp(), this.temp()];
     this.emit(`${a} = insertvalue ${type} undef, i1 true, 0`);
     this.emit(`${b} = insertvalue ${type} ${a}, ${this.llvm(to)} ${error}, 2`);
-    this.emit(`ret ${type} ${b}`);
+    this.returned(type, b);
   }
 
 
@@ -12874,7 +13048,7 @@ class Codegen implements PrintHost, ComptimeHost {
     // A library's panics all unwind, the runtime's default, whichever way the build chose: the
     // abort happens here, before C sees the unwind.
     const part = this.inst(i).returns;
-    const call = `${this.inst(i).returns === "void" ? "" : "%r = "}invoke ${this.llvm(part)} ${this.symbol(i)}(${params.map(([t, a]) => `${this.llvm(t)} ${a}`).join(", ")})`;
+    const call = `${this.inst(i).returns === "void" ? "" : "%r = "}invoke ${this.llvm(part)} ${this.valueSymbol(i)}(${params.map(([t, a]) => `${this.llvm(t)} ${a}`).join(", ")})`;
     const head = `define ${crossed(this.tables.typing, this.inst(i).returns)} @"${this.bodyAt(i).name}"(${params.map(([t, a]) => `${crossing(this.tables.typing, t)} ${a}`).join(", ")}) ${UNWINDS} {`;
     let done: string;
     if (this.inst(i).returns === "void") {
@@ -12899,7 +13073,8 @@ class Codegen implements PrintHost, ComptimeHost {
     const type = this.resultType(this.main);
     const [result, failed, bad, ok, error] = [this.temp(), this.temp(), this.label(), this.label(), this.temp()];
     this.emit("call void @fsh_rt_args(i32 %argc, ptr %argv)");
-    this.emit(`${result} = call ${type} @"fsh.main"()`);
+    const main = this.valueSymbol(this.main);
+    this.emit(`${result} = call ${type} ${main}()`);
     this.emit(`${failed} = extractvalue ${type} ${result}, 0`);
     this.emit(`br i1 ${failed}, label %${bad}, label %${ok}`);
     this.startBlock(ok);
