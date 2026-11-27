@@ -8,127 +8,187 @@
 // Each retain and the release that cancels it.
 const RELEASES = new Map<string, string>([["fsh_rt_str_retain", "fsh_rt_str_release"], ["fsh_rt_big_retain", "fsh_rt_big_release"], ["fsh_rt_handle_retain", "fsh_rt_handle_drop"]]);
 
-// A local name, as %t3, %message.0 or %"message.arg".
-const NAMES = /%(?:"[^"]*"|[\w.$-]+)/g;
-const ALLOCA = /^\s*(%(?:"[^"]*"|[\w.$-]+)) = alloca /;
-const LOAD = /^\s*(%(?:"[^"]*"|[\w.$-]+)) = load ptr, ptr (%(?:"[^"]*"|[\w.$-]+))(?:, !dbg !\d+)?$/;
-const STORE = /^\s*store ptr (\S+), ptr (%(?:"[^"]*"|[\w.$-]+))(?:, !dbg !\d+)?$/;
 const RETAIN = /^\s*call void @(fsh_rt_(?:str|big|handle)_retain)\(ptr (%(?:"[^"]*"|[\w.$-]+))\)(?:, !dbg !\d+)?$/;
 const CALL = /^\s*call void @(fsh_rt_\w+)\(ptr (%(?:"[^"]*"|[\w.$-]+))\)(?:, !dbg !\d+)?$/;
-const ENDS = /^\s*(?:br |ret\b|switch |unreachable|resume |indirectbr )/;
-const LABEL = /^[^\s;][^:]*:/;
 
-// The slots, among `lines`' allocas, that only a load or a store names, as its address.
-function privateSlots(lines: Ref<string[]>): Set<string> {
-  let slots = new Set<string>();
-  for (const line of lines) {
-    const a = ALLOCA.exec(line);
-    if (a !== null) slots.add(a[1]!);
-  }
-  let escaped = new Set<string>();
-  for (const line of lines) {
-    if (ALLOCA.test(line)) continue;
-    const l = LOAD.exec(line);
-    if (l !== null) continue;
-    const s = STORE.exec(line);
-    if (s !== null) {
-      if (slots.has(s[1]!)) escaped.add(s[1]!);
-      continue;
-    }
-    for (const name of tokens(line)) if (slots.has(name)) escaped.add(name);
-  }
-  let kept = new Set<string>();
-  for (const s of slots) if (!escaped.has(s)) kept.add(s);
-  return kept;
+// Whether `line` starts a block: a label, unindented, unlike every instruction.
+function label(line: string): boolean {
+  return line.length > 0 && !line.startsWith(" ") && !line.startsWith(";");
 }
 
-// The local names `line` mentions.
-function tokens(line: string): string[] {
-  const found = line.match(NAMES);
-  if (found === null) {
-    const none: string[] = [];
-    return none;
+// An operand up to the line's end, or to the ", !dbg" after it.
+function operand(text: string): string {
+  const cut = text.indexOf(", !");
+  return cut < 0 ? text : text.slice(0, cut);
+}
+
+// The value and the slot of a `%v = load ptr, ptr %slot` line, else null. String tests, not
+// regexes: they run on every load of every function holding a retain.
+function loadOf(line: string): [string, string] | null {
+  const at = line.indexOf(" = load ptr, ptr %");
+  if (at < 0 || !line.startsWith("  %")) return null;
+  return [line.slice(2, at), operand(line.slice(at + 17))];
+}
+
+// The value and the slot of a `store ptr <value>, ptr %slot` line, else null.
+function storeOf(line: string): [string, string] | null {
+  if (!line.startsWith("  store ptr ")) return null;
+  const at = line.indexOf(", ptr %", 12);
+  if (at < 0) return null;
+  return [line.slice(12, at), operand(line.slice(at + 6))];
+}
+
+// Whether `line` ends its block.
+function ends(line: string): boolean {
+  const t = line.trimStart();
+  return t.startsWith("br ") || t.startsWith("ret ") || t.startsWith("switch ") || t.startsWith("unreachable") || t.startsWith("resume ") || t.startsWith("indirectbr ") || t.startsWith("invoke ") || line.includes(" invoke ");
+}
+
+// Whether `line` names the local `name` itself, not one it begins.
+function mentions(line: string, name: string): boolean {
+  let at = line.indexOf(name);
+  while (at >= 0) {
+    const next = at + (name.length as i64);
+    if (next >= (line.length as i64) || !nameCode(line.charCodeAt(next as usize) as i64)) return true;
+    at = line.indexOf(name, next);
+  }
+  return false;
+}
+
+// Whether a character code can be part of a local's name: a letter, digit, '_', '.', '$' or '-'.
+function nameCode(c: i64): boolean {
+  return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95 || c === 46 || c === 36 || c === 45;
+}
+
+// The local names `line` mentions, in one scan of it.
+function namesIn(line: string): string[] {
+  let found: string[] = [];
+  const n = line.length as i64;
+  let at = line.indexOf("%");
+  while (at >= 0) {
+    let end = at + 1;
+    if (end < n && line.charCodeAt(end as usize) === 34) {
+      const close = line.indexOf("\"", end + 1);
+      end = close < 0 ? n : close + 1;
+    } else {
+      while (end < n && nameCode(line.charCodeAt(end as usize) as i64)) end++;
+    }
+    found.push(line.slice(at, end));
+    at = line.indexOf("%", end);
   }
   return found;
 }
 
-// Whether `line` names `slot`.
-function names(line: string, slot: string): boolean {
-  for (const name of tokens(line)) if (name === slot) return true;
+// Which of `slots` some instruction other than its alloca, a load from it or a store to it, as
+// the address, names: one whose address another instruction or a call could reach.
+function escaped(lines: Ref<string[]>, slots: Ref<Set<string>>): Set<string> {
+  let out = new Set<string>();
+  for (const line of lines) {
+    if (!line.includes("%")) continue;
+    if (loadOf(line) !== null) continue;
+    const s = storeOf(line);
+    if (s !== null) {
+      if (slots.has(s[0])) out.add(s[0]);
+      continue;
+    }
+    if (line.includes(" = alloca ")) continue;
+    for (const name of namesIn(line)) if (slots.has(name)) out.add(name);
+  }
+  return out;
+}
+
+// Whether `value` was loaded from `slot` anywhere before line `before`.
+function readFrom(lines: Ref<string[]>, value: string, slot: string, before: usize): boolean {
+  const load = `  ${value} = load ptr, ptr ${slot}`;
+  for (let i: usize = 0; i < before; i++) {
+    const line = lines[i]!;
+    if (line.startsWith(load) && (line.length === load.length || line.startsWith(", ", load.length as i64))) return true;
+  }
   return false;
 }
 
 // The index of the release ending the local `slot` that the retain at `at` copied out of, or -1:
 // the slot read again and at once emptied and released, with no other mention of it, no invoke
 // and no block's end between. After the first call between, which may take the copy over and
-// free it, only other values' releases may come: nothing that could read a value loaded from the
-// slot, `read`, or a pointer into one.
-function droppedAt(lines: Ref<string[]>, at: usize, slot: string, release: string, read: Ref<Set<string>>, taken: Ref<Set<usize>>): i64 {
+// free it, only releases of values not read from the slot may come: nothing that could read the
+// value or a pointer into it.
+function droppedAt(lines: Ref<string[]>, at: usize, slot: string, release: string): i64 {
   let called = false;
   for (let i = at + 1; i < lines.length; i++) {
     const line = lines[i]!;
-    if (ENDS.test(line) || LABEL.test(line) || line.includes(" invoke ") || line.trimStart().startsWith("invoke ")) return -1;
-    if (names(line, slot)) {
-      const again = LOAD.exec(line);
-      if (again === null || again[2] !== slot || i + 2 >= lines.length) return -1;
-      const emptied = STORE.exec(lines[i + 1]!);
-      if (emptied === null || emptied[2] !== slot || (emptied[1] !== "zeroinitializer" && emptied[1] !== "null")) return -1;
+    if (label(line) || ends(line)) return -1;
+    if (mentions(line, slot)) {
+      const again = loadOf(line);
+      if (again === null || again[1] !== slot || i + 2 >= lines.length) return -1;
+      const emptied = storeOf(lines[i + 1]!);
+      if (emptied === null || emptied[1] !== slot || (emptied[0] !== "zeroinitializer" && emptied[0] !== "null")) return -1;
       const dropped = CALL.exec(lines[i + 2]!);
-      if (dropped === null || dropped[1] !== release || dropped[2] !== again[1] || taken.has(i + 2)) return -1;
+      if (dropped === null || dropped[1] !== release || dropped[2] !== again[0]) return -1;
       return (i + 2) as i64;
     }
+    const call = line.includes(" call ") && !line.includes("@llvm.");
     if (called) {
-      const other = CALL.exec(line);
-      if (other === null || !(other[1]!.endsWith("_release") || other[1]!.endsWith("_drop")) || read.has(other[2]!)) return -1;
+      const other = call ? CALL.exec(line) : null;
+      if (other === null || !(other[1]!.endsWith("_release") || other[1]!.endsWith("_drop")) || readFrom(lines, other[2]!, slot, i)) return -1;
     }
-    if (line.includes(" call ") && !line.includes("@llvm.")) called = true;
+    if (call) called = true;
   }
   return -1;
 }
 
 // `lines`, one function's, without the retain and release pairs that cancel.
 export function elided(lines: string[]): string[] {
-  if (!lines.some((l) => l.includes("_retain(ptr %"))) return lines;
-  const slots = privateSlots(lines);
-  if (slots.size === 0) return lines;
-  // Every value each private slot is read into.
-  let reads = new Map<string, Set<string>>();
-  for (const line of lines) {
-    const l = LOAD.exec(line);
-    if (l === null || !slots.has(l[2]!)) continue;
-    let into = reads.get(l[2]!) ?? new Set<string>();
-    into.add(l[1]!);
-    reads.set(l[2]!, into);
-  }
-  // Each value loaded from a private slot: its slot and where it was loaded, in this block.
-  let loaded = new Map<string, [string, usize]>();
-  let gone = new Set<usize>();
+  // Each retain of a value loaded from a slot in the retain's own block, the slot holding it
+  // still: the retain's index, its function and its slot.
+  let retains: [usize, string, string][] = [];
+  let blockStart: usize = 0;
   for (let i: usize = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (LABEL.test(line)) {
-      loaded.clear();
+    if (label(line)) {
+      blockStart = i;
       continue;
     }
-    const l = LOAD.exec(line);
-    if (l !== null && slots.has(l[2]!)) {
-      loaded.set(l[1]!, [l[2]!, i]);
-      continue;
-    }
-    const s = STORE.exec(line);
-    if (s !== null && slots.has(s[2]!)) {
-      // A value loaded before the slot changed is no longer what it holds.
-      for (const v of [...loaded.keys()]) if (loaded.get(v)![0] === s[2]!) loaded.delete(v);
-      continue;
-    }
+    if (!line.includes("_retain(ptr %")) continue;
     const r = RETAIN.exec(line);
     if (r === null) continue;
-    const from = loaded.get(r[2]!);
-    if (from === undefined) continue;
-    const release = RELEASES.get(r[1]!)!;
-    const end = droppedAt(lines, i, from[0], release, reads.get(from[0])!, gone);
+    const load = `  ${r[2]!} = load ptr, ptr %`;
+    let slot = "";
+    let from: usize = 0;
+    for (let j = i; j > blockStart; j--) {
+      if (!lines[j - 1]!.startsWith(load)) continue;
+      const l = loadOf(lines[j - 1]!);
+      if (l !== null && l[0] === r[2]!) {
+        slot = l[1];
+        from = j - 1;
+      }
+      break;
+    }
+    if (slot === "") continue;
+    let held = true;
+    for (let j = from + 1; j < i; j++) {
+      const s = storeOf(lines[j]!);
+      if (s !== null && s[1] === slot) held = false;
+    }
+    if (held) retains.push([i, r[1]!, slot]);
+  }
+  if (retains.length === 0) return lines;
+  // Each retain whose slot is read, emptied and released after it, found before the slot's
+  // privacy is checked: that scan reads the whole function, and most functions have no such pair.
+  let found: [usize, usize, string][] = [];
+  let candidates = new Set<string>();
+  for (const [at, retain, slot] of retains) {
+    const end = droppedAt(lines, at, slot, RELEASES.get(retain)!);
     if (end < 0) continue;
-    gone.add(i);
-    gone.add(end as usize);
+    found.push([at, end as usize, slot]);
+    candidates.add(slot);
+  }
+  if (found.length === 0) return lines;
+  const reached = escaped(lines, candidates);
+  let gone = new Set<usize>();
+  for (const [at, end, slot] of found) {
+    if (reached.has(slot) || gone.has(end)) continue;
+    gone.add(at);
+    gone.add(end);
   }
   if (gone.size === 0) return lines;
   let out: string[] = [];
