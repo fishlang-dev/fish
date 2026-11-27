@@ -739,6 +739,22 @@ test("better-sqlite3 and sqlite3 are replaced by std:sqlite", () => {
   done(dir);
 });
 
+test("the AWS SDK's S3 packages are replaced by std:s3", () => {
+  const dir = project([["package.json", '{"dependencies":{"@aws-sdk/client-s3":"3","@aws-sdk/s3-request-presigner":"3"}}'], ["a.ts", "const x = 1;\n"]]);
+  const d = depsOf(dir);
+  same(countsOf(d), "std 2, planned 0, native 0, pure 0, unknown 0", "the counts");
+  list(equivalents(d), ["std:s3's S3Client, as Bun's false", "std:s3's S3Client, as Bun's false"], "the equivalents");
+  done(dir);
+});
+
+test("kysely is replaced by std:query", () => {
+  const dir = project([["package.json", '{"dependencies":{"kysely":"0.27"}}'], ["a.ts", "const x = 1;\n"]]);
+  const d = depsOf(dir);
+  same(countsOf(d), "std 1, planned 0, native 0, pure 0, unknown 0", "the counts");
+  list(equivalents(d), ["std:query's Kysely, compiling to SQL for std:postgres and std:sqlite false"], "the equivalents");
+  done(dir);
+});
+
 test("the OpenTelemetry packages are replaced by std's std:trace module", () => {
   const dir = project([["package.json", '{"dependencies":{"@opentelemetry/api":"1","@opentelemetry/sdk-node":"0.57","@opentelemetry/exporter-trace-otlp-http":"0.57"}}'], ["a.ts", "const x = 1;\n"]]);
   const d = depsOf(dir);

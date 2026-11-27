@@ -83,10 +83,10 @@ type A = HasNull<i64 | null>;
 type B = HasNull<i64>;
 function main() { const a: A = "y"; const b: B = "n"; console.log(a, b); }
 // case: types_conditional_extends_param
-// error: a conditional type of the type parameter 'T' isn't supported yet
-// A type parameter on the extends side would decide the branch once for every instance.
-function f<T>(x: T, y: string extends T ? i64 : boolean): i64 { return 1; }
-function main() {}
+// expect: 3 true
+// A type parameter on the extends side is decided by each instance, its type argument known.
+function f<T>(x: T, y: string extends T ? i64 : boolean): string { return `${y}`; }
+function main() { console.log(f<string>("a", 3), f(1, true)); }
 // case: types_conditional_interface
 // expect: yes yes yes p
 // A conditional type's extends, and Extract, meet an interface by shape, as in TypeScript.
@@ -105,11 +105,11 @@ function main() {
   console.log(a, b, c, p.name);
 }
 // case: types_conditional_param
-// error: a conditional type of the type parameter 'T' isn't supported yet
-// Inside generic function code, a conditional over the function's own type parameter can't be
-// computed, since T is only known per instance.
-function first<T>(x: T extends null ? never : T): i64 { return 1; }
-function main() {}
+// expect: 5
+// Inside generic function code, a conditional over the function's own type parameter is computed
+// for each instance.
+function first<T>(x: T extends null ? never : T): T extends null ? never : T { return x; }
+function main() { console.log(first<i64>(5)); }
 // case: types_exclude_refused
 // error: type '"a"' is not assignable to type '"b" | "c"'
 // Exclude removes the members that fit, so the one it removed is refused.
@@ -1068,10 +1068,14 @@ class A { y: i64 = 1; b: Pick<B, "x"> | null = null; }
 class B { x: i64 = 2; a: Pick<A, "y"> | null = null; }
 function main() {}
 // case: types_utility_param
-// error: 'Partial' of the type parameter 'T' isn't supported yet
-// Utility types are computed while compiling from a type known then.
+// error: 'Partial' takes an object type or a class, not 'i64'
+// Utility types over a type parameter are computed for each instance, from the type it is given.
 function patch<T>(x: T, p: Partial<T>): T { return x; }
 function main() { console.log(patch(1, {})); }
+// case: types_utility_param_object
+// expect: { a: 1, b: 2 }
+function patch<T>(x: T, p: Partial<T>): T { return x; }
+function main() { console.log(patch({ a: 1, b: 2 }, { b: 3 })); }
 // case: types_utility_self
 // error: 'Partial' of 'Node' is needed while the field types of 'Node' are being worked out
 // A class's fields aren't known while its own field types are being worked out.

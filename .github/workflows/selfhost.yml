@@ -33,7 +33,10 @@ jobs:
         if: runner.os == 'Linux'
         # The last is the sanitizer runtimes of the image's clang, named by its version, which the
         # x86-64 image leaves out.
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev zlib1g-dev libsqlite3-dev zip unzip "libclang-rt-$(clang -dumpversion | cut -d. -f1)-dev"
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev zlib1g-dev libbrotli-dev libsqlite3-dev zip unzip "libclang-rt-$(clang -dumpversion | cut -d. -f1)-dev"
+      - name: Libraries the tests build programs with
+        if: runner.os == 'macOS'
+        run: brew install brotli
       - uses: actions/cache@v4
         with:
           path: ~/.cache/fish/stage0
