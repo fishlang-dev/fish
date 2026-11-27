@@ -2048,6 +2048,10 @@ interface IntoResponse {
 
 // Serves HTTP/1.1 on hostname and port, or a socket path, each connection on a task of its own.
 async function serve(options: ServeOptions, handler: (req: Request) => Promise<Response>): Promise<void> throws IoError {
+  if (__platformServes()) {
+    await __platformServe(handler);
+    return;
+  }
   const unix = options.unix;
   if (unix !== null && (options.port !== null || options.hostname !== null)) throw new IoError("serve takes either a 'unix' socket path or a 'port' and 'hostname', not both");
   let hostname = "0.0.0.0";
@@ -13460,7 +13464,119 @@ class ConcurrentMap<K, V> {
   }
 }
 `;
-export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD + CONCURRENT;
+// How serve runs for a build target with a server of its own, one of three: a socket's, as here,
+// AWS Lambda's runtime API, or an edge module's one request.
+const PLATFORM_SOCKET = String.raw`
+function __platformServes(): boolean {
+  return false;
+}
+async function __platformServe(_handler: ServeHandler): Promise<void> {}
+`;
+
+// serve in a Lambda function's bootstrap: with Lambda's runtime API named in the environment, each
+// invocation, an HTTP API or function URL event in payload format 2.0, is a request for the
+// handler, and its response the invocation's result. Run anywhere else, it serves as itself.
+const PLATFORM_LAMBDA = String.raw`
+type __LambdaHttp = { method: string };
+type __LambdaContext = { http: __LambdaHttp; domainName?: string };
+type __LambdaEvent = { rawPath: string; rawQueryString?: string; headers?: Map<string, string>; cookies?: string[]; body?: string; isBase64Encoded?: boolean; requestContext: __LambdaContext };
+function __platformServes(): boolean {
+  return process.env["AWS_LAMBDA_RUNTIME_API"] !== null;
+}
+function __lambdaRequest(event: string): Request throws JsonError | TypeError {
+  const e = JSON.parse<__LambdaEvent>(event);
+  const query = e.rawQueryString ?? "";
+  const host = e.requestContext.domainName ?? "localhost";
+  let headers = new Headers();
+  const given: Ref<Map<string, string> | null> = e.headers;
+  if (given !== null) for (const [name, value] of given) headers.append(name.clone(), value.clone());
+  const cookies: Ref<string[] | null> = e.cookies;
+  if (cookies !== null && cookies.length > 0) headers.set("cookie", cookies.join("; "));
+  const text = e.body ?? "";
+  const body: u8[] = e.isBase64Encoded === true ? u8.fromBase64(text) : new TextEncoder().encode(text);
+  return new Request("https://" + host + e.rawPath + (query.length > 0 ? "?" + query : ""), { method: e.requestContext.http.method, headers, body });
+}
+// The response in payload format 2.0, its body always base64 so bytes pass as they are.
+// ponytail: a header named twice keeps its last value, as a JSON object can hold one.
+async function __lambdaReply(res: Response): Promise<string> {
+  const bytes = await res.bytes();
+  let headers = "";
+  let cookies = "";
+  for (let i: usize = 0; i < res.headers.names.length; i++) {
+    const name = res.headers.names[i]!;
+    const value = res.headers.values[i]!;
+    if (name === "set-cookie") cookies += (cookies.length > 0 ? "," : "") + JSON.stringify(value);
+    else headers += (headers.length > 0 ? "," : "") + JSON.stringify(name) + ":" + JSON.stringify(value);
+  }
+  return '{"statusCode":' + String(res.status) + ',"headers":{' + headers + '},"cookies":[' + cookies + '],"body":' + JSON.stringify(bytes.toBase64()) + ',"isBase64Encoded":true}';
+}
+// An event the handler can't be given is the invocation's error; a runtime API that stops
+// answering is the sandbox going away, so serve returns.
+async function __platformServe(handler: ServeHandler): Promise<void> {
+  const base = "http://" + (process.env["AWS_LAMBDA_RUNTIME_API"] ?? "") + "/2018-06-01/runtime/invocation/";
+  while (true) {
+    try {
+      const next = await fetch(base + "next");
+      const id = next.headers.get("lambda-runtime-aws-request-id") ?? "";
+      const event = await next.text();
+      let reply = "";
+      let failure = "";
+      try {
+        const req = __lambdaRequest(event);
+        const res = await handler(req);
+        reply = await __lambdaReply(res);
+      } catch (e) {
+        failure = e.message;
+      }
+      if (failure.length > 0) await fetch(base + id + "/error", { method: "POST", body: '{"errorMessage":' + JSON.stringify(failure) + ',"errorType":"InvalidEvent"}' });
+      else await fetch(base + id + "/response", { method: "POST", body: reply });
+    } catch (e) {
+      console.error("serve: Lambda's runtime API stopped answering: " + e.message);
+      return;
+    }
+  }
+}
+`;
+
+// serve in an edge module: one request read as JSON from standard input, { method, url, headers
+// as [name, value] pairs, body in base64 }, answered as { status, headers, body } on standard
+// output. The loader fishc writes beside the module turns a Workers fetch into that exchange.
+const PLATFORM_EDGE = String.raw`
+type __EdgeRequest = { method: string; url: string; headers: string[][]; body: string };
+function __platformServes(): boolean {
+  return true;
+}
+async function __edgeReply(res: Response): Promise<string> {
+  const bytes = await res.bytes();
+  let out = '{"status":' + String(res.status) + ',"headers":[';
+  for (let i: usize = 0; i < res.headers.names.length; i++) {
+    if (i > 0) out += ",";
+    out += "[" + JSON.stringify(res.headers.names[i]!) + "," + JSON.stringify(res.headers.values[i]!) + "]";
+  }
+  return out + '],"body":' + JSON.stringify(bytes.toBase64()) + "}";
+}
+function __edgeRequest(text: string): Request throws JsonError | TypeError {
+  const asked = JSON.parse<__EdgeRequest>(text);
+  let headers = new Headers();
+  for (const pair of asked.headers) if (pair.length === 2) headers.append(pair[0]!.clone(), pair[1]!.clone());
+  const body = u8.fromBase64(asked.body);
+  return new Request(asked.url, { method: asked.method, headers, body });
+}
+async function __platformServe(handler: ServeHandler): Promise<void> {
+  let input: u8[] = [];
+  const given = __stdinTake(1);
+  if (given !== null) input = given;
+  let reply = '{"status":400,"headers":[],"body":""}';
+  try {
+    const req = __edgeRequest(new TextDecoder().decode(input));
+    const res = await handler(req);
+    reply = await __edgeReply(res);
+  } catch (_e) {}
+  console.log(reply);
+}
+`;
+
+export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD + CONCURRENT + PLATFORM_SOCKET + PLATFORM_LAMBDA + PLATFORM_EDGE;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -13478,7 +13594,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD, CONCURRENT]) {
+  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD, CONCURRENT, PLATFORM_SOCKET, PLATFORM_LAMBDA, PLATFORM_EDGE]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -13508,6 +13624,14 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let htmls = sections.shift()!;
   let simds = sections.shift()!;
   let concurrent = sections.shift()!;
+  let sockets = sections.shift()!;
+  let lambda = sections.shift()!;
+  let edge = sections.shift()!;
+  // A serverless or edge target's serve answers through its platform, which reads its requests
+  // with fetch or from standard input.
+  const target = compilation.session.build?.triple ?? "";
+  const lambdaBuild = target === "lambda" || target === "lambda-arm64";
+  const edgeBuild = target === "edge";
   renamed(json, { kind: "json" });
   renamed(jsonName, { kind: "json" });
   let astNames: string[] = [];
@@ -13522,7 +13646,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // server's requests, from a Host it checked and a target, need only its host and path rules.
   // The std:trace module's code names __traceOn, and what it wraps is sent through Http1.
   const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn", "__logRequest"]);
-  const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
+  const fetchUsed = httpUsed && (lambdaBuild || uses(written, fetching, ["fetch"]));
   const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentionsName(written, "Request"));
   // The libraries a program gets by naming them; JsError also comes with any package.
   const jsonUsed = uses(written, json, ["Json", "JSON"]);
@@ -13533,7 +13657,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const bufferUsed = mentionsName(written, "Buffer") || mentionsName(written, "BufferEncoding");
   const btoaUsed = uses(written, btoa, ["btoa"]);
   const atobUsed = uses(written, atob, ["atob"]);
-  const readingUsed = uses(written, reading, ["readLine", "__stdinTake", "prompt"]);
+  const readingUsed = (httpUsed && edgeBuild) || uses(written, reading, ["readLine", "__stdinTake", "prompt"]);
   // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
   // btoa, atob and Buffer call them too.
   const encoding = httpUsed || bufferUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);
@@ -13544,7 +13668,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const typing = (dataViewUsed && dataView.length > 0) || mentionsTypedArray(written);
   let chosen: Stmt[] = prelude;
   if (dated) chosen = chosen.concat(dates);
-  if (httpUsed) chosen = chosen.concat(http).concat(tracing);
+  if (httpUsed) chosen = chosen.concat(http).concat(tracing).concat(lambdaBuild ? lambda : edgeBuild ? edge : sockets);
   if (fetchUsed) chosen = chosen.concat(fetching);
   if (httpUsed && !urlWanted) chosen = chosen.concat(served);
   if (httpUsed || urlWanted) chosen = chosen.concat(core);

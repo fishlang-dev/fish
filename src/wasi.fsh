@@ -13,9 +13,11 @@ export function browserFiles(out: string): { module: string; loader: string } {
   return { module: `${base}.wasm`, loader: `${base}.js` };
 }
 
-// The loader for the module named `module`, found beside it.
-export function loader(module: string): string {
-  return LOADER.replace("__FISH_MODULE__", JSON.stringify(module)).replace("__WASI_CALLS__", JSON.stringify(WASI_CALLS));
+// The loader for the module named `module`, found beside it; an edge build's also answers a
+// Workers fetch through the module.
+export function loader(module: string, edge = false): string {
+  const text = LOADER.replace("__FISH_MODULE__", JSON.stringify(module)).replace("__WASI_CALLS__", JSON.stringify(WASI_CALLS));
+  return edge ? text + EDGE.replace("__FISH_MODULE__", JSON.stringify(`./${module}`)) : text;
 }
 
 // poll_oneoff can't block a page's main thread, so a sleep there spins until its deadline; in a
@@ -201,9 +203,11 @@ export async function run(options = {}) {
   for (const name of CALLS) imports[name] = wasi[name] ?? (() => ENOSYS);
   const source = options.module ?? fetch(new URL(MODULE, import.meta.url));
   const loaded = source instanceof Promise || source instanceof Response ? await WebAssembly.instantiateStreaming(source, { wasi_snapshot_preview1: imports }) : await WebAssembly.instantiate(source, { wasi_snapshot_preview1: imports });
-  memory = loaded.instance.exports.memory;
+  // A compiled WebAssembly.Module instantiates to the instance itself; bytes to it and its module.
+  const instance = loaded instanceof WebAssembly.Instance ? loaded : loaded.instance;
+  memory = instance.exports.memory;
   try {
-    loaded.instance.exports._start();
+    instance.exports._start();
     return 0;
   } catch (e) {
     if (e instanceof Exit) return e.code;
@@ -212,5 +216,35 @@ export async function run(options = {}) {
     out.flush();
     err.flush();
   }
+}
+`;
+
+// An edge build's Workers entry: each fetch runs the module once, its request as JSON on standard
+// input and its response as JSON on standard output, as std's serve speaks on an edge target.
+const EDGE = String.raw`
+// In a Worker, with the module imported as wrangler imports one:
+//   import module from __FISH_MODULE__;
+//   import { edge } from "./this-file.js";
+//   export default edge(module);
+const base64 = (bytes) => {
+  let text = "";
+  for (let i = 0; i < bytes.length; i += 32768) text += String.fromCharCode(...bytes.subarray(i, i + 32768));
+  return btoa(text);
+};
+const unbase64 = (text) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+
+export function edge(module) {
+  return {
+    async fetch(request) {
+      const body = new Uint8Array(await request.arrayBuffer());
+      const asked = JSON.stringify({ method: request.method, url: request.url, headers: [...request.headers], body: base64(body) });
+      let out = "";
+      const code = await run({ module, stdin: new TextEncoder().encode(asked), stdout: (line) => { out += line + "\n"; } });
+      if (code !== 0) return new Response("the module exited with " + code, { status: 500 });
+      const reply = JSON.parse(out);
+      const nobody = reply.status === 204 || reply.status === 304 || request.method === "HEAD";
+      return new Response(nobody ? null : unbase64(reply.body), { status: reply.status, headers: reply.headers });
+    },
+  };
 }
 `;

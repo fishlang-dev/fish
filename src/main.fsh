@@ -24,8 +24,9 @@ import { JS_NATIVE } from "./js_native.fsh";
 import { BROTLI_NATIVE, NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
 import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
-import { copyTarget, dockerfile, dockerfilePath, findBrotli, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, forTarget, instrumented, isWasm, isWindows, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, staticTarget, threading, withFlags, type Target } from "./target.fsh";
+import { copyTarget, dockerfile, dockerfilePath, findBrotli, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, forTarget, instrumented, isLambda, isWasm, isWindows, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, staticTarget, threading, withFlags, type Target } from "./target.fsh";
 import { browserFiles, loader } from "./wasi.fsh";
+import { zipped } from "./serverless.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
 import { EXERCISES, exerciseText, FOLDER } from "./learn.fsh";
 import { documented, indexPage, modulePage, pageName, type Documented } from "./docs.fsh";
@@ -2573,9 +2574,12 @@ async function main(): Promise<void> {
       const platform = instrumenting ? withFlags(sanitizing, [...PGO_INSTRUMENT]) : profiles.length > 0 ? withFlags(sanitizing, pgoUse(profiles)) : sanitizing;
       // A sanitizer's report names .fsh lines only when the program carries line tables.
       const debug = values.debug === true || sanitized;
-      const named = out ?? `${basename(target!, ".fsh")}${wasm ? (values.target === "browser" ? ".js" : ".wasm") : isWindows(platform.triple) ? ".exe" : ""}`;
-      const page = values.target === "browser" ? browserFiles(named) : undefined;
-      const binary = page !== undefined ? page.module : named;
+      const lambda = isLambda(platform.triple);
+      const named = out ?? `${basename(target!, ".fsh")}${wasm ? (values.target === "browser" || values.target === "edge" ? ".js" : ".wasm") : isWindows(platform.triple) ? ".exe" : lambda ? ".zip" : ""}`;
+      const page = values.target === "browser" || values.target === "edge" ? browserFiles(named) : undefined;
+      // A Lambda function's executable is built as bootstrap, then zipped where the build was asked to write.
+      const scratch = lambda ? mkdtempSync(join(tmpdir(), "fishc-lambda-")) : undefined;
+      const binary = page !== undefined ? page.module : scratch !== undefined ? join(scratch, "bootstrap") : named;
       const image = values.dockerfile === true ? dockerfilePath(binary) : undefined;
       try {
         let warnings: CompileError[] = [];
@@ -2589,7 +2593,11 @@ async function main(): Promise<void> {
           reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
           warnings = made.warnings;
         }
-        if (page !== undefined) writeFileSync(page.loader, loader(basename(page.module)));
+        if (page !== undefined) writeFileSync(page.loader, loader(basename(page.module), values.target === "edge"));
+        if (scratch !== undefined) {
+          writeFileSync(named, zipped("bootstrap", readFileSync(binary)));
+          rmSync(scratch, { recursive: true, force: true });
+        }
         if (image !== undefined) writeFileSync(image, dockerfile(binary));
         for (const w of warnings) console.error(painted(w, target!, readFileSync(target!, "utf8"), "warning"));
       } catch (e) {
