@@ -1959,6 +1959,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callee.kind === "member" && recv?.kind === "handle" && callee.name !== "clone") return this.handleCall(e, callee, receiver as HandleType);
     if (callee.kind === "member" && callee.name !== "clone" && recv?.kind === "dyn") return this.dynCall(e, callee, receiver as DynType);
     if (callee.kind === "ident" && callee.name === "shared" && (this.ctx.lookup(callee.name, undefined) === undefined) && !this.ctx.byName().has("shared")) return this.sharedNew(e);
+    if (callee.kind === "member" && callee.name === "toString" && receiver !== undefined && isNumeric(this.ctx.tables().typing.lower(receiver))) return this.numberText(e);
     if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(this.ctx.tables().typing.lower(receiver))) {
       const n = this.ctx.tables().typing.lower(receiver);
       if (isInteger(n) && integerInfo(n).bits === 128) throw new CompileError("E0801", `'toFixed' on a 128-bit integer isn't supported yet; convert it with 'as f64' first`, callee.start, callee.end);
@@ -2666,14 +2667,23 @@ export class Expressions<C extends Context> implements Union<C> {
     for (const a of e.args) argTypes.push(this.value(a));
     let bindings = new Map<string, Type>();
     if (e.typeArgs.length > 0) {
-      if (e.typeArgs.length !== names.length) throw new CompileError("E0106", `expected ${names.length} type argument${names.length === 1 ? "" : "s"}, but got ${e.typeArgs.length}`, e.start, e.end);
-      for (let i: usize = 0; i < names.length; i++) bindings.set(names[i]!, this.ctx.resolveType(e.typeArgs[i]!));
+      const least = written.typeParams.filter((p) => p.default === undefined).length;
+      if (e.typeArgs.length < least || e.typeArgs.length > names.length) {
+        const expected = least === names.length ? `${least}` : `${least}-${names.length}`;
+        throw new CompileError("E0106", `expected ${expected} type argument${expected === "1" ? "" : "s"}, but got ${e.typeArgs.length}`, e.start, e.end);
+      }
+      for (let i: usize = 0; i < e.typeArgs.length; i++) bindings.set(names[i]!, this.ctx.resolveType(e.typeArgs[i]!));
     } else {
       let i: usize = 0;
       for (const p of written.params) {
         if (p.type !== undefined) this.ctx.inferArgs(p.type, argTypes[i]!, new Set(names.slice()), bindings, { start: e.args[i]!.start, end: e.args[i]!.end });
         i++;
       }
+    }
+    // A parameter neither written nor inferred takes its default, seeing those before it.
+    for (let i: usize = 0; i < names.length; i++) {
+      const d: Ref<TypeNode | undefined> = written.typeParams[i]!.default;
+      if (!bindings.has(names[i]!) && d !== undefined) bindings.set(names[i]!, this.ctx.resolveWith(cloneTypeNode(d), joinedScope(scope, bindings)));
     }
     for (let i: usize = 0; i < names.length; i++) {
       const n = names[i]!;
@@ -3852,6 +3862,18 @@ export class Expressions<C extends Context> implements Union<C> {
     const t = this.value(e.args[0]!);
     if (t !== "i64" && !this.adapt(e.args[0]!, "i64")) throw new CompileError("E0504", `'toFixed' takes its digits as an 'i64', not '${this.ctx.typing().show(t)}'`, e.args[0]!.start, e.args[0]!.end);
     return { type: "string", what: "'toFixed'" };
+  }
+
+  // `x.toString(radix?)`: String(x), or its digits in the radix given, as JavaScript prints them.
+  /** @throws {CompileError} */
+  private numberText(this: Mut<this>, e: Ref<Call>): { type: Type; what: string } {
+    if (e.args.length > 1) throw new CompileError("E0504", "'toString' takes at most a radix", e.start, e.end);
+    if (e.callee.kind === "member") this.loaded(e.callee.object, this.ctx.held().types.get(e.callee.object)!);
+    if (e.args.length > 0) {
+      const radix = this.value(e.args[0]!);
+      this.coerce(e.args[0]!, radix, "i64", "a radix is an 'i64' from 2 to 36");
+    }
+    return { type: "string", what: "'toString'" };
   }
 
   // `x.checkedAdd(y)` and its kin: the other operand is x's type, or a `u32` for a shift or a
