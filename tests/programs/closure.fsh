@@ -100,8 +100,8 @@ function main() {
 // case: closure_capture_move_out
 // A closure can't move a value out of a reference it captures.
 class O { n = 1 }
-function take(o: O) {}
-function f(r: Ref<O>) {
+export function take(o: O) {}
+export function f(r: Ref<O>) {
   const g = () => take(r)
 }
 function main() {}
@@ -109,7 +109,7 @@ function main() {}
 // case: closure_capture_move_while_held
 // What a closure captures can't move while the closure is still called.
 class O { n = 1 }
-function take(o: O) {}
+export function take(o: O) {}
 function main() {
   const o = new O()
   const g = () => o.n
@@ -120,7 +120,7 @@ function main() {
 // case: closure_capture_moved
 // A closure can't capture a moved variable.
 class O { n = 1 }
-function take(o: O) {}
+export function take(o: O) {}
 function main() {
   const o = new O()
   take(o)

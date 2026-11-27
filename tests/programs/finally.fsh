@@ -1,9 +1,9 @@
 // case: finally_break_swallows
 // A finally that breaks swallows an error, and what the error's path moved stays moved.
 class O { constructor(public n: i64) {} }
-function take(o: O) { print("took") }
-function f(n: i64): void throws i64 { if (n > 0) throw n }
-function g(c: boolean): void throws i64 {
+export function take(o: O) { print("took") }
+export function f(n: i64): void throws i64 { if (n > 0) throw n }
+export function g(c: boolean): void throws i64 {
   const o = new O(1)
   while (true) {
     try { if (c) { take(o); throw 1 } } finally { break }
@@ -116,9 +116,9 @@ function main() { print(f()) }
 // case: finally_return_nested
 // A finally that returns carries what its way in moved into the next finally.
 class O { constructor(public n: i64) {} }
-function take(o: O) { print("took") }
-function f(n: i64): void throws i64 { if (n > 0) throw n }
-function g(c: boolean): i64 throws i64 {
+export function take(o: O) { print("took") }
+export function f(n: i64): void throws i64 { if (n > 0) throw n }
+export function g(c: boolean): i64 throws i64 {
   const o = new O(1)
   try {
     try { if (c) { take(o); f(1) } } finally { return 1 }
@@ -180,8 +180,8 @@ function main() { print(f()) }
 // case: finally_three_raise
 // A raise through two finallies reaches the catch with what both moved.
 class O { constructor(public n: i64) {} }
-function take(o: O) { print("took") }
-function f(n: i64): void throws i64 { if (n > 0) throw n }
+export function take(o: O) { print("took") }
+export function f(n: i64): void throws i64 { if (n > 0) throw n }
 function main() {
   const o = new O(1)
   try {
@@ -192,9 +192,9 @@ function main() {
 // case: finally_three_return
 // A return through three levels carries their moves to the outermost finally.
 class O { constructor(public n: i64) {} }
-function take(o: O) { print("took") }
-function f(n: i64): void throws i64 { if (n > 0) throw n }
-function g(): i64 {
+export function take(o: O) { print("took") }
+export function f(n: i64): void throws i64 { if (n > 0) throw n }
+export function g(): i64 {
   const o = new O(1)
   try {
     try { try { f(0); if (o.n > 0) { take(o); return 1 } } finally { print("a") } } catch (e) {} finally { print("b") }

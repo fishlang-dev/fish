@@ -26,7 +26,7 @@ interface B {
   get(): boolean
 }
 
-function f(x: A & B): i64 {
+export function f(x: A & B): i64 {
   return 1
 }
 

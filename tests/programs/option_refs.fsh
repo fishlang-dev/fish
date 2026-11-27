@@ -404,13 +404,13 @@ function main() {
 class Item {
   id: i64 = 1
 }
-function find(items: Ref<Item[]>, id: i64): Ref<Item> | null {
+export function find(items: Ref<Item[]>, id: i64): Ref<Item> | null {
   for (let i = 0; i < items.length; i++) {
     if (items[i].id === id) return items[i]
   }
   return null
 }
-function take(xs: Item[]) {}
+export function take(xs: Item[]) {}
 function main() {
   const items = [new Item()]
   const r = find(items, 1)!

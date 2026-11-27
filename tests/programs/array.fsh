@@ -397,8 +397,8 @@ function main() {
 // error: cannot change 'xs' while 'r' borrows 'xs[...]' and is used later
 // case: array_element_move
 type Q = { n: i64 };
-function take(q: Q) {}
-function grow(xs: Mut<Q[]>, q: Ref<Q>) {
+export function take(q: Q) {}
+export function grow(xs: Mut<Q[]>, q: Ref<Q>) {
   xs.push({ n: q.n });
 }
 
