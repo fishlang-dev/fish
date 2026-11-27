@@ -1061,7 +1061,14 @@ class Codegen implements PrintHost, ComptimeHost {
       this.out.push(line7);
       this.out.push("entry:");
       const more2 = this.popFrame(this.body);
-      for (const pushed of elided([...this.allocas, ...frame, ...more2])) this.out.push(pushed);
+      // Only a body with a retain has pairs to leave out, so the others aren't copied for it.
+      if (more2.some((l) => l.includes("_retain(ptr %"))) {
+        for (const pushed of elided([...this.allocas, ...frame, ...more2])) this.out.push(pushed);
+      } else {
+        for (const pushed of this.allocas) this.out.push(pushed);
+        for (const pushed of frame) this.out.push(pushed);
+        for (const pushed of more2) this.out.push(pushed);
+      }
       this.out.push("}");
       this.out.push("");
     } catch (e) {
