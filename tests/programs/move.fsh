@@ -1,7 +1,7 @@
 // case: move_after_call
 type Point = { x: i64; y: i64 }
 
-function sum(p: Point): i64 {
+export function sum(p: Point): i64 {
   return p.x + p.y
 }
 
@@ -28,7 +28,7 @@ function main() {
 type Inner = { v: i64 }
 type Pair = { left: Inner; right: Inner }
 
-function take(p: Pair): i64 {
+export function take(p: Pair): i64 {
   return p.left.v
 }
 
@@ -51,7 +51,7 @@ function main() {
 // case: move_branch
 type Point = { x: i64 }
 
-function take(p: Point): i64 {
+export function take(p: Point): i64 {
   return p.x
 }
 
@@ -67,7 +67,7 @@ function main() {
 // case: move_break
 type Point = { x: i64 }
 
-function take(p: Point): i64 {
+export function take(p: Point): i64 {
   return p.x
 }
 
@@ -85,7 +85,7 @@ function main() {
 // case: move_conditional
 type Point = { x: i64 }
 
-function take(p: Point): i64 {
+export function take(p: Point): i64 {
   return p.x
 }
 
@@ -99,7 +99,7 @@ function main() {
 // case: move_fallthrough
 type Point = { x: i64 }
 
-function take(p: Point): i64 {
+export function take(p: Point): i64 {
   return p.x
 }
 
@@ -129,11 +129,11 @@ function main() {
 type Inner = { v: i64 }
 type Pair = { left: Inner; right: Inner }
 
-function take(i: Inner): i64 {
+export function take(i: Inner): i64 {
   return i.v
 }
 
-function sum(p: Pair): i64 {
+export function sum(p: Pair): i64 {
   return p.left.v + p.right.v
 }
 
@@ -217,7 +217,7 @@ function main() {
 // case: move_for_update
 type P = { x: i64 }
 
-function take(p: P): i64 {
+export function take(p: P): i64 {
   return p.x
 }
 
@@ -230,7 +230,7 @@ function main() {
 // error: 'p.x' can't be used here because 'p' was moved (in an earlier pass through this loop)
 // case: move_into_array
 type Box = { s: string };
-function take(b: Box): string { return b.s; }
+export function take(b: Box): string { return b.s; }
 function main() {
   const b: Box = { s: "a" + "b" };
   console.log(take(b));
@@ -251,7 +251,7 @@ function main() {
 // case: move_loop
 type Point = { x: i64 }
 
-function take(p: Point): i64 {
+export function take(p: Point): i64 {
   return p.x
 }
 
@@ -267,7 +267,7 @@ function main() {
 // case: move_loop_late
 type Point = { x: i64 }
 
-function take(p: Point): i64 {
+export function take(p: Point): i64 {
   return p.x
 }
 
@@ -428,7 +428,7 @@ class Holder {
   }
 }
 
-function keep(p: P): i64 {
+export function keep(p: P): i64 {
   return p.x
 }
 
@@ -465,7 +465,7 @@ function main() {
 // case: move_through_non_null
 class P { x: i64; constructor(x: i64) { this.x = x } }
 type B = { p: P };
-function take(p: P) { console.log(p.x) }
+export function take(p: P) { console.log(p.x) }
 function main() { let o: B | null = { p: new P(3) }; take(o!.p); console.log(o!.p.x); }
 // error: 'o!.p.x' can't be used here because 'o.p' was moved
 // case: move_type_parameter

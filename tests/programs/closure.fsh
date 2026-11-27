@@ -393,7 +393,7 @@ function main() {
 // case: closure_move_captured
 // A closure that moves out a capture takes it over when made.
 class O { constructor(public n: i64) {} }
-function take(o: O): i64 { return o.n }
+export function take(o: O): i64 { return o.n }
 function main() {
   const o = new O(5)
   const once = () => take(o)
@@ -413,7 +413,7 @@ function main() {
 // case: closure_move_inside
 // Inside a closure, a capture it moved out is gone.
 class O { constructor(public n: i64) {} }
-function take(o: O): i64 { return o.n }
+export function take(o: O): i64 { return o.n }
 function main() {
   const o = new O(5)
   const once = () => {
@@ -449,7 +449,7 @@ function main() {
 // case: closure_move_nested
 // A closure moving a capture into a nested closure moves it out of itself, so it runs once.
 class S { constructor(public n: i64) {} }
-function take(s: S): i64 { return s.n }
+export function take(s: S): i64 { return s.n }
 function main() {
   const s = new S(4)
   const mid = () => {
@@ -760,7 +760,7 @@ function main() { make() }
 // case: closure_run_once
 // A closure that moves out a capture runs once, so calling it takes it over.
 class O { constructor(public n: i64) {} }
-function take(o: O): i64 { return o.n }
+export function take(o: O): i64 { return o.n }
 function main() {
   const o = new O(5)
   const once = () => take(o)
@@ -771,7 +771,7 @@ function main() {
 // case: closure_run_once_loop
 // A function calling its parameter in a loop can't take a run-once closure.
 class S { constructor(public n: i64) {} }
-function take(s: S): i64 { return s.n }
+export function take(s: S): i64 { return s.n }
 function each(n: i64, f: () => i64) {
   let i = 0
   while (i < n) {
@@ -806,7 +806,7 @@ function main() {
 // case: closure_run_once_passed_on
 // Passing a parameter on counts as calling it again, since how often the next function calls it isn't known here.
 class S { constructor(public n: i64) {} }
-function take(s: S): i64 { return s.n }
+export function take(s: S): i64 { return s.n }
 function once(f: () => i64): i64 { return f() }
 function pass(f: () => i64): i64 { return once(f) }
 function main() {
@@ -817,7 +817,7 @@ function main() {
 // case: closure_run_once_twice
 // A function calling its parameter twice can't take a run-once closure.
 class S { constructor(public n: i64) {} }
-function take(s: S): i64 { return s.n }
+export function take(s: S): i64 { return s.n }
 function twice(f: () => i64): i64 { return f() + f() }
 function main() {
   const s = new S(4)
