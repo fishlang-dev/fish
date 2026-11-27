@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fish Paper Test</title>
+<style>
+  :root { --bg: #fbfbf9; --fg: #1d1f21; --muted: #6b6f75; --line: #dcdcd6; --panel: #ffffff; --accent: #1f6feb; --error: #c62828; --warning: #9a6700; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15171a; --fg: #e6e6e3; --muted: #9aa0a6; --line: #2c3036; --panel: #1c1f23; --accent: #58a6ff; --error: #ff7b72; --warning: #d29922; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0 auto; max-width: 1200px; padding: 16px; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  button { font: inherit; padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  pre, textarea { font: 13px/1.5 ui-monospace, Menlo, monospace; }
+  pre { margin: 0; padding: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; }
+  textarea { width: 100%; min-height: 360px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--fg); tab-size: 2; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 16px 0 6px; }
+  #tasks li { margin: 8px 0; }
+  #problems { list-style: none; padding: 0; margin: 0; font: 13px/1.5 ui-monospace, Menlo, monospace; }
+  #problems li.error { color: var(--error); }
+  #problems li.warning { color: var(--warning); }
+  .actions { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  #verdict { color: var(--muted); }
+</style>
+</head>
+<body>
+<section id="consent">
+  <h1>Rust's ownership, in TypeScript's syntax</h1>
+  <p>Each task is a small Rust program and its translation into Fish, a language with TypeScript's syntax and Rust's ownership rules. The translation has the mistake TypeScript habits lead to; fix it until it prints what the Rust program prints.</p>
+  <p>If you agree, this page records, for each task: when you open it, each time you compile and the error codes you got, and whether you solved it or gave up, with the time since you opened it. It records no name, address, browser or program text, and nothing ties the record to you. If you don't agree, the tasks work the same and nothing is recorded.</p>
+  <div class="actions"><button id="agree" class="primary">I agree</button><button id="decline">Try without recording</button></div>
+</section>
+<section id="list" hidden>
+  <h1>Tasks</h1>
+  <ol id="tasks"></ol>
+</section>
+<section id="task" hidden>
+  <div class="actions"><button id="back">All tasks</button><strong id="title"></strong></div>
+  <p id="goal"></p>
+  <div class="grid">
+    <div><h2>Rust</h2><pre id="rust"></pre></div>
+    <div>
+      <h2>Fish</h2>
+      <textarea id="source" spellcheck="false" aria-label="Fish program"></textarea>
+      <div class="actions"><button id="run" class="primary" title="Ctrl+Enter">Run</button><button id="giveup">Give up</button><span id="verdict"></span></div>
+      <h2>Output</h2><pre id="output"></pre>
+      <h2>Problems</h2><ul id="problems"></ul>
+    </div>
+  </div>
+</section>
+<script src="study.js"></script>
+</body>
+</html>
