@@ -2128,7 +2128,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
             try {
               const definition = this.definition(f);
               this.disposerMade(next, f, definition);
-            this.checkBody(definition);
+              if (this.placeholderMember(definition)) continue;
+              this.checkBody(definition);
             } catch (e) {
               if (!(e instanceof CompileError)) throw e;
               this.recover(e);
@@ -2151,12 +2152,26 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // a call inside another definition. Nothing compiles it, and its body is the one its function's
   // definition was checked with, seen through the same bounds. A function taking a comptime
   // parameter is checked for each value it is given, which the definition doesn't know.
-  private onlyAsked(id: InstanceId): boolean {
+  private onlyAsked(this: Mut<this>, id: InstanceId): boolean {
+    if (this.placeholderMember(id)) return true;
     const instance = this.tables.arenas.instanceOf(id);
     if (instance.concrete) return false;
     const definition = this.instancingState.definitions.get(instance.body);
     if (definition === undefined || definition === id) return false;
     return !this.tables.arenas.bodyOf(instance.body).params.some((p) => p.comptime === true);
+  }
+
+  // Whether an instance is a member of a generic class's instance made with placeholder
+  // arguments, which is checked only when a caller asks, as `onlyAsked` has the queue do for
+  // functions: nothing compiles it, and its body is its class definition's member, which is
+  // checked, seen through the same bounds.
+  private placeholderMember(this: Mut<this>, id: InstanceId): boolean {
+    const instance = this.tables.arenas.instanceOf(id);
+    if (instance.concrete) return false;
+    const f = bodyOf(this.tables.arenas, instance);
+    if (f.owner === undefined || f.params.some((p) => p.comptime === true)) return false;
+    const c = this.registryState.infoOf.get(f.owner!);
+    return c !== undefined && !this.declaredClasses.has(c);
   }
 
   // Records a class's own disposer, once it is an instance to compile, for the class's drop to
