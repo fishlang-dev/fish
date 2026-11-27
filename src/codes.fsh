@@ -922,13 +922,13 @@ To fix it, run the call on the blocking pool with 'spawnBlocking', which nothing
 about, or call the async version of the function.`,
       example: `import { readFileSync } from "node:fs";
 
-async function main() {
+async function main() throws IoError {
   const text = readFileSync("config.toml");
   console.log(text.length);
 }`,
       fixed: `import { readFileSync } from "node:fs";
 
-async function main() {
+async function main() throws IoError {
   const text = await spawnBlocking(() => readFileSync("config.toml"));
   console.log(text.length);
 }`,
