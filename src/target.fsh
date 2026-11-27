@@ -7,11 +7,15 @@ import { cacheDir } from "./mathlib.fsh";
 // Build targets: the four v1 platforms and Linux over musl for static binaries, named by their
 // Rust triples, and the clang flags that build for one from the host fishc runs on.
 
-export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl", "wasm32-wasip1", "browser", "x86_64-w64-windows-gnu", "aarch64-w64-windows-gnu"];
+export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl", "wasm32-wasip1", "browser", "x86_64-w64-windows-gnu", "aarch64-w64-windows-gnu", "lambda", "lambda-arm64", "edge"];
 
-// A WebAssembly module over WASI preview 1, and the same module with a JavaScript loader giving it
-// those calls in a page.
-export const isWasm = (triple: string) => triple === "wasm32-wasip1" || triple === "browser";
+// A WebAssembly module over WASI preview 1, the same module with a JavaScript loader giving it
+// those calls in a page, and one answering a request a Workers-style fetch hands it.
+export const isWasm = (triple: string) => triple === "wasm32-wasip1" || triple === "browser" || triple === "edge";
+
+// An AWS Lambda function's bootstrap: a static Linux executable over musl, zipped.
+export const isLambda = (triple: string) => triple === "lambda" || triple === "lambda-arm64";
+const lambdaCpu = (triple: string) => (triple === "lambda-arm64" ? "aarch64" : "x86_64");
 
 // Windows over the MinGW ABI, with UCRT as its C library.
 export const isWindows = (triple: string) => triple.endsWith("-w64-windows-gnu");
@@ -71,6 +75,7 @@ export function hostTriple(platform: string = process.platform, arch: string = p
 export function resolveTarget(triple: string | undefined, sysroot: string | undefined, given?: string, which?: (tool: string) => string | null, found?: (path: string) => boolean): Target {
   if (triple !== undefined && isWasm(triple)) return wasmTarget(triple, sysroot, which, found);
   if (triple !== undefined && isWindows(triple)) return windowsTarget(triple, sysroot, found);
+  if (triple !== undefined && isLambda(triple)) return { ...staticTarget(resolveTarget(`${lambdaCpu(triple)}-unknown-linux-musl`, sysroot, given, which)), triple };
   const host = given ?? hostTriple();
   // Cached objects compile in an empty directory of their own, where a relative path means nothing.
   sysroot = sysroot !== undefined && sysroot !== "" ? resolve(sysroot) : undefined;
@@ -430,6 +435,7 @@ export function pgoUse(profiles: Ref<string[]>): string[] {
 export function buildFacts(info: Ref<BuildInfo>): { os: string; arch: string; libc: string } {
   const triple = info.triple !== "" ? info.triple : hostTriple() ?? "";
   if (isWasm(triple)) return { os: "wasi", arch: "wasm32", libc: "wasi" };
+  if (isLambda(triple)) return { os: "linux", arch: lambdaCpu(triple), libc: "musl" };
   if (isWindows(triple)) return { os: "windows", arch: triple.startsWith("x86_64") ? "x86_64" : "aarch64", libc: "ucrt" };
   const os = triple.includes("-apple-") ? "macos" : "linux";
   const arch = triple.startsWith("x86_64") ? "x86_64" : "aarch64";
