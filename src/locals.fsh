@@ -1,7 +1,7 @@
 import { CompileError, type Names } from "./diag.fsh";
-import type { ClassMember, Expr, ObjectProp, Param, Pattern, Span, Stmt, TypeNode, TypeParam } from "./parser.fsh";
-import { dup, forEachChild, nextId, Rewrites, someNode, walk, type AnyNode, type Ids } from "./nodes.fsh";
-import { cloneClassMember, cloneExpr, clonePattern, cloneStmt, cloneTypeNode, cloneTypeParam, rebuiltClassMember, rebuiltStmt, rebuiltStmts } from "./rebuild.fsh";
+import type { ClassMember, Expr, Modifier, ObjectProp, Param, Pattern, PropertyName, Span, Stmt, TypeNode, TypeParam } from "./parser.fsh";
+import { dup, forEachChild, nextId, nodeIdOf, reborrowNode, Rewrites, someNode, walk, type AnyNode, type Ids } from "./nodes.fsh";
+import { cloneClassMember, cloneExpr, cloneObjectProp, cloneParam, clonePattern, cloneStmt, cloneStmts, cloneTypeNode, cloneTypeParam, rebuiltClassMember, rebuiltStmt, rebuiltStmts } from "./rebuild.fsh";
 
 // Local declarations: a `type`, `interface`, `enum` or `class` written in a body is a
 // declaration of the program's own, under a name only its scope can write. The uses in its scope
@@ -649,7 +649,7 @@ function declaredWithin(st: Ref<Stmt>): Set<string> {
   return found;
 }
 
-function namesIn(p: Ref<Pattern>): string[] {
+export function namesIn(p: Ref<Pattern>): string[] {
   let out: string[] = [];
   collectNamesIn(p, out);
   return out;
@@ -665,4 +665,234 @@ function collectNamesIn(p: Ref<Pattern>, out: Mut<string[]>): void {
     for (const x of p.props) collectNamesIn(x.value, out);
     if (p.rest !== undefined) collectNamesIn(p.rest, out);
   }
+}
+
+// Methods and accessors in object literals. An object literal holding any is made as an instance
+// of a class of its own, so its methods borrow `this` as a class's do: the class has a type
+// parameter for each property, which its constructor's arguments infer, and is declared at the
+// start of the body the literal is in, where hoisting makes it program-wide like any local class.
+// Its members are checked in each instance only, as only an instance knows its fields' types.
+export const OBJECT_CLASS = "@object";
+
+// A literal found, the body it is in (none at the top level), and the variables the bodies around
+// it declare, which its methods can't use.
+type Found = Span & { id: usize; props: ObjectProp[]; owner: usize | undefined; names: Set<string> };
+
+function bodyOwner(node: Ref<AnyNode>): boolean {
+  if (node.of === "stmt") return node.node.kind === "function" && node.node.body !== undefined;
+  if (node.of === "func") return node.node.body !== undefined;
+  if (node.of === "expr") return node.node.kind === "arrow" || node.node.kind === "function";
+  if (node.of === "classMember") return ((node.node.kind === "method" || node.node.kind === "constructor" || node.node.kind === "get" || node.node.kind === "set") && node.node.body !== undefined) || node.node.kind === "staticBlock";
+  if (node.of === "objectProp") return node.node.kind === "method" || node.node.kind === "get" || node.node.kind === "set";
+  return false;
+}
+
+// A literal with a method or accessor whose other properties are named values or shorthands.
+function lowerable(props: Ref<ObjectProp[]>): boolean {
+  if (!props.some((p) => p.kind === "method" || p.kind === "get" || p.kind === "set")) return false;
+  return props.every((p) => (p.kind === "shorthand" ? p.default === undefined : p.kind === "spread" ? false : typeof p.key === "string"));
+}
+
+// The variables a body declares at any depth, its parameters included; local types aren't
+// variables, so a class may use them.
+function declaredIn(node: AnyNode): Set<string> {
+  let found = new Set<string>();
+  walk(node, (n) => {
+    if (n.of === "param") {
+      for (const x of namesIn(n.node.pattern)) found.add(x);
+    } else if (n.of === "stmt") {
+      const s: Ref<Stmt> = n.node;
+      if (s.kind === "let") for (const d of s.declarations) for (const x of namesIn(d.target)) found.add(x);
+      if (s.kind === "function") found.add(s.name);
+      if (s.kind === "try" && s.param !== undefined) for (const x of namesIn(s.param)) found.add(x);
+    }
+  });
+  return found;
+}
+
+// A property's name; a literal is lowered only when each it holds has one.
+function keyName(k: Ref<PropertyName>): string {
+  return typeof k === "string" ? k : "";
+}
+
+function usedIn(node: AnyNode): Set<string> {
+  let found = new Set<string>();
+  walk(node, (n) => {
+    if (n.of === "expr" && n.node.kind === "ident") found.add(n.node.name);
+    if (n.of === "objectProp" && n.node.kind === "shorthand") found.add(n.node.name);
+  });
+  return found;
+}
+
+class ObjectClasses {
+  ids: Ids;
+  found: Found[] = [];
+  rewrites = new Rewrites();
+
+  constructor(lastId: usize) {
+    this.ids = { last: lastId };
+  }
+
+  visit(this: Mut<this>, node: AnyNode, owner: usize | undefined, names: Ref<Set<string>>): void {
+    if (bodyOwner(node)) {
+      const id = nodeIdOf(node) as usize;
+      const inner = new Set<string>([...names, ...declaredIn(reborrowNode(node))]);
+      forEachChild(node, (c) => {
+        this.visit(c, id, inner);
+      });
+      return;
+    }
+    if (node.of === "expr" && node.node.kind === "object" && lowerable(node.node.props)) this.found.push({ id: node.node.id, props: node.node.props.map((p) => cloneObjectProp(p)), owner, names: new Set<string>([...names]), start: node.node.start, end: node.node.end });
+    forEachChild(node, (c) => {
+      this.visit(c, owner, names);
+    });
+  }
+
+  private typeRef(this: Mut<this>, name: string, at: Ref<Span>): TypeNode {
+    return { id: nextId(this.ids), kind: "ref", name, args: [], start: at.start, end: at.end };
+  }
+
+  private ident(this: Mut<this>, name: string, at: Ref<Span>): Expr {
+    return { id: nextId(this.ids), kind: "ident", name, start: at.start, end: at.end };
+  }
+
+  // The class a literal is an instance of, with the `new` that makes it put in the literal's
+  // place; `inside` holds the classes made for the literals in each method's body, to start it.
+  /** @throws {CompileError} */
+  made(this: Mut<this>, f: Ref<Found>, inside: Mut<Map<usize, Stmt[]>>): Stmt {
+    const name = `${OBJECT_CLASS}${f.id}`;
+    let typeParams: TypeParam[] = [];
+    let params: Param[] = [];
+    let assigns: Stmt[] = [];
+    let members: ClassMember[] = [];
+    let args: Expr[] = [];
+    for (const p of f.props) {
+      const at = { start: p.start, end: p.end };
+      if (p.kind === "property" || p.kind === "shorthand") {
+        const key = p.kind === "property" ? keyName(p.key) : p.name;
+        const t = `@T${typeParams.length}`;
+        const v = `@v${typeParams.length}`;
+        typeParams.push({ id: nextId(this.ids), name: t, constraint: undefined, default: undefined, modifiers: [], start: at.start, end: at.end });
+        members.push({ id: nextId(this.ids), kind: "field", name: key, optional: false, definite: false, type: this.typeRef(t, at), init: undefined, modifiers: [], decorators: [], start: at.start, end: at.end });
+        params.push({ id: nextId(this.ids), pattern: { id: nextId(this.ids), kind: "ident", name: v, start: at.start, end: at.end }, type: this.typeRef(t, at), optional: false, rest: false, default: undefined, modifiers: [], decorators: [], comptime: false, start: at.start, end: at.end });
+        const target: Expr = { id: nextId(this.ids), kind: "member", object: { id: nextId(this.ids), kind: "this", start: at.start, end: at.end }, name: key, optional: false, start: at.start, end: at.end };
+        const value = this.ident(v, at);
+        assigns.push({ id: nextId(this.ids), kind: "expr", expr: { id: nextId(this.ids), kind: "assign", op: "=", target, value, start: at.start, end: at.end }, start: at.start, end: at.end });
+        args.push(p.kind === "property" ? cloneExpr(p.value) : this.ident(p.name, at));
+        continue;
+      }
+      if (p.kind !== "method" && p.kind !== "get" && p.kind !== "set") continue;
+      const own = declaredIn({ of: "objectProp", node: p });
+      for (const u of usedIn({ of: "objectProp", node: p })) {
+        if (f.names.has(u) && !own.has(u)) throw new CompileError("E0409", `a method in an object literal can't use '${u}' from the function around it yet; give the object a property holding it, and read it as 'this.${u}'`, p.start, p.end);
+      }
+      const key = keyName(p.key);
+      let body: Stmt[] = [];
+      const before = inside.get(p.id);
+      if (before !== undefined) for (const s of before) body.push(cloneStmt(s));
+      inside.delete(p.id);
+      for (const s of p.body) body.push(cloneStmt(s));
+      const taken = p.params.map((q) => cloneParam(q));
+      const returnType = p.returnType !== undefined ? cloneTypeNode(p.returnType!) : undefined;
+      if (p.kind === "method") {
+        const modifiers: Modifier[] = p.async ? ["async"] : [];
+        members.push({ id: nextId(this.ids), kind: "method", name: key, optional: false, generator: p.generator, typeParams: p.typeParams.map((q) => cloneTypeParam(q)), params: taken, returnType, body, modifiers, decorators: [], start: at.start, end: at.end });
+      } else {
+        members.push({ id: nextId(this.ids), kind: p.kind, name: key, params: taken, returnType, body, modifiers: [], decorators: [], start: at.start, end: at.end });
+      }
+    }
+    const span = { start: f.start, end: f.end };
+    members.unshift({ id: nextId(this.ids), kind: "constructor", params, body: assigns, modifiers: [], decorators: [], start: span.start, end: span.end });
+    const callee = this.ident(name, span);
+    this.rewrites.replaceAt(f.id, { id: f.id, kind: "new", callee, typeArgs: [], args, start: span.start, end: span.end });
+    return { id: nextId(this.ids), kind: "class", name, abstract: false, decorators: [], typeParams, extends: undefined, implements: [], members, start: span.start, end: span.end };
+  }
+
+  // A body found again with the classes made for its literals put at its start; an arrow with an
+  // expression body returns it.
+  startWith(this: Mut<this>, node: Ref<AnyNode>, classes: Ref<Stmt[]>): void {
+    let body = cloneStmts(classes);
+    if (node.of === "stmt" && node.node.kind === "function" && node.node.body !== undefined) {
+      for (const s of node.node.body!) body.push(cloneStmt(s));
+      this.rewrites.replaceStmt(node.node, { ...node.node, body });
+    } else if (node.of === "func" && node.node.body !== undefined) {
+      for (const s of node.node.body!) body.push(cloneStmt(s));
+      this.rewrites.replaceFunc(node.node, { ...node.node, body });
+    } else if (node.of === "expr") {
+      const e: Ref<Expr> = node.node;
+      if (e.kind === "arrow") {
+        if (Array.isArray(e.body)) for (const s of e.body) body.push(cloneStmt(s));
+        else body.push({ id: nextId(this.ids), kind: "return", value: cloneExpr(e.body), start: e.body.start, end: e.body.end });
+        this.rewrites.replace(e, { ...e, body });
+      } else if (e.kind === "function") {
+        for (const s of e.body) body.push(cloneStmt(s));
+        this.rewrites.replace(e, { ...e, body });
+      }
+    } else if (node.of === "classMember") {
+      const m: Ref<ClassMember> = node.node;
+      if (m.kind === "method" && m.body !== undefined) {
+        for (const s of m.body!) body.push(cloneStmt(s));
+        this.rewrites.replaceClassMember(m, { ...m, body });
+      } else if (m.kind === "constructor" && m.body !== undefined) {
+        for (const s of m.body!) body.push(cloneStmt(s));
+        this.rewrites.replaceClassMember(m, { ...m, body });
+      } else if ((m.kind === "get" || m.kind === "set") && m.body !== undefined) {
+        for (const s of m.body!) body.push(cloneStmt(s));
+        this.rewrites.replaceClassMember(m, { ...m, body });
+      } else if (m.kind === "staticBlock") {
+        for (const s of m.body) body.push(cloneStmt(s));
+        this.rewrites.replaceClassMember(m, { ...m, body });
+      }
+    } else if (node.of === "objectProp") {
+      const p: Ref<ObjectProp> = node.node;
+      if (p.kind === "method") {
+        for (const s of p.body) body.push(cloneStmt(s));
+        this.rewrites.replaceObjectProp(p, { ...p, body });
+      } else if (p.kind === "get" || p.kind === "set") {
+        for (const s of p.body) body.push(cloneStmt(s));
+        this.rewrites.replaceObjectProp(p, { ...p, body });
+      }
+    }
+  }
+}
+
+// Each object literal with methods or accessors made an instance of its own class, declared
+// where hoisting finds it; the classes for literals at the top level start the program.
+/** @throws {CompileError} */
+export function lowerObjectMethods(ids: Mut<Ids>, program: Stmt[]): Stmt[] {
+  const any = someNode({ of: "stmts", node: program }, (n) => n.of === "objectProp" && (n.node.kind === "method" || n.node.kind === "get" || n.node.kind === "set"));
+  if (!any) return program;
+  let c = new ObjectClasses(ids.last);
+  const none = new Set<string>();
+  for (const s of program) c.visit({ of: "stmt", node: s }, undefined, none);
+  let found = c.found.splice(0);
+  let inside = new Map<usize, Stmt[]>();
+  let top: Stmt[] = [];
+  // Inner literals first, so the classes for a method's own literals start its body in the class
+  // made for the literal around it.
+  while (found.length > 0) {
+    const f = found.pop()!;
+    const declared = c.made(f, inside);
+    if (f.owner === undefined) {
+      top.push(declared);
+      continue;
+    }
+    let list: Stmt[] = [];
+    const had = inside.get(f.owner!);
+    if (had !== undefined) for (const s of had) list.push(cloneStmt(s));
+    list.push(declared);
+    inside.set(f.owner!, list);
+  }
+  if (inside.size > 0) {
+    walk({ of: "stmts", node: program }, (n) => {
+      if (!bodyOwner(n)) return;
+      const classes = inside.get(nodeIdOf(n) as usize);
+      if (classes !== undefined) c.startWith(n, classes);
+    });
+  }
+  ids.last = c.ids.last;
+  // The top level's classes are rebuilt too: their methods may hold literals made into classes.
+  let out = [...top, ...program];
+  rebuiltStmts(out, c.rewrites);
+  return out;
 }

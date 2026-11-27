@@ -176,11 +176,8 @@ test("expression forms", () => {
   assert(failed.length === 0, failed.join("\n\n"));
 });
 
-// Object literal properties besides `key: value`, shorthand and spread: the rejected part is the
-// second column.
+// Object literal properties Fish has no meaning for yet: the rejected part is the second column.
 const PROPERTIES: [string, string, string][] = [
-  ["{ f() {} }", "methods in object literals", "f() {}"],
-  ["{ get x() { return 1 } }", "accessors in object literals", "get x() { return 1 }"],
   ["{ [Symbol.iterator]: 1 }", "'[Symbol.iterator]' members", "Symbol.iterator"],
 ];
 

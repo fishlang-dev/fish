@@ -10541,7 +10541,7 @@ export class Expressions<C extends Context> implements Union<C> {
       return { name: nameText(p.key)!, type: widened };
     }
     if (p.kind !== "shorthand") {
-      throw unsupported(p.kind === "spread" ? "spread elements" : p.kind === "method" ? "methods in object literals" : "accessors in object literals", p);
+      throw unsupported(p.kind === "spread" ? "spread elements" : p.kind === "method" ? "methods in object literals beside a spread or a computed key" : "accessors in object literals beside a spread or a computed key", p);
     }
     if ((p.default !== undefined)) throw new CompileError("E0004", "'=' in an object literal is only valid in a destructuring pattern", p.start, p.end);
     // A shorthand reads its variable like a name does: within its switch case, narrowed, and
