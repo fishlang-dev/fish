@@ -320,15 +320,15 @@ function main() {
 // expect: 200 user 7 posts
 // expect: 201 made
 // expect: 200 user 9 posts
-// expect: 404 Not Found
-// expect: 404 Not Found
+// expect: 405 Method Not Allowed
+// expect: 405 Method Not Allowed
 // expect: 404 Not Found
 // expect: 200 first
 // expect: 200 any PUT
 // expect: 200 deleted 3
 // expect: 200 empty
 // A Router picks the first route matching a request's method and path, reads its :params,
-// runs GET routes for HEAD, and gives 404 for the rest.
+// runs GET routes for HEAD, gives 405 for a path routed only for other methods, and 404 for the rest.
 async function show(app: Ref<Router>, method: string, url: string): Promise<void> {
   const res = await app.handle(new Request(url, { method: method }));
   const body = await res.text();
