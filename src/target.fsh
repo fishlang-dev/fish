@@ -1,6 +1,8 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import type { BuildInfo } from "./compilation.fsh";
+import { cacheDir } from "./mathlib.fsh";
 
 // Build targets: the four v1 platforms and Linux over musl for static binaries, named by their
 // Rust triples, and the clang flags that build for one from the host fishc runs on.
@@ -310,6 +312,56 @@ export function findBrotli(target: Ref<Target>): OpenSsl {
   }
   if (existsSync("/usr/include/brotli/encode.h")) return { compile: [], link: [...BROTLI] };
   return { missing: "fishc build: std:compress needs libbrotlienc, which wasn't found; install brotli (brew install brotli on macOS, apt install libbrotli-dev on Debian and Ubuntu, apk add brotli-dev on Alpine) and build the program again" };
+}
+
+// The flags of a build instrumented for profile-guided optimization: running it writes
+// default.profraw in its working directory. Fish hands clang IR, so the instrumentation is
+// LLVM's IR-level kind; clang's front-end kind would find no source to count.
+export const PGO_INSTRUMENT = ["-fprofile-generate", "-Xclang", "-fprofile-instrument-path=default.profraw"];
+
+// `target` with `flags` added to every clang call it makes, the runtime's and the link's included.
+export function withFlags(target: Target, flags: string[]): Target {
+  return { ...target, compile: [...target.compile, ...flags] };
+}
+
+// The llvm-profdata of the clang that builds, else the one on PATH, else Xcode's on macOS.
+function profileTool(): string | undefined {
+  try {
+    const beside = new TextDecoder().decode(Bun.spawnSync(["clang", "-print-prog-name=llvm-profdata"]).stdout).trim();
+    if (beside.startsWith("/") && existsSync(beside)) return beside;
+  } catch (_e) {
+    // clang's own answer is only the first place looked.
+  }
+  const onPath = Bun.which("llvm-profdata");
+  if (onPath !== null) return onPath;
+  if (process.platform !== "darwin") return undefined;
+  try {
+    const found = Bun.spawnSync(["xcrun", "-f", "llvm-profdata"]);
+    const path = new TextDecoder().decode(found.stdout).trim();
+    return found.exitCode === 0 && path !== "" ? path : undefined;
+  } catch (_e) {
+    return undefined;
+  }
+}
+
+// The flags of a release build optimized with `profiles`: raw profiles from instrumented runs, an
+// indexed .profdata, or several of either, merged by llvm-profdata into one kept under the
+// cache by its digest, so cached objects built from a profile never outlive a change to it.
+/** @throws {Error | IoError} */
+export function pgoUse(profiles: Ref<string[]>): string[] {
+  for (const p of profiles) if (!existsSync(p)) throw new Error(`fishc build: the profile '${p}' doesn't exist; build with '--pgo-instrument', run the program it writes, and pass the default.profraw the run leaves`);
+  const tool = profileTool();
+  if (tool === undefined) throw new Error("fishc build: '--pgo' merges profiles with llvm-profdata, which wasn't found beside clang or on PATH; install LLVM (apt install llvm on Debian and Ubuntu, or Xcode's command line tools on macOS) and put its bin directory on PATH");
+  const dir = join(cacheDir(), "pgo");
+  mkdirSync(dir, { recursive: true });
+  const merging = join(dir, `merging-${process.pid}.profdata`);
+  const merged = Bun.spawnSync([tool, "merge", "-o", merging, ...profiles]);
+  if (merged.exitCode !== 0) throw new Error(`fishc build: llvm-profdata couldn't merge the profiles:\n${new TextDecoder().decode(merged.stderr).trim()}`);
+  const digest = createHash("sha256").update(readFileSync(merging)).digest("hex").slice(0, 16);
+  const kept = join(dir, `${digest}.profdata`);
+  renameSync(merging, kept);
+  // A function the profile doesn't know, or knows from other code, is optimized without it.
+  return [`-fprofile-use=${kept}`, "-Wno-profile-instr-unprofiled", "-Wno-profile-instr-out-of-date", "-Wno-backend-plugin"];
 }
 
 // The OS, CPU and libc `std:build` names for a build of `info`.
