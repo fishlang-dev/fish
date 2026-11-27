@@ -5,7 +5,7 @@ import { holdsNull } from "./defaults.fsh";
 import type { EnumMember, Expr, Interface, Param, PropertyName, Span, Stmt, TupleElement, TypeAlias, TypeMember, TypeNode, TypeParam } from "./parser.fsh";
 import { nextId, NodeMap, walkWhile, type Ids } from "./nodes.fsh";
 import type { DataEnum, EnumInfo, EnumInstance } from "./enums.fsh";
-import { placeholders } from "./generics.fsh";
+import { placeholders, withDefaults } from "./generics.fsh";
 import { cloneEnumMember, cloneParam, cloneStmt, cloneTypeAlias, cloneTypeMember, cloneTypeNode, cloneTypeParam } from "./rebuild.fsh";
 import { SIMD_MASKS, SIMD_TYPES, simdTypeNamed, unitPowers, isNumeric, type UnionType, type InteriorRecord, TypeMap, ANY_REGEX, INTERIORS, familyHeld, type RecursiveType, isFloat, splitTemplate, type BlockType, isInteger, typedNamed, type MapType, INTEGERS, type Integer, type ClassType, type Field, type InteriorType, type SharedType, type InterfaceType, type LiteralType, type Method, type ObjectType, type ParamType, type Type, type Typing, type VariantType, type FunctionType, type BrandHow, type FamilyNode, type BlockRecord, type ArrayType, type FutureType, type RefType, type ClosureType, copyField, copyMethod } from "./typing.fsh";
 import { typeForm, unsupported } from "./unsupported.fsh";
@@ -1403,7 +1403,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // The interface is registered before its members resolve, so a member may name it. A generic
   // interface is one interface per list of type arguments, its members seeing them.
   /** @throws {CompileError} */
-  private interfaceOf(this: Mut<this>, i: Ref<Interface>, args: Type[], at: Ref<Span>): InterfaceType {
+  private interfaceOf(this: Mut<this>, i: Ref<Interface>, written: Type[], at: Ref<Span>): InterfaceType {
+    const args = withDefaults(this.host, i.typeParams, written, undefined);
     if (args.length !== i.typeParams.length) {
       throw new CompileError("E0106", `interface '${i.name}' expects ${i.typeParams.length} type argument${i.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
@@ -1622,7 +1623,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
   // An alias met again while its own type is made leads back to itself: that is where the
   // compiler puts a pointer, a recursive type standing for the alias's type.
   /** @throws {CompileError} */
-  private aliasType(this: Mut<this>, a: Ref<TypeAlias>, args: Ref<Type[]>, at: Ref<Span>): Type {
+  private aliasType(this: Mut<this>, a: Ref<TypeAlias>, written: Ref<Type[]>, at: Ref<Span>): Type {
+    const args = withDefaults(this.host, a.typeParams, written, undefined);
     if (args.length !== a.typeParams.length) {
       throw new CompileError("E0106", `type '${a.name}' expects ${a.typeParams.length} type argument${a.typeParams.length === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
     }
