@@ -22,7 +22,8 @@ import type { Ids } from "./nodes.fsh";
 import { bundle } from "./bundle.fsh";
 import { JS_NATIVE } from "./js_native.fsh";
 import { NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
-import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, mathUnits, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
+import { objectOf } from "./macho.fsh";
+import { cachedObjects, files, MATH_RUNTIME, NATIVE_UNIT, mathObjects, mathObjectsAsync, mathUnits, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
 import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, linkerFlags, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
@@ -70,14 +71,14 @@ export { analyze } from "./analysis.fsh";
 type Compiled = { ir: string[]; checked: Checked; loaded: Loaded; emitted: Emitted | undefined; helpers: Map<string, string> };
 
 // A build session apart: what a compilation takes, and the caches only building objects reads.
-type Caches = { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
+type Caches = { clang?: string; digests: Map<string, string>; mathUnits?: Unit[]; backend?: string };
 
 function apart(session: BuildSession): { core: Session; caches: Caches } {
-  return { core: { locking: session.locking, engineHook: session.engineHook, std: session.std, timings: session.timings, failed: session.failed, checkCache: session.checkCache }, caches: { clang: session.clang, digests: session.digests, mathUnits: session.mathUnits } };
+  return { core: { locking: session.locking, engineHook: session.engineHook, std: session.std, timings: session.timings, failed: session.failed, checkCache: session.checkCache }, caches: { clang: session.clang, digests: session.digests, mathUnits: session.mathUnits, backend: session.backend } };
 }
 
 function together(core: Session, caches: Caches): BuildSession {
-  return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, checkCache: core.checkCache, clang: caches.clang, digests: caches.digests, mathUnits: caches.mathUnits };
+  return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, checkCache: core.checkCache, clang: caches.clang, digests: caches.digests, mathUnits: caches.mathUnits, backend: caches.backend };
 }
 
 // `session` for a build that keeps nothing of its check once its program is emitted.
@@ -621,7 +622,7 @@ function linked(session: Mut<BuildSession>, natives: Ref<Natives>, halves: Ref<{
   for (const u of natives.units) units.push(u.clone());
   for (const u of halves.cached) units.push(u.clone());
   for (const u of mathUnits(session, [...target.compile])) units.push(u.clone());
-  let objects = knownObjects(session, units, known);
+  let objects = alongside && nativeBuild(session, release, leaks, target) ? nativeObjects(session, units, known) : knownObjects(session, units, known);
   stageEnd(session, "runtime", started);
   if (session.timings !== undefined) session.timings.notes.set("runtime", objectsNote(session.timings));
   const g = debug ? ["-g"] : none;
@@ -655,6 +656,39 @@ function linked(session: Mut<BuildSession>, natives: Ref<Natives>, halves: Ref<{
   }
 }
 
+// The backend a dev build's IR goes to when nothing chooses: `--backend` and FISH_BACKEND choose.
+const DEFAULT_BACKEND = "llvm";
+
+// Whether a build's IR goes to the native backend: a plain dev build for this machine, an arm64
+// Mac, when the native backend is chosen. Release builds, `-g`, sanitizers, `--leaks` and other
+// targets always go to clang.
+function nativeBuild(session: Ref<BuildSession>, release: boolean, leaks: boolean, target: Ref<Target>): boolean {
+  if ((session.backend ?? DEFAULT_BACKEND) !== "native") return false;
+  if (release || leaks || target.triple !== "" || target.sanitize !== undefined) return false;
+  return process.platform === "darwin" && process.arch === "arm64";
+}
+
+// The units' objects with every IR unit compiled by the native backend. A build's IR units are all
+// native or all clang's, since the two pass aggregates differently, so a unit the native backend
+// refuses or fails on sends them all back to clang, unless FISH_NATIVE_STRICT=1 makes that an error.
+/** @throws {Error | IoError} */
+function nativeObjects(session: Mut<BuildSession>, units: Ref<Unit[]>, known: Mut<Map<string, string[]>>): string[] {
+  let native: Unit[] = [];
+  for (const u of units) native.push(isIr(u) ? { name: u.name, args: [NATIVE_UNIT], stdin: u.stdin, inputs: [] } : u.clone());
+  try {
+    return knownObjects(session, native, known);
+  } catch (e) {
+    if (!(e instanceof Error) || !e.message.startsWith("the native backend failed") || process.env.FISH_NATIVE_STRICT === "1") throw e;
+    return knownObjects(session, units, known);
+  }
+}
+
+// Whether a unit is IR for clang.
+function isIr(u: Ref<Unit>): boolean {
+  for (let i: usize = 0; i + 1 < u.args.length; i++) if (u.args[i]! === "-x" && u.args[i + 1]! === "ir") return true;
+  return false;
+}
+
 // The units' objects, in their order: for each, the one built from its text before when the text is
 // the same and the object is still there, else the cache's, hashed from its text; those the cache
 // lacks are compiled several at once.
@@ -665,7 +699,9 @@ function knownObjects(session: Mut<BuildSession>, units: Ref<Unit[]>, known: Mut
   let places: usize[] = [];
   for (let i: usize = 0; i < units.length; i++) {
     const u: Ref<Unit> = units[i]!;
-    const was = known.get(u.name);
+    // Kept apart by backend, so `fishc watch` never takes one backend's object for the other's.
+    const key = u.args.length === 1 && u.args[0]! === NATIVE_UNIT ? `${u.name}.native` : u.name;
+    const was = known.get(key);
     if (u.inputs.length === 0 && was !== undefined && was[0]! === (u.stdin ?? "") && existsSync(was[1]!)) {
       if (session.timings !== undefined) session.timings!.objects.cached++;
       objects.push(was[1]!);
@@ -678,7 +714,8 @@ function knownObjects(session: Mut<BuildSession>, units: Ref<Unit[]>, known: Mut
   const made = cachedObjects(session, fresh);
   for (let k: usize = 0; k < fresh.length; k++) {
     objects[places[k]!] = made[k]!;
-    known.set(fresh[k]!.name, [fresh[k]!.stdin ?? "", made[k]!]);
+    const u: Ref<Unit> = fresh[k]!;
+    known.set(u.args.length === 1 && u.args[0]! === NATIVE_UNIT ? `${u.name}.native` : u.name, [u.stdin ?? "", made[k]!]);
   }
   return objects;
 }
@@ -1013,8 +1050,11 @@ export function indented(json: string): string {
 
 // A session for one build, with the lockfile kept as it is when `locked`, timed when `timed` or
 // when `json` names where to write the times, and reading no cached check when `checking`.
-function sessionWith(locked: boolean, timed: boolean, checking = false, json?: string): BuildSession {
+function sessionWith(locked: boolean, timed: boolean, checking = false, json?: string, backend?: string): BuildSession {
   let made = cachedSession();
+  const chosen = backend ?? process.env.FISH_BACKEND;
+  if (chosen !== undefined && chosen !== "native" && chosen !== "llvm") fail(`fishc: the backend '${chosen!}' isn't one; give native or llvm`);
+  made.backend = chosen;
   made.locking.locked = locked;
   // FISH_MEM=1 records what the process holds as each stage ends, as stages are timed.
   const memory = process.env.FISH_MEM === "1";
@@ -1713,6 +1753,7 @@ async function main(): Promise<void> {
           top: { type: "string" },
           names: { type: "string" },
           linker: { type: "string" },
+          backend: { type: "string" },
         },
       });
     } catch (e) {
@@ -1738,13 +1779,18 @@ async function main(): Promise<void> {
   const timed = values.timings === true;
   const checking = values["no-check-cache"] === true;
   const json = values["timings-json"];
-  const sessionFor = (): BuildSession => sessionWith(locked, timed, checking, json);
+  const sessionFor = (): BuildSession => sessionWith(locked, timed, checking, json, values.backend);
   // `fishc run` and `fishc watch` take the program's arguments after the file, or all of them with no file.
   const command = positionals.length > 0 ? positionals[0] : undefined;
   const named = positionals.length > 1 ? positionals[1] : undefined;
   const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
   if (json !== undefined && command !== "build" && command !== "check" && command !== "run") fail(`fishc: '--timings-json' writes the timings of a build, check or run; 'fishc ${command ?? ""}' takes no '--timings-json'`);
+  if (command === "native-object") {
+    if (values.out === undefined || positionals.length !== 1) fail("usage: fishc native-object -o <out.o> < <unit.ll>");
+    writeFileSync(values.out!, objectOf(readFileSync(0)));
+    return;
+  }
   if (command === "repl") {
     if (positionals.length !== 1 || flags.some((k) => k !== "panic")) fail("usage: fishc repl");
     runRepl(locked, timed, checking);
@@ -2046,7 +2092,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--linker system|lld|mold] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--linker system|lld|mold] [--backend native|llvm] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--backend native|llvm] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
