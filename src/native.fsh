@@ -26,13 +26,17 @@ export const NATIVE = String.raw`
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#ifndef __wasi__
 #include <unwind.h>
+#endif
 #include <pthread.h>
 #include <sched.h>
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
+#ifndef __wasi__
 #include <pwd.h>
+#endif
 #include <limits.h>
 #include <sys/random.h>
 #include <fcntl.h>
@@ -41,19 +45,136 @@ export const NATIVE = String.raw`
 #include <dirent.h>
 #include <ftw.h>
 #include <signal.h>
+#ifndef __wasi__
 #include <spawn.h>
-#include <poll.h>
 #include <sys/wait.h>
+#endif
+#include <poll.h>
 #include <sys/socket.h>
+#ifndef __wasi__
 #include <sys/un.h>
+#endif
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
-#include <netdb.h>
 #ifdef __APPLE__
+#include <netdb.h>
 #include <sys/event.h>
 #include <mach-o/dyld.h>
+#elif defined(__wasi__)
+// WASI preview 1 has no processes, signals, users, name lookups, file watching or readiness
+// polling beyond poll_oneoff, and wasi-libc declares none of them. They are given here as calls
+// that fail with ENOSYS, so the runtime's code for them compiles unchanged, and a program that
+// reaches one gets that error where it called. The reactors never start: the scheduler runs on one
+// thread.
+#include <sys/mman.h>
+struct passwd { char *pw_name; char *pw_dir; };
+static inline uid_t getuid(void) { return 0; }
+static inline int getpwuid_r(uid_t uid, struct passwd *pw, char *buffer, size_t size, struct passwd **found) { *found = NULL; return ENOSYS; }
+static inline int kill(pid_t pid, int sig) { errno = ENOSYS; return -1; }
+static inline int fchown(int fd, uid_t uid, gid_t gid) { errno = ENOSYS; return -1; }
+static inline char *mkdtemp(char *template) { errno = ENOSYS; return NULL; }
+struct sigaction { void (*sa_handler)(int); sigset_t sa_mask; int sa_flags; };
+#define SA_RESTART 0
+static inline int sigemptyset(sigset_t *set) { *set = 0; return 0; }
+static inline int sigaction(int sig, const struct sigaction *a, struct sigaction *old) { errno = ENOSYS; return -1; }
+struct addrinfo { int ai_flags, ai_family, ai_socktype, ai_protocol; socklen_t ai_addrlen; struct sockaddr *ai_addr; char *ai_canonname; struct addrinfo *ai_next; };
+#define EAI_NONAME -2
+#define EAI_SYSTEM -11
+static inline int getaddrinfo(const char *host, const char *port, const struct addrinfo *hints, struct addrinfo **found) { *found = NULL; return EAI_NONAME; }
+static inline void freeaddrinfo(struct addrinfo *a) {}
+static inline const char *gai_strerror(int code) { return "name lookups aren't available under WASI"; }
+struct epoll_event { uint32_t events; union { void *ptr; int fd; uint64_t u64; } data; };
+#define EPOLLIN 1
+#define EPOLLOUT 4
+#define EPOLLERR 8
+#define EPOLLHUP 16
+#define EPOLLONESHOT (1u << 30)
+#define EPOLL_CTL_ADD 1
+#define EPOLL_CTL_DEL 2
+#define EPOLL_CTL_MOD 3
+#define EPOLL_CLOEXEC 0
+static inline int epoll_create1(int flags) { errno = ENOSYS; return -1; }
+static inline int epoll_ctl(int q, int op, int fd, struct epoll_event *e) { errno = ENOSYS; return -1; }
+static inline int epoll_wait(int q, struct epoll_event *e, int n, int ms) { errno = ENOSYS; return -1; }
+#define EFD_NONBLOCK 0
+#define EFD_CLOEXEC 0
+static inline int eventfd(unsigned value, int flags) { errno = ENOSYS; return -1; }
+struct inotify_event { int wd; uint32_t mask, cookie, len; char name[]; };
+#define IN_MODIFY 2
+#define IN_ATTRIB 4
+#define IN_MOVED_FROM 64
+#define IN_MOVED_TO 128
+#define IN_CREATE 256
+#define IN_DELETE 512
+#define IN_DELETE_SELF 1024
+#define IN_MOVE_SELF 2048
+#define IN_IGNORED 0x8000
+#define IN_ISDIR 0x40000000
+#define IN_ONLYDIR 0x1000000
+#define IN_CLOEXEC 0
+#define IN_NONBLOCK 0
+static inline int inotify_init1(int flags) { errno = ENOSYS; return -1; }
+static inline int inotify_add_watch(int q, const char *path, uint32_t mask) { errno = ENOSYS; return -1; }
+static inline int inotify_rm_watch(int q, int wd) { errno = ENOSYS; return -1; }
+#define EAI_AGAIN -3
+#define SIG_BLOCK 0
+#define SIG_SETMASK 2
+static inline int sigaddset(sigset_t *set, int sig) { return 0; }
+static inline int sigismember(const sigset_t *set, int sig) { return 0; }
+static inline int sigpending(sigset_t *set) { *set = 0; return 0; }
+static inline int sigwait(const sigset_t *set, int *sig) { return ENOSYS; }
+static inline int pthread_sigmask(int how, const sigset_t *set, sigset_t *old) { if (old) *old = 0; return 0; }
+#define WNOHANG 1
+#define WIFEXITED(s) 1
+#define WEXITSTATUS(s) ((s) >> 8 & 0xff)
+#define WIFSIGNALED(s) 0
+#define WTERMSIG(s) 0
+static inline pid_t waitpid(pid_t pid, int *status, int options) { errno = ECHILD; return -1; }
+typedef int posix_spawn_file_actions_t;
+typedef int posix_spawnattr_t;
+#define POSIX_SPAWN_SETPGROUP 2
+static inline int posix_spawn_file_actions_init(posix_spawn_file_actions_t *a) { return 0; }
+static inline int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *a) { return 0; }
+static inline int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *a, int from, int to) { return 0; }
+static inline int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *a, int fd, const char *path, int flags, mode_t mode) { return 0; }
+static inline int posix_spawn_file_actions_addchdir_np(posix_spawn_file_actions_t *a, const char *path) { return 0; }
+static inline int posix_spawnattr_init(posix_spawnattr_t *a) { return 0; }
+static inline int posix_spawnattr_destroy(posix_spawnattr_t *a) { return 0; }
+static inline int posix_spawnattr_setflags(posix_spawnattr_t *a, short flags) { return 0; }
+static inline int posix_spawnattr_setpgroup(posix_spawnattr_t *a, pid_t group) { return 0; }
+static inline int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *a, const posix_spawnattr_t *at, char *const argv[], char *const envp[]) { return ENOSYS; }
+static inline int posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *a, const posix_spawnattr_t *at, char *const argv[], char *const envp[]) { return ENOSYS; }
+#ifndef SO_REUSEADDR
+#define SO_REUSEADDR 2
+#endif
+#ifndef SO_ERROR
+#define SO_ERROR 4
+#endif
+#ifndef SO_SNDBUF
+#define SO_SNDBUF 7
+#endif
+#ifndef SO_ACCEPTCONN
+#define SO_ACCEPTCONN 30
+#endif
+#ifndef SO_RCVTIMEO
+#define SO_RCVTIMEO 66
+#endif
+#ifndef SO_SNDTIMEO
+#define SO_SNDTIMEO 67
+#endif
+static inline int socket(int domain, int type, int protocol) { errno = ENOSYS; return -1; }
+static inline int bind(int fd, const struct sockaddr *at, socklen_t n) { errno = ENOSYS; return -1; }
+static inline int listen(int fd, int backlog) { errno = ENOSYS; return -1; }
+static inline int connect(int fd, const struct sockaddr *at, socklen_t n) { errno = ENOSYS; return -1; }
+static inline int setsockopt(int fd, int level, int name, const void *value, socklen_t n) { errno = ENOSYS; return -1; }
+static inline int getsockname(int fd, struct sockaddr *at, socklen_t *n) { errno = ENOSYS; return -1; }
+static inline int getpeername(int fd, struct sockaddr *at, socklen_t *n) { errno = ENOSYS; return -1; }
+static inline ssize_t sendto(int fd, const void *data, size_t n, int flags, const struct sockaddr *to, socklen_t len) { errno = ENOSYS; return -1; }
+static inline ssize_t recvfrom(int fd, void *data, size_t n, int flags, struct sockaddr *from, socklen_t *len) { errno = ENOSYS; return -1; }
+struct sockaddr_un { sa_family_t sun_family; char sun_path[108]; };
 #else
+#include <netdb.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #endif
@@ -646,6 +767,7 @@ fsh_str *fsh_rt_str_substring(fsh_str *s, int64_t start, int64_t end, int32_t en
 // program without one.
 __attribute__((weak)) const int32_t fsh_panic_abort = 0;
 
+#ifndef __wasi__
 static _Unwind_Reason_Code fsh_unwound(int version, _Unwind_Action actions, _Unwind_Exception_Class kind,
                                        struct _Unwind_Exception *exception, struct _Unwind_Context *context, void *data) {
   if (actions & _UA_END_OF_STACK) {
@@ -654,6 +776,7 @@ static _Unwind_Reason_Code fsh_unwound(int version, _Unwind_Action actions, _Unw
   }
   return _URC_NO_REASON;
 }
+#endif
 
 // Every panic: the message, after what was already printed, then an abort, or an unwind that
 // runs each frame's drops and exits with 101 once it reaches the end of the stack.
@@ -1144,7 +1267,9 @@ static _Thread_local int64_t fsh_reading_count = 0, fsh_reading_capacity = 0;
 static _Thread_local int32_t fsh_in_js = 0;
 
 void fsh_rt_panic(const char *message) {
+#ifndef __wasi__
   static _Thread_local struct _Unwind_Exception exception;
+#endif
   if (!fsh_reason_given) {
     const char *nl = strncmp(message, "panicked ", 9) == 0 ? strchr(message, '\n') : NULL;
     const char *reason = nl ? nl + 1 : message;
@@ -1176,13 +1301,21 @@ void fsh_rt_panic(const char *message) {
   // An unwind pops no frame, and a drop it runs may panic again: that panic starts from nothing,
   // rather than walking frames the unwind already left. A task's poller gets its own stack back.
   fsh_rt_frames = NULL;
+#ifdef __wasi__
+  // A module can't unwind, and WASI has no signal to abort with, so a panic ends it as one that
+  // unwound to the end of the stack does.
+  fsh_panic_began = 1;
+  exit(101);
+#endif
   if (fsh_panic_abort) abort();
   if (fsh_in_js > 0) {
     fsh_panic_began = 1;
     exit(101);
   }
+#ifndef __wasi__
   exception.exception_class = 0x46495348; // "FISH"
   _Unwind_ForcedUnwind(&exception, fsh_unwound, NULL);
+#endif
   fsh_panic_began = 1;
   exit(101);
 }
@@ -1344,6 +1477,21 @@ static uint64_t fsh_sim_user_rng[4];
 static uint64_t fsh_sim_sched_rng[4];
 static int64_t fsh_sim_now_ns = 0;
 static const int64_t FSH_SIM_EPOCH_MS = 1704067200000LL; // 2024-01-01T00:00:00.000Z
+// Set on WASI, which gives a module one thread: the simulation's scheduler runs its tasks, on the
+// real clocks, with the OS's randomness and without the fault injection.
+static int32_t fsh_sim_real = 0;
+#define FSH_VIRTUAL (fsh_sim_active && !fsh_sim_real)
+
+// The real monotonic clock, which the scheduler's time follows when it runs on real time.
+static int64_t fsh_mono_ns(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
+}
+
+static void fsh_sim_tick(void) {
+  if (fsh_sim_real) fsh_sim_now_ns = fsh_mono_ns();
+}
 
 static uint64_t fsh_sim_splitmix64(uint64_t *state) {
   uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
@@ -1376,6 +1524,18 @@ static void fsh_sim_init(void) {
   if (fsh_sim_inited) return;
   fsh_sim_inited = 1;
   const char *env = getenv("FISH_SIM_SEED");
+#ifdef __wasi__
+  if (!env || !env[0]) {
+    fsh_sim_active = 1;
+    fsh_sim_real = 1;
+    fsh_sim_tick();
+    uint64_t seed = 0;
+    if (getentropy(&seed, sizeof seed) != 0) seed = (uint64_t)fsh_sim_now_ns;
+    uint64_t ss = seed ^ 0xbf58476d1ce4e5b9ULL;
+    for (int i = 0; i < 4; i++) fsh_sim_sched_rng[i] = fsh_sim_splitmix64(&ss);
+    return;
+  }
+#endif
   if (!env || !env[0]) return;
   const char *p = env;
   while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
@@ -1420,7 +1580,7 @@ static uint64_t fsh_map_seed = 0;
 __attribute__((constructor)) static void fsh_map_seeding(void) {
   fsh_sim_init();
   if (fsh_map_seed != 0) return;
-  if (fsh_sim_active) {
+  if (FSH_VIRTUAL) {
     uint64_t st = fsh_sim_seed_val ^ 0x243f6a8885a308d3ULL;
     fsh_map_seed = fsh_sim_splitmix64(&st) | 1;
     return;
@@ -2094,7 +2254,7 @@ void fsh_rt_dyn_free(char *p) {
 // Milliseconds on the monotonic clock.
 int64_t fsh_rt_now_ms(void) {
   fsh_sim_init();
-  if (fsh_sim_active) return fsh_sim_now_ns / 1000000;
+  if (FSH_VIRTUAL) return fsh_sim_now_ns / 1000000;
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
@@ -2103,7 +2263,7 @@ int64_t fsh_rt_now_ms(void) {
 // The time now as an HTTP Date header writes it, like "Sun, 06 Nov 1994 08:49:37 GMT".
 fsh_str *fsh_rt_http_date(void) {
   fsh_sim_init();
-  time_t now = fsh_sim_active ? (time_t)(FSH_SIM_EPOCH_MS / 1000 + fsh_sim_now_ns / 1000000000) : time(NULL);
+  time_t now = FSH_VIRTUAL ? (time_t)(FSH_SIM_EPOCH_MS / 1000 + fsh_sim_now_ns / 1000000000) : time(NULL);
   struct tm at;
   gmtime_r(&now, &at);
   char text[64];
@@ -3484,7 +3644,7 @@ const char *fsh_rt_env_at(int64_t i) {
 // Date.now(): the wall clock's milliseconds since the Unix epoch.
 int64_t fsh_rt_date_now(void) {
   fsh_sim_init();
-  if (fsh_sim_active) return FSH_SIM_EPOCH_MS + fsh_sim_now_ns / 1000000;
+  if (FSH_VIRTUAL) return FSH_SIM_EPOCH_MS + fsh_sim_now_ns / 1000000;
   struct timespec t;
   clock_gettime(CLOCK_REALTIME, &t);
   return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
@@ -3493,7 +3653,7 @@ int64_t fsh_rt_date_now(void) {
 // The wall clock's nanoseconds since the Unix epoch, as OTLP writes a span's times.
 int64_t fsh_rt_unix_nanos(void) {
   fsh_sim_init();
-  if (fsh_sim_active) {
+  if (FSH_VIRTUAL) {
     int64_t base = FSH_SIM_EPOCH_MS * 1000000LL;
     return fsh_sim_now_ns > INT64_MAX - base ? INT64_MAX : base + fsh_sim_now_ns;
   }
@@ -3506,7 +3666,7 @@ int64_t fsh_rt_unix_nanos(void) {
 // and getrandom(2) on Linux, which blocks only until the pool is first seeded at boot.
 void fsh_rt_random_fill(uint8_t *at, int64_t count) {
   fsh_sim_init();
-  if (fsh_sim_active) {
+  if (FSH_VIRTUAL) {
     while (count > 0) {
       uint64_t w = fsh_sim_next_u64(fsh_sim_user_rng);
       int64_t n = count < 8 ? count : 8;
@@ -3518,6 +3678,14 @@ void fsh_rt_random_fill(uint8_t *at, int64_t count) {
   }
 #ifdef __APPLE__
   arc4random_buf(at, (size_t)count);
+#elif defined(__wasi__)
+  // WASI's random_get, which getentropy calls, takes at most 256 bytes at a time.
+  while (count > 0) {
+    int64_t n = count < 256 ? count : 256;
+    if (getentropy(at, (size_t)n) != 0) fsh_rt_panic("the OS's secure random source failed\n");
+    at += n;
+    count -= n;
+  }
 #else
   while (count > 0) {
     ssize_t got = getrandom(at, (size_t)count, 0);
@@ -3708,7 +3876,7 @@ __attribute__((constructor)) static void fsh_start_clock(void) {
 
 double fsh_rt_performance_now(void) {
   fsh_sim_init();
-  if (fsh_sim_active) return (double)fsh_sim_now_ns / 1e6;
+  if (FSH_VIRTUAL) return (double)fsh_sim_now_ns / 1e6;
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (double)(t.tv_sec - fsh_started.tv_sec) * 1e3 + (double)(t.tv_nsec - fsh_started.tv_nsec) / 1e6;
@@ -5295,7 +5463,7 @@ static pthread_t fsh_timer_thread;
 
 static int64_t fsh_now(void) {
   fsh_sim_init();
-  if (fsh_sim_active) return fsh_sim_now_ns;
+  if (FSH_VIRTUAL) return fsh_sim_now_ns;
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   return (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
@@ -8045,7 +8213,9 @@ static int64_t fsh_watch_take(fsh_watch *w, uint8_t *out, int64_t size, int64_t 
   return fsh_watch_put(w, out, size, at, 'c', name);
 }
 #else
+#ifndef __wasi__
 #include <sys/inotify.h>
+#endif
 // inotify watches a directory's files itself; a recursive watch adds each directory below.
 static void fsh_watch_add(fsh_watch *w, const char *rel, int dir) {
   char *path = fsh_watch_join(w->root, rel);
@@ -9248,7 +9418,7 @@ static int fsh_sim_normalize_host(fsh_str *host, int64_t port, char out[64], int
 // Public C entry points for the std:sim module.
 int32_t fsh_rt_sim_enabled(void) {
   fsh_sim_init();
-  return fsh_sim_active;
+  return FSH_VIRTUAL;
 }
 
 uint64_t fsh_rt_sim_seed(void) {
@@ -9258,12 +9428,12 @@ uint64_t fsh_rt_sim_seed(void) {
 
 int64_t fsh_rt_sim_now(void) {
   fsh_sim_init();
-  return fsh_sim_active ? fsh_sim_now_ns / 1000000 : fsh_rt_now_ms();
+  return FSH_VIRTUAL ? fsh_sim_now_ns / 1000000 : fsh_rt_now_ms();
 }
 
 void fsh_rt_sim_advance(int64_t ms) {
   fsh_sim_init();
-  if (!fsh_sim_active || ms <= 0) return;
+  if (!FSH_VIRTUAL || ms <= 0) return;
   if (ms > (INT64_MAX - fsh_sim_now_ns) / 1000000) fsh_sim_now_ns = INT64_MAX;
   else fsh_sim_now_ns += ms * 1000000LL;
   fsh_sim_fire_due();
@@ -9271,7 +9441,7 @@ void fsh_rt_sim_advance(int64_t ms) {
 
 void fsh_rt_sim_partition(const char *a, const char *b) {
   fsh_sim_init();
-  if (!fsh_sim_active || !a || !b) return;
+  if (!FSH_VIRTUAL || !a || !b) return;
   char ka[96], kb[96];
   snprintf(ka, sizeof ka, "%s", a);
   snprintf(kb, sizeof kb, "%s", b);
@@ -9293,7 +9463,7 @@ void fsh_rt_sim_partition(const char *a, const char *b) {
 
 void fsh_rt_sim_heal(const char *a, const char *b) {
   fsh_sim_init();
-  if (!fsh_sim_active || !a || !b) return;
+  if (!FSH_VIRTUAL || !a || !b) return;
   char ka[96], kb[96];
   snprintf(ka, sizeof ka, "%s", a);
   snprintf(kb, sizeof kb, "%s", b);
@@ -9309,7 +9479,7 @@ void fsh_rt_sim_heal(const char *a, const char *b) {
 
 void fsh_rt_sim_set_delay(int64_t min_ms, int64_t max_ms) {
   fsh_sim_init();
-  if (!fsh_sim_active) return;
+  if (!FSH_VIRTUAL) return;
   if (min_ms < 0) min_ms = 0;
   if (max_ms < min_ms) max_ms = min_ms;
   fsh_sim_delay_min_ms = min_ms;
@@ -9318,7 +9488,7 @@ void fsh_rt_sim_set_delay(int64_t min_ms, int64_t max_ms) {
 
 void fsh_rt_sim_set_drop_rate(double rate) {
   fsh_sim_init();
-  if (!fsh_sim_active) return;
+  if (!FSH_VIRTUAL) return;
   if (isnan(rate) || rate < 0.0) rate = 0.0;
   if (rate > 1.0) rate = 1.0;
   fsh_sim_drop_rate = rate;
@@ -9326,7 +9496,7 @@ void fsh_rt_sim_set_drop_rate(double rate) {
 
 void fsh_rt_sim_reset_faults(void) {
   fsh_sim_init();
-  if (!fsh_sim_active) return;
+  if (!FSH_VIRTUAL) return;
   fsh_sim_partition_count = 0;
   fsh_sim_delay_min_ms = 0;
   fsh_sim_delay_max_ms = 0;
@@ -11250,6 +11420,7 @@ static int32_t fsh_sim_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_
     }
     for (;;) {
       if (fsh_panicked) break;
+      fsh_sim_tick();
       if (phase == 0 && __atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) == FSH_DONE) break;
       if (phase == 1) {
         int32_t claimed = __atomic_load_n(&fsh_timeouts_claimed, __ATOMIC_ACQUIRE);
@@ -11257,14 +11428,30 @@ static int32_t fsh_sim_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_
       }
       fsh_sim_fire_due();
       if (fsh_sim_ready_count > 0) {
-        int64_t idx = (int64_t)(fsh_sim_next_u64(fsh_sim_sched_rng) % (uint64_t)fsh_sim_ready_count);
-        fsh_task *t = fsh_sim_ready[idx];
-        fsh_sim_ready[idx] = fsh_sim_ready[--fsh_sim_ready_count];
+        // On real time, tasks run in the order they woke, as a native worker's queue runs them.
+        // ponytail: taking the first shifts the rest; a ring buffer if thousands wait at once.
+        fsh_task *t;
+        if (fsh_sim_real) {
+          t = fsh_sim_ready[0];
+          memmove(fsh_sim_ready, fsh_sim_ready + 1, (size_t)(--fsh_sim_ready_count) * sizeof *fsh_sim_ready);
+        } else {
+          int64_t idx = (int64_t)(fsh_sim_next_u64(fsh_sim_sched_rng) % (uint64_t)fsh_sim_ready_count);
+          t = fsh_sim_ready[idx];
+          fsh_sim_ready[idx] = fsh_sim_ready[--fsh_sim_ready_count];
+        }
         fsh_run(t);
         continue;
       }
       int64_t next_ns = 0;
       if (fsh_sim_next_event_ns(&next_ns)) {
+        // On real time nothing is due before the next timer, so the thread sleeps until it, in
+        // WASI's poll_oneoff.
+        if (fsh_sim_real && next_ns > fsh_sim_now_ns) {
+          int64_t wait = next_ns - fsh_sim_now_ns;
+          struct timespec for_ = { (time_t)(wait / 1000000000), (long)(wait % 1000000000) };
+          nanosleep(&for_, NULL);
+          fsh_sim_tick();
+        }
         if (next_ns > fsh_sim_now_ns) fsh_sim_now_ns = next_ns;
         fsh_sim_fire_due();
         continue;
@@ -11274,7 +11461,8 @@ static int32_t fsh_sim_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_
         int32_t claimed = __atomic_load_n(&fsh_timeouts_claimed, __ATOMIC_ACQUIRE);
         if (fsh_timeouts_task ? __atomic_load_n(&fsh_timeouts_task->state, __ATOMIC_ACQUIRE) == FSH_DONE : !claimed) break;
       }
-      fprintf(stderr, "fish sim deadlock (seed %llu) at %lldms: no runnable tasks, timers, or network events\n",
+      if (fsh_sim_real) fputs("fish: deadlock: every task waits, and no timer or network event can wake one\n", stderr);
+      else fprintf(stderr, "fish sim deadlock (seed %llu) at %lldms: no runnable tasks, timers, or network events\n",
         (unsigned long long)fsh_sim_seed_val, (long long)(fsh_sim_now_ns / 1000000));
       for (fsh_task *a = fsh_alive; a; a = a->next) {
         const char *aw = a->awaiting ? a->awaiting : "idle";
