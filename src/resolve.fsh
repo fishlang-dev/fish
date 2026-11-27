@@ -1189,7 +1189,13 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     if (branded !== undefined) return branded;
     let sides: Type[] = [];
     for (let i: usize = 0; i < nodes.length; i++) {
-      const s = resolved[i]!;
+      // A type parameter holding the type it stands for is that type here.
+      let s = resolved[i]!;
+      while (typeof s !== "string" && this.host.tables.typing.kindOf(s) === "param") {
+        const held = this.host.tables.typing.rec(s as ParamType).concrete;
+        if (held === undefined) break;
+        s = held;
+      }
       const kind = this.kindOf(s);
       if (kind === "object" || kind === "interface") {
         sides.push(s);
@@ -1199,6 +1205,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
         sides.push(s);
         continue;
       }
+      // One over a type parameter is computed for each instance, its type argument known.
+      if (kind === "param") standIn(this.host.tables.typing, [s], "an intersection", spanOf(nodes[i]!), false, false);
       const what = kind === undefined || kind === "literal" ? "primitive types" : kind === "union" ? "unions of other than object types" : SIDE_FORMS.get(kind)!;
       throw unsupported(`intersections with ${what}`, nodes[i]!);
     }

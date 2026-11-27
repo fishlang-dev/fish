@@ -17,11 +17,11 @@ import { alwaysReturns, assignedNames, assignsOwn, assignsOwnIn, closureAssigned
 import { declareEnum, enumMemberNames, enumMemberOf, enumType, settleEnum, type EnumHost, type EnumInfo, type EnumInstance } from "./enums.fsh";
 import { bindingKey, covers, either, guard, isPath, presentKey, type Facts, type Guard, type GuardHost } from "./narrow.fsh";
 import { comparable, numberMembers, objectsMeet } from "./unions.fsh";
-import { CLASS_ASKER, comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.fsh";
+import { CLASS_ASKER, comptimeName, infer, GenericClasses, GenericClassesState, Instancing, InstancingState, perInstanceBody, typeParamsOf, type GenericClassesHost, type InstancingHost } from "./generics.fsh";
 import { unsatisfied, type Members, type Refused } from "./interfaces.fsh";
 import { Registry, RegistryState, type RegistryHost } from "./registry.fsh";
 import { addAlias, traitAlias, paramName, Resolver, ResolverState, tagStrings, typeName, type ResolverHost } from "./resolve.fsh";
-import { openParam, perInstance } from "./typefns.fsh";
+import { openParam, perInstance, PER_INSTANCE } from "./typefns.fsh";
 import { lowerDefaults, writtenName } from "./defaults.fsh";
 import { ASYNC_DISPOSE, DISPOSE, LIVE, idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
 import { unsupported, unsupportedDeclaration } from "./unsupported.fsh";
@@ -1780,6 +1780,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     // Its definition's own instance, left queued by a signature that failed before its body was
     // checked, stands for no call; checked with its placeholders, it would fail the same way.
     this.instancingState.perInstance.add(id);
+    if (this.tables.arenas.bodyOf(id).owner !== undefined) this.instancingState.perInstanceMembers.add(this.tables.arenas.bodyOf(id).start);
     const made = this.instancingState.definitions.get(id);
     if (made !== undefined) this.instancingState.pending = this.instancingState.pending.filter((p) => p !== made);
   }
@@ -1878,7 +1879,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       // placeholder of its own; the instance it makes computes it. A generic definition still
       // refuses it, which its check below takes as checking per instance.
       if (this.definingGeneric || !(e instanceof CompileError) || !perInstance(e)) throw e;
-      return this.tables.typing.typeParameter("per instance", undefined, undefined);
+      return this.tables.typing.typeParameter(PER_INSTANCE, undefined, undefined);
     }
   }
 
@@ -2103,13 +2104,16 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       const reported = this.errors.length;
       try {
         this.definingGeneric = this.instancing().generic(id);
+        this.tables.typing.openWithin = this.definingGeneric;
         this.perInstanceSeen = false;
         const definition = this.definition(id);
         this.checkBody(definition);
         this.definingGeneric = false;
+        this.tables.typing.openWithin = this.definingGeneric;
         if (this.perInstanceSeen) this.perInstanceOnly(id, reported);
       } catch (e) {
         this.definingGeneric = false;
+        this.tables.typing.openWithin = this.definingGeneric;
         // `keyof T` and `T[K]` over the function's own type parameters are computed per instance,
         // so a generic function using them is checked as each call instantiates it.
         if (e instanceof CompileError && perInstance(e) && this.instancing().generic(id)) {
@@ -2171,13 +2175,36 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         if (this.registryState.unsettled.length > 0) {
           const next = this.registryState.unsettled.shift()!;
           this.settling = next;
+          // A generic class's definition, like a generic function's, leaves a member needing types
+          // only each instance can compute to be checked in each instance of the class; so does an
+          // instance of it made with a definition's placeholders.
+          const placeholder = !this.instancingState.concreteness.concrete(this.tables.typing, this.tables.arenas.classOf(next).type);
+          const defining = placeholder || [...this.genericClassesState.defined.values()].includes(next);
           for (const f of this.registry().settle(next)) {
+            const reported = this.errors.length;
             try {
+              this.definingGeneric = defining || this.instancing().generic(f);
+              this.tables.typing.openWithin = this.definingGeneric;
+              this.perInstanceSeen = false;
               const definition = this.definition(f);
               this.disposerMade(next, f, definition);
-            this.checkBody(definition);
+              this.checkBody(definition);
+              this.definingGeneric = false;
+              this.tables.typing.openWithin = this.definingGeneric;
+              if (this.perInstanceSeen) this.perInstanceOnly(f, reported);
             } catch (e) {
+              this.definingGeneric = false;
+              this.tables.typing.openWithin = this.definingGeneric;
               if (!(e instanceof CompileError)) throw e;
+              if (perInstance(e) && (defining || this.instancing().generic(f))) {
+                this.perInstanceOnly(f, reported);
+                continue;
+              }
+              // Such a member of an instance made with placeholders stands for no code.
+              if (placeholder && ![...this.genericClassesState.defined.values()].includes(next) && perInstanceBody(this.tables, this.instancingState, f)) {
+                this.errors.splice(reported as i64);
+                continue;
+              }
               this.recover(e);
             }
           }
@@ -2256,7 +2283,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       const i = this.tables.arenas.instanceOf(id);
       const b = bodyOf(this.tables.arenas, i);
       // An instance's own copy of a function checked per instance is compiled as its original is.
-      const as = b.copyOf !== undefined && this.instancingState.perInstance.has(b.copyOf) ? this.tables.arenas.bodyOf(b.copyOf).id : b.id;
+      const as = b.copyOf !== undefined && perInstanceBody(this.tables, this.instancingState, b.copyOf) ? this.tables.arenas.bodyOf(b.copyOf).id : b.id;
       if (i.concrete && compiled.has(as) && b.js === undefined && !checkedOnly(this.tables, i)) compiledIds.push(id);
     }
     for (const c of this.closures) {
@@ -3510,7 +3537,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       // A function checked only per instance lowers its body by its own types, so each instance
       // is checked and compiled from a copy of its own.
       const shared = this.tables.arenas.instanceOf(id).body;
-      if (this.tables.arenas.instanceOf(id).concrete && this.instancingState.perInstance.has(shared)) {
+      if (this.tables.arenas.instanceOf(id).concrete && perInstanceBody(this.tables, this.instancingState, shared)) {
         const apart = instanceCopy(this.tables, shared);
         this.tables.arenas.instanceMut(id).body = apart;
       }
@@ -3538,6 +3565,13 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           if (stopped.keeps === false) stopped.keeps = undefined;
           const body = this.tables.arenas.instanceOf(id).body;
           if (!(e instanceof CompileError)) throw e;
+          // An instance made with a definition's placeholders that needs a type only a concrete
+          // instance can compute, or of a body checked only per instance, stands for no code: each
+          // concrete instance is checked itself.
+          if (this.demanded === 0 && !this.definingGeneric && !this.tables.arenas.instanceOf(id).concrete && (perInstance(e) || perInstanceBody(this.tables, this.instancingState, body))) {
+            this.done.add(id);
+            return;
+          }
           if (this.demanded === 0) {
             if (expected !== undefined) this.lentDiffers(id, lender!.from, `its own check fails: ${e.message}`);
             const thrown = this.tables.arenas.bodyOf(body).signature === true ? this.incompatible(body, e) : e;

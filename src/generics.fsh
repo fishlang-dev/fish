@@ -8,7 +8,7 @@ import { unsupported } from "./unsupported.fsh";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.fsh";
 import type { ClassNode, Expr, Id, Param, Span, TypeMember, TypeNode, TypeParam } from "./parser.fsh";
 import { paramName, unboxedClosure } from "./resolve.fsh";
-import { perInstance } from "./typefns.fsh";
+import { perInstance, perInstanceStandIn } from "./typefns.fsh";
 import { INTERIORS, ITERATOR, TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.fsh";
 import { NodeMap, NodeSet, forEachChild, nextId, renumberTypeNode, Rewrites, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
 import { cloneClassNode, cloneTypeNode, cloneTypeParam, rebuiltTypeNode } from "./rebuild.fsh";
@@ -53,6 +53,13 @@ export function placeholders<R extends BoundResolver>(r: Mut<R>, params: Ref<Typ
         continue;
       }
       const kind = typeof t === "string" ? undefined : r.tables.typing.kindOf(t);
+      // Read where the checker stands in for a type known only per instance, as a call inferring
+      // its callee's type arguments does, the bound is that stand-in, and is checked per instance.
+      if (perInstanceStandIn(r.tables.typing, t)) {
+        const unbound = concrete !== undefined ? concrete.get(p.name) : undefined;
+        scope.set(p.name, unbound !== undefined ? unbound : r.tables.typing.typeParameter(p.name, undefined, undefined));
+        continue;
+      }
       if (kind === "interface" || kind === "object") bound = t as ObjectType | InterfaceType;
       else if (valueBound(r.tables.typing, t)) within = t;
       else throw new CompileError("E0107", `a type parameter's bound must be an interface, an object type, or a union, primitive, literal or brand type, not '${r.tables.typing.show(t)}'`, p.constraint.start, p.constraint.end);
@@ -137,6 +144,37 @@ function literalArgument(typing: Mut<Typing>, f: Ref<Body>, name: string, args: 
     if (value !== undefined && namesParam(f.params[i]!, name)) return typing.literalType(value);
   }
   return undefined;
+}
+
+// So is an array literal of literals given for a `K[]` parameter, as `pick(["a", "b"])` infers
+// `"a" | "b"`.
+function literalElementsArgument(typing: Mut<Typing>, f: Ref<Body>, name: string, args: Ref<Expr[]>): Type | undefined {
+  for (let i: usize = 0; i < f.params.length && i < args.length; i++) {
+    const values = namesElement(f.params[i]!, name) ? literalElements(args[i]!) : undefined;
+    if (values === undefined) continue;
+    let parts: Type[] = [];
+    for (const v of values) parts.push(typing.literalType(v));
+    return typing.unionType(parts);
+  }
+  return undefined;
+}
+
+// Whether a parameter is typed as an array of the type parameter `name`.
+function namesElement(p: Ref<Param>, name: string): boolean {
+  if (p.type === undefined || p.type.kind !== "array") return false;
+  return p.type.element.kind === "ref" && p.type.element.name === name && p.type.element.args.length === 0;
+}
+
+// The values of an array literal holding only literals.
+function literalElements(e: Ref<Expr>): (string | bigint | boolean)[] | undefined {
+  if (e.kind !== "array" || e.elements.length === 0) return undefined;
+  let out: (string | bigint | boolean)[] = [];
+  for (const x of e.elements) {
+    const v = x !== undefined ? literalValue(x) : undefined;
+    if (v === undefined) return undefined;
+    out.push(v);
+  }
+  return out;
 }
 
 // Whether a parameter is typed as the type parameter `name` itself.
@@ -562,6 +600,13 @@ export function comptimeName(p: Ref<Param>): string {
 // Where a class's ids start among those that ask for instances.
 export const CLASS_ASKER: usize = 1 << 40;
 
+// Whether a body, or the one it is an instance's copy of, is checked only per instance.
+export function perInstanceBody(tables: Ref<Tables>, state: Ref<InstancingState>, id: BodyId): boolean {
+  const f = tables.arenas.bodyOf(id);
+  if (state.perInstance.has(id) || (f.owner !== undefined && state.perInstanceMembers.has(f.start))) return true;
+  return f.copyOf !== undefined && f.copyOf !== id && perInstanceBody(tables, state, f.copyOf);
+}
+
 export class InstancingState {
   concreteness: Concreteness;
   explicit = new Map<BodyId, Map<string, Type>>();
@@ -575,6 +620,9 @@ export class InstancingState {
   // Generic functions whose definitions need types only an instance can compute, as `T[K]` with
   // `K extends keyof T` does, so each instance's body sees its concrete types themselves.
   perInstance = new Set<BodyId>();
+  // Class members so checked, by where they are written, which every instance of a generic class
+  // shares, so each instance's own body for the member sees its class's type arguments too.
+  perInstanceMembers = new Set<usize>();
   // Instances still to check.
   pending: InstanceId[] = [];
   // What a call made inside an instance passed for each type parameter, where that was one of
@@ -886,6 +934,9 @@ export class Instancing<H extends InstancingHost> {
       // `lt(1)` with `K extends 1 | 2` infers `1` in TypeScript.
       const literal = typeArgs.length === 0 && !this.host.tables.typing.fits(bindings.get(p.name)!, bound) ? literalArgument(this.host.tables.typing, f, p.name, args) : undefined;
       if (literal !== undefined && this.host.tables.typing.fits(literal, bound)) bindings.set(p.name, literal);
+      // So does an array of literals, which is named by its literals when the bound refuses them.
+      const listed = typeArgs.length === 0 && !this.host.tables.typing.fits(bindings.get(p.name)!, bound) ? literalElementsArgument(this.host.tables.typing, f, p.name, args) : undefined;
+      if (listed !== undefined) bindings.set(p.name, listed);
       let members = this.host.members();
       checkBound(bindings.get(p.name)!, bound, members, at);
     }
@@ -995,6 +1046,13 @@ export class Instancing<H extends InstancingHost> {
     const bindings = merged(this.host.tables.arenas.instanceOf(id).bindings, undefined);
     const outer = this.host.classParams(f);
     const outerCount = outer.length;
+    // A member checked only per instance sees its class's type arguments themselves, as this
+    // instance of the class holds them.
+    if (outerCount > 0 && perInstanceBody(this.host.tables, this.host.instancingState, f.bodyId)) {
+      let held = merged(bindings, undefined);
+      if (f.scope !== undefined) for (const [n, t] of f.scope) if (!held.has(n)) held.set(n, t);
+      if (this.known(held, outer.map((p) => p.name))) return held;
+    }
     let scope = new Map<string, Type>();
     if (outer.length > 0 && this.known(bindings, outer.map((p) => p.name))) scope = placeholders(this.host, outer, undefined, merged(bindings, undefined));
     else if (f.scope !== undefined) for (const [n, t] of f.scope) scope.set(n, t);
@@ -1015,7 +1073,7 @@ export class Instancing<H extends InstancingHost> {
       }
       return scope;
     }
-    if (outerCount === 0 && this.host.instancingState.perInstance.has(f.copyOf ?? f.bodyId)) return bindings;
+    if (perInstanceBody(this.host.tables, this.host.instancingState, f.bodyId)) return bindings;
     for (const [name, t] of placeholders(this.host, typeParamsOf(f), merged(scope, undefined), merged(bindings, undefined))) scope.set(name, t);
     for (const [i, bound] of this.implicitOf(f.bodyId)) {
       const shown = this.host.tables.typing.show(bound);
@@ -1070,7 +1128,7 @@ export class Instancing<H extends InstancingHost> {
   private explicitPlaceholders(this: Mut<this>, id: BodyId): Map<string, Type> {
     // An instance's own copy of a function checked per instance has its original's parameters.
     const original = this.host.tables.arenas.bodyOf(id).copyOf;
-    if (original !== undefined && this.host.instancingState.perInstance.has(original)) return this.explicitPlaceholders(original);
+    if (original !== undefined && perInstanceBody(this.host.tables, this.host.instancingState, original)) return this.explicitPlaceholders(original);
     let made = this.host.instancingState.explicit.get(id);
     if (made === undefined) {
       const f = cloneSignature(this.host.tables.arenas.bodyOf(id));
@@ -1133,7 +1191,16 @@ export class Instancing<H extends InstancingHost> {
     for (const p of f.params) {
       const i = index;
       index++;
-      const written = p.type !== undefined ? this.host.resolveIn(scope, p.type) : undefined;
+      // A parameter whose type only each instance can compute, as `Partial<DB[T]>` in a generic
+      // class's member, is typed in each instance rather than made a type parameter.
+      let written: Type | undefined = undefined;
+      try {
+        written = p.type !== undefined ? this.host.resolveIn(scope, p.type) : undefined;
+      } catch (e) {
+        if (e instanceof CompileError && perInstance(e)) continue;
+        throw e;
+      }
+      if (written !== undefined && perInstanceStandIn(this.host.tables.typing, written)) continue;
       // A reference to an interface or object type is one over what it borrows.
       const w = written !== undefined && typeof written !== "string" ? this.host.tables.typing.rec(written) : undefined;
       const type = w?.kind === "ref" ? w.to : written;
@@ -1526,6 +1593,9 @@ export class GenericClasses<H extends GenericClassesHost> {
       for (const p of params) {
         if (p.constraint === undefined) continue;
         const bound = this.host.resolveIn(scope, p.constraint);
+        // A bound over an instance made with placeholders, as `T extends keyof DB` is in a generic
+        // body's definition, is checked by each concrete instance instead.
+        if (perInstanceStandIn(this.host.tables.typing, bound)) continue;
         let members = this.host.members();
         checkBound(scope.get(p.name)!, bound, members, use.at);
       }
