@@ -235,3 +235,28 @@ async function main(): Promise<void> throws IoError {
   await fh.close();
   rmSync(dir, { recursive: true });
 }
+// case: fs_detached_pool_job_at_shutdown
+// expect: exiting
+// Detached async file pool jobs in flight at shutdown must not UAF fsh_injected.ring (F-2493).
+import { readFile } from "node:fs/promises";
+
+async function reader(): Promise<i64> {
+  let n: i64 = 0;
+  for (let i = 0; i < 8; i++) {
+    try {
+      const data = await readFile("/dev/null");
+      n += data.length as i64;
+    } catch (_e) {
+      return n;
+    }
+  }
+  return n;
+}
+
+async function main() {
+  for (let i = 0; i < 16; i++) {
+    const _h = spawn(reader());
+  }
+  await yieldNow();
+  console.log("exiting");
+}
