@@ -9440,6 +9440,51 @@ export function compress(options: CompressOptions = {}): (req: Request, next: (r
   };
 }
 `,
+  // CORS for a Router, imported as std:cors, as Hono's cors middleware.
+  cors: String.raw`
+// origins are the origins allowed, "*" for any; methods are those a preflight allows; credentials
+// lets a browser send cookies and read the response.
+export type CorsOptions = { origins?: string[]; methods?: string[]; credentials?: boolean };
+
+// The Access-Control-Allow-Origin a request from origin gets, or "" for none. With credentials a
+// "*" can't be sent, so the origin itself is.
+export function allowedOrigin(origins: Ref<string[]>, origin: string, credentials: boolean): string {
+  if (origins.includes("*")) return credentials ? origin : "*";
+  return origins.includes(origin) ? origin : "";
+}
+
+// A Router middleware answering preflight requests itself and adding the Access-Control headers
+// to every other response, the router's 404 and 405 included.
+export function cors(options: CorsOptions = {}): (req: Request, next: (req: Request) => Promise<Response>) => Promise<Response> {
+  const origins = options.origins ?? ["*"];
+  const methods = (options.methods ?? ["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH"]).join(", ");
+  const credentials = options.credentials ?? false;
+  const varies = credentials || !origins.includes("*");
+  return async (req, next) => {
+    const allow = allowedOrigin(origins, req.headers.get("origin") ?? "", credentials);
+    let res: Response;
+    if (req.method === "OPTIONS" && req.headers.has("access-control-request-method")) {
+      res = new Response(null, { status: 204 });
+      if (allow !== "") {
+        res.headers.set("access-control-allow-methods", methods.clone());
+        const asked = req.headers.get("access-control-request-headers");
+        if (asked !== null) res.headers.set("access-control-allow-headers", asked);
+      }
+    } else {
+      res = await next(req);
+    }
+    if (allow !== "") {
+      res.headers.set("access-control-allow-origin", allow);
+      if (credentials) res.headers.set("access-control-allow-credentials", "true");
+    }
+    if (varies) {
+      const had = res.headers.get("vary");
+      res.headers.set("vary", had === null ? "Origin" : had + ", Origin");
+    }
+    return res;
+  };
+}
+`,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
 declare function write(fd: i32, data: Ptr<u8>, length: usize): isize;
@@ -13170,7 +13215,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log", "durable", "mcu", "comptime"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "cors", "query", "s3", "log", "durable", "mcu", "comptime"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
