@@ -1889,6 +1889,22 @@ class Response {
     return this.#body;
   }
 
+  // Whether the body is streamed, in text pieces or bytes.
+  __streamed(): boolean {
+    return this.#stream.update((s) => s.length > 0) || this.#bytes.update((s) => s.length > 0);
+  }
+
+  // Replaces the body, as std:compress does with the body coded.
+  __setBody(this: Mut<this>, body: u8[] | ReadableStream<u8[]>) {
+    this.#stream.update((s) => { while (s.length > 0) s.pop(); });
+    this.#bytes.update((s) => { while (s.length > 0) s.pop(); });
+    if (body instanceof ReadableStream) {
+      this.#body = [];
+      const chunks = body.__values();
+      this.#bytes.update((s) => { s.push(chunks); });
+    } else this.#body = body;
+  }
+
   // The body as a stream of bytes, or null when there is none. A streamed body is handed over
   // once, as reading it consumes it; its bytes are read from the stream, not kept.
   get body(): ReadableStream<u8[]> | null {
@@ -8366,6 +8382,190 @@ export async function unzip(data: string | u8[], options: ZlibOptions = {}): Pro
   return await runAsync(true, 47, data, options);
 }
 `,
+  // Response compression for a Router, imported as std:compress: br, gzip or deflate as a
+  // request's Accept-Encoding prefers, over the system zlib and libbrotlienc.
+  compress: String.raw`
+declare function fsh_rt_zlib_open(bits: i64, level: i64): Ptr<u8>;
+declare function fsh_rt_zlib_push(stream: Ptr<u8>, data: Ptr<u8>, length: i64, finish: i64, result: MutPtr<i64>): Ptr<u8>;
+declare function fsh_rt_zlib_take(run: Ptr<u8>, out: MutPtr<u8>): void;
+declare function fsh_rt_zlib_close(stream: Ptr<u8>): void;
+declare function fsh_rt_brotli_open(quality: i64): Ptr<u8>;
+declare function fsh_rt_brotli_push(stream: Ptr<u8>, data: Ptr<u8>, length: i64, finish: i64, result: MutPtr<i64>): Ptr<u8>;
+declare function fsh_rt_brotli_take(run: Ptr<u8>, out: MutPtr<u8>): void;
+declare function fsh_rt_brotli_close(stream: Ptr<u8>): void;
+
+// threshold is the fewest bytes a body that isn't streamed needs to be compressed; a streamed
+// body's size isn't known, so it always is.
+export type CompressOptions = { threshold?: i64 };
+
+// The coding an Accept-Encoding value prefers of br, gzip and deflate, or "" for none of them:
+// the highest q above 0, a tie going to the first of those, and * giving its q to any not named.
+export function negotiate(accept: string): string {
+  const offered = ["br", "gzip", "deflate"];
+  let named: f64[] = [-1.0, -1.0, -1.0];
+  let any: f64 = -1.0;
+  for (const part of accept.split(",")) {
+    const fields = part.split(";");
+    const name = fields[0].trim().toLowerCase();
+    let q: f64 = 1.0;
+    for (let i: usize = 1; i < fields.length; i++) {
+      const field = fields[i].trim().toLowerCase();
+      if (field.startsWith("q=")) q = parseFloat(field.slice(2)) ?? 0.0;
+    }
+    if (name === "*") any = q;
+    for (let i: usize = 0; i < offered.length; i++) if (offered[i] === name) named[i] = q;
+  }
+  let best = "";
+  let top: f64 = 0.0;
+  for (let i: usize = 0; i < offered.length; i++) {
+    const q = named[i] < 0.0 ? any : named[i];
+    if (q > top) {
+      top = q;
+      best = offered[i];
+    }
+  }
+  return best;
+}
+
+// A type whose bodies come compressed already: images but SVG, audio, video, archives, web fonts
+// and PDF.
+function packedType(type: string): boolean {
+  const t = type.split(";")[0].trim().toLowerCase();
+  if (t.startsWith("image/")) return t !== "image/svg+xml";
+  if (t.startsWith("audio/") || t.startsWith("video/")) return true;
+  switch (t) {
+    case "application/zip":
+    case "application/gzip":
+    case "application/x-gzip":
+    case "application/x-bzip2":
+    case "application/x-xz":
+    case "application/x-7z-compressed":
+    case "application/vnd.rar":
+    case "application/zstd":
+    case "application/pdf":
+    case "font/woff":
+    case "font/woff2":
+      return true;
+  }
+  return false;
+}
+
+// Whether a response may be coded at all, whatever the request accepts.
+function codable(res: Ref<Response>): boolean {
+  if (res.status < 200 || res.status === 204 || res.status === 304) return false;
+  if (res.headers.has("content-encoding")) return false;
+  const cache = res.headers.get("cache-control");
+  if (cache !== null && cache.toLowerCase().includes("no-transform")) return false;
+  const type = res.headers.get("content-type");
+  return type === null || !packedType(type);
+}
+
+// Whether a Vary value already names Accept-Encoding, or every header.
+function varies(value: string): boolean {
+  for (const name of value.split(",")) {
+    const n = name.trim().toLowerCase();
+    if (n === "accept-encoding" || n === "*") return true;
+  }
+  return false;
+}
+
+// An open deflate stream or brotli encoder.
+class Coder {
+  #brotli: boolean;
+  #state: Ptr<u8>;
+
+  // gzip and deflate as HTTP names them, deflate being zlib's format; zlib's default level, and
+  // brotli's quality 4, which compresses about as well as gzip's default but faster, as dynamic
+  // responses want.
+  constructor(coding: string) {
+    this.#brotli = coding === "br";
+    this.#state = coding === "br" ? unsafe { fsh_rt_brotli_open(4) } : unsafe { fsh_rt_zlib_open(coding === "gzip" ? 31 : 15, -1) };
+  }
+
+  // The coded bytes of the next chunk, flushed so they can be sent at once, or with finish of
+  // the last, ending the stream.
+  push(this: Ref<this>, data: Ref<u8[]>, finish: boolean): u8[] {
+    if (data.length > 0) return this.feed(data, data.length as i64, finish);
+    // A pointer is taken to an element, so no input is passed as one byte of length 0.
+    const none: u8[] = [0 as u8];
+    return this.feed(none, 0, finish);
+  }
+
+  feed(this: Ref<this>, input: Ref<u8[]>, length: i64, finish: boolean): u8[] {
+    let result: i64[] = [0, 0, 0];
+    const last = finish ? 1 : 0;
+    const done = this.#brotli
+      ? unsafe { fsh_rt_brotli_push(this.#state, ptrOf(input[0]), length, last, mutPtrOf(result[0])) }
+      : unsafe { fsh_rt_zlib_push(this.#state, ptrOf(input[0]), length, last, mutPtrOf(result[0])) };
+    let out: u8[] = new Array(result[2] === 0 ? 1 : result[2]).fill(0 as u8);
+    if (this.#brotli) {
+      unsafe { fsh_rt_brotli_take(done, mutPtrOf(out[0])) };
+    } else {
+      unsafe { fsh_rt_zlib_take(done, mutPtrOf(out[0])) };
+    }
+    if (result[2] === 0) out = [];
+    assert(result[0] === 0, "compressing a response body failed");
+    return out;
+  }
+
+  // Frees the stream or encoder; nothing may be pushed after.
+  close(this: Ref<this>): void {
+    if (this.#brotli) {
+      unsafe { fsh_rt_brotli_close(this.#state) };
+    } else {
+      unsafe { fsh_rt_zlib_close(this.#state) };
+    }
+  }
+}
+
+// A streamed body's chunks coded as they come, each flushed so a stream of events still
+// reaches the client an event at a time.
+// ponytail: the coder is closed when the body ends; a body dropped part way, as when the client
+// goes, leaks it, since a generator held in a Dyn can't own a value with a drop yet.
+async function* coded(coding: string, source: ReadableStream<u8[]>): AsyncGenerator<u8[]> {
+  const coder = new Coder(coding);
+  let chunks = source;
+  for await (const chunk of chunks) {
+    const out = coder.push(chunk, false);
+    if (out.length > 0) yield out;
+  }
+  const none: u8[] = [];
+  const last = coder.push(none, true);
+  coder.close();
+  yield last;
+}
+
+// A Router middleware compressing responses with the coding the request's Accept-Encoding
+// prefers. A response already coded, marked no-transform, of a type that comes compressed, with
+// no body, or with a whole body under the threshold is sent as it is. Every response it could
+// code says Vary: Accept-Encoding, so a cache keeps each coding apart.
+export function compress(options: CompressOptions = {}): (req: Request, next: (req: Request) => Promise<Response>) => Promise<Response> {
+  const threshold = options.threshold ?? 1024;
+  return async (req, next) => {
+    const coding = req.method === "HEAD" ? "" : negotiate(req.headers.get("accept-encoding") ?? "");
+    let res = await next(req);
+    if (!codable(res)) return res;
+    const vary = res.headers.get("vary");
+    if (vary === null) res.headers.set("vary", "Accept-Encoding");
+    else if (!varies(vary)) res.headers.set("vary", vary + ", Accept-Encoding");
+    if (coding === "") return res;
+    if (res.__streamed()) {
+      const source = res.body;
+      if (source === null) return res;
+      res.__setBody(ReadableStream.from(coded(coding, source)));
+    } else {
+      if ((res.__bytes().length as i64) < threshold) return res;
+      const coder = new Coder(coding);
+      const packed = coder.push(res.__bytes(), true);
+      coder.close();
+      res.__setBody(packed);
+    }
+    res.headers.set("content-encoding", coding);
+    res.headers.delete("content-length");
+    return res;
+  };
+}
+`,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
 declare function write(fd: i32, data: Ptr<u8>, length: usize): isize;
@@ -11705,7 +11905,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
