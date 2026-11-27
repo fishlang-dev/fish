@@ -21,6 +21,7 @@ export const RUNTIME = [
   "declare void @fsh_rt_join_push(ptr, ptr)",
   "declare ptr @fsh_rt_join_end(ptr)",
   "declare i32 @fsh_rt_str_compare(ptr, ptr)",
+  "declare i32 @fsh_rt_str_hash(ptr, i32)",
   "declare ptr @fsh_rt_str_next(ptr, ptr)",
   "declare void @fsh_rt_str_print(i32, ptr)",
   "declare i64 @fsh_rt_str_units(ptr)",

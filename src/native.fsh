@@ -1975,6 +1975,16 @@ int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {
   return x < a->length ? 1 : y < b->length ? -1 : 0;
 }
 
+// FNV-1a over the first 16 UTF-16 units from seed, as the compiler's stringHash computes it for
+// the strings a many-armed switch or match tests.
+uint32_t fsh_rt_str_hash(fsh_str *s, uint32_t seed) {
+  uint32_t h = 2166136261u ^ seed;
+  int64_t at = 0;
+  int half = 0;
+  for (int n = 0; n < 16 && at < s->length; n++) h = (h ^ fsh_next((const unsigned char *)s->bytes, &at, &half)) * 16777619u;
+  return h;
+}
+
 // A lone surrogate prints as U+FFFD, as a terminal shows one JavaScript prints.
 void fsh_rt_str_print(int32_t stream, fsh_str *s) {
   FILE *out = stream == 2 ? stderr : stdout;
