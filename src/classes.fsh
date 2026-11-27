@@ -29,6 +29,8 @@ export type Body = Span & Id & {
   async?: boolean;
   // Whether it is a C function a `declare function` names, which has no body here.
   foreign?: boolean;
+  // Whether `@blocking` marks it, so an async function calling it warns.
+  blocking?: true;
   // A package's function, or a const read as one, typed from its declaration.
   js?: JsName;
   // A Rust function, a foreign one called through the shim generated for its crate.

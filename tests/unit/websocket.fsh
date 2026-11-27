@@ -108,15 +108,16 @@ function alive(): boolean {
 async function listening(): Promise<i64> throws Error {
   const deadline = Date.now() + 10000;
   while (true) {
-    let lines = stderr().split("\n");
+    const text = await spawnBlocking(() => stderr());
+    let lines = text.split("\n");
     lines.pop();
     for (const l of lines) {
       if (!l.startsWith("listening ")) continue;
       const p = parseInt(l.slice(10));
       if (p !== null) return p!;
     }
-    if (!alive()) throw new Error("the server ended: " + stderr());
-    if (Date.now() > deadline) throw new Error("the server never listened: " + stderr());
+    if (!alive()) throw new Error("the server ended: " + text);
+    if (Date.now() > deadline) throw new Error("the server never listened: " + text);
     await sleep(10);
   }
 }
@@ -745,7 +746,7 @@ facts.set("events", events);`, "");
 
 test("wss: WebSockets over the server's TLS", () => {
   const fixtures = join(root(), "tests", "fixtures", "tls");
-  const r = run(`const ca = readFileSync(${JSON.stringify(join(fixtures, "ca.pem"))}, "utf8");
+  const r = run(`const ca = await spawnBlocking(() => readFileSync(${JSON.stringify(join(fixtures, "ca.pem"))}, "utf8"));
 const sock = await tls.connect("localhost", port, { ca: ca });
 let c = await opened(sock, "localhost:" + String(port), "/echo", "");
 await send(c, 1, utf8("secret"));
