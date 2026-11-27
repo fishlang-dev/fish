@@ -6,7 +6,7 @@ import type { Kept } from "./incremental.fsh";
 
 // How long a burst of saves is let settle before rebuilding, and how long a program is given to
 // exit on SIGTERM before it is killed.
-const SETTLE_MS = 100;
+export const SETTLE_MS = 100;
 const GRACE_MS = 2000;
 
 // The files a rebuild depends on: those a build read or looked for, and the package's manifest,
@@ -36,7 +36,7 @@ export function directories(files: Ref<string[]>): Map<string, Set<string>> {
 }
 
 /** @throws {IoError} */
-function contentsOf(f: string): string | undefined {
+export function contentsOf(f: string): string | undefined {
   return existsSync(f) ? readFileSync(f, "utf8") : undefined;
 }
 
@@ -84,7 +84,7 @@ export type Watching = { entry: string; binary: string; args: string[]; manifest
 
 // Each signal the watcher was sent, a second of the same kind apart from the first. Controllers
 // rather than counters, since a listener owns what it captures and can't change it.
-type Signals = { interrupt: AbortSignal; interruptAgain: AbortSignal; terminate: AbortSignal; terminateAgain: AbortSignal };
+export type Signals = { interrupt: AbortSignal; interruptAgain: AbortSignal; terminate: AbortSignal; terminateAgain: AbortSignal };
 
 function received(s: Ref<Signals>): i64 {
   let n = 0;
@@ -95,36 +95,36 @@ function received(s: Ref<Signals>): i64 {
   return n;
 }
 
-function shown(f: string): string {
+export function shown(f: string): string {
   const r = relative(process.cwd(), f);
   return r === "" ? f : r;
 }
 
 // What ends one wait of the watcher's loop.
-type Event = { kind: "change" } | { kind: "settled" } | { kind: "exited"; code: i64 } | { kind: "signal" } | { kind: "stopped" };
+export type Event = { kind: "change" } | { kind: "settled" } | { kind: "exited"; code: i64 } | { kind: "signal" } | { kind: "stopped" };
 
 // Until `count` signals have arrived, or `round` ends this wait, which also stands in for a source
 // with nothing to wait for.
 // ponytail: polled every 10 ms, as process.on's handler only counts; await the signal itself once
 // std can
-async function signalled(s: Ref<Signals>, count: i64, round: Ref<AbortSignal>): Promise<Event> {
+export async function signalled(s: Ref<Signals>, count: i64, round: Ref<AbortSignal>): Promise<Event> {
   while (received(s) < count && !round.aborted) await Bun.sleep(10);
   return { kind: "signal" };
 }
 
-async function settled(due: i64 | undefined, s: Ref<Signals>, round: Ref<AbortSignal>): Promise<Event> {
+export async function settled(due: i64 | undefined, s: Ref<Signals>, round: Ref<AbortSignal>): Promise<Event> {
   if (due === undefined) return await signalled(s, 1, round);
   await Bun.sleep(Math.max(0, due - Date.now()));
   return { kind: "settled" };
 }
 
-async function exited(child: Ref<Subprocess | undefined>, s: Ref<Signals>, round: Ref<AbortSignal>): Promise<Event> {
+export async function exited(child: Ref<Subprocess | undefined>, s: Ref<Signals>, round: Ref<AbortSignal>): Promise<Event> {
   if (child === undefined) return await signalled(s, 1, round);
   const code = await child.exited;
   return { kind: "exited", code };
 }
 
-async function stopped(child: Ref<Subprocess>): Promise<Event> {
+export async function stopped(child: Ref<Subprocess>): Promise<Event> {
   await stop(child);
   return { kind: "stopped" };
 }
@@ -143,7 +143,7 @@ async function changeIn(dir: string, names: string[], signal: AbortSignal): Prom
 
 // A change to any of `files`. A directory that doesn't exist can't be watched; a later build
 // watches it once it does.
-async function changes(files: Ref<string[]>, s: Ref<Signals>, round: Ref<AbortController>): Promise<Event> {
+export async function changes(files: Ref<string[]>, s: Ref<Signals>, round: Ref<AbortController>): Promise<Event> {
   let waits: Promise<Event>[] = [];
   for (const [dir, names] of directories(files)) if (existsSync(dir)) waits.push(changeIn(dir, [...names], round.signal));
   const ending = round.signal;
@@ -193,10 +193,8 @@ async function quit(w: Ref<Watching>, s: Ref<Signals>, child: Ref<Subprocess | u
   process.exit(code);
 }
 
-// Builds and runs the program, then rebuilds and restarts it each time a file it was built from
-// changes, until SIGINT or SIGTERM.
-/** @throws {IoError} */
-export async function watchProgram(w: Watching): Promise<never> {
+// The SIGINT and SIGTERM the watcher is sent from now on.
+export function listening(): Signals {
   const interrupt = new AbortController();
   const interruptAgain = new AbortController();
   const terminate = new AbortController();
@@ -210,6 +208,14 @@ export async function watchProgram(w: Watching): Promise<never> {
     if (terminate.signal.aborted) terminateAgain.abort();
     terminate.abort();
   });
+  return s;
+}
+
+// Builds and runs the program, then rebuilds and restarts it each time a file it was built from
+// changes, until SIGINT or SIGTERM.
+/** @throws {IoError} */
+export async function watchProgram(w: Watching): Promise<never> {
+  const s = listening();
   const note = (text: string) => console.error(`[fishc] ${text}`);
   let first = await start(w, watchedFiles([w.entry], w.manifest), note, undefined);
   let files = first.files;

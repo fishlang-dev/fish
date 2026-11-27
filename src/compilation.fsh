@@ -79,14 +79,16 @@ export type Session = {
 
 // A `--flag name` or `--flag name=value` given to a build.
 export type BuildFlag = { name: string; value: string | null };
-// `triple` is the one `--target` gave, or empty for the host.
-export type BuildInfo = { triple: string; release: boolean; flags: BuildFlag[] };
+// `triple` is the one `--target` gave, or empty for the host. `dev` is `fishc dev`'s build of a
+// program's handlers, whose serve answers through the host that loads them.
+export type BuildInfo = { triple: string; release: boolean; flags: BuildFlag[]; dev?: boolean };
 
 // The build `given` describes, made a release one or not, and for `triple` when one is given.
-export function buildFor(given: Ref<BuildInfo | undefined>, triple: string | undefined, release: boolean): BuildInfo {
+export function buildFor(given: Ref<BuildInfo | undefined>, triple: string | undefined, release: boolean, dev?: boolean): BuildInfo {
   let flags: BuildFlag[] = [];
   if (given !== undefined) for (const f of given.flags) flags.push({ name: f.name, value: f.value });
-  return { triple: triple ?? (given !== undefined ? given.triple : ""), release, flags };
+  const handlers = dev ?? (given !== undefined && given.dev === true);
+  return { triple: triple ?? (given !== undefined ? given.triple : ""), release, flags, dev: handlers };
 }
 
 export function newSession(): Session {
