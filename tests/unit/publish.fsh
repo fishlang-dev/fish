@@ -132,7 +132,7 @@ test("uncommitted changes, packages outside git, missing libs, links and non-reg
   same(fishc(root, linked, ["publish", "--dry-run"]).err, "fishc publish: 'hosts' is a symbolic link, which a package can't hold", "a link");
   const pathed = pkg(root, "pathed", [["src/lib.fsh", ""]], `[package]\nname = "pathed"\nversion = "1.0.0"\n[dependencies]\nutil = { path = "../util" }\n`);
   same(fishc(root, pathed, ["publish", "--dry-run"]).err, "fishc publish: 'util' is a path or git dependency, and a published package depends only on the registry; give it a version range", "a path dependency");
-  same(fishc(root, pathed, ["publish", "--yes"]).err, "usage: fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]", "--yes without --submit");
+  same(fishc(root, pathed, ["publish", "--yes"]).err, "usage: fishc publish [-p <member>] [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]", "--yes without --submit");
   removed(root);
 }, { timeout: 60_000 });
 
@@ -383,5 +383,34 @@ test("--submit to a GitHub index asks before forking, and pushes the same releas
   gitIn(clone, ["reset", "-q", "--hard", "origin/HEAD"]);
   const retried = run(dir, ["publish"], vars);
   assert(retried.code === 0 && retried.err === "", `publishing again exited with ${retried.code}: ${retried.err}`);
+  removed(root);
+}, { timeout: 60_000 });
+
+test("publishing a workspace's member names its sibling members and inherited entries by version, once the registry has them", () => {
+  const root = scratch("fish-publish-");
+  const ws = join(root, "ws");
+  write(join(ws, "fish.toml"), `[workspace]\nmembers = ["core", "app"]\n\n[workspace.dependencies]\npure = { version = "^1.0.0" }\n`);
+  write(join(ws, "core", "fish.toml"), `[package]\nname = "core"\nversion = "1.2.0"\n`);
+  write(join(ws, "core", "src", "lib.fsh"), `export function c(): i64 { return 1; }\n`);
+  write(join(ws, "app", "fish.toml"), `[package]\nname = "app"\nversion = "1.0.0"\n[dependencies]\ncore = { path = "../core" }\n\n[dependencies.pure]\nworkspace = true\n`);
+  write(join(ws, "app", "src", "lib.fsh"), `export function a(): i64 { return 2; }\n`);
+  gitIn(ws, ["init", "-q"]);
+  gitIn(ws, ["add", "."]);
+  gitIn(ws, ["commit", "-q", "-m", "first"]);
+  const sha = "a".repeat(64);
+  const listed = index(root, "ws-index", [["core", [entry("core", "1.2.0", sha, null)]], ["pure", [entry("pure", "1.0.0", sha, null)]]]);
+  const packed = run(ws, ["publish", "-p", "app", "--dry-run"], [`FISH_CACHE_DIR=${join(root, "cache-w")}`, `FISH_REGISTRY=${listed}`]);
+  assert(packed.code === 0, `publish -p app exited with ${packed.code}: ${packed.err}`);
+  try {
+    const archive = readFileSync(join(ws, "app", "target", "publish", "app-1.0.0.tar.gz"));
+    const inside = untar(new Uint8Array(gunzipSync(archive)), 1 << 30).find((f) => f.path === "fish.toml")!;
+    same(new TextDecoder().decode(inside.data.slice()), `[package]\nname = "app"\nversion = "1.0.0"\n[dependencies]\ncore = { version = "^1.2.0" }\n\n[dependencies.pure]\nversion = "^1.0.0"\n`, "the packed manifest");
+  } catch (e) {
+    assert(false, `can't read the archive: ${e.message}`);
+  }
+  same(read(join(ws, "app", "fish.toml")).includes(`core = { path = "../core" }`) ? "kept" : "changed", "kept", "the member's own manifest");
+  const missing = index(root, "ws-bare-index", [["pure", [entry("pure", "1.0.0", sha, null)]]]);
+  const refused = run(ws, ["publish", "-p", "app", "--dry-run"], [`FISH_CACHE_DIR=${join(root, "cache-m")}`, `FISH_REGISTRY=${missing}`]);
+  same(refused.err.trim(), "fishc publish: 'core' is the workspace's member at 'core', and the registry doesn't have its version 1.2.0 yet; publish it first, with 'fishc publish -p core'", "an unpublished sibling");
   removed(root);
 }, { timeout: 60_000 });

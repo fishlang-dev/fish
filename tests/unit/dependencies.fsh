@@ -395,3 +395,62 @@ test("a package's exports keep their written signatures, while its own functions
   assert(refused.code === 1 && refused.err.includes("'p.x' can't be used here because 'p' was moved"), `an export's parameter was borrowed: exited with ${refused.code}: ${refused.err}`);
   removed(root);
 }, { timeout: 30_000 });
+
+// Runs fishc with `args` in `cwd` with its cache at `cache`, keeping all of its output.
+function whole(cwd: string, cache: string, args: string[]): { code: i64; out: string; err: string } {
+  const run = spawnSync("env", [`FISH_CACHE_DIR=${cache}`, fishcPath(), ...args], { cwd });
+  return { code: run.status ?? -1, out: text(run.stdout), err: text(run.stderr) };
+}
+
+test("a workspace's members share one fish.lock at its root, depend on each other by path, and take [workspace.dependencies]", () => {
+  const root = scratch("fish-deps-");
+  const cache = join(root, "ws-cache");
+  const [repo, commit] = repository(root, "ws-http", [["fish.toml", manifest("http")], ["src/lib.fsh", `export function get(): string { return "ok"; }\n`]]);
+  const ws = join(root, "ws");
+  write(join(ws, "fish.toml"), `[workspace]\nmembers = ["app", "libs/*"]\n\n[workspace.dependencies]\nhttp = { git = "file://${repo}", rev = "${commit}" }\n`);
+  files(ws, "libs/util", [["fish.toml", manifest("util", `http = { workspace = true }\n`)], ["src/lib.fsh", `import { get } from "http";\nexport function u(): string { return get(); }\n`]]);
+  write(join(ws, "libs", "notes", "readme.txt"), "not a package\n");
+  const app = files(ws, "app", [["fish.toml", manifest("app", `util = { path = "../libs/util" }\n`)], ["src/main.fsh", `import { u } from "util";\nfunction main() { console.log(u()); }\n`]]);
+  built(buildIn(app, cache), "the member's build");
+  same(ran(join(app, "target", "debug", "app")), "ok\n", "the member's program");
+  assert(!existsSync(join(app, "fish.lock")), "the member wrote a lock of its own");
+  const lock = read(join(ws, "fish.lock"));
+  assert(lock.includes(`name = "http"`) && !lock.includes(`name = "util"`) && !lock.includes(`name = "app"`), `the workspace's lock:\n${lock}`);
+  const all = whole(ws, cache, ["build"]);
+  assert(all.code === 0 && all.err === "==> app\n==> util: a library with no entry, checked by the members that import it\n", `fishc build at the root: ${all.code}\n${all.err}`);
+  const one = whole(ws, cache, ["build", "-p", "app"]);
+  assert(one.code === 0 && one.err === "", `fishc build -p app: ${one.code}\n${one.err}`);
+  same(whole(ws, cache, ["build", "-p", "nope"]).err, "fishc build: the workspace has no member 'nope'; it has app, util\n", "-p naming no member");
+  same(whole(ws, cache, ["build", "-p", "app", "app/src/main.fsh"]).err, "fishc build: '-p' chooses the member to run in; give a file or path, or '-p', not both\n", "-p with a file");
+  same(whole(ws, cache, ["build", "-o", "out"]).err, "fishc build: '-o' names one output, and a workspace's root runs every member; choose one with -p <name>\n", "-o at the root");
+  same(whole(ws, cache, ["run", "-p", "app"]).err, "fishc run: '-p' chooses a workspace member for build, check, test, fmt, add and publish\n", "-p on run");
+  write(join(app, "src", "main.fsh"), `function main() { const x: i64 = "no"; }\n`);
+  const failing = whole(ws, cache, ["check"]);
+  assert(failing.code === 1 && failing.err.startsWith("==> app\n") && failing.err.includes("error[E0101]") && failing.err.endsWith("==> util: a library with no entry, checked by the members that import it\nfishc check: 1 of 2 members failed: app\n"), `a failing member: ${failing.code}\n${failing.err}`);
+  removed(root);
+}, { timeout: 120_000 });
+
+test("a workspace refuses a missing, unpackaged, outside, duplicate or nested member, and an inherited name it doesn't declare", () => {
+  const root = scratch("fish-deps-");
+  const cache = join(root, "ws-cache");
+  const lib: [string, string] = ["src/lib.fsh", ""];
+  const cases: [string, string, [string, string][]][] = [
+    [`members = ["gone"]`, "the member 'gone' doesn't exist; make a package there with 'fishc new', or leave it out", []],
+    [`members = ["empty"]`, "the member 'empty' has no fish.toml; make a package there with 'fishc init', or leave it out", [["empty/readme.txt", ""]]],
+    [`members = ["../x"]`, "a member is a directory inside the workspace", []],
+    [`members = ["a", "b"]`, "two members are named 'same', at 'a' and 'b'; a name is one package in a workspace", [["a/fish.toml", manifest("same")], ["b/fish.toml", manifest("same")]]],
+    [`members = ["a"]`, "this package is a member of a workspace, so it can't be a workspace itself", [["a/fish.toml", `${manifest("a")}[workspace]\nmembers = []\n`]]],
+  ];
+  let n = 0;
+  for (const [members, message, all] of cases) {
+    const ws = files(root, `bad${n}`, [["fish.toml", `[workspace]\n${members}\n`], ...all]);
+    n++;
+    const got = fishc(ws, ["build"], [`FISH_CACHE_DIR=${cache}`]);
+    assert(got.code === 1 && got.err.includes(`error[E0905]: ${message}`), `${members}: ${got.code}: ${got.err}`);
+  }
+  const ws = files(root, "undeclared", [["fish.toml", `[workspace]\nmembers = ["app"]\n`], ["app/fish.toml", manifest("app", `util = { workspace = true }\n`)], ["app/src/main.fsh", "function main() {}\n"]]);
+  assert(buildIn(join(ws, "app"), cache).err.includes("error[E0905]: the workspace's [workspace.dependencies] has no 'util'; declare it there"), "an undeclared name");
+  const alone = files(root, "alone", [["fish.toml", manifest("alone", `util = { workspace = true }\n`)], lib, ["src/main.fsh", "function main() {}\n"]]);
+  assert(buildIn(alone, cache).err.includes("error[E0905]: 'util' comes from the workspace, but this package isn't a member of one; say where it comes from instead"), "a package in no workspace");
+  removed(root);
+}, { timeout: 60_000 });

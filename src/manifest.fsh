@@ -3,11 +3,13 @@ import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "no
 import { CompileError } from "./diag.fsh";
 import { parseRange } from "./semver.fsh";
 import { validCrate } from "./rust.fsh";
+import { inherited } from "./workspace.fsh";
 
 // A package another depends on, from a local path, a git repository pinned to a commit, or the
 // registry by a version range, and where its entry is in the depending package's `fish.toml`.
-// `capabilities` is what the depending package grants it, when it says.
-export type Dependency = { name: string; start: usize; end: usize; capabilities?: Capability[] } & ({ path: string } | { git: string; rev: string } | { version: string });
+// `capabilities` is what the depending package grants it, when it says. `workspace` takes the
+// entry its workspace's [workspace.dependencies] gives, and `loadManifest` puts that in its place.
+export type Dependency = { name: string; start: usize; end: usize; capabilities?: Capability[] } & ({ path: string } | { git: string; rev: string } | { version: string } | { workspace: true });
 
 // A package as its `fish.toml` describes it, `dir` being where that file was found; `lib` is
 // what a package depending on it imports, `entry` the program it builds.
@@ -273,14 +275,16 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
 /** @throws {CompileError} */
 export function readManifest(src: string, dir: string): Manifest {
   const tables = parseToml(src);
-  const known = new Map<string, string[]>([["", []], ["package", ["name", "version", "entry", "lib", "edition", "capabilities"]], ["dependencies", []], ["rust-dependencies", []], ["registry", ["url"]], ["comptime", ["reads"]]]);
+  const known = new Map<string, string[]>([["", []], ["package", ["name", "version", "entry", "lib", "edition", "capabilities"]], ["dependencies", []], ["rust-dependencies", []], ["registry", ["url"]], ["comptime", ["reads"]], ["workspace", ["members"]]]);
   for (const [name, found] of tables) {
+    // A workspace's dependencies are read with the workspace, which a package needn't be.
+    if (name === "workspace.dependencies" || name.startsWith("workspace.dependencies.")) continue;
     if (name.startsWith("dependencies.")) {
       if (Array.isArray(found)) throw new CompileError("E0905", `a dependency is one table; write [${name}] once`, found[0]!.start, found[0]!.end);
       continue;
     }
     const keys = known.get(name);
-    const missing = `a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies], [registry] and [comptime]`;
+    const missing = `a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies], [registry], [comptime], [workspace] and [workspace.dependencies]`;
     if (Array.isArray(found)) throw new CompileError("E0905", missing, found[0]!.start, found[0]!.end);
     if (keys === undefined) throw new CompileError("E0905", missing, found.start, found.end);
     for (const { key } of found.keys.values()) {
@@ -302,18 +306,7 @@ export function readManifest(src: string, dir: string): Manifest {
   const edition = textIn(pkg.keys, "edition", true);
   if (edition !== undefined && edition.value !== "native" && edition.value !== "ts-compat" && edition.value !== "rc") throw new CompileError("E0905", `'${edition.value}' isn't an edition; it is "native", the default, "rc" for reference-counted objects, or "ts-compat" for TypeScript not yet migrated`, edition.start, edition.end);
   const chosen: Edition = edition !== undefined && edition.value === "ts-compat" ? "ts-compat" : edition !== undefined && edition.value === "rc" ? "rc" : "native";
-  let dependencies: Dependency[] = [];
-  const listed = tables.get("dependencies");
-  if (listed !== undefined && !Array.isArray(listed)) for (const e of listed.keys.values()) dependencies.push(dependency(e.key, e.value));
-  for (const [tableName, found] of tables) {
-    if (!tableName.startsWith("dependencies.") || Array.isArray(found)) continue;
-    const named = tableName.slice("dependencies.".length as i64);
-    // The header's span stands for the key, and the table for its value.
-    const key: Spanned<string> = { value: named, start: found.start, end: found.end };
-    if (dependencies.some((d) => d.name === named)) throw new CompileError("E0905", `'${named}' is listed under [dependencies] already; give it in one place`, found.start, found.end);
-    const value: SpannedValue = { value: found.keys.clone(), start: found.start, end: found.end };
-    dependencies.push(dependency(key, value));
-  }
+  const dependencies = dependenciesIn(tables, "dependencies");
   const capabilities = capabilityList(pkg.keys.get("capabilities"));
   let rustDependencies: RustDependency[] | undefined = undefined;
   const crates = tables.get("rust-dependencies");
@@ -365,6 +358,25 @@ function readsList(table: Ref<Table | Table[] | undefined>): string[] | undefine
     out.push(glob);
   }
   return out;
+}
+
+// The dependencies under the table `table`, written inline in it or each as `[<table>.<name>]`.
+/** @throws {CompileError} */
+export function dependenciesIn(tables: Ref<Map<string, Table | Table[]>>, table: string): Dependency[] {
+  let dependencies: Dependency[] = [];
+  const listed = tables.get(table);
+  if (listed !== undefined && !Array.isArray(listed)) for (const e of listed.keys.values()) dependencies.push(dependency(e.key, e.value));
+  const prefix = `${table}.`;
+  for (const [tableName, found] of tables) {
+    if (!tableName.startsWith(prefix) || Array.isArray(found)) continue;
+    const named = tableName.slice(prefix.length as i64);
+    // The header's span stands for the key, and the table for its value.
+    const key: Spanned<string> = { value: named, start: found.start, end: found.end };
+    if (dependencies.some((d) => d.name === named)) throw new CompileError("E0905", `'${named}' is listed under [${table}] already; give it in one place`, found.start, found.end);
+    const value: SpannedValue = { value: found.keys.clone(), start: found.start, end: found.end };
+    dependencies.push(dependency(key, value));
+  }
+  return dependencies;
 }
 
 // A `capabilities = ["net", ...]` list, each name one of the five and given once; none when absent.
@@ -476,7 +488,8 @@ function rustDependency(key: Ref<Spanned<string>>, value: Ref<SpannedValue>): Ru
   return made;
 }
 
-// A `[dependencies]` entry: `{ path = "..." }`, or `{ git = "...", rev = "..." }` pinned to a commit.
+// A `[dependencies]` entry: `{ version = "..." }`, `{ path = "..." }`, `{ git = "...", rev = "..." }`
+// pinned to a commit, or `{ workspace = true }`.
 /** @throws {CompileError} */
 function dependency(key: Ref<Spanned<string>>, value: Ref<SpannedValue>): Dependency {
   if (!validName(key.value)) throw new CompileError("E0905", `'${key.value}' isn't a package name: ${NAME_RULE}`, key.start, key.end);
@@ -484,9 +497,17 @@ function dependency(key: Ref<Spanned<string>>, value: Ref<SpannedValue>): Depend
   if (!(value.value instanceof Map)) throw new CompileError("E0905", form, value.start, value.end);
   const entries: Ref<Entries> = value.value;
   for (const { key: k } of entries.values()) {
-    if (!["version", "path", "git", "rev", "capabilities"].includes(k.value)) throw new CompileError("E0905", `a dependency has no key '${k.value}'; it has version, path, or git and rev, and capabilities`, k.start, k.end);
+    if (!["version", "path", "git", "rev", "capabilities", "workspace"].includes(k.value)) throw new CompileError("E0905", `a dependency has no key '${k.value}'; it has version, path, or git and rev, workspace, and capabilities`, k.start, k.end);
   }
   const capabilities = entries.has("capabilities") ? capabilityList(entries.get("capabilities")) : undefined;
+  const shared = entries.get("workspace");
+  if (shared !== undefined) {
+    if (shared.value.value !== true) throw new CompileError("E0905", "'workspace' is true, taking the dependency from the workspace's [workspace.dependencies]", shared.value.start, shared.value.end);
+    for (const { key: k } of entries.values()) {
+      if (k.value !== "workspace" && k.value !== "capabilities") throw new CompileError("E0905", `a dependency from the workspace takes where it comes from there; '${k.value}' doesn't go with workspace = true`, k.start, k.end);
+    }
+    return { name: key.value, start: key.start, end: value.end, capabilities, workspace: true };
+  }
   const version = textIn(entries, "version", false);
   const path = textIn(entries, "path", false);
   const git = textIn(entries, "git", false);
@@ -524,7 +545,7 @@ export function findManifest(from: string): string | undefined {
 export function loadManifest(file: string, needs?: "entry" | "lib"): Manifest {
   const src = readFileSync(file, "utf8");
   try {
-    const manifest = readManifest(src, dirname(file));
+    const manifest = inherited(readManifest(src, dirname(file)));
     const pkg = packageTable(src);
     for (const field of ["entry", "lib"]) {
       const at = spanOf(pkg, field);
