@@ -3,6 +3,7 @@ import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, r
 import { availableParallelism, homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { newSession, type Session } from "./compilation.fsh";
+import { scalarUses } from "./layout.fsh";
 
 // The runtime's `Math` functions: src/runtime/math.cpp over LLVM libc's correctly rounded ones,
 // and CORE-MATH's hyperbolic ones, both vendored. Compiling them takes seconds, so each clang
@@ -145,14 +146,18 @@ function emptyDir(): string {
   return mkdtempSync(join(tmpdir(), "fish-cc-"));
 }
 
-// What a clang compiling `u` is taken to hold at its peak: clang itself, and its source many times
-// over once it is parsed and optimized. The compiler's own units measured 50 to 100 bytes for each
-// byte of IR, the most where a few very large functions fill a unit.
+// What a clang compiling `u` is taken to hold at its peak, which is also how long it takes, near
+// enough to order the units by: clang itself, its source, and above all each use of a large
+// struct, which clang expands into an operation per scalar. Fitted to the compiler's own units,
+// whose peaks follow their scalar uses far more closely than their length.
 const CLANG_BASE = 100_000_000;
-const CLANG_PER_BYTE = 100;
+const CLANG_PER_BYTE = 50;
+const CLANG_PER_SCALAR = 400;
+const I64_MAX: i64 = 9_223_372_036_854_775_807;
 
 function clangBytes(u: Ref<Unit>): i64 {
-  return CLANG_BASE + ((u.stdin ?? "").length as i64) * CLANG_PER_BYTE;
+  const text = u.stdin ?? "";
+  return CLANG_BASE + (text.length as i64) * CLANG_PER_BYTE + scalarUses(text) * CLANG_PER_SCALAR;
 }
 
 // This machine's memory in bytes, or 0 when it can't be read.
@@ -171,12 +176,36 @@ function machineMemory(): i64 {
 
 const quoted = (s: string): string => "'" + s.replaceAll("'", "'\\''") + "'";
 
-// The units at `wanted` compiled into their places in `outs`, in that order and `jobs` at a time:
-// xargs runs a shell script for each, which gives clang the unit's source and keeps its errors
-// and exit code in files of the unit's own, and starts the next as one ends. Throws the first
-// failure once every object that did compile is in the cache.
+// Starts each unit's script in the order listed, once those running leave room for it: no more
+// than `cores` at once, and none while the clangs running are taken to hold so much that its own
+// estimate would pass `budget`, unless nothing runs. A unit is done once its exit code is written.
+const SCHEDULER = `budget=$1; cores=$2; list=$3; held=0; running=""
+reap() {
+  left=""; freed=0
+  for r in $running; do
+    if [ -e "\${r%:*}.code" ]; then held=$((held - \${r#*:})); freed=1; else left="$left $r"; fi
+  done
+  running=$left
+  [ $freed = 1 ] || sleep 0.05
+}
+while read -r k e; do
+  while [ -n "$running" ]; do
+    n=0; for r in $running; do n=$((n + 1)); done
+    [ $n -lt $cores ] && [ $((held + e)) -le $budget ] && break
+    reap
+  done
+  sh "$k.sh" &
+  running="$running $k:$e"; held=$((held + e))
+done < "$list"
+wait
+`;
+
+// The units at `wanted` compiled into their places in `outs`, in that order, as many at a time as
+// `SCHEDULER` lets `budget` and `cores` hold: a shell script for each gives clang the unit's
+// source and keeps its errors and exit code in files of the unit's own. Throws the first failure
+// once every object that did compile is in the cache.
 /** @throws {Error | IoError} */
-function compiledTogether(units: Ref<Unit[]>, outs: Ref<string[]>, wanted: Ref<usize[]>, jobs: usize): void {
+function compiledTogether(units: Ref<Unit[]>, outs: Ref<string[]>, wanted: Ref<usize[]>, costs: Ref<i64[]>, budget: i64, cores: usize): void {
   const work = mkdtempSync(join(tmpdir(), "fish-cc-"));
   const cwd = join(work, "empty");
   mkdirSync(cwd);
@@ -195,10 +224,12 @@ function compiledTogether(units: Ref<Unit[]>, outs: Ref<string[]>, wanted: Ref<u
       }
       let words: string[] = [];
       for (const word of command(u, temp)) words.push(quoted(word));
-      writeFileSync(`${at}.sh`, `cd ${quoted(cwd)} && ${words.join(" ")} < ${quoted(from)} 2> ${quoted(`${at}.err`)}\necho $? > ${quoted(`${at}.code`)}\n`);
-      scripts.push(`${at}.sh`);
+      writeFileSync(`${at}.sh`, `cd ${quoted(cwd)} && ${words.join(" ")} < ${quoted(from)} 2> ${quoted(`${at}.err`)}\necho $? > ${quoted(`${at}.code.part`)} && mv ${quoted(`${at}.code.part`)} ${quoted(`${at}.code`)}\n`);
+      scripts.push(`${at} ${costs[k]!}\n`);
     }
-    Bun.spawnSync(["xargs", "-0", "-n", "1", "-P", `${jobs}`, "sh"], { stdin: new TextEncoder().encode(scripts.join("\0")) });
+    writeFileSync(join(work, "units"), scripts.join(""));
+    writeFileSync(join(work, "run.sh"), SCHEDULER);
+    Bun.spawnSync(["sh", join(work, "run.sh"), `${budget}`, `${cores}`, join(work, "units")]);
     let failed: string | undefined = undefined;
     for (let k: usize = 0; k < wanted.length; k++) {
       const at = join(work, `${k}`);
@@ -217,10 +248,14 @@ function compiledTogether(units: Ref<Unit[]>, outs: Ref<string[]>, wanted: Ref<u
   }
 }
 
+// What the clangs compiling a build's units side by side may hold together. Half of it leaves
+// `-O2` too few at once to keep the build from getting slower.
+const CLANG_MEMORY: i64 = 4_000_000_000;
+
 // The units' objects, in their order, those the cache has none of compiled first: largest first,
-// as many at a time as the machine has cores, and no more than the largest that many are taken to
-// fit in half its memory, since the first to run together are the largest there are. A build of
-// many small files uses every core, and one of a few huge ones stays in memory.
+// as many at a time as the machine has cores and the clangs running are taken to fit in
+// `CLANG_MEMORY`, or half the machine's memory if that is less. A build cut into small units uses
+// every core and stays in its budget, and a huge unit runs alone.
 /** @throws {Error | IoError} */
 export function cachedObjects(session: Mut<BuildSession>, units: Ref<Unit[]>): string[] {
   let outs: string[] = [];
@@ -233,17 +268,22 @@ export function cachedObjects(session: Mut<BuildSession>, units: Ref<Unit[]>): s
   }
   if (missing.length === 0) return outs;
   if (session.timings !== undefined) for (const i of missing) session.timings!.objects.built.push(units[i]!.name);
-  missing.sort((a, b) => clangBytes(units[b]!) - clangBytes(units[a]!));
-  const cores = availableParallelism() as usize;
-  const budget = missing.length > 1 ? machineMemory() / 2 : 0;
-  let jobs: usize = 1;
-  let held = clangBytes(units[missing[0]!]!);
-  while (jobs < missing.length && jobs < cores) {
-    held += clangBytes(units[missing[jobs]!]!);
-    if (held > budget) break;
-    jobs++;
+  // Each unit's estimate and the key it is started by: the largest first, and a C source, whose
+  // cost can't be read from its text, before any of the IR.
+  let costed: [i64, i64, usize][] = [];
+  for (const i of missing) {
+    const cost = clangBytes(units[i]!);
+    costed.push([units[i]!.stdin === undefined ? I64_MAX : cost, cost, i]);
   }
-  compiledTogether(units, outs, missing, jobs);
+  costed.sort((a, b) => (b[0] > a[0] ? 1 : b[0] < a[0] ? -1 : 0));
+  let wanted: usize[] = [];
+  let costs: i64[] = [];
+  for (const [_key, cost, i] of costed) {
+    wanted.push(i);
+    costs.push(cost);
+  }
+  const half = machineMemory() / 2;
+  compiledTogether(units, outs, wanted, costs, half < CLANG_MEMORY ? half : CLANG_MEMORY, availableParallelism() as usize);
   return outs;
 }
 
@@ -331,12 +371,18 @@ function units(session: Mut<BuildSession>): Unit[] {
   return made;
 }
 
-// The objects to link, built first if this clang and target have none yet. `target` is the
-// clang flags of a target other than the host's.
-/** @throws {Error | IoError} */
-export function mathObjects(session: Mut<BuildSession>, target: string[] = []): string[] {
+// The units of the objects to link, for `target`, the clang flags of a target other than the host's.
+/** @throws {IoError} */
+export function mathUnits(session: Mut<BuildSession>, target: string[] = []): Unit[] {
   let all: Unit[] = [];
   for (const u of units(session)) all.push(target.length === 0 ? u : { ...u, args: [...target, ...u.args] });
+  return all;
+}
+
+// The objects to link, built first if this clang and target have none yet.
+/** @throws {Error | IoError} */
+export function mathObjects(session: Mut<BuildSession>, target: string[] = []): string[] {
+  const all = mathUnits(session, target);
   return cachedObjects(session, all);
 }
 

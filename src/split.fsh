@@ -205,9 +205,12 @@ function shared(found: Item[], own: Ref<Set<string>>): Item[] {
 // the program's functions, which leave the program's part for one of their own.
 // A group whose functions' text is longer than `limit`, when one is given, is divided in the IR's
 // order into parts of at most that much, the first under the group's name and the rest under
-// `<group>#2` and on, so no one file's part is the longest thing clang is given.
+// `<group>#2` and on, so no one file's part is the longest thing clang is given; std's part is
+// divided the same way, its parts in `std` in order, and so is the program's, whose first part,
+// holding its globals and debug metadata, is `program` and the rest `rest`. A `-g` build's
+// functions all refer to that metadata, so it is split with no limit.
 // `times` is how long its reading, reaching and writing took, for `--timings`.
-export function split(ir: string, stdSymbols: string[], ownSymbols: string[], groups: Ref<Map<string, string[]>>, limit: usize = 0): { std: string; groups: Map<string, string>; program: string; times: [string, f64][] } {
+export function split(ir: string, stdSymbols: string[], ownSymbols: string[], groups: Ref<Map<string, string[]>>, limit: usize = 0): { std: string[]; groups: Map<string, string>; program: string; rest: string[]; times: [string, f64][] } {
   const began = performance.now();
   const std = keysOf(stdSymbols);
   const own = keysOf(ownSymbols);
@@ -275,8 +278,8 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
     let filled = new Map<string, usize>();
     for (const item of all) {
       if (item.kind !== "define") continue;
-      const group = where.get(item.key);
-      if (group === undefined || group === STD || !groups.has(group)) continue;
+      const group = where.get(item.key) ?? "";
+      if (group !== "" && group !== STD && !groups.has(group)) continue;
       let n = divided.get(group) ?? 1;
       let size = filled.get(group) ?? 0;
       if (size > 0 && size + item.text.length > limit) {
@@ -297,10 +300,13 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
     const n = divided.get(group) ?? 1;
     for (let more: i64 = 2; more <= n; more++) out.set(`${group}#${more}`, typed(types, part(all, byName, where, `${group}#${more}`)));
   }
-  const stdPart = typed(types, part(all, byName, where, STD));
+  let stdParts = [typed(types, part(all, byName, where, STD))];
+  for (let more: i64 = 2; more <= (divided.get(STD) ?? 1); more++) stdParts.push(typed(types, part(all, byName, where, `${STD}#${more}`)));
   const programPart = typed(types, part(all, byName, where, "")) + metadata;
+  let rest: string[] = [];
+  for (let more: i64 = 2; more <= (divided.get("") ?? 1); more++) rest.push(typed(types, part(all, byName, where, `#${more}`)));
   const done = performance.now();
-  return { std: stdPart, groups: out, program: programPart, times: [["split items", read - began], ["split reach", reachedAt - read], ["split parts", done - reachedAt]] };
+  return { std: stdParts, groups: out, program: programPart, rest, times: [["split items", read - began], ["split reach", reachedAt - read], ["split parts", done - reachedAt]] };
 }
 
 // Std's part's name in `where`, which no group of the program's can have, since groups are named
