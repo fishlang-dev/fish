@@ -1293,3 +1293,70 @@ async function main() {
   const text = await res.text();
   const copy = res.clone();
 }
+// case: http_response_redirect
+// expect: 302 /login - []
+// expect: 301 https://example.com/new - []
+// expect: 303 /done - []
+// expect: 307 /again - []
+// expect: 308 /moved - []
+// expect: false
+// A redirect has the status asked for, 302 when none is, the Location as given, and no body.
+async function main(): Promise<void> {
+  let all = [Response.redirect("/login"), Response.redirect("https://example.com/new", 301)];
+  for (const s of [303, 307, 308]) all.push(Response.redirect(s === 303 ? "/done" : s === 307 ? "/again" : "/moved", s));
+  for (const res of all) {
+    const body = await res.text();
+    console.log(res.status, res.headers.get("location") ?? "-", res.headers.get("content-type") ?? "-", "[" + body + "]");
+  }
+  console.log(Response.redirect("/x").ok);
+}
+// case: http_response_redirect_status
+// panic: Response.redirect's status must be 301, 302, 303, 307 or 308
+function main() {
+  const res = Response.redirect("/x", 200);
+}
+// case: http_response_error
+// expect: 0 false []
+// expect: 500
+// Response.error() is a network error: status 0, not ok and no body; serve answers it with a 500.
+async function main(): Promise<void> throws IoError | AbortError {
+  const err = Response.error();
+  const body = await err.text();
+  console.log(err.status, err.ok, "[" + body + "]");
+  const found = shared({ port: new Atomic(0) });
+  const seen = found.clone();
+  spawn(serve({ port: 0, hostname: "127.0.0.1", onListen: (info: ServeInfo) => { seen.port.store(info.port); } }, async (_req: Request) => Response.error()));
+  while (found.port.load() === 0) await sleep(1);
+  const res = await fetch("http://127.0.0.1:" + String(found.port.load()) + "/");
+  console.log(res.status);
+}
+// case: http_request_clone
+// expect: POST http://h/a /moved 7 [hi] [hi]
+// expect: copy GET /a original kept
+// expect: streamed [streamed!] [streamed!] [streamed!]
+// A clone keeps the method, a rewritten path, the :params and the headers, and changing one copy
+// leaves the other; a streamed body read to its end by one copy is there in full for the others.
+async function* parts(): AsyncGenerator<u8[]> {
+  yield new TextEncoder().encode("stream");
+  yield new TextEncoder().encode("ed!");
+}
+
+async function main(): Promise<void> {
+  let headers = new Headers();
+  headers.set("x-n", "7");
+  let req = new Request("http://h/a", { method: "POST", headers: headers, body: "hi" });
+  req.path = "/moved";
+  const copy = req.clone();
+  console.log(copy.method, copy.url, copy.path, copy.headers.get("x-n") ?? "-", "[" + (await copy.text()) + "]", "[" + (await req.text()) + "]");
+  let changed = req.clone();
+  changed.method = "GET";
+  changed.path = "/a";
+  console.log("copy", changed.method, changed.path, req.method === "POST" && req.path === "/moved" ? "original kept" : "original changed");
+  const streamed = new Request("http://h/", { method: "POST", body: ReadableStream.from(parts()) });
+  const one = streamed.clone();
+  const two = one.clone();
+  const first = await one.text();
+  const second = await streamed.text();
+  const third = await two.text();
+  console.log("streamed", "[" + first + "]", "[" + second + "]", "[" + third + "]");
+}
