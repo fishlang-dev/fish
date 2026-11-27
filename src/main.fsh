@@ -1206,8 +1206,8 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
         if (inPackage !== undefined) edition = inPackage;
       }
       if (edition === "broken") continue;
-      if (edition === "native") {
-        if (named) console.log(`fishc lint: '${shown}' is in the native edition, so there's nothing to lint`);
+      if (edition === "native" || edition === "rc") {
+        if (named) console.log(`fishc lint: '${shown}' is in the ${edition} edition, so there's nothing to lint`);
         continue;
       }
       let parsing: Ids = { last: 0 };

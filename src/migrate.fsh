@@ -21,8 +21,16 @@ export function directive(src: string): { edition: Edition; start: usize; end: u
   let edition: Edition | undefined = undefined;
   if (line === "// @fish-edition native") edition = "native";
   else if (line === "// @fish-edition ts-compat") edition = "ts-compat";
-  if (edition === undefined) throw new CompileError("E0005", "an edition directive is written '// @fish-edition native' or '// @fish-edition ts-compat'", start, end);
+  else if (line === "// @fish-edition rc") edition = "rc";
+  if (edition === undefined) throw new CompileError("E0005", "an edition directive is written '// @fish-edition native', '// @fish-edition rc' or '// @fish-edition ts-compat'", start, end);
   return { edition, start, end };
+}
+
+// The edition a file is in: its directive's, or else its package's, or native.
+/** @throws {CompileError} */
+export function editionOf(src: string, packaged: Edition | undefined): Edition {
+  const declared = directive(src);
+  return declared !== undefined ? declared.edition : packaged ?? "native";
 }
 
 // Refuses a file in the TS-compat edition, by its directive or else its package's, at the
