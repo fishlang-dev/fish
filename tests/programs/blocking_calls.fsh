@@ -3,18 +3,31 @@
 // case: blocking_direct
 // expect: 5
 // warning: blocking_direct.fsh:6:3: warning[W0004]: 'writeFileSync' blocks the thread this async function runs on; call it inside 'spawnBlocking(() => ...)' to run it on the blocking pool
-// warning: blocking_direct.fsh:7:17: warning[W0004]: 'readFileSync' blocks the thread this async function runs on
+// warning: blocking_direct.fsh:7:10: warning[W0004]: 'readFileSync' blocks the thread this async function runs on
+import { readFileSync, writeFileSync } from "node:fs";
+async function save(): Promise<u8[]> throws IoError {
+  writeFileSync("/tmp/fish_blocking_direct.txt", "hello");
+  return readFileSync("/tmp/fish_blocking_direct.txt");
+}
+async function main() throws IoError {
+  const bytes = await save();
+  console.log(bytes.length);
+}
+// case: blocking_main_quiet
+// expect: 5
+// warning: blocking_main_quiet.fsh:9:9: warning[W0001]: unused variable 'unused'
 import { readFileSync, writeFileSync } from "node:fs";
 async function main() throws IoError {
-  writeFileSync("/tmp/fish_blocking_direct.txt", "hello");
-  const bytes = readFileSync("/tmp/fish_blocking_direct.txt");
+  writeFileSync("/tmp/fish_blocking_main_quiet.txt", "hello");
+  const bytes = readFileSync("/tmp/fish_blocking_main_quiet.txt");
+  [1].forEach((_n) => Bun.sleepSync(1));
   console.log(bytes.length);
+  const unused = 1;
 }
 // case: blocking_chain
 // expect: 5
-// warning: blocking_chain.fsh:15:13: warning[W0004]: 'load' blocks the thread this async function runs on, by calling 'readFileSync' (load -> read -> readFileSync); call it inside 'spawnBlocking(() => ...)'
-// warning: blocking_chain.fsh:17:3: warning[W0004]: 'pause' blocks the thread this async function runs on, by calling 'sleepSync' (pause -> sleepSync)
-// warning: blocking_chain.fsh:14:3: warning[W0004]: 'writeFileSync' blocks
+// warning: blocking_chain.fsh:14:13: warning[W0004]: 'load' blocks the thread this async function runs on, by calling 'readFileSync' (load -> read -> readFileSync); call it inside 'spawnBlocking(() => ...)'
+// warning: blocking_chain.fsh:16:3: warning[W0004]: 'pause' blocks the thread this async function runs on, by calling 'sleepSync' (pause -> sleepSync)
 import { readFileSync, writeFileSync } from "node:fs";
 function read(path: string): u8[] throws IoError {
   return readFileSync(path);
@@ -58,10 +71,7 @@ async function main() throws IoError {
 // expect: 3
 // expect: 2
 // expect: 1
-// warning: blocking_marked.fsh:17:17: warning[W0004]: 'crunch' blocks the thread this async function runs on
-// warning: blocking_marked.fsh:18:26: warning[W0004]: 'usleep' blocks
-// warning: blocking_marked.fsh:20:49: warning[W0004]: 'crunch' blocks
-// warning: blocking_marked.fsh:21:34: warning[W0004]: 'crunch' blocks
+// warning: blocking_marked.fsh:17:49: warning[W0004]: 'crunch' blocks
 @blocking
 function crunch(n: i64): i64 {
   let total = 0;

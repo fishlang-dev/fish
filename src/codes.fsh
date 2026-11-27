@@ -916,20 +916,31 @@ marks its blocking functions with '@blocking': the '*Sync' file system, zlib, pa
 child_process functions and 'sleepSync'. A program may mark its own, including a C function a
 'declare function' names. It is a warning, so the program still builds.
 
+An async 'main' calling a blocking function itself doesn't warn: it runs before any task it
+starts, so there is nothing yet to hold up. A sync function it calls that blocks still warns.
+
 Node and Bun don't report this; Rust's async runtimes give the same advice.
 
 To fix it, run the call on the blocking pool with 'spawnBlocking', which nothing inside warns
 about, or call the async version of the function.`,
       example: `import { readFileSync } from "node:fs";
 
+async function load(): Promise<u8[]> throws IoError {
+  return readFileSync("config.toml");
+}
+
 async function main() throws IoError {
-  const text = readFileSync("config.toml");
+  const text = await load();
   console.log(text.length);
 }`,
       fixed: `import { readFileSync } from "node:fs";
 
+async function load(): Promise<u8[]> throws IoError {
+  return await spawnBlocking(() => readFileSync("config.toml"));
+}
+
 async function main() throws IoError {
-  const text = await spawnBlocking(() => readFileSync("config.toml"));
+  const text = await load();
   console.log(text.length);
 }`,
     },

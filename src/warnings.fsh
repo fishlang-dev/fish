@@ -165,6 +165,7 @@ function unreachableInBlocks(tables: Ref<Tables>, s: Ref<Stmt>, i: Ref<Instance>
 
 // Each call a user's async function or async arrow makes that blocks the thread it runs on, by
 // where the call is written: of a function `@blocking` marks, or of sync functions that reach one.
+// An async `main`'s own calls of a marked function are left out.
 function blockingCalls(tables: Ref<Tables>, compiled: Ref<InstanceId[]>): CompileError[] {
   // Each instance's chain of calls to a blocking function; empty for none, and while being found.
   let chains = new Map<InstanceId, string[]>();
@@ -172,13 +173,16 @@ function blockingCalls(tables: Ref<Tables>, compiled: Ref<InstanceId[]>): Compil
   for (const id of compiled) {
     const b = bodyOf(tables.arenas, tables.arenas.instanceOf(id));
     if (b.async !== true || inStd(tables, b.start) || tables.generated.has(b) || tables.blockingTasks.has(b.start)) continue;
-    blockingIn(tables, id, chains, out);
+    // A program's async `main` blocks nothing else by calling a blocking function itself, as it
+    // starts before any other task; what it calls that blocks still warns.
+    const entry = b.name === "main" && b.closure === undefined && b.owner === undefined;
+    blockingIn(tables, id, entry, chains, out);
   }
   return [...out.values()];
 }
 
 // The blocking calls an async body makes, and those of the sync closures written in it.
-function blockingIn(tables: Ref<Tables>, id: InstanceId, chains: Mut<Map<InstanceId, string[]>>, out: Mut<Map<usize, CompileError>>): void {
+function blockingIn(tables: Ref<Tables>, id: InstanceId, entry: boolean, chains: Mut<Map<InstanceId, string[]>>, out: Mut<Map<usize, CompileError>>): void {
   const i = tables.arenas.instanceOf(id);
   for (const at of i.calls.ids()) {
     const callee = i.calls.getById(at)!;
@@ -187,14 +191,14 @@ function blockingIn(tables: Ref<Tables>, id: InstanceId, chains: Mut<Map<Instanc
     if (c !== undefined && c.parent === id) continue;
     let chain = chainOf(tables, callee, chains);
     const span = i.calls.spanById(at);
-    if (chain.length === 0 || span === undefined || inStd(tables, span.start) || tables.generated.hasId(at)) continue;
+    if (chain.length === 0 || (entry && chain.length === 1) || span === undefined || inStd(tables, span.start) || tables.generated.hasId(at)) continue;
     // Named as written: std may run a call by another name, as `readFileSync(p, "utf8")` runs
     // `readFileSyncText`.
     const written = /^[\w$.]+(?=\s*(<.*>)?\s*\()/.exec(textAt(tables.files, span));
     if (written !== null) chain[0] = written[0];
     out.set(span.start, new CompileError("W0004", blockingMessage(chain), span.start, span.end));
   }
-  for (const c of inlineClosures(tables, id)) blockingIn(tables, c, chains, out);
+  for (const c of inlineClosures(tables, id)) blockingIn(tables, c, entry, chains, out);
 }
 
 // The calls by which running an instance reaches a blocking function, from its own name to that
