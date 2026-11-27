@@ -321,14 +321,23 @@ function readied(core: Session, caches: Caches, file: string, release: boolean, 
   if (shim !== undefined) refuseForeignRust(target);
   stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
   const splitting = stageStart(made.kept.checked.tables.session);
-  const split = parts(ir, made.kept.checked, release, target, debug);
+  const symbols = partSymbols(ir, made.kept.checked, release, debug);
   const names = namesTable(made.kept.checked, made.helpers);
-  stageEnd(made.kept.checked.tables.session, "split", splitting);
-  if (made.kept.checked.tables.session.timings !== undefined) for (const [name, ms] of split.times) made.kept.checked.tables.session.timings!.ms.set(name, ms);
-  let { checked } = made.kept;
-  let { tables } = checked;
-  const building = together(tables.session, caches);
+  // The checked program and the loaded files are dropped here, so the split's copies of the IR
+  // take the memory they held.
+  let session = sessionOf(made.kept);
+  const split = parts(ir, symbols, release, target, debug);
+  stageEnd(session, "split", splitting);
+  if (session.timings !== undefined) for (const [name, ms] of split.times) session.timings!.ms.set(name, ms);
+  const building = together(session, caches);
   return { natives: nativesOf(ir, release, target, leaks), split, shim, warnings: made.warnings, building, names };
+}
+
+// The session a check's tables hold, the rest of what was kept dropped as this returns.
+function sessionOf(kept: Kept): Session {
+  let { checked } = kept;
+  let { tables } = checked;
+  return tables.session;
 }
 
 // `built` for `fishc watch`, from what its last build kept: a program whose files all read as they
@@ -344,7 +353,7 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
   if (shim !== undefined) refuseForeignRust(target);
   stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
   const splitting = stageStart(made.kept.checked.tables.session);
-  const split = parts(ir, made.kept.checked, release, target, debug);
+  const split = parts(ir, partSymbols(ir, made.kept.checked, release, debug), release, target, debug);
   const names = namesTable(made.kept.checked, made.helpers);
   stageEnd(made.kept.checked.tables.session, "split", splitting);
   if (made.kept.checked.tables.session.timings !== undefined) for (const [name, ms] of split.times) made.kept.checked.tables.session.timings!.ms.set(name, ms);
@@ -537,8 +546,28 @@ function namesTable(checked: Mut<Checked>, helpers: Ref<Map<string, string>>): s
 // part, with std's part and each of the program's files a unit of its own that the cache keeps by
 // its text, so a rebuild compiles only the files whose code changed. A `-g` build keeps its files
 // in the program's part, which holds the debug metadata their functions refer to.
-function parts(pieces: Ref<string[]>, checked: Ref<Checked>, release: boolean, target: Ref<Target>, debug = false): { cached: Unit[]; program: string; times: [string, f64][] } {
+function parts(pieces: Ref<string[]>, symbols: PartSymbols, release: boolean, target: Ref<Target>, debug = false): { cached: Unit[]; program: string; times: [string, f64][] } {
   if (release && lengthOf(pieces) < RELEASE_MODULE_LENGTH) return { cached: [], program: pieces.join("\n"), times: [] };
+  // The selectors that stand in for GlobalISel drop a branch on a constant and keep the block it
+  // never takes, and clang 18 passes over that block's return as it writes the unwind table, so
+  // the code after it unwinds as if its frame were gone. A synchronous table says nothing at a
+  // return, and a panic unwinds only from calls.
+  const limit = debug ? 0 : UNIT_LENGTH;
+  const halves = withoutGlobalIsel(release, target) ? split(pieces.map((p) => p.replace(/^(define [^\n]*) uwtable( personality [^\n]* \{| \{)$/gm, "$1 uwtable(sync)$2")), symbols.std, symbols.own, symbols.byFile, limit) : split(pieces, symbols.std, symbols.own, symbols.byFile, limit);
+  const args = [...target.compile, "-x", "ir", "-", ...optimization(release, target), "-funwind-tables"];
+  let cached: Unit[] = [];
+  for (let i: usize = 0; i < halves.std.length; i++) cached.push({ name: i === 0 ? "std" : `std-${i + 1}`, args: [...args], stdin: halves.std[i]!, inputs: [] });
+  for (let i: usize = 0; i < halves.rest.length; i++) cached.push({ name: `program-${i + 2}`, args: [...args], stdin: halves.rest[i]!, inputs: [] });
+  for (const [file, text] of halves.groups) cached.push({ name: `file-${file.replace(/[^\w.-]/g, "_")}`, args: [...args], stdin: text, inputs: [] });
+  return { cached, program: halves.program, times: [["split names", symbols.ms], ...halves.times] };
+}
+
+// The symbols of the compiled functions that go to std's part, the program's own and each of its
+// files', read from the checked program so a build can drop it before the split runs.
+type PartSymbols = { std: string[]; own: string[]; byFile: Map<string, string[]>; ms: f64 };
+
+function partSymbols(pieces: Ref<string[]>, checked: Ref<Checked>, release: boolean, debug = false): PartSymbols {
+  if (release && lengthOf(pieces) < RELEASE_MODULE_LENGTH) return { std: [], own: [], byFile: new Map<string, string[]>(), ms: 0 };
   const naming = performance.now();
   const arenas: Ref<Arenas> = checked.tables.arenas;
   const names = symbolNames(arenas);
@@ -566,19 +595,7 @@ function parts(pieces: Ref<string[]>, checked: Ref<Checked>, release: boolean, t
       byFile.set(file, list);
     }
   }
-  const named = performance.now() - naming;
-  // The selectors that stand in for GlobalISel drop a branch on a constant and keep the block it
-  // never takes, and clang 18 passes over that block's return as it writes the unwind table, so
-  // the code after it unwinds as if its frame were gone. A synchronous table says nothing at a
-  // return, and a panic unwinds only from calls.
-  const limit = debug ? 0 : UNIT_LENGTH;
-  const halves = withoutGlobalIsel(release, target) ? split(pieces.map((p) => p.replace(/^(define [^\n]*) uwtable( personality [^\n]* \{| \{)$/gm, "$1 uwtable(sync)$2")), std, own, byFile, limit) : split(pieces, std, own, byFile, limit);
-  const args = [...target.compile, "-x", "ir", "-", ...optimization(release, target), "-funwind-tables"];
-  let cached: Unit[] = [];
-  for (let i: usize = 0; i < halves.std.length; i++) cached.push({ name: i === 0 ? "std" : `std-${i + 1}`, args: [...args], stdin: halves.std[i]!, inputs: [] });
-  for (let i: usize = 0; i < halves.rest.length; i++) cached.push({ name: `program-${i + 2}`, args: [...args], stdin: halves.rest[i]!, inputs: [] });
-  for (const [file, text] of halves.groups) cached.push({ name: `file-${file.replace(/[^\w.-]/g, "_")}`, args: [...args], stdin: text, inputs: [] });
-  return { cached, program: halves.program, times: [["split names", named], ...halves.times] };
+  return { std, own, byFile, ms: performance.now() - naming };
 }
 
 // The runtime's units a program's IR needs and the libraries they link, read before the IR is
@@ -680,7 +697,7 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
   let looked: string[] = [];
   let made = compiledIn(newCompilation(core), readFileSync(file, "utf8"), file, release, panic, false, false, false, looked);
   const host = hostTarget();
-  const halves = parts(made.ir, made.checked, release, host);
+  const halves = parts(made.ir, partSymbols(made.ir, made.checked, release), release, host);
   const shim = rustShim(made.loaded.rust, made.checked);
   let building = together(made.checked.tables.session, caches);
   // ponytail: each object in turn, as Fish can't map to promises yet; Promise.all over them once it can.
@@ -737,7 +754,7 @@ export function buildTests(session: BuildSession, dir: string, out: string, rele
   const made = generated(checked, loaded, { src, file: entry, release, panic: "unwind", sources, harness: true });
   const shim = rustShim(made.loaded.rust, made.checked);
   const host = hostTarget();
-  const halves = parts(made.ir, made.checked, release, host);
+  const halves = parts(made.ir, partSymbols(made.ir, made.checked, release), release, host);
   let building = together(made.checked.tables.session, caches);
   let none = new Map<string, string[]>();
   linked(building, nativesOf(made.ir, release, host, false), halves, out, release, [], shim, host, false, false, none);

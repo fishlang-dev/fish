@@ -6656,7 +6656,8 @@ class BodyChecker implements Context, GuardHost {
           if (passing) this.raiseAt(at, span, from, "this", throwing);
           else this.raised(at, { from, to: caught });
         }
-        this.instance().caught.set(cloneStmt(s), caught);
+        if (this.cx.tables.session.plain === true) this.instance().caught.setId(s.id, caught);
+        else this.instance().caught.set(cloneStmt(s), caught);
         this.pushScope(new Map<string, LocalId>());
         if (s.param !== undefined) {
           if (s.param.kind !== "ident") throw unsupported("destructuring patterns", s.param);
