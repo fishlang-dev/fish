@@ -1168,3 +1168,468 @@ function main() {
 // expect: deep1
 // expect: made3 nothing
 // expect: bo2 true
+// case: match_fresh_move_only
+class Res {
+  id: i64;
+  constructor(id: i64) { this.id = id; }
+  [Symbol.dispose]() { console.log("drop", this.id); }
+}
+
+class ResB {
+  id: i64;
+  constructor(id: i64) { this.id = id; }
+  [Symbol.dispose]() { console.log("dropB", this.id); }
+}
+
+class Factory {
+  get opt(): Res | null { return new Res(1); }
+}
+
+class DispBox {
+  label: string;
+  r: Res;
+  constructor(label: string, r: Res) { this.label = label; this.r = r; }
+  [Symbol.dispose]() { console.log("box_drop", this.label, this.r.id); }
+}
+
+type Multi = { tag: "a"; r: Res } | { tag: "b"; r: Res };
+
+function makeSeed(n: i64): { n: i64 } { return { n }; }
+function wrap(s: { n: i64 }): Res | null { return new Res(s.n); }
+function makeNested(n: i64): { r: Res } | null { return { r: new Res(n) }; }
+function makeNum(): i64 { return 5; }
+function makeOptNum(): i64 | null { return 5; }
+function makeEither(flag: boolean): Res | ResB | null { return flag ? new Res(6) : new ResB(60); }
+function makeOpt(n: i64): Res | null { return new Res(n); }
+function makeMulti(): Multi { return { tag: "a", r: new Res(9) }; }
+function makeEmptyFixed(): FixedArray<Res, 0> { return []; }
+function peek(x: Ref<Res | null>): Ref<Res | null> { return x; }
+
+function run(): void {
+  const r1 = match (new Factory().opt) {
+    case Some(r) => r,
+    case None => new Res(0),
+  };
+  console.log("get", r1.id);
+
+  const r2 = match (makeSeed(2) |> wrap(%)) {
+    case Some(r) => r,
+    case None => new Res(0),
+  };
+  console.log("pipe", r2.id);
+
+  const r3 = match (makeNested(3)!) {
+    case { r } => r,
+  };
+  console.log("bang", r3.id);
+
+  const r4 = match (new Res(4) as Res | null) {
+    case Some(r) => r,
+    case None => new Res(0),
+  };
+  console.log("as", r4.id);
+
+  const u5 = match (makeNum() as i64 | Res) {
+    case v => v,
+  };
+  console.log("widen", match (u5) { case 5 => "five", case _ => "other" });
+
+  const u5b = match ((makeOptNum()!) as i64 | Res) {
+    case v => v,
+  };
+  console.log("widen_bang", match (u5b) { case 5 => "five", case _ => "other" });
+
+  const u6 = match (makeEither(true)) {
+    case Some(v) => v,
+    case None => new Res(0),
+  };
+  console.log("either", match (u6) { case { id } => id });
+
+  const r7 = match (makeOpt(7)) {
+    case Some(r) if r.id > 10 => new Res(99),
+    case Some(r) => r,
+    case None => new Res(0),
+  };
+  console.log("guard", r7.id);
+
+  const g8 = match (makeOpt(12)) {
+    case Some(r) if r.id > 10 => r.id,
+    case _ => 0,
+  };
+  console.log("guard_hit", g8);
+
+  const m9 = match (makeMulti()) {
+    case { r } => r.id,
+  };
+  console.log("multi", m9);
+
+  const kept: Res | null = new Res(10);
+  const p10 = match (peek(kept)) {
+    case Some(r) => r.id,
+    case None => 0,
+  };
+  console.log("peek", p10);
+
+  const s = "a" + "b";
+  console.log("idx", match (s[0]) { case "a" => "ok", case _ => "no" });
+
+  const box = { r: new Res(11) };
+  const p11 = match (box |> %.r) {
+    case { id } => id,
+  };
+  console.log("steady", p11);
+
+  const dbLabel = match (new DispBox("hi" + "!", new Res(13))) {
+    case { label, r } => `${label}:${r.id}`,
+  };
+  console.log("dispbox", dbLabel);
+
+  const a1 = new Res(14);
+  const b1 = new Res(15);
+  const r14 = match (true ? a1 : b1) { case x => x };
+  console.log("cond_move", r14.id);
+
+  const a2 = new Res(16);
+  const r16 = match (makeSeed(1) |> (%.n > 0 ? a2 : new Res(99))) { case x => x };
+  console.log("pipe_move", r16.id);
+
+  const a3 = new Res(17);
+  const b3 = new Res(18);
+  const r17 = match (match (true) { case true => a3, case false => b3 }) { case x => x };
+  console.log("nested_move", r17.id);
+
+  const emptyFixed = match (makeEmptyFixed()) { case x => x };
+  console.log("fixed0", emptyFixed.length);
+}
+
+function main() {
+  run();
+}
+// expect: get 1
+// expect: pipe 2
+// expect: bang 3
+// expect: as 4
+// expect: widen five
+// expect: widen_bang five
+// expect: either 6
+// expect: guard 7
+// expect: drop 12
+// expect: guard_hit 12
+// expect: drop 9
+// expect: multi 9
+// expect: peek 10
+// expect: idx ok
+// expect: steady 11
+// expect: box_drop hi! 13
+// expect: drop 13
+// expect: dispbox hi!:13
+// expect: cond_move 14
+// expect: pipe_move 16
+// expect: nested_move 17
+// expect: fixed0 0
+// expect: drop 17
+// expect: drop 18
+// expect: drop 16
+// expect: drop 14
+// expect: drop 15
+// expect: drop 11
+// expect: drop 10
+// expect: drop 7
+// expect: drop 6
+// expect: drop 4
+// expect: drop 3
+// expect: drop 2
+// expect: drop 1
+// case: match_cond_move_only_rejects_reuse
+class Res {
+  id: i64;
+  constructor(id: i64) { this.id = id; }
+  [Symbol.dispose]() {}
+}
+function main() {
+  const a = new Res(1);
+  const b = new Res(2);
+  const r = match (true ? a : b) { case x => x };
+  console.log(r.id, a.id);
+}
+// error: 'a.id' can't be used here because 'a' was moved
+// case: match_nullish_ref_move_only_rejects
+class Res {
+  id: i64;
+  constructor(id: i64) { this.id = id; }
+  [Symbol.dispose]() {}
+}
+function check(r: Ref<Res | null>): i64 {
+  return match (r ?? new Res(0)) {
+    case v => v.id,
+  };
+}
+function main() {
+  const x: Res | null = new Res(1);
+  console.log(check(x));
+}
+// error: can't move a value out of a reference to it
+// case: match_cond_dyn_move_only
+class Res {
+  id: i64;
+  constructor(id: i64) { this.id = id; }
+  [Symbol.dispose]() { console.log("drop", this.id); }
+}
+class Plain {
+  id: i64;
+  constructor(id: i64) { this.id = id; }
+}
+function main() {
+  const a = new Res(1);
+  const b = new Plain(2);
+  const got = match (true ? (a as unknown) : (b as unknown)) {
+    case v => v,
+  };
+  console.log("ok", b.id, got instanceof Res);
+}
+// expect: ok 2 true
+// expect: drop 1
+// case: match_cond_dyn_move_only_rejects_reuse
+class Res {
+  id: i64;
+  constructor(id: i64) { this.id = id; }
+  [Symbol.dispose]() {}
+}
+class Plain {
+  id: i64;
+  constructor(id: i64) { this.id = id; }
+}
+function main() {
+  const a = new Res(1);
+  const b = new Plain(2);
+  const got = match (true ? (a as unknown) : (b as unknown)) {
+    case v => v,
+  };
+  console.log(got instanceof Res, a.id);
+}
+// error: 'a.id' can't be used here because 'a' was moved
+// case: match_mixed_union_keeps_copyable_branches
+class Res {
+  id: i64;
+  constructor(id: i64) { this.id = id; }
+  [Symbol.dispose]() { console.log("drop", this.id); }
+}
+class Plain {
+  id: i64;
+  label: string;
+  constructor(id: i64, label: string) { this.id = id; this.label = label; }
+  pick(flag: boolean, a: Res): i64 {
+    return match (flag ? a : this) { case { id } => id };
+  }
+}
+function makeUnknown(n: i64): unknown { return new Res(n); }
+function main() {
+  const u: i64 | Res = 5;
+  const n = match (true ? (u as i64) : 0) { case x => x };
+  console.log("narrow", n, match (u) { case 5 => 5, case _ => 0 });
+
+  const a = new Res(1);
+  const b = new Plain(2, "hi" + "!");
+  const id = match (true ? a : b) { case { id } => id };
+  console.log("mixed", id, b.id, b.label, b.pick(false, new Res(3)));
+
+  const a2 = new Res(4);
+  const s = "hello" + "!";
+  const gotStr = match (true ? a2 : s) { case _ => 1 };
+  console.log("str", gotStr, s);
+
+  const a3 = new Res(5);
+  const b3 = new Plain(6, "world" + "!");
+  const gotUnk = match (true ? (a3 as unknown) : (b3 as unknown)) { case v => v };
+  console.log("unk_copy", b3.label, gotUnk instanceof Res);
+
+  const u1: unknown = new Res(7);
+  const u2: unknown = 2;
+  const gotU = match (true ? u1 : u2) { case v => v instanceof Res };
+  console.log("unk_cond", gotU);
+
+  const u3: unknown = new Res(8);
+  const gotNullish = match (u3 ?? 2) { case v => v instanceof Res };
+  console.log("unk_nullish", gotNullish);
+
+  const gUnk = match (makeUnknown(9)) {
+    case v if v instanceof Res => 1,
+    case _ => 0,
+  };
+  console.log("unk_guard", gUnk);
+}
+// expect: narrow 5 5
+// expect: drop 1
+// expect: drop 3
+// expect: mixed 1 2 hi! 2
+// expect: drop 4
+// expect: str 1 hello!
+// expect: unk_copy world! true
+// expect: drop 7
+// expect: unk_cond true
+// expect: drop 8
+// expect: unk_nullish true
+// expect: drop 9
+// expect: unk_guard 1
+// expect: drop 5
+// case: match_v5_edge_cases
+interface HasId { id(): i64; }
+class Res implements HasId {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  id(): i64 { return this.n; }
+  [Symbol.dispose]() { console.log("drop", this.n); }
+}
+class Plain implements HasId {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  id(): i64 { return this.n; }
+}
+type Box = { a: string; r?: Res };
+function pickRef(flag: boolean, r: Ref<string>): string | Res {
+  return flag ? r : new Res(1);
+}
+function main() {
+  const s = "hello" + "!";
+  {
+    const u = pickRef(true, s);
+    console.log("ref", match (u) { case _ => 1 });
+  }
+  console.log("after_ref", s);
+
+  const x1 = { a: "hi" + "!", extra: "drop_me" + "!" };
+  const x2 = { a: "hi" + "!", extra: "drop_me" + "!" };
+  const x3 = { a: "hi" + "!", extra: "drop_me" + "!" };
+  const a1 = match (true ? x1 : new Res(2)) { case { a } => a, case _ => "" };
+  const a2 = match (true ? x2 : 0) { case { a } => a, case _ => "" };
+  const b: Box = x3;
+  console.log("box", b.a, x1.extra, a1, a2);
+
+  const d1: Dyn<HasId> = new Plain(3);
+  const d2: Dyn<HasId> = new Plain(4);
+  const did = match (true ? d1 : d2) { case v => v.id() };
+  console.log("dyn", did);
+
+  const optDyn: Dyn<HasId> | null = new Plain(7);
+  const fbDyn: Dyn<HasId> = new Plain(8);
+  const did2 = match ((optDyn satisfies Dyn<HasId> | null) ?? fbDyn) { case v => v.id() };
+  console.log("dyn_nullish", did2);
+
+  const optRes: Res | null = new Res(9);
+  const gotRes = match ((optRes satisfies Res | null) ?? new Res(10)) { case v => v.n };
+  console.log("res_nullish", gotRes);
+
+  const optStr: string | null = "opt" + "!";
+  const gotNullish = match (optStr ?? ("fb" + "!")) { case v => v };
+  console.log("nullish", gotNullish, optStr);
+
+  // Widening `as` on `??` LHS: Copy variable, literal, `as unknown`, projected struct, and unconsumed Dyn.
+  const copyOpt: string | null = "hi" + "!";
+  const w1 = (copyOpt as string | Res | null) ?? new Res(11);
+  const w2 = (null as Res | null) ?? new Res(12);
+  const unkRes: unknown = new Res(13);
+  const s2 = "ok" + "!";
+  const w3 = match ((s2 as unknown) ?? ("fb" + "!")) { case _ => 1 };
+  const projSrc = { a: "keep" + "!", extra: "drop_me" + "!" };
+  const w4 = (projSrc as Box | null) ?? { a: "fb" + "!" };
+  const optDyn2: Dyn<HasId> | null = new Plain(14);
+  const fbDyn2: Dyn<HasId> = new Plain(15);
+  const w5 = match (optDyn2 ?? fbDyn2) { case v => v.id() };
+  console.log("widened_nullish", w1 instanceof Res, w2 instanceof Res, unkRes instanceof Res, w3, s2, w4.a, w5);
+}
+// expect: ref 1
+// expect: after_ref hello!
+// expect: box hi! drop_me! hi! hi!
+// expect: dyn 3
+// expect: dyn_nullish 7
+// expect: drop 9
+// expect: res_nullish 9
+// expect: nullish opt! opt!
+// expect: widened_nullish false true true 1 ok! keep! 14
+// expect: drop 13
+// expect: drop 12
+// case: match_fresh_nomove_borrow_rejects_escape
+class Res {
+  id: i64;
+  s: string;
+  constructor(id: i64, s: string) { this.id = id; this.s = s; }
+  [Symbol.dispose]() {}
+}
+class DispBox {
+  r: Res;
+  constructor(r: Res) { this.r = r; }
+  [Symbol.dispose]() {}
+}
+function main() {
+  const fallback = new Res(0, "ok" + "!");
+  let outer: Ref<Res> = fallback;
+  match (new DispBox(new Res(1, "hello" + "!"))) {
+    case { r } => { outer = r; },
+  }
+  console.log(outer.s);
+}
+// error: 'outer' can only be pointed at a variable
+// case: match_fresh_nomove_borrow_rejects_push_escape
+class Res {
+  id: i64;
+  s: string;
+  constructor(id: i64, s: string) { this.id = id; this.s = s; }
+  [Symbol.dispose]() {}
+}
+class DispBox {
+  r: Res;
+  constructor(r: Res) { this.r = r; }
+  [Symbol.dispose]() {}
+}
+function main() {
+  let arr: Ref<Res>[] = [];
+  match (new DispBox(new Res(1, "hello" + "!"))) {
+    case { r } => { arr.push(r); },
+  }
+  console.log(arr[0]!.s);
+}
+// error: matched value doesn't live long enough
+// case: match_fresh_nomove_borrow_rejects_throw_escape
+class Boom { msg: string; constructor(msg: string) { this.msg = msg; } }
+class Res {
+  id: i64;
+  s: string;
+  constructor(id: i64, s: string) { this.id = id; this.s = s; }
+  [Symbol.dispose]() {}
+}
+class DispBox {
+  r: Res;
+  constructor(r: Res) { this.r = r; }
+  [Symbol.dispose]() {}
+}
+function main() {
+  let arr: Ref<Res>[] = [];
+  try {
+    match (new DispBox(new Res(1, "hello" + "!"))) {
+      case { r } => { arr.push(r); throw new Boom("x"); },
+    }
+  } catch (_) {
+    console.log(arr[0]!.s);
+  }
+}
+// error: matched value doesn't live long enough
+// case: match_fresh_nomove_with_ref_field_rejects_escape
+class Res {
+  id: i64;
+  s: string;
+  constructor(id: i64, s: string) { this.id = id; this.s = s; }
+  [Symbol.dispose]() {}
+}
+type Multi = { tag: "a"; keep: Ref<string>; r: Res } | { tag: "b"; keep: Ref<string>; r: Res };
+function makeMulti(keep: Ref<string>): Multi {
+  return { tag: "a", keep, r: new Res(1, "dead" + "!") };
+}
+function main() {
+  const alive = "alive" + "!";
+  let arr: Ref<Res>[] = [];
+  match (makeMulti(alive)) {
+    case { r } => { arr.push(r); },
+  }
+  console.log(arr[0]!.s);
+}
+// error: matched value doesn't live long enough

@@ -176,3 +176,35 @@ function main() {
   console.log("[" + show4(a) + "]");
   console.log(`${b}`, String(b));
 }
+// case: bigint_setter_update
+// expect: 100000000000000000001n 100000000000000000001n 100000000000000000002n
+// expect: 100000000000000000001n 100000000000000000001n 100000000000000000000n
+// expect: 100000000000000000001n
+// Prefix and postfix ++/-- on a bigint setter return retained values without UAF or leaks (F-2443).
+class Counter {
+  #v: bigint;
+  constructor(v: bigint) { this.#v = v; }
+  get n(): bigint { return this.#v; }
+  set n(x: bigint) { this.#v = x; }
+}
+function main(): void {
+  let c = new Counter(100000000000000000000n);
+  const a = ++c.n;
+  const b = c.n++;
+  console.log(a, b, c.n);
+  const d = --c.n;
+  const e = c.n--;
+  console.log(d, e, c.n);
+  ++c.n;
+  console.log(c.n);
+}
+// case: bigint_compound_assign_mutation
+// expect: 134n 670n
+// Compound assignment on a bigint retains the target across RHS mutation (F-2491).
+function main(): void {
+  let x = 100n + 23n;
+  x += (x = 5n + 6n);
+  const first = x;
+  x *= (x = 2n + 3n);
+  console.log(first, x);
+}
