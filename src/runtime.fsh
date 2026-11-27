@@ -212,6 +212,8 @@ export const RUNTIME = [
   "declare i32 @fsh_rt_parse_float(ptr, ptr)",
   "declare i32 @fsh_rt_parse_number(ptr, ptr)",
   "declare ptr @fsh_rt_to_fixed(double, i64)",
+  "declare ptr @fsh_rt_float_radix(double, i32, i64)",
+  "declare ptr @fsh_rt_int_radix(i128, i32, i64)",
   "declare i32 @fsh_rt_regex_test(ptr, ptr)",
   "declare i32 @fsh_rt_regex_match(ptr, ptr, ptr)",
   "declare i64 @fsh_rt_regex_search(ptr, ptr)",

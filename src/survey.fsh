@@ -91,6 +91,7 @@ const RULES: Rule[] = [
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
   { id: "json", action: "unsupported", title: "JSON.parse revivers, and JSON.stringify's replacer and indent arguments" },
   { id: "nestedFunctions", action: "unsupported", title: "generic or generator function declarations inside a function" },
+  { id: "generatorExpressions", action: "unsupported", title: "generator function expressions, as in 'function* () {}': declare the generator at the top level" },
 ];
 
 // A rejected construct has no Fish equivalent and needs a redesign; a guided one, a rewrite.
@@ -568,7 +569,7 @@ function exprRules(e: Ref<Expr>, s: Mut<Scan>) {
     const index: Ref<Expr> = e.index;
     if (object.kind === "meta" && index.kind === "string" && IMPORT_META_MEMBERS.includes(index.value)) s.metaRead.add(object.id);
   } else if (e.kind === "function") {
-    note(s, "A9", e.start);
+    note(s, e.generator ? "generatorExpressions" : "A9", e.start);
     params(s, e.params, false);
   } else if (e.kind === "arrow") params(s, e.params, true);
   // A destructuring assignment ports as a statement of its own.

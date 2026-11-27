@@ -3123,6 +3123,88 @@ fsh_str *fsh_rt_int_to_fixed(int64_t v, int32_t is_signed, int64_t f) {
   }
   return s;
 }
+fsh_str *fsh_rt_str_from_f32(float x);
+
+// toString(radix) on an integer: its exact digits, as a bigint's.
+fsh_str *fsh_rt_int_radix(__int128 v, int32_t is_signed, int64_t radix) {
+  int negative = is_signed && v < 0;
+  unsigned __int128 rest = negative ? -(unsigned __int128)v : (unsigned __int128)v;
+  char text[130];
+  int at = sizeof text;
+  do {
+    text[--at] = "0123456789abcdefghijklmnopqrstuvwxyz"[(int)(rest % (unsigned)radix)];
+    rest /= (unsigned)radix;
+  } while (rest);
+  if (negative) text[--at] = '-';
+  return fsh_str_of(text + at, sizeof text - at);
+}
+
+// The exponent of x read as an integer times 2 to it, as V8's Double::Exponent gives it.
+static int fsh_double_exponent(double x) {
+  uint64_t bits;
+  memcpy(&bits, &x, sizeof bits);
+  int biased = (int)((bits >> 52) & 0x7ff);
+  return biased == 0 ? -1074 : biased - 1075;
+}
+
+// toString(radix) on a float, as V8's DoubleToRadixCString writes it: fraction digits only
+// while they still tell doubles apart, rounded half to even, and integer digits past the
+// double's precision written as zeros. Radix 10 is String(x).
+fsh_str *fsh_rt_float_radix(double x, int32_t single, int64_t radix) {
+  if (radix == 10) return single ? fsh_rt_str_from_f32((float)x) : fsh_rt_str_from_f64(x);
+  if (x != x) return fsh_rt_str_from_cstring("NaN");
+  if (isinf(x)) return fsh_rt_str_from_cstring(x < 0 ? "-Infinity" : "Infinity");
+  static const char chars[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+  char buffer[2200];
+  int integer_cursor = sizeof buffer / 2;
+  int fraction_cursor = integer_cursor;
+  int negative = x < 0;
+  if (negative) x = -x;
+  double integer = floor(x);
+  double fraction = x - integer;
+  double delta = 0.5 * (nextafter(x, INFINITY) - x);
+  if (delta < nextafter(0.0, 1.0)) delta = nextafter(0.0, 1.0);
+  if (fraction >= delta) {
+    buffer[fraction_cursor++] = '.';
+    do {
+      fraction *= radix;
+      delta *= radix;
+      int digit = (int)fraction;
+      buffer[fraction_cursor++] = chars[digit];
+      fraction -= digit;
+      if (fraction > 0.5 || (fraction == 0.5 && (digit & 1))) {
+        if (fraction + delta > 1) {
+          for (;;) {
+            fraction_cursor--;
+            if (fraction_cursor == (int)sizeof buffer / 2) {
+              integer += 1;
+              break;
+            }
+            char c = buffer[fraction_cursor];
+            int last = c > '9' ? c - 'a' + 10 : c - '0';
+            if (last + 1 < radix) {
+              buffer[fraction_cursor++] = chars[last + 1];
+              break;
+            }
+          }
+          break;
+        }
+      }
+    } while (fraction >= delta);
+  }
+  while (fsh_double_exponent(integer / radix) > 0) {
+    integer /= radix;
+    buffer[--integer_cursor] = '0';
+  }
+  do {
+    double remainder = fmod(integer, (double)radix);
+    buffer[--integer_cursor] = chars[(int)remainder];
+    integer = (integer - remainder) / radix;
+  } while (integer > 0);
+  if (negative) buffer[--integer_cursor] = '-';
+  return fsh_str_of(buffer + integer_cursor, fraction_cursor - integer_cursor);
+}
+
 char *fsh_rt_format_f32(float x, char *out) { return x == 0 && signbit(x) ? strcpy(out, "-0") : fsh_format(x, 1, out); }
 
 fsh_str *fsh_rt_str_from_f64(double x) {

@@ -734,6 +734,72 @@ function arrowFunction(ids: Mut<Ids>, name: string, arrow: Extract<Expr, { kind:
   return f;
 }
 
+// Function expressions, lowered before checking into the arrows they amount to, so they capture
+// and are typed as arrows are. A named one calling itself needs a const to hold it: its uses of
+// its name become the const's, and it calls itself as a nested function does.
+/** @throws {CompileError} */
+function lowerFunctionExpressions(tables: Mut<Tables>, program: Mut<Stmt[]>) {
+  let rewrites = new Rewrites();
+  let failure: CompileError | undefined = undefined;
+  let held = new Map<usize, string>();
+  walk({ of: "stmts", node: program }, (n) => {
+    if (failure !== undefined) return;
+    if (n.of === "stmt" && n.node.kind === "let" && n.node.keyword === "const") {
+      for (const d of n.node.declarations) if (d.target.kind === "ident" && d.init !== undefined && d.init.kind === "function") held.set(d.init.id, d.target.name);
+      return;
+    }
+    if (n.of !== "expr" || n.node.kind !== "function") return;
+    try {
+      const e = n.node;
+      if (e.generator) throw unsupported("generator function expressions", e);
+      if (e.params.length > 0 && e.params[0]!.pattern.kind === "ident" && (e.params[0]!.pattern as Extract<Pattern, { kind: "ident" }>).name === "this") throw unsupported("'this' parameters", e.params[0]!);
+      const own = ownThis(e.body);
+      // TypeScript's noImplicitThis refuses it too; as an arrow it would read the `this` around it.
+      if (own !== undefined) throw new CompileError("E0708", "a function expression has a 'this' of its own, which Fish doesn't give it; use an arrow to read the 'this' around it, or pass what it needs as a parameter", own.start, own.end);
+      const name = e.name;
+      const holder = held.get(e.id);
+      const recursive = name !== undefined && freeNames(e.params, e.body).has(name);
+      if (recursive && holder === undefined) throw unsupported("named function expressions calling themselves anywhere but a const's value", e);
+      if (recursive) {
+        const declared = declaredIn(e);
+        if (declared.has(name!) || declared.has(holder!)) throw unsupported("named function expressions whose body declares their own or their const's name", e);
+        walk({ of: "stmts", node: e.body }, (m) => {
+          if (m.of === "expr" && m.node.kind === "ident" && m.node.name === name) rewrites.replace(m.node, { ...m.node, name: holder! });
+        });
+      }
+      let params: Param[] = [];
+      for (const p of e.params) params.push(cloneParam(p));
+      let typeParams: TypeParam[] = [];
+      for (const p of e.typeParams) typeParams.push(cloneTypeParam(p));
+      const arrow: Expr = { id: 0, kind: "arrow", move: false, async: e.async, typeParams, params, returnType: e.returnType === undefined ? undefined : cloneTypeNode(e.returnType), body: cloneStmts(e.body), start: e.start, end: e.end };
+      const made = rewrites.replace(e, arrow);
+      if (recursive) tables.nestedFunctions.set(cloneExpr(made), holder!);
+    } catch (err) {
+      if (err instanceof CompileError) failure = err;
+    }
+  });
+  if (failure !== undefined) throw failure!;
+  rebuiltStmts(program, rewrites);
+}
+
+// The first `this` a function's body reads as its own, outside the functions, classes and
+// object methods inside it, which have their own.
+function ownThis(body: Ref<Stmt[]>): Span | undefined {
+  let found: Span[] = [];
+  walkWhile({ of: "stmts", node: body }, (n) => {
+    if (found.length > 0) return false;
+    if (n.of === "expr" && n.node.kind === "this") {
+      found.push({ start: n.node.start, end: n.node.end });
+      return false;
+    }
+    if (n.of === "expr" && (n.node.kind === "function" || n.node.kind === "class")) return false;
+    if (n.of === "stmt" && (n.node.kind === "function" || n.node.kind === "class")) return false;
+    if (n.of === "objectProp" && (n.node.kind === "method" || n.node.kind === "get" || n.node.kind === "set")) return false;
+    return true;
+  });
+  return found.pop();
+}
+
 // A const's function type gives the arrow it holds the parameter, result and error types the
 // arrow leaves unwritten, as TypeScript's contextual typing does.
 /** @throws {CompileError} */
@@ -921,6 +987,7 @@ export function loweredFile(tables: Mut<Tables>, given: Stmt[], library: boolean
     if (n.of === "objectProp" && n.node.kind === "get" && typeof n.node.key === "string") tables.getterNames.add(n.node.key);
     return false;
   });
+  lowerFunctionExpressions(tables, written);
   lowerDefaults(tables, written);
   return { statements: written, fallback: undefined };
 }
@@ -958,6 +1025,7 @@ function lowered(tables: Mut<Tables>, given: Stmt[], library: boolean): Stmt[] {
     if (n.of === "objectProp" && n.node.kind === "get" && typeof n.node.key === "string") tables.getterNames.add(n.node.key);
     return false;
   });
+  lowerFunctionExpressions(tables, written);
   lowerDefaults(tables, written);
   if (!library) timersRunAsync(tables.ids, written, tables.timerMains);
   let std = stdFor(tables, written);
