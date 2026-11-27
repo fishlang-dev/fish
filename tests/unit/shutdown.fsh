@@ -41,8 +41,8 @@ function alive(): boolean {
 }
 
 // The first whole stderr line that is text, or starts with it when prefix is set.
-function seen(text: string, prefix: boolean): string | null {
-  let lines = stderr().split("\n");
+function seen(err: string, text: string, prefix: boolean): string | null {
+  let lines = err.split("\n");
   lines.pop();
   for (const l of lines) if (prefix ? l.startsWith(text) : l === text) return l;
   return null;
@@ -51,12 +51,13 @@ function seen(text: string, prefix: boolean): string | null {
 async function waited(text: string, prefix: boolean): Promise<string> throws Error | IoError {
   const deadline = Date.now() + 10000;
   while (true) {
-    const found = seen(text, prefix);
+    const err = await spawnBlocking(() => stderr());
+    const found = seen(err, text, prefix);
     if (found !== null) return found;
-    if (!alive()) throw new Error("the program exited before " + text + "; stderr: " + JSON.stringify(stderr()));
+    if (!alive()) throw new Error("the program exited before " + text + "; stderr: " + JSON.stringify(err));
     if (Date.now() > deadline) {
       process.kill(pid(), "SIGKILL");
-      throw new Error("timed out waiting for " + text + "; stderr so far: " + JSON.stringify(stderr()));
+      throw new Error("timed out waiting for " + text + "; stderr so far: " + JSON.stringify(err));
     }
     await sleep(10);
   }
