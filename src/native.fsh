@@ -370,6 +370,8 @@ static uint32_t fsh_next(const unsigned char *s, int64_t *at, int *half) {
 
 // The UTF-16 length, counted once and kept; a small string's is counted each time.
 int64_t fsh_rt_str_units(fsh_str *s) {
+  // A small string of ASCII bytes, the usual one, has a unit per byte.
+  if (fsh_small(s) && ((uint64_t)(uintptr_t)s & 0x8080808080808000ull) == 0) return fsh_len(s);
   FSH_OPEN(s);
   int64_t known = __atomic_load_n(&s->units, __ATOMIC_ACQUIRE);
   if (known >= 0) return known;
@@ -539,6 +541,9 @@ int64_t fsh_rt_str_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
     unit++;
   }
   for (int64_t at = start; at + needle->length <= s->length; at++) {
+    const char *first = memchr(s->bytes + at, needle->bytes[0], s->length - needle->length + 1 - at);
+    if (!first) break;
+    at = first - s->bytes;
     if (memcmp(s->bytes + at, needle->bytes, needle->length) != 0) continue;
     if (n == s->length) return at;
     int h = 0;
@@ -995,25 +1000,6 @@ void fsh_rt_array_reverse(fsh_array *a, int64_t size) {
   }
 }
 
-// A stable merge sort of n elements of size bytes each, by the sign of cmp(env, a, b), using a
-// buffer of n elements. Each pair of runs merges into the buffer and is copied back before the
-// next, so the array holds every element exactly once whenever a comparator runs, and a panic
-// in one leaves it whole for its drop.
-void fsh_rt_sort(char *data, int64_t n, int64_t size, int32_t (*cmp)(void *, void *, void *), void *env, char *buffer) {
-  for (int64_t width = 1; width < n; width *= 2) {
-    for (int64_t low = 0; low + width < n; low += 2 * width) {
-      int64_t mid = low + width, high = low + 2 * width < n ? low + 2 * width : n;
-      int64_t i = low, j = mid, k = low;
-      // The right run's element goes first only when it orders strictly before, which keeps
-      // equal elements in their order.
-      while (i < mid && j < high) memcpy(buffer + size * k++, data + size * (cmp(env, data + size * j, data + size * i) < 0 ? j++ : i++), size);
-      if (i < mid) memcpy(buffer + size * k, data + size * i, size * (mid - i)), k += mid - i;
-      if (j < high) memcpy(buffer + size * k, data + size * j, size * (high - j));
-      memcpy(data + size * low, buffer + size * low, size * (high - low));
-    }
-  }
-}
-
 // An array's buffer for this many bytes, or none for no elements.
 void *fsh_rt_array_alloc(int64_t bytes) {
   return bytes == 0 ? NULL : fsh_rt_alloc(bytes);
@@ -1066,10 +1052,26 @@ __attribute__((constructor)) static void fsh_map_seeding(void) {
 static uint64_t fsh_map_hash(fsh_map *m, int64_t bits) {
   uint64_t h = fsh_map_seed;
   if (m->strings) {
+    // The bytes eight at a time, the last word padded with zeros, then the length, so a small
+    // string hashes from its word as the same text in a block does.
     fsh_str *s = (fsh_str *)(intptr_t)bits;
-    FSH_OPEN(s);
-    h ^= 0xcbf29ce484222325ull;
-    for (int64_t i = 0; i < s->length; i++) h = (h ^ (unsigned char)s->bytes[i]) * 0x100000001b3ull;
+    int64_t length = fsh_len(s);
+    if (fsh_small(s)) {
+      if (length > 0) h = (h ^ (uint64_t)bits >> 8) * 0x9e3779b97f4a7c15ull;
+    } else {
+      int64_t i = 0;
+      for (; i + 8 <= length; i += 8) {
+        uint64_t w;
+        memcpy(&w, s->bytes + i, 8);
+        h = (h ^ w) * 0x9e3779b97f4a7c15ull;
+      }
+      if (i < length) {
+        uint64_t w = 0;
+        memcpy(&w, s->bytes + i, length - i);
+        h = (h ^ w) * 0x9e3779b97f4a7c15ull;
+      }
+    }
+    h ^= (uint64_t)length;
   } else {
     h ^= (uint64_t)bits;
   }
@@ -1760,16 +1762,22 @@ void fsh_rt_utf8_encode(fsh_array *out, fsh_str *s) {
   }
 }
 
+// A number's decimal digits, written back from the end of text, with a minus when negative.
+static char *fsh_decimal(uint64_t v, int negative, char *end) {
+  char *at = end;
+  do *--at = (char)('0' + v % 10); while ((v /= 10) != 0);
+  if (negative) *--at = '-';
+  return at;
+}
+
 fsh_str *fsh_rt_str_from_i64(int64_t v) {
-  char text[24];
-  int n = snprintf(text, sizeof text, "%lld", (long long)v);
-  return fsh_str_of(text, n);
+  char text[24], *at = fsh_decimal(v < 0 ? 0 - (uint64_t)v : (uint64_t)v, v < 0, text + sizeof text);
+  return fsh_str_of(at, text + sizeof text - at);
 }
 
 fsh_str *fsh_rt_str_from_u64(uint64_t v) {
-  char text[24];
-  int n = snprintf(text, sizeof text, "%llu", (unsigned long long)v);
-  return fsh_str_of(text, n);
+  char text[24], *at = fsh_decimal(v, 0, text + sizeof text);
+  return fsh_str_of(at, text + sizeof text - at);
 }
 
 static char *fsh_format(double x, int single, char *out) {
