@@ -887,6 +887,7 @@ To fix it, write it the way the message says: 'let' or 'const' for 'var', a new 
   E1105: { title: "invalid quote" },
   E1106: { title: "invalid test" },
   E1107: { title: "invalid tagged template" },
+  E1108: { title: "invalid @durable function" },
 
   W0001: {
     title: "unused binding",
