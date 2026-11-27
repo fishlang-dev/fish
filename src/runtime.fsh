@@ -86,7 +86,6 @@ export const RUNTIME = [
   "declare void @fsh_rt_array_open(ptr, i64, i64, i64)",
   "declare void @fsh_rt_array_take(ptr, i64, i64, i64, ptr)",
   "declare void @fsh_rt_array_reverse(ptr, i64)",
-  "declare void @fsh_rt_sort(ptr, i64, i64, ptr, ptr, ptr)",
   "declare ptr @fsh_rt_alloc(i64)",
   "declare void @fsh_rt_print_begin(i32)",
   "declare void @fsh_rt_print_end(i32)",

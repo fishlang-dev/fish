@@ -509,6 +509,7 @@ class Codegen implements PrintHost, ComptimeHost {
   jsSite: Span | undefined;
   vtables: Map<string, string>;
   orders: Map<string, string>;
+  sorts: Set<string>;
   intrinsics: Set<string>;
   foreign: Set<string>;
   declaredRust: Set<string>;
@@ -733,6 +734,9 @@ class Codegen implements PrintHost, ComptimeHost {
     // The functions `sort` compares through: one per comparator, and one per element type for the
     // default order.
     this.orders = new Map<string, string>();
+    // The merge sorts, one per function compared through, which it calls directly so LLVM can
+    // inline the comparison.
+    this.sorts = new Set<string>();
 
     this.intrinsics = new Set<string>();
 
@@ -8587,7 +8591,7 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  // `sort`: the runtime's merge sort, comparing through a function that calls the comparator
+  // `sort`: a merge sort emitted for the function it compares through, which calls the comparator
   // with the two elements, or orders numbers and strings when there is none.
   sorted(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, array: ArrayType, at: string): undefined {
     const element = this.tables.typing.rec(array).element;
@@ -8634,13 +8638,170 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(`${room} = mul i64 ${length}, ${size}`);
     this.emit(`${buffer} = call ptr @fsh_rt_array_alloc(i64 ${room})`);
     const comparing: Type | undefined = closure;
-    this.unwinding(`call void @fsh_rt_sort(ptr ${data}, i64 ${length}, i64 ${size}, ptr ${through}, ptr ${env}, ptr ${buffer})`, undefined, (cg: Mut<Codegen>) => {
+    const sorting = this.sortThrough(through, element);
+    this.unwinding(`call void ${sorting}(ptr ${data}, i64 ${length}, ptr ${env}, ptr ${buffer})`, undefined, (cg: Mut<Codegen>) => {
       cg.emit(`call void @fsh_rt_free(ptr ${buffer})`);
       if (comparing !== undefined) cg.dropStashed(env, comparing);
     });
     this.emit(`call void @fsh_rt_free(ptr ${buffer})`);
     if (comparing !== undefined) this.dropStashed(env, comparing);
     return undefined;
+  }
+
+
+  // A stable merge sort of an array's elements through a comparing function, using a buffer as
+  // long as the array: runs of 16 sorted by swapping neighbours, then merged in pairs into the
+  // buffer and copied back, a pair already in order left as it is. The array holds every element
+  // exactly once whenever the comparator runs, so a panic in it leaves the array whole for its
+  // drop. The right element goes first only when it orders strictly before, keeping equal ones in
+  // their order.
+  sortThrough(this: Mut<this>, through: string, element: Type): string {
+    const name = `${through}.sort`;
+    if (this.sorts.has(name)) return name;
+    this.sorts.add(name);
+    this.intrinsics.add("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
+    const t = this.llvm(element);
+    const cmp = (r: string, x: string, y: string) => `  ${r} = call i32 ${through}(ptr %env, ptr ${x}, ptr ${y})`;
+    const lines = [
+      `define internal void ${name}(ptr %data, i64 %n, ptr %env, ptr %buf) ${this.unwinds} {`,
+      "entry:",
+      "  %lo.s = alloca i64", "  %i.s = alloca i64", "  %j.s = alloca i64", "  %w.s = alloca i64",
+      "  %a.s = alloca i64", "  %b.s = alloca i64", "  %k.s = alloca i64",
+      `  %one = getelementptr ${t}, ptr null, i64 1`,
+      "  %size = ptrtoint ptr %one to i64",
+      "  store i64 0, ptr %lo.s",
+      "  br label %run",
+      "run:",
+      "  %lo = load i64, ptr %lo.s",
+      "  %runs = icmp slt i64 %lo, %n",
+      "  br i1 %runs, label %run.start, label %pass.first",
+      "run.start:",
+      "  %end = add i64 %lo, 16",
+      "  %short = icmp slt i64 %end, %n",
+      "  %hi = select i1 %short, i64 %end, i64 %n",
+      "  %next = add i64 %lo, 1",
+      "  store i64 %next, ptr %i.s",
+      "  br label %insert",
+      "insert:",
+      "  %i = load i64, ptr %i.s",
+      "  %inserting = icmp slt i64 %i, %hi",
+      "  br i1 %inserting, label %insert.body, label %run.next",
+      "insert.body:",
+      "  store i64 %i, ptr %j.s",
+      "  br label %sink",
+      "sink:",
+      "  %j = load i64, ptr %j.s",
+      "  %above = icmp sgt i64 %j, %lo",
+      "  br i1 %above, label %sink.compare, label %insert.next",
+      "sink.compare:",
+      "  %before = sub i64 %j, 1",
+      `  %pj = getelementptr ${t}, ptr %data, i64 %j`,
+      `  %pb = getelementptr ${t}, ptr %data, i64 %before`,
+      cmp("%c", "%pj", "%pb"),
+      "  %less = icmp slt i32 %c, 0",
+      "  br i1 %less, label %sink.swap, label %insert.next",
+      "sink.swap:",
+      `  %vj = load ${t}, ptr %pj`,
+      `  %vb = load ${t}, ptr %pb`,
+      `  store ${t} %vb, ptr %pj`,
+      `  store ${t} %vj, ptr %pb`,
+      "  store i64 %before, ptr %j.s",
+      "  br label %sink",
+      "insert.next:",
+      "  %i1 = add i64 %i, 1",
+      "  store i64 %i1, ptr %i.s",
+      "  br label %insert",
+      "run.next:",
+      "  store i64 %hi, ptr %lo.s",
+      "  br label %run",
+      "pass.first:",
+      "  store i64 16, ptr %w.s",
+      "  br label %pass",
+      "pass:",
+      "  %w = load i64, ptr %w.s",
+      "  %passing = icmp slt i64 %w, %n",
+      "  br i1 %passing, label %pass.start, label %done",
+      "pass.start:",
+      "  store i64 0, ptr %lo.s",
+      "  br label %pair",
+      "pair:",
+      "  %plo = load i64, ptr %lo.s",
+      "  %mid = add i64 %plo, %w",
+      "  %paired = icmp slt i64 %mid, %n",
+      "  br i1 %paired, label %pair.check, label %pass.next",
+      "pair.check:",
+      "  %w2 = shl i64 %w, 1",
+      "  %far = add i64 %plo, %w2",
+      "  %inside = icmp slt i64 %far, %n",
+      "  %high = select i1 %inside, i64 %far, i64 %n",
+      "  %last = sub i64 %mid, 1",
+      `  %pmid = getelementptr ${t}, ptr %data, i64 %mid`,
+      `  %plast = getelementptr ${t}, ptr %data, i64 %last`,
+      cmp("%c0", "%pmid", "%plast"),
+      "  %unordered = icmp slt i32 %c0, 0",
+      "  br i1 %unordered, label %merge, label %pair.next",
+      "merge:",
+      "  store i64 %plo, ptr %a.s",
+      "  store i64 %mid, ptr %b.s",
+      "  store i64 %plo, ptr %k.s",
+      "  br label %step",
+      "step:",
+      "  %a = load i64, ptr %a.s",
+      "  %b = load i64, ptr %b.s",
+      "  %k = load i64, ptr %k.s",
+      "  %lefts = icmp slt i64 %a, %mid",
+      "  %rights = icmp slt i64 %b, %high",
+      "  %both = and i1 %lefts, %rights",
+      "  br i1 %both, label %step.compare, label %rest",
+      "step.compare:",
+      `  %pa = getelementptr ${t}, ptr %data, i64 %a`,
+      `  %pr = getelementptr ${t}, ptr %data, i64 %b`,
+      cmp("%c1", "%pr", "%pa"),
+      "  %right = icmp slt i32 %c1, 0",
+      `  %pk = getelementptr ${t}, ptr %buf, i64 %k`,
+      "  %k1 = add i64 %k, 1",
+      "  store i64 %k1, ptr %k.s",
+      // Chosen without a branch, which on unordered input is mispredicted half the time.
+      "  %pick = select i1 %right, ptr %pr, ptr %pa",
+      `  %v = load ${t}, ptr %pick`,
+      `  store ${t} %v, ptr %pk`,
+      "  %rightStep = zext i1 %right to i64",
+      "  %leftStep = sub i64 1, %rightStep",
+      "  %b1 = add i64 %b, %rightStep",
+      "  store i64 %b1, ptr %b.s",
+      "  %a1 = add i64 %a, %leftStep",
+      "  store i64 %a1, ptr %a.s",
+      "  br label %step",
+      // What is left of the left run follows in the buffer; what is left of the right run is
+      // already where it belongs, so only the buffer's part is copied back.
+      "rest:",
+      "  %left = sub i64 %mid, %a",
+      "  %leftBytes = mul i64 %left, %size",
+      `  %from = getelementptr ${t}, ptr %data, i64 %a`,
+      `  %to = getelementptr ${t}, ptr %buf, i64 %k`,
+      "  call void @llvm.memcpy.p0.p0.i64(ptr %to, ptr %from, i64 %leftBytes, i1 false)",
+      "  %kend = add i64 %k, %left",
+      "  %merged = sub i64 %kend, %plo",
+      "  %mergedBytes = mul i64 %merged, %size",
+      `  %back = getelementptr ${t}, ptr %data, i64 %plo`,
+      `  %out = getelementptr ${t}, ptr %buf, i64 %plo`,
+      "  call void @llvm.memcpy.p0.p0.i64(ptr %back, ptr %out, i64 %mergedBytes, i1 false)",
+      "  br label %pair.next",
+      "pair.next:",
+      "  %plo2 = add i64 %plo, %w2",
+      "  store i64 %plo2, ptr %lo.s",
+      "  br label %pair",
+      "pass.next:",
+      "  %wn = shl i64 %w, 1",
+      "  store i64 %wn, ptr %w.s",
+      "  br label %pass",
+      "done:",
+      "  ret void",
+      "}",
+      "",
+    ];
+    for (const line of lines) this.out.push(line);
+    return name;
   }
 
 
