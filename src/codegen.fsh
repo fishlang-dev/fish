@@ -10,9 +10,10 @@ import { Lowering } from "./arithmetic.fsh";
 import { CompileError, locate, sourceOf, type Source } from "./diag.fsh";
 import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, isMember, memberOf, toFloat, type ComptimeHost, type Value } from "./comptime.fsh";
 import { Printer, RUNTIME, type PrintHost } from "./runtime.fsh";
-import type { ArithmeticOp, AssignOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.fsh";
+import type { ArithmeticOp, AssignOp, BinaryOp, Expr, JsName, MatchArm, ObjectProp, Param, Pattern, Span, Stmt, SwitchCase } from "./parser.fsh";
 import { ARRAY, DYN, atNamesIn, compound, Conversions, llvmOf, nameAt, structNames, textOf, typeDefinitions } from "./layout.fsh";
 import { made, type PatternInfo } from "./match.fsh";
+import { dispatchOf, HASHED_ARMS, i32Text, type Dispatch } from "./perfect.fsh";
 import { STD_BASE } from "./std.fsh";
 import { EMBEDDED, LIVE, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.fsh";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.fsh";
@@ -5228,8 +5229,28 @@ class Codegen implements PrintHost, ComptimeHost {
         // The cases share one scope.
         this.scopes.push({ transient: false, held: [] });
         // The tests run in order; when none matches, control goes to `default`, wherever it sits.
+        // Many string literals are told apart by their hash instead, each tested once.
+        const dispatch = subjectType === "string" ? this.caseDispatch(s.cases) : undefined;
+        if (dispatch !== undefined) {
+          const rest = this.label();
+          const candidates = dispatch.keys.map(() => this.label());
+          this.hashSwitch(subject, dispatch, candidates, rest);
+          for (let k: usize = 0; k < candidates.length; k++) {
+            this.startBlock(candidates[k]!);
+            const at = dispatch.keys[k]!.at;
+            const test: Ref<Expr> = s.cases[at]!.test!;
+            const candidate = this.value(test);
+            const candidateType = this.valueType(test);
+            const equal = this.conversions().equals(subject, subjectType, candidate, candidateType);
+            this.settle(this.floor + held.length);
+            const into = this.enterCase(held.length > 0, entries, bodies[at]!);
+            this.emit(`br i1 ${equal}, label %${into}, label %${rest}`);
+          }
+          this.startBlock(rest);
+        }
         let iAt: usize = 0;
         for (const c of s.cases) {
+          if (dispatch !== undefined) break;
           const i = iAt;
           iAt++;
           if (c.test === undefined) continue;
@@ -5451,6 +5472,38 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // The hash dispatch of a switch whose every case tests a string literal.
+  caseDispatch(cases: Ref<SwitchCase[]>): Dispatch | undefined {
+    let tests: { text: string; at: usize }[] = [];
+    for (let i: usize = 0; i < cases.length; i++) {
+      if (cases[i]!.test === undefined) continue;
+      const t: Ref<Expr> = cases[i]!.test!;
+      if (t.kind !== "string") return undefined;
+      tests.push({ text: t.value, at: i });
+    }
+    return dispatchOf(tests, HASHED_ARMS);
+  }
+
+  // The hash dispatch of a match's arms of string literals before its first arm of anything else.
+  armDispatch(arms: Ref<MatchArm[]>): Dispatch | undefined {
+    let tests: { text: string; at: usize }[] = [];
+    for (let i: usize = 0; i < arms.length; i++) {
+      const texts = literalTexts(arms[i]!.pattern);
+      if (texts === undefined) return dispatchOf(tests, HASHED_ARMS);
+      for (const text of texts) tests.push({ text, at: i });
+    }
+    return undefined;
+  }
+
+  // Branches on a string's hash: to each key's label, and to `otherwise` for any other hash.
+  hashSwitch(this: Mut<this>, subject: string, d: Ref<Dispatch>, labels: Ref<string[]>, otherwise: string): void {
+    const h = this.temp();
+    this.emit(`${h} = call i32 @fsh_rt_str_hash(ptr ${subject}, i32 ${d.seed})`);
+    let cases: string[] = [];
+    for (let k: usize = 0; k < d.keys.length; k++) cases.push(`i32 ${i32Text(d.keys[k]!.hash)}, label %${labels[k]!}`);
+    this.emit(`switch i32 ${h}, label %${otherwise} [ ${cases.join(" ")} ]`);
+  }
+
   // A match: the subject is read once, then each arm's pattern is tested in order; a match binds
   // its names and runs its guard, and a failing guard drops what it bound and tries the next arm.
   // The checker made sure some arm matches. As a value, each arm gives one of its own. A value
@@ -5474,8 +5527,21 @@ class Codegen implements PrintHost, ComptimeHost {
     const result = wanted ? this.cur().types.get(e) : undefined;
     const slot = (result !== undefined ? this.alloca(this.llvm(result)) : undefined);
     const end = this.label();
-    for (const arm of e.arms) {
-      const next = this.label();
+    // Many arms of string literals before any other are entered by the subject's hash, at the
+    // first arm testing its string; any other hash goes to the first arm that isn't one.
+    const dispatch = type === "string" ? this.armDispatch(e.arms) : undefined;
+    let entered: string[] = [];
+    if (dispatch !== undefined) {
+      for (let k: usize = 0; k < e.arms.length; k++) entered.push(this.label());
+      const other = e.arms.findIndex((a) => literalTexts(a.pattern) === undefined);
+      let targets: string[] = [];
+      for (const k of dispatch.keys) targets.push(entered[k.at]!);
+      this.hashSwitch(subject, dispatch, targets, entered[other as usize]!);
+      this.startBlock(entered[0]!);
+    }
+    for (let armAt: usize = 0; armAt < e.arms.length; armAt++) {
+      const arm: Ref<MatchArm> = e.arms[armAt]!;
+      const next = armAt + 1 < entered.length ? entered[armAt + 1]! : this.label();
       this.tested(arm.pattern, subject, next);
       this.scopes.push({ transient: true, held: [] });
       // A guarded arm copies what it binds, since a failing guard moves on to arms that may bind
@@ -15295,6 +15361,19 @@ function wtf8(text: string): u8[] {
       out.push((0x80 | ((c >> 6) & 63)) as u8);
       out.push((0x80 | (c & 63)) as u8);
     }
+  }
+  return out;
+}
+
+// The strings a pattern of string literals tests, or undefined for any other pattern.
+function literalTexts(p: Ref<Pattern>): string[] | undefined {
+  if (p.kind === "literal") return p.value.kind === "string" ? [p.value.value] : undefined;
+  if (p.kind !== "or") return undefined;
+  let out: string[] = [];
+  for (const q of p.patterns) {
+    const texts = literalTexts(q);
+    if (texts === undefined) return undefined;
+    out = out.concat(texts);
   }
   return out;
 }
