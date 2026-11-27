@@ -2036,8 +2036,9 @@ type __routerMiddleware = (req: Request, next: __routerNext) => Promise<Response
 // Each route's method, split path, handler, whether it takes every path below its own, and the
 // middleware of the routers mounted around it, outermost first, added together under one lock.
 type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHandler[]; prefixes: boolean[]; groups: __routerMiddleware[][] };
-// A router's routes and middleware, shared so each middleware's next can hold them.
-type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
+// A router's routes and middleware, shared so each middleware's next can hold them, and the
+// handler notFound set, when one was.
+type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]>; notFound: Lock<ServeHandler[]> };
 
 // A value a route's handler gives or throws that makes its own response, as axum's trait does.
 // A Response is given as it is, a thrown string as a 500's text, and any other error a handler
@@ -2322,7 +2323,9 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
 }
 
 // Routes requests by method and path, as Hono and Express do: the first route matching both
-// runs, ':name' segments match any one segment, and a request no route matches gets a 404.
+// runs, ':name' segments match any one segment, a last '*' segment matches the rest, a path
+// routed only for other methods gets a 405 with Allow, or a 204 for OPTIONS, and a request no
+// route matches gets a 404 or what notFound's handler gives.
 // ponytail: each request walks every route in order; a tree of segments would scale further.
 class Router {
   private table: shared<__routerTable>;
@@ -2336,7 +2339,8 @@ class Router {
     const groups: __routerMiddleware[][] = [];
     const routes: __routerRoutes = { methods: [], paths: [], handlers: handlers, prefixes: [], groups: groups };
     const middleware: __routerMiddleware[] = [];
-    const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware) });
+    const missing: ServeHandler[] = [];
+    const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware), notFound: new Lock<ServeHandler[]>(missing) });
     const held = table.clone();
     this.table = table;
     this.inner = Router.routing(held, 1);
@@ -2353,6 +2357,14 @@ class Router {
 
   // Wraps every route and the 404, whenever it is added; the first added runs outermost.
   use(this: Mut<this>, middleware: __routerMiddleware) { this.table.middleware.update((m) => { m.push(middleware); }); }
+
+  // The handler answering what no route takes, in place of the plain 404, as Hono's app.notFound.
+  notFound(this: Mut<this>, handler: ServeHandler) {
+    this.table.notFound.update((n) => {
+      n.splice(0);
+      n.push(handler);
+    });
+  }
 
   get(this: Mut<this>, path: string, handler: ServeHandler) { this.add("GET", path, handler); }
   post(this: Mut<this>, path: string, handler: ServeHandler) { this.add("POST", path, handler); }
@@ -2473,7 +2485,11 @@ class Router {
     const method = req.method.clone();
     const have = path.split("/");
     const found = this.table.routes.update((t) => Router.find(t, method, have, 0));
-    let handler: ServeHandler = async (r: Request) => new Response("Not Found\\n", { status: 404 });
+    const missed = this.table.clone();
+    let handler: ServeHandler = async (r: Request) => {
+      const res = await Router.missed(missed.clone(), r);
+      return res;
+    };
     let params: string[] = [];
     let prefix = false;
     let after: usize = 0;
@@ -2530,7 +2546,10 @@ class Router {
     while (true) {
       const at = from;
       const found = table.routes.update((t) => Router.find(t, method, have, at));
-      if (found === null) return new Response("Not Found\\n", { status: 404 });
+      if (found === null) {
+        const res = await Router.missed(table.clone(), req);
+        return res;
+      }
       const params = Router.decoded(found.params);
       if (params === null) return new Response("Bad Request\\n", { status: 400 });
       const again = Router.routing(table.clone(), depth + 1);
@@ -2570,6 +2589,37 @@ class Router {
     }
     const res = await next(req);
     return res;
+  }
+
+  // The answer for a request no route takes: a 405 naming the methods its path is routed for, a
+  // 204 for OPTIONS there, else notFound's handler or a 404.
+  private static async missed(table: shared<__routerTable>, req: Request): Promise<Response> {
+    const have = req.path.split("/");
+    let allowed = table.routes.update((t) => Router.allowed(t, have));
+    if (allowed.length > 0) {
+      allowed.push("OPTIONS");
+      let res = req.method === "OPTIONS" ? new Response(null, { status: 204 }) : new Response("Method Not Allowed\\n", { status: 405 });
+      res.headers.set("allow", allowed.join(", "));
+      return res;
+    }
+    let own = table.notFound.update((n) => n.map((h) => h.clone()));
+    if (own.length === 0) return new Response("Not Found\\n", { status: 404 });
+    const handler = own.pop()!;
+    const res = await handler(req);
+    return res;
+  }
+
+  // The methods of the routes taking a path, in the order they were added, HEAD after GET. A
+  // static route's path is a prefix it may pass on, so it names none.
+  private static allowed(t: Ref<__routerRoutes>, have: Ref<string[]>): string[] {
+    let out: string[] = [];
+    for (let i = 0; i < t.paths.length; i++) {
+      if (t.prefixes[i] || Router.match(t.paths[i], have, false) === null) continue;
+      const m = t.methods[i].clone();
+      if (!out.includes(m)) out.push(m.clone());
+      if (m === "GET" && !out.includes("HEAD")) out.push("HEAD");
+    }
+    return out;
   }
 
   // The first route from index start taking a method and path, its handler cloned, with the
@@ -2613,16 +2663,23 @@ class Router {
   }
 
   // The :params a route's segments take from a path's, or null when they don't match. A prefix
-  // route matches a path with more segments than its own.
+  // route matches a path with more segments than its own, and a last '*' segment takes the rest
+  // of the path, none included, as the param '*'.
   static match(want: Ref<string[]>, have: Ref<string[]>, prefix: boolean): string[] | null {
-    if (prefix ? have.length < want.length : want.length !== have.length) return null;
+    const rest = want.length > 1 && want[want.length - 1] === "*";
+    const fixed = rest ? want.length - 1 : want.length;
+    if (prefix || rest ? have.length < fixed : want.length !== have.length) return null;
     let params: string[] = [];
-    for (let i = 0; i < want.length; i++) {
+    for (let i = 0; i < fixed; i++) {
       if (want[i].startsWith(":")) {
         if (have[i].length === 0) return null;
         params.push(want[i].slice(1));
         params.push(have[i]);
       } else if (want[i] !== have[i]) return null;
+    }
+    if (rest) {
+      params.push("*");
+      params.push(have.slice(fixed as i64).join("/"));
     }
     return params;
   }
@@ -2659,6 +2716,8 @@ class StateRouter<S> {
   delete(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.delete(path, this.bound(handler)); }
   all(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.all(path, this.bound(handler)); }
   route(this: Mut<this>, method: string, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.route(method, path, this.bound(handler)); }
+
+  notFound(this: Mut<this>, handler: (req: Request, state: S) => Promise<Response>) { this.router.notFound(this.bound(handler)); }
 
   // A plain router's routes under a prefix, as Router.route mounts one.
   mount(this: Mut<this>, prefix: string, child: Router) { this.router.route(prefix, child); }
