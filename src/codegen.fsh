@@ -1,3 +1,4 @@
+import { elided } from "./elide.fsh";
 import assert from "node:assert";
 import type { Body } from "./classes.fsh";
 import { cloneExpr, cloneStmt } from "./rebuild.fsh";
@@ -1060,10 +1061,15 @@ class Codegen implements PrintHost, ComptimeHost {
       const frame = this.pushFrame(instance);
       this.out.push(line7);
       this.out.push("entry:");
-      for (const pushed of this.allocas) this.out.push(pushed);
-      for (const pushed of frame) this.out.push(pushed);
       const more2 = this.popFrame(this.body);
-      for (const pushed of more2) this.out.push(pushed);
+      // Only a body with a retain has pairs to leave out, so the others aren't copied for it.
+      if (more2.some((l) => l.includes("_retain(ptr %"))) {
+        for (const pushed of elided([...this.allocas, ...frame, ...more2])) this.out.push(pushed);
+      } else {
+        for (const pushed of this.allocas) this.out.push(pushed);
+        for (const pushed of frame) this.out.push(pushed);
+        for (const pushed of more2) this.out.push(pushed);
+      }
       this.out.push("}");
       this.out.push("");
     } catch (e) {
