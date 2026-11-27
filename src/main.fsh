@@ -52,6 +52,7 @@ import type { Type, Typing } from "./typing.fsh";
 import { rustShim, type Shim } from "./rustshim.fsh";
 import { split } from "./split.fsh";
 import { withDebugInfo } from "./debuginfo.fsh";
+import { jsModule, type JsModule } from "./jsgen.fsh";
 import { watchProgram, type Rebuilt } from "./watch.fsh";
 import { cachedScript, keepScript, scriptBuildPath } from "./scripts.fsh";
 import { type Kept } from "./incremental.fsh";
@@ -164,6 +165,32 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   stageEnd(done.checked.tables.session, "codegen", started);
   stopAfter(done.checked.tables.session, "codegen");
   return { ir, checked: done.checked, loaded, emitted: done.emitted };
+}
+
+// Builds `file` as a JavaScript module at `out`, `<name>.js` when it isn't given, with the `.d.ts`
+// typing its exports beside it. A library has no `main` and exports its classes too. Gives the
+// warnings.
+/** @throws {CompileError | Error | IoError} */
+function buildJs(session: Session, file: string, out: string | undefined, release: boolean, library: boolean): CompileError[] {
+  let compilation = newCompilation(plain(session));
+  compilation.session.build = buildFor(compilation.session.build, "js", release);
+  let looked: string[] = [];
+  const src = readFileSync(file, "utf8");
+  const none = new Set<string>();
+  let made = checkedSource(compilation, file, src, library ? none : false, looked);
+  const sources = [...made.loaded.sources];
+  const names = copyNames(made.checked.tables.names);
+  const warnings = [...made.checked.warnings];
+  let module: JsModule = { js: "", dts: "" };
+  try {
+    module = jsModule(made.checked, { src, file, sources: [...sources], release, library });
+  } catch (e) {
+    throw sourced(e, names, sources);
+  }
+  const named = out ?? `${basename(file, ".fsh")}.js`;
+  writeFileSync(named, module.js);
+  writeFileSync(`${named.replace(/\.m?js$/, "")}.d.ts`, module.dts);
+  return warnings;
 }
 
 // The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
@@ -2560,6 +2587,20 @@ async function main(): Promise<void> {
   if (profiles.length > 0 && !release) fail("fishc build: '--pgo' optimizes a release build; add '--release'");
   if ((instrumenting || profiles.length > 0) && (llvm || lib !== undefined || sanitize !== undefined)) fail(`fishc build: '${pgo}' applies to an executable clang builds, so it doesn't go with '--emit-llvm', '--lib' or '--sanitize'`);
   if (values.dockerfile === true && values.static !== true) fail("fishc build: '--dockerfile' writes an image holding only the binary, which needs it built with '--static'");
+  if (values.target === "js") {
+    if (llvm || values.static === true || values.dockerfile === true || sanitize !== undefined || instrumenting || profiles.length > 0 || leaks || profile !== false || links.length > 0 || values.sysroot !== undefined || values.debug === true || values.timings === true) {
+      fail("fishc build: a js build is a JavaScript module and its .d.ts, so '--emit-llvm', '--static', '--dockerfile', '--sanitize', '--pgo-instrument', '--pgo', '--leaks', '--profile', '--heap-profile', '--link', '--sysroot', '-g' and '--timings' don't apply; leave them out");
+    }
+    try {
+      const warnings = buildJs(sessionFor(), target!, out, release, lib !== undefined);
+      for (const w of warnings) console.error(painted(w, target!, readFileSync(target!, "utf8"), "warning"));
+    } catch (e) {
+      if (e instanceof CompileError) console.error(painted(e, target!, readFileSync(target!, "utf8")));
+      else console.error((e as { message: string }).message);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
   const wasm = values.target !== undefined && isWasm(values.target);
   if (wasm) {
     const what = `fishc build: a ${values.target ?? ""} build is a WebAssembly module`;
