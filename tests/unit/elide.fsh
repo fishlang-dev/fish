@@ -19,7 +19,7 @@ const MOVED = [
   "  ret void",
 ];
 
-function shown(lines: string[]): string {
+function shown(lines: Ref<string[]>): string {
   return lines.join("\n");
 }
 
