@@ -54,6 +54,7 @@ import { rustShim, type Shim } from "./rustshim.fsh";
 import { split } from "./split.fsh";
 import { withDebugInfo } from "./debuginfo.fsh";
 import { watchProgram, type Rebuilt } from "./watch.fsh";
+import { develop, HANDLERS_C, HOST_C, hostSource, stateShapes, type Handlers } from "./dev.fsh";
 import { cachedScript, keepScript, scriptBuildPath } from "./scripts.fsh";
 import { type Kept } from "./incremental.fsh";
 import { checkedProgram, checkedSource, Queries } from "./queries.fsh";
@@ -259,6 +260,69 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
     rmSync(dir, { recursive: true, force: true });
   }
   return made.checked.warnings;
+}
+
+// `fishc dev`'s builds: with `handlers`, the program as a shared library its host loads, its serve
+// answering through the host; else the host, an executable. `glue` is the C half it links. Gives
+// the warnings and the shapes of the state the handlers keep; `looked` is given the files read.
+/** @throws {CompileError | Error | IoError | JsonError} */
+export function buildDev(session: BuildSession, file: string, out: string, glue: string, handlers: boolean, looked: Mut<string[]>): { warnings: CompileError[]; shapes: string } {
+  const src = readFileSync(file, "utf8");
+  let { core, caches } = apart(session);
+  core.build = buildFor(core.build, undefined, false, handlers);
+  // The handlers are checked with std's dev section, which no other build of the program shares.
+  core.checkCache = false;
+  const made = compiledIn(newCompilation(core), src, file, false, "unwind", false, false, false, looked);
+  const ir = made.ir;
+  const checked: Ref<Checked> = made.checked;
+  if (rustShim(made.loaded.rust, checked) !== undefined) throw new Error("fishc dev: a program calling Rust isn't reloaded in place yet; run it with 'fishc watch'");
+  const target = hostTarget();
+  const darwin = process.platform === "darwin";
+  let building = together(newSession(), caches);
+  let objects: string[] = [];
+  for (const o of cachedObjects(building, runtimeUnits(ir, false, handlers, copyTarget(target)))) objects.push(o);
+  for (const o of mathObjects(building, [...target.compile])) objects.push(o);
+  // Each load's own calls stay its own, never bound to a later load's or the host's.
+  const shared: string[] = !handlers ? [] : darwin ? ["-shared", "-fPIC"] : ["-shared", "-fPIC", "-Wl,-Bsymbolic"];
+  const dl: string[] = darwin ? [] : ["-ldl"];
+  const dir = mkdtempSync(join(tmpdir(), "fishc-dev-"));
+  try {
+    const c = join(dir, "glue.c");
+    writeFileSync(c, glue);
+    run(["clang", ...target.compile, ...target.link, ...shared, "-x", "ir", "-", "-x", "c", c, "-x", "none", ...objects, "-funwind-tables", ...threading(target), "-o", out, "-O0", "-lm", ...runtimeLinks(ir, target), ...dl], ir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return { warnings: made.checked.warnings, shapes: handlers ? stateShapes(ir) : "" };
+}
+
+// What one of `fishc dev`'s builds takes: the source, where the build goes, and --locked.
+type DevBuild = { file: string; out: string; locked: boolean };
+
+// The host `fishc dev` serves through, built once from its generated source.
+function devHost(b: Ref<DevBuild>): boolean {
+  try {
+    let looked: string[] = [];
+    buildDev(sessionWith(b.locked, false), b.file, b.out, HOST_C, false, looked);
+    return true;
+  } catch (e) {
+    console.error(`fishc: ${(e as { message: string }).message}`);
+    return false;
+  }
+}
+
+// One build of the handlers at `out`, its warnings or error shown as `fishc watch` shows them.
+function devHandlers(b: Ref<DevBuild>, out: string): Handlers {
+  let loaded: string[] = [];
+  try {
+    const made = buildDev(sessionWith(b.locked, false), b.file, out, HANDLERS_C, true, loaded);
+    for (const w of made.warnings) console.error(painted(w, b.file, textOf(b.file), "warning"));
+    return { built: true, loaded, shapes: made.shapes };
+  } catch (e) {
+    if (e instanceof CompileError) console.error(painted(e, b.file, textOf(b.file)));
+    else console.error(`fishc: ${(e as { message: string }).message}`);
+    return { built: false, loaded, shapes: "" };
+  }
 }
 
 // Runs a command to its end with `stdin` as its input when given, throwing its stderr if it fails.
@@ -2589,7 +2653,7 @@ async function main(): Promise<void> {
   let target = file;
   let out = values.out;
   // With no file, the package around the working directory is built, as cargo builds one.
-  if ((command === "build" || command === "check" || command === "run" || command === "watch") && file === undefined && lib === undefined) {
+  if ((command === "build" || command === "check" || command === "run" || command === "watch" || command === "dev") && file === undefined && lib === undefined) {
     const found = findManifest(process.cwd()) ?? fail(`fishc ${command ?? ""}: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
     try {
       const manifest = loadManifest(found, "entry");
@@ -2656,6 +2720,31 @@ async function main(): Promise<void> {
       done: () => {
         try {
           if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
+        } catch (_e) {
+          // The scratch directory is the system's temporary one, which it clears in time.
+        }
+      },
+    });
+  }
+  if (command === "dev") {
+    if (target === undefined || positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "locked") || values.panic !== "unwind") fail(usageOf("dev"));
+    const entry = target!;
+    const scratch = mkdtempSync(join(tmpdir(), "fishc-dev-"));
+    const hostFile = join(scratch, "host.fsh");
+    writeFileSync(hostFile, hostSource(join(scratch, "current")));
+    // What each callback takes, its own copy, since a closure owns what it captures.
+    const forHost: DevBuild = { file: hostFile, out: join(scratch, "host"), locked };
+    const forHandlers: DevBuild = { file: `${entry}`, out: "", locked };
+    const removing = `${scratch}`;
+    await develop({
+      entry,
+      dir: scratch,
+      manifest: findManifest(dirname(resolve(entry))),
+      host: () => devHost(forHost),
+      handlers: (out) => devHandlers(forHandlers, out),
+      done: () => {
+        try {
+          rmSync(removing, { recursive: true, force: true });
         } catch (_e) {
           // The scratch directory is the system's temporary one, which it clears in time.
         }
