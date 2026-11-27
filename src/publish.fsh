@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, normalize, relative, sep } from "node:path";
+import { dirname, join, normalize, relative, resolve, sep } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import type { ZlibError } from "node:zlib";
 import { MAX_DOWNLOAD, MAX_UNPACKED } from "./dependencies.fsh";
 import { firstLine, git } from "./git.fsh";
-import { loadManifest, MANIFEST, readManifest, type Manifest } from "./manifest.fsh";
+import { loadManifest, MANIFEST, readManifest, type Capability, type Dependency, type Manifest } from "./manifest.fsh";
+import { workspaceOf, type Member } from "./workspace.fsh";
 import { MAX_ENTRIES, tar, untar, type TarFile } from "./tar.fsh";
 import { CompileError, locate } from "./diag.fsh";
 import { resolveSpecifier, specifierOf } from "./modules.fsh";
@@ -24,9 +25,10 @@ export type Packed = { manifest: Manifest; bytes: Uint8Array; sha256: string; fi
 // changes, unless `dirty` allows it.
 /** @throws {CompileError | Error | IoError | ZlibError} */
 export function pack(file: string, dirty = false): Packed {
-  const manifest = loadManifest(file, "lib");
+  let manifest = loadManifest(file, "lib");
   const dir = manifest.dir;
-  const outside = manifest.dependencies.find((d) => !("version" in d));
+  const shipped = publishedManifest(file, manifest);
+  const outside = readManifest(shipped, dir).dependencies.find((d) => !("version" in d));
   if (outside !== undefined) throw new Error(`'${outside.name}' is a path or git dependency, and a published package depends only on the registry; give it a version range`);
   if (git(dir, "rev-parse", "--show-toplevel").exitCode !== 0) throw new Error(`the package at ${dir} isn't in a git repository; publishing packs the files git tracks`);
   const changed = text(git(dir, "status", "--porcelain=v1", "-z", "--untracked-files=no", "--", ".").stdout);
@@ -49,7 +51,9 @@ export function pack(file: string, dirty = false): Packed {
     const stat = lstatSync(join(dir, path), { throwIfNoEntry: false });
     if (stat === undefined) throw new Error(`git tracks '${path}' but it has been deleted; commit the deletion or restore it`);
     if (!stat.isFile() || !realpathSync(join(dir, path)).startsWith(realpathSync(dir) + sep)) throw new Error(`'${path}' is a symbolic link, leads through one, or isn't a plain file, which a package can't hold`);
-    files.push({ path, data: new Uint8Array(readFileSync(join(dir, path))), executable: mode === "100755" });
+    // The manifest goes out as published, its workspace's members named by version.
+    const data = path === MANIFEST ? new Uint8Array(new TextEncoder().encode(shipped)) : new Uint8Array(readFileSync(join(dir, path)));
+    files.push({ path, data, executable: mode === "100755" });
   }
   if (!files.some((f) => f.path === MANIFEST)) throw new Error(`git doesn't track ${MANIFEST}; add and commit it`);
   if (files.length > (MAX_ENTRIES as usize)) throw new Error(`the package has ${files.length} files, more than the ${MAX_ENTRIES} a build accepts`);
@@ -70,6 +74,8 @@ export function pack(file: string, dirty = false): Packed {
   if (!same || inside === undefined) throw new Error("the archive didn't unpack back into the same files");
   const unpacked = readManifest(new TextDecoder().decode(inside.data.slice()), dir);
   if (unpacked.name !== manifest.name || unpacked.version !== manifest.version) throw new Error("the archive's fish.toml doesn't match the package's");
+  // The index line and the unsafe check read the dependencies as the archive declares them.
+  manifest.dependencies = [...unpacked.dependencies];
   readsBack(back, normalize(manifest.lib));
   const out = join(dir, "target", "publish");
   mkdirSync(out, { recursive: true });
@@ -82,6 +88,61 @@ export function pack(file: string, dirty = false): Packed {
   let paths = files.map((f) => f.path);
   paths.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   return { manifest, bytes, sha256, file: archive, files: paths, unsafe: uses };
+}
+
+// The fish.toml a package publishes: a path dependency on a member of its workspace written as
+// `^<that member's version>`, once the registry has that version, and an entry taken from the
+// workspace written as the workspace gives it. Every other byte is as the file stands.
+/** @throws {CompileError | Error | IoError} */
+function publishedManifest(file: string, manifest: Ref<Manifest>): string {
+  const src = readFileSync(file, "utf8");
+  const ws = workspaceOf(manifest.dir);
+  let listed: string[] | undefined = undefined;
+  let edits: { start: usize; end: usize; text: string }[] = [];
+  for (const raw of readManifest(src, manifest.dir).dependencies) {
+    const d = manifest.dependencies.find((x) => x.name === raw.name)!;
+    let range: string | undefined = undefined;
+    if ("path" in d && ws !== undefined) {
+      const at = resolve(manifest.dir, d.path);
+      const real = existsSync(at) ? realpathSync(at) : at;
+      const sibling = ws.members.find((m) => m.dir === real);
+      if (sibling !== undefined) range = `^${publishedVersion(sibling, manifest, ws.dir)}`;
+    } else if ("version" in d && "workspace" in raw) range = d.version;
+    if (range === undefined) continue;
+    edits.push(entryEdit(src, raw, range!, d.capabilities));
+  }
+  edits.sort((a, b) => (a.start > b.start ? -1 : a.start < b.start ? 1 : 0));
+  let out = src;
+  for (const e of edits) out = `${out.slice(0, e.start as i64)}${e.text}${out.slice(e.end as i64)}`;
+  return out;
+}
+
+// The version of the workspace member `sibling` a published package depends on, refused until the
+// registry has it.
+/** @throws {CompileError | Error | IoError} */
+function publishedVersion(sibling: Ref<Member>, manifest: Ref<Manifest>, root: string): string {
+  const own = readManifest(readFileSync(join(sibling.dir, MANIFEST), "utf8"), sibling.dir);
+  const released = openIndex(registryUrl(manifest), true).versions(own.name);
+  if (!released.some((e) => e.text === own.version && !e.yanked)) {
+    const near = relative(root, sibling.dir);
+    throw new Error(`'${own.name}' is the workspace's member at '${near !== "" ? near : "."}', and the registry doesn't have its version ${own.version} yet; publish it first, with 'fishc publish -p ${own.name}'`);
+  }
+  return own.version;
+}
+
+// The text replacing a [dependencies] entry with one naming `range` from the registry: the inline
+// entry from its key to its value's end, or a `[dependencies.<name>]` table to the next table.
+function entryEdit(src: string, raw: Ref<Dependency>, range: string, capabilities: Ref<Capability[] | undefined>): { start: usize; end: usize; text: string } {
+  const granted = capabilities !== undefined ? `capabilities = [${capabilities.map((c) => `"${c}"`).join(", ")}]` : "";
+  if (src.charAt(raw.start as i64) !== "[") return { start: raw.start, end: raw.end, text: `${raw.name} = { version = "${range}"${granted !== "" ? `, ${granted}` : ""} }` };
+  let end = src.length;
+  for (let at = src.indexOf("\n", raw.end as i64); at >= 0; at = src.indexOf("\n", at + 1)) {
+    if (src.slice(at + 1).trimStart().startsWith("[")) {
+      end = (at + 1) as usize;
+      break;
+    }
+  }
+  return { start: raw.start, end, text: `[dependencies.${raw.name}]\nversion = "${range}"\n${granted !== "" ? `${granted}\n` : ""}${end < src.length ? "\n" : ""}` };
 }
 
 // What a process wrote, as text.
