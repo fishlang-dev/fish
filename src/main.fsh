@@ -514,7 +514,7 @@ const UNIT_LENGTH: usize = 2 * 1024 * 1024;
 // A build's `.fshnames` table: each compiled instance whose symbol doesn't read as its Fish name
 // alone, and each helper made for a type.
 function namesTable(checked: Mut<Checked>, helpers: Ref<Map<string, string>>): string {
-  const names = symbolNames(checked.tables.arenas);
+  const names = symbolNames(checked.tables.arenas, checked.tables.typing);
   // Each instance's IR symbol, its own symbol, and the arguments it was made for past those of a
   // generic class it is a member of, which its class's name already shows.
   let made: { symbol: string; own: string; args: Type[] }[] = [];
@@ -570,7 +570,7 @@ function partSymbols(pieces: Ref<string[]>, checked: Ref<Checked>, release: bool
   if (release && lengthOf(pieces) < RELEASE_MODULE_LENGTH) return { std: [], own: [], byFile: new Map<string, string[]>(), ms: 0 };
   const naming = performance.now();
   const arenas: Ref<Arenas> = checked.tables.arenas;
-  const names = symbolNames(arenas);
+  const names = symbolNames(arenas, checked.tables.typing);
   let std: string[] = [];
   let own: string[] = [];
   let byFile = new Map<string, string[]>();
