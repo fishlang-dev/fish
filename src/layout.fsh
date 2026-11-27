@@ -451,6 +451,79 @@ export function typeNamesIn(text: string): string[] {
   return out;
 }
 
+// How many scalars the named struct types `text` uses add up to, each use counted on its own: a
+// load, store or phi of a large struct is one line of IR that clang expands into one operation
+// per scalar, so this is a better measure of what compiling a part costs than its length. The
+// part's own type definitions, which `typed` puts first, give each struct's scalars.
+export function scalarUses(text: string): i64 {
+  let defined = new Map<string, string>();
+  let at: i64 = 0;
+  while (text.startsWith('%"<', at)) {
+    const end = text.indexOf("\n", at);
+    const line = text.slice(at, end < 0 ? text.length as i64 : end);
+    const split = line.indexOf(" = type ");
+    if (split > 0) defined.set(line.slice(0, split), line.slice(split + 8));
+    if (end < 0) return 0;
+    at = end + 1;
+  }
+  let counted = new Map<string, i64>();
+  let total: i64 = 0;
+  for (;;) {
+    const start = text.indexOf('%"<', at);
+    if (start < 0) break;
+    const close = text.indexOf('"', start + 3);
+    if (close < 0) break;
+    total += scalarsOf(text.slice(start, close + 1), defined, counted);
+    at = close + 1;
+  }
+  return total;
+}
+
+// The scalars of a named struct type, from its definition, counted once per name.
+function scalarsOf(name: string, defined: Ref<Map<string, string>>, counted: Mut<Map<string, i64>>): i64 {
+  const known = counted.get(name);
+  if (known !== undefined) return known;
+  // A type that holds itself, through no pointer, can't be; a guess stops the loop all the same.
+  counted.set(name, 1);
+  const body = defined.get(name);
+  const n = body === undefined ? 1 : scalarsAt(body, 0, defined, counted).n;
+  counted.set(name, n);
+  return n;
+}
+
+// The scalars of the type written at `at` in `text`, and where it ends.
+function scalarsAt(text: string, at: usize, defined: Ref<Map<string, string>>, counted: Mut<Map<string, i64>>): { n: i64; end: usize } {
+  let i = at;
+  while (i < text.length && text[i]! === " ") i++;
+  if (text.startsWith('%"<', i as i64)) {
+    const close = text.indexOf('"', (i + 3) as i64);
+    return { n: scalarsOf(text.slice(i as i64, close + 1), defined, counted), end: (close + 1) as usize };
+  }
+  if (text[i]! === "{" || text[i]! === "<") {
+    const closing = text[i]! === "{" ? "}" : ">";
+    let n: i64 = 0;
+    i++;
+    for (;;) {
+      while (i < text.length && (text[i]! === " " || text[i]! === ",")) i++;
+      if (i >= text.length) return { n, end: i };
+      if (text[i]! === closing) return { n: n === 0 ? 1 : n, end: i + 1 };
+      const field = scalarsAt(text, i, defined, counted);
+      n += field.n;
+      i = field.end;
+    }
+  }
+  if (text[i]! === "[") {
+    const x = text.indexOf(" x ", i as i64);
+    const count = parseInt(text.slice((i + 1) as i64, x)) ?? 1;
+    const element = scalarsAt(text, (x + 3) as usize, defined, counted);
+    let end = element.end;
+    while (end < text.length && text[end]! !== "]") end++;
+    return { n: count * element.n, end: end + 1 };
+  }
+  while (i < text.length && text[i]! !== "," && text[i]! !== "}" && text[i]! !== "]" && text[i]! !== ">" && text[i]! !== " ") i++;
+  return { n: 1, end: i };
+}
+
 // Whether a code unit is one an unquoted IR name holds: a letter, a digit, `_`, `.`, `$` or `-`.
 function nameUnit(c: u16): boolean {
   return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 46 || c === 36 || c === 45;

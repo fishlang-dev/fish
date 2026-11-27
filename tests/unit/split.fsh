@@ -1,5 +1,6 @@
 // A file's part of the IR is divided once its functions' text passes a limit: each part defines
 // its share, in the IR's order, and declares what it calls of the others'.
+import { scalarUses } from "../../src/layout.fsh";
 import { split } from "../../src/split.fsh";
 
 function ir(): string {
@@ -52,6 +53,24 @@ test("a file's functions over the limit are divided, each part declaring the oth
 test("a limit a file's functions fit under divides nothing", () => {
   const halves = split(ir(), [], [...OWN], groups(), 100000);
   assert([...halves.groups.keys()].join(" ") === "f.fsh", "one part");
+});
+
+test("the program's own functions over the limit are divided, the first part keeping the rest", () => {
+  const halves = split(ir(), [], [...OWN], new Map<string, string[]>(), 1);
+  assert(halves.rest.length === 2, `${halves.rest.length} more parts`);
+  assert(halves.program.includes('define void @"fsh.a"()') && halves.program.includes('declare void @"fsh.b"()'), halves.program);
+  assert(halves.rest[1]!.includes('define void @"fsh.main"()') && halves.rest[1]!.includes('declare void @"fsh.a"()'), halves.rest[1]!);
+  assert(split(ir(), [], [...OWN], new Map<string, string[]>()).rest.length === 0, "divided with no limit");
+});
+
+test("std's functions over the limit are divided as a file's are", () => {
+  const std = ['@"fsh.a"', '@"fsh.b"'];
+  const whole = split(ir(), [...std], ['@"fsh.main"'], new Map<string, string[]>());
+  assert(whole.std.length === 1, `${whole.std.length} parts`);
+  const halves = split(ir(), [...std], ['@"fsh.main"'], new Map<string, string[]>(), 1);
+  assert(halves.std.length === 2, `${halves.std.length} parts`);
+  assert(halves.std[0]!.includes('define void @"fsh.a"()') && halves.std[0]!.includes('declare void @"fsh.b"()'), halves.std[0]!);
+  assert(halves.std[1]!.includes('define void @"fsh.b"()') && !halves.std[1]!.includes("fsh.a"), halves.std[1]!);
 });
 
 // Two instances of `walk` with the same text, each called by an instance of `visit`, and `main`
@@ -125,4 +144,10 @@ test("a merged function's part declares the one kept, wherever its callers are",
   const halves = split(instances(false), [], [...INSTANCES], groups);
   assert(defined(halves.groups.get("w.fsh") ?? "") === '@"fsh.walk#aaaaaa"', halves.groups.get("w.fsh") ?? "");
   assert(halves.program.includes('declare i64 @"fsh.walk#aaaaaa"(i64)') && !halves.program.includes("bbbbbb"), halves.program);
+});
+
+test("a part's scalar uses count each named struct's scalars at every use", () => {
+  const text = ['%"<a>" = type { i64, [3 x i64] }', '%"<b>" = type { %"<a>", ptr }', "define void @f(ptr %p) {", '  %x = load %"<a>", ptr %p', '  %y = load %"<b>", ptr %p', '  store %"<b>" %y, ptr %p', "  ret void", "}", ""].join("\n");
+  assert(scalarUses(text) === 14, `${scalarUses(text)}`);
+  assert(scalarUses("define void @f() {\n  ret void\n}\n") === 0, "no structs");
 });

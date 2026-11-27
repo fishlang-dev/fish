@@ -22,7 +22,7 @@ import type { Ids } from "./nodes.fsh";
 import { bundle } from "./bundle.fsh";
 import { JS_NATIVE } from "./js_native.fsh";
 import { NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
-import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
+import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, mathUnits, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
 import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, resolveTarget, sanitizedTarget, staticTarget, type Target } from "./target.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
@@ -474,10 +474,11 @@ function refuseForeignRust(target: Ref<Target>) {
 // about 40 bytes for each byte of it, 24 GB for the compiler's own 570 MB, so a larger program
 // is compiled a file at a time, as a dev build is, and clang holds one file's code at once.
 const RELEASE_MODULE_LENGTH: usize = 64 * 1024 * 1024;
-// The most of one file's functions that go to clang as one unit. Clang holds a unit of this much
-// IR in under a gigabyte and compiles it in well under a minute, so a build's units can go to it
-// side by side on a small machine, and no one file sets how long the build takes.
-const UNIT_LENGTH: usize = 16 * 1024 * 1024;
+// The most of one file's functions, or of std's or the program's own, that go to clang as one
+// unit. Clang holds a unit of this much IR in well under a gigabyte, so several go to it side by
+// side, and a large file is cut into enough units that the longest is a few heavy functions'
+// rather than the file's.
+const UNIT_LENGTH: usize = 2 * 1024 * 1024;
 
 // A build's `.fshnames` table: each compiled instance whose symbol doesn't read as its Fish name
 // alone, and each helper made for a type.
@@ -549,9 +550,11 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
   // the code after it unwinds as if its frame were gone. A synchronous table says nothing at a
   // return, and a panic unwinds only from calls.
   if (withoutGlobalIsel(release, target)) ir = ir.replace(/^(define [^\n]*) uwtable( personality [^\n]* \{| \{)$/gm, "$1 uwtable(sync)$2");
-  const halves = split(ir, std, own, byFile, UNIT_LENGTH);
+  const halves = split(ir, std, own, byFile, debug ? 0 : UNIT_LENGTH);
   const args = [...target.compile, "-x", "ir", "-", ...optimization(release, target), "-funwind-tables"];
-  let cached: Unit[] = [{ name: "std", args: [...args], stdin: halves.std, inputs: [] }];
+  let cached: Unit[] = [];
+  for (let i: usize = 0; i < halves.std.length; i++) cached.push({ name: i === 0 ? "std" : `std-${i + 1}`, args: [...args], stdin: halves.std[i]!, inputs: [] });
+  for (let i: usize = 0; i < halves.rest.length; i++) cached.push({ name: `program-${i + 2}`, args: [...args], stdin: halves.rest[i]!, inputs: [] });
   for (const [file, text] of halves.groups) cached.push({ name: `file-${file.replace(/[^\w.-]/g, "_")}`, args: [...args], stdin: text, inputs: [] });
   return { cached, program: halves.program, times: [["split names", named], ...halves.times] };
 }
@@ -562,21 +565,30 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
 // whose text is the same takes its object without hashing the text again.
 function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ cached: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean, known: Mut<Map<string, string[]>>) {
   const started = stageStart(session);
-  let units = runtimeUnits(ir, release, false, copyTarget(target), leaks);
-  for (const u of halves.cached) units.push(u.clone());
-  let objects = knownObjects(session, units, known);
-  for (const o of mathObjects(session, [...target.compile])) objects.push(o);
-  stageEnd(session, "runtime", started);
   const none: string[] = [];
+  // A split program's own part is a unit beside the others, so every unit is compiled in one batch
+  // and the link compiles nothing; a `-g` build's stays in the link, which gathers its debug info.
+  const alongside = !debug && halves.cached.length > 0;
+  let units: Unit[] = alongside ? [{ name: "program", args: [...halves.cached[0]!.args], stdin: halves.program, inputs: [] }] : [];
+  for (const u of runtimeUnits(ir, release, false, copyTarget(target), leaks)) units.push(u.clone());
+  for (const u of halves.cached) units.push(u.clone());
+  for (const u of mathUnits(session, [...target.compile])) units.push(u.clone());
+  let objects = knownObjects(session, units, known);
+  stageEnd(session, "runtime", started);
+  if (session.timings !== undefined) session.timings.notes.set("runtime", objectsNote(session.timings));
   const g = debug ? ["-g"] : none;
   const tls = runtimeLinks(ir, target);
+  if (alongside) {
+    const linking = stageStart(session);
+    clang([...clangArgs(out, release, links, objects, shim, copyTarget(target), []), ...tls]);
+    stageEnd(session, "link", linking);
+    return;
+  }
   if (session.timings === undefined) {
     clang([...clangArgs(out, release, links, objects, shim, copyTarget(target)), ...tls, ...g], halves.program);
     return;
   }
   // Timed, the program is compiled and linked by two clang calls, so each is measured on its own.
-  const note = objectsNote(session.timings);
-  session.timings.notes.set("runtime", note);
   const dir = mkdtempSync(join(tmpdir(), "fishc-"));
   try {
     const object = join(dir, "program.o");
