@@ -12,7 +12,7 @@ import { comptimeBlock, comptimeBody, comptimeParameter, comptimeValue, isMember
 import { Printer, RUNTIME, type PrintHost } from "./runtime.fsh";
 import type { ArithmeticOp, AssignOp, BinaryOp, Expr, JsName, ObjectProp, Param, Pattern, Span, Stmt } from "./parser.fsh";
 import { ARRAY, DYN, atNamesIn, compound, Conversions, llvmOf, nameAt, structNames, textOf, typeDefinitions } from "./layout.fsh";
-import { made, type PatternInfo } from "./match.fsh";
+import { type PatternInfo } from "./match.fsh";
 import { STD_BASE } from "./std.fsh";
 import { EMBEDDED, LIVE, idOf, type RecordOf, type Typing, type ArrayRecord, type FixedRecord, TypeMap, TypeSet, isLock, literalText, copyField, type ClassRecord, copyMethod, type InterfaceType, type ClosureType, type FixedType, type RefType, integerInfo, SLEEP, YIELD_NOW, type ArrayType, type MapType, type FutureType, type HandleType, type GeneratorType, type InteriorType, type PointerType, type SharedType, type BlockType, type DynType, type Method, type Field, digest, fullDigest, isFloat, isInteger, redundantBang, bare, type ClassType, type Integer, type Numeric, type ObjectType, type RegexType, type UnionType, type RecursiveType, type LiteralType, type VariantType, isNumeric } from "./typing.fsh";
 import { NodeMap, walk, walkWhile, type AnyNode, type NodeSet } from "./nodes.fsh";
@@ -5278,7 +5278,7 @@ class Codegen implements PrintHost, ComptimeHost {
     this.scopes.push({ transient: true, held: [] });
     let subject: string;
     let at: string | undefined;
-    const owning = made(e.subject) && this.fresh(e.subject);
+    const owning = this.fresh(e.subject);
     if (owning) {
       subject = this.value(e.subject, true);
       at = this.alloca(this.llvm(type));
@@ -5538,7 +5538,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const union = info.type !== holder;
       const held = union ? this.convert(v, info.type, holder) : v;
       const shape = this.recOf(holder);
-      const single = shape?.kind === "object" || shape?.kind === "class" ? (holder as ObjectType | ClassType) : undefined;
+      const single = shape?.kind === "object" || (shape?.kind === "class" && !this.tables.typing.disposable(holder)) ? (holder as ObjectType | ClassType) : undefined;
       const holderAt = (at !== undefined && at !== "") && single !== undefined ? (union ? this.partAt(this.llvm(info.type), at, 1) : at) : undefined;
       for (const [key, sub, type] of info.fields) {
         let fieldAt: string | undefined = undefined;
@@ -5564,11 +5564,22 @@ class Codegen implements PrintHost, ComptimeHost {
       return;
     }
     if (info.kind === "some") {
-      // Only an Option of one member keeps that member in place as its payload.
+      // Only an Option of one member keeps that member in place as its payload; a multi-member
+      // Option moved out of an owned subject transfers ownership into an arm-scoped slot.
       const alone = this.tables.typing.rec(info.type as UnionType).members.length === 2;
-      const innerAt = (at !== undefined && at !== "") && alone ? this.partAt(this.llvm(info.type), at, 1) : undefined;
       const convert2 = this.convert(v, info.type, info.inner);
-      this.bindAll(info.arg, convert2, innerAt, move && innerAt !== undefined);
+      if (alone) {
+        const innerAt = (at !== undefined && at !== "") ? this.partAt(this.llvm(info.type), at, 1) : undefined;
+        this.bindAll(info.arg, convert2, innerAt, move && innerAt !== undefined);
+      } else if (move && (at !== undefined && at !== "") && this.needsDrop(info.inner)) {
+        const innerAt = this.alloca(this.llvm(info.inner));
+        this.own(innerAt, info.inner);
+        this.emit(`store ${this.llvm(info.inner)} ${convert2}, ptr ${innerAt}`);
+        this.emit(`store ${this.llvm(info.type)} zeroinitializer, ptr ${at}`);
+        this.bindAll(info.arg, convert2, innerAt, true);
+      } else {
+        this.bindAll(info.arg, convert2, undefined, false);
+      }
     }
   }
 
@@ -5689,10 +5700,10 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // A copy of a value, holding its own reference to each string in it.
   copied(this: Mut<this>, v: string, type: Type): string {
-    if (this.moveOnly(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle or an instance with a disposer, which is moved, never copied`);
     const r = this.recOf(type);
     if (r?.kind === "interior" && !isLock(r)) return this.copied(v, r.of);
     if (!this.needsDrop(type)) return v;
+    if (this.moveOnly(type)) assert(false, `internal error: a '${this.tables.typing.show(type)}' holds a Rust handle or an instance with a disposer, which is moved, never copied`);
     if (type === "string") {
       this.emit(`call void @fsh_rt_str_retain(ptr ${v})`);
       return v;
@@ -9299,7 +9310,17 @@ class Codegen implements PrintHost, ComptimeHost {
   fresh(this: Mut<this>, eGiven: Ref<Expr>): boolean {
     const e = this.unwrapped(eGiven);
     const get2 = this.cur().types.get(e);
-    if (!this.needsDrop(get2)) return false;
+    if (get2 === undefined || this.isRef(get2)) return false;
+    if (!this.needsDrop(get2) && !this.needsDrop(this.cur().types.get(eGiven))) return false;
+    return this.madeFresh(e);
+  }
+
+  // Structural half of `fresh`, without the top-level `needsDrop` gate so `nonNull` inside a
+  // widening wrapper preserves the outer drop-requiring type.
+  madeFresh(this: Mut<this>, eGiven: Ref<Expr>): boolean {
+    const e = this.unwrapped(eGiven);
+    const get2 = this.cur().types.get(e);
+    if (get2 === undefined || this.isRef(get2)) return false;
     switch (e.kind) {
       case "call":
       case "new":
@@ -9329,7 +9350,7 @@ class Codegen implements PrintHost, ComptimeHost {
         return !this.indexes(this.valueType(e.object));
       // Unwrapping an Option made here takes what it holds.
       case "nonNull":
-        return e.narrows === undefined && !redundantBang(e) && this.valueType(e.expr) !== "null" && this.fresh(e.expr);
+        return e.narrows === undefined && !redundantBang(e) && this.valueType(e.expr) !== "null" && this.madeFresh(e.expr);
       default:
         return false;
     }
@@ -9417,9 +9438,25 @@ class Codegen implements PrintHost, ComptimeHost {
     const get2 = this.cur().types.get(e)!;
     const rust = this.moveOnly(get2) && (whole || this.moveOnly(to!));
     if ((whole || rust) && this.fresh(e)) return this.value(e, true);
-    if (!rust && !this.needsDrop(this.cur().types.get(e)!) && this.moveOnly(this.valueType(e))) return this.value(e);
+    const fromType = this.referent(get2);
+    if (!rust && !this.needsDrop(fromType) && this.moveOnly(this.valueType(e))) return this.value(e);
     // A value owning nothing meets a recursive type's blocks only as the blocks just made for it.
-    if (to !== undefined && !this.needsDrop(this.referent(this.cur().types.get(e)!)) && this.tables.typing.holdsPart(to, (t) => this.kindOf(t) === "recursive")) return this.value(e, true);
+    if (to !== undefined && !this.needsDrop(fromType) && this.tables.typing.holdsPart(to, (t) => this.kindOf(t) === "recursive")) return this.value(e, true);
+    // An unconsumed copyable value widened or projected into a move-only type (such as `string`
+    // into `Res | string`, `Plain` into closed `unknown`, or `{ a: string; extra: string }` into
+    // `{ a: string; r?: Res } | Res`) is copied via `copyInto` at its non-move-only source parts
+    // rather than calling `copied` on the move-only target.
+    if (to !== undefined && !this.isRef(to) && !this.moveOnly(fromType) && this.moveOnly(to) && !((whole || rust) && this.cur().consumes.has(e.id) && this.lendable(e))) {
+      let raw = this.known.get(e) ?? this.evaluate(e);
+      if (get2 === "never") return "undef";
+      if (this.fresh(e) && !this.known.has(e)) this.pending.push({ v: raw, type: get2 });
+      if (this.isRef(get2)) {
+        const loaded = this.temp();
+        this.emit(`${loaded} = load ${this.llvm(fromType)}, ptr ${raw}`);
+        raw = loaded;
+      }
+      return e.kind === "string" ? this.convert(raw, fromType, to) : this.copyInto(raw, fromType, to);
+    }
     const v = this.value(e);
     if ((whole || rust) && this.cur().consumes.has(e.id) && this.lendable(e)) {
       this.take(e);
@@ -14891,13 +14928,13 @@ class Codegen implements PrintHost, ComptimeHost {
   orElse(this: Mut<this>, e: Ref<Extract<Expr, { kind: "binary" }>>): string {
     const option = this.valueType(e.left) as UnionType;
     const type = this.cur().types.get(e)!;
-    // A Rust value is moved out of the left side, which is left empty, never copied.
-    const rust = this.moveOnly(option);
-    const v = rust && this.fresh(e.left) ? this.value(e.left, true) : this.value(e.left);
-    if (rust && !this.fresh(e.left)) {
-      if (!this.cur().consumes.has(e.left.id) || !this.lendable(e.left)) assert(false, "internal error: a Rust value on the left of '??' isn't moved");
-      this.take(e.left);
-    }
+    const nonNullMembers = this.tables.typing.rec(option).members.filter((m) => m !== "null");
+    const nonNullType = nonNullMembers.length === 1 ? nonNullMembers[0]! : this.tables.typing.unionType(nonNullMembers);
+    // Taking ownership of `e.left` via `owned` handles moves, `Dyn`/union widening, structural
+    // projections, literals, and `Copy` values uniformly. On the `none` branch `v` holds `null`
+    // (nothing to drop); on the `some` branch ownership transfers straight into `type`.
+    const ownedLeft = this.needsDrop(option) && this.keepsAll(nonNullType, type);
+    const v = ownedLeft ? this.owned(e.left) : this.value(e.left);
     const lent = this.tables.typing.holdsRef(type);
     let hoisted: { slot: string; type: Type }[] = [];
     const [some, none, end] = [this.label(), this.label(), this.label()];
@@ -14906,11 +14943,11 @@ class Codegen implements PrintHost, ComptimeHost {
     this.startBlock(some);
     // The result is a value of its own, like a conditional's.
     let kept: string;
-    if (rust) {
+    if (ownedLeft) {
       kept = this.convert(v, option, type);
     } else {
-      const convert2 = this.convert(v, option, type);
-      kept = this.copied(convert2, type);
+      const inner = this.convert(v, option, nonNullType);
+      kept = this.copyInto(inner, nonNullType, type);
     }
     const someEnd = this.block;
     this.emit(`br label %${end}`);

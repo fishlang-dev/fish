@@ -1763,8 +1763,8 @@ function main() {
   console.log(idRef(r) === dropAndMake(g));
 }
 // case: borrow_compare_match_block_arm_mutated
-// error: cannot move 'g' while a comparison is reading 'g'
-// A match block arm returning a move-only place in === keeps that place lent across RHS (F-2708).
+// error: 'g' was moved, so it can't be used here
+// A match block arm returning a move-only place moves that place out, rejecting reuse in === RHS.
 @derive(Eq)
 class Guard {
   n: i64;
