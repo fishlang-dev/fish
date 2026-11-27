@@ -5,7 +5,7 @@ const problems = document.getElementById("problems");
 const explain = document.getElementById("explain");
 const status = document.getElementById("status");
 const link = document.getElementById("link");
-const worker = new Worker("worker.js");
+const worker = new Worker("worker.js", { type: "module" });
 
 const SAMPLE = `function longest(a: string, b: string): string {
   return a.length >= b.length ? a : b;
@@ -56,6 +56,12 @@ function run() {
   status.textContent = "checking";
   worker.postMessage({ source: editor.value });
 }
+
+// The worker can't start when the compiler isn't built.
+worker.onerror = () => {
+  busy = false;
+  status.textContent = "the compiler isn't here: build it with 'fishc run scripts/playground.fsh'";
+};
 
 worker.onmessage = (event) => {
   busy = false;
