@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { indented } from "../../src/main.fsh";
+import { COMMANDS, helpOf, overview, usageOf, VERSION } from "../../src/commands.fsh";
 import { fishcPath, ran, ranFor, read, reference, removed, same, scratch, text, type Ran } from "./support.fsh";
 
 // Runs the native fishc with `args` in `cwd`, without the variables that decide whether output is
@@ -328,3 +329,30 @@ test("fishc parse parses a file without checking it, and reports a syntax error"
   assert(bad.err.includes("bad.fsh:2:1: error[E0001]"), `stderr: ${bad.err}`);
   removed(root);
 }, { timeout: 30_000 });
+
+test("fishc --version prints the version fish.toml gives", () => {
+  const root = scratch("fish-cli-");
+  const toml = read(join(import.meta.dir, "..", "..", "fish.toml"));
+  const line = toml.split("\n").find((l) => l.startsWith("version = "));
+  same(`version = "${VERSION}"`, line ?? "no version line", "VERSION against fish.toml");
+  ran(fishcIn(root, ["--version"]), 0, `fishc ${VERSION}\n`, "", "--version");
+  ran(fishcIn(root, ["-V"]), 0, `fishc ${VERSION}\n`, "", "-V");
+  removed(root);
+}, { timeout: 30_000 });
+
+test("fishc help lists the commands, and help, --help and -h show one's usage", () => {
+  const root = scratch("fish-cli-");
+  ran(fishcIn(root, ["help"]), 0, `${overview()}\n`, "", "fishc help");
+  ran(fishcIn(root, ["--help"]), 0, `${overview()}\n`, "", "fishc --help");
+  ran(fishcIn(root, []), 2, "", `${overview()}\n`, "fishc alone");
+  for (const c of COMMANDS) {
+    const help = `${helpOf(c.name)!}\n`;
+    ran(fishcIn(root, ["help", c.name]), 0, help, "", `fishc help ${c.name}`);
+    ran(fishcIn(root, [c.name, "--help"]), 0, help, "", `fishc ${c.name} --help`);
+  }
+  ran(fishcIn(root, ["build", "x.fsh", "-h"]), 0, `${helpOf("build")!}\n`, "", "-h after a file");
+  ran(fishcIn(root, ["help", "nope"]), 2, "", "fishc help: 'nope' isn't a command; run 'fishc help' for the list\n", "help for no command");
+  ran(fishcIn(root, ["nope"]), 2, "", "fishc: 'nope' isn't a command; run 'fishc help' for the list\n", "no such command");
+  ran(fishcIn(root, ["check", "--release", "x.fsh"]), 2, "", `${usageOf("check")}\n`, "check with a flag it doesn't take");
+  removed(root);
+}, { timeout: 120_000 });
