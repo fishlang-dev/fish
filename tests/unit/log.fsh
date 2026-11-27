@@ -51,7 +51,7 @@ test("std:log writes JSON lines at FISH_LOG's level and up, with the request ID 
   same(lines(text(plain.stderr)).join("\n"), [
     "{\"level\":\"info\",\"msg\":\"plain\"}",
     "{\"level\":\"warn\",\"msg\":\"list\",\"fields\":[1,2]}",
-    "{\"level\":\"error\",\"msg\":\"hit\",\"user\":\"ann\",\"n\":2}",
+    "{\"level\":\"error\",\"msg\":\"hit\",\"n\":2,\"user\":\"ann\"}",
     "{\"level\":\"info\",\"msg\":\"child\",\"requestId\":\"req-7\"}",
     "{\"level\":\"info\",\"msg\":\"served\",\"requestId\":\"req-7\",\"path\":\"/\"}",
   ].join("\n"), "stderr at info");

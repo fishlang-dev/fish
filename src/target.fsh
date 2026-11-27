@@ -7,7 +7,11 @@ import { cacheDir } from "./mathlib.fsh";
 // Build targets: the four v1 platforms and Linux over musl for static binaries, named by their
 // Rust triples, and the clang flags that build for one from the host fishc runs on.
 
-export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"];
+export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl", "wasm32-wasip1", "browser"];
+
+// A WebAssembly module over WASI preview 1, and the same module with a JavaScript loader giving it
+// those calls in a page.
+export const isWasm = (triple: string) => triple === "wasm32-wasip1" || triple === "browser";
 
 // `compile` goes to every clang compile, and `compile` then `link` to the final link. The host's
 // own target has both empty, so its builds and cache keys are what they were before targets.
@@ -60,7 +64,8 @@ export function hostTriple(platform: string = process.platform, arch: string = p
 // Linux over the other libc, musl or glibc, needs that libc's sysroot too.
 // Throws an Error whose message is the user-facing reason. `host` is the machine's own when left out.
 /** @throws {Error} */
-export function resolveTarget(triple: string | undefined, sysroot: string | undefined, given?: string, which?: (tool: string) => string | null): Target {
+export function resolveTarget(triple: string | undefined, sysroot: string | undefined, given?: string, which?: (tool: string) => string | null, found?: (path: string) => boolean): Target {
+  if (triple !== undefined && isWasm(triple)) return wasmTarget(triple, sysroot, which, found);
   const host = given ?? hostTriple();
   // Cached objects compile in an empty directory of their own, where a relative path means nothing.
   sysroot = sysroot !== undefined && sysroot !== "" ? resolve(sysroot) : undefined;
@@ -89,6 +94,33 @@ export function resolveTarget(triple: string | undefined, sysroot: string | unde
   const roots: string[] = sysroot !== undefined ? ["--sysroot", sysroot] : [];
   const link: string[] = lld ? ["-fuse-ld=lld"] : [];
   return { triple, compile: ["-target", triple, "-Wno-override-module", ...macos, ...roots], link, ar: foreign ? "llvm-ar" : "ar" };
+}
+
+// Where Homebrew's wasi-libc and wasi-runtimes put the sysroot and compiler-rt's builtins.
+const WASI_SYSROOTS = ["/opt/homebrew/opt/wasi-libc/share/wasi-sysroot", "/usr/local/opt/wasi-libc/share/wasi-sysroot"];
+const WASI_BUILTINS = ["/opt/homebrew/opt/wasi-runtimes/share/wasi-runtimes/lib/wasm32-unknown-wasip1/libclang_rt.builtins.a", "/usr/local/opt/wasi-runtimes/share/wasi-runtimes/lib/wasm32-unknown-wasip1/libclang_rt.builtins.a"];
+
+// wasm32-wasip1 over wasi-libc. WASI has no signals, process clocks or mmap of its own, which
+// wasi-libc emulates in libraries of their own. The module exports `_start`, linked by wasm-ld with
+// compiler-rt's builtins for the 128-bit and float arithmetic LLVM calls out to; clang's own
+// resource directory has none for wasm32, so the archive is named on the link. Its stack is 8 MiB,
+// as a native thread's is, since deep recursion is ordinary Fish.
+/** @throws {Error} */
+function wasmTarget(triple: string, sysroot: string | undefined, which?: (tool: string) => string | null, found?: (path: string) => boolean): Target {
+  const exists = (path: string): boolean => (found === undefined ? existsSync(path) : found(path));
+  const root = sysroot !== undefined && sysroot !== "" ? resolve(sysroot) : WASI_SYSROOTS.find((d) => exists(d));
+  if (root === undefined) throw new Error(`fishc build: building for ${triple} needs a WASI sysroot, wasi-libc's headers and libraries; install it with 'brew install wasi-libc wasi-runtimes', or give one with --sysroot <dir> or FISH_SYSROOT`);
+  if ((which === undefined ? Bun.which("wasm-ld") : which("wasm-ld")) === null) throw new Error(`fishc build: building for ${triple} links with wasm-ld, which isn't on PATH; install it with 'brew install lld', or your package manager's lld package`);
+  const builtins = [join(root, "lib", "wasm32-wasip1", "libclang_rt.builtins-wasm32.a"), ...WASI_BUILTINS].find((f) => exists(f));
+  if (builtins === undefined) throw new Error(`fishc build: building for ${triple} links compiler-rt's builtins for wasm32, which weren't found; install them with 'brew install wasi-runtimes'`);
+  const emulated = ["-D_WASI_EMULATED_SIGNAL", "-D_WASI_EMULATED_PROCESS_CLOCKS", "-D_WASI_EMULATED_GETPID", "-D_WASI_EMULATED_MMAN"];
+  const libraries = ["-lwasi-emulated-signal", "-lwasi-emulated-process-clocks", "-lwasi-emulated-getpid", "-lwasi-emulated-mman"];
+  return { triple, compile: ["-target", "wasm32-wasip1", "--sysroot", root, "-Wno-override-module", ...emulated], link: ["-nodefaultlibs", "-lc", ...libraries, builtins, "-Wl,-z,stack-size=8388608"], ar: "llvm-ar" };
+}
+
+// The flags that give a build threads: none for wasm32-wasip1, whose runtime runs on one.
+export function threading(target: Ref<Target>): string[] {
+  return isWasm(target.triple) ? [] : ["-pthread"];
 }
 
 // `target` linked into one binary with no libc or loader to find at run time. Only musl is: glibc
@@ -367,6 +399,7 @@ export function pgoUse(profiles: Ref<string[]>): string[] {
 // The OS, CPU and libc `std:build` names for a build of `info`.
 export function buildFacts(info: Ref<BuildInfo>): { os: string; arch: string; libc: string } {
   const triple = info.triple !== "" ? info.triple : hostTriple() ?? "";
+  if (isWasm(triple)) return { os: "wasi", arch: "wasm32", libc: "wasi" };
   const os = triple.includes("-apple-") ? "macos" : "linux";
   const arch = triple.startsWith("x86_64") ? "x86_64" : "aarch64";
   const libc = triple.includes("-apple-") ? "darwin" : triple.endsWith("-musl") ? "musl" : "gnu";
@@ -380,9 +413,9 @@ export function buildModule(info: Ref<BuildInfo>): string {
   const names = info.flags.map((f) => JSON.stringify(f.name)).join(", ");
   const values = info.flags.map((f) => (f.value === null ? "null" : JSON.stringify(f.value))).join(", ");
   return `
-export type Os = "macos" | "linux";
-export type Arch = "x86_64" | "aarch64";
-export type Libc = "darwin" | "gnu" | "musl";
+export type Os = "macos" | "linux" | "wasi";
+export type Arch = "x86_64" | "aarch64" | "wasm32";
+export type Libc = "darwin" | "gnu" | "musl" | "wasi";
 export const target: { os: Os; arch: Arch; libc: Libc; release: boolean } = { os: "${os}", arch: "${arch}", libc: "${libc}", release: ${info.release} };
 // The build's --flag options, by name: a bare --flag name has no value, so get gives null for it.
 export class BuildFlags {
