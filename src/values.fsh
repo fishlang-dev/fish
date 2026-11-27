@@ -4947,12 +4947,14 @@ export class Expressions<C extends Context> implements Union<C> {
   }
 
   // A raw pointer's methods, all inside `unsafe`: reading and writing what it points at, which
-  // must be a plain value a raw write can't leave dangling, moving along by elements, and
-  // telling whether it points anywhere.
+  // must be a plain value a raw write can't leave dangling, volatile for a device's registers,
+  // moving along by elements, and telling whether it points anywhere.
   /** @throws {CompileError} */
   private pointerCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>, p: PointerType): { type: Type; what: string } {
-    const count: usize | undefined = callee.name === "read" || callee.name === "isNull" ? 0 : callee.name === "write" || callee.name === "offset" ? 1 : undefined;
-    if (count === undefined) throw new CompileError("E1006", `raw pointers have no method '${callee.name}'; they have 'read', 'write', 'offset' and 'isNull'`, callee.start, callee.end);
+    const reads = callee.name === "read" || callee.name === "readVolatile";
+    const writes = callee.name === "write" || callee.name === "writeVolatile";
+    const count: usize | undefined = reads || callee.name === "isNull" ? 0 : writes || callee.name === "offset" ? 1 : undefined;
+    if (count === undefined) throw new CompileError("E1006", `raw pointers have no method '${callee.name}'; they have 'read', 'write', 'readVolatile', 'writeVolatile', 'offset' and 'isNull'`, callee.start, callee.end);
     this.needsUnsafe(`'${callee.name}' on a raw pointer`, { start: callee.start, end: callee.end });
     if (this.linked(callee)) throw unsupported("optional chains calling raw pointer methods", callee);
     const held = this.ctx.held().types.get(callee.object)!;
@@ -4960,16 +4962,16 @@ export class Expressions<C extends Context> implements Union<C> {
     if (e.args.length !== count) throw new CompileError("E0504", `'${callee.name}' takes ${count === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
     const { to } = this.ctx.typing().rec(p);
     const plain = isNumeric(to) || to === "boolean" || this.kindOf(to) === "pointer";
-    if ((callee.name === "read" || callee.name === "write") && !plain) throw unsupported(`raw reads and writes of '${this.ctx.typing().show(to)}'`, callee);
-    if (callee.name === "read") return { type: to, what: "'read'" };
+    if ((reads || writes) && !plain) throw unsupported(`raw reads and writes of '${this.ctx.typing().show(to)}'`, callee);
+    if (reads) return { type: to, what: `'${callee.name}'` };
     if (callee.name === "isNull") return { type: "boolean", what: "'isNull'" };
-    const want = callee.name === "write" ? to : "i64";
-    if (callee.name === "write" && !this.ctx.typing().rec(p).mutable) throw new CompileError("E1006", "'write' needs a 'MutPtr'; a 'Ptr' only reads what it points at", callee.start, callee.end);
+    const want = writes ? to : "i64";
+    if (writes && !this.ctx.typing().rec(p).mutable) throw new CompileError("E1006", `'${callee.name}' needs a 'MutPtr'; a 'Ptr' only reads what it points at`, callee.start, callee.end);
     this.expect(e.args[0]!, want);
     const t = this.value(e.args[0]!);
     const arg4525_1 = `argument of type '${this.ctx.typing().show(t)}' is not assignable to parameter of type '${this.ctx.typing().show(want)}'`;
     this.coerce(e.args[0]!, t, want, arg4525_1);
-    return { type: callee.name === "write" ? "void" : p, what: `'${callee.name}'` };
+    return { type: writes ? "void" : p, what: `'${callee.name}'` };
   }
 
   // `new Atomic(v)`, `new Lock(v)`, `new Cell(v)`: one holding v, of its type argument, the type

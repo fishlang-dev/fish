@@ -3,6 +3,7 @@
 // rebuild whose files all read as they did is not checked again, and one after an edit checks only
 // the bodies that changed. `fishc build`, `fishc check` and `fishc watch` all drive it; the
 // language server holds one per program, and the cache on disk reads and writes one here.
+import { listedFiles, readsOf } from "./reads.fsh";
 import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import type { InstanceId } from "./arenas.fsh";
@@ -86,7 +87,11 @@ function checkedAfresh(session: Session, file: string, looked: Mut<string[]>, ma
   let loaded = loadedFrom(compilation, file, src !== undefined ? src! : readFileSync(file, "utf8"), looked, open);
   stopAfter(compilation.session, "parse");
   // Every file the load read, which is what the cached check is keyed by.
-  const contents = loadedContents(loaded, looked, manifest, manifestText, open);
+  let contents = loadedContents(loaded, looked, manifest, manifestText, open);
+  // The files comptime may read key it too, whichever of them it reads.
+  if (compilation.reads !== undefined) {
+    for (const path of listedFiles(compilation.reads!)) contents.set(path, textIn(open, path));
+  }
   // std:build's text is made from the build's target and flags rather than read, so it keys too.
   let entry = file;
   for (const m of loaded.modules) if (m.path === "std:build") entry = `${file}\0${m.src}`;
@@ -269,6 +274,7 @@ function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, lo
   // holder's: a copy of a handful of open documents against a program's whole parse.
   let held = new Map<string, string>();
   for (const [path, text] of open) held.set(path, text);
+  compilation.reads = readsOf(file);
   try {
     return load(compilation, file, src, move (path): string | undefined => {
       let out = held.get(resolve(path));

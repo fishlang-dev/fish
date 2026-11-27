@@ -1,3 +1,4 @@
+import { listedFiles, readsOf } from "./reads.fsh";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { watch } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
@@ -15,7 +16,12 @@ const GRACE_MS = 2000;
 export function watchedFiles(loaded: Ref<string[]>, manifest?: string): string[] {
   let files: string[] = [];
   for (const f of loaded) files.push(existsSync(f) ? realpathSync(f) : resolve(f));
-  if (manifest !== undefined) files.push(existsSync(manifest) ? realpathSync(manifest) : resolve(manifest));
+  if (manifest !== undefined) {
+    files.push(existsSync(manifest) ? realpathSync(manifest) : resolve(manifest));
+    // What comptime may read changes the program as a source does.
+    const reads = readsOf(manifest);
+    if (reads !== undefined) for (const f of listedFiles(reads!)) files.push(f);
+  }
   let unique = [...new Set(files)];
   unique.sort();
   return unique;

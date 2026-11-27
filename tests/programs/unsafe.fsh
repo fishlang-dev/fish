@@ -180,3 +180,22 @@ function main() {
   }
 }
 // error: 'write' needs a 'MutPtr'; a 'Ptr' only reads what it points at
+// case: unsafe_volatile
+function main() {
+  let x: u32 = 7;
+  const p = mutPtrOf(x);
+  unsafe {
+    p.writeVolatile(p.readVolatile() + 35);
+  }
+  console.log(x, unsafe { p.readVolatile() });
+}
+// expect: 42 42
+// case: unsafe_volatile_write_through_ptr
+function main() {
+  let x = 1;
+  const p = ptrOf(x);
+  unsafe {
+    p.writeVolatile(2);
+  }
+}
+// error: 'writeVolatile' needs a 'MutPtr'; a 'Ptr' only reads what it points at

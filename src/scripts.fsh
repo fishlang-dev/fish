@@ -7,6 +7,7 @@ import { compilerDigest } from "./checkcache.fsh";
 import { LOCKFILE } from "./dependencies.fsh";
 import { findManifest } from "./manifest.fsh";
 import { cacheDir, partial } from "./mathlib.fsh";
+import { listedFiles, readsOf } from "./reads.fsh";
 
 function sha256(text: string): string {
   let hash = createHash("sha256");
@@ -29,6 +30,8 @@ export function scriptRecord(script: string, looked: Ref<string[]>): string {
   if (manifest !== undefined) {
     paths.push(manifest!);
     paths.push(join(dirname(manifest!), LOCKFILE));
+    const reads = readsOf(script);
+    if (reads !== undefined) for (const path of listedFiles(reads!)) paths.push(path);
   }
   paths.sort();
   let lines = [compilerDigest()];
