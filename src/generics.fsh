@@ -8,7 +8,7 @@ import { unsupported } from "./unsupported.fsh";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.fsh";
 import type { ClassNode, Expr, Id, Param, Span, TypeMember, TypeNode, TypeParam } from "./parser.fsh";
 import { paramName, unboxedClosure } from "./resolve.fsh";
-import type { Candidate } from "./ownership.fsh";
+import { inferredRef, type Candidate } from "./ownership.fsh";
 import { perInstance, perInstanceStandIn } from "./typefns.fsh";
 import { INTERIORS, ITERATOR, TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.fsh";
 import { NodeMap, NodeSet, forEachChild, nextId, renumberTypeNode, Rewrites, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
@@ -984,7 +984,7 @@ export class Instancing<H extends InstancingHost> {
         continue;
       }
       const lentAs = this.host.instancingState.lent.get(f.bodyId)!.get(i);
-      own.set(`#${i}`, implicitArgument(this.host, args[i]!, argTypes[i]!, meant, lentAs));
+      own.set(`#${i}`, implicitArgument(this.host, args[i]!, argTypes[i]!, meant, lentAs, inferredRef(f.params[i]!)));
       const given = argTypes[i]!;
       const r = typeof given === "string" ? undefined : this.host.tables.typing.rec(given);
       const held = r?.kind === "ref" ? r.to : given;
@@ -1388,14 +1388,14 @@ function presentArgument<H extends InstancingHost>(host: Mut<H>, arg: Ref<Expr> 
   const r = typeof type === "string" ? undefined : host.tables.typing.rec(type);
   const held = r?.kind === "union" && r.members.includes("null") ? host.tables.typing.unionType(r.members.filter((m) => m !== "null")) : type;
   if (host.tables.typing.lower(held) === "never") return absent;
-  return implicitArgument(host, arg, held, bound, undefined);
+  return implicitArgument(host, arg, held, bound, undefined, false);
 }
 
 // What an implicit type parameter stands for in a call: the argument's own type, which must
 // satisfy the parameter's. A fresh object literal takes the declared object type instead, so
 // it gets TypeScript's excess property check.
 /** @throws {CompileError} */
-function implicitArgument<H extends InstancingHost>(host: Mut<H>, arg: Ref<Expr>, type: Type, bound: Bound, lent: RefType | undefined): Type {
+function implicitArgument<H extends InstancingHost>(host: Mut<H>, arg: Ref<Expr>, type: Type, bound: Bound, lent: RefType | undefined, inferred: boolean): Type {
   const borrowed = lent !== undefined;
   // A borrowed argument stands for what it is, or what it refers to.
   const given = typeof type === "string" ? undefined : host.tables.typing.rec(type);
@@ -1448,9 +1448,10 @@ function implicitArgument<H extends InstancingHost>(host: Mut<H>, arg: Ref<Expr>
   if (arg.kind === "object" && (host.tables.typing.holdsRef(bound) || !host.tables.typing.fits(type, bound))) return bound;
   if (!host.tables.typing.fits(type, bound)) throw new CompileError("E0101", message, arg.start, arg.end);
   // A value leaving out an optional field is copied into the parameter's type, which fills
-  // it in empty; a reference can't be.
+  // it in empty; a written reference can't be, but an inferred one reads a filled-in copy, as
+  // the owned parameter it stands for took one.
   const missing = lacks(host.tables.typing, type, bound);
-  if (missing !== undefined && missing !== "" && borrowed) throw new CompileError("E0101", `${message}: it has no '${missing}', which a reference can't fill in; pass one that has it`, arg.start, arg.end);
+  if (missing !== undefined && missing !== "" && borrowed && !inferred) throw new CompileError("E0101", `${message}: it has no '${missing}', which a reference can't fill in; pass one that has it`, arg.start, arg.end);
   return arg.kind === "object" || (missing !== undefined && missing !== "") ? bound : type;
 }
 

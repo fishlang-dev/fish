@@ -41,6 +41,16 @@ export function plainParam(p: Ref<Param>): boolean {
   return p.pattern.kind === "ident" && p.pattern.name !== "this";
 }
 
+// Whether a parameter's reference was inferred rather than written: inference wraps the written
+// type in a `Ref` or `Mut` spanning exactly what was written, which no written one does.
+export function inferredRef(p: Ref<Param>): boolean {
+  if (p.type === undefined) return false;
+  const t: Ref<TypeNode> = p.type!;
+  if (t.kind !== "ref" || t.args.length !== 1) return false;
+  const w: Ref<TypeNode> = t.args[0]!;
+  return w.start === t.start && w.end === t.end;
+}
+
 // Whether a reference to a value of `t` reads it as the value itself does: an object, instance or
 // array that moves rather than copies, holds no reference, and nothing whose drop can be seen.
 export function lendable(typing: Ref<Typing>, t: Type): boolean {

@@ -21,6 +21,7 @@ import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex
 import { BUFFER_ENCODINGS, BUFFER_READS, BUFFER_REFUSED, BUFFER_STATICS, JSON_VALUE_NAME, STD_BASE } from "./std.fsh";
 import { parseArgsArgs, typedParseArgs, writtenFields } from "./parseargs.fsh";
 import { parseExpression } from "./parser.fsh";
+import { inferredRef } from "./ownership.fsh";
 import { holesOf, quoted, type Category } from "./quote.fsh";
 import { holdsNull } from "./defaults.fsh";
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.fsh";
@@ -8320,6 +8321,12 @@ export class Expressions<C extends Context> implements Union<C> {
       const expected = params[i]!;
       if (this.isRefType(expected) && this.ctx.typing().rec(expected).mutable) this.readOnlySubarray(list[i]!);
       const declared = cloneParam(written[i]!);
+      // An inferred reference takes what the owned parameter it stands for took, and is named as
+      // that was written.
+      if (inferredRef(declared) && this.isRefType(expected)) {
+        this.lendInferred(list[i]!, type, expected, this.ctx.typing().rec(expected).to);
+        continue;
+      }
       const shown = this.defaultedArg(list[i]!, type, declared) ?? expected;
       this.coerceArg(list[i]!, type, expected, shown);
     }
@@ -8336,6 +8343,24 @@ export class Expressions<C extends Context> implements Union<C> {
       const said = `argument of type '${this.ctx.typing().show(type)}' is not assignable to parameter of type '${this.ctx.typing().show(shown)}'`;
       throw new CompileError(err.code, err.message.replace(ARGUMENT_MISMATCH, said), err.start, err.end, err.note === undefined ? undefined : { ...err.note! });
     }
+  }
+
+  // An argument to an inferred reference: lent where it fits as it is, and otherwise judged as
+  // the owned parameter judged it, which either refuses it with its own message or converts it,
+  // here into the copy the reference reads.
+  /** @throws {CompileError} */
+  private lendInferred(this: Mut<this>, a: Ref<Expr>, type: Type, to: Type, written: Type): void {
+    try {
+      this.coerceArg(a, type, to, written);
+    } catch (err) {
+      if (!(err instanceof CompileError)) throw err;
+      this.coerceArg(a, type, written, written);
+      const now = this.ctx.tables().rewrites.rewritten(a);
+      this.ctx.coercions().set(now !== undefined ? now : a, to);
+      return;
+    }
+    // A literal that fits a reference as it is still names only what the parameter has.
+    this.excess(a, written);
   }
 
   // A parameter with a default takes a value of its declared type, which this gives: leaving the

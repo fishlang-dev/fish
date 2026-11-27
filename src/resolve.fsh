@@ -1265,7 +1265,6 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
     let shown: string[] = [];
     for (const s of sides) shown.push(this.host.tables.typing.show(s));
     const found = this.host.tables.typing.interfaceType(shown.join(" & "));
-    this.host.resolverState.combined.set(key, found);
     let r = this.host.tables.typing.rec(found);
     const record2 = this.host.tables.typing.rec(fields);
     for (const f of record2.fields) r.fields.push(copyField(f));
@@ -1294,6 +1293,8 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
         this.host.tables.typing.setRec(found, replaced);
       }
     }
+    // Kept only once both sides agree, so resolving it again still finds a conflict.
+    this.host.resolverState.combined.set(key, found);
     return found;
   }
 
