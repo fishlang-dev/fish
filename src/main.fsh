@@ -12,8 +12,8 @@ import { cachedSession } from "./mathlib.fsh";
 import { CompileError, copyNames, formatError, movedOffset, type BorrowEvent, type Names, type Source } from "./diag.fsh";
 import { load, type Loaded, type RustCrate } from "./modules.fsh";
 import { resolvePackages } from "./dependencies.fsh";
-import { pack, prepare, submit, unsafeDependencies } from "./publish.fsh";
-import { openIndex, registryUrl } from "./registry_index.fsh";
+import { pack, prepare, submit, unsafeDependencies, upload } from "./publish.fsh";
+import { openIndex, registryUrl, sparseBase, useRegistry } from "./registry_index.fsh";
 import { formatVersion, parseRange, maxSatisfying, type Version } from "./semver.fsh";
 import { createPackage, type Edition, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.fsh";
 import { parse, parseWithComments, type Stmt } from "./parser.fsh";
@@ -2011,6 +2011,7 @@ async function main(): Promise<void> {
           "allow-dirty": { type: "boolean" },
           submit: { type: "boolean" },
           fork: { type: "string" },
+          registry: { type: "string" },
           yes: { type: "boolean" },
           check: { type: "boolean" },
           fix: { type: "boolean" },
@@ -2045,8 +2046,10 @@ async function main(): Promise<void> {
     }
   })();
   // The options given, as Node's parseArgs keys them: those on the command line and `panic`'s default.
+  // --registry applies to whatever reads the registry, so no command's own flags list it.
   let flags: string[] = [];
-  for (const [k, v] of Object.entries(values)) if (v !== undefined) flags.push(k);
+  for (const [k, v] of Object.entries(values)) if (v !== undefined && k !== "registry") flags.push(k);
+  if (values.registry !== undefined) useRegistry(values.registry);
   const links: string[] = values.link === undefined ? [] : [...values.link];
   // Each build compiles within a session of its own, since a check uses up the one it is given.
   const locked = values.locked === true;
@@ -2336,7 +2339,10 @@ async function main(): Promise<void> {
       if (packed.unsafe.length === 0 && deps.length === 0) console.log(`no unsafe in ${packed.manifest.name} or its dependencies`);
       for (const u of packed.unsafe) console.log(`unsafe: ${u.file}:${u.line}:${u.col} ${u.what}`);
       for (const d of deps) console.log(`unsafe: the dependency '${d.name}' ${d.text} uses unsafe`);
-      if (values["dry-run"] !== true) {
+      if (values["dry-run"] !== true && sparseBase(registryUrl(packed.manifest)) !== undefined) {
+        if (submitting) fail("fishc publish: --submit opens a pull request against a git index; a registry server takes the release itself");
+        console.log(`published ${packed.manifest.name} ${packed.manifest.version} to ${upload(packed)}`);
+      } else if (values["dry-run"] !== true) {
         const prepared = prepare(packed);
         console.log(`prepared ${prepared.branch} in ${prepared.clone}: ${prepared.archive} and its index line`);
         if (!submitting) console.log(`run 'fishc publish --submit' to push it to your fork and open a pull request`);
