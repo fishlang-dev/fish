@@ -109,7 +109,7 @@ test("instances that read alike get symbols of their own", () => {
   const a = made(arenas, "Box<T>.get");
   const b = made(arenas, "Box<T>.get");
   const c = made(arenas, "Box<U>.get");
-  const names = symbolNames(arenas);
+  const names = symbolNames(arenas, new Typing());
   const got = [symbolIn(arenas, arenas.instanceOf(a), names), symbolIn(arenas, arenas.instanceOf(b), names), symbolIn(arenas, arenas.instanceOf(c), names)].join(" ");
   assert(got === '@"fsh.Box<T>.get~r07hia" @"fsh.Box<T>.get~r07hia.2" @"fsh.Box<U>.get"', got);
 });

@@ -134,9 +134,12 @@ function brief(shown: string): string {
 
 // Each instance's name in the IR: instances whose shortened symbols read alike, as two classes made
 // from arguments shown the same way, are each told apart by a digest of the whole symbol, so a
-// name doesn't depend on the order instances were made in. Whole symbols alike are numbered.
-export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
+// name doesn't depend on the order instances were made in. Whole symbols alike, as instances of
+// one value shape spelled two ways, are numbered in the order of their type arguments' keys, last
+// first, and in the order they were made only where those are alike too.
+export function symbolNames(arenas: Ref<Arenas>, typing: Ref<Typing>): Map<InstanceId, string> {
   let alike = new Map<string, usize>();
+  let whole = new Map<string, usize>();
   // Each live instance's shortened symbol, made once.
   let short: string[] = [""];
   for (let id: usize = 1; id <= arenas.instanceCount(); id++) {
@@ -148,19 +151,34 @@ export function symbolNames(arenas: Ref<Arenas>): Map<InstanceId, string> {
     const name = shortened(x.symbol);
     short.push(name);
     alike.set(name, (alike.get(name) ?? 0) + 1);
+    whole.set(x.symbol, (whole.get(x.symbol) ?? 0) + 1);
   }
-  let known = new Map<InstanceId, string>();
-  let taken = new Set<string>();
+  let order: { id: InstanceId; key: string }[] = [];
   for (let id: usize = 1; id <= arenas.instanceCount(); id++) {
     const x = arenas.instanceOf(id as InstanceId);
     if (x.retired === true) continue;
-    const name = short[id]!;
+    order.push({ id: x.id, key: (whole.get(x.symbol) ?? 0) > 1 ? argumentKeys(typing, x.bindings) : "" });
+  }
+  order.sort((a, b) => (a.key > b.key ? -1 : a.key < b.key ? 1 : a.id < b.id ? -1 : 1));
+  let known = new Map<InstanceId, string>();
+  let taken = new Set<string>();
+  for (const { id } of order) {
+    const x = arenas.instanceOf(id);
+    const name = short[id as usize]!;
     let chosen = (alike.get(name) ?? 0) > 1 ? `${name}~${digest(x.symbol)}` : name;
     for (let n: usize = 2; taken.has(chosen); n++) chosen = `${name}~${digest(x.symbol)}.${n}`;
     taken.add(chosen);
     known.set(x.id, chosen);
   }
   return known;
+}
+
+// An instance's type arguments as their keys, which are the same exactly when the arguments are.
+function argumentKeys(typing: Ref<Typing>, bindings: Ref<Map<string, Type>>): string {
+  let parts: string[] = [];
+  for (const [k, t] of bindings) parts.push(`${k}=${typing.keyOf(t)}`);
+  parts.sort();
+  return parts.join(";");
 }
 
 // An instance's name in the IR, from the names `symbolNames` gave the compilation's instances.
@@ -508,7 +526,7 @@ class Codegen implements PrintHost, ComptimeHost {
       if (made.generator !== undefined) resumes.set(made.generator, i);
       if (made.future !== undefined) polls.set(made.future, i);
     }
-    this.names = symbolNames(checked.tables.arenas);
+    this.names = symbolNames(checked.tables.arenas, checked.tables.typing);
     this.src = options.src;
     this.file = options.file;
     this.release = options.release;
@@ -1191,7 +1209,7 @@ class Codegen implements PrintHost, ComptimeHost {
 
   // Instances made while compiling, as comptime makes, are named once they are met.
   symbol(this: Mut<this>, i: InstanceId): string {
-    if (!this.names.has(i)) this.names = symbolNames(this.tables.arenas);
+    if (!this.names.has(i)) this.names = symbolNames(this.tables.arenas, this.tables.typing);
     return symbolIn(this.tables.arenas, this.inst(i), this.names);
   }
 

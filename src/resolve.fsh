@@ -483,11 +483,13 @@ export class Resolver<H extends ResolverHost> implements TypeFunctionsHost {
         let members: EnumMember[] = [];
         const written = this.host.enums.get(enumName)!.data!;
         for (const m of written.members) members.push(cloneEnumMember(m));
+        let position: usize = 0;
         for (const m of members) {
           const payload = this.payloadOf(m, args, at);
           let given: Type[] = [];
           for (const a of args) given.push(a);
-          variants.set(m.name, this.host.tables.typing.variantType(data.name, data.id, m.name, given, payload));
+          variants.set(m.name, this.host.tables.typing.variantType(data.name, data.id, m.name, given, payload, position));
+          position++;
         }
       } finally {
         this.host.resolverState.scope = outer;
