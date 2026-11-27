@@ -2160,10 +2160,11 @@ export class Typing {
   // The key of a type that is a type of its own each time one is made, as a class or a closure is:
   // a digest of what it is made from, numbered past the first made from the same. So the key, and
   // the order a union keeps its members in, follows what each member is rather than how many types
-  // were made before it, which the order bodies are checked in decides. A class or an interface
-  // puts its name first, so a union of classes is kept, and shown, in the order of their names.
-  private declaredKey(this: Mut<this>, kind: string, from: string, named = ""): string {
-    const stem = named === "" ? `${kind} ${fullDigest(from)}` : `${kind} ${named} ${fullDigest(from)}`;
+  // were made before it, which the order bodies are checked in decides. `first` goes before the
+  // digest: a class's or an interface's name, so a union of classes is kept, and shown, in the order
+  // of their names, and an enum variant's place.
+  private declaredKey(this: Mut<this>, kind: string, from: string, first = ""): string {
+    const stem = first === "" ? `${kind} ${fullDigest(from)}` : `${kind} ${first} ${fullDigest(from)}`;
     const made = this.declared.get(stem) ?? 0;
     this.declared.set(stem, made + 1);
     return made === 0 ? stem : `${stem}.${made}`;
@@ -2671,8 +2672,9 @@ export class Typing {
 
   private maps = new Map<string, MapType>();
 
-  // The variant `member` of an enum declaration (by its unique id) with these type arguments.
-  variantType(this: Mut<this>, enumName: string, id: usize, member: string, args: Type[], payload: Type[]): VariantType {
+  // The variant `member` of an enum declaration (by its unique id) with these type arguments,
+  // `position` its place among the enum's members.
+  variantType(this: Mut<this>, enumName: string, id: usize, member: string, args: Type[], payload: Type[], position: usize): VariantType {
     const key = `variant ${id} ${member} <${args.map((t) => this.keyOf(t)).join(",")}>`;
     let t = this.variants.get(key);
     if (t === undefined) {
@@ -2680,8 +2682,11 @@ export class Typing {
       t = this.made<VariantType>({ kind: "variant", name: `${shown}.${member}`, member, enum: enumName, fields: payload.map((type, i): Field => ({ name: String(i), type })), args });
       this.variants.set(key, t);
       this.variantIds.set(t, id);
-      // A short key of its own, so an enum nested in itself doesn't double its key each level.
-      const short = this.declaredKey("variant", key);
+      // A short key of its own, so an enum nested in itself doesn't double its key each level. It
+      // starts with the member's place, its digit count first, so an enum's union keeps its members
+      // in the order they are written.
+      const place = `${position}`;
+      const short = this.declaredKey("variant", key, `${id} ${place.length}${place}`);
       this.keys.set(t, short);
     }
     return t;
