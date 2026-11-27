@@ -7423,6 +7423,47 @@ async function* grpcReplies(call: GrpcCall | null, method: string, service: stri
 `;
 
 export const STD_MODULES: Record<string, string> = {
+  // A microcontroller's peripherals, imported as std:mcu.
+  mcu: String.raw`
+// @registers(base) on a class: its fields are one peripheral's registers, in order, each at the
+// next offset its size aligns to from base, and the class becomes one static method per register
+// giving a MutPtr at that address, read and written with readVolatile and writeVolatile inside
+// unsafe. Every address is worked out while compiling, so an access is one load or store.
+export macro function registers(input: AstStmt, base: i64): AstStmt {
+  let c = input;
+  assert(c.kind === "class", "'@registers' applies to a class whose fields are a peripheral's registers, in order");
+  if (c.kind !== "class") return c;
+  let offset: i64 = 0;
+  let made: AstClassMember[] = [];
+  for (const m of c.members) {
+    assert(m.kind === "field" && typeof m.name === "string", "a register block holds only fields, like 'data: u32'");
+    if (m.kind !== "field" || typeof m.name !== "string") continue;
+    const name = m.name;
+    const t = m.type.clone();
+    assert(t !== null && t.kind === "ref", "register '" + name + "' needs its type written, like 'data: u32'");
+    if (t === null || t.kind !== "ref") continue;
+    const size: i64 = t.name === "u8" || t.name === "i8" ? 1 : t.name === "u16" || t.name === "i16" ? 2 : t.name === "u32" || t.name === "i32" ? 4 : t.name === "u64" || t.name === "i64" ? 8 : 0;
+    assert(size > 0, "register '" + name + "' is an integer of 8, 16, 32 or 64 bits, not '" + t.name + "'");
+    if (size === 0) continue;
+    offset = (offset + size - 1) / size * size;
+    const at: AstExpr = { kind: "int", value: base + offset, start: 0, end: 0 };
+    const pointer: AstType = { kind: "ref", name: "MutPtr", args: [t.clone()], start: 0, end: 0 };
+    const k = quote\`class X {
+      static register(): \${pointer.clone()} {
+        return unsafe { (\${at} as usize) as \${pointer.clone()} };
+      }
+    }\`;
+    if (k.kind === "class") for (const member of k.members) {
+      let method = member.clone();
+      if (method.kind === "method") method.name = name;
+      made.push(method);
+    }
+    offset += size;
+  }
+  c.members = made;
+  return c;
+}
+`,
   grpc: GRPC,
   query: QUERY,
   s3: String.raw`import { hash, hmac } from "crypto";
@@ -13032,7 +13073,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log", "durable"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log", "durable", "mcu"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.

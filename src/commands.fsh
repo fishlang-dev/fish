@@ -10,7 +10,7 @@ export const COMMANDS: Command[] = [
     name: "build",
     summary: "compile a program, a library, a Node addon or a mobile module",
     usage: [
-      "fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--heap-profile] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--flag <name>[=<value>]]...",
+      "fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--arena <bytes>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--heap-profile] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--flag <name>[=<value>]]...",
       "fishc build --addon <file.fsh> [-o <out.node>] [--release] [-g]",
       "fishc build --mobile ios|android|react-native <file.fsh> [-o <dir>] [--release] [-g] [--sysroot <ndk>]",
     ],

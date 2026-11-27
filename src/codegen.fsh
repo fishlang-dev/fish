@@ -2199,18 +2199,20 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  // A raw pointer's method: a load or a store of what it points at, the address `n` elements
-  // along, or whether it is null.
+  // A raw pointer's method: a load or a store of what it points at, volatile for a device's
+  // registers, the address `n` elements along, or whether it is null.
   pointerCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, callee: Ref<Extract<Expr, { kind: "member" }>>): string | undefined {
     const p = this.valueType(callee.object) as PointerType;
     const at = this.value(callee.object);
     const result = this.temp();
     switch (callee.name) {
       case "read":
-        this.emit(`${result} = load ${this.llvm(this.tables.typing.rec(p).to)}, ptr ${at}`);
+      case "readVolatile":
+        this.emit(`${result} = load ${callee.name === "readVolatile" ? "volatile " : ""}${this.llvm(this.tables.typing.rec(p).to)}, ptr ${at}`);
         return result;
       case "write":
-        const line = `store ${this.llvm(this.tables.typing.rec(p).to)} ${this.value(e.args[0]!)}, ptr ${at}`;
+      case "writeVolatile":
+        const line = `store ${callee.name === "writeVolatile" ? "volatile " : ""}${this.llvm(this.tables.typing.rec(p).to)} ${this.value(e.args[0]!)}, ptr ${at}`;
         this.emit(line);
         return undefined;
       case "offset":
