@@ -800,6 +800,29 @@ function ownThis(body: Ref<Stmt[]>): Span | undefined {
   return found.pop();
 }
 
+// Comma expressions written as statements, a `for` loop's initializer included, lowered before
+// checking into a block of one statement per part, run in order. One in a `for` loop's update is
+// run part by part where the update is; one used as a value is refused while checking.
+function lowerSequenceStatements(tables: Mut<Tables>, program: Mut<Stmt[]>) {
+  let rewrites = new Rewrites();
+  walk({ of: "stmts", node: program }, (n) => {
+    if (n.of !== "stmt" || n.node.kind !== "expr" || n.node.expr.kind !== "sequence") return;
+    const s = n.node;
+    let parts: Expr[] = [];
+    sequenceParts(s.expr, parts);
+    let body: Stmt[] = [];
+    for (const part of parts) body.push({ id: nextId(tables.ids), kind: "expr", expr: cloneExpr(part), start: part.start, end: part.end });
+    rewrites.replaceStmt(s, { id: 0, kind: "block", body, start: s.start, end: s.end });
+  });
+  rebuiltStmts(program, rewrites);
+}
+
+// The parts of a comma expression in order, a parenthesized one inside it opened too.
+function sequenceParts(e: Ref<Expr>, out: Mut<Expr[]>): void {
+  if (e.kind !== "sequence") out.push(cloneExpr(e));
+  else for (const x of e.exprs) sequenceParts(x, out);
+}
+
 // A const's function type gives the arrow it holds the parameter, result and error types the
 // arrow leaves unwritten, as TypeScript's contextual typing does.
 /** @throws {CompileError} */
@@ -989,6 +1012,7 @@ export function loweredFile(tables: Mut<Tables>, given: Stmt[], library: boolean
     return false;
   });
   lowerFunctionExpressions(tables, written);
+  lowerSequenceStatements(tables, written);
   lowerDefaults(tables, written);
   return { statements: written, fallback: undefined };
 }
@@ -1028,6 +1052,7 @@ function lowered(tables: Mut<Tables>, given: Stmt[], library: boolean): Stmt[] {
     return false;
   });
   lowerFunctionExpressions(tables, written);
+  lowerSequenceStatements(tables, written);
   lowerDefaults(tables, written);
   if (!library) timersRunAsync(tables.ids, written, tables.timerMains);
   let std = stdFor(tables, written);
@@ -6649,7 +6674,8 @@ class BodyChecker implements Context, GuardHost {
         this.pushScope(new Map<string, LocalId>());
         if (s.init !== undefined) this.statement(s.init);
         if (s.test !== undefined) this.exprs().condition(s.test);
-        if (s.update !== undefined) this.exprs().effect(s.update);
+        if (s.update !== undefined && s.update.kind === "sequence") for (const part of s.update.exprs) this.exprs().effect(part);
+        else if (s.update !== undefined) this.exprs().effect(s.update);
         this.enterTarget({ stmt: standIn(s), kind: "loop" as const });
         this.scoped(s.id, "body", s.body);
         this.leaveTarget();

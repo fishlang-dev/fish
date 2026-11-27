@@ -232,7 +232,7 @@ test("rest over an interface's fields", () => {
 test("(1, 2)", () => {
   const src = "function main() {\n  let x = (1, 2)\n}";
   const start = src.indexOf("1, 2");
-  refuses("(1, 2)", src, "comma expressions are not supported yet", start, start + 4);
+  refuses("(1, 2)", src, "comma expressions used as values are not supported yet", start, start + 4);
 });
 
 // Statements that parse but have no meaning yet, inside main().
