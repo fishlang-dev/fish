@@ -3,6 +3,7 @@ import type { Checked } from "./check.fsh";
 import { AstValues, comptimeBody, comptimeCall, type ComptimeHost, type Value } from "./comptime.fsh";
 import { macroCompilation, type Compilation, type Tables } from "./compilation.fsh";
 import { CompileError } from "./diag.fsh";
+import { durableBody } from "./durable.fsh";
 import { flatten, type Loaded, type Module } from "./modules.fsh";
 import { parse, type ClassMember, type Expr, type Func, type Param, type Pattern, type PropertyName, type Span, type Specifier, type Stmt, type TypeMember, type TypeNode, type TypeParam } from "./parser.fsh";
 import { built, declaredBy, freshName, quoted, type Categories, type Free, type Hygiene, type Quote } from "./quote.fsh";
@@ -169,11 +170,11 @@ class MacroHost implements ComptimeHost {
   }
 }
 
-// Whether a decorator is `@derive(...)` or `@c`, which the compiler gives unless the program has
-// its own.
+// Whether a decorator is `@derive(...)`, `@c` or `@durable`, which the compiler gives unless the
+// program has its own.
 function builtin(d: Ref<Expr>, macros: Ref<Map<string, Func>>): boolean {
   const callee: Ref<Expr> = d.kind === "call" ? d.callee : d;
-  return callee.kind === "ident" && (callee.name === "derive" || (callee.name === "c" && d.kind === "ident")) && !macros.has(callee.name);
+  return callee.kind === "ident" && (callee.name === "derive" || ((callee.name === "c" || callee.name === "durable") && d.kind === "ident")) && !macros.has(callee.name);
 }
 
 // `@derive(Eq, Json)`: a mark on the class or enum that `===` and `JSON` read, and on a class
@@ -182,6 +183,7 @@ function builtin(d: Ref<Expr>, macros: Ref<Map<string, Func>>): boolean {
 function derived(compilation: Mut<Compilation>, d: Ref<Stmt>, exported: boolean, pending: Ref<Pending>): Stmt[] {
   const at: Ref<Expr> = pending.decorator;
   if (at.kind === "ident" && at.name === "c") return cStruct(compilation, d, exported, pending);
+  if (at.kind === "ident" && at.name === "durable") return durable(compilation, d, exported, pending);
   const derivable = d.kind === "class" || d.kind === "enum";
   if (pending.where !== "own" || !derivable) throw new CompileError("E1104", "'derive' applies to a class or an enum", at.start, at.end);
   if (at.kind !== "call" || at.args.length === 0) throw new CompileError("E1104", "'derive' names what to derive, as in '@derive(Eq)'", at.start, at.end);
@@ -235,6 +237,19 @@ function cStruct(compilation: Mut<Compilation>, d: Ref<Stmt>, exported: boolean,
   if (d.extends !== undefined) throw new CompileError("E1007", "a '@c' struct can't extend a class: C structs have no bases; hold the other struct in a field", d.extends.start, d.extends.end);
   if (d.abstract) throw new CompileError("E1007", "a '@c' struct can't be abstract: C makes and reads its values", d.start, d.end);
   const decl: Stmt = { ...d, id: nextId(compilation.ids), decorators: withoutLast(d.decorators), derives: derivesWith(d.derives, ["C"]) };
+  if (!exported) return [decl];
+  const start = decl.start;
+  const end = decl.end;
+  return [{ id: nextId(compilation.ids), kind: "export", body: decl, start, end }];
+}
+
+// `@durable`: an async function whose awaits its run records, lowered in `src/durable.fsh`.
+/** @throws {CompileError | Error} */
+function durable(compilation: Mut<Compilation>, d: Ref<Stmt>, exported: boolean, pending: Ref<Pending>): Stmt[] {
+  const at: Ref<Expr> = pending.decorator;
+  if (pending.where !== "own" || d.kind !== "function") throw new CompileError("E1108", "'@durable' marks an async function, whose awaits it records", at.start, at.end);
+  const body = durableBody(compilation, d, at);
+  const decl: Stmt = { ...d, id: nextId(compilation.ids), decorators: withoutLast(d.decorators), body };
   if (!exported) return [decl];
   const start = decl.start;
   const end = decl.end;
