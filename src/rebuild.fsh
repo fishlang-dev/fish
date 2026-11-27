@@ -922,44 +922,44 @@ export function rebuiltStmt(n: Stmt, r: Ref<Replacements>): Stmt {
       break;
     case "class":
       if (m.decorators.length > 0) {
-        let i76 = m.decorators.splice(0);
-        i76.reverse();
-        while (i76.length > 0) {
-          let e76 = i76.pop()!;
-          e76 = rebuiltExpr(e76, r);
-          m.decorators.push(e76);
-        }
-      }
-      if (m.typeParams.length > 0) {
-        let i77 = m.typeParams.splice(0);
+        let i77 = m.decorators.splice(0);
         i77.reverse();
         while (i77.length > 0) {
           let e77 = i77.pop()!;
-          e77 = rebuiltTypeParam(e77, r);
-          m.typeParams.push(e77);
+          e77 = rebuiltExpr(e77, r);
+          m.decorators.push(e77);
+        }
+      }
+      if (m.typeParams.length > 0) {
+        let i78 = m.typeParams.splice(0);
+        i78.reverse();
+        while (i78.length > 0) {
+          let e78 = i78.pop()!;
+          e78 = rebuiltTypeParam(e78, r);
+          m.typeParams.push(e78);
         }
       }
       if (m.extends !== undefined) {
-        let o78 = m.extends!;
-        o78 = rebuiltExpr(o78, r);
-        m.extends = o78;
+        let o79 = m.extends!;
+        o79 = rebuiltExpr(o79, r);
+        m.extends = o79;
       }
       if (m.implements.length > 0) {
-        let i79 = m.implements.splice(0);
-        i79.reverse();
-        while (i79.length > 0) {
-          let e79 = i79.pop()!;
-          e79 = rebuiltTypeNode(e79, r);
-          m.implements.push(e79);
-        }
-      }
-      if (m.members.length > 0) {
-        let i80 = m.members.splice(0);
+        let i80 = m.implements.splice(0);
         i80.reverse();
         while (i80.length > 0) {
           let e80 = i80.pop()!;
-          e80 = rebuiltClassMember(e80, r);
-          m.members.push(e80);
+          e80 = rebuiltTypeNode(e80, r);
+          m.implements.push(e80);
+        }
+      }
+      if (m.members.length > 0) {
+        let i81 = m.members.splice(0);
+        i81.reverse();
+        while (i81.length > 0) {
+          let e81 = i81.pop()!;
+          e81 = rebuiltClassMember(e81, r);
+          m.members.push(e81);
         }
       }
       break;
@@ -4421,7 +4421,7 @@ export function cloneStmt(n: Ref<Stmt>): Stmt {
     case "interface":
       return { kind: "interface" as const, start: n.start, end: n.end, id: n.id, name: n.name, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneTypeMember(x1)), decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, jsClass: n.jsClass !== undefined ? { constructors: n.jsClass!.constructors.map((x1) => x1.map((x2) => cloneParam(x2))), statics: n.jsClass!.statics.map((x1) => cloneTypeMember(x1)) } : undefined, jsSource: n.jsSource !== undefined ? cloneStmt(n.jsSource!) : undefined };
     case "function":
-      return { kind: "function" as const, start: n.start, end: n.end, id: n.id, name: n.name, async: n.async, generator: n.generator, macro: n.macro, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined, decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, overloadNames: n.overloadNames !== undefined ? [...n.overloadNames!] : undefined, signature: n.signature };
+      return { kind: "function" as const, start: n.start, end: n.end, id: n.id, name: n.name, async: n.async, generator: n.generator, macro: n.macro, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined, decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, overloadNames: n.overloadNames !== undefined ? [...n.overloadNames!] : undefined, signature: n.signature, blocking: n.blocking };
     case "class":
       return { kind: "class" as const, start: n.start, end: n.end, id: n.id, name: n.name, abstract: n.abstract, decorators: n.decorators.map((x1) => cloneExpr(x1)), typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends !== undefined ? cloneExpr(n.extends!) : undefined, implements: n.implements.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneClassMember(x1)), derives: n.derives !== undefined ? [...n.derives!] : undefined };
     default:
@@ -4568,7 +4568,7 @@ export function cloneJsName(n: Ref<JsName>): JsName {
 }
 
 export function cloneFunc(n: Ref<Func>): Func {
-  return { kind: "function" as const, start: n.start, end: n.end, id: n.id, name: n.name, async: n.async, generator: n.generator, macro: n.macro, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined, decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, overloadNames: n.overloadNames !== undefined ? [...n.overloadNames!] : undefined, signature: n.signature };
+  return { kind: "function" as const, start: n.start, end: n.end, id: n.id, name: n.name, async: n.async, generator: n.generator, macro: n.macro, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined, decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, overloadNames: n.overloadNames !== undefined ? [...n.overloadNames!] : undefined, signature: n.signature, blocking: n.blocking };
 }
 
 export function cloneStmts(n: Ref<Stmt[]>): Stmt[] {
@@ -4651,7 +4651,7 @@ export function cloneOneOf1(n: Ref<Stmt | Pattern>): Stmt | Pattern {
     case "interface":
       return { kind: "interface" as const, start: n.start, end: n.end, id: n.id, name: n.name, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneTypeMember(x1)), decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, jsClass: n.jsClass !== undefined ? { constructors: n.jsClass!.constructors.map((x1) => x1.map((x2) => cloneParam(x2))), statics: n.jsClass!.statics.map((x1) => cloneTypeMember(x1)) } : undefined, jsSource: n.jsSource !== undefined ? cloneStmt(n.jsSource!) : undefined };
     case "function":
-      return { kind: "function" as const, start: n.start, end: n.end, id: n.id, name: n.name, async: n.async, generator: n.generator, macro: n.macro, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined, decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, overloadNames: n.overloadNames !== undefined ? [...n.overloadNames!] : undefined, signature: n.signature };
+      return { kind: "function" as const, start: n.start, end: n.end, id: n.id, name: n.name, async: n.async, generator: n.generator, macro: n.macro, typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), params: n.params.map((x1) => cloneParam(x1)), returnType: n.returnType !== undefined ? cloneTypeNode(n.returnType!) : undefined, throws: n.throws !== undefined ? cloneTypeNode(n.throws!) : undefined, body: n.body !== undefined ? cloneStmts(n.body!) : undefined, decorators: n.decorators !== undefined ? n.decorators!.map((x1) => cloneExpr(x1)) : undefined, js: n.js !== undefined ? cloneJsName(n.js!) : undefined, overloadNames: n.overloadNames !== undefined ? [...n.overloadNames!] : undefined, signature: n.signature, blocking: n.blocking };
     case "class":
       return { kind: "class" as const, start: n.start, end: n.end, id: n.id, name: n.name, abstract: n.abstract, decorators: n.decorators.map((x1) => cloneExpr(x1)), typeParams: n.typeParams.map((x1) => cloneTypeParam(x1)), extends: n.extends !== undefined ? cloneExpr(n.extends!) : undefined, implements: n.implements.map((x1) => cloneTypeNode(x1)), members: n.members.map((x1) => cloneClassMember(x1)), derives: n.derives !== undefined ? [...n.derives!] : undefined };
     case "ident":

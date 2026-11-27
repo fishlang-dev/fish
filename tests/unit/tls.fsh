@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { NATIVE, tlsStub } from "../../src/native.fsh";
-import { findOpenSsl, type OpenSsl, type Target } from "../../src/target.fsh";
+import { findBrotli, findOpenSsl, type OpenSsl, type Target } from "../../src/target.fsh";
 import { built, fishc, freePort, removed, root, same, scratch, text } from "./support.fsh";
 
 function fixtures(): string {
@@ -146,6 +146,22 @@ test("OpenSSL for another target is looked for only in its sysroot", () => {
   }
   write(join(sysroot, "usr", "include", "openssl", "ssl.h"), "");
   same(shown(findOpenSsl(musl(["-target", "x86_64-unknown-linux-musl", "--sysroot", sysroot]))), `compile: [] link: ["-lssl","-lcrypto"]`, "with the headers in the sysroot");
+  removed(tmp);
+}, { timeout: 60_000 });
+
+test("libbrotlienc for another target is looked for only in its sysroot", () => {
+  const tmp = scratch("fish-brotli-");
+  const sysroot = join(tmp, "sysroot");
+  try {
+    mkdirSync(join(sysroot, "usr", "include", "brotli"), { recursive: true });
+  } catch (e) {
+    assert(false, e.message);
+  }
+  same(shown(findBrotli(musl(["-target", "x86_64-unknown-linux-musl"]))), "missing: fishc build: std:compress needs libbrotlienc built for x86_64-unknown-linux-musl, and no sysroot was given; install brotli's headers and libraries into a sysroot for that target and build the program again", "with no sysroot");
+  const empty = findBrotli(musl(["-target", "x86_64-unknown-linux-musl", "--sysroot", sysroot]));
+  assert("missing" in empty, `found in an empty sysroot: ${shown(empty)}`);
+  write(join(sysroot, "usr", "include", "brotli", "encode.h"), "");
+  same(shown(findBrotli(musl(["-target", "x86_64-unknown-linux-musl", "--sysroot", sysroot]))), `compile: [] link: ["-lbrotlienc","-lbrotlicommon"]`, "with the headers in the sysroot");
   removed(tmp);
 }, { timeout: 60_000 });
 

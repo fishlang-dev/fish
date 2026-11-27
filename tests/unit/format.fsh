@@ -1444,3 +1444,12 @@ test("a long array of numbers fills its lines in time linear in its length", () 
     assert(!out.startsWith("<format threw"), out);
   });
 });
+
+test("@blocking prints on its own line before a function, an exported one and a declare function", () => {
+  differ([
+    ["@blocking function f() {}", "@blocking\nfunction f() {}\n", "Fish's mark for a function that blocks its thread"],
+    ["@blocking export function f() {}", "@blocking\nexport function f() {}\n", "Fish's mark for a function that blocks its thread"],
+    ["export @blocking function f() {}", "@blocking\nexport function f() {}\n", "Fish's mark for a function that blocks its thread"],
+    ["@blocking declare function f(): void;", "@blocking\ndeclare function f(): void;\n", "Fish's mark for a function that blocks its thread"],
+  ]);
+});

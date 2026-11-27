@@ -283,7 +283,8 @@ class Server {
 // 'fishc lsp' started in 'dir', reading one named pipe and writing the other.
 async function server(fishc: string, dir: string, n: i64): Promise<Server> throws IoError {
   const [inPipe, outPipe] = [join(dir, "lsp-in-" + String(n)), join(dir, "lsp-out-" + String(n))];
-  spawnSync("mkfifo", [inPipe, outPipe]);
+  const pipes = [inPipe.clone(), outPipe.clone()];
+  const _made = await spawnBlocking(() => spawnSync("mkfifo", pipes));
   const child = Bun.spawn(["sh", "-c", "exec \"$1\" lsp < \"$2\" > \"$3\"", "sh", fishc, inPipe, outPipe], { stdout: "ignore", stderr: "ignore" });
   const toServer = await open(inPipe, "w");
   const fromServer = await open(outPipe, "r");

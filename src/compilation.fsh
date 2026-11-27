@@ -269,6 +269,9 @@ export type Tables = {
   deepEqualities: NodeSet<Expr>;
   // The calls `spawnBlocking` makes of a function it was given other than as an arrow.
   blockingRuns: NodeSet<Expr>;
+  // Where each function `spawnBlocking` runs starts, which the closures made of it share: they
+  // run on the blocking pool, where blocking is what they are for.
+  blockingTasks: Set<usize>;
   // The `parseArgs` calls whose config has been turned into the arguments std's port takes.
   parsedArgs: NodeSet<Expr>;
   // The calls that add a route to one of std's routers or mount one router in another, which
@@ -484,6 +487,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     inspectCalls: new NodeSet<Expr>(),
     deepEqualities: new NodeSet<Expr>(),
     blockingRuns: new NodeSet<Expr>(),
+    blockingTasks: new Set<usize>(),
     parsedArgs: new NodeSet<Expr>(),
     routes: new NodeMap<Expr, Route>(),
     printed: new NodeSet<Expr>(),

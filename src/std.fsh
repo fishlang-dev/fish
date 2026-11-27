@@ -1889,6 +1889,22 @@ class Response {
     return this.#body;
   }
 
+  // Whether the body is streamed, in text pieces or bytes.
+  __streamed(): boolean {
+    return this.#stream.update((s) => s.length > 0) || this.#bytes.update((s) => s.length > 0);
+  }
+
+  // Replaces the body, as std:compress does with the body coded.
+  __setBody(this: Mut<this>, body: u8[] | ReadableStream<u8[]>) {
+    this.#stream.update((s) => { while (s.length > 0) s.pop(); });
+    this.#bytes.update((s) => { while (s.length > 0) s.pop(); });
+    if (body instanceof ReadableStream) {
+      this.#body = [];
+      const chunks = body.__values();
+      this.#bytes.update((s) => { s.push(chunks); });
+    } else this.#body = body;
+  }
+
   // The body as a stream of bytes, or null when there is none. A streamed body is handed over
   // once, as reading it consumes it; its bytes are read from the stream, not kept.
   get body(): ReadableStream<u8[]> | null {
@@ -6075,6 +6091,7 @@ function checkPath(path: string): void throws IoError {
   if (path.includes("\0")) throw invalid("The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received '" + path.replaceAll("\0", "\\x00") + "'");
 }
 
+@blocking
 export function openSync(path: string, flags: string | i64 = "r", mode: i64 = 0o666): i64 throws IoError {
   checkPath(path);
   let bits = 0;
@@ -6090,6 +6107,7 @@ export function openSync(path: string, flags: string | i64 = "r", mode: i64 = 0o
   return fd;
 }
 
+@blocking
 export function closeSync(fd: i64): void throws IoError {
   checkFd(fd);
   const r = unsafe { fsh_rt_fd_call(3, fd, 0) };
@@ -6099,6 +6117,7 @@ export function closeSync(fd: i64): void throws IoError {
 // What's read lands at offset; a null or -1 position reads from the file's own, which moves.
 export function readSync(fd: i64, buffer: Mut<u8[]>): i64 throws IoError;
 export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64, length: i64, position?: i64 | null): i64 throws IoError;
+@blocking
 export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64 = 0, length?: i64, position?: i64 | null): i64 throws IoError {
   checkFd(fd, false);
   // length |= 0, which FileHandle's read doesn't do.
@@ -6125,6 +6144,7 @@ function readInto(fd: i64, buffer: Mut<u8[]>, offset: i64, n: i64, position: i64
 // writes at the file's own.
 export function writeSync(fd: i64, buffer: Ref<u8[]>, offset?: i64 | null, length?: i64 | null, position?: i64 | null): i64 throws IoError;
 export function writeSync(fd: i64, text: string, position?: i64 | null, encoding?: "utf8" | "utf-8"): i64 throws IoError;
+@blocking
 export function writeSync(fd: i64, data: Ref<string | u8[]>, second?: i64 | null, third?: i64 | "utf8" | "utf-8" | null, position?: i64 | null): i64 throws IoError {
   checkFd(fd, false);
   if (typeof data === "string") {
@@ -6149,6 +6169,7 @@ function written(fd: i64, bytes: Ref<u8[]>, offset: i64, n: i64, position: i64):
   return r;
 }
 
+@blocking
 export function fstatSync(fd: i64): Stats throws IoError {
   checkFd(fd);
   let out: i64[] = new Array(8).fill(0);
@@ -6194,6 +6215,7 @@ class FsConstants {
 }
 
 // A negative length truncates to nothing.
+@blocking
 export function ftruncateSync(fd: i64, len: i64 = 0): void throws IoError {
   if (len < -SAFE || len > SAFE) throw outOfRange("len", ">= -9007199254740991 && <= 9007199254740991", len);
   checkFd(fd);
@@ -6201,6 +6223,7 @@ export function ftruncateSync(fd: i64, len: i64 = 0): void throws IoError {
   if (r < 0) throw failed(r, "ftruncate", null);
 }
 
+@blocking
 export function fchmodSync(fd: i64, mode: i64): void throws IoError {
   checkMode(mode);
   checkFd(fd);
@@ -6208,10 +6231,313 @@ export function fchmodSync(fd: i64, mode: i64): void throws IoError {
   if (r < 0) throw failed(r, "fchmod", null);
 }
 
+@blocking
 export function fsyncSync(fd: i64): void throws IoError {
   checkFd(fd);
   const r = unsafe { fsh_rt_fd_call(2, fd, 0) };
   if (r < 0) throw failed(r, "fsync", null);
+}
+`;
+
+// std:query, as a template rather than String.raw, since its column types are template literal types.
+const QUERY = `// A value a compiled query passes as a parameter, as std:postgres and std:sqlite bind them.
+export type QueryValue = null | boolean | i64 | f64 | string | u8[];
+
+// Whose SQL a query compiles to: \`$1\` parameters for Postgres, \`?\` for SQLite.
+export type Dialect = "postgres" | "sqlite";
+
+export type ComparisonOperator = "=" | "<>" | "!=" | "<" | "<=" | ">" | ">=" | "like" | "not like" | "is" | "is not";
+export type OrderDirection = "asc" | "desc";
+
+// A column of the tables a query reads, by name or as \`table.column\`.
+export type ColumnRef<S> = { [T in keyof S]: \`\${T}.\${keyof S[T]}\` }[keyof S] | { [T in keyof S]: keyof S[T] }[keyof S];
+// The type of the column a reference names.
+export type ColumnValue<S, R> = R extends \`\${infer T}.\${infer C}\` ? S[T][C] : { [T in keyof S]: R extends keyof S[T] ? S[T][R] : never }[keyof S];
+type ColumnName<R> = R extends \`\${infer T}.\${infer C}\` ? C : R;
+// The row selecting \`C\` gives: each column under its own name.
+export type Selection<S, C> = { [P in C as ColumnName<P>]: ColumnValue<S, P> };
+// A table a left join reads, each column null where no row matched.
+export type Nullable<T> = { [P in keyof T]: T[P] | null };
+
+// A query's SQL and the values its placeholders stand for, giving rows of type O.
+export class CompiledQuery<O> {
+  sql: string;
+  parameters: QueryValue[];
+  constructor(sql: string, parameters: QueryValue[]) {
+    this.sql = sql;
+    this.parameters = parameters;
+  }
+}
+
+type Condition = { column: string; op: string; value: QueryValue };
+type Join = { kind: string; table: string; left: string; right: string };
+type Order = { column: string; direction: string };
+
+// What a query has been given so far, rendered once it is compiled. An insert's column names and
+// each row's values are \`names\` and \`rows\`; an update's are \`names\` and \`assigned\`.
+type Parts = { dialect: Dialect; table: string; columns: string[]; joins: Join[]; conditions: Condition[]; orders: Order[]; limit: i64 | null; offset: i64 | null; names: string[]; rows: QueryValue[][]; assigned: QueryValue[] };
+
+function parts(dialect: Dialect, table: string): Parts {
+  return { dialect: dialect, table: table, columns: [], joins: [], conditions: [], orders: [], limit: null, offset: null, names: [], rows: [], assigned: [] };
+}
+
+// SQL text with its parameters, numbered as the dialect numbers them.
+class Writer {
+  dialect: Dialect;
+  sql: string = "";
+  parameters: QueryValue[] = [];
+  constructor(dialect: Dialect) {
+    this.dialect = dialect;
+  }
+  text(this: Mut<this>, s: string): void {
+    this.sql += s;
+  }
+  value(this: Mut<this>, v: QueryValue): void {
+    this.parameters.push(v);
+    this.sql += this.dialect === "postgres" ? "$" + String(this.parameters.length) : "?";
+  }
+}
+
+// An identifier double-quoted, a \`table.column\` reference part by part.
+function quoted(name: string): string {
+  return name.split(".").map((p) => "\\"" + p.replaceAll("\\"", "\\"\\"") + "\\"").join(".");
+}
+
+function conditions(w: Mut<Writer>, parts: Ref<Parts>): void {
+  let first = true;
+  for (const c of parts.conditions) {
+    w.text(first ? " where " : " and ");
+    first = false;
+    w.text(quoted(c.column) + " " + c.op + " ");
+    w.value(c.value.clone());
+  }
+}
+
+function selectSql(parts: Ref<Parts>): Writer {
+  let w = new Writer(parts.dialect);
+  w.text("select " + (parts.columns.length === 0 ? "*" : parts.columns.map((c) => c === "*" ? c : c.endsWith(".*") ? quoted(c.slice(0, (c.length as i64) - 2)) + ".*" : quoted(c)).join(", ")));
+  w.text(" from " + quoted(parts.table));
+  for (const j of parts.joins) w.text(" " + j.kind + " join " + quoted(j.table) + " on " + quoted(j.left) + " = " + quoted(j.right));
+  conditions(w, parts);
+  for (let i: usize = 0; i < parts.orders.length; i++) w.text((i === 0 ? " order by " : ", ") + quoted(parts.orders[i]!.column) + " " + parts.orders[i]!.direction);
+  if (parts.limit !== null) {
+    w.text(" limit ");
+    w.value(parts.limit);
+  }
+  if (parts.offset !== null) {
+    w.text(" offset ");
+    w.value(parts.offset);
+  }
+  return w;
+}
+
+export class SelectQueryBuilder<DB, S, TB, O> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  // Adds columns to the rows the query gives, each under its own name.
+  select<C extends ColumnRef<S>>(this: Ref<this>, columns: C[]): SelectQueryBuilder<DB, S, TB, O & Selection<S, C>> {
+    let parts = this.parts.clone();
+    for (const c of columns) parts.columns.push(c);
+    return new SelectQueryBuilder<DB, S, TB, O & Selection<S, C>>(parts);
+  }
+
+  // Adds every column of the table the query selects from.
+  selectAll(this: Ref<this>): SelectQueryBuilder<DB, S, TB, O & S[TB]> {
+    let parts = this.parts.clone();
+    parts.columns.push(parts.table + ".*");
+    return new SelectQueryBuilder<DB, S, TB, O & S[TB]>(parts);
+  }
+
+  innerJoin<J extends keyof DB>(this: Ref<this>, table: J, left: ColumnRef<S & Record<J, DB[J]>>, right: ColumnRef<S & Record<J, DB[J]>>): SelectQueryBuilder<DB, S & Record<J, DB[J]>, TB, O> {
+    let parts = this.parts.clone();
+    parts.joins.push({ kind: "inner", table: table, left: left, right: right });
+    return new SelectQueryBuilder<DB, S & Record<J, DB[J]>, TB, O>(parts);
+  }
+
+  // A left join's columns are null where no row of \`table\` matched.
+  leftJoin<J extends keyof DB>(this: Ref<this>, table: J, left: ColumnRef<S & Record<J, DB[J]>>, right: ColumnRef<S & Record<J, DB[J]>>): SelectQueryBuilder<DB, S & Record<J, Nullable<DB[J]>>, TB, O> {
+    let parts = this.parts.clone();
+    parts.joins.push({ kind: "left", table: table, left: left, right: right });
+    return new SelectQueryBuilder<DB, S & Record<J, Nullable<DB[J]>>, TB, O>(parts);
+  }
+
+  // Keeps the rows where the column compares so with the value; several are all required.
+  where<R extends ColumnRef<S>>(this: Ref<this>, column: R, op: ComparisonOperator, value: ColumnValue<S, R>): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    const v: QueryValue = value;
+    parts.conditions.push({ column: column, op: op, value: v });
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  orderBy(this: Ref<this>, column: ColumnRef<S>, direction: OrderDirection = "asc"): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    parts.orders.push({ column: column, direction: direction });
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  limit(this: Ref<this>, n: i64): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    parts.limit = n;
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  offset(this: Ref<this>, n: i64): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    parts.offset = n;
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<O> {
+    const w = selectSql(this.parts);
+    return new CompiledQuery<O>(w.sql, w.parameters);
+  }
+}
+
+export class InsertQueryBuilder<DB, T extends keyof DB> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  // Adds a row to insert; a field the row leaves out is the column's default. Every row names the
+  // same columns as the first.
+  values(this: Ref<this>, row: Partial<DB[T]>): InsertQueryBuilder<DB, T> throws TypeError {
+    let parts = this.parts.clone();
+    let names: string[] = [];
+    let values: QueryValue[] = [];
+    for (const [k, v] of Object.entries(row)) {
+      if (v === undefined) continue;
+      const value: QueryValue = v;
+      names.push(k);
+      values.push(value);
+    }
+    if (parts.rows.length === 0) parts.names = names;
+    else if (names.join(",") !== parts.names.join(",")) throw new TypeError("each row inserted names the same columns as the first: " + parts.names.join(", "));
+    parts.rows.push(values);
+    return new InsertQueryBuilder<DB, T>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<{}> throws TypeError {
+    if (this.parts.rows.length === 0) throw new TypeError("an insert needs a row; add one with values()");
+    let w = new Writer(this.parts.dialect);
+    w.text("insert into " + quoted(this.parts.table));
+    if (this.parts.names.length === 0) w.text(" default values");
+    else {
+      w.text(" (" + this.parts.names.map((n) => quoted(n)).join(", ") + ") values ");
+      let first = true;
+      for (const row of this.parts.rows) {
+        w.text(first ? "(" : ", (");
+        first = false;
+        let next = false;
+        for (const v of row) {
+          if (next) w.text(", ");
+          next = true;
+          w.value(v.clone());
+        }
+        w.text(")");
+      }
+    }
+    return new CompiledQuery<{}>(w.sql, w.parameters);
+  }
+}
+
+export class UpdateQueryBuilder<DB, T extends keyof DB> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  // The columns to change, from the fields \`values\` has.
+  set(this: Ref<this>, values: Partial<DB[T]>): UpdateQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    for (const [k, v] of Object.entries(values)) {
+      if (v === undefined) continue;
+      const value: QueryValue = v;
+      parts.names.push(k);
+      parts.assigned.push(value);
+    }
+    return new UpdateQueryBuilder<DB, T>(parts);
+  }
+
+  // One column to change, which may be set to null.
+  setColumn<C extends keyof DB[T]>(this: Ref<this>, column: C, value: DB[T][C]): UpdateQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    parts.names.push(column);
+    const v: QueryValue = value;
+    parts.assigned.push(v);
+    return new UpdateQueryBuilder<DB, T>(parts);
+  }
+
+  where<C extends keyof DB[T]>(this: Ref<this>, column: C, op: ComparisonOperator, value: DB[T][C]): UpdateQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    const v: QueryValue = value;
+    parts.conditions.push({ column: column, op: op, value: v });
+    return new UpdateQueryBuilder<DB, T>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<{}> throws TypeError {
+    if (this.parts.names.length === 0) throw new TypeError("an update needs a column to set; add one with set()");
+    let w = new Writer(this.parts.dialect);
+    w.text("update " + quoted(this.parts.table) + " set ");
+    // A null value is an element like any other, so the values are read by looping, not by index.
+    let i: usize = 0;
+    for (const v of this.parts.assigned) {
+      if (i > 0) w.text(", ");
+      w.text(quoted(this.parts.names[i]!) + " = ");
+      w.value(v.clone());
+      i++;
+    }
+    conditions(w, this.parts);
+    return new CompiledQuery<{}>(w.sql, w.parameters);
+  }
+}
+
+export class DeleteQueryBuilder<DB, T extends keyof DB> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  where<C extends keyof DB[T]>(this: Ref<this>, column: C, op: ComparisonOperator, value: DB[T][C]): DeleteQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    const v: QueryValue = value;
+    parts.conditions.push({ column: column, op: op, value: v });
+    return new DeleteQueryBuilder<DB, T>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<{}> {
+    let w = new Writer(this.parts.dialect);
+    w.text("delete from " + quoted(this.parts.table));
+    conditions(w, this.parts);
+    return new CompiledQuery<{}>(w.sql, w.parameters);
+  }
+}
+
+// Queries over the tables \`DB\` maps names to row types, checked against them while compiling.
+export class Kysely<DB> {
+  dialect: Dialect;
+  constructor(options: { dialect: Dialect }) {
+    this.dialect = options.dialect;
+  }
+
+  selectFrom<T extends keyof DB>(this: Ref<this>, table: T): SelectQueryBuilder<DB, Record<T, DB[T]>, T, {}> {
+    return new SelectQueryBuilder<DB, Record<T, DB[T]>, T, {}>(parts(this.dialect, table));
+  }
+
+  insertInto<T extends keyof DB>(this: Ref<this>, table: T): InsertQueryBuilder<DB, T> {
+    return new InsertQueryBuilder<DB, T>(parts(this.dialect, table));
+  }
+
+  updateTable<T extends keyof DB>(this: Ref<this>, table: T): UpdateQueryBuilder<DB, T> {
+    return new UpdateQueryBuilder<DB, T>(parts(this.dialect, table));
+  }
+
+  deleteFrom<T extends keyof DB>(this: Ref<this>, table: T): DeleteQueryBuilder<DB, T> {
+    return new DeleteQueryBuilder<DB, T>(parts(this.dialect, table));
+  }
 }
 `;
 
@@ -6952,6 +7278,294 @@ async function* grpcReplies(call: GrpcCall | null, method: string, service: stri
 
 export const STD_MODULES: Record<string, string> = {
   grpc: GRPC,
+  query: QUERY,
+  s3: String.raw`import { hash, hmac } from "crypto";
+
+// Where a client finds its bucket and how it signs: any left out is read from S3_* and then AWS_*
+// environment variables (S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY_ID,
+// S3_SECRET_ACCESS_KEY, S3_SESSION_TOKEN). Objects are addressed as endpoint/bucket/key unless
+// virtualHostedStyle asks for bucket.host/key.
+export type S3Options = { endpoint?: string; region?: string; bucket?: string; accessKeyId?: string; secretAccessKey?: string; sessionToken?: string; virtualHostedStyle?: boolean };
+export type S3Method = "GET" | "PUT" | "DELETE" | "HEAD";
+// date is when the URL is signed, now when left out.
+export type PresignOptions = { expiresIn?: i64; method?: S3Method; date?: Date };
+export type WriteOptions = { type?: string };
+export type ListOptions = { prefix?: string; delimiter?: string; maxKeys?: i64; startAfter?: string; continuationToken?: string };
+export type S3ListObject = { key: string; size: i64; lastModified: string; eTag: string };
+export type S3ListResult = { contents: S3ListObject[]; commonPrefixes: string[]; isTruncated: boolean; keyCount: i64; nextContinuationToken: string | null };
+
+// What S3 answered a request it refused with: its error code, as NoSuchKey or AccessDenied, and
+// the HTTP status.
+export class S3Error {
+  name: string = "S3Error";
+  code: string;
+  message: string;
+  status: i64;
+  constructor(code: string, message: string, status: i64) {
+    this.code = code;
+    this.message = message;
+    this.status = status;
+  }
+}
+
+// One request's SigV4 inputs: every header is signed, and host as the URL gives it.
+export type SignInput = { method: string; url: string; headers: Record<string, string>; payloadHash: string; accessKeyId: string; secretAccessKey: string; region: string; date: Date; service?: string };
+export type Signed = { authorization: string; amzDate: string; signature: string };
+
+type Config = { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; sessionToken: string; virtualHostedStyle: boolean };
+
+const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+function setting(given: string | undefined, name: string, fallback: string): string {
+  if (given !== undefined) return given;
+  const own = process.env["S3_" + name];
+  if (own !== undefined) return own;
+  const aws = process.env["AWS_" + name];
+  return aws !== undefined ? aws : fallback;
+}
+
+function configOf(o: Ref<S3Options>): Config {
+  const region = setting(o.region, "REGION", process.env["AWS_DEFAULT_REGION"] ?? "us-east-1");
+  let endpoint = setting(o.endpoint, "ENDPOINT", "https://s3." + region + ".amazonaws.com");
+  while (endpoint.endsWith("/")) endpoint = endpoint.slice(0, (endpoint.length as i64) - 1);
+  return {
+    endpoint: endpoint, region: region, bucket: setting(o.bucket, "BUCKET", ""),
+    accessKeyId: setting(o.accessKeyId, "ACCESS_KEY_ID", ""), secretAccessKey: setting(o.secretAccessKey, "SECRET_ACCESS_KEY", ""),
+    sessionToken: setting(o.sessionToken, "SESSION_TOKEN", ""), virtualHostedStyle: o.virtualHostedStyle ?? false,
+  };
+}
+
+const HEX = "0123456789abcdef";
+
+function hex(bytes: Ref<u8[]>): string {
+  let out = "";
+  for (const b of bytes) out += HEX[(b >> 4) as usize]! + HEX[(b & 15) as usize]!;
+  return out;
+}
+
+// RFC 3986 percent-encoding as SigV4 wants it: every byte but letters, digits and -._~, and '/'
+// too unless it separates a path's segments.
+export function uriEncode(text: string, keepSlash: boolean): string {
+  let out = "";
+  for (const b of new TextEncoder().encode(text)) {
+    const kept = (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b === 45 || b === 46 || b === 95 || b === 126 || (keepSlash && b === 47);
+    if (kept) out += String.fromCharCode(b as u16);
+    else out += "%" + HEX[(b >> 4) as usize]!.toUpperCase() + HEX[(b & 15) as usize]!.toUpperCase();
+  }
+  return out;
+}
+
+// "20130524T000000Z", the form SigV4 dates take.
+function amzDateOf(date: Ref<Date>): string {
+  const iso = date.toISOString();
+  return iso.slice(0, 4) + iso.slice(5, 7) + iso.slice(8, 13) + iso.slice(14, 16) + iso.slice(17, 19) + "Z";
+}
+
+// A query string's pairs, already encoded as sent, sorted by name as a canonical request holds them.
+function canonicalQuery(search: string): string {
+  if (search.length === 0) return "";
+  let pairs: [string, string][] = [];
+  for (const part of search.split("&")) {
+    if (part.length === 0) continue;
+    const eq = part.indexOf("=");
+    const name = eq < 0 ? part : part.slice(0, eq);
+    const value = eq < 0 ? "" : part.slice(eq + 1);
+    pairs.push([name, value]);
+  }
+  pairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  return pairs.map((p) => p[0] + "=" + p[1]).join("&");
+}
+
+function signingKey(secret: string, day: string, region: string, service: string): u8[] {
+  const k1 = hmac("sha256", "AWS4" + secret, day);
+  const k2 = hmac("sha256", k1, region);
+  const k3 = hmac("sha256", k2, service);
+  return hmac("sha256", k3, "aws4_request");
+}
+
+// The SigV4 signature of a request, its URL already encoded as sent.
+function signature(input: Ref<SignInput>): [string, string, string] throws TypeError {
+  const service = input.service ?? "s3";
+  const url = new URL(input.url);
+  const amzDate = amzDateOf(input.date);
+  const day = amzDate.slice(0, 8);
+  let all: [string, string][] = [["host", url.host]];
+  for (const [n, v] of Object.entries(input.headers)) all.push([n.toLowerCase(), v.trim()]);
+  all.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const signed = all.map((h) => h[0]).join(";");
+  const canonical = [input.method, url.pathname, canonicalQuery(url.search.length > 0 ? url.search.slice(1) : ""), all.map((h) => h[0] + ":" + h[1] + "\n").join(""), signed, input.payloadHash].join("\n");
+  const scope = day + "/" + input.region + "/" + service + "/aws4_request";
+  const toSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + hash("sha256", canonical, "hex");
+  return [hex(hmac("sha256", signingKey(input.secretAccessKey, day, input.region, service), toSign)), signed, scope];
+}
+
+// Signs a request with SigV4 in an Authorization header, as every S3Client request is.
+export function signRequest(input: SignInput): Signed throws TypeError {
+  const amzDate = amzDateOf(input.date);
+  const [sig, signed, scope] = signature(input);
+  return { authorization: "AWS4-HMAC-SHA256 Credential=" + input.accessKeyId + "/" + scope + ", SignedHeaders=" + signed + ", Signature=" + sig, amzDate: amzDate, signature: sig };
+}
+
+function objectUrl(c: Ref<Config>, key: string): string {
+  const path = key.length > 0 ? "/" + uriEncode(key, true) : "";
+  if (!c.virtualHostedStyle) return c.endpoint + "/" + uriEncode(c.bucket, false) + path;
+  const scheme = c.endpoint.indexOf("://");
+  return c.endpoint.slice(0, scheme + 3) + c.bucket + "." + c.endpoint.slice(scheme + 3) + (path.length > 0 ? path : "/");
+}
+
+function presigned(c: Ref<Config>, key: string, options: Ref<PresignOptions>): string throws TypeError {
+  if (c.bucket.length === 0) throw new TypeError("S3Client needs a bucket: pass { bucket } or set S3_BUCKET");
+  const expires = options.expiresIn ?? 86400;
+  if (expires < 1 || expires > 604800) throw new TypeError("a presigned URL expires in 1 to 604800 seconds, not " + String(expires));
+  const date = options.date !== undefined ? options.date.clone() : new Date();
+  const amzDate = amzDateOf(date);
+  const scope = amzDate.slice(0, 8) + "/" + c.region + "/s3/aws4_request";
+  let query = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=" + uriEncode(c.accessKeyId + "/" + scope, false) + "&X-Amz-Date=" + amzDate + "&X-Amz-Expires=" + String(expires);
+  if (c.sessionToken.length > 0) query += "&X-Amz-Security-Token=" + uriEncode(c.sessionToken, false);
+  query += "&X-Amz-SignedHeaders=host";
+  const url = objectUrl(c, key) + "?" + query;
+  const input: SignInput = { method: options.method ?? "GET", url: url, headers: {}, payloadHash: "UNSIGNED-PAYLOAD", accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, region: c.region, date: date };
+  const [sig, _signed, _scope] = signature(input);
+  return url + "&X-Amz-Signature=" + sig;
+}
+
+// The text between the first <tag> and its </tag> from at, entities decoded, and where it ends.
+function tagged(xml: string, tag: string, at: i64): [string, i64] | null {
+  const open = xml.indexOf("<" + tag + ">", at);
+  if (open < 0) return null;
+  const start = open + (tag.length as i64) + 2;
+  const close = xml.indexOf("</" + tag + ">", start);
+  if (close < 0) return null;
+  const text = xml.slice(start, close).replaceAll("&quot;", "\"").replaceAll("&apos;", "'").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+  return [text, close + (tag.length as i64) + 3];
+}
+
+function textOf(xml: string, tag: string): string {
+  const found = tagged(xml, tag, 0);
+  return found !== null ? found[0] : "";
+}
+
+async function send(c: Ref<Config>, method: S3Method, key: string, query: string, body: u8[], type: string): Promise<Response> throws S3Error | IoError | AbortError | TypeError {
+  if (c.bucket.length === 0) throw new TypeError("S3Client needs a bucket: pass { bucket } or set S3_BUCKET");
+  const url = objectUrl(c, key) + (query.length > 0 ? "?" + query : "");
+  const payload = body.length > 0 ? hash("sha256", body.clone(), "hex") : EMPTY_SHA256;
+  const date = new Date();
+  let headers: Record<string, string> = { "x-amz-content-sha256": payload, "x-amz-date": amzDateOf(date) };
+  if (c.sessionToken.length > 0) headers["x-amz-security-token"] = c.sessionToken;
+  if (type.length > 0) headers["content-type"] = type;
+  const signed = signRequest({ method: method, url: url, headers: headers.clone(), payloadHash: payload, accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, region: c.region, date: date });
+  let sent = new Headers();
+  for (const [n, v] of Object.entries(headers)) sent.set(n, v);
+  sent.set("authorization", signed.authorization);
+  const res = await fetch(url, method === "PUT" ? { method: method, headers: sent, body: body } : { method: method, headers: sent });
+  if (res.status >= 200 && res.status < 300) return res;
+  const status = res.status;
+  let xml = "";
+  if (method !== "HEAD") xml = await res.text();
+  const code = textOf(xml, "Code");
+  const message = textOf(xml, "Message");
+  throw new S3Error(code.length > 0 ? code : status === 404 ? "NoSuchKey" : "HTTP" + String(status), message.length > 0 ? message : "S3 answered " + method + " " + key + " with status " + String(status), status);
+}
+
+function bytesOf(data: string | u8[]): u8[] {
+  return typeof data === "string" ? new TextEncoder().encode(data) : data;
+}
+
+// An object in a bucket, by its key; nothing is fetched until it is read.
+export class S3File {
+  config: Config;
+  key: string;
+  constructor(config: Config, key: string) {
+    this.config = config;
+    this.key = key;
+  }
+  async bytes(this: Ref<this>): Promise<u8[]> throws S3Error | IoError | AbortError | TypeError {
+    const res = await send(this.config, "GET", this.key, "", [], "");
+    return await res.bytes();
+  }
+  async text(this: Ref<this>): Promise<string> throws S3Error | IoError | AbortError | TypeError {
+    const res = await send(this.config, "GET", this.key, "", [], "");
+    return await res.text();
+  }
+  async exists(this: Ref<this>): Promise<boolean> throws S3Error | IoError | AbortError | TypeError {
+    try {
+      await send(this.config, "HEAD", this.key, "", [], "");
+      return true;
+    } catch (e) {
+      if (e instanceof S3Error && e.status === 404) return false;
+      throw e;
+    }
+  }
+  async write(this: Ref<this>, data: string | u8[], options: WriteOptions = {}): Promise<i64> throws S3Error | IoError | AbortError | TypeError {
+    const body = bytesOf(data);
+    const n = body.length as i64;
+    await send(this.config, "PUT", this.key, "", body, options.type ?? "");
+    return n;
+  }
+  async delete(this: Ref<this>): Promise<void> throws S3Error | IoError | AbortError | TypeError {
+    await send(this.config, "DELETE", this.key, "", [], "");
+  }
+  presign(this: Ref<this>, options: PresignOptions = {}): string throws TypeError {
+    return presigned(this.config, this.key, options);
+  }
+}
+
+// An S3-compatible bucket, as Bun's S3Client reaches one: AWS, R2, MinIO and others.
+export class S3Client {
+  config: Config;
+  constructor(options: S3Options = {}) {
+    this.config = configOf(options);
+  }
+  file(this: Ref<this>, key: string): S3File {
+    return new S3File(this.config.clone(), key);
+  }
+  async write(this: Ref<this>, key: string, data: string | u8[], options: WriteOptions = {}): Promise<i64> throws S3Error | IoError | AbortError | TypeError {
+    const f = this.file(key);
+    return await f.write(data, options);
+  }
+  async delete(this: Ref<this>, key: string): Promise<void> throws S3Error | IoError | AbortError | TypeError {
+    await send(this.config, "DELETE", key, "", [], "");
+  }
+  async exists(this: Ref<this>, key: string): Promise<boolean> throws S3Error | IoError | AbortError | TypeError {
+    const f = this.file(key);
+    return await f.exists();
+  }
+  presign(this: Ref<this>, key: string, options: PresignOptions = {}): string throws TypeError {
+    return presigned(this.config, key, options);
+  }
+  // One page of the bucket's keys, in key order, as ListObjectsV2 gives them.
+  async list(this: Ref<this>, options: ListOptions = {}): Promise<S3ListResult> throws S3Error | IoError | AbortError | TypeError {
+    let query = "list-type=2";
+    if (options.continuationToken !== undefined) query += "&continuation-token=" + uriEncode(options.continuationToken, false);
+    if (options.delimiter !== undefined) query += "&delimiter=" + uriEncode(options.delimiter, false);
+    if (options.maxKeys !== undefined) query += "&max-keys=" + String(options.maxKeys);
+    if (options.prefix !== undefined) query += "&prefix=" + uriEncode(options.prefix, false);
+    if (options.startAfter !== undefined) query += "&start-after=" + uriEncode(options.startAfter, false);
+    const res = await send(this.config, "GET", "", query, [], "");
+    const xml = await res.text();
+    let contents: S3ListObject[] = [];
+    let at: i64 = 0;
+    for (;;) {
+      const item = tagged(xml, "Contents", at);
+      if (item === null) break;
+      at = item[1];
+      const size = Number.parseInt(textOf(item[0], "Size"));
+      contents.push({ key: textOf(item[0], "Key"), size: size ?? 0, lastModified: textOf(item[0], "LastModified"), eTag: textOf(item[0], "ETag") });
+    }
+    let prefixes: string[] = [];
+    at = 0;
+    for (;;) {
+      const item = tagged(xml, "CommonPrefixes", at);
+      if (item === null) break;
+      at = item[1];
+      prefixes.push(textOf(item[0], "Prefix"));
+    }
+    const token = tagged(xml, "NextContinuationToken", 0);
+    const count = Number.parseInt(textOf(xml, "KeyCount")) ?? (contents.length as i64);
+    return { contents: contents, commonPrefixes: prefixes, isTruncated: textOf(xml, "IsTruncated") === "true", keyCount: count, nextContinuationToken: token !== null ? token[0] : null };
+  }
+}
+`,
   // What a build is for, made per build from its target, release mode and flags by the loader.
   build: "",
   // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
@@ -8046,6 +8660,7 @@ async function watchAborted(signal: AbortSignal): Promise<string | null> {
   fs: String.raw`
 // A descriptor is read to its end from where it is. Standard input goes through readLine's
 // buffer, so what a line read took is still read here.
+@blocking
 export function readFileSync(path: string | i64): u8[] throws IoError {
   if (typeof path === "string") return fileReadSync(path);
   if (path === 0) {
@@ -8062,28 +8677,33 @@ export function readFileSync(path: string | i64): u8[] throws IoError {
   }
 }
 
+@blocking
 export function readFileSyncText(path: string | i64): string throws IoError {
   const bytes = readFileSync(path);
   return new TextDecoder().decode(bytes);
 }
 
+@blocking
 export function writeFileSync(path: string, data: string | u8[]): void throws IoError {
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
   fileWriteSync(path, bytes);
 }
 
+@blocking
 export function existsSync(path: string): boolean {
   return pathExists(path);
 }
 
 export function statSync(path: string, options?: { throwIfNoEntry?: true }): Stats throws IoError;
 export function statSync(path: string, options: { throwIfNoEntry: false }): Stats | undefined throws IoError;
+@blocking
 export function statSync(path: string, options?: { throwIfNoEntry?: boolean }): Stats | undefined throws IoError {
   return pathStats(path, true, options?.throwIfNoEntry ?? true);
 }
 
 export function lstatSync(path: string, options?: { throwIfNoEntry?: true }): Stats throws IoError;
 export function lstatSync(path: string, options: { throwIfNoEntry: false }): Stats | undefined throws IoError;
+@blocking
 export function lstatSync(path: string, options?: { throwIfNoEntry?: boolean }): Stats | undefined throws IoError {
   return pathStats(path, false, options?.throwIfNoEntry ?? true);
 }
@@ -8091,6 +8711,7 @@ export function lstatSync(path: string, options?: { throwIfNoEntry?: boolean }):
 export function readdirSync(path: string): string[] throws IoError;
 export function readdirSync(path: string, options: { withFileTypes?: false }): string[] throws IoError;
 export function readdirSync(path: string, options: { withFileTypes: true }): Dirent[] throws IoError;
+@blocking
 export function readdirSync(path: string, options?: { withFileTypes?: boolean }): string[] | Dirent[] throws IoError {
   const names = dirRead(path);
   if (!(options?.withFileTypes ?? false)) return names;
@@ -8106,16 +8727,19 @@ export function readdirSync(path: string, options?: { withFileTypes?: boolean })
   return entries;
 }
 
+@blocking
 export function realpathSync(path: string): string throws IoError {
   return pathReal(path);
 }
 
+@blocking
 export function mkdtempSync(prefix: string): string throws IoError {
   return dirTemp(prefix);
 }
 
 export type RmOptions = { recursive?: boolean; force?: boolean };
 
+@blocking
 export function rmSync(path: string, options: RmOptions = {}): void throws IoError {
   pathRemove(path, options.recursive ?? false, options.force ?? false);
 }
@@ -8123,27 +8747,32 @@ export function rmSync(path: string, options: RmOptions = {}): void throws IoErr
 export type MakeDirectoryOptions = { recursive?: boolean; mode?: i64 };
 
 // The first directory made with recursive, as the prefix of path spells it; otherwise undefined.
+@blocking
 export function mkdirSync(path: string, options: MakeDirectoryOptions | i64 = {}): string | undefined throws IoError {
   if (typeof options === "number") return dirMake(path, false, options);
   return dirMake(path, options.recursive ?? false, options.mode ?? 0o777);
 }
 
+@blocking
 export function renameSync(oldPath: string, newPath: string): void throws IoError {
   pathRename(oldPath, newPath);
 }
 
 export const constants = new FsConstants();
 
+@blocking
 export function copyFileSync(src: string, dest: string, mode: i64 = 0): void throws IoError {
   fileCopy(src, dest, mode);
 }
 
+@blocking
 export function unlinkSync(path: string): void throws IoError {
   pathUnlink(path);
 }
 
 ${FILES}
 
+@blocking
 export function accessSync(path: string, mode: i64 = 0): void throws IoError {
   pathAccess(path, mode);
 }
@@ -8155,11 +8784,13 @@ function seconds(time: f64 | Date): f64 {
   return time < 0 && time - time === 0 ? (Date.now() as f64) / 1000 : time;
 }
 
+@blocking
 export function utimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
   pathUtimes(path, seconds(atime), seconds(mtime), true);
 }
 
 // A link's own times, not its target's.
+@blocking
 export function lutimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
   pathUtimes(path, seconds(atime), seconds(mtime), false);
 }
@@ -8208,19 +8839,23 @@ function fileMode(mode: i64 | string): i64 throws IoError {
   return n as i64;
 }
 
+@blocking
 export function chmodSync(path: string, mode: i64 | string): void throws IoError {
   pathChmod(path, fileMode(mode));
 }
 
 // The link type matters only on Windows, so it is checked and then unused.
+@blocking
 export function symlinkSync(target: string, path: string, _type: "dir" | "file" | "junction" | null = null): void throws IoError {
   pathLink(target, path, true);
 }
 
+@blocking
 export function linkSync(existingPath: string, newPath: string): void throws IoError {
   pathLink(existingPath, newPath, false);
 }
 
+@blocking
 export function readlinkSync(path: string): string throws IoError {
   return pathReadLink(path);
 }
@@ -8301,31 +8936,38 @@ function checked(inflating: boolean, bits: i64, level: i64, input: Ref<u8[]>, li
   return out;
 }
 
+@blocking
 export function gzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(false, 31, data, options);
 }
 
+@blocking
 export function gunzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, 31, data, options);
 }
 
+@blocking
 export function deflateSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(false, 15, data, options);
 }
 
+@blocking
 export function inflateSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, 15, data, options);
 }
 
+@blocking
 export function deflateRawSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(false, -15, data, options);
 }
 
+@blocking
 export function inflateRawSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, -15, data, options);
 }
 
 // Gzip or zlib, whichever the input's header says.
+@blocking
 export function unzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, 47, data, options);
 }
@@ -8368,6 +9010,190 @@ export async function unzip(data: string | u8[], options: ZlibOptions = {}): Pro
   return await runAsync(true, 47, data, options);
 }
 `,
+  // Response compression for a Router, imported as std:compress: br, gzip or deflate as a
+  // request's Accept-Encoding prefers, over the system zlib and libbrotlienc.
+  compress: String.raw`
+declare function fsh_rt_zlib_open(bits: i64, level: i64): Ptr<u8>;
+declare function fsh_rt_zlib_push(stream: Ptr<u8>, data: Ptr<u8>, length: i64, finish: i64, result: MutPtr<i64>): Ptr<u8>;
+declare function fsh_rt_zlib_take(run: Ptr<u8>, out: MutPtr<u8>): void;
+declare function fsh_rt_zlib_close(stream: Ptr<u8>): void;
+declare function fsh_rt_brotli_open(quality: i64): Ptr<u8>;
+declare function fsh_rt_brotli_push(stream: Ptr<u8>, data: Ptr<u8>, length: i64, finish: i64, result: MutPtr<i64>): Ptr<u8>;
+declare function fsh_rt_brotli_take(run: Ptr<u8>, out: MutPtr<u8>): void;
+declare function fsh_rt_brotli_close(stream: Ptr<u8>): void;
+
+// threshold is the fewest bytes a body that isn't streamed needs to be compressed; a streamed
+// body's size isn't known, so it always is.
+export type CompressOptions = { threshold?: i64 };
+
+// The coding an Accept-Encoding value prefers of br, gzip and deflate, or "" for none of them:
+// the highest q above 0, a tie going to the first of those, and * giving its q to any not named.
+export function negotiate(accept: string): string {
+  const offered = ["br", "gzip", "deflate"];
+  let named: f64[] = [-1.0, -1.0, -1.0];
+  let any: f64 = -1.0;
+  for (const part of accept.split(",")) {
+    const fields = part.split(";");
+    const name = fields[0].trim().toLowerCase();
+    let q: f64 = 1.0;
+    for (let i: usize = 1; i < fields.length; i++) {
+      const field = fields[i].trim().toLowerCase();
+      if (field.startsWith("q=")) q = parseFloat(field.slice(2)) ?? 0.0;
+    }
+    if (name === "*") any = q;
+    for (let i: usize = 0; i < offered.length; i++) if (offered[i] === name) named[i] = q;
+  }
+  let best = "";
+  let top: f64 = 0.0;
+  for (let i: usize = 0; i < offered.length; i++) {
+    const q = named[i] < 0.0 ? any : named[i];
+    if (q > top) {
+      top = q;
+      best = offered[i];
+    }
+  }
+  return best;
+}
+
+// A type whose bodies come compressed already: images but SVG, audio, video, archives, web fonts
+// and PDF.
+function packedType(type: string): boolean {
+  const t = type.split(";")[0].trim().toLowerCase();
+  if (t.startsWith("image/")) return t !== "image/svg+xml";
+  if (t.startsWith("audio/") || t.startsWith("video/")) return true;
+  switch (t) {
+    case "application/zip":
+    case "application/gzip":
+    case "application/x-gzip":
+    case "application/x-bzip2":
+    case "application/x-xz":
+    case "application/x-7z-compressed":
+    case "application/vnd.rar":
+    case "application/zstd":
+    case "application/pdf":
+    case "font/woff":
+    case "font/woff2":
+      return true;
+  }
+  return false;
+}
+
+// Whether a response may be coded at all, whatever the request accepts.
+function codable(res: Ref<Response>): boolean {
+  if (res.status < 200 || res.status === 204 || res.status === 304) return false;
+  if (res.headers.has("content-encoding")) return false;
+  const cache = res.headers.get("cache-control");
+  if (cache !== null && cache.toLowerCase().includes("no-transform")) return false;
+  const type = res.headers.get("content-type");
+  return type === null || !packedType(type);
+}
+
+// Whether a Vary value already names Accept-Encoding, or every header.
+function varies(value: string): boolean {
+  for (const name of value.split(",")) {
+    const n = name.trim().toLowerCase();
+    if (n === "accept-encoding" || n === "*") return true;
+  }
+  return false;
+}
+
+// An open deflate stream or brotli encoder.
+class Coder {
+  #brotli: boolean;
+  #state: Ptr<u8>;
+
+  // gzip and deflate as HTTP names them, deflate being zlib's format; zlib's default level, and
+  // brotli's quality 4, which compresses about as well as gzip's default but faster, as dynamic
+  // responses want.
+  constructor(coding: string) {
+    this.#brotli = coding === "br";
+    this.#state = coding === "br" ? unsafe { fsh_rt_brotli_open(4) } : unsafe { fsh_rt_zlib_open(coding === "gzip" ? 31 : 15, -1) };
+  }
+
+  // The coded bytes of the next chunk, flushed so they can be sent at once, or with finish of
+  // the last, ending the stream.
+  push(this: Ref<this>, data: Ref<u8[]>, finish: boolean): u8[] {
+    if (data.length > 0) return this.feed(data, data.length as i64, finish);
+    // A pointer is taken to an element, so no input is passed as one byte of length 0.
+    const none: u8[] = [0 as u8];
+    return this.feed(none, 0, finish);
+  }
+
+  feed(this: Ref<this>, input: Ref<u8[]>, length: i64, finish: boolean): u8[] {
+    let result: i64[] = [0, 0, 0];
+    const last = finish ? 1 : 0;
+    const done = this.#brotli
+      ? unsafe { fsh_rt_brotli_push(this.#state, ptrOf(input[0]), length, last, mutPtrOf(result[0])) }
+      : unsafe { fsh_rt_zlib_push(this.#state, ptrOf(input[0]), length, last, mutPtrOf(result[0])) };
+    let out: u8[] = new Array(result[2] === 0 ? 1 : result[2]).fill(0 as u8);
+    if (this.#brotli) {
+      unsafe { fsh_rt_brotli_take(done, mutPtrOf(out[0])) };
+    } else {
+      unsafe { fsh_rt_zlib_take(done, mutPtrOf(out[0])) };
+    }
+    if (result[2] === 0) out = [];
+    assert(result[0] === 0, "compressing a response body failed");
+    return out;
+  }
+
+  // Frees the stream or encoder; nothing may be pushed after.
+  close(this: Ref<this>): void {
+    if (this.#brotli) {
+      unsafe { fsh_rt_brotli_close(this.#state) };
+    } else {
+      unsafe { fsh_rt_zlib_close(this.#state) };
+    }
+  }
+}
+
+// A streamed body's chunks coded as they come, each flushed so a stream of events still
+// reaches the client an event at a time.
+// ponytail: the coder is closed when the body ends; a body dropped part way, as when the client
+// goes, leaks it, since a generator held in a Dyn can't own a value with a drop yet.
+async function* coded(coding: string, source: ReadableStream<u8[]>): AsyncGenerator<u8[]> {
+  const coder = new Coder(coding);
+  let chunks = source;
+  for await (const chunk of chunks) {
+    const out = coder.push(chunk, false);
+    if (out.length > 0) yield out;
+  }
+  const none: u8[] = [];
+  const last = coder.push(none, true);
+  coder.close();
+  yield last;
+}
+
+// A Router middleware compressing responses with the coding the request's Accept-Encoding
+// prefers. A response already coded, marked no-transform, of a type that comes compressed, with
+// no body, or with a whole body under the threshold is sent as it is. Every response it could
+// code says Vary: Accept-Encoding, so a cache keeps each coding apart.
+export function compress(options: CompressOptions = {}): (req: Request, next: (req: Request) => Promise<Response>) => Promise<Response> {
+  const threshold = options.threshold ?? 1024;
+  return async (req, next) => {
+    const coding = req.method === "HEAD" ? "" : negotiate(req.headers.get("accept-encoding") ?? "");
+    let res = await next(req);
+    if (!codable(res)) return res;
+    const vary = res.headers.get("vary");
+    if (vary === null) res.headers.set("vary", "Accept-Encoding");
+    else if (!varies(vary)) res.headers.set("vary", vary + ", Accept-Encoding");
+    if (coding === "") return res;
+    if (res.__streamed()) {
+      const source = res.body;
+      if (source === null) return res;
+      res.__setBody(ReadableStream.from(coded(coding, source)));
+    } else {
+      if ((res.__bytes().length as i64) < threshold) return res;
+      const coder = new Coder(coding);
+      const packed = coder.push(res.__bytes(), true);
+      coder.close();
+      res.__setBody(packed);
+    }
+    res.headers.set("content-encoding", coding);
+    res.headers.delete("content-length");
+    return res;
+  };
+}
+`,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
 declare function write(fd: i32, data: Ptr<u8>, length: usize): isize;
@@ -8393,6 +9219,7 @@ export class SpawnSyncReturns<T> {
   }
 }
 
+@blocking
 export function spawnSync(command: string, args: string[] = [], options: SpawnSyncOptions = {}): SpawnSyncReturns<u8[]> {
   const input = options.input ?? "";
   const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
@@ -8432,23 +9259,28 @@ function executed(r: SpawnSyncReturns<u8[]>, command: string): u8[] throws IoErr
   throw new ExecError(message, r.status, r.signal, r.stdout, r.stderr);
 }
 
+@blocking
 export function execFileSync(file: string, args: string[] = [], options: SpawnSyncOptions = {}): u8[] throws IoError | ExecError {
   const named = [file, ...args].join(" ");
   return executed(spawnSync(file, args, options), named);
 }
 
+@blocking
 export function execFileSyncText(file: string, args: string[] = [], options: SpawnSyncOptions = {}): string throws IoError | ExecError {
   return new TextDecoder().decode(execFileSync(file, args, options));
 }
 
+@blocking
 export function execSync(command: string, options: SpawnSyncOptions = {}): u8[] throws IoError | ExecError {
   return executed(spawnSync("/bin/sh", ["-c", command], options), command);
 }
 
+@blocking
 export function execSyncText(command: string, options: SpawnSyncOptions = {}): string throws IoError | ExecError {
   return new TextDecoder().decode(execSync(command, options));
 }
 
+@blocking
 export function spawnSyncText(command: string, args: string[] = [], options: SpawnSyncOptions = {}): SpawnSyncReturns<string> {
   const r = spawnSync(command, args, options);
   const text = new TextDecoder();
@@ -8472,7 +9304,7 @@ export async function connect(host: string, port: i64, options: ConnectOptions =
 `,
   // Postgres over its wire protocol: a pool of connections, statements with parameters sent apart from
   // their text, and rows read by column name into a type.
-  postgres: String.raw`
+  postgres: String.raw`import type { CompiledQuery } from "std:query";
 declare function fsh_rt_crypto_digest(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, rounds: i64, out: MutPtr<u8>): i64;
 declare function fsh_rt_crypto_missing(): Ptr<u8>;
 declare function fsh_rt_random_fill(at: MutPtr<u8>, count: usize): void;
@@ -9021,6 +9853,13 @@ export class Pool {
     return rowsAs<T>(outcome);
   }
 
+  // The rows a query std:query compiled gives, typed by what it selected.
+  async executeQuery<T>(this: Ref<this>, q: Ref<CompiledQuery<T>>): Promise<T[]> throws PostgresError | RowError | IoError | AbortError {
+    let params: SqlValue[] = [];
+    for (const p of q.parameters) params.push(p.clone());
+    return await this.query<T>(q.sql, params);
+  }
+
   // The first row sql gives as a T, or null when it gives none.
   async queryOne<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T | null> throws PostgresError | RowError | IoError | AbortError {
     let rows = await this.query<T>(sql, params);
@@ -9242,6 +10081,7 @@ export async function hashPassword(password: string): Promise<string> throws Pas
 
 // The same hash made on the calling thread, for code with no runtime running, such as a CLI tool;
 // in an async function it holds its worker for the whole hash, so use hashPassword there.
+@blocking
 export function hashPasswordSync(password: string): string throws PasswordError {
   return __hashPassword(password);
 }
@@ -9261,6 +10101,7 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
 
 // The same check made on the calling thread, for code with no runtime running; in an async
 // function use verifyPassword.
+@blocking
 export function verifyPasswordSync(password: string, hash: string): boolean throws PasswordError {
   return __verifyPassword(password, hash);
 }
@@ -9652,7 +10493,7 @@ function asInteger(reply: RedisReply): i64 throws RedisError {
   // SQLite through the system's library, which links into a program only when it imports this:
   // statements with parameters bound apart from their text, and rows read by column name into a
   // type, as the postgres module reads them.
-  sqlite: String.raw`
+  sqlite: String.raw`import type { CompiledQuery } from "std:query";
 declare function fsh_rt_sqlite_database(): i64;
 declare function fsh_rt_sqlite_open(db: i64, path: Ptr<u8>): i64;
 declare function fsh_rt_sqlite_error(db: i64): Ptr<u8>;
@@ -9897,6 +10738,13 @@ export class Database {
   }
 
   // The first row sql gives as a T, or null when it gives none.
+  // The rows a query std:query compiled gives, typed by what it selected.
+  async executeQuery<T>(this: Ref<this>, q: Ref<CompiledQuery<T>>): Promise<T[]> throws SqliteError | RowError {
+    let params: SqlValue[] = [];
+    for (const p of q.parameters) params.push(p.clone());
+    return await this.query<T>(q.sql, params);
+  }
+
   async queryOne<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T | null> throws SqliteError | RowError {
     const out = await once(this.handle, sql, params, 1);
     let rows = rowsAs<T>(out.rows);
@@ -11547,6 +12395,7 @@ async function sleeping(ms: i64): Promise<void> {
   await sleep(ms);
 }
 
+@blocking
 export function sleepSync(ms: i64): void {
   let left = ms;
   while (left > 0) {
@@ -11680,6 +12529,7 @@ function signalName(n: i64): string {
 // Runs a command to its end. stdin is /dev/null unless given, and stdout and stderr are piped
 // unless asked otherwise; env, when given, is the child's whole environment, and its PATH, when
 // it has one, is where the command is looked for.
+@blocking
 export function spawnSync(cmd: string[], options: SpawnOptions = {}): SyncSubprocess throws IoError {
   const [file, input, flags, pairs] = spawnPlan(cmd, options, null, options.stdout ?? "pipe", options.stderr ?? "pipe");
   const [pid, status, signo, stdout, stderr] = processSpawn(file, cmd, options.cwd ?? "", input, flags, pairs);
@@ -11831,7 +12681,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
@@ -12366,7 +13216,64 @@ function __simd_u32x4_store(v: u32x4, a: Mut<u32[]>, i: usize): void { a[i + 0] 
 function __simd_u64x2_load(a: Ref<u64[]>, i: usize): u64x2 { return [a[i + 0], a[i + 1]]; }
 function __simd_u64x2_store(v: u64x2, a: Mut<u64[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; }
 `;
-export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD;
+const CONCURRENT = String.raw`
+// A Map many tasks read and write at once: its entries are spread over shards by their key's
+// hash, each under a lock of its own, so tasks working in different shards never wait for one
+// another. Nothing is lent out past a shard's lock: 'get' gives a clone, and 'with' and 'update'
+// run a callback on the value while the lock is held, which can't 'await'.
+class ConcurrentMap<K, V> {
+  private shards: RwLock<Map<K, V>>[] = [];
+  constructor(options?: { shards?: i64 }) {
+    const n = options === undefined || options.shards === undefined ? 16 : options.shards;
+    // Fewer than one shard is one.
+    for (let i = 0; i < n || i === 0; i++) this.shards.push(new RwLock(new Map<K, V>()));
+  }
+  private shardOf(k: Ref<K>): usize {
+    return (__keyHash(k.clone()) % (this.shards.length as u64)) as usize;
+  }
+  get(k: K): V | undefined {
+    return this.shards[this.shardOf(k)].read((m): V | undefined => {
+      const found = m.get(k);
+      if (found === undefined) return undefined;
+      return found.clone();
+    });
+  }
+  has(k: K): boolean {
+    return this.shards[this.shardOf(k)].read((m) => m.has(k));
+  }
+  set(k: K, v: V): void {
+    this.shards[this.shardOf(k)].update((m) => { m.set(k, v); });
+  }
+  delete(k: K): boolean {
+    return this.shards[this.shardOf(k)].update((m) => m.delete(k));
+  }
+  // Every shard's count, each read under its own lock, so not one moment's.
+  get size(): usize {
+    let n: usize = 0;
+    for (const s of this.shards) n += s.read((m) => m.size);
+    return n;
+  }
+  // What 'fn' gives from the key's value, read in place, or undefined when the key is absent.
+  with<R>(k: K, fn: (v: Ref<V>) => R): R | undefined {
+    return this.shards[this.shardOf(k)].read((m): R | undefined => {
+      const found = m.get(k);
+      if (found === undefined) return undefined;
+      return fn(found);
+    });
+  }
+  // Changes the key's value in place; false when the key is absent.
+  update(k: K, fn: (v: Mut<V>) => void): boolean {
+    return this.shards[this.shardOf(k)].update((m) => m.update(k, (v) => fn(v)));
+  }
+  // Changes the key's value in place, or adds 'value' when the key is absent, in one hold of the lock.
+  upsert(k: K, value: V, fn: (v: Mut<V>) => void): void {
+    this.shards[this.shardOf(k)].update((m) => {
+      if (!m.update(k.clone(), (v) => fn(v))) m.set(k, value);
+    });
+  }
+}
+`;
+export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD + CONCURRENT;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -12384,7 +13291,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD]) {
+  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD, CONCURRENT]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -12413,6 +13320,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let arenas = sections.shift()!;
   let htmls = sections.shift()!;
   let simds = sections.shift()!;
+  let concurrent = sections.shift()!;
   renamed(json, { kind: "json" });
   renamed(jsonName, { kind: "json" });
   let astNames: string[] = [];
@@ -12472,6 +13380,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   if (httpUsed || uses(written, htmls, HTML_NAMES)) chosen = chosen.concat(htmls);
   // The checker turns SIMD vectors' constructors and methods into calls of these helpers.
   if (uses(written, simds, [...SIMD_TYPES.keys(), ...SIMD_MASKS.keys()])) chosen = chosen.concat(simds);
+  if (uses(written, concurrent, ["ConcurrentMap"])) chosen = chosen.concat(concurrent);
   // A C function the program declares already, as a std module it imports may, is declared once.
   const foreign = foreignShapes(written);
   if (foreign.size > 0) chosen = chosen.filter((s) => !declaredNames(s).some((n) => sameForeign(foreign, s, n)));

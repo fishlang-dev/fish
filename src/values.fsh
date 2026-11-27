@@ -2083,6 +2083,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const fn: Expr = made ? { id: nextId(this.ctx.tables().ids), kind: "topic", start: f.start, end: f.end } : cloneExpr(f);
       const run: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: fn, typeArgs: [], args: [], optional: false, start: f.start, end: f.end };
       if (f.kind !== "arrow") this.ctx.tables().blockingRuns.add(cloneExpr(run));
+      this.ctx.tables().blockingTasks.add(f.start);
       const arrow: Expr = { id: nextId(this.ctx.tables().ids), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: run, start: f.start, end: f.end };
       const task: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: cloneExpr(arrow), typeArgs: [], args: [], optional: false, start: f.start, end: f.end };
       const spawned: Expr = made ? { id: nextId(this.ctx.tables().ids), kind: "pipe", value: cloneExpr(f), body: task, start: f.start, end: f.end } : arrow;
@@ -2211,6 +2212,11 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callee.kind === "ident" && callee.name === "unixUnlink" && e.start >= STD_BASE && e.args.length === 1) {
       this.value(e.args[0]!);
       return { type: "void", what: "'unixUnlink'" };
+    }
+    // A Map key's hash, for std's ConcurrentMap to pick a shard by.
+    if (callee.kind === "ident" && callee.name === "__keyHash" && e.start >= STD_BASE && e.args.length === 1) {
+      this.value(e.args[0]!);
+      return { type: "u64", what: "'__keyHash'" };
     }
     // Milliseconds on a clock that only goes forward, for the std HTTP server's deadlines.
     if (callee.kind === "ident" && callee.name === "nowMs" && e.start >= STD_BASE && e.args.length === 0) return { type: "i64", what: "'nowMs'" };
