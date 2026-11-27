@@ -121,11 +121,10 @@ function lowerOne(compilation: Mut<Compilation>, l: Mut<Lowering>, s: Ref<Stmt>,
 /** @throws {CompileError | Error} */
 function lowerStmt(compilation: Mut<Compilation>, l: Mut<Lowering>, s: Ref<Stmt>, visible: Ref<Visible[]>, loop: Ref<Span | undefined>): Stmt[] {
   const run = l.run;
-  const replaying = `(await ${run}.__replaying())`;
   if (s.kind === "expr" && isAwait(s.expr)) {
     l.handled.add(s.expr.id);
     let out = checks(compilation, l, s, visible, loop);
-    append(out, step(compilation, `if ${replaying} ${run}.__skipped(); else { await ${WORK}; await ${run}.__passed(); }`, spanOf(s.start, s.end), operandOf(s.expr), undefined));
+    append(out, step(compilation, `await ${run}.__pass(${WORK});`, spanOf(s.start, s.end), operandOf(s.expr), undefined));
     return out;
   }
   if (s.kind === "expr") {
@@ -136,7 +135,7 @@ function lowerStmt(compilation: Mut<Compilation>, l: Mut<Lowering>, s: Ref<Stmt>
       l.handled.add(e.value.id);
       const x = target.name;
       let out = checks(compilation, l, s, visible, loop);
-      append(out, step(compilation, `${x} = ${replaying} ? ${run}.__replayedLike(${x}) : await ${run}.__recorded(await ${WORK});`, spanOf(s.start, s.end), operandOf(e.value), undefined));
+      append(out, step(compilation, `${x} = await ${run}.__step(${WORK});`, spanOf(s.start, s.end), operandOf(e.value), undefined));
       return out;
     }
   }
@@ -152,7 +151,7 @@ function lowerStmt(compilation: Mut<Compilation>, l: Mut<Lowering>, s: Ref<Stmt>
     l.handled.add(init.id);
     const keyword = s.keyword;
     let out = checks(compilation, l, s, visible, loop);
-    append(out, step(compilation, `${keyword} ${x}: ${TYPE} = ${replaying} ? ${run}.__replayed<${TYPE}>() : await ${run}.__recorded<${TYPE}>(await ${WORK});`, spanOf(s.start, s.end), operandOf(init), d.type));
+    append(out, step(compilation, `${keyword} ${x}: ${TYPE} = await ${run}.__step<${TYPE}>(${WORK});`, spanOf(s.start, s.end), operandOf(init), d.type));
     return out;
   }
   if (s.kind === "return") {
@@ -162,8 +161,8 @@ function lowerStmt(compilation: Mut<Compilation>, l: Mut<Lowering>, s: Ref<Stmt>
       l.handled.add(value.id);
       let out = checks(compilation, l, s, visible, loop);
       const text = nothing
-        ? `if ${replaying} ${run}.__skipped(); else { await ${WORK}; await ${run}.__passed(); }\nawait ${run}.__finished();\nreturn;`
-        : `{ const __durableResult: ${TYPE} = ${replaying} ? ${run}.__replayed<${TYPE}>() : await ${run}.__recorded<${TYPE}>(await ${WORK}); await ${run}.__finished(); return __durableResult; }`;
+        ? `await ${run}.__pass(${WORK});\nawait ${run}.__finished();\nreturn;`
+        : `{ const __durableResult: ${TYPE} = await ${run}.__step<${TYPE}>(${WORK}); await ${run}.__finished(); return __durableResult; }`;
       append(out, step(compilation, text, spanOf(s.start, s.end), operandOf(value), l.returns));
       return out;
     }
@@ -289,7 +288,7 @@ export function durableBody(compilation: Mut<Compilation>, f: Ref<Func>, at: Ref
   // resumed run reads those it was given first.
   if (given.length > 0) {
     const fields = given.join(", ");
-    let args = template(compilation, `const __durableArgs = (await ${run}.__replaying()) ? ${run}.__replayedLike({ ${fields} }) : await ${run}.__recorded({ ${fields} });`, f);
+    let args = template(compilation, `const __durableArgs = await ${run}.__args({ ${fields} });`, f);
     let taken = template(compilation, `let { ${fields} } = __durableArgs;`, f);
     markGenerated(compilation.generated, { of: "stmts", node: args });
     markGenerated(compilation.generated, { of: "stmts", node: taken });
