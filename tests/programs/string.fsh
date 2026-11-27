@@ -1294,3 +1294,34 @@ function main() {
   console.log(f(a));
 }
 // panic: index out of bounds: the len is 0 but the index is 3
+// case: string_small
+function main(): void throws JsonError {
+  const n = 42;
+  const a = "ab" + n;
+  const b = "abcdefg" + "";
+  const c = b + "h";
+  console.log(a, a.length, b.length, c.length);
+  console.log(c.slice(0, 7) === b, c.slice(1), c.slice(0, 7).length, c.slice(3, 3).length);
+  let m = new Map<string, i64>();
+  m.set(a, 1);
+  m.set(c.slice(0, 7), 2);
+  console.log(m.get("ab42")!, m.get("abcdefg")!, m.has("ab4"), m.get(c.slice(0, 7))!);
+  const e = "é" + "ü";
+  console.log(e, e.length, e.toUpperCase(), e.charAt(1), e.indexOf("ü"));
+  const hi = "\uD83D";
+  const lo = "\uDE00";
+  const pair = hi + lo;
+  console.log(pair.length, pair === "😀", (pair + pair).length);
+  const parts = "a,bb,ccc,dddddddd".split(",");
+  console.log(parts.length, parts[3], parts[2].length);
+  console.log(`${n}` < "5", "abc" < "abd", ("x" + 1).padStart(5, "-"), "ab".repeat(3), " ab ".trim() + "|");
+  console.log(JSON.stringify(a), JSON.parse<i64>("7" + ""), parseInt("12" + "3") ?? 0, String(123456) + "7");
+}
+// expect: ab42 4 7 8
+// expect: true bcdefgh 7 0
+// expect: 1 2 false 2
+// expect: éü 2 ÉÜ ü 1
+// expect: 2 true 4
+// expect: 4 dddddddd 3
+// expect: true true ---x1 ababab ab|
+// expect: "ab42" 7 123 1234567
