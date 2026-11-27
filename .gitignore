@@ -19,3 +19,8 @@ dist/
 
 # The Rust HTTP service benchmarks/run.fsh builds with cargo
 benchmarks/http/rust/target/
+
+# The playground compiler scripts/playground.fsh builds, and the programs its server keeps
+playground/public/fishc.wasm
+playground/public/fishc.js
+shares/
