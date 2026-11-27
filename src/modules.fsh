@@ -38,7 +38,8 @@ export type Module = { path: string; file: string; base: usize; src: string; sta
 export type Package = { specifier: string; dir: string; at: Span };
 // `rust`: each Rust crate the program imports, with the directory of the Fish package listing it.
 // `links` is what linking made of each file, kept once the program is linked.
-export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[]; links?: Linked[] };
+// `fish` is the program's Fish packages, its own first, when it has a fish.toml.
+export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[]; links?: Linked[]; fish?: FishPackage[] };
 export type RustCrate = { dependency: RustDependency; dir: string };
 
 // What reads a file the program imports before the disk does: an editor's unsaved text, or
@@ -70,7 +71,7 @@ export function load(compilation: Mut<Compilation>, entry: string, src: string =
   for (const m of loader.modules) compilation.files.push({ base: m.base, file: m.base === 0 ? basename(entry) : m.file, src: m.src, std: m.path.startsWith("std:") });
   // std's text sits past every file's, so it goes last, where an offset past them finds it.
   const sources = withStd(loader.sources);
-  return { modules: loader.modules, sources, packages: loader.packages, rust: loader.rust };
+  return { modules: loader.modules, sources, packages: loader.packages, rust: loader.rust, fish: loader.fish };
 }
 
 function withStd(sources: Ref<Source[]>): Source[] {

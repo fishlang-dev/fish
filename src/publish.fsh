@@ -13,7 +13,7 @@ import { resolveSpecifier, specifierOf } from "./modules.fsh";
 import { parse, type Span, type Stmt } from "./parser.fsh";
 import { walkWhile, type Ids } from "./nodes.fsh";
 import { cacheDir } from "./mathlib.fsh";
-import { openIndex, registryUrl, resolveVersions, versions, type IndexEntry, type Request, type Unresolved } from "./registry_index.fsh";
+import { openIndex, registryUrl, resolveVersions, sparseBase, versions, type IndexEntry, type Request, type Unresolved } from "./registry_index.fsh";
 
 // A package packed for the registry: its manifest, the archive's bytes and sha256, where it was
 // written, and the files it holds.
@@ -258,6 +258,37 @@ export function prepare(packed: Ref<Packed>): Prepared {
     run(["reset", "--quiet", "--hard", earlier]);
   }
   return { branch, clone, archive, line };
+}
+
+// Sends a release to a registry server, authorized by FISH_REGISTRY_TOKEN, its index line's fields
+// as headers beside the archive; gives the package's URL there. The token goes to curl in a file in
+// a directory only this user can read, so no other process sees it in curl's arguments.
+/** @throws {Error | IoError} */
+export function upload(packed: Ref<Packed>): string {
+  const url = registryUrl(packed.manifest);
+  const base = sparseBase(url)!.replace(/\/index$/, "");
+  const token = process.env.FISH_REGISTRY_TOKEN ?? "";
+  if (token === "") throw new Error(`publishing to '${url}' needs FISH_REGISTRY_TOKEN set to a token the registry gave you`);
+  if (/[\r\n]/.test(token)) throw new Error("FISH_REGISTRY_TOKEN holds a line break");
+  if (Bun.which("curl") === null) throw new Error("publishing needs the curl command, which isn't on PATH; install curl");
+  const { name, version } = packed.manifest;
+  let dependencies: { [name: string]: string } = {};
+  for (const d of packed.manifest.dependencies) if ("version" in d) dependencies[d.name] = d.version;
+  const dir = mkdtempSync(join(tmpdir(), "fish-publish-"));
+  const headers = join(dir, "headers");
+  try {
+    writeFileSync(headers, `authorization: Bearer ${token}\nfish-dependencies: ${JSON.stringify(dependencies)}\nfish-unsafe: ${packed.unsafe.length > 0 ? "true" : "false"}\ncontent-type: application/gzip\n`);
+    const target = `${base}/api/v1/packages/${name}/${version}`;
+    const sent = Bun.spawnSync(["curl", "-q", "--silent", "--show-error", "--fail-with-body", "--proto", "=https,http", "--max-time", "600", "-X", "PUT", "-H", `@${headers}`, "--data-binary", `@${packed.file}`, "--", target], { stdout: "pipe", stderr: "pipe" });
+    if (sent.exitCode !== 0) {
+      const body = text(sent.stdout).trim();
+      const said = body !== "" ? body : text(sent.stderr).trim().replace(/^curl: \(\d+\) /, "");
+      throw new Error(`the registry refused ${name} ${version}: ${said}`);
+    }
+    return `${base}/api/v1/packages/${name}`;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // A GitHub repository's owner/name, from an https or ssh URL, when it is one.

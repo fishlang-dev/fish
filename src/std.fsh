@@ -2039,6 +2039,13 @@ type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHan
 // A router's routes and middleware, shared so each middleware's next can hold them.
 type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
 
+// A value a route's handler gives or throws that makes its own response, as axum's trait does.
+// A Response is given as it is, a thrown string as a 500's text, and any other error a handler
+// throws as a 500 that says nothing of it.
+interface IntoResponse {
+  intoResponse(): Response;
+}
+
 // Serves HTTP/1.1 on hostname and port, or a socket path, each connection on a task of its own.
 async function serve(options: ServeOptions, handler: (req: Request) => Promise<Response>): Promise<void> throws IoError {
   const unix = options.unix;
@@ -2574,6 +2581,12 @@ class Router {
     return null;
   }
 
+  // The router with state its handlers and middleware are given, as axum's with_state: each
+  // request gets a clone, so the state is a handle such as a pool or a shared<T>.
+  state<S>(this: Own<this>, state: S): StateRouter<S> {
+    return new StateRouter<S>(this, state);
+  }
+
   // The router as the handler serve takes; the handler owns it.
   handler(this: Own<this>): ServeHandler {
     const router = this;
@@ -2611,9 +2624,62 @@ class Router {
   }
 }
 
+// A Router whose handlers take (req, state) and whose middleware take (req, state, next).
+class StateRouter<S> {
+  private router: Router;
+  private held: S;
+
+  constructor(router: Router, held: S) {
+    this.router = router;
+    this.held = held;
+  }
+
+  use(this: Mut<this>, middleware: (req: Request, state: S, next: __routerNext) => Promise<Response>) {
+    const state = this.held.clone();
+    this.router.use(async (req: Request, next: __routerNext) => {
+      const res = await middleware(req, state.clone(), next);
+      return res;
+    });
+  }
+
+  get(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.get(path, this.bound(handler)); }
+  post(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.post(path, this.bound(handler)); }
+  put(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.put(path, this.bound(handler)); }
+  patch(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.patch(path, this.bound(handler)); }
+  delete(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.delete(path, this.bound(handler)); }
+  all(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.all(path, this.bound(handler)); }
+  route(this: Mut<this>, method: string, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.route(method, path, this.bound(handler)); }
+
+  // A plain router's routes under a prefix, as Router.route mounts one.
+  mount(this: Mut<this>, prefix: string, child: Router) { this.router.route(prefix, child); }
+
+  static(this: Mut<this>, prefix: string, root: string) { this.router.static(prefix, root); }
+
+  async handle(req: Request): Promise<Response> {
+    const res = await this.router.handle(req);
+    return res;
+  }
+
+  handler(this: Own<this>): ServeHandler {
+    const router = this;
+    return async (req: Request) => {
+      const res = await router.handle(req);
+      return res;
+    };
+  }
+
+  private bound(this: Ref<this>, handler: (req: Request, state: S) => Promise<Response>): ServeHandler {
+    const state = this.held.clone();
+    return async (req: Request) => {
+      const res = await handler(req, state.clone());
+      return res;
+    };
+  }
+}
+
 // What the checker writes around a route's handler that says its types: a 400 saying why the
-// body isn't the JSON its type reads, a 204 for a handler giving nothing, and what a handler
-// gives as JSON.
+// body isn't the JSON its type reads, a 204 for a handler giving nothing, what a handler gives as
+// JSON or as its own response, and the response for what it throws, chosen by the error's type.
 function __routerRefused(message: string): Response {
   return new Response(message, { status: 400 });
 }
@@ -2626,6 +2692,25 @@ function __routerEmpty(): Response {
 // write it as the type's layout, an empty optional field as null where the type leaves it out.
 function __routerJson<T>(data: Ref<T>): Response {
   let res = new Response(JSON.stringify(data));
+  res.headers.set("content-type", "application/json");
+  return res;
+}
+
+function __routerInto(value: IntoResponse): Response {
+  return value.intoResponse();
+}
+
+function __routerGiven(res: Response): Response {
+  return res;
+}
+
+function __routerText(message: string): Response {
+  return new Response(message, { status: 500 });
+}
+
+// The error is dropped unread: its message may say what a client shouldn't see.
+function __routerFailed<E>(_error: E): Response {
+  let res = new Response("{\\"error\\":\\"Internal Server Error\\"}", { status: 500 });
   res.headers.set("content-type", "application/json");
   return res;
 }
@@ -3273,8 +3358,16 @@ class Http1 {
     return b;
   }
 
+  // The handler's task is the request's, so the request ID it sets here is what std:log's entries
+  // carry in it and every task it spawns, across awaits; the response echoes it.
   static async handle(handler: ServeHandler, req: Request): Promise<Response> {
-    return await handler(req);
+    const given = req.headers.get("x-request-id");
+    const id = given !== null && __logUsable(given) ? given : __traceHex([__traceFresh()[0]]);
+    const slot = __logBegin(id.clone());
+    let res = await handler(req);
+    __logEnd(slot);
+    res.headers.set("x-request-id", id);
+    return res;
   }
 
   // The client's next bytes, nothing once the stream ends or the server stops, or null once the
@@ -3814,6 +3907,49 @@ type __traceTarget = { host: string; port: i64; authority: string; path: string 
 const __traceMode = new Atomic(0);
 // The delay is the OpenTelemetry batch processor's default, five seconds.
 const __traceHeld = new Lock<__traceSettings>({ endpoint: "", service: "", delay: 5000, armed: false, timer: 0, spans: [] });
+
+declare function fsh_rt_log_get(): i64;
+declare function fsh_rt_log_set(request: i64): void;
+
+// The request IDs of the requests being served, keyed by the number the task holding one carries,
+// which only a number fits in.
+// ponytail: a handler that panics leaves its entry behind; remove it where serve catches the
+// panic if a server that panics often grows.
+const __logIds = new Lock<Map<i64, string>>(new Map<i64, string>());
+const __logNext = new Atomic(0);
+
+// Whether a client's x-request-id is one to keep: visible ASCII, at most 128 characters.
+function __logUsable(id: string): boolean {
+  if (id.length === 0 || id.length > 128) return false;
+  for (let i: usize = 0; i < id.length; i++) {
+    const c = id.charCodeAt(i) as i64;
+    if (c < 33 || c > 126) return false;
+  }
+  return true;
+}
+
+// Makes id the current task's request ID, giving the number it is kept under.
+function __logBegin(id: string): i64 {
+  const n = __logNext.add(1) + 1;
+  __logIds.update((m) => { m.set(n, id); });
+  unsafe { fsh_rt_log_set(n) };
+  return n;
+}
+
+function __logEnd(n: i64): void {
+  __logIds.update((m) => { m.delete(n); });
+  unsafe { fsh_rt_log_set(0) };
+}
+
+// The request ID of the request the current task serves, or "" outside one.
+function __logRequest(): string {
+  const n = unsafe { fsh_rt_log_get() };
+  if (n === 0) return "";
+  return __logIds.update((m): string => {
+    const id = m.get(n);
+    return id === null ? "" : id.clone();
+  });
+}
 
 // The current context: a trace id's halves, the current span's id and its flags, all 0 outside
 // any span. It belongs to the task, so it follows one through its awaits.
@@ -5304,7 +5440,7 @@ const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date", "RangeError", "Html"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
 export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection", "Http2", "Http2Hpack", "Http2Stream"]);
-const HTTP_NAMES = ["fetch", "serve", "Router", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+const HTTP_NAMES = ["fetch", "serve", "Router", "StateRouter", "IntoResponse", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE: usize = 2 ** 40;
@@ -11806,6 +11942,57 @@ export async function create(file: string, paths: string[], options: ZipPackOpti
 `,
   // Spans in a program's own code, imported as std:trace. Their state is std's own, which serve
   // shares, so what is here only wraps it.
+  // Structured logging, imported as std:log: each entry one JSON line on stderr.
+  log: String.raw`
+// An entry's extra fields: any value with a JSON form, an object's fields joining the entry's own.
+export interface LogFields {}
+
+// Writes one line, {"ts", "level", "msg", "requestId"?, ...fields}, when the level is at least
+// FISH_LOG's (debug, info, warn or error; info when unset or anything else). requestId is that of
+// the request the calling task serves, inside serve.
+export function debug(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(0, message, JSON.stringify(fields));
+  else entry(0, message, "");
+}
+
+export function info(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(1, message, JSON.stringify(fields));
+  else entry(1, message, "");
+}
+
+export function warn(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(2, message, JSON.stringify(fields));
+  else entry(2, message, "");
+}
+
+export function error(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(3, message, JSON.stringify(fields));
+  else entry(3, message, "");
+}
+
+const LEVELS = ["debug", "info", "warn", "error"];
+
+// ponytail: FISH_LOG is read for every entry; keep it once read if a hot path logs at a level
+// that's off.
+function least(): i64 {
+  const named = process.env["FISH_LOG"];
+  if (named === null) return 1;
+  const at = LEVELS.indexOf(named.toLowerCase());
+  return at < 0 ? 1 : at;
+}
+
+// An object's fields go into the entry; any other JSON value goes in as "fields".
+function entry(level: i64, message: string, fields: string): void {
+  if (level < least()) return;
+  let line = "{"ts":" + JSON.stringify(new Date().toISOString()) + ","level":"" + LEVELS[level as usize] + "","msg":" + JSON.stringify(message);
+  const id = __logRequest();
+  if (id.length > 0) line += ","requestId":" + JSON.stringify(id);
+  if (fields.startsWith("{")) {
+    if (fields.length > 2) line += "," + fields.slice(1, (fields.length as i64) - 1);
+  } else if (fields.length > 0) line += ","fields":" + fields;
+  console.error(line + "}");
+}
+`,
   trace: String.raw`
 // endpoint is the collector's base URL, as OTEL_EXPORTER_OTLP_ENDPOINT is, and "" turns tracing
 // off whatever the environment says; serviceName is the service the spans are from; batchDelay
@@ -12681,7 +12868,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
@@ -13334,7 +13521,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
   // The std:trace module's code names __traceOn, and what it wraps is sent through Http1.
-  const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn"]);
+  const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn", "__logRequest"]);
   const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
   const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentionsName(written, "Request"));
   // The libraries a program gets by naming them; JsError also comes with any package.
