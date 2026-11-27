@@ -26,7 +26,7 @@ import { openParam, perInstance, PER_INSTANCE } from "./typefns.fsh";
 import { lowerDefaults, writtenName } from "./defaults.fsh";
 import { ASYNC_DISPOSE, DISPOSE, LIVE, idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
 import { unsupported, unsupportedDeclaration } from "./unsupported.fsh";
-import { hoistLocals } from "./locals.fsh";
+import { hoistLocals, lowerObjectMethods, OBJECT_CLASS } from "./locals.fsh";
 import { localKeys, lowerKeys, lowerKeysWith, numberKey, topKeys } from "./keys.fsh";
 import { lowerOverloads } from "./overloads.fsh";
 import { checkMoves } from "./moves.fsh";
@@ -979,6 +979,7 @@ export function loweredFile(tables: Mut<Tables>, given: Stmt[], library: boolean
   if (holdsNode({ of: "stmts", node: written }, (n) => (n.of === "expr" && n.node.kind === "ident" && TIMER_GLOBALS.has(n.node.name)) || (n.of === "classMember" && privateMember(n.node)) || (n.of === "expr" && n.node.kind === "member" && typeof n.node.name === "string" && n.node.name.startsWith("#")))) return { statements: [], fallback: "the file uses a timer or a private name" };
   if (tables.timerMains.size > 0 && !library) return { statements: [], fallback: "the program's main runs timers" };
   localKeys(written);
+  if (holdsNode({ of: "stmts", node: written }, (n) => n.of === "objectProp" && (n.node.kind === "method" || n.node.kind === "get" || n.node.kind === "set"))) return { statements: [], fallback: "the file has methods in object literals" };
   if (hoistLocals(tables, written).hoisted.length > 0) return { statements: [], fallback: "the file declares local types" };
   if (tables.topKeys === undefined) return { statements: [], fallback: "the program's keys weren't kept" };
   lowerKeysWith(written, tables.topKeys!);
@@ -1016,6 +1017,7 @@ function lowered(tables: Mut<Tables>, given: Stmt[], library: boolean): Stmt[] {
   if (misplaced.length > 0) throw new CompileError("E1103", misplaced[0]!.message, misplaced[0]!.start, misplaced[0]!.end);
   written = lowerOverloads(tables.ids, written);
   localKeys(written);
+  written = lowerObjectMethods(tables.ids, written);
   const hoisted = hoistLocals(tables, written).hoisted;
   written = [...written, ...hoisted];
   lowerKeys(written);
@@ -2356,8 +2358,14 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           // instance of it made with a definition's placeholders.
           const placeholder = !this.instancingState.concreteness.concrete(this.tables.typing, this.tables.arenas.classOf(next).type);
           const defining = placeholder || [...this.genericClassesState.defined.values()].includes(next);
+          const literal = this.tables.typing.rec(this.tables.arenas.classOf(next).type).name.startsWith(OBJECT_CLASS);
           for (const f of this.registry().settle(next)) {
             const reported = this.errors.length;
+            // An object literal's class has a field type only in each instance.
+            if (defining && literal) {
+              this.perInstanceOnly(f, reported);
+              continue;
+            }
             try {
               this.definingGeneric = defining || this.instancing().generic(f);
               this.tables.typing.openWithin = this.definingGeneric;
