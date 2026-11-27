@@ -7,17 +7,21 @@ import { cacheDir } from "./mathlib.fsh";
 // Build targets: the four v1 platforms and Linux over musl for static binaries, named by their
 // Rust triples, and the clang flags that build for one from the host fishc runs on.
 
-export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl", "wasm32-wasip1", "browser"];
+export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl", "wasm32-wasip1", "browser", "x86_64-w64-windows-gnu", "aarch64-w64-windows-gnu"];
 
 // A WebAssembly module over WASI preview 1, and the same module with a JavaScript loader giving it
 // those calls in a page.
 export const isWasm = (triple: string) => triple === "wasm32-wasip1" || triple === "browser";
 
+// Windows over the MinGW ABI, with UCRT as its C library.
+export const isWindows = (triple: string) => triple.endsWith("-w64-windows-gnu");
+
 // `compile` goes to every clang compile, and `compile` then `link` to the final link. The host's
 // own target has both empty, so its builds and cache keys are what they were before targets.
 // `ar` archives a static library: the host's own can't index another OS's objects. `sanitize`
-// names the sanitizer a build is instrumented with, if any.
-export type Target = { triple: string; compile: string[]; link: string[]; ar: string; sanitize?: string };
+// names the sanitizer a build is instrumented with, if any. `cc` is the clang a target is built
+// with, when it isn't the one on PATH.
+export type Target = { triple: string; compile: string[]; link: string[]; ar: string; sanitize?: string; cc?: string };
 
 export const HOST_TARGET: Target = { triple: "", compile: [], link: [], ar: "ar" };
 
@@ -28,7 +32,7 @@ export function hostTarget(): Target {
 
 // A copy of `target` for a caller to own.
 export function copyTarget(target: Ref<Target>): Target {
-  return { triple: target.triple, compile: [...target.compile], link: [...target.link], ar: target.ar, sanitize: target.sanitize };
+  return { triple: target.triple, compile: [...target.compile], link: [...target.link], ar: target.ar, sanitize: target.sanitize, cc: target.cc };
 }
 
 const osOf = (triple: string) => (triple.includes("-apple-") ? "macOS" : "Linux");
@@ -66,6 +70,7 @@ export function hostTriple(platform: string = process.platform, arch: string = p
 /** @throws {Error} */
 export function resolveTarget(triple: string | undefined, sysroot: string | undefined, given?: string, which?: (tool: string) => string | null, found?: (path: string) => boolean): Target {
   if (triple !== undefined && isWasm(triple)) return wasmTarget(triple, sysroot, which, found);
+  if (triple !== undefined && isWindows(triple)) return windowsTarget(triple, sysroot, found);
   const host = given ?? hostTriple();
   // Cached objects compile in an empty directory of their own, where a relative path means nothing.
   sysroot = sysroot !== undefined && sysroot !== "" ? resolve(sysroot) : undefined;
@@ -116,6 +121,31 @@ function wasmTarget(triple: string, sysroot: string | undefined, which?: (tool: 
   const emulated = ["-D_WASI_EMULATED_SIGNAL", "-D_WASI_EMULATED_PROCESS_CLOCKS", "-D_WASI_EMULATED_GETPID", "-D_WASI_EMULATED_MMAN"];
   const libraries = ["-lwasi-emulated-signal", "-lwasi-emulated-process-clocks", "-lwasi-emulated-getpid", "-lwasi-emulated-mman"];
   return { triple, compile: ["-target", "wasm32-wasip1", "--sysroot", root, "-Wno-override-module", ...emulated], link: ["-nodefaultlibs", "-lc", ...libraries, builtins, "-Wl,-z,stack-size=8388608"], ar: "llvm-ar" };
+}
+
+// Windows through llvm-mingw, a toolchain holding a clang, lld, compiler-rt, libunwind and the
+// MinGW-w64 headers and libraries for each CPU, named by --sysroot or FISH_SYSROOT. Its clang reads
+// the configuration beside it for a MinGW triple, which links with lld, compiler-rt and libunwind,
+// so it builds rather than the clang on PATH. Linked statically, an executable needs no DLL beyond
+// the system's own: winpthreads and libunwind are inside it. Winsock, ntdll's AFD calls the reactor
+// polls sockets with, and the system's random source are Windows libraries.
+/** @throws {Error} */
+function windowsTarget(triple: string, sysroot: string | undefined, found?: (path: string) => boolean): Target {
+  const exists = (path: string): boolean => (found === undefined ? existsSync(path) : found(path));
+  const cpu = triple.split("-")[0]!;
+  const mingw = `${cpu}-w64-mingw32`;
+  const get = `download llvm-mingw's ucrt release for this machine from https://github.com/mstorsjo/llvm-mingw/releases, unpack it, and give its directory with --sysroot <dir> or FISH_SYSROOT`;
+  if (sysroot === undefined || sysroot === "") throw new Error(`fishc build: building for ${triple} needs llvm-mingw; ${get}`);
+  const root = resolve(sysroot);
+  const cc = join(root, "bin", "clang");
+  if (!exists(cc) || !exists(join(root, mingw))) throw new Error(`fishc build: ${root} isn't an llvm-mingw toolchain for ${triple}: it needs bin/clang and ${mingw}; ${get}`);
+  return { triple, compile: ["-target", triple, "-Wno-override-module", "-D_WIN32_WINNT=0x0A00"], link: ["-static", "-lws2_32", "-lntdll", "-lbcrypt"], ar: join(root, "bin", "llvm-ar"), cc };
+}
+
+// Windows unwinds through SEH, whose tables name a personality of their own: the C personality's
+// SEH form, which libunwind gives as GCC does.
+export function forTarget(ir: string, target: Ref<Target>): string {
+  return isWindows(target.triple) ? ir.replaceAll("@__gcc_personality_v0", "@__gcc_personality_seh0") : ir;
 }
 
 // The flags that give a build threads: none for wasm32-wasip1, whose runtime runs on one.
@@ -400,6 +430,7 @@ export function pgoUse(profiles: Ref<string[]>): string[] {
 export function buildFacts(info: Ref<BuildInfo>): { os: string; arch: string; libc: string } {
   const triple = info.triple !== "" ? info.triple : hostTriple() ?? "";
   if (isWasm(triple)) return { os: "wasi", arch: "wasm32", libc: "wasi" };
+  if (isWindows(triple)) return { os: "windows", arch: triple.startsWith("x86_64") ? "x86_64" : "aarch64", libc: "ucrt" };
   const os = triple.includes("-apple-") ? "macos" : "linux";
   const arch = triple.startsWith("x86_64") ? "x86_64" : "aarch64";
   const libc = triple.includes("-apple-") ? "darwin" : triple.endsWith("-musl") ? "musl" : "gnu";
@@ -413,9 +444,9 @@ export function buildModule(info: Ref<BuildInfo>): string {
   const names = info.flags.map((f) => JSON.stringify(f.name)).join(", ");
   const values = info.flags.map((f) => (f.value === null ? "null" : JSON.stringify(f.value))).join(", ");
   return `
-export type Os = "macos" | "linux" | "wasi";
+export type Os = "macos" | "linux" | "wasi" | "windows";
 export type Arch = "x86_64" | "aarch64" | "wasm32";
-export type Libc = "darwin" | "gnu" | "musl" | "wasi";
+export type Libc = "darwin" | "gnu" | "musl" | "wasi" | "ucrt";
 export const target: { os: Os; arch: Arch; libc: Libc; release: boolean } = { os: "${os}", arch: "${arch}", libc: "${libc}", release: ${info.release} };
 // The build's --flag options, by name: a bare --flag name has no value, so get gives null for it.
 export class BuildFlags {
