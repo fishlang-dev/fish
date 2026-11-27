@@ -257,7 +257,7 @@ function irOf(tmp: string, name: string, src: string): string {
 
 function unitNames(ir: string): string[] {
   try {
-    return runtimeUnits(ir, false).map((u) => u.name);
+    return runtimeUnits([ir], false).map((u) => u.name);
   } catch (e) {
     assert(false, `runtimeUnits: ${e.message}`);
     return [];
@@ -268,9 +268,9 @@ test("zlib is compiled and linked into a program only when it calls the module",
   const tmp = scratch("fish-zlib-");
   const using = irOf(tmp, "using.fsh", `import { gzipSync, ZlibError } from "node:zlib";\nfunction main(): void throws ZlibError { console.log(gzipSync("x").length); }\n`);
   const plain = irOf(tmp, "plain.fsh", `function main() { console.log(new TextEncoder().encode("x").length); }\n`);
-  assert(runtimeLinks(using, HOST_TARGET).includes("-lz"), "the program calling zlib doesn't link -lz");
+  assert(runtimeLinks([using], HOST_TARGET).includes("-lz"), "the program calling zlib doesn't link -lz");
   assert(unitNames(using).includes("zlib"), "the program calling zlib has no zlib unit");
-  assert(!runtimeLinks(plain, HOST_TARGET).includes("-lz"), "the plain program links -lz");
+  assert(!runtimeLinks([plain], HOST_TARGET).includes("-lz"), "the plain program links -lz");
   assert(!unitNames(plain).includes("zlib"), "the plain program has a zlib unit");
   removed(tmp);
 }, { timeout: 30_000 });

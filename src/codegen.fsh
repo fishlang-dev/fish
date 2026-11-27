@@ -765,10 +765,12 @@ class Codegen implements PrintHost, ComptimeHost {
     return this.tables.arenas.instanceOf(this.current)!;
   }
 
-  // Emits every instance and gives the module's IR.
+  // Emits every instance and gives the module's IR in pieces, whose text joined by newlines is the
+  // module's: joined, the text would be held twice while the pieces are dropped, and the split into
+  // units reads the pieces anyway.
   /** @throws {CompileError} */
   // `prior` is what the last build's codegen made, when a function nothing changed may take its define.
-  module(this: Mut<this>, prior: Ref<Emitted> | undefined = undefined): string {
+  module(this: Mut<this>, prior: Ref<Emitted> | undefined = undefined): string[] {
     let timer = partStart(this.tables.session);
     this.newlines.set(this.file, newlinesOf(this.src));
     for (const s of this.sources) this.newlines.set(s.file, newlinesOf(s.src));
@@ -1131,26 +1133,30 @@ class Codegen implements PrintHost, ComptimeHost {
     ...this.filled,
     "",
   ];
-  // Each named struct the module uses, defined once ahead of everything. The names are read from
-  // the pieces and the text is joined once: joined twice, a large module was held three times.
-  const whole = [...typeDefinitions(this.tables.typing, module), ...module].join("\n");
+  // Each named struct the module uses, defined once ahead of everything.
+  const whole = [...typeDefinitions(this.tables.typing, module), ...module];
   this.out = [];
   partEnd(this.tables.session, "codegen assembly", timer);
   return whole;
   }
 
-  // Joins the lines emitted since `from` into one string for each function among them, as
-  // `byName` divides them. A module's text is millions of lines, and each held as a string of its
-  // own takes about as much again as the text.
+  // Joins the lines emitted since `from` into one string for each function among them, from its
+  // `define` line to its closing brace, so the split into units takes a function's text as it is.
+  // A module's text is millions of lines, and each held as a string of its own takes about as much
+  // again as the text.
   pack(this: Mut<this>, from: usize): void {
     const lines = this.out.splice(from as i64);
     let chunk: string[] = [];
     for (const line of lines) {
-      if (chunk.length > 0 && (line.startsWith("define ") || line.startsWith("declare "))) {
+      if (chunk.length === 0 && !line.startsWith("define ")) {
+        this.out.push(line);
+        continue;
+      }
+      chunk.push(line);
+      if (line === "}") {
         this.out.push(chunk.join("\n"));
         chunk = [];
       }
-      chunk.push(line);
     }
     if (chunk.length > 0) this.out.push(chunk.join("\n"));
   }
@@ -14944,7 +14950,7 @@ export function codegen(checked: Checked, options: Options): string {
   checked.tables.typing.structNames = named.names;
   checked.tables.typing.structColors = named.colors;
   checked.tables.typing.structSignatures = named.signatures;
-  return new Codegen(checked, options).module();
+  return new Codegen(checked, options).module().join("\n");
 }
 
 // A place a function's code names: its offset, and how it read.
@@ -15034,7 +15040,7 @@ export function definesIn(lines: Ref<string[]>): Map<string, string> {
 
 // `codegen`, giving back the checked program, which what is built from the IR reads after it.
 /** @throws {CompileError} */
-export function codegenChecked(checked: Checked, options: Options): { ir: string; checked: Checked; emitted: Emitted | undefined; helpers: Map<string, string> } {
+export function codegenChecked(checked: Checked, options: Options): { ir: string[]; checked: Checked; emitted: Emitted | undefined; helpers: Map<string, string> } {
   let { instances, tables, warnings } = checked;
   const naming = partStart(tables.session);
   const measured = allWords(tables.typing);
@@ -15062,7 +15068,9 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
     const awaits: { state: usize; field: usize; type: Type }[] = generator.awaitsOf.has(id) ? [...generator.awaitsOf.get(id)!] : [];
     made.set(id, { symbol: generator.symbol(id), face: generator.face(id), places, reads, comptime: generator.ranComptime.has(id), shared: generator.sharedKey(id), awaits });
   }
-  const defines = definesIn(ir.split("\n"));
+  let lines: string[] = [];
+  for (const piece of ir) for (const line of piece.split("\n")) lines.push(line);
+  const defines = definesIn(lines);
   // What each define names, read again only from a define whose text this build changed.
   let uses = new Map<string, string[]>();
   for (const [name, text] of defines) {

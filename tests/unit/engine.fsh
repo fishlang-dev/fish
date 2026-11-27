@@ -315,7 +315,7 @@ test("a program with no JS doesn't build the engine in", () => {
   write(file, src);
   try {
     const ir = compile(hooked(), src, file);
-    assert(!callsEngine(ir), "the IR calls the engine");
+    assert(!callsEngine([ir]), "the IR calls the engine");
   } catch (e) {
     assert(false, failure(e, file, src));
   }
