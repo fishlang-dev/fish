@@ -11,6 +11,7 @@ import { untar, type TarFile } from "./tar.fsh";
 import { cacheDir } from "./mathlib.fsh";
 import type { Locking } from "./program.fsh";
 import { fieldError, findManifest, inManifest, loadManifest, MANIFEST, parseToml, type Dependency, type Manifest, type Table, type TomlValue } from "./manifest.fsh";
+import { workspaceOf } from "./workspace.fsh";
 
 // A Fish package of a program: its manifest, its real directory, the packages its dependencies
 // name, by the names it imports them under, each by its directory, and for one from git, the
@@ -41,6 +42,8 @@ class Resolver {
   byName = new Map<string, usize>();
   // Registry dependencies wait until every range on each name is known, then take one version.
   wanted: Wanted[] = [];
+  // Where fish.lock is: the workspace's root, or the package's own directory.
+  lockDir = "";
 
   add(this: Mut<this>, pkg: Package): usize {
     const at = this.packages.length;
@@ -72,11 +75,11 @@ class Resolver {
       let dir = "";
       let git: { url: string; commit: string } | undefined = undefined;
       if ("path" in dep) dir = located(here, dep, blame);
-      else {
+      else if ("git" in dep) {
         const [d, g] = fetched(dep, blame);
         dir = d;
         git = g;
-      }
+      } else throw new Error(`'${dep.name}' from the workspace reached resolution unreplaced`);
       let chain = [...path];
       chain.push(at);
       for (let i: usize = 0; i < chain.length; i++) {
@@ -131,7 +134,7 @@ class Resolver {
     }
     const root: Ref<Package> = this.packages[0]!;
     const url = registryUrl(root.manifest);
-    const rootDir = root.dir;
+    const rootDir = this.lockDir;
     let lockedHere = lockedVersions(rootDir, url);
     const update: Ref<Set<string> | "all" | undefined> = locking.update;
     if (update === "all") lockedHere.clear();
@@ -237,11 +240,30 @@ export function resolvePackages(entry: string, locking: Ref<Locking>): Package[]
   let r = new Resolver();
   const manifest = loadManifest(file);
   const name = manifest.name;
-  const root = r.add({ manifest, dir: realpathSync(dirname(file)), deps: new Map<string, string>() });
+  const dir = realpathSync(dirname(file));
+  const root = r.add({ manifest, dir, deps: new Map<string, string>() });
   r.byName.set(name, root);
   r.visit(root, []);
+  // Every member of a workspace is resolved with the one being built, so they share one version of
+  // each registry package and one lock.
+  const ws = workspaceOf(dir);
+  r.lockDir = ws !== undefined ? ws.dir : dir;
+  let own = new Set<string>([dir]);
+  if (ws !== undefined) {
+    for (const m of ws.members) {
+      own.add(m.dir);
+      if (r.byDir.has(m.dir)) continue;
+      const other = r.byName.get(m.name);
+      if (other !== undefined) throw inManifest(new CompileError("E0906", `the member '${m.name}' has the name of a package this program already has from '${relative(ws.dir, r.packages[other]!.dir)}'`, 0, 1), ws.file);
+      const at = r.add({ manifest: loadManifest(join(m.dir, MANIFEST)), dir: m.dir, deps: new Map<string, string>() });
+      r.byName.set(m.name, at);
+      r.visit(at, []);
+    }
+  }
   if (r.wanted.length > 0) r.fromRegistry(locking);
-  const packages = r.take();
+  const lockDir = r.lockDir;
+  const all = r.take();
+  const packages = reached(all.clone());
   // A lib inside a package nested in this one would build as that package's file, and reach
   // what is private to it.
   for (const p of packages) {
@@ -261,8 +283,28 @@ export function resolvePackages(entry: string, locking: Ref<Locking>): Package[]
     const end = table !== undefined && !Array.isArray(table) ? table.end : 1;
     throw inManifest(new CompileError("E0906", `the dependency '${p.manifest.name}' lists Rust crates under [rust-dependencies]; only the package being built may list them for now`, start, end), manifestFile, src);
   }
-  lock(locking, packages);
+  lock(locking, all, lockDir, own);
   return packages;
+}
+
+// The packages the first one reaches through its dependencies, itself first, in the order given:
+// the members of its workspace it doesn't depend on aren't part of its program.
+function reached(all: Package[]): Package[] {
+  let at = new Map<string, usize>();
+  for (let i: usize = 0; i < all.length; i++) at.set(all[i]!.dir, i);
+  let seen = new Set<string>([all[0]!.dir]);
+  let queue = [all[0]!.dir];
+  while (queue.length > 0) {
+    const dir = queue.pop()!;
+    for (const next of all[at.get(dir)!]!.deps.values()) {
+      if (seen.has(next)) continue;
+      seen.add(next);
+      queue.push(next);
+    }
+  }
+  let kept: Package[] = [];
+  for (const p of all) if (seen.has(p.dir)) kept.push(p);
+  return kept;
 }
 
 export const LOCKFILE = "fish.lock";
@@ -282,18 +324,19 @@ function trueAt(t: Ref<Table>, key: string): boolean {
 
 type LockEntry = { name: string; source: string; checksum: string | undefined; version: string | undefined; unsafe: boolean };
 
-// Writes `fish.lock` beside the root package's manifest when what it resolves to has changed,
-// after checking that each git package's files still hash to what the lock recorded.
+// Writes `fish.lock` in `rootDir`, the workspace's root or the package's own directory, when what
+// it resolves to has changed, after checking that each git package's files still hash to what the
+// lock recorded. The packages in `own`, the one built and its workspace's members, aren't locked.
 /** @throws {CompileError | IoError} */
-function lock(locking: Ref<Locking>, packages: Ref<Package[]>): void {
-  const rootDir = packages[0]!.dir;
+function lock(locking: Ref<Locking>, packages: Ref<Package[]>, rootDir: string, own: Ref<Set<string>>): void {
   const file = join(rootDir, LOCKFILE);
   const had = existsSync(file) ? readFileSync(file, "utf8") : undefined;
-  if (packages.length === 1 && had === undefined) return;
+  if (packages.every((p) => own.has(p.dir)) && had === undefined) return;
   const recorded = had === undefined ? new Map<string, Table>() : locked(file, had);
   let entries: LockEntry[] = [];
-  for (let i: usize = 1; i < packages.length; i++) {
+  for (let i: usize = 0; i < packages.length; i++) {
     const p: Ref<Package> = packages[i]!;
+    if (own.has(p.dir)) continue;
     const git: Ref<{ url: string; commit: string } | undefined> = p.git;
     const registry: Ref<{ url: string; version: string; unsafe: boolean } | undefined> = p.registry;
     const near = relative(rootDir, p.dir);
