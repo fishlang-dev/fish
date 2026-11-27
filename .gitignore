@@ -24,3 +24,4 @@ benchmarks/http/rust/target/
 playground/public/fishc.wasm
 playground/public/fishc.js
 shares/
+study.db
