@@ -17,6 +17,7 @@ export const COMMANDS: Command[] = [
   { name: "check", summary: "check a program without building it", usage: ["fishc check [<file.fsh>] [--timings] [--no-check-cache] [--flag <name>[=<value>]]..."] },
   { name: "run", summary: "build a program and run it", usage: ["fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--heap-profile] [--timings] [--flag <name>[=<value>]]... [-- <args>...]"] },
   { name: "watch", summary: "rebuild and rerun a program whenever its files change", usage: ["fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--heap-profile] [--timings] [--flag <name>[=<value>]]... [-- <args>...]"] },
+  { name: "dev", summary: "serve a program, swapping in its changed handlers while connections and state stay", usage: ["fishc dev [<file.fsh>] [--locked]"] },
   { name: "repl", summary: "try lines of Fish one at a time", usage: ["fishc repl"] },
   { name: "new", summary: "make a package in a new directory", usage: ["fishc new <name>"] },
   { name: "init", summary: "make a package in this directory", usage: ["fishc init [<name>]"] },

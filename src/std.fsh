@@ -2049,7 +2049,7 @@ interface IntoResponse {
 // Serves HTTP/1.1 on hostname and port, or a socket path, each connection on a task of its own.
 async function serve(options: ServeOptions, handler: (req: Request) => Promise<Response>): Promise<void> throws IoError {
   if (__platformServes()) {
-    await __platformServe(handler);
+    await __platformServe(options, handler);
     return;
   }
   const unix = options.unix;
@@ -2588,7 +2588,7 @@ class Router {
   // The router with state its handlers and middleware are given, as axum's with_state: each
   // request gets a clone, so the state is a handle such as a pool or a shared<T>.
   state<S>(this: Own<this>, state: S): StateRouter<S> {
-    return new StateRouter<S>(this, state);
+    return new StateRouter<S>(this, __devKeep(state));
   }
 
   // The router as the handler serve takes; the handler owns it.
@@ -2626,6 +2626,12 @@ class Router {
     }
     return params;
   }
+}
+
+// The state a StateRouter is given. Under fishc dev, codegen makes this the state the host kept from
+// the first load of the handlers, so it outlives a reload; anywhere else it is the state given.
+function __devKeep<S>(state: S): S {
+  return state;
 }
 
 // A Router whose handlers take (req, state) and whose middleware take (req, state, next).
@@ -13470,7 +13476,7 @@ const PLATFORM_SOCKET = String.raw`
 function __platformServes(): boolean {
   return false;
 }
-async function __platformServe(_handler: ServeHandler): Promise<void> {}
+async function __platformServe(_options: Ref<ServeOptions>, _handler: ServeHandler): Promise<void> {}
 `;
 
 // serve in a Lambda function's bootstrap: with Lambda's runtime API named in the environment, each
@@ -13518,7 +13524,7 @@ async function __lambdaReply(res: Response): Promise<string> {
 }
 // An event the handler can't be given is the invocation's error; a runtime API that stops
 // answering is the sandbox going away, so serve returns.
-async function __platformServe(handler: ServeHandler): Promise<void> {
+async function __platformServe(_options: Ref<ServeOptions>, handler: ServeHandler): Promise<void> {
   const base = "http://" + (__lambdaApi() ?? "") + "/2018-06-01/runtime/invocation/";
   while (true) {
     try {
@@ -13568,7 +13574,7 @@ function __edgeRequest(text: string): Request throws JsonError | TypeError {
   const body = u8.fromBase64(asked.body);
   return new Request(asked.url, { method: asked.method, headers, body });
 }
-async function __platformServe(handler: ServeHandler): Promise<void> {
+async function __platformServe(_options: Ref<ServeOptions>, handler: ServeHandler): Promise<void> {
   let input: u8[] = [];
   const given = __stdinTake(1);
   if (given !== null) input = given;
@@ -13582,7 +13588,113 @@ async function __platformServe(handler: ServeHandler): Promise<void> {
 }
 `;
 
-export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD + CONCURRENT + PLATFORM_SOCKET + PLATFORM_LAMBDA + PLATFORM_EDGE;
+// serve in fishc dev's handlers, a shared library the host loads again on each change: the host
+// listens and holds every connection, and hands this load each request to answer, one task each,
+// as JSON in the edge module's shape, until a newer load takes over. The fishdev_* functions are
+// the library's C glue, which calls the host.
+const PLATFORM_DEV = String.raw`
+declare function fishdev_listen(hostname: Ptr<u8>, port: i64): void;
+declare function fishdev_next(): i64;
+declare function fishdev_request(job: i64): Ptr<u8>;
+declare function fishdev_reply(job: i64, bytes: Ptr<u8>, length: i64): void;
+type __DevRequest = { method: string; url: string; headers: string[][]; body: string };
+function __platformServes(): boolean {
+  return true;
+}
+function __devRequest(text: string): Request throws JsonError | TypeError {
+  const asked = JSON.parse<__DevRequest>(text);
+  let headers = new Headers();
+  for (const pair of asked.headers) if (pair.length === 2) headers.append(pair[0]!.clone(), pair[1]!.clone());
+  const body = u8.fromBase64(asked.body);
+  return new Request(asked.url, { method: asked.method, headers, body });
+}
+async function __devReply(res: Response): Promise<string> {
+  const bytes = await res.bytes();
+  let out = '{"status":' + String(res.status) + ',"headers":[';
+  for (let i: usize = 0; i < res.headers.names.length; i++) {
+    if (i > 0) out += ",";
+    out += "[" + JSON.stringify(res.headers.names[i]!) + "," + JSON.stringify(res.headers.values[i]!) + "]";
+  }
+  return out + '],"body":' + JSON.stringify(bytes.toBase64()) + "}";
+}
+async function __devAnswer(job: i64, handler: ServeHandler): Promise<void> {
+  let reply = '{"status":500,"headers":[],"body":""}';
+  try {
+    const req = __devRequest(unsafe { fromCString(fishdev_request(job)) });
+    const res = await handler(req);
+    reply = await __devReply(res);
+  } catch (e) {
+    console.error("fishc dev: a request couldn't be answered: " + e.message);
+  }
+  const bytes = new TextEncoder().encode(reply);
+  unsafe { fishdev_reply(job, ptrOf(bytes[0]), bytes.length as i64) };
+}
+async function __platformServe(options: Ref<ServeOptions>, handler: ServeHandler): Promise<void> {
+  let hostname = "0.0.0.0";
+  const h = options.hostname;
+  if (h !== null) hostname = h.clone();
+  let port: i64 = 8000;
+  const p = options.port;
+  if (p !== null) port = p;
+  unsafe { fishdev_listen(cString(hostname), port) };
+  const boxed: ServeHandler = handler;
+  while (true) {
+    const job = await spawnBlocking(() => unsafe { fishdev_next() });
+    spawn(__devAnswer(job, boxed.clone()));
+  }
+}
+`;
+
+// fishc dev's host, a program of one call: it loads the handlers the control file names, again each
+// time the file names others, and serves on the address their serve gives, sending each request to
+// the handlers loaded last. The fishdev_host_* functions are the host's C glue.
+const DEV_HOST = String.raw`
+declare function fishdev_host_start(control: Ptr<u8>): i64;
+declare function fishdev_host_port(): i64;
+declare function fishdev_host_hostname(): Ptr<u8>;
+declare function fishdev_host_call(request: Ptr<u8>): Ptr<u8>;
+declare function fishdev_host_free(text: Ptr<u8>): void;
+type __DevReply = { status: i64; headers: string[][]; body: string };
+async function __devAsked(req: Request): Promise<string> {
+  const bytes = await req.bytes();
+  let out = '{"method":' + JSON.stringify(req.method) + ',"url":' + JSON.stringify(req.url) + ',"headers":[';
+  for (let i: usize = 0; i < req.headers.names.length; i++) {
+    if (i > 0) out += ",";
+    out += "[" + JSON.stringify(req.headers.names[i]!) + "," + JSON.stringify(req.headers.values[i]!) + "]";
+  }
+  return out + '],"body":' + JSON.stringify(bytes.toBase64()) + "}";
+}
+@blocking
+function __devCall(asked: string): string {
+  const given = unsafe { fishdev_host_call(cString(asked)) };
+  const text = unsafe { fromCString(given) };
+  unsafe { fishdev_host_free(given) };
+  return text;
+}
+function __devAnswered(text: string): Response throws JsonError | TypeError {
+  const r = JSON.parse<__DevReply>(text);
+  let headers = new Headers();
+  for (const pair of r.headers) if (pair.length === 2) headers.append(pair[0]!.clone(), pair[1]!.clone());
+  return new Response(u8.fromBase64(r.body), { status: r.status, headers });
+}
+async function __devHost(control: string): Promise<void> throws IoError {
+  if (unsafe { fishdev_host_start(cString(control)) } !== 0) throw new IoError("fishc dev: the host has no handlers to load");
+  const port = await spawnBlocking(() => unsafe { fishdev_host_port() });
+  const hostname = unsafe { fromCString(fishdev_host_hostname()) };
+  const shown = hostname === "0.0.0.0" ? "localhost" : hostname.clone();
+  await serve({ hostname, port, onListen: (info: ServeInfo) => console.error("[fishc] serving on http://" + shown + ":" + String(info.port)) }, async (req: Request) => {
+    const asked = await __devAsked(req);
+    const given = await spawnBlocking(() => __devCall(asked));
+    try {
+      return __devAnswered(given);
+    } catch (_e) {
+      return new Response("fishc dev: the handlers gave a reply the host couldn't read\n", { status: 502 });
+    }
+  });
+}
+`;
+
+export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD + CONCURRENT + PLATFORM_SOCKET + PLATFORM_LAMBDA + PLATFORM_EDGE + PLATFORM_DEV + DEV_HOST;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -13600,7 +13712,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD, CONCURRENT, PLATFORM_SOCKET, PLATFORM_LAMBDA, PLATFORM_EDGE]) {
+  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD, CONCURRENT, PLATFORM_SOCKET, PLATFORM_LAMBDA, PLATFORM_EDGE, PLATFORM_DEV, DEV_HOST]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -13633,11 +13745,14 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let sockets = sections.shift()!;
   let lambda = sections.shift()!;
   let edge = sections.shift()!;
+  let dev = sections.shift()!;
+  let devHost = sections.shift()!;
   // A serverless or edge target's serve answers through its platform, which reads its requests
   // with fetch or from standard input.
   const target = compilation.session.build?.triple ?? "";
   const lambdaBuild = target === "lambda" || target === "lambda-arm64";
   const edgeBuild = target === "edge";
+  const devBuild = compilation.session.build?.dev === true;
   renamed(json, { kind: "json" });
   renamed(jsonName, { kind: "json" });
   let astNames: string[] = [];
@@ -13651,7 +13766,8 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
   // The std:trace module's code names __traceOn, and what it wraps is sent through Http1.
-  const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn", "__logRequest"]);
+  const devHostUsed = uses(written, devHost, ["__devHost"]);
+  const httpUsed = devHostUsed || uses(written, http, [...HTTP_NAMES, "__traceOn", "__logRequest"]);
   const fetchUsed = httpUsed && (lambdaBuild || uses(written, fetching, ["fetch"]));
   const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentionsName(written, "Request"));
   // The libraries a program gets by naming them; JsError also comes with any package.
@@ -13674,7 +13790,8 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const typing = (dataViewUsed && dataView.length > 0) || mentionsTypedArray(written);
   let chosen: Stmt[] = prelude;
   if (dated) chosen = chosen.concat(dates);
-  if (httpUsed) chosen = chosen.concat(http).concat(tracing).concat(lambdaBuild ? lambda : edgeBuild ? edge : sockets);
+  if (httpUsed) chosen = chosen.concat(http).concat(tracing).concat(lambdaBuild ? lambda : edgeBuild ? edge : devBuild ? dev : sockets);
+  if (devHostUsed) chosen = chosen.concat(devHost);
   if (fetchUsed) chosen = chosen.concat(fetching);
   if (httpUsed && !urlWanted) chosen = chosen.concat(served);
   if (httpUsed || urlWanted) chosen = chosen.concat(core);
