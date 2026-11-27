@@ -861,6 +861,8 @@ To fix it, write it the way the message says: 'let' or 'const' for 'var', a new 
     },
   },
 
+  E0803: { title: "a form the js target doesn't compile yet" },
+
   E0901: { title: "cannot find the file or package an import names" },
   E0902: { title: "an import of a name its module doesn't export" },
   E0903: { title: "an import that crosses a package's boundary" },

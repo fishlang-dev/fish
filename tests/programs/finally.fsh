@@ -64,7 +64,7 @@ function main() {
 // case: finally_move_break
 // Or where a break through it lands.
 class O { constructor(public n: i64) {} }
-function take(o: O) { print("took", o.n) }
+export function take(o: O) { print("took", o.n) }
 function main() {
   const o = new O(5)
   while (true) {
@@ -80,7 +80,7 @@ function main() {
 // case: finally_move_raise
 // What a finally moves is gone where an error it passes on is caught.
 class O { constructor(public n: i64) {} }
-function take(o: O) { print("took", o.n) }
+export function take(o: O) { print("took", o.n) }
 function fail(): void throws i64 { throw 1 }
 function main() {
   const o = new O(5)
@@ -98,7 +98,7 @@ function main() {
 // case: finally_move_return
 // Or in a finally a return passes through next.
 class O { constructor(public n: i64) {} }
-function take(o: O) { print("took", o.n) }
+export function take(o: O) { print("took", o.n) }
 function f(): i64 {
   const o = new O(5)
   try {

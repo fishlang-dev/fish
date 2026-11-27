@@ -50,7 +50,7 @@ async function main() {
 }
 // case: async_arrow_ref_capture
 // error: cannot move 's' while 'p' borrows 's'
-function consume(xs: string[]): i64 { return xs.length as i64; }
+export function consume(xs: string[]): i64 { return xs.length as i64; }
 async function main() {
   const s = ["abc" + "", "def" + ""];
   const r: Ref<string[]> = s;
@@ -494,7 +494,7 @@ class C {
     return x + "!";
   }
 }
-function consume(xs: string[]): i64 { return xs.length as i64; }
+export function consume(xs: string[]): i64 { return xs.length as i64; }
 async function main() {
   const d: Dyn<H> = new C();
   let s = ["abc" + "x", "def" + "y"];
