@@ -224,6 +224,7 @@ export const RUNTIME = [
   "declare ptr @fsh_rt_int_to_fixed(i64, i32, i64)",
   "declare ptr @fsh_rt_http_date()",
   "declare i64 @fsh_rt_now_ms()",
+  "declare i64 @fsh_rt_key_hash(i64, i32)",
   "declare void @fsh_rt_constants(ptr)",
   "declare ptr @fsh_rt_dyn_alloc(i64)",
   "declare ptr @fsh_rt_dyn_retain(ptr)",

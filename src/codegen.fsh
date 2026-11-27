@@ -10503,6 +10503,22 @@ class Codegen implements PrintHost, ComptimeHost {
         }
         return made;
       }
+      if (e.callee.kind === "ident" && e.callee.name === "__keyHash" && !this.cur().calls.has(e)) {
+        const arg: Ref<Expr> = e.args[0]!;
+        const t = this.valueType(arg);
+        const key = this.referent(t);
+        let v = this.value(arg);
+        if (key !== t) {
+          const loaded = this.temp();
+          this.emit(`${loaded} = load ${this.llvm(key)}, ptr ${v}`);
+          v = loaded;
+        }
+        const bits = this.keyBits(v, key);
+        const strings = this.tables.typing.lower(key) === "string" ? 1 : 0;
+        const made = this.temp();
+        this.emit(`${made} = call i64 @fsh_rt_key_hash(i64 ${bits}, i32 ${strings})`);
+        return made;
+      }
       if (e.callee.kind === "ident" && e.callee.name === "nowMs" && !this.cur().calls.has(e)) {
         const made = this.temp();
         this.emit(`${made} = call i64 @fsh_rt_now_ms()`);

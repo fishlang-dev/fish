@@ -13044,7 +13044,64 @@ function __simd_u32x4_store(v: u32x4, a: Mut<u32[]>, i: usize): void { a[i + 0] 
 function __simd_u64x2_load(a: Ref<u64[]>, i: usize): u64x2 { return [a[i + 0], a[i + 1]]; }
 function __simd_u64x2_store(v: u64x2, a: Mut<u64[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; }
 `;
-export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD;
+const CONCURRENT = String.raw`
+// A Map many tasks read and write at once: its entries are spread over shards by their key's
+// hash, each under a lock of its own, so tasks working in different shards never wait for one
+// another. Nothing is lent out past a shard's lock: 'get' gives a clone, and 'with' and 'update'
+// run a callback on the value while the lock is held, which can't 'await'.
+class ConcurrentMap<K, V> {
+  private shards: RwLock<Map<K, V>>[] = [];
+  constructor(options?: { shards?: i64 }) {
+    const n = options === undefined || options.shards === undefined ? 16 : options.shards;
+    // Fewer than one shard is one.
+    for (let i = 0; i < n || i === 0; i++) this.shards.push(new RwLock(new Map<K, V>()));
+  }
+  private shardOf(k: Ref<K>): usize {
+    return (__keyHash(k.clone()) % (this.shards.length as u64)) as usize;
+  }
+  get(k: K): V | undefined {
+    return this.shards[this.shardOf(k)].read((m): V | undefined => {
+      const found = m.get(k);
+      if (found === undefined) return undefined;
+      return found.clone();
+    });
+  }
+  has(k: K): boolean {
+    return this.shards[this.shardOf(k)].read((m) => m.has(k));
+  }
+  set(k: K, v: V): void {
+    this.shards[this.shardOf(k)].update((m) => { m.set(k, v); });
+  }
+  delete(k: K): boolean {
+    return this.shards[this.shardOf(k)].update((m) => m.delete(k));
+  }
+  // Every shard's count, each read under its own lock, so not one moment's.
+  get size(): usize {
+    let n: usize = 0;
+    for (const s of this.shards) n += s.read((m) => m.size);
+    return n;
+  }
+  // What 'fn' gives from the key's value, read in place, or undefined when the key is absent.
+  with<R>(k: K, fn: (v: Ref<V>) => R): R | undefined {
+    return this.shards[this.shardOf(k)].read((m): R | undefined => {
+      const found = m.get(k);
+      if (found === undefined) return undefined;
+      return fn(found);
+    });
+  }
+  // Changes the key's value in place; false when the key is absent.
+  update(k: K, fn: (v: Mut<V>) => void): boolean {
+    return this.shards[this.shardOf(k)].update((m) => m.update(k, (v) => fn(v)));
+  }
+  // Changes the key's value in place, or adds 'value' when the key is absent, in one hold of the lock.
+  upsert(k: K, value: V, fn: (v: Mut<V>) => void): void {
+    this.shards[this.shardOf(k)].update((m) => {
+      if (!m.update(k.clone(), (v) => fn(v))) m.set(k, value);
+    });
+  }
+}
+`;
+export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD + CONCURRENT;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -13062,7 +13119,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD]) {
+  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD, CONCURRENT]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -13091,6 +13148,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let arenas = sections.shift()!;
   let htmls = sections.shift()!;
   let simds = sections.shift()!;
+  let concurrent = sections.shift()!;
   renamed(json, { kind: "json" });
   renamed(jsonName, { kind: "json" });
   let astNames: string[] = [];
@@ -13150,6 +13208,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   if (httpUsed || uses(written, htmls, HTML_NAMES)) chosen = chosen.concat(htmls);
   // The checker turns SIMD vectors' constructors and methods into calls of these helpers.
   if (uses(written, simds, [...SIMD_TYPES.keys(), ...SIMD_MASKS.keys()])) chosen = chosen.concat(simds);
+  if (uses(written, concurrent, ["ConcurrentMap"])) chosen = chosen.concat(concurrent);
   // A C function the program declares already, as a std module it imports may, is declared once.
   const foreign = foreignShapes(written);
   if (foreign.size > 0) chosen = chosen.filter((s) => !declaredNames(s).some((n) => sameForeign(foreign, s, n)));

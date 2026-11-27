@@ -2197,6 +2197,11 @@ export class Expressions<C extends Context> implements Union<C> {
       this.value(e.args[0]!);
       return { type: "void", what: "'unixUnlink'" };
     }
+    // A Map key's hash, for std's ConcurrentMap to pick a shard by.
+    if (callee.kind === "ident" && callee.name === "__keyHash" && e.start >= STD_BASE && e.args.length === 1) {
+      this.value(e.args[0]!);
+      return { type: "u64", what: "'__keyHash'" };
+    }
     // Milliseconds on a clock that only goes forward, for the std HTTP server's deadlines.
     if (callee.kind === "ident" && callee.name === "nowMs" && e.start >= STD_BASE && e.args.length === 0) return { type: "i64", what: "'nowMs'" };
     // The signal the first SIGINT or SIGTERM aborts, for std:process's 'shutdown' and the HTTP server.

@@ -1439,6 +1439,14 @@ static uint64_t fsh_map_hash(fsh_map *m, int64_t bits) {
   return h ^ (h >> 31);
 }
 
+// A key's hash as a table of such keys hashes it, from its top half: a table picks its slot from
+// the bottom bits, so a ConcurrentMap picking a shard from the same bits would crowd each shard.
+uint64_t fsh_rt_key_hash(int64_t bits, int32_t strings) {
+  fsh_map m = {0};
+  m.strings = strings;
+  return fsh_map_hash(&m, bits) >> 32;
+}
+
 static int fsh_map_same(fsh_map *m, int64_t a, int64_t b) {
   if (!m->strings) return a == b;
   fsh_str *x = (fsh_str *)(intptr_t)a, *y = (fsh_str *)(intptr_t)b;
