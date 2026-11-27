@@ -83,6 +83,10 @@ static int32_t fsh_counts(void) {
 static int32_t fsh_abandoned = 0;
 // File jobs the blocking pool holds, whose memory is still live when a program ends mid-read.
 static int64_t fsh_pool_busy = 0;
+// Set once runtime teardown begins; checked before injecting tasks or aborting process.shutdown.
+static int32_t fsh_stopping = 0;
+// Set while fsh_shutdown_watch is aborting process.shutdown.
+static int32_t fsh_shutdown_busy = 0;
 
 #ifdef FSH_LEAK_SITES
 // A --leaks build's blocks each start with a header naming the allocation's site, on one list
@@ -156,7 +160,8 @@ static void fsh_leak_report(void);
 #endif
 
 __attribute__((destructor)) static void fsh_leaks(void) {
-  if (__atomic_load_n(&fsh_pool_busy, __ATOMIC_ACQUIRE) != 0) fsh_abandoned = 1;
+  __atomic_store_n(&fsh_stopping, 1, __ATOMIC_SEQ_CST);
+  if (__atomic_load_n(&fsh_pool_busy, __ATOMIC_SEQ_CST) != 0 || __atomic_load_n(&fsh_shutdown_busy, __ATOMIC_SEQ_CST) != 0) fsh_abandoned = 1;
   if (fsh_constants_drop && !fsh_abandoned) fsh_constants_drop();
   if (fsh_shutdown_end && !fsh_abandoned) fsh_shutdown_end();
   // A program that never allocated never asked, and has nothing to report.
@@ -4546,7 +4551,6 @@ static _Thread_local int64_t fsh_worker = -1;
 static pthread_mutex_t fsh_park = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fsh_parked = PTHREAD_COND_INITIALIZER;
 static int64_t fsh_queued = 0;
-static int32_t fsh_stopping = 0;
 static int64_t fsh_stopped = 0;
 static pthread_cond_t fsh_left = PTHREAD_COND_INITIALIZER;
 // The tasks not yet done, dropped when the runtime stops; and how the program ends.
@@ -4571,8 +4575,12 @@ static int64_t fsh_blocking_live = 0;
 // these, or the blocks that thread is about to free would be counted as leaks.
 static int64_t fsh_blocking_ending = 0;
 
-static void fsh_push(fsh_queue *q, fsh_task *t) {
+static int fsh_push_checked(fsh_queue *q, fsh_task *t, int check_stopping) {
   pthread_mutex_lock(&q->lock);
+  if (check_stopping && __atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) {
+    pthread_mutex_unlock(&q->lock);
+    return 0;
+  }
   if (q->count == q->capacity) {
     int64_t capacity = q->capacity ? q->capacity * 2 : 64;
     fsh_task **ring = malloc(capacity * sizeof(fsh_task *));
@@ -4585,6 +4593,11 @@ static void fsh_push(fsh_queue *q, fsh_task *t) {
   q->ring[(q->head + q->count) % q->capacity] = t;
   q->count++;
   pthread_mutex_unlock(&q->lock);
+  return 1;
+}
+
+static void fsh_push(fsh_queue *q, fsh_task *t) {
+  (void)fsh_push_checked(q, t, 0);
 }
 
 static fsh_task *fsh_pop(fsh_queue *q) {
@@ -4621,7 +4634,8 @@ static void fsh_schedule(fsh_task *t) {
     return;
   }
   if (t->blocking) return fsh_pool_task(t);
-  fsh_push(fsh_worker >= 0 ? &fsh_queues[fsh_worker] : &fsh_injected, t);
+  if (fsh_worker >= 0) fsh_push(&fsh_queues[fsh_worker], t);
+  else if (!fsh_push_checked(&fsh_injected, t, 1)) return;
   pthread_mutex_lock(&fsh_park);
   __atomic_fetch_add(&fsh_queued, 1, __ATOMIC_RELAXED);
   pthread_cond_signal(&fsh_parked);
@@ -4747,7 +4761,7 @@ static void *fsh_work(void *arg) {
       continue;
     }
     pthread_mutex_lock(&fsh_park);
-    while (__atomic_load_n(&fsh_queued, __ATOMIC_RELAXED) <= 0 && !fsh_stopping) pthread_cond_wait(&fsh_parked, &fsh_park);
+    while (__atomic_load_n(&fsh_queued, __ATOMIC_RELAXED) <= 0 && !__atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) pthread_cond_wait(&fsh_parked, &fsh_park);
     pthread_mutex_unlock(&fsh_park);
   }
 #ifdef FSH_PROFILE
@@ -6061,7 +6075,14 @@ static void *fsh_shutdown_watch(void *arg) {
     if (got < 0 && errno == EINTR) continue;
     if (got <= 0) return NULL;
     if (seen++ == 0) {
-      fsh_rt_signal_abort(&fsh_shutdown);
+      __atomic_store_n(&fsh_shutdown_busy, 1, __ATOMIC_SEQ_CST);
+      if (!__atomic_load_n(&fsh_stopping, __ATOMIC_SEQ_CST)) fsh_rt_signal_abort(&fsh_shutdown);
+      __atomic_store_n(&fsh_shutdown_busy, 0, __ATOMIC_SEQ_CST);
+      if (__atomic_load_n(&fsh_stopping, __ATOMIC_SEQ_CST)) {
+        pthread_mutex_lock(&fsh_park);
+        pthread_cond_signal(&fsh_left);
+        pthread_mutex_unlock(&fsh_park);
+      }
       continue;
     }
     fsh_shutdown_code = 128 + number;
@@ -6076,9 +6097,10 @@ static void *fsh_shutdown_watch(void *arg) {
 
 static void fsh_shutdown_waiters_free(void) {
   pthread_mutex_lock(&fsh_shutdown.lock);
-  fsh_waiters_free(&fsh_shutdown.waiting);
+  fsh_waiters w = fsh_shutdown.waiting;
   fsh_shutdown.waiting = (fsh_waiters){ NULL, 0, 0 };
   pthread_mutex_unlock(&fsh_shutdown.lock);
+  fsh_waiters_free(&w);
 }
 
 static void fsh_shutdown_start(void) {
@@ -7995,7 +8017,11 @@ static void *fsh_pool_work(void *arg) {
     fsh_rt_wake(task);
     fsh_task_release(task);
     fsh_rt_file_job_release(job);
-    __atomic_sub_fetch(&fsh_pool_busy, 1, __ATOMIC_RELEASE);
+    if (__atomic_sub_fetch(&fsh_pool_busy, 1, __ATOMIC_SEQ_CST) == 0 && __atomic_load_n(&fsh_stopping, __ATOMIC_SEQ_CST)) {
+      pthread_mutex_lock(&fsh_park);
+      pthread_cond_signal(&fsh_left);
+      pthread_mutex_unlock(&fsh_park);
+    }
     pthread_mutex_lock(&fsh_pool_lock);
   }
 }
@@ -8042,7 +8068,7 @@ static void fsh_pool_submit(fsh_file_job *job) {
   job->site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
   job->name = fsh_rt_frames ? fsh_rt_frames->name : NULL;
 #endif
-  __atomic_add_fetch(&fsh_pool_busy, 1, __ATOMIC_RELAXED);
+  __atomic_add_fetch(&fsh_pool_busy, 1, __ATOMIC_SEQ_CST);
   fsh_pool_enqueue(job);
   pthread_mutex_unlock(&fsh_pool_lock);
 }
@@ -10534,7 +10560,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
     pthread_mutex_unlock(&fsh_alive_lock);
   }
   pthread_mutex_lock(&fsh_park);
-  __atomic_store_n(&fsh_stopping, 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&fsh_stopping, 1, __ATOMIC_SEQ_CST);
   pthread_cond_broadcast(&fsh_parked);
   // A worker stops between polls, so one inside a long poll with no await can't be waited for:
   // past a grace period, its task and every other is abandoned rather than dropped.
@@ -10543,9 +10569,10 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   until.tv_nsec += 100000000;
   until.tv_sec += until.tv_nsec / 1000000000;
   until.tv_nsec %= 1000000000;
-  while (fsh_stopped < fsh_workers && pthread_cond_timedwait(&fsh_left, &fsh_park, &until) == 0) {}
-  // A blocking task still on the pool can't be dropped while its thread may be polling it.
-  int stuck = fsh_stopped < fsh_workers || __atomic_load_n(&fsh_blocking_live, __ATOMIC_ACQUIRE) != 0;
+  while ((fsh_stopped < fsh_workers || __atomic_load_n(&fsh_pool_busy, __ATOMIC_SEQ_CST) != 0 || __atomic_load_n(&fsh_shutdown_busy, __ATOMIC_SEQ_CST) != 0) && pthread_cond_timedwait(&fsh_left, &fsh_park, &until) == 0) {}
+  // A blocking task or pool job still active (or a shutdown signal still aborting) can't be dropped
+  // while its thread may still touch runtime state.
+  int stuck = fsh_stopped < fsh_workers || __atomic_load_n(&fsh_blocking_live, __ATOMIC_ACQUIRE) != 0 || __atomic_load_n(&fsh_pool_busy, __ATOMIC_SEQ_CST) != 0 || __atomic_load_n(&fsh_shutdown_busy, __ATOMIC_SEQ_CST) != 0;
   pthread_mutex_unlock(&fsh_park);
   if (stuck) {
     fsh_abandoned = 1;
@@ -10571,6 +10598,10 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   fsh_inspector_stop(0);
   while (fsh_timer_count > 0) fsh_timer_fire(fsh_timer_take(), 0);
   free(fsh_timers);
+  if (fsh_shutdown_end) {
+    fsh_shutdown_end();
+    fsh_shutdown_end = NULL;
+  }
   // Every task not done is dropped where it stopped; one dropping may release another.
   for (;;) {
     pthread_mutex_lock(&fsh_alive_lock);
@@ -10598,7 +10629,11 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   if (fsh_timeouts_task) fsh_task_release(fsh_timeouts_task);
   fsh_timeouts_waiter = fsh_timeouts_task = NULL;
   for (int64_t i = 0; i < fsh_workers; i++) free(fsh_queues[i].ring);
+  pthread_mutex_lock(&fsh_injected.lock);
   free(fsh_injected.ring);
+  fsh_injected.ring = NULL;
+  fsh_injected.head = fsh_injected.count = fsh_injected.capacity = 0;
+  pthread_mutex_unlock(&fsh_injected.lock);
   free(fsh_queues);
   free(fsh_threads);
   if (fsh_panicked) {
