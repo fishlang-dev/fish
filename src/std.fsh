@@ -3358,8 +3358,16 @@ class Http1 {
     return b;
   }
 
+  // The handler's task is the request's, so the request ID it sets here is what std:log's entries
+  // carry in it and every task it spawns, across awaits; the response echoes it.
   static async handle(handler: ServeHandler, req: Request): Promise<Response> {
-    return await handler(req);
+    const given = req.headers.get("x-request-id");
+    const id = given !== null && __logUsable(given) ? given : __traceHex([__traceFresh()[0]]);
+    const slot = __logBegin(id.clone());
+    let res = await handler(req);
+    __logEnd(slot);
+    res.headers.set("x-request-id", id);
+    return res;
   }
 
   // The client's next bytes, nothing once the stream ends or the server stops, or null once the
@@ -3899,6 +3907,49 @@ type __traceTarget = { host: string; port: i64; authority: string; path: string 
 const __traceMode = new Atomic(0);
 // The delay is the OpenTelemetry batch processor's default, five seconds.
 const __traceHeld = new Lock<__traceSettings>({ endpoint: "", service: "", delay: 5000, armed: false, timer: 0, spans: [] });
+
+declare function fsh_rt_log_get(): i64;
+declare function fsh_rt_log_set(request: i64): void;
+
+// The request IDs of the requests being served, keyed by the number the task holding one carries,
+// which only a number fits in.
+// ponytail: a handler that panics leaves its entry behind; remove it where serve catches the
+// panic if a server that panics often grows.
+const __logIds = new Lock<Map<i64, string>>(new Map<i64, string>());
+const __logNext = new Atomic(0);
+
+// Whether a client's x-request-id is one to keep: visible ASCII, at most 128 characters.
+function __logUsable(id: string): boolean {
+  if (id.length === 0 || id.length > 128) return false;
+  for (let i: usize = 0; i < id.length; i++) {
+    const c = id.charCodeAt(i) as i64;
+    if (c < 33 || c > 126) return false;
+  }
+  return true;
+}
+
+// Makes id the current task's request ID, giving the number it is kept under.
+function __logBegin(id: string): i64 {
+  const n = __logNext.add(1) + 1;
+  __logIds.update((m) => { m.set(n, id); });
+  unsafe { fsh_rt_log_set(n) };
+  return n;
+}
+
+function __logEnd(n: i64): void {
+  __logIds.update((m) => { m.delete(n); });
+  unsafe { fsh_rt_log_set(0) };
+}
+
+// The request ID of the request the current task serves, or "" outside one.
+function __logRequest(): string {
+  const n = unsafe { fsh_rt_log_get() };
+  if (n === 0) return "";
+  return __logIds.update((m): string => {
+    const id = m.get(n);
+    return id === null ? "" : id.clone();
+  });
+}
 
 // The current context: a trace id's halves, the current span's id and its flags, all 0 outside
 // any span. It belongs to the task, so it follows one through its awaits.
@@ -11891,6 +11942,57 @@ export async function create(file: string, paths: string[], options: ZipPackOpti
 `,
   // Spans in a program's own code, imported as std:trace. Their state is std's own, which serve
   // shares, so what is here only wraps it.
+  // Structured logging, imported as std:log: each entry one JSON line on stderr.
+  log: String.raw`
+// An entry's extra fields: any value with a JSON form, an object's fields joining the entry's own.
+export interface LogFields {}
+
+// Writes one line, {"ts", "level", "msg", "requestId"?, ...fields}, when the level is at least
+// FISH_LOG's (debug, info, warn or error; info when unset or anything else). requestId is that of
+// the request the calling task serves, inside serve.
+export function debug(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(0, message, JSON.stringify(fields));
+  else entry(0, message, "");
+}
+
+export function info(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(1, message, JSON.stringify(fields));
+  else entry(1, message, "");
+}
+
+export function warn(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(2, message, JSON.stringify(fields));
+  else entry(2, message, "");
+}
+
+export function error(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(3, message, JSON.stringify(fields));
+  else entry(3, message, "");
+}
+
+const LEVELS = ["debug", "info", "warn", "error"];
+
+// ponytail: FISH_LOG is read for every entry; keep it once read if a hot path logs at a level
+// that's off.
+function least(): i64 {
+  const named = process.env["FISH_LOG"];
+  if (named === null) return 1;
+  const at = LEVELS.indexOf(named.toLowerCase());
+  return at < 0 ? 1 : at;
+}
+
+// An object's fields go into the entry; any other JSON value goes in as "fields".
+function entry(level: i64, message: string, fields: string): void {
+  if (level < least()) return;
+  let line = "{"ts":" + JSON.stringify(new Date().toISOString()) + ","level":"" + LEVELS[level as usize] + "","msg":" + JSON.stringify(message);
+  const id = __logRequest();
+  if (id.length > 0) line += ","requestId":" + JSON.stringify(id);
+  if (fields.startsWith("{")) {
+    if (fields.length > 2) line += "," + fields.slice(1, (fields.length as i64) - 1);
+  } else if (fields.length > 0) line += ","fields":" + fields;
+  console.error(line + "}");
+}
+`,
   trace: String.raw`
 // endpoint is the collector's base URL, as OTEL_EXPORTER_OTLP_ENDPOINT is, and "" turns tracing
 // off whatever the environment says; serviceName is the service the spans are from; batchDelay
@@ -12766,7 +12868,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
@@ -13419,7 +13521,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
   // The std:trace module's code names __traceOn, and what it wraps is sent through Http1.
-  const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn"]);
+  const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn", "__logRequest"]);
   const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
   const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentionsName(written, "Request"));
   // The libraries a program gets by naming them; JsError also comes with any package.
