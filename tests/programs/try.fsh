@@ -181,7 +181,7 @@ function main() {}
 // case: try_moved
 // A value moved into a call that failed is gone in the catch.
 class O { constructor(public n: i64) {} }
-function take(o: O): i64 throws i64 {
+export function take(o: O): i64 throws i64 {
   if (o.n < 0) throw 1
   return o.n
 }

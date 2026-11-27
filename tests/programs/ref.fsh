@@ -647,7 +647,7 @@ class P {
 
 type Holder = { r: Ref<P> }
 
-function take(i: Inner): i64 {
+export function take(i: Inner): i64 {
   return i.v
 }
 

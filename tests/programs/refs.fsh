@@ -170,7 +170,7 @@ function main() {
 type Inner = { v: i64 }
 type P = { inner: Inner }
 
-function own(i: Inner): i64 {
+export function own(i: Inner): i64 {
   return i.v
 }
 
@@ -187,7 +187,7 @@ function main() {
 // case: refs_move_out
 type P = { x: i64 }
 
-function own(p: P): i64 {
+export function own(p: P): i64 {
   return p.x
 }
 

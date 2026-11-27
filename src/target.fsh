@@ -7,7 +7,7 @@ import { cacheDir } from "./mathlib.fsh";
 // Build targets: the four v1 platforms and Linux over musl for static binaries, named by their
 // Rust triples, and the clang flags that build for one from the host fishc runs on.
 
-export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl", "wasm32-wasip1", "browser", "x86_64-w64-windows-gnu", "aarch64-w64-windows-gnu", "lambda", "lambda-arm64", "edge", "thumbv7em-none-eabihf", "riscv32imc-unknown-none-elf"];
+export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl", "wasm32-wasip1", "browser", "x86_64-w64-windows-gnu", "aarch64-w64-windows-gnu", "lambda", "lambda-arm64", "edge", "js", "thumbv7em-none-eabihf", "riscv32imc-unknown-none-elf"];
 
 // A WebAssembly module over WASI preview 1, the same module with a JavaScript loader giving it
 // those calls in a page, and one answering a request a Workers-style fetch hands it.

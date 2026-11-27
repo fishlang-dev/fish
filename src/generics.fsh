@@ -8,6 +8,7 @@ import { unsupported } from "./unsupported.fsh";
 import { familyMismatch, unsatisfied, type Members } from "./interfaces.fsh";
 import type { ClassNode, Expr, Id, Param, Span, TypeMember, TypeNode, TypeParam } from "./parser.fsh";
 import { paramName, unboxedClosure } from "./resolve.fsh";
+import type { Candidate } from "./ownership.fsh";
 import { perInstance, perInstanceStandIn } from "./typefns.fsh";
 import { INTERIORS, ITERATOR, TypeSet, TypeMap, digest, type RegexType, type FunctionType, type Bound, type ClassType, type InterfaceType, type ObjectType, type RefType, type Type, type VariantType, type Typing } from "./typing.fsh";
 import { NodeMap, NodeSet, forEachChild, nextId, renumberTypeNode, Rewrites, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
@@ -620,6 +621,10 @@ export class InstancingState {
   // Generic functions whose definitions need types only an instance can compute, as `T[K]` with
   // `K extends keyof T` does, so each instance's body sees its concrete types themselves.
   perInstance = new Set<BodyId>();
+  // The functions ownership inference considered, with their parameters as written, and what it
+  // inferred, which a recheck compares with what the edited program infers.
+  borrowCandidates: Candidate[] = [];
+  inferredBorrows: string = "";
   // Class members so checked, by where they are written, which every instance of a generic class
   // shares, so each instance's own body for the member sees its class's type arguments too.
   perInstanceMembers = new Set<usize>();
