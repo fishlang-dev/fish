@@ -31,20 +31,595 @@ export const NATIVE = String.raw`
 #endif
 #include <pthread.h>
 #include <sched.h>
-#include <unistd.h>
 #include <time.h>
 #include <errno.h>
+#include <limits.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#include <signal.h>
+#ifdef _WIN32
+// Windows, through MinGW-w64 and UCRT: the POSIX calls the runtime makes, given over Winsock and
+// Win32. A socket is a Winsock handle the runtime holds as an int, as every handle fits in 32
+// bits; the sockets made here are remembered, so close, read, write and fcntl know a socket from
+// a C runtime descriptor. What Windows has no form of (child processes, signals beyond Ctrl-C,
+// users, file watching) fails with ENOSYS where it is called.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <afunix.h>
+#include <windows.h>
+#include <winternl.h>
+#include <mswsock.h>
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#include <unistd.h>
+#include <sys/utime.h>
+
+typedef int uid_t_fsh;
+#define uid_t uid_t_fsh
+typedef int gid_t;
+typedef unsigned long sigset_t;
+typedef unsigned long nfds_t_fsh;
+#define nfds_t nfds_t_fsh
+
+__attribute__((constructor)) static void fsh_win_start(void) {
+  WSADATA data;
+  WSAStartup(MAKEWORD(2, 2), &data);
+  // Bytes are written as they are, as on every other platform: no CRLF in place of a newline.
+  _setmode(0, _O_BINARY);
+  _setmode(1, _O_BINARY);
+  _setmode(2, _O_BINARY);
+  _set_fmode(_O_BINARY);
+}
+
+// The IR prints to stderr with dprintf, which UCRT doesn't have.
+int dprintf(int fd, const char *format, ...) {
+  va_list args, again;
+  va_start(args, format);
+  va_copy(again, args);
+  char small[512];
+  int n = vsnprintf(small, sizeof small, format, args);
+  va_end(args);
+  char *text = small;
+  if (n >= (int)sizeof small) {
+    text = malloc((size_t)n + 1);
+    vsnprintf(text, (size_t)n + 1, format, again);
+  }
+  va_end(again);
+  if (n > 0) _write(fd, text, (unsigned)n);
+  if (text != small) free(text);
+  return n;
+}
+
+// The sockets live now, by handle. ponytail: one table under one lock, scanned linearly on a
+// collision; a hash set sized to the open sockets if thousands are open at once.
+#define FSH_WIN_SOCKETS 65536
+static int fsh_win_socket_table[FSH_WIN_SOCKETS];
+static SRWLOCK fsh_win_socket_lock = SRWLOCK_INIT;
+static int fsh_win_socket_slot(int fd, int adding) {
+  unsigned h = ((unsigned)fd >> 2) % FSH_WIN_SOCKETS;
+  for (int i = 0; i < FSH_WIN_SOCKETS; i++, h = (h + 1) % FSH_WIN_SOCKETS) {
+    if (fsh_win_socket_table[h] == fd + 1) return (int)h;
+    if (fsh_win_socket_table[h] == 0) return adding ? (int)h : -1;
+  }
+  return -1;
+}
+static void fsh_win_socket_add(int fd) {
+  AcquireSRWLockExclusive(&fsh_win_socket_lock);
+  int at = fsh_win_socket_slot(fd, 1);
+  if (at >= 0) fsh_win_socket_table[at] = fd + 1;
+  ReleaseSRWLockExclusive(&fsh_win_socket_lock);
+}
+// A slot emptied is marked -1, so the probes that passed it go on.
+static void fsh_win_socket_remove(int fd) {
+  AcquireSRWLockExclusive(&fsh_win_socket_lock);
+  int at = fsh_win_socket_slot(fd, 0);
+  if (at >= 0) fsh_win_socket_table[at] = -1;
+  ReleaseSRWLockExclusive(&fsh_win_socket_lock);
+}
+static int fsh_win_is_socket(int fd) {
+  AcquireSRWLockShared(&fsh_win_socket_lock);
+  int at = fsh_win_socket_slot(fd, 0);
+  ReleaseSRWLockShared(&fsh_win_socket_lock);
+  return at >= 0;
+}
+
+// Winsock's errors as the errno values the runtime reads.
+static int fsh_win_errno(int e) {
+  switch (e) {
+  case WSAEWOULDBLOCK: return EAGAIN;
+  case WSAEINPROGRESS: return EINPROGRESS;
+  case WSAEALREADY: return EALREADY;
+  case WSAEINTR: return EINTR;
+  case WSAEBADF: case WSAENOTSOCK: return EBADF;
+  case WSAEACCES: return EACCES;
+  case WSAEFAULT: return EFAULT;
+  case WSAEINVAL: return EINVAL;
+  case WSAEMFILE: return EMFILE;
+  case WSAEMSGSIZE: return EMSGSIZE;
+  case WSAEAFNOSUPPORT: return EAFNOSUPPORT;
+  case WSAEADDRINUSE: return EADDRINUSE;
+  case WSAEADDRNOTAVAIL: return EADDRNOTAVAIL;
+  case WSAENETDOWN: return ENETDOWN;
+  case WSAENETUNREACH: return ENETUNREACH;
+  case WSAENETRESET: return ENETRESET;
+  case WSAECONNABORTED: return ECONNABORTED;
+  case WSAECONNRESET: return ECONNRESET;
+  case WSAENOBUFS: return ENOBUFS;
+  case WSAEISCONN: return EISCONN;
+  case WSAENOTCONN: return ENOTCONN;
+  case WSAESHUTDOWN: return EPIPE;
+  case WSAETIMEDOUT: return ETIMEDOUT;
+  case WSAECONNREFUSED: return ECONNREFUSED;
+  case WSAEHOSTUNREACH: return EHOSTUNREACH;
+  default: return EIO;
+  }
+}
+static int fsh_win_failed(void) {
+  errno = fsh_win_errno(WSAGetLastError());
+  return -1;
+}
+
+static int fsh_win_socket(int domain, int type, int protocol) {
+  SOCKET s = WSASocketW(domain, type, protocol, NULL, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+  if (s == INVALID_SOCKET) return fsh_win_failed();
+  fsh_win_socket_add((int)s);
+  return (int)s;
+}
+static int fsh_win_accept(int fd, struct sockaddr *at, socklen_t *n) {
+  SOCKET s = accept((SOCKET)fd, at, n);
+  if (s == INVALID_SOCKET) return fsh_win_failed();
+  fsh_win_socket_add((int)s);
+  return (int)s;
+}
+static int fsh_win_close(int fd) {
+  if (!fsh_win_is_socket(fd)) return _close(fd);
+  fsh_win_socket_remove(fd);
+  return closesocket((SOCKET)fd) == 0 ? 0 : fsh_win_failed();
+}
+static ssize_t fsh_win_read(int fd, void *data, size_t n) {
+  if (!fsh_win_is_socket(fd)) return _read(fd, data, (unsigned)(n > INT_MAX ? INT_MAX : n));
+  int got = recv((SOCKET)fd, data, (int)(n > INT_MAX ? INT_MAX : n), 0);
+  return got >= 0 ? got : fsh_win_failed();
+}
+static ssize_t fsh_win_write(int fd, const void *data, size_t n) {
+  if (!fsh_win_is_socket(fd)) return _write(fd, data, (unsigned)(n > INT_MAX ? INT_MAX : n));
+  int put = send((SOCKET)fd, data, (int)(n > INT_MAX ? INT_MAX : n), 0);
+  return put >= 0 ? put : fsh_win_failed();
+}
+static ssize_t fsh_win_recv(int fd, void *data, size_t n, int flags) {
+  int got = recv((SOCKET)fd, data, (int)(n > INT_MAX ? INT_MAX : n), flags);
+  return got >= 0 ? got : fsh_win_failed();
+}
+static ssize_t fsh_win_send(int fd, const void *data, size_t n, int flags) {
+  int put = send((SOCKET)fd, data, (int)(n > INT_MAX ? INT_MAX : n), flags);
+  return put >= 0 ? put : fsh_win_failed();
+}
+static ssize_t fsh_win_sendto(int fd, const void *data, size_t n, int flags, const struct sockaddr *to, socklen_t len) {
+  int put = sendto((SOCKET)fd, data, (int)n, flags, to, len);
+  return put >= 0 ? put : fsh_win_failed();
+}
+static ssize_t fsh_win_recvfrom(int fd, void *data, size_t n, int flags, struct sockaddr *from, socklen_t *len) {
+  int got = recvfrom((SOCKET)fd, data, (int)n, flags, from, len);
+  return got >= 0 ? got : fsh_win_failed();
+}
+static int fsh_win_connect(int fd, const struct sockaddr *at, socklen_t n) {
+  if (connect((SOCKET)fd, at, n) == 0) return 0;
+  int e = WSAGetLastError();
+  errno = e == WSAEWOULDBLOCK ? EINPROGRESS : fsh_win_errno(e);
+  return -1;
+}
+static int fsh_win_bind(int fd, const struct sockaddr *at, socklen_t n) {
+  return bind((SOCKET)fd, at, n) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_listen(int fd, int backlog) {
+  return listen((SOCKET)fd, backlog) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_shutdown(int fd, int how) {
+  return shutdown((SOCKET)fd, how) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_getsockname(int fd, struct sockaddr *at, socklen_t *n) {
+  return getsockname((SOCKET)fd, at, n) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_getpeername(int fd, struct sockaddr *at, socklen_t *n) {
+  return getpeername((SOCKET)fd, at, n) == 0 ? 0 : fsh_win_failed();
+}
+// Winsock takes a send or receive timeout as milliseconds, not a timeval.
+static int fsh_win_setsockopt(int fd, int level, int name, const void *value, socklen_t n) {
+  if (level == SOL_SOCKET && (name == SO_RCVTIMEO || name == SO_SNDTIMEO) && n == sizeof(struct timeval)) {
+    const struct timeval *t = value;
+    DWORD ms = (DWORD)(t->tv_sec * 1000 + t->tv_usec / 1000);
+    return setsockopt((SOCKET)fd, level, name, (const char *)&ms, sizeof ms) == 0 ? 0 : fsh_win_failed();
+  }
+  // SO_REUSEADDR on Windows lets another socket take a port in use; exclusive use is the default
+  // the runtime wants.
+  if (level == SOL_SOCKET && name == SO_REUSEADDR) return 0;
+  return setsockopt((SOCKET)fd, level, name, (const char *)value, n) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_getsockopt(int fd, int level, int name, void *value, socklen_t *n) {
+  return getsockopt((SOCKET)fd, level, name, (char *)value, n) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_ioctl(int fd, unsigned long request, ...) {
+  va_list args;
+  va_start(args, request);
+  void *arg = va_arg(args, void *);
+  va_end(args);
+  if (request != (unsigned long)FIONREAD && request != (unsigned long)FIONBIO) {
+    errno = ENOTTY;
+    return -1;
+  }
+  return ioctlsocket((SOCKET)fd, (long)request, (u_long *)arg) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_poll(struct pollfd *fds, unsigned long n, int ms) {
+  int ready = WSAPoll(fds, n, ms);
+  return ready >= 0 ? ready : fsh_win_failed();
+}
+
+#define F_GETFD 1
+#define F_SETFD 2
+#define F_GETFL 3
+#define F_SETFL 4
+#define F_DUPFD_CLOEXEC 1030
+#define FD_CLOEXEC 1
+#define O_NONBLOCK 0x10000000
+#define O_CLOEXEC _O_NOINHERIT
+#define O_SYNC 0
+#define O_NOFOLLOW 0
+#define SOCK_CLOEXEC 0
+#define SHUT_RD SD_RECEIVE
+#define SHUT_WR SD_SEND
+#define SHUT_RDWR SD_BOTH
+#define MSG_NOSIGNAL_FSH 0
+// A socket's blocking mode is all that F_SETFL changes; Windows handles aren't inherited unless
+// asked, so close-on-exec is already so.
+static int fsh_win_fcntl(int fd, int command, ...) {
+  va_list args;
+  va_start(args, command);
+  long value = va_arg(args, long);
+  va_end(args);
+  int socket = fsh_win_is_socket(fd);
+  switch (command) {
+  case F_GETFD:
+    return socket || _get_osfhandle(fd) != -1 ? 0 : (errno = EBADF, -1);
+  case F_SETFD:
+  case F_GETFL:
+    return 0;
+  case F_SETFL: {
+    if (!socket) return 0;
+    u_long on = (value & O_NONBLOCK) != 0;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &on) == 0 ? 0 : fsh_win_failed();
+  }
+  case F_DUPFD_CLOEXEC:
+    return _dup(fd);
+  }
+  errno = EINVAL;
+  return -1;
+}
+
+static int fsh_win_pipe(int fds[2]) {
+  return _pipe(fds, 65536, _O_BINARY | _O_NOINHERIT);
+}
+static int fsh_win_pipe2(int fds[2], int flags) {
+  return fsh_win_pipe(fds);
+}
+
+// A stat with nanosecond times, as the runtime reads them; Windows keeps 100ns ticks.
+struct fsh_win_stat {
+  dev_t st_dev;
+  ino_t st_ino;
+  unsigned short st_mode;
+  short st_nlink;
+  short st_uid;
+  short st_gid;
+  dev_t st_rdev;
+  int64_t st_size;
+  struct timespec st_atim, st_mtim, st_ctim, st_birthtim;
+  int64_t st_blksize, st_blocks;
+};
+static void fsh_win_times(struct fsh_win_stat *out, const struct _stat64 *in) {
+  out->st_dev = in->st_dev;
+  out->st_ino = in->st_ino;
+  out->st_mode = in->st_mode;
+  out->st_nlink = in->st_nlink;
+  out->st_uid = in->st_uid;
+  out->st_gid = in->st_gid;
+  out->st_rdev = in->st_rdev;
+  out->st_size = in->st_size;
+  out->st_atim = (struct timespec){ in->st_atime, 0 };
+  out->st_mtim = (struct timespec){ in->st_mtime, 0 };
+  out->st_ctim = (struct timespec){ in->st_ctime, 0 };
+  out->st_birthtim = out->st_ctim;
+  out->st_blksize = 4096;
+  out->st_blocks = (in->st_size + 511) / 512;
+}
+// The 100ns ticks since 1601 a handle's times are in, as seconds and nanoseconds since 1970.
+static struct timespec fsh_win_filetime(FILETIME t) {
+  int64_t ticks = ((int64_t)t.dwHighDateTime << 32 | t.dwLowDateTime) - 116444736000000000LL;
+  return (struct timespec){ (time_t)(ticks / 10000000), (long)(ticks % 10000000) * 100 };
+}
+static void fsh_win_exact(struct fsh_win_stat *out, HANDLE h) {
+  FILETIME made, read, written;
+  if (h == INVALID_HANDLE_VALUE || !GetFileTime(h, &made, &read, &written)) return;
+  out->st_atim = fsh_win_filetime(read);
+  out->st_mtim = fsh_win_filetime(written);
+  out->st_ctim = out->st_mtim;
+  out->st_birthtim = fsh_win_filetime(made);
+}
+static int fsh_win_fstat(int fd, struct fsh_win_stat *out) {
+  struct _stat64 in;
+  if (_fstat64(fd, &in) != 0) return -1;
+  fsh_win_times(out, &in);
+  fsh_win_exact(out, (HANDLE)_get_osfhandle(fd));
+  return 0;
+}
+static int fsh_win_stat(const char *path, struct fsh_win_stat *out) {
+  struct _stat64 in;
+  if (_stat64(path, &in) != 0) return -1;
+  fsh_win_times(out, &in);
+  HANDLE h = CreateFileA(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  fsh_win_exact(out, h);
+  if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+  return 0;
+}
+#define S_ISLNK(m) 0
+#define S_IFLNK 0120000
+#define S_ISSOCK(m) 0
+
+static char *fsh_win_realpath(const char *path, char *out) {
+  DWORD attributes = GetFileAttributesA(path);
+  if (attributes == INVALID_FILE_ATTRIBUTES) {
+    errno = ENOENT;
+    return NULL;
+  }
+  char *made = _fullpath(out, path, PATH_MAX);
+  if (!made) return NULL;
+  for (char *p = made; *p; p++) if (*p == '\\') *p = '/';
+  return made;
+}
+
+static ssize_t fsh_win_pread(int fd, void *data, size_t n, int64_t at) {
+  OVERLAPPED place = { 0 };
+  place.Offset = (DWORD)at;
+  place.OffsetHigh = (DWORD)(at >> 32);
+  DWORD got = 0;
+  if (ReadFile((HANDLE)_get_osfhandle(fd), data, (DWORD)(n > 0x7fffffff ? 0x7fffffff : n), &got, &place)) return got;
+  if (GetLastError() == ERROR_HANDLE_EOF) return 0;
+  errno = EIO;
+  return -1;
+}
+static ssize_t fsh_win_pwrite(int fd, const void *data, size_t n, int64_t at) {
+  OVERLAPPED place = { 0 };
+  place.Offset = (DWORD)at;
+  place.OffsetHigh = (DWORD)(at >> 32);
+  DWORD put = 0;
+  if (WriteFile((HANDLE)_get_osfhandle(fd), data, (DWORD)(n > 0x7fffffff ? 0x7fffffff : n), &put, &place)) return put;
+  errno = EIO;
+  return -1;
+}
+static int fsh_win_fsync(int fd) { return _commit(fd); }
+static int fsh_win_ftruncate(int fd, int64_t length) {
+  errno = _chsize_s(fd, length);
+  return errno == 0 ? 0 : -1;
+}
+static int fsh_win_fchmod(int fd, int mode) { return 0; }
+static int fsh_win_fchown(int fd, int uid, int gid) { return 0; }
+static int fsh_win_mkdir(const char *path, int mode) { return _mkdir(path); }
+static int fsh_win_unsupported(void) {
+  errno = ENOSYS;
+  return -1;
+}
+#define readlink(path, out, n) (fsh_win_unsupported())
+#define symlink(from, to) (CreateSymbolicLinkA(to, from, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) ? 0 : (errno = EPERM, -1))
+#define link(from, to) (CreateHardLinkA(to, from, NULL) ? 0 : (errno = EPERM, -1))
+#define AT_FDCWD -100
+#define AT_SYMLINK_NOFOLLOW 0x100
+static int fsh_win_utimensat(int dir, const char *path, const struct timespec t[2], int flags) {
+  struct __utimbuf64 times = { t[0].tv_sec, t[1].tv_sec };
+  return _utime64(path, &times);
+}
+static int fsh_win_futimens(int fd, const struct timespec t[2]) {
+  struct __utimbuf64 times = { t[0].tv_sec, t[1].tv_sec };
+  return _futime64(fd, &times);
+}
+
+static struct tm *gmtime_r(const time_t *t, struct tm *out) { return gmtime_s(out, t) == 0 ? out : NULL; }
+static struct tm *localtime_r(const time_t *t, struct tm *out) { return localtime_s(out, t) == 0 ? out : NULL; }
+#define flockfile(f) _lock_file(f)
+#define funlockfile(f) _unlock_file(f)
+#define ftrylockfile(f) (_lock_file(f), 0)
+static int unsetenv(const char *name) { return _putenv_s(name, ""); }
+static int setenv(const char *name, const char *value, int overwrite) {
+  if (!overwrite && getenv(name)) return 0;
+  return _putenv_s(name, value);
+}
+
+NTSTATUS WINAPI BCryptGenRandom(void *algorithm, unsigned char *at, ULONG count, ULONG flags);
+static ssize_t getrandom(void *at, size_t count, unsigned flags) {
+  return BCryptGenRandom(NULL, at, (ULONG)count, 2) == 0 ? (ssize_t)count : (errno = EIO, -1);
+}
+static int getentropy(void *at, size_t count) { return getrandom(at, count, 0) == (ssize_t)count ? 0 : -1; }
+
+#define _SC_NPROCESSORS_ONLN 84
+static long sysconf(int name) {
+  SYSTEM_INFO info;
+  GetSystemInfo(&info);
+  return name == _SC_NPROCESSORS_ONLN ? (long)info.dwNumberOfProcessors : -1;
+}
+
+// The home directory is the profile's.
+struct passwd { char *pw_name; char *pw_dir; };
+static int getuid(void) { return 0; }
+static int getpwuid_r(int uid, struct passwd *pw, char *buffer, size_t size, struct passwd **found) {
+  const char *home = getenv("USERPROFILE");
+  *found = NULL;
+  if (!home || strlen(home) >= size) return ENOENT;
+  strcpy(buffer, home);
+  pw->pw_dir = buffer;
+  pw->pw_name = buffer;
+  *found = pw;
+  return 0;
+}
+
+// Ctrl-C reaches a console program as SIGINT, and Ctrl-Break as SIGBREAK; signal() is the
+// whole of what the C runtime has.
+#define SIGHUP 1
+#define SIGQUIT 3
+#define SIGTRAP 5
+#define SIGBUS 7
+#define SIGKILL 9
+#define SIGUSR1 10
+#define SIGUSR2 12
+#define SIGPIPE 13
+#define SIGALRM 14
+#define SIGCHLD 17
+#define SIGCONT 18
+#define SIGSTOP 19
+#define SIGTSTP 20
+#define SIGTTIN 26
+#define SIGTTOU 27
+#define SIGURG 23
+#define SIGXCPU 24
+#define SIGXFSZ 25
+#define SIGVTALRM 28
+#define SIGPROF 29
+#define SIGWINCH 30
+#define SIGIO 31
+#define SIGSYS 32
+struct sigaction { void (*sa_handler)(int); sigset_t sa_mask; int sa_flags; };
+#define SA_RESTART 0
+#define SIG_BLOCK 0
+#define SIG_SETMASK 2
+static int sigemptyset(sigset_t *set) { *set = 0; return 0; }
+static int sigaddset(sigset_t *set, int sig) { return 0; }
+static int sigismember(const sigset_t *set, int sig) { return 0; }
+static int sigpending(sigset_t *set) { *set = 0; return 0; }
+static int sigwait(const sigset_t *set, int *sig) { return ENOSYS; }
+static int pthread_sigmask_fsh(int how, const sigset_t *set, sigset_t *old) { if (old) *old = 0; return 0; }
+#undef pthread_sigmask
+#define pthread_sigmask pthread_sigmask_fsh
+static int sigaction(int sig, const struct sigaction *a, struct sigaction *old) {
+  if (sig != SIGINT && sig != SIGTERM && sig != SIGBREAK) return fsh_win_unsupported();
+  return a && signal(sig, a->sa_handler) == SIG_ERR ? -1 : 0;
+}
+static int kill(int pid, int sig) { return fsh_win_unsupported(); }
+
+// Child processes need CreateProcess, which isn't built yet: a spawn fails with ENOSYS.
+#define WNOHANG 1
+#define WIFEXITED(s) 1
+#define WEXITSTATUS(s) ((s) >> 8 & 0xff)
+#define WIFSIGNALED(s) 0
+#define WTERMSIG(s) 0
+static int waitpid(int pid, int *status, int options) { errno = ECHILD; return -1; }
+typedef int posix_spawn_file_actions_t;
+typedef int posix_spawnattr_t;
+#define POSIX_SPAWN_SETPGROUP 2
+#define posix_spawn_file_actions_init(a) 0
+#define posix_spawn_file_actions_destroy(a) 0
+#define posix_spawn_file_actions_adddup2(a, from, to) 0
+#define posix_spawn_file_actions_addopen(a, fd, path, flags, mode) 0
+#define posix_spawn_file_actions_addchdir_np(a, path) 0
+#define posix_spawnattr_init(a) 0
+#define posix_spawnattr_destroy(a) 0
+#define posix_spawnattr_setflags(a, flags) 0
+#define posix_spawnattr_setpgroup(a, group) 0
+#define posix_spawn(pid, path, a, at, argv, envp) ENOSYS
+#define posix_spawnp(pid, file, a, at, argv, envp) ENOSYS
+
+// A tree removed depth first, as nftw walks it with FTW_DEPTH.
+#define FTW_PHYS 1
+#define FTW_DEPTH 8
+#define FTW_F 0
+#define FTW_D 1
+#define FTW_DP 5
+struct FTW { int base; int level; };
+static int fsh_win_nftw(const char *path, int (*visit)(const char *, const struct fsh_win_stat *, int, struct FTW *), int open, int flags) {
+  struct fsh_win_stat st;
+  if (fsh_win_stat(path, &st) != 0) return -1;
+  struct FTW at = { 0, 0 };
+  if (S_ISDIR(st.st_mode)) {
+    DIR *d = opendir(path);
+    if (!d) return -1;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+      if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+      size_t n = strlen(path) + strlen(e->d_name) + 2;
+      char *child = malloc(n);
+      snprintf(child, n, "%s/%s", path, e->d_name);
+      int r = fsh_win_nftw(child, visit, open, flags);
+      free(child);
+      if (r != 0) {
+        closedir(d);
+        return r;
+      }
+    }
+    closedir(d);
+    return visit(path, &st, FTW_DP, &at);
+  }
+  return visit(path, &st, FTW_F, &at);
+}
+
+#define close fsh_win_close
+#define read fsh_win_read
+#define write fsh_win_write
+#define recv fsh_win_recv
+#define send fsh_win_send
+#define sendto fsh_win_sendto
+#define recvfrom fsh_win_recvfrom
+#define socket fsh_win_socket
+#define accept fsh_win_accept
+#define accept4(fd, at, n, flags) fsh_win_accept(fd, at, n)
+#define connect fsh_win_connect
+#define bind fsh_win_bind
+#define listen fsh_win_listen
+#define shutdown fsh_win_shutdown
+#define getsockname fsh_win_getsockname
+#define getpeername fsh_win_getpeername
+#define setsockopt fsh_win_setsockopt
+#define getsockopt fsh_win_getsockopt
+#define ioctl fsh_win_ioctl
+#define poll fsh_win_poll
+#define fcntl fsh_win_fcntl
+#define pipe fsh_win_pipe
+#define pipe2 fsh_win_pipe2
+#define stat fsh_win_stat
+#define fstat fsh_win_fstat
+#define lstat fsh_win_stat
+#define realpath fsh_win_realpath
+#define pread fsh_win_pread
+#define pwrite fsh_win_pwrite
+#define fsync fsh_win_fsync
+#define ftruncate fsh_win_ftruncate
+#define fchmod fsh_win_fchmod
+#define fchown fsh_win_fchown
+#define mkdir fsh_win_mkdir
+#define utimensat fsh_win_utimensat
+#define futimens fsh_win_futimens
+#define nftw fsh_win_nftw
+struct inotify_event { int wd; uint32_t mask, cookie, len; char name[]; };
+#define IN_MODIFY 2
+#define IN_ATTRIB 4
+#define IN_MOVED_FROM 64
+#define IN_MOVED_TO 128
+#define IN_CREATE 256
+#define IN_DELETE 512
+#define IN_DELETE_SELF 1024
+#define IN_MOVE_SELF 2048
+#define IN_IGNORED 0x8000
+#define IN_ISDIR 0x40000000
+#define IN_ONLYDIR 0x1000000
+#define IN_CLOEXEC 0
+#define IN_NONBLOCK 0
+static int inotify_init1(int flags) { return fsh_win_unsupported(); }
+static int inotify_add_watch(int q, const char *path, uint32_t mask) { return fsh_win_unsupported(); }
+#else
+#include <unistd.h>
 #ifndef __wasi__
 #include <pwd.h>
 #endif
-#include <limits.h>
 #include <sys/random.h>
-#include <fcntl.h>
-#include <sys/stat.h>
 #include <sys/ioctl.h>
-#include <dirent.h>
 #include <ftw.h>
-#include <signal.h>
 #ifndef __wasi__
 #include <spawn.h>
 #include <sys/wait.h>
@@ -57,10 +632,12 @@ export const NATIVE = String.raw`
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#endif
 #ifdef __APPLE__
 #include <netdb.h>
 #include <sys/event.h>
 #include <mach-o/dyld.h>
+#elif defined(_WIN32)
 #elif defined(__wasi__)
 // WASI preview 1 has no processes, signals, users, name lookups, file watching or readiness
 // polling beyond poll_oneoff, and wasi-libc declares none of them. They are given here as calls
@@ -7018,8 +7595,8 @@ int64_t fsh_rt_kill(int64_t pid, int64_t sig) {
   return kill((pid_t)pid, (int)sig) == 0 ? 0 : errno;
 }
 
-// The reactor: a thread waiting on kqueue (macOS) or epoll (Linux) for the sockets tasks wait
-// on. Each interest is one task waiting for one socket to be readable or writable, once; the
+// The reactor: a thread waiting on kqueue (macOS), epoll (Linux) or an I/O completion port
+// (Windows) for the sockets tasks wait on. Each interest is one task waiting for one socket to be readable or writable, once; the
 // list holds a count on each task, so shutdown can give back those never woken.
 // ponytail: one list scanned under one lock; keep interests per socket if many connections wait.
 typedef struct { int fd; int32_t writing; fsh_task *task; } fsh_interest;
@@ -7029,8 +7606,43 @@ static int64_t fsh_interest_count = 0, fsh_interest_capacity = 0;
 static int fsh_poller = -1;
 static int32_t fsh_io_stopping = 0;
 static pthread_t fsh_io_thread;
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_WIN32)
 static int fsh_io_wake = -1;
+#endif
+
+#ifdef _WIN32
+// Windows tells readiness through AFD, the driver beneath Winsock, as wepoll and mio ask it: a
+// poll of one socket for one direction is an I/O request on a handle to AFD that the completion
+// port completes once the socket is ready, so it is one-shot as kqueue's and epoll's interests are.
+#define FSH_AFD_RECEIVE 0x0001
+#define FSH_AFD_SEND 0x0004
+#define FSH_AFD_DISCONNECT 0x0008
+#define FSH_AFD_ABORT 0x0010
+#define FSH_AFD_LOCAL_CLOSE 0x0020
+#define FSH_AFD_ACCEPT 0x0080
+#define FSH_AFD_CONNECT_FAIL 0x0100
+#define FSH_AFD_FAILED (FSH_AFD_DISCONNECT | FSH_AFD_ABORT | FSH_AFD_LOCAL_CLOSE | FSH_AFD_CONNECT_FAIL)
+typedef struct { HANDLE handle; ULONG events; NTSTATUS status; } fsh_afd_handle;
+typedef struct { LARGE_INTEGER timeout; ULONG count; ULONG exclusive; fsh_afd_handle handles[1]; } fsh_afd_poll;
+typedef struct { IO_STATUS_BLOCK io; fsh_afd_poll poll; int fd; int32_t writing; } fsh_afd_op;
+static HANDLE fsh_iocp = NULL;
+static HANDLE fsh_afd = NULL;
+
+static void fsh_afd_open(void) {
+  fsh_iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+  static WCHAR name[] = L"\\Device\\Afd\\Fish";
+  UNICODE_STRING path = { sizeof name - sizeof(WCHAR), sizeof name, name };
+  OBJECT_ATTRIBUTES attributes;
+  InitializeObjectAttributes(&attributes, &path, 0, NULL, NULL);
+  IO_STATUS_BLOCK io;
+  if (NtCreateFile(&fsh_afd, SYNCHRONIZE, &attributes, &io, NULL, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN, 0, NULL, 0) != 0) {
+    fputs("fish: can't open AFD to wait on sockets\n", stderr);
+    fsh_abandoned = 1;
+    exit(101);
+  }
+  CreateIoCompletionPort(fsh_afd, fsh_iocp, 0, 0);
+  SetFileCompletionNotificationModes(fsh_afd, FILE_SKIP_SET_EVENT_ON_HANDLE);
+}
 #endif
 
 // Arms the kernel for what is still wanted of a socket: on epoll one registration covers both
@@ -7040,6 +7652,25 @@ static void fsh_io_arm(int fd, int32_t writing) {
   struct kevent change;
   EV_SET(&change, fd, writing ? EVFILT_WRITE : EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, NULL);
   kevent(fsh_poller, &change, 1, NULL, 0, NULL);
+#elif defined(_WIN32)
+  // The poll goes to the base socket, beneath any layered service provider.
+  SOCKET base = (SOCKET)fd;
+  DWORD bytes = 0;
+  WSAIoctl((SOCKET)fd, SIO_BASE_HANDLE, NULL, 0, &base, sizeof base, &bytes, NULL, NULL);
+  fsh_afd_op *op = calloc(1, sizeof *op);
+  op->fd = fd;
+  op->writing = writing;
+  op->poll.timeout.QuadPart = INT64_MAX;
+  op->poll.count = 1;
+  op->poll.handles[0].handle = (HANDLE)base;
+  op->poll.handles[0].events = FSH_AFD_FAILED | (writing ? FSH_AFD_SEND : FSH_AFD_RECEIVE | FSH_AFD_ACCEPT);
+  op->io.Status = STATUS_PENDING;
+  NTSTATUS status = NtDeviceIoControlFile(fsh_afd, NULL, NULL, op, &op->io, 0x00012024, &op->poll, sizeof op->poll, &op->poll, sizeof op->poll);
+  // A request that fails at once never reaches the port: its waiters are woken to find out why.
+  if (status != 0 && status != STATUS_PENDING) {
+    free(op);
+    PostQueuedCompletionStatus(fsh_iocp, 0, (ULONG_PTR)fd + 2, NULL);
+  }
 #else
   (void)writing;
   uint32_t events = EPOLLONESHOT;
@@ -7082,7 +7713,7 @@ static void fsh_io_take(int fd, int32_t readable, int32_t writable, int32_t clos
     woken[count++] = in->task;
     fsh_interests[i] = fsh_interests[--fsh_interest_count];
   }
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_WIN32)
   for (int64_t i = 0; !closing && i < fsh_interest_count; i++) {
     if (fsh_interests[i].fd == fd) {
       fsh_io_arm(fd, fsh_interests[i].writing);
@@ -7112,6 +7743,21 @@ static void *fsh_io_loop(void *arg) {
       int32_t error = (events[i].flags & (EV_EOF | EV_ERROR)) != 0;
       fsh_io_ready(fd, events[i].filter == EVFILT_READ || error, events[i].filter == EVFILT_WRITE || error);
     }
+#elif defined(_WIN32)
+    OVERLAPPED_ENTRY events[64];
+    ULONG n = 0;
+    if (!GetQueuedCompletionStatusEx(fsh_iocp, events, 64, &n, INFINITE, FALSE)) n = 0;
+    for (ULONG i = 0; i < n; i++) {
+      fsh_afd_op *op = (fsh_afd_op *)events[i].lpOverlapped;
+      // A key past 1 is a poll that failed as it was asked, for the socket it names.
+      if (!op) {
+        if (events[i].lpCompletionKey > 1) fsh_io_ready((int)(events[i].lpCompletionKey - 2), 1, 1);
+        continue;
+      }
+      int32_t error = op->io.Status != 0 || (op->poll.handles[0].events & FSH_AFD_FAILED) != 0;
+      fsh_io_ready(op->fd, !op->writing || error, op->writing || error);
+      free(op);
+    }
 #else
     struct epoll_event events[64];
     int n = epoll_wait(fsh_poller, events, 64, -1);
@@ -7131,6 +7777,8 @@ static void fsh_io_start(void) {
   struct kevent wake;
   EV_SET(&wake, 0, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
   kevent(fsh_poller, &wake, 1, NULL, 0, NULL);
+#elif defined(_WIN32)
+  fsh_afd_open();
 #else
   fsh_poller = epoll_create1(EPOLL_CLOEXEC);
   fsh_io_wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -7147,6 +7795,8 @@ static void fsh_io_stop(void) {
   struct kevent wake;
   EV_SET(&wake, 0, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
   kevent(fsh_poller, &wake, 1, NULL, 0, NULL);
+#elif defined(_WIN32)
+  PostQueuedCompletionStatus(fsh_iocp, 0, 1, NULL);
 #else
   uint64_t one = 1;
   (void)!write(fsh_io_wake, &one, sizeof one);
@@ -7161,10 +7811,16 @@ static void fsh_io_stop(void) {
   pthread_mutex_unlock(&fsh_io_lock);
   for (int64_t i = 0; i < count; i++) fsh_task_release(left[i].task);
   free(left);
+#ifdef _WIN32
+  // Polls still pending complete into the port as it closes, and their memory goes with the process.
+  CloseHandle(fsh_afd);
+  CloseHandle(fsh_iocp);
+#else
   close(fsh_poller);
   fsh_poller = -1;
 #ifndef __APPLE__
   close(fsh_io_wake);
+#endif
 #endif
 }
 
@@ -8213,7 +8869,7 @@ static int64_t fsh_watch_take(fsh_watch *w, uint8_t *out, int64_t size, int64_t 
   return fsh_watch_put(w, out, size, at, 'c', name);
 }
 #else
-#ifndef __wasi__
+#if !defined(__wasi__) && !defined(_WIN32)
 #include <sys/inotify.h>
 #endif
 // inotify watches a directory's files itself; a recursive watch adds each directory below.

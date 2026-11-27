@@ -1,6 +1,6 @@
 // The golden runner: builds and runs every program in tests/programs with a fishc binary and
 // checks it against the expectations its comments state.
-//   fishc run tests/run.fsh -- [--fishc <path>] [--jobs <n>] [--list] [<pattern>]
+//   fishc run tests/run.fsh -- [--fishc <path>] [--jobs <n>] [--list] [--wine <llvm-mingw>] [<pattern>]
 //
 // Each program states its expectations in comments:
 //   // expect: <line>   the next line of stdout, in order
@@ -27,6 +27,11 @@
 // next. Each case is built and checked on its own, as the file `<name>.fsh` holding just its
 // lines, so its line numbers and messages read as they would in a file of its own; its test is
 // `<file> > <name>`. Text before the first case is the file's comment and belongs to no case.
+//
+// With `--wine <llvm-mingw>`, every program is built for x86_64 Windows with that toolchain and run
+// under Wine in the Docker image `fish-wine`, which `tests/unit/windows.fsh` builds; the repository
+// and the scratch directory are mounted at their own paths, so a program's paths read as they do
+// natively.
 //
 // The fishc is `--fishc`, else FISHC, else `fishc` on PATH. Programs are built and run as many at
 // once as the machine has cores, or FISH_TEST_JOBS, or `--jobs`. A pattern keeps the tests whose
@@ -69,14 +74,21 @@ function limit(name: string): i64 {
   return name.startsWith("http_") || name.startsWith("tcp_") ? 30000 : 10000;
 }
 
-async function outcome(fishc: string, tmp: string, p: Program): Promise<Outcome> {
+// What runs a built program: itself, or Wine in Docker for a Windows build.
+function runner(wine: string, tmp: string, binary: string): string[] {
+  if (wine === "") return [binary];
+  return ["docker", "run", "--rm", "-i", "--platform", "linux/amd64", "-e", "FISH_LEAKS=1", "-v", `${tmp}:${tmp}`, "-v", `${process.cwd()}:${process.cwd()}`, "-w", process.cwd(), "fish-wine", "wine", binary];
+}
+
+async function outcome(fishc: string, tmp: string, p: Program, wine: string): Promise<Outcome> {
   const empty: Outcome = { failed: false, printed: "", warnings: [], stdout: "", stderr: "", exitCode: 0, signal: "", timedOut: false };
   const buildEnv = environment("NO_COLOR");
   try {
     let args = [fishc];
     if (p.src.includes("// mode: parse")) args = [fishc, "parse", basename(p.file)];
     else {
-      args = [fishc, "build", basename(p.file), "-o", join(tmp, binaryName(p.name))];
+      args = [fishc, "build", basename(p.file), "-o", join(tmp, binaryName(p.name) + (wine === "" ? "" : ".exe"))];
+      if (wine !== "") for (const a of ["--target", "x86_64-w64-windows-gnu", "--sysroot", wine]) args.push(a);
       if (p.src.includes("// mode: release")) args.push("--release");
       if (p.src.includes("// mode: abort")) args.push("--panic=abort");
       for (const l of directive(p.src, "link")) {
@@ -100,7 +112,7 @@ async function outcome(fishc: string, tmp: string, p: Program): Promise<Outcome>
     const stdin = input.length > 0 ? new TextEncoder().encode(joined) : null;
     // Every program is checked for leaks: the runtime reports what is still allocated at exit. It
     // runs where the runner does, so its paths to fixtures are relative to the repository.
-    const run = await ran([join(tmp, binaryName(p.name))], process.cwd(), environment("FISH_LEAKS"), stdin, limit(p.label));
+    const run = await ran(runner(wine, tmp, join(tmp, binaryName(p.name) + (wine === "" ? "" : ".exe"))), process.cwd(), environment("FISH_LEAKS"), stdin, limit(p.label) * (wine === "" ? 1 : 3));
     return { ...run, warnings: warningsOf(built.stderr) };
   } catch (e) {
     return { ...empty, failed: true, printed: `the runner failed: ${e.message}` };
@@ -156,7 +168,7 @@ function verdict(p: Program, run: Outcome): string {
   return run.exitCode === want ? "" : `expected exit ${want}, got ${run.exitCode}:\n${run.stderr}`;
 }
 
-type Queue = { programs: Program[]; next: Atomic<i64>; fishc: string; tmp: string };
+type Queue = { programs: Program[]; next: Atomic<i64>; fishc: string; tmp: string; wine: string };
 
 // More failures than this are no accident of timing, and running each again alone would take longer
 // than the run did.
@@ -169,7 +181,7 @@ async function worker(q: shared<Queue>): Promise<i64[]> {
     const i = q.next.add(1);
     if (i >= (q.programs.length as i64)) return failed;
     const p = q.programs[i as usize]!.clone();
-    const why = await failure(q.fishc, q.tmp, p.clone());
+    const why = await failure(q.fishc, q.tmp, p.clone(), q.wine);
     if (why !== "") {
       failed.push(i);
       console.log(`fail ${p.name}\n${why.trimEnd()}\n`);
@@ -178,9 +190,9 @@ async function worker(q: shared<Queue>): Promise<i64[]> {
 }
 
 // Why a program fails, or "" when it passes.
-async function failure(fishc: string, tmp: string, p: Program): Promise<string> {
+async function failure(fishc: string, tmp: string, p: Program, wine: string): Promise<string> {
   if (p.problem !== "") return p.problem;
-  const run = await outcome(fishc, tmp, p.clone());
+  const run = await outcome(fishc, tmp, p.clone(), wine);
   return verdict(p.clone(), run);
 }
 
@@ -189,12 +201,14 @@ async function main(): Promise<void> throws IoError {
   let jobs = parseInt(process.env.FISH_TEST_JOBS ?? "") ?? availableParallelism();
   let list = false;
   let pattern = "";
+  let wine = "";
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--fishc" && i + 1 < args.length) fishc = args[++i]!;
     else if (a === "--jobs" && i + 1 < args.length) jobs = parseInt(args[++i]!) ?? jobs;
     else if (a === "--list") list = true;
+    else if (a === "--wine" && i + 1 < args.length) wine = args[++i]!;
     else pattern = a;
   }
   const dir = join(import.meta.dir, "programs");
@@ -209,7 +223,7 @@ async function main(): Promise<void> throws IoError {
   }
   const started = performance.now();
   const total = programs.length as i64;
-  const q = shared<Queue>({ programs: programs.clone(), next: new Atomic(0), fishc, tmp });
+  const q = shared<Queue>({ programs: programs.clone(), next: new Atomic(0), fishc, tmp, wine });
   let workers: JoinHandle<i64[]>[] = [];
   for (let w = 0; w < jobs; w++) workers.push(spawn(worker(q.clone())));
   let again: i64[] = [];
@@ -225,7 +239,7 @@ async function main(): Promise<void> throws IoError {
     for (const i of again) {
       const p = programs[i as usize]!.clone();
       if (p.problem !== "") continue;
-      const why = await failure(fishc, tmp, p.clone());
+      const why = await failure(fishc, tmp, p.clone(), wine);
       if (why === "") {
         failed--;
         second++;

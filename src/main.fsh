@@ -24,7 +24,7 @@ import { JS_NATIVE } from "./js_native.fsh";
 import { BROTLI_NATIVE, NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
 import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
-import { copyTarget, dockerfile, dockerfilePath, findBrotli, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, instrumented, isWasm, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, staticTarget, threading, withFlags, type Target } from "./target.fsh";
+import { copyTarget, dockerfile, dockerfilePath, findBrotli, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, forTarget, instrumented, isWasm, isWindows, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, staticTarget, threading, withFlags, type Target } from "./target.fsh";
 import { browserFiles, loader } from "./wasi.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
 import { EXERCISES, exerciseText, FOLDER } from "./learn.fsh";
@@ -326,7 +326,7 @@ function built(session: BuildSession, file: string, out: string, release: boolea
 function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>, profile: Profiling = false): { ir: string; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession } {
   let made = compiledKept(core, file, release, panic, leaks, debug, looked, undefined, undefined, false, profile);
   const instrumenting = stageStart(made.kept.checked.tables.session);
-  const ir = instrumented(made.ir, target);
+  const ir = forTarget(instrumented(made.ir, target), target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
   if (shim !== undefined) refuseForeignRust(target);
   stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
@@ -349,7 +349,7 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
   core.build = buildFor(core.build, target.triple, release);
   let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest, keep, profile);
   const instrumenting = stageStart(made.kept.checked.tables.session);
-  const ir = instrumented(made.ir, target);
+  const ir = forTarget(instrumented(made.ir, target), target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
   if (shim !== undefined) refuseForeignRust(target);
   stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
@@ -2546,6 +2546,13 @@ async function main(): Promise<void> {
     if (profile !== false) fail(`${what}, and WASI has no signals to sample or report a profile with; leave out '${profile === "heap" ? "--heap-profile" : "--profile"}'`);
     if (panicName === "unwind") fail(`${what}, which can't unwind, so a panic in it prints its message and exits with 101; leave out '--panic=unwind'`);
   }
+  if (values.target !== undefined && isWindows(values.target)) {
+    const what = `fishc build: a ${values.target} build`;
+    if (lib !== undefined) fail(`${what} is an executable; libraries for Windows aren't built yet, so leave out '--lib'`);
+    if (values.static === true) fail(`${what} links its C runtime and threads into the executable already; leave out '--static'`);
+    if (sanitize !== undefined) fail(`${what} has no sanitizer runtime in llvm-mingw; leave out '--sanitize'`);
+    if (profile !== false) fail(`${what} has no signals to sample or report a profile with; leave out '${profile === "heap" ? "--heap-profile" : "--profile"}'`);
+  }
   // A module never unwinds: WASI preview 1 has no exceptions to unwind with.
   const panicking: Panic = wasm ? "abort" : panic;
   try {
@@ -2566,7 +2573,7 @@ async function main(): Promise<void> {
       const platform = instrumenting ? withFlags(sanitizing, [...PGO_INSTRUMENT]) : profiles.length > 0 ? withFlags(sanitizing, pgoUse(profiles)) : sanitizing;
       // A sanitizer's report names .fsh lines only when the program carries line tables.
       const debug = values.debug === true || sanitized;
-      const named = out ?? `${basename(target!, ".fsh")}${wasm ? (values.target === "browser" ? ".js" : ".wasm") : ""}`;
+      const named = out ?? `${basename(target!, ".fsh")}${wasm ? (values.target === "browser" ? ".js" : ".wasm") : isWindows(platform.triple) ? ".exe" : ""}`;
       const page = values.target === "browser" ? browserFiles(named) : undefined;
       const binary = page !== undefined ? page.module : named;
       const image = values.dockerfile === true ? dockerfilePath(binary) : undefined;
@@ -2576,7 +2583,9 @@ async function main(): Promise<void> {
         else {
           const start = performance.now();
           let looked: string[] = [];
-          const made = built(sessionFor(), target!, binary, release || instrumenting, panicking, [...links], copyTarget(platform), leaks, debug, looked, profile);
+          let session = sessionFor();
+          if (platform.cc !== undefined) session.cc = platform.cc;
+          const made = built(session, target!, binary, release || instrumenting, panicking, [...links], copyTarget(platform), leaks, debug, looked, profile);
           reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
           warnings = made.warnings;
         }
