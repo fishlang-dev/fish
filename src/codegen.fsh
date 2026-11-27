@@ -1863,6 +1863,45 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // `x.toString(radix?)`: String(x) with no radix, else the runtime's digits, an integer's
+  // widened to 128 bits; a radix outside 2 to 36 panics, as JavaScript throws a RangeError.
+  numberText(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>): string {
+    const object: Ref<Expr> = (e.callee as Extract<Expr, { kind: "member" }>).object;
+    const type = this.tables.typing.lower(this.valueType(object)) as Numeric;
+    const x = this.value(object);
+    if (e.args.length === 0) {
+      const v = this.written(x, type);
+      const made = this.pending.at(-1)?.v === v ? this.pending.pop() : undefined;
+      if (made !== undefined && !this.cur().types.has(e)) this.pending.push(made);
+      return v;
+    }
+    const radix = this.value(e.args[0]!);
+    const shifted = this.temp();
+    this.emit(`${shifted} = sub i64 ${radix}, 2`);
+    const outside = this.temp();
+    this.emit(`${outside} = icmp ugt i64 ${shifted}, 34`);
+    this.lowering().panicIf(outside, "toString() radix argument must be between 2 and 36", { start: e.args[0]!.start, end: e.args[0]!.end });
+    const result = this.temp();
+    if (isFloat(type)) {
+      let wide = x;
+      if (type === "f32") {
+        wide = this.temp();
+        this.emit(`${wide} = fpext float ${x} to double`);
+      }
+      this.emit(`${result} = call ptr @fsh_rt_float_radix(double ${wide}, i32 ${type === "f32" ? 1 : 0}, i64 ${radix})`);
+    } else {
+      const { signed, bits } = integerInfo(type as Integer);
+      let wide = x;
+      if (bits < 128) {
+        wide = this.temp();
+        this.emit(`${wide} = ${signed ? "sext" : "zext"} i${bits} ${x} to i128`);
+      }
+      this.emit(`${result} = call ptr @fsh_rt_int_radix(i128 ${wide}, i32 ${signed ? 1 : 0}, i64 ${radix})`);
+    }
+    if (!this.cur().types.has(e)) this.pending.push({ v: result, type: "string" });
+    return result;
+  }
+
   // `x.checkedAdd(y)` and its kin: checked gives null when the operation overflowed, and
   // overflowing pairs the wrapped value with whether it did, the intrinsic's own `{ iN, i1 }`.
   // A SIMD vector is held as its fixed array is, an LLVM array; its operators move it into an
@@ -11296,6 +11335,7 @@ class Codegen implements PrintHost, ComptimeHost {
         if (!this.cur().types.has(e)) this.pending.push({ v: made, type: "bigint" });
         return made;
       }
+      if (e.callee.kind === "member" && e.callee.name === "toString" && isNumeric(this.tables.typing.lower(this.valueType(e.callee.object)))) return this.numberText(e);
       if (e.callee.kind === "member" && e.callee.name === "toString" && this.referent(this.valueType(e.callee.object)) === "bigint") {
         const radix = e.args.length > 0 ? this.value(e.args[0]!) : "10";
         const made = this.temp();

@@ -1959,6 +1959,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (callee.kind === "member" && recv?.kind === "handle" && callee.name !== "clone") return this.handleCall(e, callee, receiver as HandleType);
     if (callee.kind === "member" && callee.name !== "clone" && recv?.kind === "dyn") return this.dynCall(e, callee, receiver as DynType);
     if (callee.kind === "ident" && callee.name === "shared" && (this.ctx.lookup(callee.name, undefined) === undefined) && !this.ctx.byName().has("shared")) return this.sharedNew(e);
+    if (callee.kind === "member" && callee.name === "toString" && receiver !== undefined && isNumeric(this.ctx.tables().typing.lower(receiver))) return this.numberText(e);
     if (callee.kind === "member" && callee.name === "toFixed" && receiver !== undefined && isNumeric(this.ctx.tables().typing.lower(receiver))) {
       const n = this.ctx.tables().typing.lower(receiver);
       if (isInteger(n) && integerInfo(n).bits === 128) throw new CompileError("E0801", `'toFixed' on a 128-bit integer isn't supported yet; convert it with 'as f64' first`, callee.start, callee.end);
@@ -3852,6 +3853,18 @@ export class Expressions<C extends Context> implements Union<C> {
     const t = this.value(e.args[0]!);
     if (t !== "i64" && !this.adapt(e.args[0]!, "i64")) throw new CompileError("E0504", `'toFixed' takes its digits as an 'i64', not '${this.ctx.typing().show(t)}'`, e.args[0]!.start, e.args[0]!.end);
     return { type: "string", what: "'toFixed'" };
+  }
+
+  // `x.toString(radix?)`: String(x), or its digits in the radix given, as JavaScript prints them.
+  /** @throws {CompileError} */
+  private numberText(this: Mut<this>, e: Ref<Call>): { type: Type; what: string } {
+    if (e.args.length > 1) throw new CompileError("E0504", "'toString' takes at most a radix", e.start, e.end);
+    if (e.callee.kind === "member") this.loaded(e.callee.object, this.ctx.held().types.get(e.callee.object)!);
+    if (e.args.length > 0) {
+      const radix = this.value(e.args[0]!);
+      this.coerce(e.args[0]!, radix, "i64", "a radix is an 'i64' from 2 to 36");
+    }
+    return { type: "string", what: "'toString'" };
   }
 
   // `x.checkedAdd(y)` and its kin: the other operand is x's type, or a `u32` for a shift or a
