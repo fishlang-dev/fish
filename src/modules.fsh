@@ -777,10 +777,26 @@ export function flatten(compilation: Mut<Compilation>, loaded: Mut<Loaded>, libr
     }
   }
   if (!lenient) compilation.fileNames = names;
+  if (!lenient) compilation.published = publishedNames(all, loaded.modules);
   // Kept for a file read again into the same program, as `fishc watch` does; their bodies are
   // the program's now.
   if (!lenient) loaded.links = all;
   return program;
+}
+
+// The program-wide names of what each Fish package's lib exports, which other packages may call.
+function publishedNames(all: Ref<Linked[]>, modules: Ref<Module[]>): Set<string> {
+  let out = new Set<string>();
+  for (let i: usize = 0; i < all.length; i++) {
+    if (modules[i]!.owner === undefined) continue;
+    let names: string[] = [...all[i]!.exports.keys()];
+    for (const star of all[i]!.stars) for (const n of all[star]!.exports.keys()) names.push(n);
+    for (const n of names) {
+      const d = exported(all, i, n, new Set<string>());
+      if (d !== undefined) out.add(d.unique);
+    }
+  }
+  return out;
 }
 
 // The file at `index` parsed again from `text`, as loading parsed it: its spans in its own place

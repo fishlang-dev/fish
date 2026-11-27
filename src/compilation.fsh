@@ -35,9 +35,11 @@ import type { DynTable } from "./values.fsh";
 // `generated`: the nodes a macro made, which no warning points into: their author can't change them.
 // `rewrites`: the nodes lowering replaced, by id, until each body's rebuild puts them in place.
 // `looked`: every source file loading read or looked for, as an absolute path, missing ones included.
+// `published`: the program-wide names of the functions a Fish package's lib exports to other
+// packages, whose signatures stay as written.
 export type Compilation = {
   session: Session; ids: Ids; rewrites: Rewrites; names: Names; regex: RegexTables; typing: Typing; arenas: Arenas; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string; std: boolean }[]; rust: RustTables;
-  enumInits: [usize, usize, string][]; fileNames?: Map<usize, Map<string, string>>; generated: NodeSet<Id>; looked: string[];
+  enumInits: [usize, usize, string][]; fileNames?: Map<usize, Map<string, string>>; generated: NodeSet<Id>; looked: string[]; published?: Set<string>;
 };
 
 // What a compilation numbers as it goes, from 0, so the same program is numbered the same way
@@ -149,6 +151,7 @@ export type Tables = {
   names: Names;
   enumInits: Compilation["enumInits"];
   fileNames?: Compilation["fileNames"];
+  published?: Compilation["published"];
   looked: string[];
   typing: Typing;
   arenas: Arenas;
@@ -425,12 +428,13 @@ export type Tables = {
 /** @throws {CompileError} */
 export type Timed<T> = () => T;
 
-export function newTables({ session, names, enumInits, fileNames, looked, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
+export function newTables({ session, names, enumInits, fileNames, published, looked, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
   return {
     session,
     names,
     enumInits,
     fileNames,
+    published,
     looked,
     typing,
     arenas,
