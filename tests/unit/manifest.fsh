@@ -94,6 +94,7 @@ function key(t: Ref<Table>, name: string): string {
 function dep(d: Ref<Dependency>): string {
   if ("path" in d) return JSON.stringify({ name: d.name, path: d.path });
   if ("git" in d) return JSON.stringify({ name: d.name, git: d.git, rev: d.rev });
+  if ("workspace" in d) return JSON.stringify({ name: d.name, workspace: true });
   return JSON.stringify({ name: d.name, version: d.version });
 }
 
@@ -134,9 +135,9 @@ test("a manifest missing what it needs, or holding what it doesn't have, is refu
   is(refused(`[package]\nname = 1\nversion = "1.0.0"\n`), `fish.toml:2:8: error[E0905]: 'name' is a string, as in name = "..."`, "a number name");
   is(refused(`[package]\nname = "a"\nversion = "1.0.0"\nentry = "main.ts"\n`), `fish.toml:4:9: error[E0905]: the entry is a .fsh file, as in entry = "src/main.fsh"`, "a .ts entry");
   is(refused(`[package]\nnmae = "a"\n`), "fish.toml:2:1: error[E0905]: [package] has no key 'nmae'; it has name, version, entry, lib, edition, capabilities", "a misspelled key");
-  is(refused(`[package]\nname = "a"\nversion = "1.0.0"\nedition = "ts"\n`), `fish.toml:4:11: error[E0905]: 'ts' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated`, "an unknown edition");
+  is(refused(`[package]\nname = "a"\nversion = "1.0.0"\nedition = "ts"\n`), `fish.toml:4:11: error[E0905]: 'ts' isn't an edition; it is "native", the default, "rc" for reference-counted objects, or "ts-compat" for TypeScript not yet migrated`, "an unknown edition");
   is(refused(`name = "a"\n`), "fish.toml:1:1: error[E0905]: 'name' belongs in a table, such as [package]", "a key outside a table");
-  is(refused(`[package]\nname = "a"\nversion = "1.0.0"\n[dev]\n`), "fish.toml:4:1: error[E0905]: a manifest has no table [dev]; it has [package], [dependencies], [rust-dependencies], [registry], [workspace] and [workspace.dependencies]", "an unknown table");
+  is(refused(`[package]\nname = "a"\nversion = "1.0.0"\n[dev]\n`), "fish.toml:4:1: error[E0905]: a manifest has no table [dev]; it has [package], [dependencies], [rust-dependencies], [registry], [comptime], [workspace] and [workspace.dependencies]", "an unknown table");
   is(refused(`[package]\nname = "a"\nname = "b"\n`), "fish.toml:3:1: error[E0904]: 'name' is given twice", "a key twice");
   is(refused(`[package]\nname = "a"\n[package]\n`), "fish.toml:3:1: error[E0904]: the table [package] is given twice", "a table twice");
 });
@@ -147,7 +148,7 @@ test("TOML a manifest doesn't use is refused where it starts", () => {
   is(refused(`[package]\nname = """a"""\n`), "fish.toml:2:8: error[E0904]: a multi-line string is TOML Fish doesn't read in a manifest yet", "a multi-line string");
   is(refused(`[package]\na.b = 1\n`), "fish.toml:2:2: error[E0904]: a dotted key is TOML Fish doesn't read in a manifest yet", "a dotted key");
   has(refused(`[package.x]\n`), "fish.toml:1:1: error[E0905]: a manifest has no table [package.x]", "a dotted table other than a dependency's");
-  is(refused(`[[package]]\n`), "fish.toml:1:1: error[E0905]: a manifest has no table [package]; it has [package], [dependencies], [rust-dependencies], [registry], [workspace] and [workspace.dependencies]", "an array of packages");
+  is(refused(`[[package]]\n`), "fish.toml:1:1: error[E0905]: a manifest has no table [package]; it has [package], [dependencies], [rust-dependencies], [registry], [comptime], [workspace] and [workspace.dependencies]", "an array of packages");
   is(refused(`[package]\nname = "a\n`), "fish.toml:2:8: error[E0904]: this string isn't closed on its line", "an open string");
   is(refused(`[package]\nname = "a" b\n`), "fish.toml:2:12: error[E0904]: expected the end of the line here", "trailing text");
   is(refused(`[package]\nname "a"\n`), "fish.toml:2:6: error[E0904]: expected '=' after the key", "no '='");
@@ -259,9 +260,9 @@ test("a package states its capabilities, and a dependency is granted them inline
 test("a dependency can come from the workspace, alone or with capabilities, and a package may hold [workspace]", () => {
   const pkg = `[package]\nname = "a"\nversion = "1.0.0"\n`;
   const read = manifest(pkg + `[workspace]\nmembers = ["b"]\n[workspace.dependencies]\nu = { path = "u" }\n[dependencies]\nu = { workspace = true, capabilities = ["fs"] }\n`);
-  const d = read.dependencies[0]!;
+  const d = read.dependencies[0]!.clone();
   assert(d.name === "u" && "workspace" in d && d.capabilities !== undefined && d.capabilities!.join(",") === "fs", "the dependency from the workspace");
-  is(refused(pkg + `[dependencies]\nu = { workspace = false }\n`), "fish.toml:4:19: error[E0905]: 'workspace' is true, taking the dependency from the workspace's [workspace.dependencies]", "workspace = false");
+  is(refused(pkg + `[dependencies]\nu = { workspace = false }\n`), "fish.toml:5:19: error[E0905]: 'workspace' is true, taking the dependency from the workspace's [workspace.dependencies]", "workspace = false");
   is(refused(pkg + `[dependencies]\nu = { workspace = true, version = "^1.0.0" }\n`), "fish.toml:4:25: error[E0905]: a dependency from the workspace takes where it comes from there; 'version' doesn't go with workspace = true", "a version beside it");
   is(refused(pkg + `[workspace]\nmember = ["b"]\n`), "fish.toml:5:1: error[E0905]: [workspace] has no key 'member'; it has members", "a misspelled [workspace] key");
 });

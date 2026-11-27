@@ -8,15 +8,17 @@ export type Command = { name: string; summary: string; usage: string[] };
 export const COMMANDS: Command[] = [
   {
     name: "build",
-    summary: "compile a program, a library or a Node addon",
+    summary: "compile a program, a library, a Node addon or a mobile module",
     usage: [
-      "fishc build [<file.fsh>] [-p <member>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--heap-profile] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--flag <name>[=<value>]]...",
+      "fishc build [<file.fsh>] [-p <member>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--arena <bytes>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--profile] [--heap-profile] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--flag <name>[=<value>]]...",
       "fishc build --addon <file.fsh> [-o <out.node>] [--release] [-g]",
+      "fishc build --mobile ios|android|react-native <file.fsh> [-o <dir>] [--release] [-g] [--sysroot <ndk>]",
     ],
   },
   { name: "check", summary: "check a program without building it", usage: ["fishc check [<file.fsh>] [-p <member>] [--timings] [--no-check-cache] [--flag <name>[=<value>]]..."] },
   { name: "run", summary: "build a program and run it", usage: ["fishc run [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--heap-profile] [--timings] [--flag <name>[=<value>]]... [-- <args>...]"] },
   { name: "watch", summary: "rebuild and rerun a program whenever its files change", usage: ["fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--profile] [--heap-profile] [--timings] [--flag <name>[=<value>]]... [-- <args>...]"] },
+  { name: "dev", summary: "serve a program, swapping in its changed handlers while connections and state stay", usage: ["fishc dev [<file.fsh>] [--locked]"] },
   { name: "repl", summary: "try lines of Fish one at a time", usage: ["fishc repl"] },
   { name: "new", summary: "make a package in a new directory", usage: ["fishc new <name>"] },
   { name: "init", summary: "make a package in this directory", usage: ["fishc init [<name>]"] },

@@ -2199,18 +2199,20 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
-  // A raw pointer's method: a load or a store of what it points at, the address `n` elements
-  // along, or whether it is null.
+  // A raw pointer's method: a load or a store of what it points at, volatile for a device's
+  // registers, the address `n` elements along, or whether it is null.
   pointerCall(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>, callee: Ref<Extract<Expr, { kind: "member" }>>): string | undefined {
     const p = this.valueType(callee.object) as PointerType;
     const at = this.value(callee.object);
     const result = this.temp();
     switch (callee.name) {
       case "read":
-        this.emit(`${result} = load ${this.llvm(this.tables.typing.rec(p).to)}, ptr ${at}`);
+      case "readVolatile":
+        this.emit(`${result} = load ${callee.name === "readVolatile" ? "volatile " : ""}${this.llvm(this.tables.typing.rec(p).to)}, ptr ${at}`);
         return result;
       case "write":
-        const line = `store ${this.llvm(this.tables.typing.rec(p).to)} ${this.value(e.args[0]!)}, ptr ${at}`;
+      case "writeVolatile":
+        const line = `store ${callee.name === "writeVolatile" ? "volatile " : ""}${this.llvm(this.tables.typing.rec(p).to)} ${this.value(e.args[0]!)}, ptr ${at}`;
         this.emit(line);
         return undefined;
       case "offset":
@@ -10977,6 +10979,7 @@ class Codegen implements PrintHost, ComptimeHost {
         if (!this.cur().types.has(e)) this.pending.push({ v: result, type: this.cur().types.get(e.callee)! });
         return result;
       }
+      if (e.callee.kind === "ident" && e.callee.name === "__devKeep" && this.tables.session.build?.dev === true) return this.devKept(e);
       // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return this.value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
@@ -13954,6 +13957,89 @@ class Codegen implements PrintHost, ComptimeHost {
     this.startBlock(join);
     this.emit(`${made} = phi ${this.llvm(thrown)} [ ${asPanic}, %${fromPanic} ], [ ${asOwn}, %${fromOwn} ]`);
     return made;
+  }
+
+
+  // The state a StateRouter is given in `fishc dev`'s handlers: the one the host kept under the
+  // state's shape from an earlier load, when there is one, else the one given, a copy of which the
+  // host keeps for the next load. Each load is a library of its own, so a kept value's code stays
+  // loaded; `fishc dev` restarts the host when a shape, read from the IR's `fsh.devstate` lines,
+  // changes, so no load reads a block laid out for another.
+  devKept(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>): string {
+    const type = this.cur().types.get(e)!;
+    const ty = this.llvm(type);
+    const shape = this.devShape(type, new Set<string>());
+    this.globals.push(`; fsh.devstate ${shape}`);
+    const key = this.cString(shape);
+    const given = this.owned(e.args[0]!);
+    const [slot, none, fresh, kept, done] = [this.temp(), this.temp(), this.label(), this.label(), this.label()];
+    this.emit(`${slot} = call ptr @fishdev_state(ptr ${key})`);
+    this.emit(`${none} = icmp eq ptr ${slot}, null`);
+    this.emit(`br i1 ${none}, label %${fresh}, label %${kept}`);
+    this.startBlock(fresh);
+    const copy = this.copied(given, type);
+    const block = this.temp();
+    this.emit(`${block} = call ptr @fsh_rt_alloc(i64 ${this.sizeOf(ty)})`);
+    this.emit(`store ${ty} ${copy}, ptr ${block}`);
+    this.emit(`call void @fishdev_keep(ptr ${key}, ptr ${block})`);
+    const freshEnd = this.block;
+    this.emit(`br label %${done}`);
+    this.startBlock(kept);
+    this.dispose(given, type);
+    const held = this.temp();
+    this.emit(`${held} = load ${ty}, ptr ${slot}`);
+    const ours = this.copied(held, type);
+    const keptEnd = this.block;
+    this.emit(`br label %${done}`);
+    this.startBlock(done);
+    const result = this.temp();
+    this.emit(`${result} = phi ${ty} [ ${given}, %${freshEnd} ], [ ${ours}, %${keptEnd} ]`);
+    return result;
+  }
+
+  // A type written out with everything it holds, so two loads agree on a shape only when they lay
+  // it out alike.
+  devShape(this: Mut<this>, t: Type, seen: Mut<Set<string>>): string {
+    const shown = this.tables.typing.show(t);
+    if (typeof t === "string" || seen.has(shown)) return shown;
+    seen.add(shown);
+    const r = this.recOf(t);
+    let inner: Type[] = [];
+    let names: string[] = [];
+    if (r?.kind === "class") {
+      if (r.base !== undefined) {
+        names.push("extends");
+        inner.push(r.base);
+      }
+      for (const f of r.fields) {
+        names.push(f.name);
+        inner.push(f.type);
+      }
+    } else if (r?.kind === "object") {
+      for (const f of r.fields) {
+        names.push(f.name);
+        inner.push(f.type);
+      }
+    } else if (r?.kind === "array") inner.push(r.element);
+    else if (r?.kind === "fixed") inner.push(r.element);
+    else if (r?.kind === "map") {
+      inner.push(r.key);
+      inner.push(r.value);
+    } else if (r?.kind === "interior") inner.push(r.of);
+    else if (r?.kind === "shared") inner.push(r.of);
+    else if (r?.kind === "block") inner.push(r.of);
+    else if (r?.kind === "recursive") inner.push(r.of);
+    else if (r?.kind === "union") for (const m of r.members) inner.push(m);
+    else if (r?.kind === "ref") inner.push(r.to);
+    else if (r?.kind === "pointer") inner.push(r.to);
+    else if (r?.kind === "brand") inner.push(r.base);
+    if (inner.length === 0) return shown;
+    let parts: string[] = [];
+    for (let i: usize = 0; i < inner.length; i++) {
+      const held = this.devShape(inner[i]!, seen);
+      parts.push(i < names.length ? `${names[i]!}: ${held}` : held);
+    }
+    return `${shown} { ${parts.join(", ")} }`;
   }
 
 

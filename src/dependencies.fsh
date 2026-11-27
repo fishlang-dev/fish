@@ -43,7 +43,7 @@ class Resolver {
   // Registry dependencies wait until every range on each name is known, then take one version.
   wanted: Wanted[] = [];
   // Where fish.lock is: the workspace's root, or the package's own directory.
-  lockDir = "";
+  lockDir: string = "";
 
   add(this: Mut<this>, pkg: Package): usize {
     const at = this.packages.length;
@@ -303,7 +303,7 @@ function reached(all: Package[]): Package[] {
     }
   }
   let kept: Package[] = [];
-  for (const p of all) if (seen.has(p.dir)) kept.push(p);
+  for (const p of all) if (seen.has(p.dir)) kept.push(p.clone());
   return kept;
 }
 

@@ -99,7 +99,8 @@ function publishedManifest(file: string, manifest: Ref<Manifest>): string {
   const ws = workspaceOf(manifest.dir);
   let listed: string[] | undefined = undefined;
   let edits: { start: usize; end: usize; text: string }[] = [];
-  for (const raw of readManifest(src, manifest.dir).dependencies) {
+  const parsed = readManifest(src, manifest.dir);
+  for (const raw of parsed.dependencies) {
     const d = manifest.dependencies.find((x) => x.name === raw.name)!;
     let range: string | undefined = undefined;
     if ("path" in d && ws !== undefined) {

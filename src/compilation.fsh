@@ -1,3 +1,4 @@
+import type { Reads } from "./reads.fsh";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.fsh";
@@ -35,9 +36,13 @@ import type { DynTable } from "./values.fsh";
 // `generated`: the nodes a macro made, which no warning points into: their author can't change them.
 // `rewrites`: the nodes lowering replaced, by id, until each body's rebuild puts them in place.
 // `looked`: every source file loading read or looked for, as an absolute path, missing ones included.
+// `published`: the program-wide names of the functions a Fish package's lib exports to other
+// packages, whose signatures stay as written.
+// `editionWarnings`: what lowering files in the reference-counted edition warned about.
+// `reads`: the files the entry's package lets comptime read.
 export type Compilation = {
   session: Session; ids: Ids; rewrites: Rewrites; names: Names; regex: RegexTables; typing: Typing; arenas: Arenas; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string; std: boolean }[]; rust: RustTables;
-  enumInits: [usize, usize, string][]; fileNames?: Map<usize, Map<string, string>>; generated: NodeSet<Id>; looked: string[];
+  enumInits: [usize, usize, string][]; fileNames?: Map<usize, Map<string, string>>; generated: NodeSet<Id>; looked: string[]; published?: Set<string>; editionWarnings?: CompileError[]; reads?: Reads;
 };
 
 // What a compilation numbers as it goes, from 0, so the same program is numbered the same way
@@ -77,14 +82,16 @@ export type Session = {
 
 // A `--flag name` or `--flag name=value` given to a build.
 export type BuildFlag = { name: string; value: string | null };
-// `triple` is the one `--target` gave, or empty for the host.
-export type BuildInfo = { triple: string; release: boolean; flags: BuildFlag[] };
+// `triple` is the one `--target` gave, or empty for the host. `dev` is `fishc dev`'s build of a
+// program's handlers, whose serve answers through the host that loads them.
+export type BuildInfo = { triple: string; release: boolean; flags: BuildFlag[]; dev?: boolean };
 
 // The build `given` describes, made a release one or not, and for `triple` when one is given.
-export function buildFor(given: Ref<BuildInfo | undefined>, triple: string | undefined, release: boolean): BuildInfo {
+export function buildFor(given: Ref<BuildInfo | undefined>, triple: string | undefined, release: boolean, dev?: boolean): BuildInfo {
   let flags: BuildFlag[] = [];
   if (given !== undefined) for (const f of given.flags) flags.push({ name: f.name, value: f.value });
-  return { triple: triple ?? (given !== undefined ? given.triple : ""), release, flags };
+  const handlers = dev ?? (given !== undefined && given.dev === true);
+  return { triple: triple ?? (given !== undefined ? given.triple : ""), release, flags, dev: handlers };
 }
 
 export function newSession(): Session {
@@ -127,6 +134,7 @@ export function macroCompilation(c: Ref<Compilation>): Compilation {
     fileNames,
     generated: c.generated.copy(),
     looked: [...c.looked],
+    reads: c.reads === undefined ? undefined : { dir: c.reads!.dir, globs: [...c.reads!.globs] },
   };
 }
 
@@ -149,7 +157,10 @@ export type Tables = {
   names: Names;
   enumInits: Compilation["enumInits"];
   fileNames?: Compilation["fileNames"];
+  published?: Compilation["published"];
+  editionWarnings?: Compilation["editionWarnings"];
   looked: string[];
+  reads?: Reads;
   typing: Typing;
   arenas: Arenas;
   upcasts: Set<string>;
@@ -425,13 +436,16 @@ export type Tables = {
 /** @throws {CompileError} */
 export type Timed<T> = () => T;
 
-export function newTables({ session, names, enumInits, fileNames, looked, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
+export function newTables({ session, names, enumInits, fileNames, published, editionWarnings, looked, reads, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
   return {
     session,
     names,
     enumInits,
     fileNames,
+    published,
+    editionWarnings,
     looked,
+    reads,
     typing,
     arenas,
     upcasts,

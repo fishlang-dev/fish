@@ -43,7 +43,7 @@ test("fishc fix prefers Ref<T> borrow over clone for read-only callee and preser
   try {
     const file = join(dir, "app.fsh");
     const src = `// keep this header comment
-function total(xs: i64[]): i64 {
+export function total(xs: i64[]): i64 {
   let sum = 0;
   for (const x of xs) sum += x;
   return sum;
@@ -213,7 +213,7 @@ function main() {
     assert(fixed.code === 0, `package fix failed: ${fixed.out}\n${fixed.err}`);
     const helperAfter = read(helper);
     const entryAfter = read(entry);
-    assert(helperAfter.includes("firstLen(xs: Ref<string[]>)"), `expected Ref<string[]> in helper.fsh:\n${helperAfter}`);
+    assert(helperAfter.includes("firstLen(xs: string[])"), `a function only its own package calls borrows what it only reads without a fix:\n${helperAfter}`);
     assert(helperAfter.includes("inc(this: Mut<this>, by: i64)"), `expected this: Mut<this> in helper.fsh:\n${helperAfter}`);
     assert(helperAfter.includes("bump(c: Mut<Counter>)"), `expected Ref -> Mut in helper.fsh:\n${helperAfter}`);
     assert(entryAfter.includes("let c = new Counter();"), `expected const c -> let c in main.fsh:\n${entryAfter}`);
@@ -340,8 +340,18 @@ test("fishc fix handles intra-project symlinked imports and parenthesizes lower-
     const real = join(dir, "src", "real.fsh");
     write(
       real,
-      `export function count(xs: i64[]): usize {
-  return xs.length;
+      `export class Bag {
+  vals: i64[];
+  constructor(vals: i64[]) {
+    this.vals = vals;
+  }
+  size(): usize {
+    return this.vals.length;
+  }
+}
+
+export function count(b: Bag): usize {
+  return b.size();
 }
 `,
     );
@@ -349,7 +359,7 @@ test("fishc fix handles intra-project symlinked imports and parenthesizes lower-
     const entry = join(dir, "src", "main.fsh");
     write(
       entry,
-      `import { count } from "./link.fsh";
+      `import { Bag, count } from "./link.fsh";
 
 class Wrap {
   vals: i64[];
@@ -363,11 +373,11 @@ function pickOr(maybe: Ref<i64[]> | undefined, w: Ref<Wrap>): i64[] {
 }
 
 function main() {
-  const nums = [7, 8];
-  const n = count(nums);
+  const bag = new Bag([7, 8]);
+  const n = count(bag);
   const w = new Wrap([1, 2, 3]);
   const picked = pickOr(undefined, w);
-  console.log(n, nums.length, picked.length);
+  console.log(n, bag.vals.length, picked.length);
 }
 `,
     );
@@ -375,7 +385,7 @@ function main() {
     assert(fixed.code === 0, `symlink/parens fix failed: ${fixed.out}\n${fixed.err}`);
     const realAfter = read(real);
     const entryAfter = read(entry);
-    assert(realAfter.includes("count(xs: Ref<i64[]>): usize"), `expected Ref<i64[]> through intra-project symlink:\n${realAfter}`);
+    assert(realAfter.includes("count(b: Ref<Bag>): usize"), `expected Ref<Bag> through intra-project symlink:\n${realAfter}`);
     assert(entryAfter.includes("(maybe ?? w.vals).clone()"), `expected parenthesized clone on binary expression:\n${entryAfter}`);
 
     const bin = join(dir, "app");

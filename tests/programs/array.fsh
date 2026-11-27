@@ -60,7 +60,7 @@ function main() { const xs = [1]; console.log(xs.map(double).length); }
 // case: array_callback_once
 // error: 'map' calls its callback once per element, but this closure moves 'owned' out, so it can run only once
 class P { n: i64; name: string; constructor(n: i64, name: string) { this.n = n; this.name = name; } }
-function take(p: P): string { return p.name; }
+export function take(p: P): string { return p.name; }
 function main() {
   const owned = new P(4, "own" + 1);
   const xs = [1, 2, 3];
@@ -397,8 +397,8 @@ function main() {
 // error: cannot change 'xs' while 'r' borrows 'xs[...]' and is used later
 // case: array_element_move
 type Q = { n: i64 };
-function take(q: Q) {}
-function grow(xs: Mut<Q[]>, q: Ref<Q>) {
+export function take(q: Q) {}
+export function grow(xs: Mut<Q[]>, q: Ref<Q>) {
   xs.push({ n: q.n });
 }
 

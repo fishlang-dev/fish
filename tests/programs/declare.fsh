@@ -221,7 +221,7 @@ async function main() {
 // error: 'c.xs.length' can't be used here because 'c' was moved
 class E { constructor(public m: string) {} }
 class C { constructor(public xs: string[]) {} }
-function take(c: C) { console.log(c.xs.length); }
+export function take(c: C) { console.log(c.xs.length); }
 async function bad(n: i64): Promise<i64> throws E { await sleep(1); if (n > 0) throw new E("e" + n); return n; }
 async function main() {
   let c = new C(["a" + 1]);

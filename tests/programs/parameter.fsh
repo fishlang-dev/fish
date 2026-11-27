@@ -83,11 +83,11 @@ function main() {
 // expect: 1
 // expect: 3
 // case: parameter_moved_read
-function take(xs: string[]) {
+export function take(xs: string[]) {
   console.log(xs.length)
 }
 
-function f(xs: string[]) {
+export function f(xs: string[]) {
   take(xs)
   console.log(xs.length)  // error: 'xs.length' can't be used here because 'xs' was moved
 }

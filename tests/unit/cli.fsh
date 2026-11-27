@@ -150,7 +150,7 @@ test("a file's directive sets its edition, over its package's, after any shebang
   ]);
   ran(fishcIn(mixed, ["build", "main.fsh"]), 1, "", `two.fsh:1:1: error[E0006]: ${compat()}\n 1 | // @fish-edition ts-compat\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^\n`, "a TS-compat import");
   const unknown = dir(root, "unknown-edition", [["main.fsh", "#!/usr/bin/env fishc\n// @fish-edition typescript\nfunction main() {}\n"]]);
-  ran(fishcIn(unknown, ["build", "main.fsh"]), 1, "", "main.fsh:2:1: error[E0005]: an edition directive is written '// @fish-edition native' or '// @fish-edition ts-compat'\n 2 | // @fish-edition typescript\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n", "an unknown edition");
+  ran(fishcIn(unknown, ["build", "main.fsh"]), 1, "", "main.fsh:2:1: error[E0005]: an edition directive is written '// @fish-edition native', '// @fish-edition rc' or '// @fish-edition ts-compat'\n 2 | // @fish-edition typescript\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n", "an unknown edition");
   removed(root);
 }, { timeout: 30_000 });
 

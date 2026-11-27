@@ -383,6 +383,19 @@ test("the user's own git hooks don't run while a dependency is checked out", () 
   removed(root);
 }, { timeout: 30_000 });
 
+test("a package's exports keep their written signatures, while its own functions borrow what they only read", () => {
+  const root = scratch("fish-deps-");
+  const lib = "export type Point = { x: i64; y: i64 };\nfunction sum(p: Point): i64 { return p.x + p.y; }\nexport function show(p: Point): i64 { return sum(p) + sum(p); }\n";
+  files(root, "own/shapes", [["fish.toml", manifest("shapes")], ["src/lib.fsh", lib]]);
+  const ok = files(root, "own/ok", [["fish.toml", manifest("ok", `shapes = { path = "../shapes" }\n`)], ["src/main.fsh", `import { show } from "shapes";\nfunction main() { const p = { x: 1, y: 2 }; console.log(show(p)); }\n`]]);
+  built(fishc(ok, ["build"]), "fishc build");
+  same(ran(join(ok, "target", "debug", "ok")), "6\n", "the program");
+  const kept = files(root, "own/kept", [["fish.toml", manifest("kept", `shapes = { path = "../shapes" }\n`)], ["src/main.fsh", `import { show } from "shapes";\nfunction main() { const p = { x: 1, y: 2 }; console.log(show(p)); console.log(p.x); }\n`]]);
+  const refused = fishc(kept, ["build"]);
+  assert(refused.code === 1 && refused.err.includes("'p.x' can't be used here because 'p' was moved"), `an export's parameter was borrowed: exited with ${refused.code}: ${refused.err}`);
+  removed(root);
+}, { timeout: 30_000 });
+
 // Runs fishc with `args` in `cwd` with its cache at `cache`, keeping all of its output.
 function whole(cwd: string, cache: string, args: string[]): { code: i64; out: string; err: string } {
   const run = spawnSync("env", [`FISH_CACHE_DIR=${cache}`, fishcPath(), ...args], { cwd });

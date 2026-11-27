@@ -21,6 +21,7 @@ import { compile as compileRegex, parsePattern, RegexSyntaxError } from "./regex
 import { BUFFER_ENCODINGS, BUFFER_READS, BUFFER_REFUSED, BUFFER_STATICS, JSON_VALUE_NAME, STD_BASE } from "./std.fsh";
 import { parseArgsArgs, typedParseArgs, writtenFields } from "./parseargs.fsh";
 import { parseExpression } from "./parser.fsh";
+import { inferredRef } from "./ownership.fsh";
 import { holesOf, quoted, type Category } from "./quote.fsh";
 import { holdsNull } from "./defaults.fsh";
 import { bodyOf, type Arenas, type BodyId, type ClassId, type InstanceId, type LocalId } from "./arenas.fsh";
@@ -4947,12 +4948,14 @@ export class Expressions<C extends Context> implements Union<C> {
   }
 
   // A raw pointer's methods, all inside `unsafe`: reading and writing what it points at, which
-  // must be a plain value a raw write can't leave dangling, moving along by elements, and
-  // telling whether it points anywhere.
+  // must be a plain value a raw write can't leave dangling, volatile for a device's registers,
+  // moving along by elements, and telling whether it points anywhere.
   /** @throws {CompileError} */
   private pointerCall(this: Mut<this>, e: Ref<Call>, callee: Ref<Extract<Expr, { kind: "member" }>>, p: PointerType): { type: Type; what: string } {
-    const count: usize | undefined = callee.name === "read" || callee.name === "isNull" ? 0 : callee.name === "write" || callee.name === "offset" ? 1 : undefined;
-    if (count === undefined) throw new CompileError("E1006", `raw pointers have no method '${callee.name}'; they have 'read', 'write', 'offset' and 'isNull'`, callee.start, callee.end);
+    const reads = callee.name === "read" || callee.name === "readVolatile";
+    const writes = callee.name === "write" || callee.name === "writeVolatile";
+    const count: usize | undefined = reads || callee.name === "isNull" ? 0 : writes || callee.name === "offset" ? 1 : undefined;
+    if (count === undefined) throw new CompileError("E1006", `raw pointers have no method '${callee.name}'; they have 'read', 'write', 'readVolatile', 'writeVolatile', 'offset' and 'isNull'`, callee.start, callee.end);
     this.needsUnsafe(`'${callee.name}' on a raw pointer`, { start: callee.start, end: callee.end });
     if (this.linked(callee)) throw unsupported("optional chains calling raw pointer methods", callee);
     const held = this.ctx.held().types.get(callee.object)!;
@@ -4960,16 +4963,16 @@ export class Expressions<C extends Context> implements Union<C> {
     if (e.args.length !== count) throw new CompileError("E0504", `'${callee.name}' takes ${count === 1 ? "1 argument" : "no arguments"}`, e.start, e.end);
     const { to } = this.ctx.typing().rec(p);
     const plain = isNumeric(to) || to === "boolean" || this.kindOf(to) === "pointer";
-    if ((callee.name === "read" || callee.name === "write") && !plain) throw unsupported(`raw reads and writes of '${this.ctx.typing().show(to)}'`, callee);
-    if (callee.name === "read") return { type: to, what: "'read'" };
+    if ((reads || writes) && !plain) throw unsupported(`raw reads and writes of '${this.ctx.typing().show(to)}'`, callee);
+    if (reads) return { type: to, what: `'${callee.name}'` };
     if (callee.name === "isNull") return { type: "boolean", what: "'isNull'" };
-    const want = callee.name === "write" ? to : "i64";
-    if (callee.name === "write" && !this.ctx.typing().rec(p).mutable) throw new CompileError("E1006", "'write' needs a 'MutPtr'; a 'Ptr' only reads what it points at", callee.start, callee.end);
+    const want = writes ? to : "i64";
+    if (writes && !this.ctx.typing().rec(p).mutable) throw new CompileError("E1006", `'${callee.name}' needs a 'MutPtr'; a 'Ptr' only reads what it points at`, callee.start, callee.end);
     this.expect(e.args[0]!, want);
     const t = this.value(e.args[0]!);
     const arg4525_1 = `argument of type '${this.ctx.typing().show(t)}' is not assignable to parameter of type '${this.ctx.typing().show(want)}'`;
     this.coerce(e.args[0]!, t, want, arg4525_1);
-    return { type: callee.name === "write" ? "void" : p, what: `'${callee.name}'` };
+    return { type: writes ? "void" : p, what: `'${callee.name}'` };
   }
 
   // `new Atomic(v)`, `new Lock(v)`, `new Cell(v)`: one holding v, of its type argument, the type
@@ -8318,6 +8321,12 @@ export class Expressions<C extends Context> implements Union<C> {
       const expected = params[i]!;
       if (this.isRefType(expected) && this.ctx.typing().rec(expected).mutable) this.readOnlySubarray(list[i]!);
       const declared = cloneParam(written[i]!);
+      // An inferred reference takes what the owned parameter it stands for took, and is named as
+      // that was written.
+      if (inferredRef(declared) && this.isRefType(expected)) {
+        this.lendInferred(list[i]!, type, expected, this.ctx.typing().rec(expected).to);
+        continue;
+      }
       const shown = this.defaultedArg(list[i]!, type, declared) ?? expected;
       this.coerceArg(list[i]!, type, expected, shown);
     }
@@ -8334,6 +8343,24 @@ export class Expressions<C extends Context> implements Union<C> {
       const said = `argument of type '${this.ctx.typing().show(type)}' is not assignable to parameter of type '${this.ctx.typing().show(shown)}'`;
       throw new CompileError(err.code, err.message.replace(ARGUMENT_MISMATCH, said), err.start, err.end, err.note === undefined ? undefined : { ...err.note! });
     }
+  }
+
+  // An argument to an inferred reference: lent where it fits as it is, and otherwise judged as
+  // the owned parameter judged it, which either refuses it with its own message or converts it,
+  // here into the copy the reference reads.
+  /** @throws {CompileError} */
+  private lendInferred(this: Mut<this>, a: Ref<Expr>, type: Type, to: Type, written: Type): void {
+    try {
+      this.coerceArg(a, type, to, written);
+    } catch (err) {
+      if (!(err instanceof CompileError)) throw err;
+      this.coerceArg(a, type, written, written);
+      const now = this.ctx.tables().rewrites.rewritten(a);
+      this.ctx.coercions().set(now !== undefined ? now : a, to);
+      return;
+    }
+    // A literal that fits a reference as it is still names only what the parameter has.
+    this.excess(a, written);
   }
 
   // A parameter with a default takes a value of its declared type, which this gives: leaving the

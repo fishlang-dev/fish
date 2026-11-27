@@ -164,8 +164,8 @@ function main() { f(false) }
 // case: try_finally_moved
 // A value moved on a way out is gone in the finally.
 class O { constructor(public n: i64) {} }
-function take(o: O) {}
-function f(c: boolean) {
+export function take(o: O) {}
+export function f(c: boolean) {
   const o = new O(1)
   try {
     if (c) {
@@ -181,7 +181,7 @@ function main() {}
 // case: try_moved
 // A value moved into a call that failed is gone in the catch.
 class O { constructor(public n: i64) {} }
-function take(o: O): i64 throws i64 {
+export function take(o: O): i64 throws i64 {
   if (o.n < 0) throw 1
   return o.n
 }

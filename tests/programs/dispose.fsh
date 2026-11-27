@@ -567,7 +567,7 @@ class Res {
   constructor(tag: string) { this.tags = [tag]; }
   [Symbol.dispose](this: Mut<this>): void { console.log(`dispose ${this.tags.length}`); }
 }
-function keep(tags: string[]): void {}
+export function keep(tags: string[]): void {}
 function main() {
   const r = new Res("a");
   keep(r.tags);
@@ -1392,7 +1392,7 @@ class Res {
   constructor(name: string) { this.name = name; }
   async [Symbol.asyncDispose](this: Mut<this>): Promise<void> {}
 }
-function consume(r: Res): void {}
+export function consume(r: Res): void {}
 async function main() {
   await using r = new Res("a");
   consume(r);

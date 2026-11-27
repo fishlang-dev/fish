@@ -14,15 +14,16 @@ export type Dependency = { name: string; start: usize; end: usize; capabilities?
 // A package as its `fish.toml` describes it, `dir` being where that file was found; `lib` is
 // what a package depending on it imports, `entry` the program it builds.
 // `edition`: "ts-compat" marks TypeScript not yet migrated, which a build refuses and `fishc lint`
-// reads.
+// reads; "rc" holds objects reference-counted, as `src/refcounted.fsh` lowers them.
 // `rustDependencies` is the `[rust-dependencies]` table, when the manifest has one.
 // `capabilities` is what the package says it uses of what a dependency must be granted.
-export type Manifest = { name: string; version: string; entry: string; lib: string; edition: Edition; capabilities: Capability[]; dependencies: Dependency[]; rustDependencies?: RustDependency[]; registry?: string; dir: string };
+// `reads`: the globs `[comptime] reads` lists, the package's files comptime may read.
+export type Manifest = { name: string; version: string; entry: string; lib: string; edition: Edition; capabilities: Capability[]; dependencies: Dependency[]; rustDependencies?: RustDependency[]; registry?: string; reads?: string[]; dir: string };
 // A Rust crate the package's `declare module "rust:<crate>"` declarations call, in Cargo's terms.
 export type RustDependency = {
   name: string; start: usize; end: usize; version?: string; features?: string[]; defaultFeatures?: boolean; path?: string; git?: string; rev?: string; tag?: string; branch?: string;
 };
-export type Edition = "native" | "ts-compat";
+export type Edition = "native" | "ts-compat" | "rc";
 // What a dependency's code may reach beyond computing: the network, files, C and other native
 // code, `unsafe`, and other programs.
 export type Capability = "net" | "fs" | "ffi" | "unsafe" | "spawn";
@@ -274,7 +275,7 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
 /** @throws {CompileError} */
 export function readManifest(src: string, dir: string): Manifest {
   const tables = parseToml(src);
-  const known = new Map<string, string[]>([["", []], ["package", ["name", "version", "entry", "lib", "edition", "capabilities"]], ["dependencies", []], ["rust-dependencies", []], ["registry", ["url"]], ["workspace", ["members"]]]);
+  const known = new Map<string, string[]>([["", []], ["package", ["name", "version", "entry", "lib", "edition", "capabilities"]], ["dependencies", []], ["rust-dependencies", []], ["registry", ["url"]], ["comptime", ["reads"]], ["workspace", ["members"]]]);
   for (const [name, found] of tables) {
     // A workspace's dependencies are read with the workspace, which a package needn't be.
     if (name === "workspace.dependencies" || name.startsWith("workspace.dependencies.")) continue;
@@ -283,7 +284,7 @@ export function readManifest(src: string, dir: string): Manifest {
       continue;
     }
     const keys = known.get(name);
-    const missing = `a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies], [registry], [workspace] and [workspace.dependencies]`;
+    const missing = `a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies], [registry], [comptime], [workspace] and [workspace.dependencies]`;
     if (Array.isArray(found)) throw new CompileError("E0905", missing, found[0]!.start, found[0]!.end);
     if (keys === undefined) throw new CompileError("E0905", missing, found.start, found.end);
     for (const { key } of found.keys.values()) {
@@ -303,8 +304,8 @@ export function readManifest(src: string, dir: string): Manifest {
   const entry = packageFile(pkg, "entry", "src/main.fsh");
   const lib = packageFile(pkg, "lib", "src/lib.fsh");
   const edition = textIn(pkg.keys, "edition", true);
-  if (edition !== undefined && edition.value !== "native" && edition.value !== "ts-compat") throw new CompileError("E0905", `'${edition.value}' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated`, edition.start, edition.end);
-  const chosen: Edition = edition !== undefined && edition.value === "ts-compat" ? "ts-compat" : "native";
+  if (edition !== undefined && edition.value !== "native" && edition.value !== "ts-compat" && edition.value !== "rc") throw new CompileError("E0905", `'${edition.value}' isn't an edition; it is "native", the default, "rc" for reference-counted objects, or "ts-compat" for TypeScript not yet migrated`, edition.start, edition.end);
+  const chosen: Edition = edition !== undefined && edition.value === "ts-compat" ? "ts-compat" : edition !== undefined && edition.value === "rc" ? "rc" : "native";
   const dependencies = dependenciesIn(tables, "dependencies");
   const capabilities = capabilityList(pkg.keys.get("capabilities"));
   let rustDependencies: RustDependency[] | undefined = undefined;
@@ -332,7 +333,31 @@ export function readManifest(src: string, dir: string): Manifest {
       registry = written;
     }
   }
-  return { name: name.value, version: version.value, entry, lib, edition: chosen, capabilities, dependencies, rustDependencies, registry, dir };
+  const section = tables.get("comptime");
+  const reads = readsList(section);
+  let made: Manifest = { name: name.value, version: version.value, entry, lib, edition: chosen, capabilities, dependencies, rustDependencies, registry, dir };
+  if (reads !== undefined) made.reads = reads;
+  return made;
+}
+
+// `[comptime] reads = ["assets/*.txt", ...]`: globs relative to the package's directory, none
+// absolute or reaching out of it with '..'.
+/** @throws {CompileError} */
+function readsList(table: Ref<Table | Table[] | undefined>): string[] | undefined {
+  if (table === undefined || Array.isArray(table)) return undefined;
+  const found = table.keys.get("reads");
+  if (found === undefined) return undefined;
+  const form = "'reads' is a list of globs relative to the package, as in reads = [\"assets/*.txt\", \"schemas/**/*.json\"]";
+  const list = found.value.value;
+  if (!Array.isArray(list)) throw new CompileError("E0905", form, found.value.start, found.value.end);
+  let out: string[] = [];
+  for (const g of list) {
+    const glob: Ref<TomlValue> = g.value;
+    if (typeof glob !== "string") throw new CompileError("E0905", form, g.start, g.end);
+    if (glob === "" || glob.startsWith("/") || glob.split("/").includes("..")) throw new CompileError("E0905", `'${glob}' reaches outside the package; a glob is relative to the directory holding fish.toml, with no '..'`, g.start, g.end);
+    out.push(glob);
+  }
+  return out;
 }
 
 // The dependencies under the table `table`, written inline in it or each as `[<table>.<name>]`.

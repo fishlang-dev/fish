@@ -166,14 +166,14 @@ export function inherited(manifest: Manifest): Manifest {
   let deps: Dependency[] = [];
   for (const d of [...manifest.dependencies]) {
     if (!("workspace" in d)) {
-      deps.push(d);
+      deps.push(d.clone());
       continue;
     }
     if (ws === undefined) throw new CompileError("E0905", `'${d.name}' comes from the workspace, but this package isn't a member of one; say where it comes from instead`, d.start, d.end);
     const shared = ws.dependencies.find((w) => w.name === d.name);
     if (shared === undefined) throw new CompileError("E0905", `the workspace's [workspace.dependencies] has no '${d.name}'; declare it there`, d.start, d.end);
-    const own = d.capabilities;
-    const given = shared.capabilities;
+    const own = d.capabilities.clone();
+    const given = shared.capabilities.clone();
     const capabilities = own !== undefined ? [...own] : given !== undefined ? [...given] : undefined;
     if ("version" in shared) deps.push({ name: d.name, start: d.start, end: d.end, capabilities, version: shared.version });
     else if ("path" in shared) {
