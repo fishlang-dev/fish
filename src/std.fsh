@@ -2039,6 +2039,13 @@ type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHan
 // A router's routes and middleware, shared so each middleware's next can hold them.
 type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
 
+// A value a route's handler gives or throws that makes its own response, as axum's trait does.
+// A Response is given as it is, a thrown string as a 500's text, and any other error a handler
+// throws as a 500 that says nothing of it.
+interface IntoResponse {
+  intoResponse(): Response;
+}
+
 // Serves HTTP/1.1 on hostname and port, or a socket path, each connection on a task of its own.
 async function serve(options: ServeOptions, handler: (req: Request) => Promise<Response>): Promise<void> throws IoError {
   const unix = options.unix;
@@ -2574,6 +2581,12 @@ class Router {
     return null;
   }
 
+  // The router with state its handlers and middleware are given, as axum's with_state: each
+  // request gets a clone, so the state is a handle such as a pool or a shared<T>.
+  state<S>(this: Own<this>, state: S): StateRouter<S> {
+    return new StateRouter<S>(this, state);
+  }
+
   // The router as the handler serve takes; the handler owns it.
   handler(this: Own<this>): ServeHandler {
     const router = this;
@@ -2611,9 +2624,62 @@ class Router {
   }
 }
 
+// A Router whose handlers take (req, state) and whose middleware take (req, state, next).
+class StateRouter<S> {
+  private router: Router;
+  private held: S;
+
+  constructor(router: Router, held: S) {
+    this.router = router;
+    this.held = held;
+  }
+
+  use(this: Mut<this>, middleware: (req: Request, state: S, next: __routerNext) => Promise<Response>) {
+    const state = this.held.clone();
+    this.router.use(async (req: Request, next: __routerNext) => {
+      const res = await middleware(req, state.clone(), next);
+      return res;
+    });
+  }
+
+  get(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.get(path, this.bound(handler)); }
+  post(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.post(path, this.bound(handler)); }
+  put(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.put(path, this.bound(handler)); }
+  patch(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.patch(path, this.bound(handler)); }
+  delete(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.delete(path, this.bound(handler)); }
+  all(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.all(path, this.bound(handler)); }
+  route(this: Mut<this>, method: string, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.route(method, path, this.bound(handler)); }
+
+  // A plain router's routes under a prefix, as Router.route mounts one.
+  mount(this: Mut<this>, prefix: string, child: Router) { this.router.route(prefix, child); }
+
+  static(this: Mut<this>, prefix: string, root: string) { this.router.static(prefix, root); }
+
+  async handle(req: Request): Promise<Response> {
+    const res = await this.router.handle(req);
+    return res;
+  }
+
+  handler(this: Own<this>): ServeHandler {
+    const router = this;
+    return async (req: Request) => {
+      const res = await router.handle(req);
+      return res;
+    };
+  }
+
+  private bound(this: Ref<this>, handler: (req: Request, state: S) => Promise<Response>): ServeHandler {
+    const state = this.held.clone();
+    return async (req: Request) => {
+      const res = await handler(req, state.clone());
+      return res;
+    };
+  }
+}
+
 // What the checker writes around a route's handler that says its types: a 400 saying why the
-// body isn't the JSON its type reads, a 204 for a handler giving nothing, and what a handler
-// gives as JSON.
+// body isn't the JSON its type reads, a 204 for a handler giving nothing, what a handler gives as
+// JSON or as its own response, and the response for what it throws, chosen by the error's type.
 function __routerRefused(message: string): Response {
   return new Response(message, { status: 400 });
 }
@@ -2626,6 +2692,25 @@ function __routerEmpty(): Response {
 // write it as the type's layout, an empty optional field as null where the type leaves it out.
 function __routerJson<T>(data: Ref<T>): Response {
   let res = new Response(JSON.stringify(data));
+  res.headers.set("content-type", "application/json");
+  return res;
+}
+
+function __routerInto(value: IntoResponse): Response {
+  return value.intoResponse();
+}
+
+function __routerGiven(res: Response): Response {
+  return res;
+}
+
+function __routerText(message: string): Response {
+  return new Response(message, { status: 500 });
+}
+
+// The error is dropped unread: its message may say what a client shouldn't see.
+function __routerFailed<E>(_error: E): Response {
+  let res = new Response("{\\"error\\":\\"Internal Server Error\\"}", { status: 500 });
   res.headers.set("content-type", "application/json");
   return res;
 }
@@ -5304,7 +5389,7 @@ const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date", "RangeError", "Html"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
 export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection", "Http2", "Http2Hpack", "Http2Stream"]);
-const HTTP_NAMES = ["fetch", "serve", "Router", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+const HTTP_NAMES = ["fetch", "serve", "Router", "StateRouter", "IntoResponse", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE: usize = 2 ** 40;
