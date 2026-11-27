@@ -12,6 +12,7 @@ import { cachedSession } from "./mathlib.fsh";
 import { CompileError, copyNames, formatError, movedOffset, type BorrowEvent, type Names, type Source } from "./diag.fsh";
 import { load, type Loaded, type RustCrate } from "./modules.fsh";
 import { resolvePackages } from "./dependencies.fsh";
+import { workspaceAbove, workspaceOf, type Member, type Workspace } from "./workspace.fsh";
 import { pack, prepare, submit, unsafeDependencies, upload } from "./publish.fsh";
 import { openIndex, registryUrl, sparseBase, useRegistry } from "./registry_index.fsh";
 import { formatVersion, parseRange, maxSatisfying, type Version } from "./semver.fsh";
@@ -1670,6 +1671,92 @@ function fail(message: string): never {
   return process.exit(2);
 }
 
+// The commands that run in every member at a workspace's root, and those `-p` can aim.
+const ACROSS = new Set(["build", "check", "test", "fmt"]);
+const AIMED = new Set(["build", "check", "test", "fmt", "add", "publish"]);
+
+// fishc's own arguments without the `-p <name>` they were given in any of its spellings, and with
+// `-p <member>` first, for fishc run again in that member's directory.
+function aimedAt(member: string): string[] {
+  let out = ["-p", member];
+  let ended = false;
+  const given = Bun.argv.slice(2);
+  for (let i: usize = 0; i < given.length; i++) {
+    const a = given[i]!;
+    if (!ended && (a === "-p" || a === "--package")) i++;
+    else if (!ended && ((a.startsWith("-p") && a !== "-p") || a.startsWith("--package="))) continue;
+    else {
+      if (a === "--") ended = true;
+      out.push(a);
+    }
+  }
+  return out;
+}
+
+// Runs fishc again in a member's directory, aimed at it, and gives its exit code.
+function inMember(member: Ref<Member>): i64 {
+  const run = Bun.spawnSync([process.execPath, ...aimedAt(member.name)], { cwd: member.dir, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+  return run.exitCode ?? 1;
+}
+
+// Whether a member is only a library, with a lib and no entry: build and check across a workspace
+// pass over it, as the members importing it check it. A manifest that doesn't read isn't passed
+// over, so its own run reports it.
+function libraryOnly(member: Ref<Member>): boolean {
+  try {
+    const m = loadManifest(join(member.dir, MANIFEST));
+    return !existsSync(join(member.dir, m.entry)) && existsSync(join(member.dir, m.lib));
+  } catch (_e) {
+    return false;
+  }
+}
+
+// `-p <name>` runs the command in that member of the workspace around the working directory, and
+// build, check, test and fmt at a workspace's root, with no file or path, run in every member, each
+// after a line naming it. Returns when the command runs here, as it would with no workspace.
+function throughWorkspace(command: string | undefined, chosen: string | undefined, given: boolean, out: boolean): void {
+  const across = command !== undefined && ACROSS.has(command!);
+  if (chosen === undefined && !across) return;
+  const shown = command ?? "";
+  if (chosen !== undefined && !(command !== undefined && AIMED.has(command!))) fail(`fishc ${shown}: '-p' chooses a workspace member for build, check, test, fmt, add and publish`);
+  if (chosen !== undefined && given) fail(`fishc ${shown}: '-p' chooses the member to run in; give a file or path, or '-p', not both`);
+  const here = realpathSync(process.cwd());
+  let ws: Workspace | undefined = undefined;
+  try {
+    ws = workspaceAbove(here);
+  } catch (e) {
+    if (!(e instanceof CompileError)) throw e;
+    console.error(painted(e, e.sources.length > 0 ? e.sources[0]!.file : MANIFEST, e.sources.length > 0 ? e.sources[0]!.src : ""));
+    process.exit(1);
+  }
+  if (chosen !== undefined) {
+    if (ws === undefined) fail(`fishc ${shown}: '-p' chooses a member of a workspace, and there is no [workspace] here or above`);
+    const member = ws!.members.find((m) => m.name === chosen) ?? fail(`fishc ${shown}: the workspace has no member '${chosen!}'; it has ${ws!.members.map((m) => m.name).join(", ")}`);
+    if (member.dir === here) return;
+    process.exit(inMember(member));
+  }
+  // Only at the root itself: inside a member, or a package on its own, the command is that one's.
+  const found = findManifest(here);
+  if (ws === undefined || given || found === undefined || realpathSync(found!) !== ws!.file) return;
+  if (out) fail(`fishc ${shown}: '-o' names one output, and a workspace's root runs every member; choose one with -p <name>`);
+  let failed: string[] = [];
+  let code = 0;
+  for (const m of ws!.members) {
+    if ((command === "build" || command === "check") && libraryOnly(m)) {
+      console.error(`==> ${m.name}: a library with no entry, checked by the members that import it`);
+      continue;
+    }
+    console.error(`==> ${m.name}`);
+    const ran = inMember(m);
+    if (ran !== 0) {
+      failed.push(m.name);
+      if (code === 0) code = ran;
+    }
+  }
+  if (failed.length > 0) console.error(`fishc ${shown}: ${failed.length} of ${ws!.members.length} members failed: ${failed.join(", ")}`);
+  process.exit(code);
+}
+
 // The errors that are what `fishc explain-borrows` shows rather than what stops it.
 const OWNERSHIP = new Set(["E0201", "E0202", "E0203", "E0204", "E0205"]);
 
@@ -2064,6 +2151,7 @@ async function main(): Promise<void> {
           seeds: { type: "string" },
           "no-doc": { type: "boolean" },
           flag: { type: "string", multiple: true },
+          package: { type: "string", short: "p" },
         },
       });
     } catch (e) {
@@ -2071,9 +2159,10 @@ async function main(): Promise<void> {
     }
   })();
   // The options given, as Node's parseArgs keys them: those on the command line and `panic`'s default.
-  // --registry applies to whatever reads the registry, so no command's own flags list it.
+  // --registry applies to whatever reads the registry, and -p is taken by throughWorkspace before
+  // any command reads its flags, so no command's own flags list them.
   let flags: string[] = [];
-  for (const [k, v] of Object.entries(values)) if (v !== undefined && k !== "registry") flags.push(k);
+  for (const [k, v] of Object.entries(values)) if (v !== undefined && k !== "registry" && k !== "package") flags.push(k);
   if (values.registry !== undefined) useRegistry(values.registry);
   const links: string[] = values.link === undefined ? [] : [...values.link];
   // Each build compiles within a session of its own, since a check uses up the one it is given.
@@ -2087,6 +2176,7 @@ async function main(): Promise<void> {
   const named = positionals.length > 1 ? positionals[1] : undefined;
   const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
+  throughWorkspace(command, values.package, command === "fmt" ? positionals.length > 1 : (command === "build" || command === "check") && file !== undefined, values.out !== undefined);
   if (command === "repl") {
     if (positionals.length !== 1 || flags.some((k) => k !== "panic")) fail(usageOf("repl"));
     runRepl(locked, timed, checking);
@@ -2391,7 +2481,13 @@ async function main(): Promise<void> {
     if (positionals.length > 2 || (command === "add" && file === undefined) || flags.some((k) => k !== "panic")) fail(usage);
     const found = findManifest(process.cwd()) ?? fail(`fishc ${command ?? ""}: no ${MANIFEST} here or in any directory above; make a package with 'fishc new <name>' or 'fishc init'`);
     try {
-      const manifest = loadManifest(found);
+      // A workspace's root with no package of its own adds to a member, and updates the lock all of
+      // its members share through the first.
+      const around = workspaceAbove(dirname(found!));
+      const bare = around !== undefined && around!.file === realpathSync(found!) && !around!.members.some((m) => m.dir === around!.dir);
+      if (bare && command === "add") fail(`fishc add: the workspace's root holds no package; add to a member with -p <name>`);
+      if (bare && around!.members.length === 0) fail(`fishc update: the workspace has no members`);
+      const manifest = loadManifest(bare ? join(around!.members[0]!.dir, MANIFEST) : found);
       if (command === "add") {
         const at = file!.indexOf("@");
         const name = at >= 0 ? file!.slice(0, at) : file!;
@@ -2413,11 +2509,12 @@ async function main(): Promise<void> {
         const chosen = released.find((e) => formatVersion(e.version) === formatVersion(latest!));
         if (chosen !== undefined && chosen.unsafe === true) console.error(`note: '${name}' ${chosen.text} uses unsafe`);
       } else {
-        if (file !== undefined && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
+        if (file !== undefined && !bare && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
         let updating = cachedSession();
         updating.locking.update = file !== undefined ? new Set([file]) : "all";
         resolvePackages(join(manifest.dir, manifest.entry), updating.locking);
-        console.log(`updated ${fromHere(join(manifest.dir, "fish.lock"))}`);
+        const shared = workspaceOf(manifest.dir);
+        console.log(`updated ${fromHere(join(shared !== undefined ? shared!.dir : manifest.dir, "fish.lock"))}`);
       }
     } catch (e) {
       if (e instanceof CompileError) {

@@ -153,7 +153,7 @@ test("a flag fmt doesn't take, or - beside other paths, prints usage and exits 2
   const cases: string[][] = [["--release", "a.fsh"], ["-", "a.fsh"]];
   for (const args of cases) {
     const run = fmt(dir, args.clone());
-    assert(run.code === 2 && run.err.includes("usage: fishc fmt [<path>...] [--check]"), `${args.join(" ")}: exit code ${run.code}, stderr: ${run.err}`);
+    assert(run.code === 2 && run.err.includes("usage: fishc fmt [<path>...] [-p <member>] [--check]"), `${args.join(" ")}: exit code ${run.code}, stderr: ${run.err}`);
   }
   const unknown = fmt(dir, ["--fast", "a.fsh"]);
   assert(unknown.code === 2 && unknown.err.includes("Unknown option '--fast'"), `--fast: exit code ${unknown.code}, stderr: ${unknown.err}`);
