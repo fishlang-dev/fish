@@ -37,7 +37,7 @@ function listed(events: Ref<BorrowEvent[]>): string {
 }
 
 const HEAD = `class P { n: i64; constructor(n: i64) { this.n = n; } }
-function take(p: P): void { console.log(p.n); }
+export function take(p: P): void { console.log(p.n); }
 `;
 
 test("a check logging for explain-borrows gives each move and each loan with its holder's last use", () => {
@@ -215,7 +215,7 @@ function lentLines(): string {
 test("fishc explain-borrows prints a file with its moves, loans and ownership errors", () => {
   const dir = fixture(program());
   ran(fishc(dir, ["explain-borrows", "main.fsh"]), 0, `  1 | class P { n: i64; constructor(n: i64) { this.n = n; } }
-  2 | function take(p: P): void { console.log(p.n); }
+  2 | export function take(p: P): void { console.log(p.n); }
 ${movedLines()}
 ${lentLines()}
  14 | function main() {

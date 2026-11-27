@@ -108,7 +108,7 @@ function f1(): i64 {
 // error: errors_move_after_calling_failed_function.fsh:6:59: error[E0201]: 'b.v' can't be used here because 'b' was moved
 // error: errors_move_after_calling_failed_function.fsh:10:15: error[E0201]: 'b.v' can't be used here because 'b' was moved
 class Box { v: i64 = 0; constructor() {} }
-function take(b: Box): i64 { return b.v; }
+export function take(b: Box): i64 { return b.v; }
 function f1(): i64 { const b = new Box(); take(b); return b.v; }
 function main() {
   const b = new Box();

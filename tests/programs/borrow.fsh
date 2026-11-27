@@ -500,7 +500,7 @@ function main() {
 // case: borrow_move
 type P = { x: i64 }
 
-function take(p: P): i64 {
+export function take(p: P): i64 {
   return p.x
 }
 
@@ -1712,7 +1712,7 @@ function main() {
 // case: borrow_call_iife_arrow_move
 // error: cannot move 'xs'
 // An immediately-called arrow closure keeps its captures lent across argument evaluation (F-2440).
-function dropArr(xs: string[]): i64 { return xs.length as i64; }
+export function dropArr(xs: string[]): i64 { return xs.length as i64; }
 function main() {
   let xs: string[] = ["hello" + "!"];
   console.log(((_: i64) => xs.length as i64)(dropArr(xs)));

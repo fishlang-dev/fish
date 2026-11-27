@@ -113,7 +113,7 @@ function main() {
 // case: pipe_place_moved
 type Box = { name: string };
 
-function take(b: Box): string {
+export function take(b: Box): string {
   return b.name;
 }
 
@@ -126,7 +126,7 @@ function main() {
 // case: pipe_place_moved_twice
 type Box = { name: string };
 
-function both(a: Box, b: Box): string {
+export function both(a: Box, b: Box): string {
   return a.name + b.name;
 }
 
@@ -267,7 +267,7 @@ function make(): Box {
   return { name: "made" };
 }
 
-function both(a: Box, b: Box): string {
+export function both(a: Box, b: Box): string {
   return a.name + b.name;
 }
 

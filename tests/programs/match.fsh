@@ -500,7 +500,7 @@ function main() {
 // case: match_guard_moves_other
 type Box = { s: string };
 
-function take(b: Box): boolean {
+export function take(b: Box): boolean {
   return b.s === "no";
 }
 
