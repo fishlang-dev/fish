@@ -5176,7 +5176,12 @@ class Codegen implements PrintHost, ComptimeHost {
         this.scoped(s.body);
         this.emit(`br label %${next}`);
         this.startBlock(next);
-        if (s.update !== undefined) this.effect(s.update);
+        if (s.update !== undefined && s.update.kind === "sequence") {
+          for (const part of s.update.exprs) {
+            this.effect(part);
+            this.settle();
+          }
+        } else if (s.update !== undefined) this.effect(s.update);
         this.settle();
         this.emit(`br label %${test}`);
         this.startBlock(end);

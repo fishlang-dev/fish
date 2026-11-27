@@ -808,7 +808,8 @@ class Interpreter<H extends ComptimeHost> {
         while (s.test === undefined || this.valueOf(f, s.test) === true) {
           this.step(s);
           if (!this.loopBody(f, s, s.body)) break;
-          if (s.update !== undefined) this.expr(f, s.update);
+          if (s.update !== undefined && s.update.kind === "sequence") for (const part of s.update.exprs) this.expr(f, part);
+          else if (s.update !== undefined) this.expr(f, s.update);
         }
         return;
       case "forOf": {
