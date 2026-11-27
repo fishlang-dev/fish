@@ -30,8 +30,8 @@ function pkg(root: string, name: string, capabilities: string, deps: string, fil
   return dir;
 }
 
-const READS = `import { readFileSync } from "node:fs";\nexport function load(p: string): string { return readFileSync(p, "utf8"); }\n`;
-const MAIN = `import { load } from "files";\nfunction main() { console.log(load("x")); }\n`;
+const READS = `import { readFileSync } from "node:fs";\nexport function load(p: string): string throws IoError { return readFileSync(p, "utf8"); }\n`;
+const MAIN = `import { load } from "files";\nfunction main(): void throws IoError { console.log(load("x")); }\n`;
 
 function passes(got: Ref<Got>, what: string): void {
   assert(got.code === 0 && got.err === "", `${what}: exited with ${got.code}: ${got.err}`);

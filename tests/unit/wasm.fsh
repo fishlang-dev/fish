@@ -117,7 +117,7 @@ function name(bytes: Ref<u8[]>, at: Mut<usize[]>): string {
   const length = leb(bytes, at);
   const start = at[0]!;
   at[0] = start + length;
-  return new TextDecoder().decode(bytes.slice(start, start + length));
+  return new TextDecoder().decode(bytes.slice(start as i64, (start + length) as i64));
 }
 
 // A module's imports as `module.field`, read from its import section.

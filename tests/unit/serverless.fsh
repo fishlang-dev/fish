@@ -41,7 +41,7 @@ test("a Lambda zip holds bootstrap, executable, stored", () => {
   const end = zip.length - 22;
   assert(zip[end]! === 0x50 && zip[end + 1]! === 0x4b && zip[end + 2]! === 5 && zip[end + 3]! === 6, "an end of central directory");
   // The central entry's external attributes hold the mode 0100755 in their high half.
-  const attributes = 48 + 38;
+  const attributes = (48 + 38) as usize;
   assert(zip[attributes + 2]! === 0xed && zip[attributes + 3]! === 0x81, "an executable mode");
 });
 

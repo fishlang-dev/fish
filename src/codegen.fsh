@@ -6444,7 +6444,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.jsonRaw(w, typeof literal.value === "string" ? JSON.stringify(literal.value) : literalText(literal.value));
       return;
     }
-    if (t === "null") {
+    if (t === "null" || t === "never") {
       this.jsonRaw(w, "null");
       return;
     }

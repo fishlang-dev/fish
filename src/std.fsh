@@ -11988,12 +11988,12 @@ function least(): i64 {
 // An object's fields go into the entry; any other JSON value goes in as "fields".
 function entry(level: i64, message: string, fields: string): void {
   if (level < least()) return;
-  let line = "{"ts":" + JSON.stringify(new Date().toISOString()) + ","level":"" + LEVELS[level as usize] + "","msg":" + JSON.stringify(message);
+  let line = '{"ts":' + JSON.stringify(new Date().toISOString()) + ',"level":"' + LEVELS[level as usize] + '","msg":' + JSON.stringify(message);
   const id = __logRequest();
-  if (id.length > 0) line += ","requestId":" + JSON.stringify(id);
+  if (id.length > 0) line += ',"requestId":' + JSON.stringify(id);
   if (fields.startsWith("{")) {
     if (fields.length > 2) line += "," + fields.slice(1, (fields.length as i64) - 1);
-  } else if (fields.length > 0) line += ","fields":" + fields;
+  } else if (fields.length > 0) line += ',"fields":' + fields;
   console.error(line + "}");
 }
 `,
@@ -13480,8 +13480,14 @@ const PLATFORM_LAMBDA = String.raw`
 type __LambdaHttp = { method: string };
 type __LambdaContext = { http: __LambdaHttp; domainName?: string };
 type __LambdaEvent = { rawPath: string; rawQueryString?: string; headers?: Map<string, string>; cookies?: string[]; body?: string; isBase64Encoded?: boolean; requestContext: __LambdaContext };
+// Read through the runtime, since std's own source has no 'process' to name.
+function __lambdaApi(): string | null {
+  const value = unsafe { fsh_rt_getenv(cString("AWS_LAMBDA_RUNTIME_API")) };
+  if (unsafe { value.isNull() }) return null;
+  return unsafe { fromCString(value) };
+}
 function __platformServes(): boolean {
-  return process.env["AWS_LAMBDA_RUNTIME_API"] !== null;
+  return __lambdaApi() !== null;
 }
 function __lambdaRequest(event: string): Request throws JsonError | TypeError {
   const e = JSON.parse<__LambdaEvent>(event);
@@ -13513,7 +13519,7 @@ async function __lambdaReply(res: Response): Promise<string> {
 // An event the handler can't be given is the invocation's error; a runtime API that stops
 // answering is the sandbox going away, so serve returns.
 async function __platformServe(handler: ServeHandler): Promise<void> {
-  const base = "http://" + (process.env["AWS_LAMBDA_RUNTIME_API"] ?? "") + "/2018-06-01/runtime/invocation/";
+  const base = "http://" + (__lambdaApi() ?? "") + "/2018-06-01/runtime/invocation/";
   while (true) {
     try {
       const next = await fetch(base + "next");

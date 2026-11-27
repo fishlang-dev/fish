@@ -779,7 +779,8 @@ async function main(): Promise<void> {
   app.post("/users", async (_req): Promise<Created> => new Created("ann"));
   const res = await app.handle(new Request("http://h/users", { method: "POST" }));
   const type = res.headers.get("content-type") ?? "none";
-  console.log(res.status, type, "[" + await res.text() + "]");
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
 }
 // case: router_state
 // expect: mw 1
@@ -792,7 +793,7 @@ async function main(): Promise<void> {
 // taking a body takes it after the state.
 type NewUser = { name: string };
 type User = { id: i64; name: string };
-type App = { hits: shared<Atomic<i64>> };
+type App = shared<{ hits: Atomic<i64> }>;
 async function create(_req: Request, state: App, body: NewUser): Promise<User> {
   return { id: state.hits.load(), name: body.name };
 }
@@ -800,10 +801,10 @@ async function show(app: Ref<StateRouter<App>>, method: string, path: string, bo
   const res = await app.handle(new Request("http://h" + path, { method, body }));
   const type = res.headers.get("content-type") ?? "none";
   const text = await res.text();
-  console.log(res.status, type, "[" + text + "]");
+  console.log(res.status, type, "[" + text.trim() + "]");
 }
 async function main(): Promise<void> {
-  const initial: App = { hits: shared(new Atomic(0)) };
+  const initial: App = shared({ hits: new Atomic(0) });
   let app = new Router().state(initial);
   app.use(async (req, state, next) => {
     console.log("mw", state.hits.add(1) + 1);

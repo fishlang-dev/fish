@@ -2545,7 +2545,8 @@ async function main(): Promise<void> {
     if (sanitize !== undefined) fail(`${what}, and clang has no sanitizer runtimes for wasm32; leave out '--sanitize'`);
     if (instrumenting || profiles.length > 0) fail(`${what}, and clang has no profile runtime for wasm32; leave out '${pgo}'`);
     if (profile !== false) fail(`${what}, and WASI has no signals to sample or report a profile with; leave out '${profile === "heap" ? "--heap-profile" : "--profile"}'`);
-    if (panicName === "unwind") fail(`${what}, which can't unwind, so a panic in it prints its message and exits with 101; leave out '--panic=unwind'`);
+    // --panic defaults to unwind, so only one written out is refused.
+    if (panicName === "unwind" && Bun.argv.some((a) => a === "--panic" || a.startsWith("--panic="))) fail(`${what}, which can't unwind, so a panic in it prints its message and exits with 101; leave out '--panic=unwind'`);
   }
   if (values.target !== undefined && isWindows(values.target)) {
     const what = `fishc build: a ${values.target} build`;

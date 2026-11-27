@@ -7,11 +7,10 @@
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { Database, RowError, SqliteError } from "sqlite";
-import { KINDS, summarize, type EventRow, type TaskSummary } from "./summary.fsh";
+import { invalid, summarize, type EventIn, type EventRow, type TaskSummary } from "./summary.fsh";
 import { TASKS } from "./tasks.fsh";
 
 type Consent = { consent: boolean };
-type EventIn = { session: string; task: string; kind: string; codes: string[]; ms: i64 };
 type Made = { id: string };
 type Seen = { id: string };
 
@@ -19,23 +18,11 @@ const SCHEMA = [
   "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, started INTEGER NOT NULL)",
   "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, session TEXT NOT NULL REFERENCES sessions(id), task TEXT NOT NULL, kind TEXT NOT NULL, codes TEXT NOT NULL, ms INTEGER NOT NULL, at INTEGER NOT NULL)",
 ];
-// A day: a task left open longer than this isn't timing anything.
-const MAX_MS: i64 = 24 * 60 * 60 * 1000;
 
 function plain(body: string, status: i64): Response {
   let headers = new Headers();
   headers.set("content-type", "text/plain; charset=utf-8");
   return new Response(body, { status, headers });
-}
-
-// Why an event can't be recorded, or "" when it can.
-export function invalid(e: Ref<EventIn>): string {
-  if (!/^[0-9a-f]{32}$/.test(e.session)) return "the session id is 32 hex digits";
-  if (!TASKS.some((t) => t.id === e.task)) return `there is no task '${e.task}'`;
-  if (!KINDS.includes(e.kind)) return `an event is one of ${KINDS.join(", ")}`;
-  if (e.codes.length > 20 || e.codes.some((c) => !/^[EW]\d{4}$/.test(c))) return "codes are at most 20 diagnostic codes, as E0201";
-  if (e.ms < 0 || e.ms > MAX_MS) return "ms is the time since the task started, at most a day";
-  return "";
 }
 
 function escaped(s: string): string {

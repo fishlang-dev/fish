@@ -237,7 +237,8 @@ test("a malformed Rust dependency is refused where it is", () => {
 
 // A dependency's grant, or "none" when its entry doesn't give one.
 function granted(d: Ref<Dependency>): string {
-  return d.capabilities === undefined ? "none" : d.capabilities.join(",");
+  const caps = d.capabilities.clone();
+  return caps === null ? "none" : caps.join(",");
 }
 
 test("a package states its capabilities, and a dependency is granted them inline or under [dependencies.x]", () => {

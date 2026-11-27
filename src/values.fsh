@@ -4104,7 +4104,9 @@ export class Expressions<C extends Context> implements Union<C> {
       this.ctx.tables().unknownJson.push({ start: at.start, end: at.end });
     }
     const part = this.unjsonPart(t);
-    if (part === undefined) return;
+    // A 'never' holds no value, so there is nothing to write: an optional parameter of an
+    // implicit type parameter is 'never' in a call leaving it out.
+    if (part === undefined || (part === "never" && verb === "written as")) return;
     const r = this.recOf(part);
     const why = r === undefined ? "it has no JSON form"
       : r.kind === "class" ? `a class is ${verb} JSON when it has '@derive(Json)', which '${r.name}' doesn't`
@@ -5914,11 +5916,14 @@ export class Expressions<C extends Context> implements Union<C> {
     if (state !== undefined && handler.kind === "arrow" && handler.params.length > 1 && handler.params[1]!.type === undefined) this.ctx.tables().presetParams.set(cloneParam(handler.params[1]!), state!);
     const count = typed.params;
     const passed = (state === undefined ? ["req", "body"] : ["req", "state", "body"]).slice(0, count as i64).join(", ");
-    const run = `${typed.awaits ? "await " : ""}%(${passed})`;
+    // A named function is called by its name, since one that throws can't be a pipe's value.
+    const byName = handler.kind === "ident";
+    const run = `${typed.awaits ? "await " : ""}${byName ? "fsh_handler" : "%"}(${passed})`;
     const head = `${count === 0 ? "_req" : "req"}${state === undefined ? "" : count < 2 ? ", _state" : ", state"}`;
     const read = typed.reads === undefined ? "" : "let body: fsh_body; try { body = await req.json<fsh_body>(); } catch (e) { return fsh_refused(e.message); } ";
     const answer = typed.gives === undefined ? `return ${run};` : typed.gives === "void" ? `${run}; return fsh_empty();` : `const out: fsh_out = ${run}; return ${into ? "fsh_into" : "fsh_json"}(out);`;
-    const text = `fsh_handler |> (async (${head}) => { ${read}try { ${answer} } catch (fsh_error) { return fsh_caught(fsh_error); } })`;
+    const made = `(async (${head}) => { ${read}try { ${answer} } catch (fsh_error) { return fsh_caught(fsh_error); } })`;
+    const text = byName ? made : `fsh_handler |> ${made}`;
     const tb = this.ctx.tables();
     const parsed = respanExpr(parseExpression(text, tb.ids), at);
     let slots: TypeNode[] = [];
@@ -5942,21 +5947,32 @@ export class Expressions<C extends Context> implements Union<C> {
     }
     for (const name of names) {
       if (name.kind !== "ident") continue;
-      if (name.name === "fsh_handler") rewrites.replace(name, cloneExpr(handler));
+      if (name.name === "fsh_handler") rewrites.replace(name, typed.gives === undefined ? this.answering(cloneExpr(handler), at.start, at.end) : cloneExpr(handler));
       else rewrites.replace(name, { ...name, name: `router ${name.name.slice(4)}` });
     }
     // The check makes this try a plain block when the handler throws nothing.
     for (const p of caught) if (p.kind === "ident") rewrites.replacePattern(p, { ...p, name: "router error" });
     const wrapped = rebuiltExpr(parsed, rewrites);
-    if (wrapped.kind === "pipe" && wrapped.body.kind === "arrow") {
-      this.ctx.tables().presetParams.set(cloneParam(wrapped.body.params[0]!), request);
-      if (state !== undefined) this.ctx.tables().presetParams.set(cloneParam(wrapped.body.params[1]!), state!);
-      this.ctx.tables().madeArrows.add(cloneExpr(wrapped.body));
+    const arrow = wrapped.kind === "pipe" ? cloneExpr(wrapped.body) : cloneExpr(wrapped);
+    if (arrow.kind === "arrow") {
+      this.ctx.tables().presetParams.set(cloneParam(arrow.params[0]!), request);
+      if (state !== undefined) this.ctx.tables().presetParams.set(cloneParam(arrow.params[1]!), state!);
+      this.ctx.tables().madeArrows.add(cloneExpr(arrow));
     }
     let args: Expr[] = [];
     for (let i: usize = 0; i + 1 < e.args.length; i++) args.push(cloneExpr(e.args[i]!));
     args.push(wrapped);
     return args;
+  }
+
+  // A handler arrow written with no return type gives a Response, as the router's own handler
+  // type says: as a pipe's value it meets no type to take that from, and one that only throws
+  // would otherwise give nothing.
+  private answering(this: Mut<this>, handler: Expr, start: usize, end: usize): Expr {
+    if (handler.kind !== "arrow" || handler.returnType !== undefined) return handler;
+    const response: TypeNode = { id: nextId(this.ctx.tables().ids), kind: "ref", name: "Response", args: [], start, end };
+    const returnType: TypeNode = handler.async ? { id: nextId(this.ctx.tables().ids), kind: "ref", name: "Promise", args: [response], start, end } : response;
+    return { ...handler, returnType };
   }
 
   // The state a StateRouter's handlers take, for a method of one.

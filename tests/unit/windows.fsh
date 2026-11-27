@@ -66,7 +66,8 @@ async function main(): Promise<void> throws IoError {
   let bytes: u8[] = [1, 2, 3];
   await c.write(bytes);
   const got = await server.read(10);
-  console.log("windows", await a, got.length, Math.sqrt(2.0));
+  const n = await a;
+  console.log("windows", n, got.length, Math.sqrt(2.0));
   const xs: i64[] = [];
   console.log(xs[got.length]);
 }
