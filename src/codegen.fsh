@@ -2184,12 +2184,33 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // A new lock's word, free: 0, or in a debug build minus the id lock-order checking gives a
+  // Lock or shared value made at `at`.
+  lockWord(this: Mut<this>, checked: boolean, at: Ref<Span>): string {
+    if (this.release || !checked) return "0";
+    const word = this.temp();
+    const site = this.panicAt(at);
+    this.emit(`${word} = call i32 @fsh_rt_lock_new(ptr ${site})`);
+    return word;
+  }
+
+
   // A new Atomic, Cell, Lock or RwLock: what it holds, a boolean widened to a byte in an Atomic,
   // and a lock's word unlocked.
   interiorNew(this: Mut<this>, e: Ref<Extract<Expr, { kind: "new" }>>, t: InteriorType): string {
     const v = this.owned(e.args![0]!);
     const result = this.temp();
-    if (isLock(this.tables.typing.rec(t))) this.emit(`${result} = insertvalue ${this.llvm(t)} { i32 0, ${this.llvm(this.tables.typing.rec(t).of)} poison }, ${this.llvm(this.tables.typing.rec(t).of)} ${v}, 1`);
+    if (isLock(this.tables.typing.rec(t))) {
+      const word = this.lockWord(this.tables.typing.rec(t).which === "Lock", { start: e.start, end: e.end });
+      let free = `{ i32 0, ${this.llvm(this.tables.typing.rec(t).of)} poison }`;
+      if (word !== "0") {
+        free = this.temp();
+        const line = `${free} = insertvalue ${this.llvm(t)} poison, i32 ${word}, 0`;
+        this.emit(line);
+      }
+      const line2 = `${result} = insertvalue ${this.llvm(t)} ${free}, ${this.llvm(this.tables.typing.rec(t).of)} ${v}, 1`;
+      this.emit(line2);
+    }
     else if (this.llvm(t) !== this.llvm(this.tables.typing.rec(t).of)) this.emit(`${result} = zext i1 ${v} to i8`);
     else return v;
     return result;
@@ -2266,7 +2287,12 @@ class Codegen implements PrintHost, ComptimeHost {
   // if a task panicked holding it, which leaves it held over a value it may have half changed.
   takeLock(this: Mut<this>, word: string, at: Ref<Span>, take = "fsh_rt_lock") {
     const [taken, held, poisoned] = [this.temp(), this.temp(), this.temp()];
-    this.emit(`${taken} = call i32 @${take}(ptr ${word})`);
+    // A debug build checks the order a Lock is taken in against the program's other takings.
+    if (take === "fsh_rt_lock" && !this.release) {
+      const site = this.panicAt(at);
+      this.emit(`${taken} = call i32 @fsh_rt_lock_at(ptr ${word}, ptr ${site})`);
+    }
+    else this.emit(`${taken} = call i32 @${take}(ptr ${word})`);
     this.emit(`${held} = icmp eq i32 ${taken}, 1`);
     const holder = take === "fsh_rt_lock" ? "an `update`" : "a `read` or an `update`";
     this.lowering().panicIf(held, `this lock is already held by ${holder} running here; use the value its callback is given`, at);
@@ -4488,6 +4514,13 @@ class Codegen implements PrintHost, ComptimeHost {
     this.emit(line);
     this.emit(`${size} = ptrtoint ptr ${end} to i64`);
     this.emit(`${block} = call ptr @fsh_rt_${this.tables.typing.rec(t).which === "Rc" ? "rc" : "shared"}_new(i64 ${size})`);
+    if (!this.release && this.tables.typing.rec(t).which === "shared") {
+      const word = this.temp();
+      const line3 = `${word} = getelementptr ${this.sharedBlock(t)}, ptr ${block}, i32 0, i32 1, i32 0`;
+      this.emit(line3);
+      const free = this.lockWord(true, { start: e.start, end: e.end });
+      this.emit(`store i32 ${free}, ptr ${word}`);
+    }
     const line2 = `${at} = getelementptr ${this.sharedBlock(t)}, ptr ${block}, i32 0, i32 1, i32 1`;
     this.emit(line2);
     this.emit(`store ${this.llvm(this.tables.typing.rec(t).of)} ${v}, ptr ${at}`);
