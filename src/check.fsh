@@ -9,6 +9,7 @@ import { FILE_SPAN, stdModuleAt } from "./program.fsh";
 import { comptimeArgument, comptimeBody, stringsType, untagged, type Value } from "./comptime.fsh";
 import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Id, Interface, ObjectProp, Param, Pattern, PatternProp, PropertyName, Span, Stmt, TypeNode, TypeParam } from "./parser.fsh";
 import { lowerPattern, type PatternInfo } from "./match.fsh";
+import { inferable, inferModes, lendable, modesText, plainParam, slotKey, type Candidate, type Mode, type Slot } from "./ownership.fsh";
 import { nextId, nodeIdOf, NodeMap, NodeSet, renumberExpr, Rewrites, SiteTable, walk, walkWhile, type AnyNode, type Ids, type Site } from "./nodes.fsh";
 import { cloneDeclarator, cloneExpr, cloneInterface, cloneObjectProp, cloneParam, clonePattern, clonePatternProp, cloneStmt, cloneStmts, cloneTypeAlias, cloneTypeNode, cloneTypeParam, rebuiltExpr, rebuiltParam, rebuiltStmts, withIdExpr } from "./rebuild.fsh";
 
@@ -867,11 +868,20 @@ function memberBody(info: Ref<ClassInfo>, key: string): BodyId | undefined {
   return info.methods.get(key);
 }
 
+// Whether a parameter's written type is a reference.
+function writtenRef(t: Ref<TypeNode | undefined>): boolean {
+  return t !== undefined && t.kind === "ref" && (t.name === "Ref" || t.name === "Mut");
+}
+
 // Gives the member of `node` that `key` names the statements `statements`.
 function memberWithBody(node: Mut<ClassNode>, key: string, statements: Ref<Stmt[]>): void {
-  for (let i: usize = 0; i < node.members.length; i++) {
-    if (memberKey(node.members[i]!) !== key) continue;
-    let m: Mut<ClassMember> = node.members[i]!;
+  membersWith(node.members, key, statements);
+}
+
+function membersWith(members: Mut<ClassMember[]>, key: string, statements: Ref<Stmt[]>): void {
+  for (let i: usize = 0; i < members.length; i++) {
+    if (memberKey(members[i]!) !== key) continue;
+    let m: Mut<ClassMember> = members[i]!;
     switch (m.kind) {
       case "method":
         m.body = cloneStmts(statements);
@@ -1471,6 +1481,101 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     return c;
   }
 
+  // Ownership inference, before any body is checked, so each body and each call of it sees an
+  // inferred parameter as if its `Ref` or `Mut` were written.
+  /** @throws {CompileError} */
+  private inferBorrows(this: Mut<this>): void {
+    let found: Candidate[] = [];
+    for (const id of [...this.funcs]) {
+      const c = this.borrowCandidate(id);
+      if (c !== undefined) found.push(c);
+    }
+    if (found.length === 0) return;
+    const modes = inferModes(this.tables.typing, this.program, found);
+    for (const c of found) {
+      const id = this.byName.get(c.name);
+      if (id === undefined) continue;
+      for (const slot of c.slots) {
+        const mode = modes.get(slotKey(c.name, slot.index));
+        if (mode !== undefined) this.lendParam(id, slot.index, mode);
+      }
+    }
+    this.instancingState.inferredBorrows = modesText(modes);
+    this.instancingState.borrowCandidates = found;
+  }
+
+  // A function's parameters ownership inference may decide, with their types as written; none
+  // for a function whose signature already holds a reference, or one a check has already met.
+  /** @throws {CompileError} */
+  private borrowCandidate(this: Mut<this>, id: BodyId): Candidate | undefined {
+    const f = cloneSignature(this.tables.arenas.bodyOf(id));
+    if (!inferable(f) || this.macroBodies.has(id) || this.instancingState.implicits.has(id) || this.instancingState.instances.has(id)) return undefined;
+    if (this.tables.published !== undefined && this.tables.published!.has(f.name)) return undefined;
+    if (f.start >= STD_BASE || stdModuleAt(this.tables.files, f.start) !== undefined) return undefined;
+    let slots: Slot[] = [];
+    try {
+      if (f.returnType !== undefined) {
+        const returned = this.resolveSigned(id, new Map<string, Type>(), f.returnType!);
+        if (this.tables.typing.holdsRef(returned)) return undefined;
+      }
+      for (let i: usize = 0; i < f.params.length; i++) {
+        const p: Ref<Param> = f.params[i]!;
+        if (p.type === undefined) continue;
+        const t = this.resolveSigned(id, new Map<string, Type>(), p.type!);
+        if (this.tables.typing.holdsRef(t)) return undefined;
+        if (!plainParam(p) || this.tables.defaulted.has(p) || !lendable(this.tables.typing, t) || p.pattern.kind !== "ident") continue;
+        const written: Ref<TypeNode> = p.type!;
+        const cls = this.tables.typing.kindOf(t) === "class" && written.kind === "ref" && written.args.length === 0 ? written.name : undefined;
+        slots.push(cls !== undefined ? { index: i, name: p.pattern.name, type: t, cls } : { index: i, name: p.pattern.name, type: t });
+      }
+    } catch (e) {
+      if (e instanceof CompileError) return undefined;
+      throw e;
+    }
+    return slots.length > 0 ? { name: f.name, slots } : undefined;
+  }
+
+  // Writes a parameter's inferred reference around its written type.
+  private lendParam(this: Mut<this>, id: BodyId, i: usize, mode: Mode): void {
+    const written = cloneTypeNode(this.tables.arenas.bodyOf(id).params[i]!.type!);
+    const madeId = nextId(this.tables.ids);
+    const start = written.start;
+    const end = written.end;
+    let body = this.tables.arenas.bodyMut(id);
+    body.params[i]!.type = { kind: "ref", name: mode === "mut" ? "Mut" : "Ref", args: [written], start, end, id: madeId };
+  }
+
+  // Why the edited bodies can't be rechecked alone because what ownership inference decides
+  // may change with them: a function it may decide has a new signature, or the edited program
+  // infers differently. The program is brought up to date with the bodies to infer again.
+  private borrowsAfter(this: Mut<this>, replaced: Ref<Replaced[]>): string | undefined {
+    for (const r of replaced) {
+      if (r.func === undefined) continue;
+      const f: Ref<Declared> = r.func!;
+      if (this.tables.published !== undefined && this.tables.published!.has(f.name)) continue;
+      if (f.params.some((p) => p.type !== undefined && !writtenRef(p.type))) return "a function whose parameters' borrows may be inferred has a new signature";
+    }
+    if (this.instancingState.borrowCandidates.length === 0) return undefined;
+    for (const r of replaced) if (!this.programWith(r)) return "an exported function's body changed";
+    const modes = inferModes(this.tables.typing, this.program, this.instancingState.borrowCandidates);
+    return modesText(modes) !== this.instancingState.inferredBorrows ? "the edit changes which parameters are inferred to be borrowed" : undefined;
+  }
+
+  // Puts a body read again in place in the program's own statements, or says it can't: an
+  // exported function's is wrapped in its export.
+  private programWith(this: Mut<this>, r: Ref<Replaced>): boolean {
+    let statements: Stmt[] = [];
+    if (r.func === undefined) statements = cloneStmts(r.statements);
+    else if (r.func!.body !== undefined) statements = cloneStmts(r.func!.body!);
+    for (let i: usize = 0; i < this.program.length; i++) {
+      let s: Mut<Stmt> = this.program[i]!;
+      if (r.owner === undefined && s.kind === "export" && s.body.kind === "function" && s.body.name === r.name) return false;
+      if (r.owner === undefined && s.kind === "function" && s.name === r.name) s.body = cloneStmts(statements);
+      if (r.owner !== undefined && s.kind === "class" && s.name === r.owner) membersWith(s.members, r.name, statements);
+    }
+    return true;
+  }
+
   // Puts each body read again in place of what it held, in every class and copy that holds it,
   // and checks again every instance of each, then what they ask for; gives why it can't, before
   // changing anything.
@@ -1513,6 +1618,8 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       }
       targets.push(ids);
     }
+    const borrows = this.borrowsAfter(replaced);
+    if (borrows !== undefined) return borrows;
     let again: InstanceId[] = [];
     let named = new Set<string>();
     let at: usize = 0;
@@ -2100,6 +2207,7 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
         this.recover(e);
       }
     }
+    this.inferBorrows();
     for (const id of [...this.funcs]) {
       const reported = this.errors.length;
       try {
