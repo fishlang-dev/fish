@@ -11994,6 +11994,160 @@ export async function create(file: string, paths: string[], options: ZipPackOpti
   // Spans in a program's own code, imported as std:trace. Their state is std's own, which serve
   // shares, so what is here only wraps it.
   // Structured logging, imported as std:log: each entry one JSON line on stderr.
+  // @durable functions' runs: what an await gave, recorded as JSON as each one ends, so a run
+  // given its id again after a crash or a deploy replays what it recorded and carries on from
+  // the first await it hadn't finished. The fishc lowering of a @durable function calls the
+  // __ methods of Durable.
+  durable: String.raw`import { Database, type SqliteError } from "std:sqlite";
+
+// Where runs keep what they recorded. A store that can't read or write panics, since a run
+// that can't record can't be resumed.
+export interface DurableStore {
+  // What the run recorded, step by step, as JSON; none for a run not started or finished.
+  steps(run: string): Promise<string[]>;
+  record(run: string, step: i64, value: string): Promise<void>;
+  // Forgets the run, which ended; its id may start a new run.
+  finish(run: string): Promise<void>;
+  // The runs that recorded a step and haven't ended, to resume.
+  unfinished(): Promise<string[]>;
+}
+
+// A DurableStore in a SQLite database, its steps in the table durable_steps.
+export class SqliteStore {
+  #db: Database;
+
+  constructor(db: Database) {
+    this.#db = db;
+  }
+
+  // The store in the database file at path, made when it isn't there; ":memory:" keeps it in memory.
+  static async open(path: string): Promise<SqliteStore> throws SqliteError {
+    const db = await Database.open(path);
+    await db.run("CREATE TABLE IF NOT EXISTS durable_steps (run TEXT NOT NULL, step INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY (run, step))");
+    return new SqliteStore(db);
+  }
+
+  // Another handle on the same database, for a store given to more than one run.
+  clone(): SqliteStore {
+    return new SqliteStore(this.#db.clone());
+  }
+
+  async steps(run: string): Promise<string[]> {
+    let out: string[] = [];
+    try {
+      const rows = await this.#db.query<{ value: string }>("SELECT value FROM durable_steps WHERE run = ? ORDER BY step", [run.clone()]);
+      for (const r of rows) out.push(r.value.clone());
+    } catch (e) {
+      assert(false, "the durable store can't read run '" + run + "': " + e.message);
+    }
+    return out;
+  }
+
+  async record(run: string, step: i64, value: string): Promise<void> {
+    try {
+      await this.#db.run("INSERT OR REPLACE INTO durable_steps (run, step, value) VALUES (?, ?, ?)", [run.clone(), step, value]);
+    } catch (e) {
+      assert(false, "the durable store can't record a step of run '" + run + "': " + e.message);
+    }
+  }
+
+  async finish(run: string): Promise<void> {
+    try {
+      await this.#db.run("DELETE FROM durable_steps WHERE run = ?", [run.clone()]);
+    } catch (e) {
+      assert(false, "the durable store can't finish run '" + run + "': " + e.message);
+    }
+  }
+
+  async unfinished(): Promise<string[]> {
+    let out: string[] = [];
+    try {
+      const rows = await this.#db.query<{ run: string }>("SELECT DISTINCT run FROM durable_steps ORDER BY run");
+      for (const r of rows) out.push(r.run.clone());
+    } catch (e) {
+      assert(false, "the durable store can't list its runs: " + e.message);
+    }
+    return out;
+  }
+}
+
+// One run of a @durable function, by its id in its store: given as the function's first
+// argument, it replays the steps the run recorded before, then records each await after them.
+export class Durable {
+  readonly id: string;
+  #store: Dyn<DurableStore>;
+  #saved: Lock<string[]>;
+  #loaded: Atomic<boolean>;
+  #next: Atomic<i64>;
+
+  constructor(store: Dyn<DurableStore>, id: string) {
+    this.id = id;
+    this.#store = store;
+    this.#saved = new Lock<string[]>([]);
+    this.#loaded = new Atomic(false);
+    this.#next = new Atomic(0);
+  }
+
+  // Whether the run recorded its next await before, reading what it recorded the first time.
+  async __replaying(): Promise<boolean> {
+    if (!this.#loaded.exchange(true)) {
+      const steps = await this.#store.steps(this.id);
+      this.#saved.update((s) => {
+        for (const step of steps) s.push(step.clone());
+      });
+    }
+    const at = this.#next.load();
+    return this.#saved.read((s) => at < (s.length as i64));
+  }
+
+  // What the next await gave when it was recorded, read back as its type.
+  // ponytail: a recorded null of a type holding null reads back as no value, which panics.
+  __replayed<T>(): T {
+    const at = this.#next.add(1);
+    const text = this.#saved.read((s) => s[at as usize]!.clone());
+    let found: T[] = [];
+    try {
+      found.push(JSON.parse<T>(text));
+    } catch (e) {
+      assert(false, "durable run '" + this.id + "' recorded a step its code no longer awaits there: " + e.message);
+    }
+    return found.pop()!;
+  }
+
+  // The same, typed as like is, for an await assigned to a variable already holding a value.
+  __replayedLike<T>(_like: Ref<T>): T {
+    return this.__replayed<T>();
+  }
+
+  // Passes over an await the run recorded, whose value nothing keeps.
+  __skipped(): void {
+    this.#next.add(1);
+  }
+
+  // Records what the next await gave, then gives it on.
+  async __recorded<T>(value: T): Promise<T> {
+    const at = this.#next.add(1);
+    await this.#store.record(this.id, at, JSON.stringify(value));
+    return value;
+  }
+
+  // Records that the next await, whose value nothing keeps, ended.
+  async __passed(): Promise<void> {
+    const at = this.#next.add(1);
+    await this.#store.record(this.id, at, "null");
+  }
+
+  async __finished(): Promise<void> {
+    await this.#store.finish(this.id);
+  }
+
+  // False, as the condition of the checks the lowering makes that never run: they only type
+  // what a run keeps across an await, which has to be Json.
+  __never(): boolean {
+    return false;
+  }
+}
+`,
   log: String.raw`
 // An entry's extra fields: any value with a JSON form, an object's fields joining the entry's own.
 export interface LogFields {}
@@ -12919,7 +13073,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log", "mcu"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log", "durable", "mcu"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
