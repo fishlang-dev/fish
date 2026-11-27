@@ -140,7 +140,7 @@ test("unknown flags, a missing path and no package are refused", () => {
 test("a broken manifest is reported once, and its package's files are skipped", () => {
   const top = fresh();
   const pkg = dir(top, "broken-manifest", [["fish.toml", '[package]\nname = "a"\nversion = "1.0.0"\nedition = "ts"\n'], ["src/a.fsh", 'eval("1");\n'], ["src/b.fsh", 'eval("2");\n']]);
-  ran(lint(pkg, []), 1, "0 to change in 0 files\n", `fish.toml:4:11: error[E0905]: 'ts' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated\n 4 | edition = "ts"\n   |           ^^^^\n`, "lint");
+  ran(lint(pkg, []), 1, "0 to change in 0 files\n", `fish.toml:4:11: error[E0905]: 'ts' isn't an edition; it is "native", the default, "rc" for reference-counted objects, or "ts-compat" for TypeScript not yet migrated\n 4 | edition = "ts"\n   |           ^^^^\n`, "lint");
   done(top);
 });
 

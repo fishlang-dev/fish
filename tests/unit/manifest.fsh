@@ -134,7 +134,7 @@ test("a manifest missing what it needs, or holding what it doesn't have, is refu
   is(refused(`[package]\nname = 1\nversion = "1.0.0"\n`), `fish.toml:2:8: error[E0905]: 'name' is a string, as in name = "..."`, "a number name");
   is(refused(`[package]\nname = "a"\nversion = "1.0.0"\nentry = "main.ts"\n`), `fish.toml:4:9: error[E0905]: the entry is a .fsh file, as in entry = "src/main.fsh"`, "a .ts entry");
   is(refused(`[package]\nnmae = "a"\n`), "fish.toml:2:1: error[E0905]: [package] has no key 'nmae'; it has name, version, entry, lib, edition, capabilities", "a misspelled key");
-  is(refused(`[package]\nname = "a"\nversion = "1.0.0"\nedition = "ts"\n`), `fish.toml:4:11: error[E0905]: 'ts' isn't an edition; it is "native", the default, or "ts-compat" for TypeScript not yet migrated`, "an unknown edition");
+  is(refused(`[package]\nname = "a"\nversion = "1.0.0"\nedition = "ts"\n`), `fish.toml:4:11: error[E0905]: 'ts' isn't an edition; it is "native", the default, "rc" for reference-counted objects, or "ts-compat" for TypeScript not yet migrated`, "an unknown edition");
   is(refused(`name = "a"\n`), "fish.toml:1:1: error[E0905]: 'name' belongs in a table, such as [package]", "a key outside a table");
   is(refused(`[package]\nname = "a"\nversion = "1.0.0"\n[dev]\n`), "fish.toml:4:1: error[E0905]: a manifest has no table [dev]; it has [package], [dependencies], [rust-dependencies] and [registry]", "an unknown table");
   is(refused(`[package]\nname = "a"\nname = "b"\n`), "fish.toml:3:1: error[E0904]: 'name' is given twice", "a key twice");

@@ -98,12 +98,13 @@ test("R7 finds declarations TypeScript merges, and module augmentation", () => {
 
 test("the edition directive is the first line, or the second after a shebang", () => {
   same(directiveOf("// @fish-edition ts-compat\nconst a = 1;\n"), "ts-compat 0 26", "the first line");
+  same(directiveOf("// @fish-edition rc\nclass A {}\n"), "rc 0 19", "the reference-counted edition");
   same(directiveOf("#!/usr/bin/env fishc\r\n// @fish-edition native\r\n"), "native 22 45", "after a shebang");
   same(directiveOf("const a = 1;\n// @fish-edition ts-compat\n"), "none", "a later line");
   same(directiveOf("// a comment\n"), "none", "a comment");
   assert(directiveOf("// @fish-edition  native\n").startsWith("throws "), "two spaces don't throw");
   const bad = directiveOf("//@fish-edition ts\n");
-  assert(bad.startsWith("throws ") && bad.includes("an edition directive is written '// @fish-edition native' or '// @fish-edition ts-compat'"), `no space: ${bad}`);
+  assert(bad.startsWith("throws ") && bad.includes("an edition directive is written '// @fish-edition native', '// @fish-edition rc' or '// @fish-edition ts-compat'"), `no space: ${bad}`);
 });
 
 test("only a class's own prototype member keeps its .prototype from counting", () => {
