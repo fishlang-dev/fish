@@ -44,7 +44,6 @@ const ROUTE_METHODS = ["get", "post", "put", "patch", "delete", "all"];
 // the request's body as, what it gives when that isn't a Response, each as the handler wrote it
 // when it is an arrow, whether its call is awaited, and whether it says it throws.
 type RouteHandler = { params: usize; body?: TypeNode; reads?: Type; answer?: TypeNode; gives?: Type; awaits: boolean; throws: boolean };
-const ROUTE_THROWS = "a route's handler that says its types can't throw yet; catch the error inside the handler and give back a 'Response' for it, as in 'return new Response(e.message, { status: 422 })'";
 // Stands in for an argument's mismatch message until an error needs the real one.
 const ARGUMENT_MISMATCH = "\u0000argument mismatch\u0000";
 
@@ -1640,6 +1639,14 @@ export class Expressions<C extends Context> implements Union<C> {
   }
   /** @throws {CompileError} */
   private callSpread(this: Mut<this>, e: Ref<Call>): { type: Type; what: string } {
+    // The catch made around a route's handler answers with the helper its error's type picks.
+    if (e.callee.kind === "ident" && e.callee.name === "router caught" && e.args.length === 1) {
+      const name = this.caughtBy(e.args[0]!);
+      const tables = this.ctx.tables();
+      const named = tables.rewrites.replace({ id: idOfExpr(e.callee) }, { id: 0, kind: "ident", name, start: e.callee.start, end: e.callee.end });
+      const made = this.ctx.tables().rewrites.replace(e, { ...callNode(e), callee: cloneExpr(named) });
+      if (made.kind === "call") return this.callNamed(made);
+    }
     const variant = this.ctx.view().promiseVariants.get(e);
     if (variant !== undefined) {
       const given = this.ctx.resolveType(variant.typeArgs[0]!);
@@ -2258,18 +2265,9 @@ export class Expressions<C extends Context> implements Union<C> {
       foundId = this.method(callee, receiver).bodyId;
       const routed = this.routeArgs(e, foundId);
       if (routed !== undefined) {
-        const at: Span = { start: routed[routed.length - 1]!.start, end: routed[routed.length - 1]!.end };
         const tb = this.ctx.tables();
         const made = tb.rewrites.replace(e, withArgs(e, routed));
-        if (made.kind === "call") {
-          try {
-            return this.calleeFound(made, foundId);
-          } catch (err) {
-            // The arrow written around the handler spans it, and throws only what the handler does.
-            if (err instanceof CompileError && err.code === "E0602" && err.start === at.start && err.end === at.end) throw new CompileError("E0511", ROUTE_THROWS, at.start, at.end);
-            throw err;
-          }
-        }
+        if (made.kind === "call") return this.calleeFound(made, foundId);
       }
     }
     return this.calleeFound(e, foundId);
@@ -5866,11 +5864,13 @@ export class Expressions<C extends Context> implements Union<C> {
     return call;
   }
 
-  // The arguments of a route added to std's Router whose handler says its body's type or what it
-  // answers with: the handler becomes a plain one, `handler |> (async (req) => ...)`, whose arrow
-  // reads the body as JSON, answers 400 with why when it isn't that, calls the handler and answers
-  // with what it gives as JSON. As the pipe's value the handler keeps what it captures, so the
-  // arrow captures nothing of its own. Its helpers are std's, under names no program can write.
+  // The arguments of a route added to std's Router or StateRouter whose handler says its body's
+  // type or what it answers with, can throw, or is async: the handler becomes a plain one,
+  // `handler |> (async (req) => ...)`, whose arrow reads the body as JSON, answers 400 with why
+  // when it isn't that, calls the handler, answers with what it gives as JSON or as its own
+  // response, and answers what it throws by the error's type. As the pipe's value the handler
+  // keeps what it captures, so the arrow captures nothing of its own. Its helpers are std's, under
+  // names no program can write. A StateRouter's handler takes its state second, before the body.
   /** @throws {CompileError} */
   private routeArgs(this: Mut<this>, e: Ref<Call>, found: BodyId): Expr[] | undefined {
     const callee: Ref<Expr> = e.callee;
@@ -5880,7 +5880,11 @@ export class Expressions<C extends Context> implements Union<C> {
     if (!added && !mounted && (callee.name !== "route" || e.args.length !== 3)) return undefined;
     const method = this.ctx.view().arenas.bodyOf(found);
     const owner = method.start >= STD_BASE ? method.owner : undefined;
-    if (owner === undefined || this.ctx.typing().rec(owner).name !== "Router") return undefined;
+    if (owner === undefined) return undefined;
+    const named = this.ctx.typing().rec(owner).name;
+    const state = this.routerState(owner);
+    if (named !== "Router" && state === undefined) return undefined;
+    const skip: usize = state === undefined ? 1 : 2;
     // Each call is recorded once, as written: checked again, its handler is the one made here.
     const record = !this.ctx.view().routes.has(e);
     const router = callee.object.kind === "ident" ? this.ctx.lookup(callee.object.name, undefined) : undefined;
@@ -5891,32 +5895,39 @@ export class Expressions<C extends Context> implements Union<C> {
       if (record) this.ctx.tables().routes.set(cloneExpr(e), { mount: true, path: first.kind === "string" ? first.value : undefined, router, child });
       return undefined;
     }
-    const typed = this.typedHandler(handler);
+    const at: Span = { start: handler.start, end: handler.end };
+    const typed = this.typedHandler(handler, skip);
+    const into = typed !== undefined && typed.gives !== undefined && typed.gives !== "void" && this.intoResponse(typed.gives!, at.start, at.end);
     const verb = added ? callee.name : first.kind === "string" ? first.value.toLowerCase() : undefined;
     const where: Ref<Expr> = e.args[e.args.length - 2]!;
-    if (record) this.ctx.tables().routes.set(cloneExpr(e), { mount: false, method: verb === undefined ? undefined : verb.toUpperCase(), path: where.kind === "string" ? where.value : undefined, router, body: typed?.reads, response: typed?.gives });
+    if (record) this.ctx.tables().routes.set(cloneExpr(e), { mount: false, method: verb === undefined ? undefined : verb.toUpperCase(), path: where.kind === "string" ? where.value : undefined, router, body: typed?.reads, response: into ? undefined : typed?.gives });
     if (typed === undefined) return undefined;
-    const at: Span = { start: handler.start, end: handler.end };
-    if (typed.params > 2) throw new CompileError("E0511", `a route's handler takes the request and, to have its body read as JSON, a second parameter of the body's type, not ${typed.params} parameters`, at.start, at.end);
-    if (typed.reads !== undefined && verb === "get") throw new CompileError("E0511", "a GET request carries no body, so its handler can't take one as a second parameter; take the request alone, or add the route with 'post', 'put' or 'patch'", at.start, at.end);
-    if (typed.throws) throw new CompileError("E0511", ROUTE_THROWS, at.start, at.end);
+    const takes = state === undefined ? "the request" : "the request, the router's state";
+    if (typed.params > skip + 1) throw new CompileError("E0511", `a route's handler takes ${takes} and, to have its body read as JSON, a parameter of the body's type, not ${typed.params} parameters`, at.start, at.end);
+    if (typed.params > skip && typed.reads === undefined) throw new CompileError("E0511", `a route's handler's parameter after ${takes} is its body, read as JSON, so it needs the body's type written, as in 'body: NewUser'`, at.start, at.end);
+    if (typed.reads !== undefined && verb === "get") throw new CompileError("E0511", `a GET request carries no body, so its handler can't take one after ${takes}; take ${takes} alone, or add the route with 'post', 'put' or 'patch'`, at.start, at.end);
     if (typed.reads !== undefined) this.jsonable(typed.reads, at, "read from");
-    if (typed.gives !== undefined && typed.gives !== "void") this.jsonable(typed.gives, at, "written as");
+    if (typed.gives !== undefined && typed.gives !== "void" && !into) this.jsonable(typed.gives, at, "written as");
     const request = this.ctx.view().arenas.classOf(this.ctx.classes().get("Request")!).type;
-    // As a pipe's value the handler meets no function type to take its request's type from.
+    // As a pipe's value the handler meets no function type to take its parameters' types from.
     if (handler.kind === "arrow" && handler.params.length > 0 && handler.params[0]!.type === undefined) this.ctx.tables().presetParams.set(cloneParam(handler.params[0]!), request);
+    if (state !== undefined && handler.kind === "arrow" && handler.params.length > 1 && handler.params[1]!.type === undefined) this.ctx.tables().presetParams.set(cloneParam(handler.params[1]!), state!);
     const count = typed.params;
-    const run = `${typed.awaits ? "await " : ""}%(${count === 0 ? "" : count === 1 ? "req" : "req, body"})`;
+    const passed = (state === undefined ? ["req", "body"] : ["req", "state", "body"]).slice(0, count as i64).join(", ");
+    const run = `${typed.awaits ? "await " : ""}%(${passed})`;
+    const head = `${count === 0 ? "_req" : "req"}${state === undefined ? "" : count < 2 ? ", _state" : ", state"}`;
     const read = typed.reads === undefined ? "" : "let body: fsh_body; try { body = await req.json<fsh_body>(); } catch (e) { return fsh_refused(e.message); } ";
-    const answer = typed.gives === undefined ? `return ${run};` : typed.gives === "void" ? `${run}; return fsh_empty();` : `const out: fsh_out = ${run}; return fsh_json(out);`;
-    const text = `fsh_handler |> (async (${count === 0 ? "_req" : "req"}) => { ${read}${answer} })`;
+    const answer = typed.gives === undefined ? `return ${run};` : typed.gives === "void" ? `${run}; return fsh_empty();` : `const out: fsh_out = ${run}; return ${into ? "fsh_into" : "fsh_json"}(out);`;
+    const text = `fsh_handler |> (async (${head}) => { ${read}try { ${answer} } catch (fsh_error) { return fsh_caught(fsh_error); } })`;
     const tb = this.ctx.tables();
     const parsed = respanExpr(parseExpression(text, tb.ids), at);
     let slots: TypeNode[] = [];
     let names: Expr[] = [];
+    let caught: Pattern[] = [];
     walk({ of: "expr", node: parsed }, (n) => {
       if (n.of === "typeNode" && n.node.kind === "ref" && n.node.name.startsWith("fsh_")) slots.push(cloneTypeNode(n.node));
       else if (n.of === "expr" && n.node.kind === "ident" && n.node.name.startsWith("fsh_")) names.push(cloneExpr(n.node));
+      else if (n.of === "pattern" && n.node.kind === "ident" && n.node.name.startsWith("fsh_")) caught.push(clonePattern(n.node));
     });
     // An arrow's types are read as it wrote them; a named function's are its declaration's. What
     // the handler gives is held as that type, so a field written `name?: T` is left out while empty.
@@ -5934,9 +5945,12 @@ export class Expressions<C extends Context> implements Union<C> {
       if (name.name === "fsh_handler") rewrites.replace(name, cloneExpr(handler));
       else rewrites.replace(name, { ...name, name: `router ${name.name.slice(4)}` });
     }
+    // The check makes this try a plain block when the handler throws nothing.
+    for (const p of caught) if (p.kind === "ident") rewrites.replacePattern(p, { ...p, name: "router error" });
     const wrapped = rebuiltExpr(parsed, rewrites);
     if (wrapped.kind === "pipe" && wrapped.body.kind === "arrow") {
       this.ctx.tables().presetParams.set(cloneParam(wrapped.body.params[0]!), request);
+      if (state !== undefined) this.ctx.tables().presetParams.set(cloneParam(wrapped.body.params[1]!), state!);
       this.ctx.tables().madeArrows.add(cloneExpr(wrapped.body));
     }
     let args: Expr[] = [];
@@ -5945,14 +5959,48 @@ export class Expressions<C extends Context> implements Union<C> {
     return args;
   }
 
-  // What a route's handler says beyond a plain one, if anything, for an arrow written in place
-  // or a function named there.
+  // The state a StateRouter's handlers take, for a method of one.
+  private routerState(owner: Type): Type | undefined {
+    if (typeof owner === "string") return undefined;
+    const r = this.ctx.typing().rec(owner);
+    if (r.kind !== "class") return undefined;
+    const g = r.generic;
+    return g !== undefined && g.name === "StateRouter" ? g.args[0]! : undefined;
+  }
+
+  // Whether a type makes its own response, satisfying std's IntoResponse.
   /** @throws {CompileError} */
-  private typedHandler(this: Mut<this>, handler: Ref<Expr>): RouteHandler | undefined {
+  private intoResponse(this: Mut<this>, t: Type, start: usize, end: usize): boolean {
+    if (typeof t === "string") return false;
+    const refId = nextId(this.ctx.tables().ids);
+    const trait = this.ctx.resolveType({ id: refId, kind: "ref", name: "IntoResponse", args: [], start, end });
+    return this.isInterface(trait) && unsatisfied(t, trait, this.ctx.members(), { start, end }) === undefined;
+  }
+
+  // The std helper a route's made catch answers its error with, by the error's type: its own
+  // response, a thrown Response as it is, a string as a 500's text, and anything else, unions of
+  // errors included, as a 500 that says nothing of it.
+  // ponytail: a union is never asked for each member's own response; match on its members when
+  // a handler throwing several kinds of IntoResponse error needs that.
+  /** @throws {CompileError} */
+  private caughtBy(this: Mut<this>, error: Ref<Expr>): string {
+    const id = error.kind === "ident" ? this.ctx.peek(error.name) : undefined;
+    if (id === undefined) return "router failed";
+    const t = this.ctx.view().arenas.localOf(id).type;
+    if (t === "string") return "router text";
+    if (t === this.ctx.view().arenas.classOf(this.ctx.classes().get("Response")!).type) return "router given";
+    return this.intoResponse(t, error.start, error.end) ? "router into" : "router failed";
+  }
+
+  // What a route's handler says, for an arrow written in place or a function named there, or
+  // undefined for one that says nothing a wrapper is needed for. `skip` is how many parameters
+  // come before the body's.
+  /** @throws {CompileError} */
+  private typedHandler(this: Mut<this>, handler: Ref<Expr>, skip: usize): RouteHandler | undefined {
     if (handler.kind === "arrow") {
       if (handler.typeParams.length > 0) return undefined;
       const returns = handler.returnType === undefined ? undefined : cloneTypeNode(handler.returnType);
-      return this.handlerTypes(handler.params, returns, handler.async, handler.throws !== undefined, undefined);
+      return this.handlerTypes(handler.params, returns, handler.async, handler.throws !== undefined, undefined, skip);
     }
     if (handler.kind !== "ident" || this.ctx.lookup(handler.name, undefined) !== undefined) return undefined;
     const id = this.ctx.byName().get(handler.name);
@@ -5960,13 +6008,15 @@ export class Expressions<C extends Context> implements Union<C> {
     const f = cloneSignature(this.ctx.view().arenas.bodyOf(id));
     if (f.foreign === true || f.js !== undefined) return undefined;
     const returns = f.returnType === undefined ? undefined : cloneTypeNode(f.returnType);
-    return this.handlerTypes(f.params, returns, f.async === true, f.throws !== undefined, id);
+    return this.handlerTypes(f.params, returns, f.async === true, f.throws !== undefined, id, skip);
   }
 
-  // A second parameter is the body's type, and a written return type that isn't a Response is
-  // what the handler answers with. A function `named` is typed where it is declared.
+  // The parameter after the first `skip` is the body's type, and a written return type that
+  // isn't a Response is what the handler answers with. A function `named` is typed where it is
+  // declared. An async handler is wrapped whatever it says, since only its check finds whether
+  // it throws.
   /** @throws {CompileError} */
-  private handlerTypes(this: Mut<this>, params: Ref<Param[]>, returns: TypeNode | undefined, async: boolean, throws: boolean, named: BodyId | undefined): RouteHandler | undefined {
+  private handlerTypes(this: Mut<this>, params: Ref<Param[]>, returns: TypeNode | undefined, async: boolean, throws: boolean, named: BodyId | undefined, skip: usize): RouteHandler | undefined {
     let awaits = async;
     let given: TypeNode | undefined = undefined;
     if (returns !== undefined && returns.kind === "ref" && returns.name === "Promise" && returns.args.length === 1) {
@@ -5979,14 +6029,14 @@ export class Expressions<C extends Context> implements Union<C> {
     const answer = named === undefined && answers !== undefined ? given : undefined;
     let body: TypeNode | undefined = undefined;
     let reads: Type | undefined = undefined;
-    if (params.length > 1 && named !== undefined) {
+    if (params.length > skip && named !== undefined) {
       const declared = this.ctx.instanceOf(named, undefined);
-      reads = this.ctx.paramTypes(declared)[1]!;
-    } else if (params.length > 1 && params[1]!.type !== undefined) {
-      body = cloneTypeNode(params[1]!.type!);
-      reads = this.ctx.resolveType(cloneTypeNode(params[1]!.type!));
+      reads = this.ctx.paramTypes(declared)[skip]!;
+    } else if (params.length > skip && params[skip]!.type !== undefined) {
+      body = cloneTypeNode(params[skip]!.type!);
+      reads = this.ctx.resolveType(cloneTypeNode(params[skip]!.type!));
     }
-    if (reads === undefined && answers === undefined) return undefined;
+    if (reads === undefined && answers === undefined && !throws && !awaits) return undefined;
     return { params: params.length, body, reads, answer, gives: answers, awaits, throws };
   }
 

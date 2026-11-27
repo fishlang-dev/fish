@@ -682,37 +682,155 @@ async function main(): Promise<void> {
   app.get("/point", async (_req): Promise<Point> => new Point(1));
 }
 // case: router_typed_throws
-// error: a route's handler that says its types can't throw yet; catch the error inside the handler and give back a 'Response' for it
+// expect: 409 text/plain;charset=UTF-8 [taken: root]
+// expect: 200 application/json [{"name":"ann"}]
+// A typed handler may throw: an error with 'intoResponse()' answers with the response it makes.
 type NewUser = { name: string };
-class Taken extends Error {}
+class Taken extends Error implements IntoResponse {
+  intoResponse(): Response {
+    return new Response("taken: " + this.message, { status: 409 });
+  }
+}
+async function show(app: Ref<Router>, body: string): Promise<void> {
+  const res = await app.handle(new Request("http://h/users", { method: "POST", body }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
 async function main(): Promise<void> {
   let app = new Router();
   app.post("/users", async (_req, body: NewUser): Promise<NewUser> => {
-    if (body.name === "root") throw new Taken("taken");
+    if (body.name === "root") throw new Taken(body.name);
     return body;
   });
+  await show(app, "{\"name\":\"root\"}");
+  await show(app, "{\"name\":\"ann\"}");
 }
 // case: router_typed_named_throws
-// error: a route's handler that says its types can't throw yet; catch the error inside the handler and give back a 'Response' for it
+// expect: 500 application/json [{"error":"Internal Server Error"}]
+// expect: 200 application/json [{"name":"ann"}]
+// An error without 'intoResponse()' answers a 500 that doesn't say what it was.
 type NewUser = { name: string };
 class Taken extends Error {}
 async function create(_req: Request, body: NewUser): Promise<NewUser> throws Taken {
-  if (body.name === "root") throw new Taken("taken");
+  if (body.name === "root") throw new Taken("secret detail");
   return body;
+}
+async function show(app: Ref<Router>, body: string): Promise<void> {
+  const res = await app.handle(new Request("http://h/users", { method: "POST", body }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
 }
 async function main(): Promise<void> {
   let app = new Router();
   app.post("/users", create);
+  await show(app, "{\"name\":\"root\"}");
+  await show(app, "{\"name\":\"ann\"}");
+}
+// case: router_errors_plain
+// expect: 404 text/plain;charset=UTF-8 [no user 7]
+// expect: 200 text/plain;charset=UTF-8 [user 1]
+// expect: 418 text/plain;charset=UTF-8 [teapot]
+// expect: 500 text/plain;charset=UTF-8 [bad input]
+// A plain handler may throw too: its own response, a thrown Response as it is, and a string as a
+// 500's text.
+class NotFound extends Error implements IntoResponse {
+  intoResponse(): Response {
+    return new Response(this.message, { status: 404 });
+  }
+}
+function find(id: string): string throws NotFound {
+  if (id !== "1") throw new NotFound("no user " + id);
+  return "user " + id;
+}
+async function show(app: Ref<Router>, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/users/:id", async (req) => new Response(find(req.param("id"))));
+  app.get("/tea", async (_req) => {
+    throw new Response("teapot", { status: 418 });
+  });
+  app.get("/bad", async (_req) => {
+    throw "bad input";
+  });
+  await show(app, "/users/7");
+  await show(app, "/users/1");
+  await show(app, "/tea");
+  await show(app, "/bad");
+}
+// case: router_errors_answer
+// expect: 201 text/plain;charset=UTF-8 [made ann]
+// A handler's written return type with 'intoResponse()' answers with the response it makes.
+class Created implements IntoResponse {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  intoResponse(): Response {
+    return new Response("made " + this.name, { status: 201 });
+  }
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (_req): Promise<Created> => new Created("ann"));
+  const res = await app.handle(new Request("http://h/users", { method: "POST" }));
+  const type = res.headers.get("content-type") ?? "none";
+  console.log(res.status, type, "[" + await res.text() + "]");
+}
+// case: router_state
+// expect: mw 1
+// expect: 200 text/plain;charset=UTF-8 [hits 1]
+// expect: mw 2
+// expect: 200 application/json [{"id":2,"name":"ann"}]
+// expect: mw 3
+// expect: 404 text/plain;charset=UTF-8 [Not Found]
+// A router's state is given to each handler and middleware, cloned for each request; a handler
+// taking a body takes it after the state.
+type NewUser = { name: string };
+type User = { id: i64; name: string };
+type App = { hits: shared<Atomic<i64>> };
+async function create(_req: Request, state: App, body: NewUser): Promise<User> {
+  return { id: state.hits.load(), name: body.name };
+}
+async function show(app: Ref<StateRouter<App>>, method: string, path: string, body: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method, body }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
+async function main(): Promise<void> {
+  const initial: App = { hits: shared(new Atomic(0)) };
+  let app = new Router().state(initial);
+  app.use(async (req, state, next) => {
+    console.log("mw", state.hits.add(1) + 1);
+    const res = await next(req);
+    return res;
+  });
+  app.get("/hits", async (_req, state) => new Response("hits " + state.hits.load()));
+  app.post("/users", create);
+  await show(app, "GET", "/hits", "");
+  await show(app, "POST", "/users", "{\"name\":\"ann\"}");
+  await show(app, "GET", "/nowhere", "");
+}
+// case: router_typed_untyped_body
+// error: a route's handler's parameter after the request is its body, read as JSON, so it needs the body's type written
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (_req, body) => new Response("x"));
 }
 // case: router_typed_three_parameters
-// error: a route's handler takes the request and, to have its body read as JSON, a second parameter of the body's type, not 3 parameters
+// error: a route's handler takes the request and, to have its body read as JSON, a parameter of the body's type, not 3 parameters
 type NewUser = { name: string };
 async function main(): Promise<void> {
   let app = new Router();
   app.post("/users", async (_req: Request, body: NewUser, _extra: i64): Promise<NewUser> => body);
 }
 // case: router_typed_get_body
-// error: a GET request carries no body, so its handler can't take one as a second parameter
+// error: a GET request carries no body, so its handler can't take one after the request
 type Query = { q: string };
 async function main(): Promise<void> {
   let app = new Router();
