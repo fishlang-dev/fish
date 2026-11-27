@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 import { bodyOf, type Arenas } from "./arenas.fsh";
 import { C_KEYWORDS } from "./check.fsh";
-import { codegenChecked, compiledOf, shortened, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.fsh";
+import { codegenChecked, compiledOf, pointerSymbol, shortened, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.fsh";
 import { demangled, helperName, namesFrom, namesText, plainName } from "./demangle.fsh";
 import { fileCosts, formatFiles, formatMemory, formatTimings, formatUsage, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Peaks, type Reading, type Session, type Tables, type Timings } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
@@ -525,19 +525,21 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
   for (const i of compiledOf(checked)) {
     const body = bodyOf(arenas, i);
     if (body.foreign === true || body.rust !== undefined) continue;
-    const symbol = symbolIn(arenas, i, names);
+    // A function taking large values through pointers has a body under a second name, which goes
+    // with it; a name no function has is never asked for.
+    const symbols = [symbolIn(arenas, i, names), pointerSymbol(symbolIn(arenas, i, names))];
     if (body.start >= STD_BASE) {
-      std.push(symbol);
+      for (const symbol of symbols) std.push(symbol);
       continue;
     }
-    own.push(symbol);
+    for (const symbol of symbols) own.push(symbol);
     if (debug) continue;
     const file = fileAt(checked.tables.files, body.start);
     const had = byFile.get(file);
-    if (had === undefined) byFile.set(file, [symbol]);
+    if (had === undefined) byFile.set(file, [...symbols]);
     else {
       let list: string[] = had;
-      list.push(symbol);
+      for (const symbol of symbols) list.push(symbol);
       byFile.set(file, list);
     }
   }
