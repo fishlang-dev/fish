@@ -105,6 +105,8 @@ export const RUNTIME = [
   "declare void @fsh_rt_handle_drop(ptr)",
   "declare void @fsh_rt_handle_retain(ptr)",
   "declare i32 @fsh_rt_lock(ptr)",
+  "declare i32 @fsh_rt_lock_at(ptr, ptr)",
+  "declare i32 @fsh_rt_lock_new(ptr)",
   "declare void @fsh_rt_unlock(ptr)",
   "declare i32 @fsh_rt_read_lock(ptr)",
   "declare void @fsh_rt_read_unlock(ptr)",
