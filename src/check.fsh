@@ -6647,8 +6647,20 @@ class BodyChecker implements Context, GuardHost {
         this.leaveTarget();
         this.popScope();
         return undefined;
-      case "forIn":
-        throw unsupported("'for...in' loops", s);
+      // `for (const k in o)` loops over what `Object.keys(o)` gives, each key a string.
+      case "forIn": {
+        if (s.await) throw new CompileError("E0004", "'for await' loops over values with 'of', not 'in'", s.start, s.end);
+        const left: Ref<Stmt | Pattern> = s.left;
+        if (left.kind !== "let" || left.keyword === "var") throw unsupported("'for...in' loops over a variable declared outside them", left);
+        const d: Ref<Declarator> = left.declarations[0]!;
+        if (left.declarations.length > 1 || d.target.kind !== "ident") throw new CompileError("E0004", "a 'for...in' variable can't be a destructuring pattern; it holds each key, a string", d.target.start, d.target.end);
+        if (d.type !== undefined) throw new CompileError("E0004", "a 'for...in' variable can't have a type annotation; it holds each key, a string", d.type.start, d.type.end);
+        const at = { start: s.right.start, end: s.right.end };
+        const keys: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: { id: nextId(this.cx.tables.ids), kind: "ident", name: "Object", ...at }, name: "keys", optional: false, ...at };
+        const right: Expr = { id: nextId(this.cx.tables.ids), kind: "call", callee: keys, args: [cloneExpr(s.right)], typeArgs: [], optional: false, ...at };
+        const lowered = this.cx.tables.rewrites.replaceStmt(s, { id: 0, kind: "forOf", await: false, left: cloneStmt(left), right, body: s.body.slice(), start: s.start, end: s.end });
+        return this.statement(lowered);
+      }
       // `for (const x of arr)` borrows each element, shared, or copies a Copy one.
       case "forOf": {
         if (s.await) {
