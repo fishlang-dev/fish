@@ -155,7 +155,7 @@ test("function signatures", () => {
 const EXPRESSIONS: [string, string, string][] = [
   ["super", "'super' expressions", ""],
   ["[1, , 2]", "holes in array literals", ""],
-  ["function () {}", "function expressions", ""],
+  ["function* () {}", "generator function expressions", ""],
   ["class {}", "class expressions", ""],
   ["true[0]", "indexed access expressions", ""],
   ["f<i64>", "instantiation expressions", ""],
@@ -239,7 +239,6 @@ test("(1, 2)", () => {
 const STATEMENTS: [string, string][] = [
   ["function* inner() {}", "nested generator functions"],
   ["debugger", "'debugger' statements"],
-  ["for (const k in o) {}", "'for...in' loops"],
   ["namespace N {}", "namespaces"],
   ["declare const x: i64", "ambient declarations"],
 ];

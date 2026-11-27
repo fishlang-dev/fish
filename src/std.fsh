@@ -1649,8 +1649,9 @@ class Request {
   // A body given as a stream, at most one, read into #body when the request is sent or read.
   // Shared, so a request still clones, its copies sharing the one stream. The stream's
   // generator is held rather than the stream, since a class field naming a ReadableStream
-  // instance makes it before its type parameter is bound.
-  #bytes: shared<{ s: Lock<Dyn<AsyncGenerator<u8[]>>[]> }>;
+  // instance makes it before its type parameter is bound. Once the request is cloned, the copy
+  // that reads the stream to its end keeps the bytes in read for the others.
+  #bytes: shared<{ s: Lock<Dyn<AsyncGenerator<u8[]>>[]>; read: Lock<u8[][]>; cloned: Atomic<i64> }>;
   signal: AbortSignal;
   // The :params a Router's route took from the path, as name then value.
   params: string[] = [];
@@ -1677,8 +1678,35 @@ class Request {
     this.method = method;
     this.headers = headers;
     this.#body = bytes;
-    this.#bytes = shared({ s: new Lock(streams) });
+    const read: u8[][] = [];
+    this.#bytes = shared({ s: new Lock(streams), read: new Lock(read), cloned: new Atomic(0) });
     this.signal = signal;
+  }
+
+  // A copy of the request, as it is now: its path as a middleware may have rewritten it, its
+  // :params, and a body each copy can read in full.
+  // ponytail: a streamed body read through body, or by two copies at once, reaches only one of
+  // them; tee the stream if a program needs that.
+  clone(): Request {
+    this.#bytes.cloned.store(1);
+    let copy = new Request(this.url, { method: this.method, headers: this.headers.clone(), signal: this.signal.clone() });
+    copy.path = this.path;
+    copy.params = this.params.clone();
+    copy.#body = this.#body.clone();
+    copy.#bytes = this.#bytes.clone();
+    return copy;
+  }
+
+  // The bytes a copy of this request read from the stream they share, or null.
+  private kept(this: Ref<this>): u8[] | null {
+    return this.#bytes.read.update((r) => r.length > 0 ? r[0].clone() : null);
+  }
+
+  // Keeps a streamed body's bytes for the other copies, when there are any.
+  private keep(this: Ref<this>, bytes: Ref<u8[]>) {
+    if (this.#bytes.cloned.load() === 0) return;
+    const held = bytes.clone();
+    this.#bytes.read.update((r) => { r.push(held); });
   }
 
   __setBody(this: Mut<this>, body: string | u8[] | ReadableStream<u8[]>) {
@@ -1699,8 +1727,13 @@ class Request {
   // A body given as a stream, read to its end into the bytes, as fetch sends it with a length.
   async __drain(this: Mut<this>) {
     const given = this.#bytes.s.update((s) => s.pop());
-    if (given === null) return;
+    if (given === null) {
+      const kept = this.kept();
+      if (kept !== null) this.#body = kept;
+      return;
+    }
     const bytes = await __streamBytes(ReadableStream.from(__streamDyn(given)));
+    this.keep(bytes);
     this.#body = bytes;
   }
 
@@ -1721,7 +1754,13 @@ class Request {
   // The body's bytes as they were sent; a streamed one's read to its end, once.
   async bytes(): Promise<u8[]> {
     const given = this.#bytes.s.update((s) => s.pop());
-    if (given !== null) return await __streamBytes(ReadableStream.from(__streamDyn(given)));
+    if (given !== null) {
+      const bytes = await __streamBytes(ReadableStream.from(__streamDyn(given)));
+      this.keep(bytes);
+      return bytes;
+    }
+    const kept = this.kept();
+    if (kept !== null) return kept;
     return this.#body.clone();
   }
 
@@ -1854,6 +1893,20 @@ class Response {
     if (!res.headers.has("content-type")) res.headers.set("content-type", "text/event-stream");
     if (!res.headers.has("cache-control")) res.headers.set("cache-control", "no-cache");
     return new Response(__sseFrames(events), { status: res.status, statusText: res.statusText, headers: res.headers });
+  }
+
+  // A redirect to url, as given, with no body. Fetch throws a RangeError for a status that isn't a
+  // redirect; here it panics.
+  static redirect(url: string, status: i64 = 302): Response {
+    assert(status === 301 || status === 302 || status === 303 || status === 307 || status === 308, "Response.redirect's status must be 301, 302, 303, 307 or 308");
+    let res = new Response(null, { status: status });
+    res.headers.set("location", url);
+    return res;
+  }
+
+  // A network error, as Fetch's: status 0 and no body. serve answers it with a 500.
+  static error(): Response {
+    return new Response(null, { status: 0 });
   }
 
   get ok(): boolean {
@@ -9440,6 +9493,51 @@ export function compress(options: CompressOptions = {}): (req: Request, next: (r
   };
 }
 `,
+  // CORS for a Router, imported as std:cors, as Hono's cors middleware.
+  cors: String.raw`
+// origins are the origins allowed, "*" for any; methods are those a preflight allows; credentials
+// lets a browser send cookies and read the response.
+export type CorsOptions = { origins?: string[]; methods?: string[]; credentials?: boolean };
+
+// The Access-Control-Allow-Origin a request from origin gets, or "" for none. With credentials a
+// "*" can't be sent, so the origin itself is.
+export function allowedOrigin(origins: Ref<string[]>, origin: string, credentials: boolean): string {
+  if (origins.includes("*")) return credentials ? origin : "*";
+  return origins.includes(origin) ? origin : "";
+}
+
+// A Router middleware answering preflight requests itself and adding the Access-Control headers
+// to every other response, the router's 404 and 405 included.
+export function cors(options: CorsOptions = {}): (req: Request, next: (req: Request) => Promise<Response>) => Promise<Response> {
+  const origins = options.origins ?? ["*"];
+  const methods = (options.methods ?? ["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH"]).join(", ");
+  const credentials = options.credentials ?? false;
+  const varies = credentials || !origins.includes("*");
+  return async (req, next) => {
+    const allow = allowedOrigin(origins, req.headers.get("origin") ?? "", credentials);
+    let res: Response;
+    if (req.method === "OPTIONS" && req.headers.has("access-control-request-method")) {
+      res = new Response(null, { status: 204 });
+      if (allow !== "") {
+        res.headers.set("access-control-allow-methods", methods.clone());
+        const asked = req.headers.get("access-control-request-headers");
+        if (asked !== null) res.headers.set("access-control-allow-headers", asked);
+      }
+    } else {
+      res = await next(req);
+    }
+    if (allow !== "") {
+      res.headers.set("access-control-allow-origin", allow);
+      if (credentials) res.headers.set("access-control-allow-credentials", "true");
+    }
+    if (varies) {
+      const had = res.headers.get("vary");
+      res.headers.set("vary", had === null ? "Origin" : had + ", Origin");
+    }
+    return res;
+  };
+}
+`,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
 declare function write(fd: i32, data: Ptr<u8>, length: usize): isize;
@@ -13170,7 +13268,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log", "durable", "mcu", "comptime"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "cors", "query", "s3", "log", "durable", "mcu", "comptime"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.

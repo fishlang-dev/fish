@@ -2667,14 +2667,23 @@ export class Expressions<C extends Context> implements Union<C> {
     for (const a of e.args) argTypes.push(this.value(a));
     let bindings = new Map<string, Type>();
     if (e.typeArgs.length > 0) {
-      if (e.typeArgs.length !== names.length) throw new CompileError("E0106", `expected ${names.length} type argument${names.length === 1 ? "" : "s"}, but got ${e.typeArgs.length}`, e.start, e.end);
-      for (let i: usize = 0; i < names.length; i++) bindings.set(names[i]!, this.ctx.resolveType(e.typeArgs[i]!));
+      const least = written.typeParams.filter((p) => p.default === undefined).length;
+      if (e.typeArgs.length < least || e.typeArgs.length > names.length) {
+        const expected = least === names.length ? `${least}` : `${least}-${names.length}`;
+        throw new CompileError("E0106", `expected ${expected} type argument${expected === "1" ? "" : "s"}, but got ${e.typeArgs.length}`, e.start, e.end);
+      }
+      for (let i: usize = 0; i < e.typeArgs.length; i++) bindings.set(names[i]!, this.ctx.resolveType(e.typeArgs[i]!));
     } else {
       let i: usize = 0;
       for (const p of written.params) {
         if (p.type !== undefined) this.ctx.inferArgs(p.type, argTypes[i]!, new Set(names.slice()), bindings, { start: e.args[i]!.start, end: e.args[i]!.end });
         i++;
       }
+    }
+    // A parameter neither written nor inferred takes its default, seeing those before it.
+    for (let i: usize = 0; i < names.length; i++) {
+      const d: Ref<TypeNode | undefined> = written.typeParams[i]!.default;
+      if (!bindings.has(names[i]!) && d !== undefined) bindings.set(names[i]!, this.ctx.resolveWith(cloneTypeNode(d), joinedScope(scope, bindings)));
     }
     for (let i: usize = 0; i < names.length; i++) {
       const n = names[i]!;
