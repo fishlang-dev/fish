@@ -1038,7 +1038,7 @@ export class Typing {
     return this.holdsPart(t, (u) => {
       const r = this.recOf(u);
       return r !== undefined && r.kind === "class" && (r.rust !== undefined || this.disposable(u));
-    });
+    }, false, true);
   }
 
   isCopy(t: Type): boolean {
@@ -1112,14 +1112,14 @@ export class Typing {
     return out;
   }
 
-  holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false): boolean {
+  holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false, skipEmptyFixed = false): boolean {
     let seen = new TypeSet<Type>();
-    return this.holdsPartIn(t, found, throughRefs, seen);
+    return this.holdsPartIn(t, found, throughRefs, skipEmptyFixed, seen);
   }
 
   // Walked with a stack, in the order a recursive walk would take, so `found` is called rather than
   // handed on, which would make another instance of this method for each closure handed on.
-  private holdsPartIn(start: Type, found: (t: Type) => boolean, throughRefs: boolean, seen: Mut<TypeSet<Type>>): boolean {
+  private holdsPartIn(start: Type, found: (t: Type) => boolean, throughRefs: boolean, skipEmptyFixed: boolean, seen: Mut<TypeSet<Type>>): boolean {
     let stack: Type[] = [start];
     while (stack.length > 0) {
       const t = stack.pop()!;
@@ -1133,7 +1133,8 @@ export class Typing {
       if (r.kind === "ref") parts = throughRefs ? [r.to] : [];
       else if (r.kind === "param") parts = r.concrete !== undefined ? [r.concrete] : [];
       else if (r.kind === "union") parts = r.members.slice();
-      else if (r.kind === "array" || r.kind === "fixed") parts = [r.element];
+      else if (r.kind === "array") parts = [r.element];
+      else if (r.kind === "fixed") parts = !skipEmptyFixed || r.size > 0 ? [r.element] : [];
       else if (r.kind === "map") parts = [r.key, r.value];
       else if (r.kind === "interior" || r.kind === "recursive") parts = [r.of];
       else if (r.kind === "class") {

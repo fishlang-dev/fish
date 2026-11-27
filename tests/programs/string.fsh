@@ -1194,3 +1194,20 @@ function main(): void { console.log(String.nope("a")); }
 // error: 'i64' has no method 'fromCharCode'
 const String: i64 = 5;
 function main(): void { console.log(String.fromCharCode(65)); }
+// case: string_multi_arg_mutated
+// expect: hello replaced!
+// expect: Z!-b-Z!
+// expect: first!second!third!fourth!
+// Multi-argument String methods retain earlier arguments across later argument mutations (F-2492).
+function main(): void {
+  let x = "wor" + "ld";
+  const r1 = "hello world".replace(x, (x = "replaced" + "!"));
+  let y = "a" + "";
+  const r2 = "a-b-a".replaceAll(y, (y = "Z" + "!"));
+  let a = "first" + "!";
+  let b = "third" + "!";
+  const r3 = "".concat(a, (a = "second" + "!"), b, (b = "fourth" + "!"));
+  console.log(r1);
+  console.log(r2);
+  console.log(r3);
+}

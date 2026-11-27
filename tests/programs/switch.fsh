@@ -158,3 +158,82 @@ function main() {
   }
 }
 // error: type '"z"' is not comparable to type '"a" | "b"'
+// case: switch_later_case_test_init
+// error: 's'
+// An assignment in a later switch case test does not initialize 's' for earlier cases (F-2441).
+function main() {
+  let s: string;
+  switch (0) {
+    case 0:
+      console.log(s);
+      break;
+    case (s = "ok" + "!").length as i64:
+      break;
+  }
+}
+// case: switch_later_case_test_move_earlier_ok
+// expect: ok!
+// A move in a later switch case test does not reject reading the value in an earlier case (F-2441).
+function take(s: string): i64 { return s.length as i64; }
+function main() {
+  let s = "ok" + "!";
+  switch (0) {
+    case 0:
+      console.log(s);
+      break;
+    case take(s):
+      break;
+  }
+}
+// case: switch_break_release_ok
+// expect: a!
+// expect: b!
+// Loans of references declared inside a switch case are released on break (F-2441).
+function main() {
+  let s = "a" + "!";
+  switch (1) {
+    case 1:
+      const r: Ref<string> = s;
+      console.log(r);
+      break;
+  }
+  s = "b" + "!";
+  console.log(s);
+}
+// case: switch_move_only_discriminant_mutated
+// error: cannot change 'u' while the 'switch' is reading 'u'
+// Mutating a move-only switch discriminant in a case test is rejected (F-2708).
+@derive(Eq)
+class Guard {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function mkStr(_: Guard | string): string { return "bye" + "!"; }
+function main() {
+  let u: Guard | string = "init" + "!";
+  switch (u) {
+    case mkStr((u = "bye" + "!")):
+      break;
+  }
+}
+// case: switch_move_only_body_mutate_ok
+// expect: ok
+// Mutating a move-only switch discriminant inside a case body is allowed once tests finish (F-2708).
+@derive(Eq)
+class Guard {
+  n: i64;
+  constructor(n: i64) { this.n = n; }
+  [Symbol.dispose](this: Mut<this>): void {}
+}
+function main() {
+  let u: Guard | string = "init" + "!";
+  switch (u) {
+    case "init!":
+      u = "ok";
+      break;
+    default:
+      break;
+  }
+  console.log(u);
+}

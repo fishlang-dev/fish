@@ -6132,7 +6132,8 @@ function readInto(fd: i64, buffer: Mut<u8[]>, offset: i64, n: i64, position: i64
   if (n === 0) return 0;
   if (size === 0) throw invalid("The argument 'buffer' is empty and cannot be written. Received Uint8Array(0) []");
   if (n < 0) throw outOfRange("length", ">= 0", n);
-  if (offset + n > size) throw outOfRange("length", "<= " + String(size - offset), n);
+  if (offset > size) throw outOfRange("offset", "<= " + String(size), offset);
+  if (n > size - offset) throw outOfRange("length", "<= " + String(size - offset), n);
   if (position < -1 || position > SAFE) throw outOfRange("position", ">= -1 && <= 9007199254740991", position);
   const got = unsafe { fsh_rt_fd_read(fd, mutPtrOf(buffer[offset as usize]), n, position) };
   if (got < 0) throw failed(got, "read", null);
@@ -8449,6 +8450,7 @@ export class FileHandle {
     const held = this.#held.clone();
     const size = buffer.length as i64;
     const from = offset ?? 0;
+    if (from < 0 || from > SAFE) throw outOfRange("offset", ">= 0 && <= 9007199254740991", from);
     const n = length ?? size - from;
     const at = position ?? -1;
     // The read fills a copy of its own, since the buffer stays here, then lands in the buffer.
@@ -10825,7 +10827,7 @@ export class Statement {
 `,
   // Tar archives, read an entry at a time and written from files, imported as std:tar.
   tar: String.raw`
-import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, rmSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve } from "std:path";
 import { gunzipSync, gzipSync, ZlibError } from "zlib";
 import { open } from "fs/promises";
@@ -11073,6 +11075,51 @@ function throughLinks(root: string, to: string, path: string): void throws IoErr
   }
 }
 
+// Validates a symlink target's lexical constraints before creating it on disk.
+function checkLinkEntry(root: string, to: string, path: string, target: string): void throws TarError {
+  if (to === root) throw new TarError("'" + path + "' cannot replace the target directory with a symlink", path);
+  if (isAbsolute(target)) throw new TarError("'" + path + "' is a symlink to the absolute path '" + target + "', which extract refuses", path);
+  if (target.length > 4096) throw new TarError("'" + path + "' has a symlink target that is too long, which extract refuses", path);
+  landing(root, join(dirname(relative(root, to)), target));
+}
+
+// Walks a symlink's target component by component from its parent directory under root,
+// expanding any existing symlinks along the way so symlink chains and loops cannot escape root.
+// Returns the remaining path-step budget for this extract().
+function checkLinkTarget(root: string, to: string, path: string, target: string, budget: i64): i64 throws IoError | TarError {
+  checkLinkEntry(root, to, path, target);
+  let cur = dirname(to);
+  let stack: string[] = [];
+  const initial = target.split("/");
+  for (let i = (initial.length as i64) - 1; i >= 0; i--) stack.push(initial[i as usize]!);
+  let hops: i64 = 0;
+  let left = budget;
+  while (stack.length > 0) {
+    left--;
+    if (left < 0) throw new TarError("'" + path + "' follows too many symlinks, which extract refuses", path);
+    const seg = stack.pop()!;
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (cur === root) throw new TarError("'" + path + "' follows symlinks out of the target, which extract refuses", path);
+      cur = dirname(cur);
+      continue;
+    }
+    const next = join(cur, seg);
+    const st = lstatSync(next, { throwIfNoEntry: false });
+    if (st !== undefined && st.isSymbolicLink()) {
+      hops++;
+      if (hops > 40) throw new TarError("'" + path + "' follows too many symlinks, which extract refuses", path);
+      const linkTarget = readlinkSync(next);
+      if (isAbsolute(linkTarget)) throw new TarError("'" + path + "' follows a symlink to the absolute path '" + linkTarget + "', which extract refuses", path);
+      const parts = linkTarget.split("/");
+      for (let i = (parts.length as i64) - 1; i >= 0; i--) stack.push(parts[i as usize]!);
+    } else {
+      cur = next;
+    }
+  }
+  return left;
+}
+
 // Writes the archive's entries under dir, made if it isn't there, and gives the paths written.
 // Nothing lands outside dir: absolute paths, climbing paths, links pointing out and paths
 // through symlinks are refused with TarError, as are devices and FIFOs.
@@ -11080,32 +11127,51 @@ export async function extract(source: TarSource, dir: string, limits: TarLimits 
   const root = resolve(dir);
   mkdirSync(root, { recursive: true });
   let written: string[] = [];
+  let links: { to: string; path: string; target: string }[] = [];
+  let dirModes: { to: string; mode: i64 }[] = [];
   let all = entries(source, limits);
-  for await (const e of all) {
-    const to = landing(root, e.path);
-    throughLinks(root, to, e.path);
-    if (e.type === "directory") {
-      mkdirSync(to, { recursive: true });
-      if (e.mode !== 0) chmodSync(to, e.mode & 0o777);
+  try {
+    for await (const e of all) {
+      const to = landing(root, e.path);
+      throughLinks(root, to, e.path);
+      if (e.type === "directory") {
+        mkdirSync(to, { recursive: true });
+        if (e.mode !== 0) dirModes.push({ to, mode: e.mode & 0o777 });
+        written.push(to);
+        continue;
+      }
+      mkdirSync(dirname(to), { recursive: true });
+      if (e.type === "symlink") {
+        checkLinkEntry(root, to, e.path, e.target);
+        symlinkSync(e.target, to);
+        links.push({ to, path: e.path, target: e.target });
+      } else if (e.type === "link") {
+        const from = landing(root, e.target);
+        throughLinks(root, from, e.path);
+        linkSync(from, to);
+      } else {
+        writeFileSync(to, e.data);
+        chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
+        utimesSync(to, e.mtime as f64, e.mtime as f64);
+      }
       written.push(to);
-      continue;
     }
-    mkdirSync(dirname(to), { recursive: true });
-    if (e.type === "symlink") {
-      if (isAbsolute(e.target)) throw new TarError("'" + e.path + "' is a symlink to the absolute path '" + e.target + "', which extract refuses", e.path);
-      landing(root, join(dirname(relative(root, to)), e.target));
-      symlinkSync(e.target, to);
-    } else if (e.type === "link") {
-      const from = landing(root, e.target);
-      throughLinks(root, from, e.path);
-      linkSync(from, to);
-    } else {
-      writeFileSync(to, e.data);
-      chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
-      utimesSync(to, e.mtime as f64, e.mtime as f64);
+    // Validate every created symlink once all entries exist so forward and reverse chains
+    // (including under case- or normalization-insensitive filesystems) cannot escape root.
+    let budget: i64 = 200000;
+    for (const l of links) budget = checkLinkTarget(root, l.to, l.path, l.target, budget);
+  } catch (err) {
+    for (const l of links) {
+      try {
+        rmSync(l.to, { force: true });
+      } catch (_e) {}
     }
-    written.push(to);
+    throw err;
   }
+  // Apply directory modes deepest-first after validation succeeds so read-only directories
+  // cannot block child writes or symlink cleanup on failure.
+  dirModes.sort((a, b) => (b.to.length as i64) - (a.to.length as i64));
+  for (const d of dirModes) chmodSync(d.to, d.mode);
   return written;
 }
 
@@ -11262,7 +11328,7 @@ export async function create(file: string, paths: string[], options: TarPackOpti
 `,
   // Zip archives, read through their central directory and written deflated, as std:zip.
   zip: String.raw`
-import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "std:path";
 import { deflateRawSync, inflateRawSync, ZlibError } from "zlib";
 import { open } from "fs/promises";
@@ -11488,33 +11554,93 @@ function throughLinks(root: string, to: string, path: string): void throws IoErr
   }
 }
 
+function checkLinkEntry(root: string, to: string, path: string, target: string): void throws ZipError {
+  if (to === root) throw new ZipError("'" + path + "' cannot replace the target directory with a symlink", path);
+  if (isAbsolute(target)) throw new ZipError("'" + path + "' is a symlink to the absolute path '" + target + "', which extract refuses", path);
+  if (target.length > 4096) throw new ZipError("'" + path + "' has a symlink target that is too long, which extract refuses", path);
+  landing(root, join(dirname(relative(root, to)), target));
+}
+
+function checkLinkTarget(root: string, to: string, path: string, target: string, budget: i64): i64 throws IoError | ZipError {
+  checkLinkEntry(root, to, path, target);
+  let cur = dirname(to);
+  let stack: string[] = [];
+  const initial = target.split("/");
+  for (let i = (initial.length as i64) - 1; i >= 0; i--) stack.push(initial[i as usize]!);
+  let hops: i64 = 0;
+  let left = budget;
+  while (stack.length > 0) {
+    left--;
+    if (left < 0) throw new ZipError("'" + path + "' follows too many symlinks, which extract refuses", path);
+    const seg = stack.pop()!;
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (cur === root) throw new ZipError("'" + path + "' follows symlinks out of the target, which extract refuses", path);
+      cur = dirname(cur);
+      continue;
+    }
+    const next = join(cur, seg);
+    const st = lstatSync(next, { throwIfNoEntry: false });
+    if (st !== undefined && st.isSymbolicLink()) {
+      hops++;
+      if (hops > 40) throw new ZipError("'" + path + "' follows too many symlinks, which extract refuses", path);
+      const linkTarget = readlinkSync(next);
+      if (isAbsolute(linkTarget)) throw new ZipError("'" + path + "' follows a symlink to the absolute path '" + linkTarget + "', which extract refuses", path);
+      const parts = linkTarget.split("/");
+      for (let i = (parts.length as i64) - 1; i >= 0; i--) stack.push(parts[i as usize]!);
+    } else {
+      cur = next;
+    }
+  }
+  return left;
+}
+
 // Writes the archive's entries under dir and gives the paths written, refusing as std:tar's
 // extract does anything that would land outside dir.
 export async function extract(source: ZipSource, dir: string, limits: ZipLimits = {}): Promise<string[]> throws IoError | ZipError {
   const root = resolve(dir);
   mkdirSync(root, { recursive: true });
   let written: string[] = [];
+  let links: { to: string; path: string; target: string }[] = [];
+  let dirModes: { to: string; mode: i64 }[] = [];
   let all = entries(source, limits);
-  for await (const e of all) {
-    const to = landing(root, e.path);
-    throughLinks(root, to, e.path);
-    if (e.type === "directory") {
-      mkdirSync(to, { recursive: true });
-      if (e.mode !== 0) chmodSync(to, e.mode & 0o777);
-    } else {
-      mkdirSync(dirname(to), { recursive: true });
-      if (e.type === "symlink") {
-        if (isAbsolute(e.target)) throw new ZipError("'" + e.path + "' is a symlink to the absolute path '" + e.target + "', which extract refuses", e.path);
-        landing(root, join(dirname(relative(root, to)), e.target));
-        symlinkSync(e.target, to);
+  try {
+    for await (const e of all) {
+      const to = landing(root, e.path);
+      throughLinks(root, to, e.path);
+      if (e.type === "directory") {
+        mkdirSync(to, { recursive: true });
+        if (e.mode !== 0) dirModes.push({ to, mode: e.mode & 0o777 });
       } else {
-        writeFileSync(to, e.data);
-        chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
-        utimesSync(to, e.mtime as f64, e.mtime as f64);
+        mkdirSync(dirname(to), { recursive: true });
+        if (e.type === "symlink") {
+          checkLinkEntry(root, to, e.path, e.target);
+          symlinkSync(e.target, to);
+          links.push({ to, path: e.path, target: e.target });
+        } else {
+          writeFileSync(to, e.data);
+          chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
+          utimesSync(to, e.mtime as f64, e.mtime as f64);
+        }
       }
+      written.push(to);
     }
-    written.push(to);
+    // Validate every created symlink once all entries exist so forward and reverse chains
+    // (including under case- or normalization-insensitive filesystems) cannot escape root.
+    let budget: i64 = 200000;
+    for (const l of links) budget = checkLinkTarget(root, l.to, l.path, l.target, budget);
+  } catch (err) {
+    for (const l of links) {
+      try {
+        rmSync(l.to, { force: true });
+      } catch (_e) {}
+    }
+    throw err;
   }
+  // Apply directory modes deepest-first after validation succeeds so read-only directories
+  // cannot block child writes or symlink cleanup on failure.
+  dirModes.sort((a, b) => (b.to.length as i64) - (a.to.length as i64));
+  for (const d of dirModes) chmodSync(d.to, d.mode);
   return written;
 }
 
