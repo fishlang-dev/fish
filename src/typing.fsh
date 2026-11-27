@@ -1802,9 +1802,9 @@ export class Typing {
     return t;
   }
 
-  futureType(this: Mut<this>, name: string, concrete: boolean): FutureType {
-    const id = this.declared++;
-    const t = this.made<FutureType>({ kind: "future", name, gives: "void", fields: [], params: [], frame: [], concrete }, `future ${id}`);
+  futureType(this: Mut<this>, name: string, concrete: boolean, of: string = name): FutureType {
+    const key = this.declaredKey("future", `${of} ${concrete}`);
+    const t = this.made<FutureType>({ kind: "future", name, gives: "void", fields: [], params: [], frame: [], concrete }, key);
     return t;
   }
   combinedOf = new TypeMap<FutureType, Combined>();
@@ -1838,8 +1838,8 @@ export class Typing {
       const r = this.rec(f);
       if (r.kind === "future") for (const p of r.params) params.push({ ...p });
     }
-    const id = this.declared++;
-    const t = this.made<FutureType>({ kind: "future", name: `Promise.${c.kind}`, gives, throws, fields: [], params, frame, concrete: true }, `future ${id}`);
+    const key = this.declaredKey("future", `Promise.${c.kind} ${c.futures.map((f) => this.keyOf(f)).join(",")}`);
+    const t = this.made<FutureType>({ kind: "future", name: `Promise.${c.kind}`, gives, throws, fields: [], params, frame, concrete: true }, key);
     this.combinedOf.set(t, c);
     return t;
   }
@@ -1897,8 +1897,8 @@ export class Typing {
     for (const p of r.params) params.push({ ...p });
     const scope = this.blockType("TaskScope");
     const frame: Field[] = [{ name: "state", type: "i32" }, { name: "body", type: body }, { name: "scope", type: scope }, { name: "value", type: gives === "void" ? "null" : gives }, { name: "error", type: throws ?? "null" }];
-    const id = this.declared++;
-    const t = this.made<FutureType>({ kind: "future", name: "taskGroup", gives, throws, fields: [], params, frame, concrete }, `future ${id}`);
+    const key = this.declaredKey("future", `taskGroup ${this.keyOf(body)}`);
+    const t = this.made<FutureType>({ kind: "future", name: "taskGroup", gives, throws, fields: [], params, frame, concrete }, key);
     this.groups.set(body, t);
     this.groupOf.set(t, { body, at });
     return t;
@@ -1965,8 +1965,8 @@ export class Typing {
 
   // One per alias instance a program's types lead back to; the checker keeps them by instance.
   recursiveType(this: Mut<this>, name: string, args: Type[]): RecursiveType {
-    const id = this.declared++;
-    const t = this.made<RecursiveType>({ kind: "recursive", name, args, of: "never", fields: [] }, `recursive ${id}`);
+    const key = this.declaredKey("recursive", `${name}<${args.map((a) => this.keyOf(a)).join(",")}>`);
+    const t = this.made<RecursiveType>({ kind: "recursive", name, args, of: "never", fields: [] }, key);
     return t;
   }
 
@@ -2154,7 +2154,20 @@ export class Typing {
   }
   private keys = new TypeMap<Exclude<Type, string>, string>();
   private keyIds = new Map<string, usize>();
-  private declared = 0;
+  // How many types of each kind have been made from what a key's digest stands for.
+  private declared = new Map<string, usize>();
+
+  // The key of a type that is a type of its own each time one is made, as a class or a closure is:
+  // a digest of what it is made from, numbered past the first made from the same. So the key, and
+  // the order a union keeps its members in, follows what each member is rather than how many types
+  // were made before it, which the order bodies are checked in decides. A class or an interface
+  // puts its name first, so a union of classes is kept, and shown, in the order of their names.
+  private declaredKey(this: Mut<this>, kind: string, from: string, named = ""): string {
+    const stem = named === "" ? `${kind} ${fullDigest(from)}` : `${kind} ${named} ${fullDigest(from)}`;
+    const made = this.declared.get(stem) ?? 0;
+    this.declared.set(stem, made + 1);
+    return made === 0 ? stem : `${stem}.${made}`;
+  }
 
   // A new type: its record kept in the arena, and interned under `key` when it has one.
   private made<T extends Exclude<Type, string>>(this: Mut<this>, record: RecordOf<T>, key?: string): T {
@@ -2171,21 +2184,21 @@ export class Typing {
 
   // A class's key is unique to its declaration, since two programs may reuse a class name.
   classType(this: Mut<this>, name: string, generic?: ClassRecord["generic"]): ClassType {
-    const id = this.declared++;
-    const t = this.made<ClassType>({ kind: "class", name, fields: [], generic }, `class ${id}`);
+    const key = this.declaredKey("class", generic === undefined ? name : `${name} ${generic.name}<${generic.args.map((a) => this.keyOf(a)).join(",")}>`, generic === undefined ? name : generic.name);
+    const t = this.made<ClassType>({ kind: "class", name, fields: [], generic }, key);
     return t;
   }
 
   interfaceType(this: Mut<this>, name: string): InterfaceType {
-    const id = this.declared++;
-    const t = this.made<InterfaceType>({ kind: "interface", name, fields: [], methods: [] }, `interface ${id}`);
+    const key = this.declaredKey("interface", name, name.split("<")[0]!);
+    const t = this.made<InterfaceType>({ kind: "interface", name, fields: [], methods: [] }, key);
     return t;
   }
 
-  generatorType(this: Mut<this>, name: string, concrete: boolean, async = false): GeneratorType {
-    const id = this.declared++;
+  generatorType(this: Mut<this>, name: string, concrete: boolean, async = false, of: string = name): GeneratorType {
+    const key = this.declaredKey("generator", `${of} ${concrete} ${async}`);
     const rec: GeneratorRecord = async ? { kind: "generator", name, yields: "never", fields: [], params: [], frame: [], concrete, async: true } : { kind: "generator", name, yields: "never", fields: [], params: [], frame: [], concrete };
-    const t = this.made<GeneratorType>(rec, `generator ${id}`);
+    const t = this.made<GeneratorType>(rec, key);
     return t;
   }
 
@@ -2350,10 +2363,15 @@ export class Typing {
 
   functionType(this: Mut<this>, names: string[], params: Type[], returns: Type, throws?: Type): FunctionType {
     const name = this.signatureName(names, params, returns, throws);
-    const id = this.declared++;
+    const key = this.declaredKey("function", `${name} ${this.signatureKey(params, returns, throws)}`);
     const rec: FunctionRecord = throws !== undefined ? { kind: "function", name, names, params, returns, throws, fields: [] } : { kind: "function", name, names, params, returns, fields: [] };
-    const t = this.made<FunctionType>(rec, `function ${id}`);
+    const t = this.made<FunctionType>(rec, key);
     return t;
+  }
+
+  // What a signature's types are, as keys: its name shows them, and types may show alike.
+  private signatureKey(params: Ref<Type[]>, returns: Type, throws: Type | undefined): string {
+    return `${params.map((p) => this.keyOf(p)).join(",")} => ${this.keyOf(returns)}${throws !== undefined ? ` throws ${this.keyOf(throws)}` : ""}`;
   }
 
   private signatureName(this: Mut<this>, names: Ref<string[]>, params: Ref<Type[]>, returns: Type, throws: Type | undefined) {
@@ -2362,9 +2380,10 @@ export class Typing {
 
   closureType(this: Mut<this>, names: string[], params: Type[], returns: Type, fields: Field[], once: string | undefined, concrete: boolean, throws?: Type): ClosureType {
     const name = this.signatureName(names, params, returns, throws);
-    const id = this.declared++;
+    const captured = fields.map((f) => `${f.name}:${this.keyOf(f.type)}`).join(",");
+    const key = this.declaredKey("closure", `${name} ${this.signatureKey(params, returns, throws)} {${captured}} ${once ?? ""} ${concrete}`);
     const rec: ClosureRecord = throws !== undefined ? { kind: "closure", name, params, returns, throws, fields, once, concrete } : { kind: "closure", name, params, returns, fields, once, concrete };
-    const t = this.made<ClosureType>(rec, `closure ${id}`);
+    const t = this.made<ClosureType>(rec, key);
     return t;
   }
 
@@ -2521,9 +2540,9 @@ export class Typing {
   private intoUnknown = new TypeSet<Type>();
 
   typeParameter(this: Mut<this>, name: string, bound: Bound | undefined, within?: Type): ParamType {
-    const id = this.declared++;
+    const key = this.declaredKey("param", `${name} ${bound !== undefined ? this.keyOf(bound) : ""} ${within !== undefined ? this.keyOf(within) : ""}`);
     const rec: ParamRecord = within === undefined ? { kind: "param", name, bound, fields: [] } : { kind: "param", name, bound, fields: [], concrete: within, within: true };
-    const t = this.made<ParamType>(rec, `param ${id}`);
+    const t = this.made<ParamType>(rec, key);
     return t;
   }
 
@@ -2662,7 +2681,8 @@ export class Typing {
       this.variants.set(key, t);
       this.variantIds.set(t, id);
       // A short key of its own, so an enum nested in itself doesn't double its key each level.
-      this.keys.set(t, `variant#${this.variants.size}`);
+      const short = this.declaredKey("variant", key);
+      this.keys.set(t, short);
     }
     return t;
   }

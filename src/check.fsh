@@ -4120,7 +4120,7 @@ class BodyChecker implements Context, GuardHost {
       const concrete = this.instance().concrete;
       const name = this.f().name;
       const async = this.f().async === true;
-      const generator = this.cx.tables.typing.generatorType(name, concrete, async);
+      const generator = this.cx.tables.typing.generatorType(name, concrete, async, symbol);
       const made = madeBy(this.cx.tables.typing, generator, symbol);
       this.instance().generator = made;
     }
@@ -4145,7 +4145,7 @@ class BodyChecker implements Context, GuardHost {
       const symbol = this.instance().symbol;
       const concrete = this.instance().concrete;
       const name = this.f().name;
-      const future = this.cx.tables.typing.futureType(name, concrete);
+      const future = this.cx.tables.typing.futureType(name, concrete, symbol);
       const made = madeBy(this.cx.tables.typing, future, symbol);
       this.instance().future = made;
     }
