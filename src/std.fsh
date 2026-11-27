@@ -6230,6 +6230,308 @@ export function fsyncSync(fd: i64): void throws IoError {
 }
 `;
 
+// std:query, as a template rather than String.raw, since its column types are template literal types.
+const QUERY = `// A value a compiled query passes as a parameter, as std:postgres and std:sqlite bind them.
+export type QueryValue = null | boolean | i64 | f64 | string | u8[];
+
+// Whose SQL a query compiles to: \`$1\` parameters for Postgres, \`?\` for SQLite.
+export type Dialect = "postgres" | "sqlite";
+
+export type ComparisonOperator = "=" | "<>" | "!=" | "<" | "<=" | ">" | ">=" | "like" | "not like" | "is" | "is not";
+export type OrderDirection = "asc" | "desc";
+
+// A column of the tables a query reads, by name or as \`table.column\`.
+export type ColumnRef<S> = { [T in keyof S]: \`\${T}.\${keyof S[T]}\` }[keyof S] | { [T in keyof S]: keyof S[T] }[keyof S];
+// The type of the column a reference names.
+export type ColumnValue<S, R> = R extends \`\${infer T}.\${infer C}\` ? S[T][C] : { [T in keyof S]: R extends keyof S[T] ? S[T][R] : never }[keyof S];
+type ColumnName<R> = R extends \`\${infer T}.\${infer C}\` ? C : R;
+// The row selecting \`C\` gives: each column under its own name.
+export type Selection<S, C> = { [P in C as ColumnName<P>]: ColumnValue<S, P> };
+// A table a left join reads, each column null where no row matched.
+export type Nullable<T> = { [P in keyof T]: T[P] | null };
+
+// A query's SQL and the values its placeholders stand for, giving rows of type O.
+export class CompiledQuery<O> {
+  sql: string;
+  parameters: QueryValue[];
+  constructor(sql: string, parameters: QueryValue[]) {
+    this.sql = sql;
+    this.parameters = parameters;
+  }
+}
+
+type Condition = { column: string; op: string; value: QueryValue };
+type Join = { kind: string; table: string; left: string; right: string };
+type Order = { column: string; direction: string };
+
+// What a query has been given so far, rendered once it is compiled. An insert's column names and
+// each row's values are \`names\` and \`rows\`; an update's are \`names\` and \`assigned\`.
+type Parts = { dialect: Dialect; table: string; columns: string[]; joins: Join[]; conditions: Condition[]; orders: Order[]; limit: i64 | null; offset: i64 | null; names: string[]; rows: QueryValue[][]; assigned: QueryValue[] };
+
+function parts(dialect: Dialect, table: string): Parts {
+  return { dialect: dialect, table: table, columns: [], joins: [], conditions: [], orders: [], limit: null, offset: null, names: [], rows: [], assigned: [] };
+}
+
+// SQL text with its parameters, numbered as the dialect numbers them.
+class Writer {
+  dialect: Dialect;
+  sql: string = "";
+  parameters: QueryValue[] = [];
+  constructor(dialect: Dialect) {
+    this.dialect = dialect;
+  }
+  text(this: Mut<this>, s: string): void {
+    this.sql += s;
+  }
+  value(this: Mut<this>, v: QueryValue): void {
+    this.parameters.push(v);
+    this.sql += this.dialect === "postgres" ? "$" + String(this.parameters.length) : "?";
+  }
+}
+
+// An identifier double-quoted, a \`table.column\` reference part by part.
+function quoted(name: string): string {
+  return name.split(".").map((p) => "\\"" + p.replaceAll("\\"", "\\"\\"") + "\\"").join(".");
+}
+
+function conditions(w: Mut<Writer>, parts: Ref<Parts>): void {
+  let first = true;
+  for (const c of parts.conditions) {
+    w.text(first ? " where " : " and ");
+    first = false;
+    w.text(quoted(c.column) + " " + c.op + " ");
+    w.value(c.value.clone());
+  }
+}
+
+function selectSql(parts: Ref<Parts>): Writer {
+  let w = new Writer(parts.dialect);
+  w.text("select " + (parts.columns.length === 0 ? "*" : parts.columns.map((c) => c === "*" ? c : c.endsWith(".*") ? quoted(c.slice(0, (c.length as i64) - 2)) + ".*" : quoted(c)).join(", ")));
+  w.text(" from " + quoted(parts.table));
+  for (const j of parts.joins) w.text(" " + j.kind + " join " + quoted(j.table) + " on " + quoted(j.left) + " = " + quoted(j.right));
+  conditions(w, parts);
+  for (let i: usize = 0; i < parts.orders.length; i++) w.text((i === 0 ? " order by " : ", ") + quoted(parts.orders[i]!.column) + " " + parts.orders[i]!.direction);
+  if (parts.limit !== null) {
+    w.text(" limit ");
+    w.value(parts.limit);
+  }
+  if (parts.offset !== null) {
+    w.text(" offset ");
+    w.value(parts.offset);
+  }
+  return w;
+}
+
+export class SelectQueryBuilder<DB, S, TB, O> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  // Adds columns to the rows the query gives, each under its own name.
+  select<C extends ColumnRef<S>>(this: Ref<this>, columns: C[]): SelectQueryBuilder<DB, S, TB, O & Selection<S, C>> {
+    let parts = this.parts.clone();
+    for (const c of columns) parts.columns.push(c);
+    return new SelectQueryBuilder<DB, S, TB, O & Selection<S, C>>(parts);
+  }
+
+  // Adds every column of the table the query selects from.
+  selectAll(this: Ref<this>): SelectQueryBuilder<DB, S, TB, O & S[TB]> {
+    let parts = this.parts.clone();
+    parts.columns.push(parts.table + ".*");
+    return new SelectQueryBuilder<DB, S, TB, O & S[TB]>(parts);
+  }
+
+  innerJoin<J extends keyof DB>(this: Ref<this>, table: J, left: ColumnRef<S & Record<J, DB[J]>>, right: ColumnRef<S & Record<J, DB[J]>>): SelectQueryBuilder<DB, S & Record<J, DB[J]>, TB, O> {
+    let parts = this.parts.clone();
+    parts.joins.push({ kind: "inner", table: table, left: left, right: right });
+    return new SelectQueryBuilder<DB, S & Record<J, DB[J]>, TB, O>(parts);
+  }
+
+  // A left join's columns are null where no row of \`table\` matched.
+  leftJoin<J extends keyof DB>(this: Ref<this>, table: J, left: ColumnRef<S & Record<J, DB[J]>>, right: ColumnRef<S & Record<J, DB[J]>>): SelectQueryBuilder<DB, S & Record<J, Nullable<DB[J]>>, TB, O> {
+    let parts = this.parts.clone();
+    parts.joins.push({ kind: "left", table: table, left: left, right: right });
+    return new SelectQueryBuilder<DB, S & Record<J, Nullable<DB[J]>>, TB, O>(parts);
+  }
+
+  // Keeps the rows where the column compares so with the value; several are all required.
+  where<R extends ColumnRef<S>>(this: Ref<this>, column: R, op: ComparisonOperator, value: ColumnValue<S, R>): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    const v: QueryValue = value;
+    parts.conditions.push({ column: column, op: op, value: v });
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  orderBy(this: Ref<this>, column: ColumnRef<S>, direction: OrderDirection = "asc"): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    parts.orders.push({ column: column, direction: direction });
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  limit(this: Ref<this>, n: i64): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    parts.limit = n;
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  offset(this: Ref<this>, n: i64): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    parts.offset = n;
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<O> {
+    const w = selectSql(this.parts);
+    return new CompiledQuery<O>(w.sql, w.parameters);
+  }
+}
+
+export class InsertQueryBuilder<DB, T extends keyof DB> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  // Adds a row to insert; a field the row leaves out is the column's default. Every row names the
+  // same columns as the first.
+  values(this: Ref<this>, row: Partial<DB[T]>): InsertQueryBuilder<DB, T> throws TypeError {
+    let parts = this.parts.clone();
+    let names: string[] = [];
+    let values: QueryValue[] = [];
+    for (const [k, v] of Object.entries(row)) {
+      if (v === undefined) continue;
+      const value: QueryValue = v;
+      names.push(k);
+      values.push(value);
+    }
+    if (parts.rows.length === 0) parts.names = names;
+    else if (names.join(",") !== parts.names.join(",")) throw new TypeError("each row inserted names the same columns as the first: " + parts.names.join(", "));
+    parts.rows.push(values);
+    return new InsertQueryBuilder<DB, T>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<{}> throws TypeError {
+    if (this.parts.rows.length === 0) throw new TypeError("an insert needs a row; add one with values()");
+    let w = new Writer(this.parts.dialect);
+    w.text("insert into " + quoted(this.parts.table));
+    if (this.parts.names.length === 0) w.text(" default values");
+    else {
+      w.text(" (" + this.parts.names.map((n) => quoted(n)).join(", ") + ") values ");
+      let first = true;
+      for (const row of this.parts.rows) {
+        w.text(first ? "(" : ", (");
+        first = false;
+        let next = false;
+        for (const v of row) {
+          if (next) w.text(", ");
+          next = true;
+          w.value(v.clone());
+        }
+        w.text(")");
+      }
+    }
+    return new CompiledQuery<{}>(w.sql, w.parameters);
+  }
+}
+
+export class UpdateQueryBuilder<DB, T extends keyof DB> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  // The columns to change, from the fields \`values\` has.
+  set(this: Ref<this>, values: Partial<DB[T]>): UpdateQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    for (const [k, v] of Object.entries(values)) {
+      if (v === undefined) continue;
+      const value: QueryValue = v;
+      parts.names.push(k);
+      parts.assigned.push(value);
+    }
+    return new UpdateQueryBuilder<DB, T>(parts);
+  }
+
+  // One column to change, which may be set to null.
+  setColumn<C extends keyof DB[T]>(this: Ref<this>, column: C, value: DB[T][C]): UpdateQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    parts.names.push(column);
+    const v: QueryValue = value;
+    parts.assigned.push(v);
+    return new UpdateQueryBuilder<DB, T>(parts);
+  }
+
+  where<C extends keyof DB[T]>(this: Ref<this>, column: C, op: ComparisonOperator, value: DB[T][C]): UpdateQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    const v: QueryValue = value;
+    parts.conditions.push({ column: column, op: op, value: v });
+    return new UpdateQueryBuilder<DB, T>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<{}> throws TypeError {
+    if (this.parts.names.length === 0) throw new TypeError("an update needs a column to set; add one with set()");
+    let w = new Writer(this.parts.dialect);
+    w.text("update " + quoted(this.parts.table) + " set ");
+    // A null value is an element like any other, so the values are read by looping, not by index.
+    let i: usize = 0;
+    for (const v of this.parts.assigned) {
+      if (i > 0) w.text(", ");
+      w.text(quoted(this.parts.names[i]!) + " = ");
+      w.value(v.clone());
+      i++;
+    }
+    conditions(w, this.parts);
+    return new CompiledQuery<{}>(w.sql, w.parameters);
+  }
+}
+
+export class DeleteQueryBuilder<DB, T extends keyof DB> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  where<C extends keyof DB[T]>(this: Ref<this>, column: C, op: ComparisonOperator, value: DB[T][C]): DeleteQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    const v: QueryValue = value;
+    parts.conditions.push({ column: column, op: op, value: v });
+    return new DeleteQueryBuilder<DB, T>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<{}> {
+    let w = new Writer(this.parts.dialect);
+    w.text("delete from " + quoted(this.parts.table));
+    conditions(w, this.parts);
+    return new CompiledQuery<{}>(w.sql, w.parameters);
+  }
+}
+
+// Queries over the tables \`DB\` maps names to row types, checked against them while compiling.
+export class Kysely<DB> {
+  dialect: Dialect;
+  constructor(options: { dialect: Dialect }) {
+    this.dialect = options.dialect;
+  }
+
+  selectFrom<T extends keyof DB>(this: Ref<this>, table: T): SelectQueryBuilder<DB, Record<T, DB[T]>, T, {}> {
+    return new SelectQueryBuilder<DB, Record<T, DB[T]>, T, {}>(parts(this.dialect, table));
+  }
+
+  insertInto<T extends keyof DB>(this: Ref<this>, table: T): InsertQueryBuilder<DB, T> {
+    return new InsertQueryBuilder<DB, T>(parts(this.dialect, table));
+  }
+
+  updateTable<T extends keyof DB>(this: Ref<this>, table: T): UpdateQueryBuilder<DB, T> {
+    return new UpdateQueryBuilder<DB, T>(parts(this.dialect, table));
+  }
+
+  deleteFrom<T extends keyof DB>(this: Ref<this>, table: T): DeleteQueryBuilder<DB, T> {
+    return new DeleteQueryBuilder<DB, T>(parts(this.dialect, table));
+  }
+}
+`;
+
 // std:grpc, as a template rather than String.raw, since its macros quote with backquotes.
 const GRPC = `// gRPC over HTTP/2: messages as classes the @message macro gives protobuf encoders while
 // compiling, services as interfaces @service gives a client and a server side.
@@ -6967,6 +7269,7 @@ async function* grpcReplies(call: GrpcCall | null, method: string, service: stri
 
 export const STD_MODULES: Record<string, string> = {
   grpc: GRPC,
+  query: QUERY,
   // What a build is for, made per build from its target, release mode and flags by the loader.
   build: "",
   // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
@@ -8670,7 +8973,7 @@ export async function connect(host: string, port: i64, options: ConnectOptions =
 `,
   // Postgres over its wire protocol: a pool of connections, statements with parameters sent apart from
   // their text, and rows read by column name into a type.
-  postgres: String.raw`
+  postgres: String.raw`import type { CompiledQuery } from "std:query";
 declare function fsh_rt_crypto_digest(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, rounds: i64, out: MutPtr<u8>): i64;
 declare function fsh_rt_crypto_missing(): Ptr<u8>;
 declare function fsh_rt_random_fill(at: MutPtr<u8>, count: usize): void;
@@ -9217,6 +9520,13 @@ export class Pool {
   async query<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T[]> throws PostgresError | RowError | IoError | AbortError {
     const outcome = await this.run(sql, params);
     return rowsAs<T>(outcome);
+  }
+
+  // The rows a query std:query compiled gives, typed by what it selected.
+  async executeQuery<T>(this: Ref<this>, q: Ref<CompiledQuery<T>>): Promise<T[]> throws PostgresError | RowError | IoError | AbortError {
+    let params: SqlValue[] = [];
+    for (const p of q.parameters) params.push(p.clone());
+    return await this.query<T>(q.sql, params);
   }
 
   // The first row sql gives as a T, or null when it gives none.
@@ -9850,7 +10160,7 @@ function asInteger(reply: RedisReply): i64 throws RedisError {
   // SQLite through the system's library, which links into a program only when it imports this:
   // statements with parameters bound apart from their text, and rows read by column name into a
   // type, as the postgres module reads them.
-  sqlite: String.raw`
+  sqlite: String.raw`import type { CompiledQuery } from "std:query";
 declare function fsh_rt_sqlite_database(): i64;
 declare function fsh_rt_sqlite_open(db: i64, path: Ptr<u8>): i64;
 declare function fsh_rt_sqlite_error(db: i64): Ptr<u8>;
@@ -10095,6 +10405,13 @@ export class Database {
   }
 
   // The first row sql gives as a T, or null when it gives none.
+  // The rows a query std:query compiled gives, typed by what it selected.
+  async executeQuery<T>(this: Ref<this>, q: Ref<CompiledQuery<T>>): Promise<T[]> throws SqliteError | RowError {
+    let params: SqlValue[] = [];
+    for (const p of q.parameters) params.push(p.clone());
+    return await this.query<T>(q.sql, params);
+  }
+
   async queryOne<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T | null> throws SqliteError | RowError {
     const out = await once(this.handle, sql, params, 1);
     let rows = rowsAs<T>(out.rows);
@@ -11905,7 +12222,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.

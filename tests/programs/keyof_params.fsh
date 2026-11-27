@@ -53,3 +53,42 @@ function main(): void {
   const b = new Box(3);
   console.log(field(b, "size"));
 }
+
+// case: keyof_param_generic_class
+// expect: id,name
+// expect: 0
+// A generic class's members over `keyof` and `Pick` of its own type parameters are checked in
+// each instance of the class, its type arguments known.
+type User = { id: i64; name: string; admin: boolean };
+class Columns<Row, Out> {
+  names: string[];
+  constructor(names: string[]) {
+    this.names = names;
+  }
+  pick<K extends keyof Row>(this: Ref<this>, keys: K[]): Columns<Row, Pick<Row, K>> {
+    let names: string[] = [];
+    for (const k of keys) names.push(k);
+    return new Columns<Row, Pick<Row, K>>(names);
+  }
+  rows(this: Ref<this>): Out[] {
+    return [];
+  }
+}
+function main() {
+  const c = new Columns<User, User>([]).pick(["id", "name"]);
+  console.log(c.names.join(","));
+  const rows: { id: i64; name: string }[] = c.rows();
+  console.log(rows.length);
+}
+
+// case: keyof_param_generic_class_wrong_key
+// error: does not satisfy the constraint '"admin" | "id" | "name"'
+type User = { id: i64; name: string; admin: boolean };
+class Columns<Row> {
+  pick<K extends keyof Row>(this: Ref<this>, keys: K[]): Pick<Row, K>[] {
+    return [];
+  }
+}
+function main() {
+  console.log(new Columns<User>().pick(["id", "nope"]).length);
+}

@@ -700,6 +700,10 @@ export function familyHeld(where: string): string {
 const FIRST_ID: usize = 21;
 
 export class Typing {
+  // Whether a generic definition that each instance can check instead is being checked, where a
+  // type parameter bounded by values, as `K extends "a" | "b"`, is left open for type functions
+  // rather than read as its bound's union.
+  openWithin: boolean = false;
   // Every record of this program, the one for type id N at N - FIRST_ID: the module constants'
   // first, then those this program makes. An array rather than a map, so a record can be lent.
   private arena: TypeRecord[] = [
