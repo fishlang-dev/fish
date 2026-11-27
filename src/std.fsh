@@ -7270,6 +7270,293 @@ async function* grpcReplies(call: GrpcCall | null, method: string, service: stri
 export const STD_MODULES: Record<string, string> = {
   grpc: GRPC,
   query: QUERY,
+  s3: String.raw`import { hash, hmac } from "crypto";
+
+// Where a client finds its bucket and how it signs: any left out is read from S3_* and then AWS_*
+// environment variables (S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY_ID,
+// S3_SECRET_ACCESS_KEY, S3_SESSION_TOKEN). Objects are addressed as endpoint/bucket/key unless
+// virtualHostedStyle asks for bucket.host/key.
+export type S3Options = { endpoint?: string; region?: string; bucket?: string; accessKeyId?: string; secretAccessKey?: string; sessionToken?: string; virtualHostedStyle?: boolean };
+export type S3Method = "GET" | "PUT" | "DELETE" | "HEAD";
+// date is when the URL is signed, now when left out.
+export type PresignOptions = { expiresIn?: i64; method?: S3Method; date?: Date };
+export type WriteOptions = { type?: string };
+export type ListOptions = { prefix?: string; delimiter?: string; maxKeys?: i64; startAfter?: string; continuationToken?: string };
+export type S3ListObject = { key: string; size: i64; lastModified: string; eTag: string };
+export type S3ListResult = { contents: S3ListObject[]; commonPrefixes: string[]; isTruncated: boolean; keyCount: i64; nextContinuationToken: string | null };
+
+// What S3 answered a request it refused with: its error code, as NoSuchKey or AccessDenied, and
+// the HTTP status.
+export class S3Error {
+  name: string = "S3Error";
+  code: string;
+  message: string;
+  status: i64;
+  constructor(code: string, message: string, status: i64) {
+    this.code = code;
+    this.message = message;
+    this.status = status;
+  }
+}
+
+// One request's SigV4 inputs: every header is signed, and host as the URL gives it.
+export type SignInput = { method: string; url: string; headers: Record<string, string>; payloadHash: string; accessKeyId: string; secretAccessKey: string; region: string; date: Date; service?: string };
+export type Signed = { authorization: string; amzDate: string; signature: string };
+
+type Config = { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; sessionToken: string; virtualHostedStyle: boolean };
+
+const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+function setting(given: string | undefined, name: string, fallback: string): string {
+  if (given !== undefined) return given;
+  const own = process.env["S3_" + name];
+  if (own !== undefined) return own;
+  const aws = process.env["AWS_" + name];
+  return aws !== undefined ? aws : fallback;
+}
+
+function configOf(o: Ref<S3Options>): Config {
+  const region = setting(o.region, "REGION", process.env["AWS_DEFAULT_REGION"] ?? "us-east-1");
+  let endpoint = setting(o.endpoint, "ENDPOINT", "https://s3." + region + ".amazonaws.com");
+  while (endpoint.endsWith("/")) endpoint = endpoint.slice(0, (endpoint.length as i64) - 1);
+  return {
+    endpoint: endpoint, region: region, bucket: setting(o.bucket, "BUCKET", ""),
+    accessKeyId: setting(o.accessKeyId, "ACCESS_KEY_ID", ""), secretAccessKey: setting(o.secretAccessKey, "SECRET_ACCESS_KEY", ""),
+    sessionToken: setting(o.sessionToken, "SESSION_TOKEN", ""), virtualHostedStyle: o.virtualHostedStyle ?? false,
+  };
+}
+
+const HEX = "0123456789abcdef";
+
+function hex(bytes: Ref<u8[]>): string {
+  let out = "";
+  for (const b of bytes) out += HEX[(b >> 4) as usize]! + HEX[(b & 15) as usize]!;
+  return out;
+}
+
+// RFC 3986 percent-encoding as SigV4 wants it: every byte but letters, digits and -._~, and '/'
+// too unless it separates a path's segments.
+export function uriEncode(text: string, keepSlash: boolean): string {
+  let out = "";
+  for (const b of new TextEncoder().encode(text)) {
+    const kept = (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b === 45 || b === 46 || b === 95 || b === 126 || (keepSlash && b === 47);
+    if (kept) out += String.fromCharCode(b as u16);
+    else out += "%" + HEX[(b >> 4) as usize]!.toUpperCase() + HEX[(b & 15) as usize]!.toUpperCase();
+  }
+  return out;
+}
+
+// "20130524T000000Z", the form SigV4 dates take.
+function amzDateOf(date: Ref<Date>): string {
+  const iso = date.toISOString();
+  return iso.slice(0, 4) + iso.slice(5, 7) + iso.slice(8, 13) + iso.slice(14, 16) + iso.slice(17, 19) + "Z";
+}
+
+// A query string's pairs, already encoded as sent, sorted by name as a canonical request holds them.
+function canonicalQuery(search: string): string {
+  if (search.length === 0) return "";
+  let pairs: [string, string][] = [];
+  for (const part of search.split("&")) {
+    if (part.length === 0) continue;
+    const eq = part.indexOf("=");
+    const name = eq < 0 ? part : part.slice(0, eq);
+    const value = eq < 0 ? "" : part.slice(eq + 1);
+    pairs.push([name, value]);
+  }
+  pairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  return pairs.map((p) => p[0] + "=" + p[1]).join("&");
+}
+
+function signingKey(secret: string, day: string, region: string, service: string): u8[] {
+  const k1 = hmac("sha256", "AWS4" + secret, day);
+  const k2 = hmac("sha256", k1, region);
+  const k3 = hmac("sha256", k2, service);
+  return hmac("sha256", k3, "aws4_request");
+}
+
+// The SigV4 signature of a request, its URL already encoded as sent.
+function signature(input: Ref<SignInput>): [string, string, string] throws TypeError {
+  const service = input.service ?? "s3";
+  const url = new URL(input.url);
+  const amzDate = amzDateOf(input.date);
+  const day = amzDate.slice(0, 8);
+  let all: [string, string][] = [["host", url.host]];
+  for (const [n, v] of Object.entries(input.headers)) all.push([n.toLowerCase(), v.trim()]);
+  all.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const signed = all.map((h) => h[0]).join(";");
+  const canonical = [input.method, url.pathname, canonicalQuery(url.search.length > 0 ? url.search.slice(1) : ""), all.map((h) => h[0] + ":" + h[1] + "\n").join(""), signed, input.payloadHash].join("\n");
+  const scope = day + "/" + input.region + "/" + service + "/aws4_request";
+  const toSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + hash("sha256", canonical, "hex");
+  return [hex(hmac("sha256", signingKey(input.secretAccessKey, day, input.region, service), toSign)), signed, scope];
+}
+
+// Signs a request with SigV4 in an Authorization header, as every S3Client request is.
+export function signRequest(input: SignInput): Signed throws TypeError {
+  const amzDate = amzDateOf(input.date);
+  const [sig, signed, scope] = signature(input);
+  return { authorization: "AWS4-HMAC-SHA256 Credential=" + input.accessKeyId + "/" + scope + ", SignedHeaders=" + signed + ", Signature=" + sig, amzDate: amzDate, signature: sig };
+}
+
+function objectUrl(c: Ref<Config>, key: string): string {
+  const path = key.length > 0 ? "/" + uriEncode(key, true) : "";
+  if (!c.virtualHostedStyle) return c.endpoint + "/" + uriEncode(c.bucket, false) + path;
+  const scheme = c.endpoint.indexOf("://");
+  return c.endpoint.slice(0, scheme + 3) + c.bucket + "." + c.endpoint.slice(scheme + 3) + (path.length > 0 ? path : "/");
+}
+
+function presigned(c: Ref<Config>, key: string, options: Ref<PresignOptions>): string throws TypeError {
+  if (c.bucket.length === 0) throw new TypeError("S3Client needs a bucket: pass { bucket } or set S3_BUCKET");
+  const expires = options.expiresIn ?? 86400;
+  if (expires < 1 || expires > 604800) throw new TypeError("a presigned URL expires in 1 to 604800 seconds, not " + String(expires));
+  const date = options.date !== undefined ? options.date.clone() : new Date();
+  const amzDate = amzDateOf(date);
+  const scope = amzDate.slice(0, 8) + "/" + c.region + "/s3/aws4_request";
+  let query = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=" + uriEncode(c.accessKeyId + "/" + scope, false) + "&X-Amz-Date=" + amzDate + "&X-Amz-Expires=" + String(expires);
+  if (c.sessionToken.length > 0) query += "&X-Amz-Security-Token=" + uriEncode(c.sessionToken, false);
+  query += "&X-Amz-SignedHeaders=host";
+  const url = objectUrl(c, key) + "?" + query;
+  const input: SignInput = { method: options.method ?? "GET", url: url, headers: {}, payloadHash: "UNSIGNED-PAYLOAD", accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, region: c.region, date: date };
+  const [sig, _signed, _scope] = signature(input);
+  return url + "&X-Amz-Signature=" + sig;
+}
+
+// The text between the first <tag> and its </tag> from at, entities decoded, and where it ends.
+function tagged(xml: string, tag: string, at: i64): [string, i64] | null {
+  const open = xml.indexOf("<" + tag + ">", at);
+  if (open < 0) return null;
+  const start = open + (tag.length as i64) + 2;
+  const close = xml.indexOf("</" + tag + ">", start);
+  if (close < 0) return null;
+  const text = xml.slice(start, close).replaceAll("&quot;", "\"").replaceAll("&apos;", "'").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+  return [text, close + (tag.length as i64) + 3];
+}
+
+function textOf(xml: string, tag: string): string {
+  const found = tagged(xml, tag, 0);
+  return found !== null ? found[0] : "";
+}
+
+async function send(c: Ref<Config>, method: S3Method, key: string, query: string, body: u8[], type: string): Promise<Response> throws S3Error | IoError | AbortError | TypeError {
+  if (c.bucket.length === 0) throw new TypeError("S3Client needs a bucket: pass { bucket } or set S3_BUCKET");
+  const url = objectUrl(c, key) + (query.length > 0 ? "?" + query : "");
+  const payload = body.length > 0 ? hash("sha256", body.clone(), "hex") : EMPTY_SHA256;
+  const date = new Date();
+  let headers: Record<string, string> = { "x-amz-content-sha256": payload, "x-amz-date": amzDateOf(date) };
+  if (c.sessionToken.length > 0) headers["x-amz-security-token"] = c.sessionToken;
+  if (type.length > 0) headers["content-type"] = type;
+  const signed = signRequest({ method: method, url: url, headers: headers.clone(), payloadHash: payload, accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, region: c.region, date: date });
+  let sent = new Headers();
+  for (const [n, v] of Object.entries(headers)) sent.set(n, v);
+  sent.set("authorization", signed.authorization);
+  const res = await fetch(url, method === "PUT" ? { method: method, headers: sent, body: body } : { method: method, headers: sent });
+  if (res.status >= 200 && res.status < 300) return res;
+  const status = res.status;
+  let xml = "";
+  if (method !== "HEAD") xml = await res.text();
+  const code = textOf(xml, "Code");
+  const message = textOf(xml, "Message");
+  throw new S3Error(code.length > 0 ? code : status === 404 ? "NoSuchKey" : "HTTP" + String(status), message.length > 0 ? message : "S3 answered " + method + " " + key + " with status " + String(status), status);
+}
+
+function bytesOf(data: string | u8[]): u8[] {
+  return typeof data === "string" ? new TextEncoder().encode(data) : data;
+}
+
+// An object in a bucket, by its key; nothing is fetched until it is read.
+export class S3File {
+  config: Config;
+  key: string;
+  constructor(config: Config, key: string) {
+    this.config = config;
+    this.key = key;
+  }
+  async bytes(this: Ref<this>): Promise<u8[]> throws S3Error | IoError | AbortError | TypeError {
+    const res = await send(this.config, "GET", this.key, "", [], "");
+    return await res.bytes();
+  }
+  async text(this: Ref<this>): Promise<string> throws S3Error | IoError | AbortError | TypeError {
+    const res = await send(this.config, "GET", this.key, "", [], "");
+    return await res.text();
+  }
+  async exists(this: Ref<this>): Promise<boolean> throws S3Error | IoError | AbortError | TypeError {
+    try {
+      await send(this.config, "HEAD", this.key, "", [], "");
+      return true;
+    } catch (e) {
+      if (e instanceof S3Error && e.status === 404) return false;
+      throw e;
+    }
+  }
+  async write(this: Ref<this>, data: string | u8[], options: WriteOptions = {}): Promise<i64> throws S3Error | IoError | AbortError | TypeError {
+    const body = bytesOf(data);
+    const n = body.length as i64;
+    await send(this.config, "PUT", this.key, "", body, options.type ?? "");
+    return n;
+  }
+  async delete(this: Ref<this>): Promise<void> throws S3Error | IoError | AbortError | TypeError {
+    await send(this.config, "DELETE", this.key, "", [], "");
+  }
+  presign(this: Ref<this>, options: PresignOptions = {}): string throws TypeError {
+    return presigned(this.config, this.key, options);
+  }
+}
+
+// An S3-compatible bucket, as Bun's S3Client reaches one: AWS, R2, MinIO and others.
+export class S3Client {
+  config: Config;
+  constructor(options: S3Options = {}) {
+    this.config = configOf(options);
+  }
+  file(this: Ref<this>, key: string): S3File {
+    return new S3File(this.config.clone(), key);
+  }
+  async write(this: Ref<this>, key: string, data: string | u8[], options: WriteOptions = {}): Promise<i64> throws S3Error | IoError | AbortError | TypeError {
+    const f = this.file(key);
+    return await f.write(data, options);
+  }
+  async delete(this: Ref<this>, key: string): Promise<void> throws S3Error | IoError | AbortError | TypeError {
+    await send(this.config, "DELETE", key, "", [], "");
+  }
+  async exists(this: Ref<this>, key: string): Promise<boolean> throws S3Error | IoError | AbortError | TypeError {
+    const f = this.file(key);
+    return await f.exists();
+  }
+  presign(this: Ref<this>, key: string, options: PresignOptions = {}): string throws TypeError {
+    return presigned(this.config, key, options);
+  }
+  // One page of the bucket's keys, in key order, as ListObjectsV2 gives them.
+  async list(this: Ref<this>, options: ListOptions = {}): Promise<S3ListResult> throws S3Error | IoError | AbortError | TypeError {
+    let query = "list-type=2";
+    if (options.continuationToken !== undefined) query += "&continuation-token=" + uriEncode(options.continuationToken, false);
+    if (options.delimiter !== undefined) query += "&delimiter=" + uriEncode(options.delimiter, false);
+    if (options.maxKeys !== undefined) query += "&max-keys=" + String(options.maxKeys);
+    if (options.prefix !== undefined) query += "&prefix=" + uriEncode(options.prefix, false);
+    if (options.startAfter !== undefined) query += "&start-after=" + uriEncode(options.startAfter, false);
+    const res = await send(this.config, "GET", "", query, [], "");
+    const xml = await res.text();
+    let contents: S3ListObject[] = [];
+    let at: i64 = 0;
+    for (;;) {
+      const item = tagged(xml, "Contents", at);
+      if (item === null) break;
+      at = item[1];
+      const size = Number.parseInt(textOf(item[0], "Size"));
+      contents.push({ key: textOf(item[0], "Key"), size: size ?? 0, lastModified: textOf(item[0], "LastModified"), eTag: textOf(item[0], "ETag") });
+    }
+    let prefixes: string[] = [];
+    at = 0;
+    for (;;) {
+      const item = tagged(xml, "CommonPrefixes", at);
+      if (item === null) break;
+      at = item[1];
+      prefixes.push(textOf(item[0], "Prefix"));
+    }
+    const token = tagged(xml, "NextContinuationToken", 0);
+    const count = Number.parseInt(textOf(xml, "KeyCount")) ?? (contents.length as i64);
+    return { contents: contents, commonPrefixes: prefixes, isTruncated: textOf(xml, "IsTruncated") === "true", keyCount: count, nextContinuationToken: token !== null ? token[0] : null };
+  }
+}
+`,
   // What a build is for, made per build from its target, release mode and flags by the loader.
   build: "",
   // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
@@ -12222,7 +12509,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
