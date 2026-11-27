@@ -108,7 +108,7 @@ function main() {
 }
 // case: callable_element_moved
 // error: 'fs[0]' can't be used here because 'fs' was moved
-function eat(fs: ((n: i64) => string)[]): i64 { return 1 }
+export function eat(fs: ((n: i64) => string)[]): i64 { return 1 }
 function main() {
   const s = "orig" + "";
   let fs: ((n: i64) => string)[] = [(n) => s + n];
@@ -188,7 +188,7 @@ function main() {
 }
 // case: callable_once
 // error: this closure moves 'items' out of what it captures, so it can run only once
-function take(xs: i64[]): i64 {
+export function take(xs: i64[]): i64 {
   return 1;
 }
 

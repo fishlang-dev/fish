@@ -7424,7 +7424,7 @@ async function* grpcReplies(call: GrpcCall | null, method: string, service: stri
 
 export const STD_MODULES: Record<string, string> = {
   // A microcontroller's peripherals, imported as std:mcu.
-  mcu: String.raw`
+  mcu: `
 // @registers(base) on a class: its fields are one peripheral's registers, in order, each at the
 // next offset its size aligns to from base, and the class becomes one static method per register
 // giving a MutPtr at that address, read and written with readVolatile and writeVolatile inside
@@ -7441,7 +7441,7 @@ export macro function registers(input: AstStmt, base: i64): AstStmt {
     const name = m.name;
     const t = m.type.clone();
     assert(t !== null && t.kind === "ref", "register '" + name + "' needs its type written, like 'data: u32'");
-    if (t === null || t.kind !== "ref") continue;
+    if (t.kind !== "ref") continue;
     const size: i64 = t.name === "u8" || t.name === "i8" ? 1 : t.name === "u16" || t.name === "i16" ? 2 : t.name === "u32" || t.name === "i32" ? 4 : t.name === "u64" || t.name === "i64" ? 8 : 0;
     assert(size > 0, "register '" + name + "' is an integer of 8, 16, 32 or 64 bits, not '" + t.name + "'");
     if (size === 0) continue;
@@ -12028,11 +12028,17 @@ export interface DurableStore {
 }
 
 // A DurableStore in a SQLite database, its steps in the table durable_steps.
+// The database is held shared, so the store has no disposer of its own and can be a
+// Dyn<DurableStore>; each use takes a handle on it.
 export class SqliteStore {
-  #db: Database;
+  #db: shared<{ db: Database }>;
 
   constructor(db: Database) {
-    this.#db = db;
+    this.#db = shared({ db });
+  }
+
+  #handle(): Database {
+    return this.#db.update((v) => v.db.clone());
   }
 
   // The store in the database file at path, made when it isn't there; ":memory:" keeps it in memory.
@@ -12044,13 +12050,14 @@ export class SqliteStore {
 
   // Another handle on the same database, for a store given to more than one run.
   clone(): SqliteStore {
-    return new SqliteStore(this.#db.clone());
+    return new SqliteStore(this.#handle());
   }
 
   async steps(run: string): Promise<string[]> {
     let out: string[] = [];
     try {
-      const rows = await this.#db.query<{ value: string }>("SELECT value FROM durable_steps WHERE run = ? ORDER BY step", [run.clone()]);
+      const db = this.#handle();
+      const rows = await db.query<{ value: string }>("SELECT value FROM durable_steps WHERE run = ? ORDER BY step", [run.clone()]);
       for (const r of rows) out.push(r.value.clone());
     } catch (e) {
       assert(false, "the durable store can't read run '" + run + "': " + e.message);
@@ -12060,7 +12067,8 @@ export class SqliteStore {
 
   async record(run: string, step: i64, value: string): Promise<void> {
     try {
-      await this.#db.run("INSERT OR REPLACE INTO durable_steps (run, step, value) VALUES (?, ?, ?)", [run.clone(), step, value]);
+      const db = this.#handle();
+      await db.run("INSERT OR REPLACE INTO durable_steps (run, step, value) VALUES (?, ?, ?)", [run.clone(), step, value]);
     } catch (e) {
       assert(false, "the durable store can't record a step of run '" + run + "': " + e.message);
     }
@@ -12068,7 +12076,8 @@ export class SqliteStore {
 
   async finish(run: string): Promise<void> {
     try {
-      await this.#db.run("DELETE FROM durable_steps WHERE run = ?", [run.clone()]);
+      const db = this.#handle();
+      await db.run("DELETE FROM durable_steps WHERE run = ?", [run.clone()]);
     } catch (e) {
       assert(false, "the durable store can't finish run '" + run + "': " + e.message);
     }
@@ -12077,7 +12086,8 @@ export class SqliteStore {
   async unfinished(): Promise<string[]> {
     let out: string[] = [];
     try {
-      const rows = await this.#db.query<{ run: string }>("SELECT DISTINCT run FROM durable_steps ORDER BY run");
+      const db = this.#handle();
+      const rows = await db.query<{ run: string }>("SELECT DISTINCT run FROM durable_steps ORDER BY run");
       for (const r of rows) out.push(r.run.clone());
     } catch (e) {
       assert(false, "the durable store can't list its runs: " + e.message);
@@ -12112,31 +12122,22 @@ export class Durable {
       });
     }
     const at = this.#next.load();
-    return this.#saved.read((s) => at < (s.length as i64));
+    return this.#saved.update((s) => at < (s.length as i64));
   }
 
   // What the next await gave when it was recorded, read back as its type.
   // ponytail: a recorded null of a type holding null reads back as no value, which panics.
   __replayed<T>(): T {
     const at = this.#next.add(1);
-    const text = this.#saved.read((s) => s[at as usize]!.clone());
+    const text = this.#saved.update((s) => s[at as usize]!.clone());
     let found: T[] = [];
     try {
-      found.push(JSON.parse<T>(text));
+      const value = JSON.parse<T>(text);
+      found.push(value);
     } catch (e) {
       assert(false, "durable run '" + this.id + "' recorded a step its code no longer awaits there: " + e.message);
     }
     return found.pop()!;
-  }
-
-  // The same, typed as like is, for an await assigned to a variable already holding a value.
-  __replayedLike<T>(_like: Ref<T>): T {
-    return this.__replayed<T>();
-  }
-
-  // Passes over an await the run recorded, whose value nothing keeps.
-  __skipped(): void {
-    this.#next.add(1);
   }
 
   // Records what the next await gave, then gives it on.
@@ -12146,10 +12147,32 @@ export class Durable {
     return value;
   }
 
-  // Records that the next await, whose value nothing keeps, ended.
-  async __passed(): Promise<void> {
+  // What the next await gives: what the run recorded there before, or else what work gives,
+  // recorded. Fish's promises are lazy, so work a run replays never runs.
+  async __step<T>(work: Promise<T>): Promise<T> {
+    const replaying = await this.__replaying();
+    if (replaying) return this.__replayed<T>();
+    const value = await work;
+    return await this.__recorded<T>(value);
+  }
+
+  // The same for an await whose value nothing keeps, recorded as having ended.
+  async __pass<T>(work: Promise<T>): Promise<void> {
+    const replaying = await this.__replaying();
+    if (replaying) {
+      this.#next.add(1);
+      return;
+    }
+    await work;
     const at = this.#next.add(1);
     await this.#store.record(this.id, at, "null");
+  }
+
+  // The run's arguments: those it recorded first, or else these, recorded.
+  async __args<T>(given: T): Promise<T> {
+    const replaying = await this.__replaying();
+    if (replaying) return this.__replayed<T>();
+    return await this.__recorded<T>(given);
   }
 
   async __finished(): Promise<void> {

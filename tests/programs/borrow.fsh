@@ -1266,8 +1266,8 @@ function main() {
 // case: borrow_argument_assigned_owned_in_call
 // error: cannot move 'c' while 'c' is lent to 'shown' for this call
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B): i64 { return 1; }
-function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+export function eat(_b: B): i64 { return 1; }
+export function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
 function main() {
   let b1 = new B("a" + 1);
   let c = new B("c" + 1);
@@ -1276,7 +1276,7 @@ function main() {
 // case: borrow_receiver_assigned_owned_in_call
 // error: cannot move 'c' while 'c' is lent to 'len' for this call
 class B { s: string; constructor(s: string) { this.s = s; } len(n: i64): i64 { return (this.s.length as i64) + n; } }
-function eat(_b: B): i64 { return 1; }
+export function eat(_b: B): i64 { return 1; }
 function main() {
   let c = new B("c" + 1);
   console.log((c = new B("n" + 1)).len(eat(c)));
@@ -1284,7 +1284,7 @@ function main() {
 // case: borrow_assignment_to_owned_held
 // error: cannot move 'c' while 'y' borrows 'c' and is used later
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B): i64 { return 1; }
+export function eat(_b: B): i64 { return 1; }
 function main() {
   let b1 = new B("a" + 1);
   let c = new B("c" + 1);
@@ -1308,8 +1308,8 @@ function main() {
 // error: cannot move 'h' while 'h.b' is lent to 'shown' for this call
 class B { s: string; constructor(s: string) { this.s = s; } }
 class H { b: B = new B("h" + 1); }
-function eatH(_h: H): i64 { return 1; }
-function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+export function eatH(_h: H): i64 { return 1; }
+export function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
 function main() {
   let h = new H();
   shown((h = new H()).b, eatH(h));
@@ -1317,8 +1317,8 @@ function main() {
 // case: borrow_argument_bang_of_assignment
 // error: cannot move 'c'
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B): i64 { return 1; }
-function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+export function eat(_b: B): i64 { return 1; }
+export function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
 function main() {
   let b1 = new B("a" + 1);
   let c = new B("c" + 1);
@@ -1327,8 +1327,8 @@ function main() {
 // case: borrow_argument_method_of_assignment
 // error: cannot move 'c'
 class B { s: string; constructor(s: string) { this.s = s; } me(): Ref<B> { return this; } }
-function eat(_b: B): i64 { return 1; }
-function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
+export function eat(_b: B): i64 { return 1; }
+export function shown(x: Ref<B>, _n: i64) { console.log(x.s); }
 function main() {
   let b1 = new B("a" + 1);
   let c = new B("c" + 1);
@@ -1406,7 +1406,7 @@ function main() { let xs = mkA(); f(xs); }
 // error: cannot move 'b' while the new object being built borrows 'b'
 class B { s: string; constructor(s: string) { this.s = s; } }
 type P = { a: Ref<B>; n: i64 };
-function eat(_b: B): i64 { return 1; }
+export function eat(_b: B): i64 { return 1; }
 function main() {
   let b = new B("b" + 1);
   const o: P = { a: b, n: eat(b) };
@@ -1445,7 +1445,7 @@ function main() {
 // error: cannot move 'b' while the new object being built borrows 'b'
 class B { s: string; constructor(s: string) { this.s = s; } }
 type PB = { b: Ref<B>; n: i64 };
-function eat(_b: B): i64 { return 1; }
+export function eat(_b: B): i64 { return 1; }
 function main() {
   let b = new B("a" + 1);
   const o: PB = { b, n: eat(b) };
@@ -1466,7 +1466,7 @@ function main() {
 // error: cannot move 'b' while the new object being built borrows 'b'
 class B { s: string; constructor(s: string) { this.s = s; } }
 type PB = { b: Ref<B>; n: i64 };
-function eat(_b: B): i64 { return 1; }
+export function eat(_b: B): i64 { return 1; }
 function main() {
   let b = new B("a" + 1);
   const o: { p: PB; n: i64 } = { p: { b, n: 1 }, n: eat(b) };

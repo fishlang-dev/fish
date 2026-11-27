@@ -21,7 +21,7 @@ class Memory {
     this.kept = kept;
   }
   async steps(_run: string): Promise<string[]> {
-    return this.kept.steps.read((s) => s.clone());
+    return this.kept.steps.update((s) => s.clone());
   }
   async record(_run: string, step: i64, value: string): Promise<void> {
     console.log("record", step, value);
@@ -55,11 +55,13 @@ async function order(run: Durable, amount: i64, to: string): Promise<string> {
 
 async function main(): Promise<void> {
   const fresh: Kept = shared({ steps: new Lock<string[]>([]) });
-  console.log(await order(new Durable(new Memory(fresh), "o-1"), 3, "ann"));
+  const first = await order(new Durable(new Memory(fresh), "o-1"), 3, "ann");
+  console.log(first);
   // A run a crash stopped after its charge: its arguments and the charge come back from the
   // record, so only the email runs.
   const stopped: Kept = shared({ steps: new Lock<string[]>(["{\"amount\":5,\"to\":\"bob\"}", "500"]) });
-  console.log(await order(new Durable(new Memory(stopped), "o-2"), 0, ""));
+  const resumed = await order(new Durable(new Memory(stopped), "o-2"), 0, "");
+  console.log(resumed);
 }
 // case: durable_loop_assign_and_sqlite
 // expect: step 1
@@ -104,14 +106,17 @@ async function risky(run: Durable): Promise<i64> throws string {
 
 async function main(): Promise<void> throws SqliteError {
   const store = await SqliteStore.open(":memory:");
-  console.log("total", await sum(new Durable(store.clone(), "s-1"), 3));
-  console.log("unfinished", JSON.stringify(await store.unfinished()));
+  const total = await sum(new Durable(store.clone(), "s-1"), 3);
+  console.log("total", total);
+  const before = await store.unfinished();
+  console.log("unfinished", JSON.stringify(before));
   try {
     await risky(new Durable(store.clone(), "r-1"));
   } catch (e) {
     console.log("caught", e);
   }
-  console.log("unfinished", JSON.stringify(await store.unfinished()));
+  const after = await store.unfinished();
+  console.log("unfinished", JSON.stringify(after));
   // The second try replays what 'one' gave, so it doesn't run again.
   try {
     await risky(new Durable(store.clone(), "r-1"));

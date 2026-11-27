@@ -121,9 +121,18 @@ function main() {
 }
 `;
 
+// Writes `text` to `path`, failing the test if it can't.
+function wrote(path: string, text: string): void {
+  try {
+    writeFileSync(path, text);
+  } catch (e) {
+    assert(false, `writing ${path}: ${e.message}`);
+  }
+}
+
 // Builds `source` for `triple` in `dir` as `name`, failing the test unless it builds.
 function built(dir: string, name: string, source: string, triple: string, more: string[] = []): string {
-  writeFileSync(join(dir, `${name}.fsh`), source);
+  wrote(join(dir, `${name}.fsh`), source);
   const run = fishc(dir, ["build", `${name}.fsh`, "--target", triple, ...more]);
   same(`${run.code} ${run.err}`, "0 ", `building ${name}`);
   return join(dir, name);
@@ -165,10 +174,10 @@ test("ESP32-C3 images link, and what needs a runtime is refused", () => {
   assert(bytes[0]! === 0x7f && bytes[1]! === 0x45 && bytes[2]! === 0x4c && bytes[3]! === 0x46, "an ELF header");
   assert(bytes[4]! === 1 && bytes[5]! === 1, "32-bit and little-endian");
   assert(bytes[16]! === 2 && bytes[18]! === 0xf3 && bytes[19]! === 0, "a RISC-V executable");
-  writeFileSync(join(dir, "prints.fsh"), `function main() {\n  console.log("hello");\n}\n`);
+  wrote(join(dir, "prints.fsh"), `function main() {\n  console.log("hello");\n}\n`);
   const prints = fishc(dir, ["build", "prints.fsh", "--target", "riscv32imc-unknown-none-elf"]);
   assert(prints.code === 1 && prints.err.includes("has no runtime, and this program needs:") && prints.err.includes("printf: strings or printing"), `printing: ${prints.err}`);
-  writeFileSync(join(dir, "grows.fsh"), ARENA);
+  wrote(join(dir, "grows.fsh"), ARENA);
   const grows = fishc(dir, ["build", "grows.fsh", "--target", "riscv32imc-unknown-none-elf"]);
   assert(grows.code === 1 && grows.err.includes("declare a fixed arena with --arena <bytes>"), `an array with no arena: ${grows.err}`);
   const lib = fishc(dir, ["build", "grows.fsh", "--target", "riscv32imc-unknown-none-elf", "--lib"]);

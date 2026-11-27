@@ -27,7 +27,7 @@ function main() {
 // error:   const p: Point = { x: 1, y: 2, z: 3 }
 // error:                                  ^^^^
 // case: object_excess_nested
-function f(p: { inner: { n: i64 } }) {}
+export function f(p: { inner: { n: i64 } }) {}
 
 function main() {
   f({ inner: { n: 1, m: 2 } })

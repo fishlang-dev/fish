@@ -55,9 +55,19 @@ test("a glob matches names within one directory, or any depth with **", () => {
 });
 
 test("fish.toml's [comptime] reads lists globs inside the package", () => {
-  const m = readManifest(MANIFEST, "/pkg");
-  same((m.reads ?? []).join(" "), "assets/*.txt schemas/**/*.json", "the globs");
-  same(readManifest('[package]\nname = "a"\nversion = "0.1.0"\n', "/pkg").reads === undefined ? "none" : "some", "none", "a manifest listing none");
+  let globs = "";
+  let none = "";
+  try {
+    const m = readManifest(MANIFEST, "/pkg");
+    const reads = m.reads;
+    if (reads !== undefined) globs = reads.join(" ");
+    const plain = readManifest('[package]\nname = "a"\nversion = "0.1.0"\n', "/pkg");
+    none = plain.reads === undefined ? "none" : "some";
+  } catch (e) {
+    assert(false, `the manifest was refused: ${e.message}`);
+  }
+  same(globs, "assets/*.txt schemas/**/*.json", "the globs");
+  same(none, "none", "a manifest listing none");
   const cases: [string, string][] = [["reads = \"assets\"", "'reads' is a list of globs"], ["reads = [\"../other/*.txt\"]", "reaches outside the package"], ["reads = [\"/etc/passwd\"]", "reaches outside the package"], ["files = []", "[comptime] has no key 'files'"]];
   for (const [bad, said] of cases) {
     let message = "";
@@ -80,7 +90,7 @@ test("comptime may read a listed file inside the package, and nothing else", () 
     const got = readable(reads, path);
     assert("why" in got && got.why.includes(said), `${path}: ${"why" in got ? got.why : "allowed"}`);
   }
-  same(listedFiles(reads).map((p) => p.slice(dir.length + 1)).join(" "), "assets/hello.txt schemas/v1/user.json", "every listed file, in order");
+  same(listedFiles(reads).map((p) => p.slice((dir.length + 1) as i64)).join(" "), "assets/hello.txt schemas/v1/user.json", "every listed file, in order");
   removed(dir);
 });
 
