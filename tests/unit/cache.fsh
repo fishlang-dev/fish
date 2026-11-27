@@ -125,7 +125,7 @@ test("a change to the runtime's source or flags is a new object", () => {
   }
   let session = cachedSession();
   try {
-    const units = runtimeUnits("", false);
+    const units = runtimeUnits([""], false);
     const unit: Ref<Unit> = units[0];
     const built = cachedObject(session, unit);
     const twice = cachedObject(session, unit);
@@ -307,7 +307,7 @@ test("an edit to a hashed engine header is a new object", () => {
   try {
     const ir = "  call void @fsh_rt_js_eval()";
     const engine = files(engineDir());
-    for (const unit of runtimeUnits(ir, false)) assert(unit.inputs === engine, `${unit.name}'s inputs: ${JSON.stringify(unit.inputs)}`);
+    for (const unit of runtimeUnits([ir], false)) assert(unit.inputs === engine, `${unit.name}'s inputs: ${JSON.stringify(unit.inputs)}`);
     const copy = join(root, "engine-copy");
     const copied = spawnSync("cp", ["-R", engineDir(), copy]);
     assert(copied.status === 0, `cp failed: ${text(copied.stderr)}`);
@@ -494,13 +494,13 @@ async function bothWays(p: Program): Promise<string> {
     const ir = compile(cachedSession(), p.src, p.file);
     let session = cachedSession();
     let objects: string[] = [];
-    for (const u of runtimeUnits(ir, false)) {
+    for (const u of runtimeUnits([ir], false)) {
       const object = await cachedObjectAsync(session, u.clone());
       objects.push(object);
     }
     const math = await mathObjectsAsync(session);
     for (const m of math) objects.push(m);
-    const clang = spawnSync("clang", ["-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", whole, "-O0", "-lm", ...runtimeLinks(ir, hostTarget())], { input: ir });
+    const clang = spawnSync("clang", ["-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", whole, "-O0", "-lm", ...runtimeLinks([ir], hostTarget())], { input: ir });
     if (clang.status !== 0) return `${p.file}: clang failed:\n${text(clang.stderr)}`;
   } catch (e) {
     return `${p.file}: ${failure(e)}`;

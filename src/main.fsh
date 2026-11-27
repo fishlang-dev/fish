@@ -65,8 +65,9 @@ export type Library = "static" | "shared";
 export { analyze } from "./analysis.fsh";
 
 // What compiling a program gives: its IR, the checked program, and the Rust crates its calls go to.
-// The program as loaded comes back too, which `fishc watch` keeps.
-type Compiled = { ir: string; checked: Checked; loaded: Loaded; emitted: Emitted | undefined; helpers: Map<string, string> };
+// The program as loaded comes back too, which `fishc watch` keeps. The IR is in pieces, whose text
+// joined by newlines is the module's, so a large program's is never held as one string as well.
+type Compiled = { ir: string[]; checked: Checked; loaded: Loaded; emitted: Emitted | undefined; helpers: Map<string, string> };
 
 // A build session apart: what a compilation takes, and the caches only building objects reads.
 type Caches = { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
@@ -90,7 +91,7 @@ function plain(session: Session): Session {
 /** @throws {CompileError | Error | IoError | JsonError} */
 export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false, debug = false): string {
   let looked: string[] = [];
-  return compiledIn(newCompilation(session), src, file, release, panic, library, leaks, debug, looked).ir;
+  return compiledIn(newCompilation(session), src, file, release, panic, library, leaks, debug, looked).ir.join("\n");
 }
 
 // Checks the program whose entry is `file` as `compile` would, generating nothing; throws its
@@ -127,7 +128,7 @@ function compiledIn(compilation: Compilation, src: string, file: string, release
 // codegen made is returned straight from the call: unwrapped from a local after the `try`, the
 // checked program and its IR would be copied whole while the originals stayed alive.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function codegenSourced(checked: Checked, options: Options, names: Names, sources: Ref<Source[]>): { ir: string; checked: Checked; emitted: Emitted | undefined; helpers: Map<string, string> } {
+function codegenSourced(checked: Checked, options: Options, names: Names, sources: Ref<Source[]>): { ir: string[]; checked: Checked; emitted: Emitted | undefined; helpers: Map<string, string> } {
   try {
     return codegenChecked(checked, options);
   } catch (e) {
@@ -147,7 +148,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   let done = codegenSourced(checked, options, names, loaded.sources);
   const bundling = partStart(done.checked.tables.session);
   let ir = bundled(done.ir, loaded);
-  if (debug) ir = withDebugInfo(ir, src, file, [...loaded.sources], release);
+  if (debug) ir = [withDebugInfo(ir.join("\n"), src, file, [...loaded.sources], release)];
   partEnd(done.checked.tables.session, "codegen bundle", bundling);
   stageEnd(done.checked.tables.session, "codegen", started);
   stopAfter(done.checked.tables.session, "codegen");
@@ -156,7 +157,7 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
 
 // The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function bundled(ir: string, loaded: Ref<Loaded>): string {
+function bundled(ir: string[], loaded: Ref<Loaded>): string[] {
   let seen = new Set<usize>();
   for (const line of linesWith(ir, "@fsh_rt_js_export(ptr @fsh.js.bundle")) {
     const m = /^\s+(?:%\S+ = )?(?:call|invoke) ptr @fsh_rt_js_export\(ptr @fsh\.js\.bundle, i64 (\d+)/.exec(line);
@@ -169,7 +170,10 @@ function bundled(ir: string, loaded: Ref<Loaded>): string {
   let text = "";
   const hex = "0123456789ABCDEF";
   for (const c of bytes) text += c >= 0x20 && c < 0x7f && c !== 0x22 && c !== 0x5c ? String.fromCharCode(c as u16) : `\\${hex.charAt((c >> 4) as i64)}${hex.charAt((c & 15) as i64)}`;
-  return `${ir}\n@fsh.js.bundle = private unnamed_addr constant [${bytes.length + 1} x i8] c"${text}\\00"\n`;
+  let out = ir;
+  out.push(`@fsh.js.bundle = private unnamed_addr constant [${bytes.length + 1} x i8] c"${text}\\00"`);
+  out.push("");
+  return out;
 }
 
 // The C names a library's exports can't take besides C's keywords, since an export would replace
@@ -198,7 +202,8 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
   let { core, caches } = apart(session);
   let looked: string[] = [];
   const made = compiledIn(newCompilation(core), src, file, release, panic, true, false, debug, looked);
-  const ir = made.ir;
+  const pieces: Ref<string[]> = made.ir;
+  const ir = pieces.join("\n");
   const checked: Ref<Checked> = made.checked;
   const shim = rustShim(made.loaded.rust, checked);
   if (shim !== undefined) refuseForeignRust(target);
@@ -213,12 +218,12 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
   let building = together(newSession(), caches);
   try {
     let objects: string[] = [];
-    for (const o of cachedObjects(building, runtimeUnits(ir, release, true, copyTarget(target)))) objects.push(o);
+    for (const o of cachedObjects(building, runtimeUnits(pieces, release, true, copyTarget(target)))) objects.push(o);
     for (const o of mathObjects(building, [...target.compile])) objects.push(o);
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
       const extension = darwin ? "dylib" : "so";
-      run(["clang", ...target.compile, ...target.link, ...linkerFlags(target), "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", join(dirname(out), `lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)], ir);
+      run(["clang", ...target.compile, ...target.link, ...linkerFlags(target), "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", join(dirname(out), `lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(pieces, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)], ir);
     } else {
       run(["clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize, ...g], ir);
       const archive = shim !== undefined ? join(dir, "fish.a") : join(dirname(out), `lib${name}.a`);
@@ -299,19 +304,19 @@ function built(session: BuildSession, file: string, out: string, release: boolea
   let { core, caches } = apart(session);
   let ready = readied(core, caches, file, release, panic, leaks, debug, looked, target);
   let known = new Map<string, string[]>();
-  linked(ready.building, ready.ir, ready.split, out, release, links, ready.shim, target, leaks, debug, known);
+  linked(ready.building, ready.natives, ready.split, out, release, links, ready.shim, target, leaks, debug, known);
   writeFileSync(`${out}.fshnames`, ready.names);
   return { warnings: ready.warnings, session: ready.building };
 }
 
 // A build up to its IR and how clang takes it, which is all linking reads. A function of its own
-// so the checked program and the loaded files, which only `fishc watch` keeps for its next build,
-// are dropped as it returns: clang then compiles with nothing of them held beside it.
+// so the checked program, the loaded files and the IR, which only `fishc watch` keeps for its next
+// build, are dropped as it returns: clang then compiles with nothing of them held beside it.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>): { ir: string; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession; names: string } {
+function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>): { natives: Natives; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession; names: string } {
   let made = compiledKept(core, file, release, panic, leaks, debug, looked, undefined, undefined, false);
   const instrumenting = stageStart(made.kept.checked.tables.session);
-  const ir = instrumented(made.ir, target);
+  const ir = instrumentedPieces(made.ir, target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
   if (shim !== undefined) refuseForeignRust(target);
   stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
@@ -323,18 +328,18 @@ function readied(core: Session, caches: Caches, file: string, release: boolean, 
   let { checked } = made.kept;
   let { tables } = checked;
   const building = together(tables.session, caches);
-  return { ir, split, shim, warnings: made.warnings, building, names };
+  return { natives: nativesOf(ir, release, target, leaks), split, shim, warnings: made.warnings, building, names };
 }
 
 // `built` for `fishc watch`, from what its last build kept: a program whose files all read as they
 // did is not loaded or checked again. Gives what to keep for the next build. `manifest` is the
 // package's, which a build may read.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string; warnings: CompileError[]; session: BuildSession; kept: Kept } {
+export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string[]; warnings: CompileError[]; session: BuildSession; kept: Kept } {
   let { core, caches } = apart(session);
   let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest, keep);
   const instrumenting = stageStart(made.kept.checked.tables.session);
-  const ir = instrumented(made.ir, target);
+  const ir = instrumentedPieces(made.ir, target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
   if (shim !== undefined) refuseForeignRust(target);
   stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
@@ -349,15 +354,15 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
   // The next build gives the kept tables its own session.
   tables.session = newSession();
   let known: Map<string, string[]> = units !== undefined ? units! : new Map<string, string[]>();
-  linked(building, ir, split, out, release, links, shim, target, leaks, debug, known);
+  linked(building, nativesOf(ir, release, target, leaks), split, out, release, links, shim, target, leaks, debug, known);
   writeFileSync(`${out}.fshnames`, names);
-  return { ir: made.ir, warnings: made.warnings, session: building, kept: { checked: { instances, tables, warnings }, parts: checkerParts, loaded, contents, carried, emitted, units: known } };
+  return { ir, warnings: made.warnings, session: building, kept: { checked: { instances, tables, warnings }, parts: checkerParts, loaded, contents, carried, emitted, units: known } };
 }
 
 // `compile` for `fishc watch`, from what its last build kept, giving the IR, the warnings and what
 // to keep.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string; warnings: CompileError[]; kept: Kept; helpers: Map<string, string> } {
+export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string[]; warnings: CompileError[]; kept: Kept; helpers: Map<string, string> } {
   const reusing = kept !== undefined;
   // Reading the files again and putting the changed ones back, apart from the check it times itself.
   // Counted by hand from the front end's stages, since the session it starts on moves into the
@@ -397,7 +402,7 @@ export function cleanDifference(session: Session, file: string, release: boolean
   try {
     let looked: string[] = [];
     const made = compiledIn(newCompilation(session), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, looked);
-    clean = { ir: made.ir, warnings: [...made.checked.warnings] };
+    clean = { ir: made.ir.join("\n"), warnings: [...made.checked.warnings] };
   } catch (e) {
     if (!(e instanceof CompileError)) return `the clean build failed: ${(e as { message: string }).message}`;
     clean = e;
@@ -470,6 +475,23 @@ function refuseForeignRust(target: Ref<Target>) {
   if (target.compile.includes("-target")) throw new Error(`fishc build: Rust crates can't be built for ${target.triple} yet; build on a ${target.triple} machine, or without --target`);
 }
 
+// Writes IR in pieces to stdout as its text, joined by newlines a megabyte or so at a time, so the
+// whole text is never made at once.
+function writePieces(pieces: Ref<string[]>): void {
+  let batch: string[] = [];
+  let length: usize = 0;
+  for (let i: usize = 0; i < pieces.length; i++) {
+    if (i > 0) batch.push("\n");
+    batch.push(pieces[i]!);
+    length += pieces[i]!.length;
+    if (length < 1048576) continue;
+    process.stdout.write(batch.join(""));
+    batch = [];
+    length = 0;
+  }
+  if (batch.length > 0) process.stdout.write(batch.join(""));
+}
+
 // The length of IR up to which a release build is one module. Clang optimizing a module holds
 // about 40 bytes for each byte of it, 24 GB for the compiler's own 570 MB, so a larger program
 // is compiled a file at a time, as a dev build is, and clang holds one file's code at once.
@@ -515,8 +537,8 @@ function namesTable(checked: Mut<Checked>, helpers: Ref<Map<string, string>>): s
 // part, with std's part and each of the program's files a unit of its own that the cache keeps by
 // its text, so a rebuild compiles only the files whose code changed. A `-g` build keeps its files
 // in the program's part, which holds the debug metadata their functions refer to.
-function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<Target>, debug = false): { cached: Unit[]; program: string; times: [string, f64][] } {
-  if (release && ir.length < RELEASE_MODULE_LENGTH) return { cached: [], program: ir, times: [] };
+function parts(pieces: Ref<string[]>, checked: Ref<Checked>, release: boolean, target: Ref<Target>, debug = false): { cached: Unit[]; program: string; times: [string, f64][] } {
+  if (release && lengthOf(pieces) < RELEASE_MODULE_LENGTH) return { cached: [], program: pieces.join("\n"), times: [] };
   const naming = performance.now();
   const arenas: Ref<Arenas> = checked.tables.arenas;
   const names = symbolNames(arenas);
@@ -549,8 +571,8 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
   // never takes, and clang 18 passes over that block's return as it writes the unwind table, so
   // the code after it unwinds as if its frame were gone. A synchronous table says nothing at a
   // return, and a panic unwinds only from calls.
-  if (withoutGlobalIsel(release, target)) ir = ir.replace(/^(define [^\n]*) uwtable( personality [^\n]* \{| \{)$/gm, "$1 uwtable(sync)$2");
-  const halves = split(ir, std, own, byFile, debug ? 0 : UNIT_LENGTH);
+  const limit = debug ? 0 : UNIT_LENGTH;
+  const halves = withoutGlobalIsel(release, target) ? split(pieces.map((p) => p.replace(/^(define [^\n]*) uwtable( personality [^\n]* \{| \{)$/gm, "$1 uwtable(sync)$2")), std, own, byFile, limit) : split(pieces, std, own, byFile, limit);
   const args = [...target.compile, "-x", "ir", "-", ...optimization(release, target), "-funwind-tables"];
   let cached: Unit[] = [];
   for (let i: usize = 0; i < halves.std.length; i++) cached.push({ name: i === 0 ? "std" : `std-${i + 1}`, args: [...args], stdin: halves.std[i]!, inputs: [] });
@@ -559,25 +581,34 @@ function parts(ir: string, checked: Ref<Checked>, release: boolean, target: Ref<
   return { cached, program: halves.program, times: [["split names", named], ...halves.times] };
 }
 
-// Builds the program's IR, split into `halves`, into the executable `out`.
+// The runtime's units a program's IR needs and the libraries they link, read before the IR is
+// dropped.
+type Natives = { units: Unit[]; links: string[] };
+
+/** @throws {IoError} */
+function nativesOf(ir: Ref<string[]>, release: boolean, target: Ref<Target>, leaks: boolean): Natives {
+  return { units: runtimeUnits(ir, release, false, copyTarget(target), leaks), links: runtimeLinks(ir, target) };
+}
+
+// Builds the program, split into `halves`, into the executable `out`.
 /** @throws {Error | IoError} */
 // `known` is each unit's text and object from the build before, kept by `fishc watch`, so a unit
 // whose text is the same takes its object without hashing the text again.
-function linked(session: Mut<BuildSession>, ir: string, halves: Ref<{ cached: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean, known: Mut<Map<string, string[]>>) {
+function linked(session: Mut<BuildSession>, natives: Ref<Natives>, halves: Ref<{ cached: Unit[]; program: string }>, out: string, release: boolean, links: string[], shim: Shim | undefined, target: Ref<Target>, leaks: boolean, debug: boolean, known: Mut<Map<string, string[]>>) {
   const started = stageStart(session);
   const none: string[] = [];
   // A split program's own part is a unit beside the others, so every unit is compiled in one batch
   // and the link compiles nothing; a `-g` build's stays in the link, which gathers its debug info.
   const alongside = !debug && halves.cached.length > 0;
   let units: Unit[] = alongside ? [{ name: "program", args: [...halves.cached[0]!.args], stdin: halves.program, inputs: [] }] : [];
-  for (const u of runtimeUnits(ir, release, false, copyTarget(target), leaks)) units.push(u.clone());
+  for (const u of natives.units) units.push(u.clone());
   for (const u of halves.cached) units.push(u.clone());
   for (const u of mathUnits(session, [...target.compile])) units.push(u.clone());
   let objects = knownObjects(session, units, known);
   stageEnd(session, "runtime", started);
   if (session.timings !== undefined) session.timings.notes.set("runtime", objectsNote(session.timings));
   const g = debug ? ["-g"] : none;
-  const tls = runtimeLinks(ir, target);
+  const tls = [...natives.links];
   if (alongside) {
     const linking = stageStart(session);
     clang([...clangArgs(out, release, links, objects, shim, copyTarget(target), []), ...tls]);
@@ -709,7 +740,7 @@ export function buildTests(session: BuildSession, dir: string, out: string, rele
   const halves = parts(made.ir, made.checked, release, host);
   let building = together(made.checked.tables.session, caches);
   let none = new Map<string, string[]>();
-  linked(building, made.ir, halves, out, release, [], shim, host, false, false, none);
+  linked(building, nativesOf(made.ir, release, host, false), halves, out, release, [], shim, host, false, false, none);
   return tests;
 }
 
@@ -1015,7 +1046,7 @@ function rebuilt(r: Ref<Rebuild>, kept: Kept | undefined): Rebuilt {
     for (const w of made.warnings) console.error(painted(w, r.entry, textOf(r.entry), "warning"));
     // Only a build from what an earlier one kept can differ from a clean one.
     saved(made.kept.carried, made.ir, made.warnings);
-    if (made.kept.carried > 0) verified(r, { ir: made.ir, warnings: [...made.warnings] });
+    if (made.kept.carried > 0 && process.env.FISH_WATCH_VERIFY !== undefined) verified(r, { ir: made.ir.join("\n"), warnings: [...made.warnings] });
     return { built: true, loaded, kept: made.kept };
   } catch (e) {
     if (e instanceof CompileError) {
@@ -1029,12 +1060,12 @@ function rebuilt(r: Ref<Rebuild>, kept: Kept | undefined): Rebuilt {
 // With FISH_WATCH_IR set to a directory, each build's IR and warnings are written there, named by
 // how many builds in a row it follows from what one kept, to compare with a clean build later
 // when there's no memory for both at once.
-function saved(carried: usize, ir: string, warnings: Ref<CompileError[]>): void {
+function saved(carried: usize, ir: Ref<string[]>, warnings: Ref<CompileError[]>): void {
   const dir = process.env.FISH_WATCH_IR;
   if (dir === undefined) return;
   try {
     mkdirSync(dir!, { recursive: true });
-    writeFileSync(join(dir!, `build-${carried}.ll`), ir);
+    writeFileSync(join(dir!, `build-${carried}.ll`), ir.join("\n"));
     writeFileSync(join(dir!, `build-${carried}.warnings`), warnings.map((w) => `${w.code} ${w.message}`).join("\n"));
   } catch (e) {
     console.error(`[fishc] can't save the build's IR in ${dir!}: ${(e as { message: string }).message}`);
@@ -1106,35 +1137,50 @@ export function engineSources(): string[] {
 // Whether the IR calls into the JS engine: an instruction, not a declaration or a string's bytes.
 // The lines of the IR holding `name`. A program's IR runs to hundreds of megabytes and these names
 // are rare, so a regex is run over each line found rather than over the whole text.
-function linesWith(ir: string, name: string): string[] {
+function linesWith(pieces: Ref<string[]>, name: string): string[] {
   let out: string[] = [];
-  let at = ir.indexOf(name);
-  while (at >= 0) {
-    let end = ir.indexOf("\n", at);
-    if (end < 0) end = ir.length as i64;
-    out.push(ir.slice(ir.lastIndexOf("\n", at) + 1, end));
-    at = ir.indexOf(name, end);
+  for (const ir of pieces) {
+    let at = ir.indexOf(name);
+    while (at >= 0) {
+      let end = ir.indexOf("\n", at);
+      if (end < 0) end = ir.length as i64;
+      out.push(ir.slice(ir.lastIndexOf("\n", at) + 1, end));
+      at = ir.indexOf(name, end);
+    }
   }
   return out;
 }
 
-export const callsEngine = (ir: string) => linesWith(ir, "@fsh_rt_js_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/.test(l));
+// The length of the text pieces of IR make, joined by newlines.
+function lengthOf(pieces: Ref<string[]>): usize {
+  let n: usize = pieces.length > 0 ? pieces.length - 1 : 0;
+  for (const p of pieces) n += p.length;
+  return n;
+}
+
+// The IR in pieces as a sanitizer build gives clang it, each function marked for its sanitizer.
+function instrumentedPieces(pieces: string[], target: Ref<Target>): string[] {
+  if (target.sanitize === undefined) return pieces;
+  return pieces.map((p) => instrumented(p, target));
+}
+
+export const callsEngine = (ir: Ref<string[]>) => linesWith(ir, "@fsh_rt_js_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/.test(l));
 
 // Whether the IR calls into the OpenSSL half of the runtime, as fetch, serve and the tls module do
 // for TLS, and the postgres module and WebSocket handshakes for hashes. A function std declares
 // itself is called by its quoted name.
-export const callsTls = (ir: string) => [...linesWith(ir, "fsh_rt_tls_"), ...linesWith(ir, "fsh_rt_crypto_")].some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_(?:tls|crypto)_/.test(l));
+export const callsTls = (ir: Ref<string[]>) => [...linesWith(ir, "fsh_rt_tls_"), ...linesWith(ir, "fsh_rt_crypto_")].some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_(?:tls|crypto)_/.test(l));
 
 // Whether the IR calls into the zlib half of the runtime, as the zlib module does.
-export const callsZlib = (ir: string) => linesWith(ir, "fsh_rt_zlib_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_zlib_/.test(l));
+export const callsZlib = (ir: Ref<string[]>) => linesWith(ir, "fsh_rt_zlib_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_zlib_/.test(l));
 
 // Whether the IR calls into the SQLite half of the runtime, as the sqlite module does.
-export const callsSqlite = (ir: string) => linesWith(ir, "fsh_rt_sqlite_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_sqlite_/.test(l));
+export const callsSqlite = (ir: Ref<string[]>) => linesWith(ir, "fsh_rt_sqlite_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_sqlite_/.test(l));
 
 // What links OpenSSL into a program calling the TLS runtime, when it was found, without which the
 // runtime's TLS calls say how to install it, zlib into one calling the zlib runtime, and the
 // system's SQLite into one calling the SQLite runtime.
-export function runtimeLinks(ir: string, target: Ref<Target>): string[] {
+export function runtimeLinks(ir: Ref<string[]>, target: Ref<Target>): string[] {
   let libraries: string[] = [];
   if (callsZlib(ir)) libraries.push("-lz");
   if (callsSqlite(ir)) libraries.push("-lsqlite3");
@@ -1149,7 +1195,7 @@ export function runtimeLinks(ir: string, target: Ref<Target>): string[] {
 // them, and position-independent when `pic`, for a library. A `--leaks` build's runtime records
 // each block's site, so it is an object of its own.
 /** @throws {IoError} */
-export function runtimeUnits(ir: string, release: boolean, pic = false, target: Target = hostTarget(), leaks = false): Unit[] {
+export function runtimeUnits(ir: Ref<string[]>, release: boolean, pic = false, target: Target = hostTarget(), leaks = false): Unit[] {
   const js = callsEngine(ir);
   const openssl = callsTls(ir) ? findOpenSsl(target) : undefined;
   const none: string[] = [];
@@ -1507,7 +1553,7 @@ function reportedIr(file: string, release: boolean): string {
   try {
     src = readFileSync(file, "utf8");
     let looked: string[] = [];
-    return compiledIn(newCompilation(plain(sessionWith(false, false))), src, file, release, "unwind", false, false, false, looked).ir;
+    return compiledIn(newCompilation(plain(sessionWith(false, false))), src, file, release, "unwind", false, false, false, looked).ir.join("\n");
   } catch (e) {
     if (e instanceof CompileError) console.error(painted(e, file, src));
     else console.error((e as { message: string }).message);
@@ -2001,7 +2047,7 @@ async function main(): Promise<void> {
       let looked: string[] = [];
       const made = compiledIn(newCompilation(plain(sessionFor())), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked);
       reportTimings(made.checked.tables.session, [...FRONT_END, "codegen"], start);
-      process.stdout.write(made.ir);
+      writePieces(made.ir);
     } else {
       // FISH_SYSROOT is for building for another target, never the host's own plain builds.
       const fromEnv = process.env.FISH_SYSROOT ?? "";

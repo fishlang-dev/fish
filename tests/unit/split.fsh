@@ -33,14 +33,14 @@ function groups(): Map<string, string[]> {
 const OWN = ['@"fsh.a"', '@"fsh.b"', '@"fsh.main"'];
 
 test("a file's functions stay one part with no limit", () => {
-  const halves = split(ir(), [], [...OWN], groups());
+  const halves = split([ir()], [], [...OWN], groups());
   assert([...halves.groups.keys()].join(" ") === "f.fsh", "one part");
   const part = halves.groups.get("f.fsh") ?? "";
   assert(part.includes('define void @"fsh.a"()') && part.includes('define void @"fsh.b"()'), part);
 });
 
 test("a file's functions over the limit are divided, each part declaring the others'", () => {
-  const halves = split(ir(), [], [...OWN], groups(), 1);
+  const halves = split([ir()], [], [...OWN], groups(), 1);
   assert([...halves.groups.keys()].join(" ") === "f.fsh f.fsh#2", [...halves.groups.keys()].join(" "));
   const first = halves.groups.get("f.fsh") ?? "";
   const second = halves.groups.get("f.fsh#2") ?? "";
@@ -51,23 +51,23 @@ test("a file's functions over the limit are divided, each part declaring the oth
 });
 
 test("a limit a file's functions fit under divides nothing", () => {
-  const halves = split(ir(), [], [...OWN], groups(), 100000);
+  const halves = split([ir()], [], [...OWN], groups(), 100000);
   assert([...halves.groups.keys()].join(" ") === "f.fsh", "one part");
 });
 
 test("the program's own functions over the limit are divided, the first part keeping the rest", () => {
-  const halves = split(ir(), [], [...OWN], new Map<string, string[]>(), 1);
+  const halves = split([ir()], [], [...OWN], new Map<string, string[]>(), 1);
   assert(halves.rest.length === 2, `${halves.rest.length} more parts`);
   assert(halves.program.includes('define void @"fsh.a"()') && halves.program.includes('declare void @"fsh.b"()'), halves.program);
   assert(halves.rest[1]!.includes('define void @"fsh.main"()') && halves.rest[1]!.includes('declare void @"fsh.a"()'), halves.rest[1]!);
-  assert(split(ir(), [], [...OWN], new Map<string, string[]>()).rest.length === 0, "divided with no limit");
+  assert(split([ir()], [], [...OWN], new Map<string, string[]>()).rest.length === 0, "divided with no limit");
 });
 
 test("std's functions over the limit are divided as a file's are", () => {
   const std = ['@"fsh.a"', '@"fsh.b"'];
-  const whole = split(ir(), [...std], ['@"fsh.main"'], new Map<string, string[]>());
+  const whole = split([ir()], [...std], ['@"fsh.main"'], new Map<string, string[]>());
   assert(whole.std.length === 1, `${whole.std.length} parts`);
-  const halves = split(ir(), [...std], ['@"fsh.main"'], new Map<string, string[]>(), 1);
+  const halves = split([ir()], [...std], ['@"fsh.main"'], new Map<string, string[]>(), 1);
   assert(halves.std.length === 2, `${halves.std.length} parts`);
   assert(halves.std[0]!.includes('define void @"fsh.a"()') && halves.std[0]!.includes('declare void @"fsh.b"()'), halves.std[0]!);
   assert(halves.std[1]!.includes('define void @"fsh.b"()') && !halves.std[1]!.includes("fsh.a"), halves.std[1]!);
@@ -121,7 +121,7 @@ function defined(text: string): string {
 }
 
 test("instances of one function with the same text become the one with the smallest symbol", () => {
-  const halves = split(instances(false), [], [...INSTANCES], new Map<string, string[]>());
+  const halves = split([instances(false)], [], [...INSTANCES], new Map<string, string[]>());
   // The two walks merge first, which makes the two visits the same, so they merge in turn.
   assert(defined(halves.program) === '@"fsh.walk#aaaaaa" @"fsh.visit#aaaaaa" @"fsh.main"', defined(halves.program));
   assert(!halves.program.includes("bbbbbb"), halves.program);
@@ -129,19 +129,19 @@ test("instances of one function with the same text become the one with the small
 });
 
 test("instances whose text differs stay apart, and so do their callers", () => {
-  const halves = split(instances(true), [], [...INSTANCES], new Map<string, string[]>());
+  const halves = split([instances(true)], [], [...INSTANCES], new Map<string, string[]>());
   assert(defined(halves.program) === '@"fsh.walk#aaaaaa" @"fsh.walk#bbbbbb" @"fsh.visit#bbbbbb" @"fsh.visit#aaaaaa" @"fsh.main"', defined(halves.program));
 });
 
 test("std's instances are left as they are", () => {
-  const halves = split(instances(false), ['@"fsh.walk#aaaaaa"', '@"fsh.walk#bbbbbb"'], ['@"fsh.visit#aaaaaa"', '@"fsh.visit#bbbbbb"', '@"fsh.main"'], new Map<string, string[]>());
+  const halves = split([instances(false)], ['@"fsh.walk#aaaaaa"', '@"fsh.walk#bbbbbb"'], ['@"fsh.visit#aaaaaa"', '@"fsh.visit#bbbbbb"', '@"fsh.main"'], new Map<string, string[]>());
   assert(defined(halves.std) === '@"fsh.walk#aaaaaa" @"fsh.walk#bbbbbb"', defined(halves.std));
   assert(defined(halves.program) === '@"fsh.visit#bbbbbb" @"fsh.visit#aaaaaa" @"fsh.main"', defined(halves.program));
 });
 
 test("a merged function's part declares the one kept, wherever its callers are", () => {
   const groups = new Map<string, string[]>([["w.fsh", ['@"fsh.walk#aaaaaa"', '@"fsh.walk#bbbbbb"']]]);
-  const halves = split(instances(false), [], [...INSTANCES], groups);
+  const halves = split([instances(false)], [], [...INSTANCES], groups);
   assert(defined(halves.groups.get("w.fsh") ?? "") === '@"fsh.walk#aaaaaa"', halves.groups.get("w.fsh") ?? "");
   assert(halves.program.includes('declare i64 @"fsh.walk#aaaaaa"(i64)') && !halves.program.includes("bbbbbb"), halves.program);
 });
