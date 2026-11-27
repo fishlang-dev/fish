@@ -111,7 +111,7 @@ function planOf(path: string): Plan {
 test("each rule counts what the sample shows", () => {
   list(nonzero(survey(sample())), sorted([
     "parse: 1", "R1: 1", "R2: 1", "R3: 1", "declarators: 1",
-    "forIn: 1", "decorators: 1",
+    "decorators: 1",
     "G1: 3", "G6: 1", "G7: 1", "G8: 1", "G10: 1", "A1: 1", "A2: 1", "A3: 1", "A4: 1", "A8: 1", "A9: 1",
   ]), "counts");
 });
@@ -361,7 +361,7 @@ function steps(r: Ref<Ranking>): string[] {
 }
 
 test("the curve picks the feature freeing the most lines first, and frees a file only once all it needs exist", () => {
-  const one = project([["a.ts", big()], ["b.ts", "for (const k in o) {}\n"], ["c.ts", "namespace N {}\nfor (const k in o) {}\n"]]);
+  const one = project([["a.ts", big()], ["b.ts", "for (k in o) {}\n"], ["c.ts", "namespace N {}\nfor (k in o) {}\n"]]);
   const two = project([["d.ts", "function main(): void {}\n"]]);
   const r = ranked([one, two]);
   same(`${r.curve.start.files} ${r.curve.start.lines} ${r.curve.start.share}`, "1 1 7.1", "the start");
@@ -393,7 +393,7 @@ function selfSteps(r: Ref<Ranking>): string[] {
 
 test("unread files are left out of the steps but not the shares, and the self curve stands alone", () => {
   const repo = project([["a.ts", big()], ["bad.ts", "const = ;\n"], ["v.tsx", "const v = <div>;\nconst w = 1;\n"]]);
-  const self = project([["s.ts", "for (const k in o) {}\n"]]);
+  const self = project([["s.ts", "for (k in o) {}\n"]]);
   const r = ranked([repo], self);
   same(`${r.repos[0]!.unread.files} ${r.repos[0]!.unread.lines}`, "2 3", "unread");
   list(r.curve.steps.map((s) => `${s.feature} ${s.portable.share}`), ["The rest of console 76.9"], "the steps");
@@ -451,7 +451,7 @@ function planShown(s: Ref<Step>): string {
 }
 
 test("a plan names each feature's item and whether it is done", () => {
-  const dir = project([["a.ts", big() + "for (const k in o) {}\nnamespace N {}\n"], ["plan.md", "## Plan\n\n- [ ] 7. **The rest of console** - console.debug\n  - [x] 9b. **for...in** - keys\n"]]);
+  const dir = project([["a.ts", big() + "for (k in o) {}\nnamespace N {}\n"], ["plan.md", "## Plan\n\n- [ ] 7. **The rest of console** - console.debug\n  - [x] 9b. **for...in** - keys\n"]]);
   const r = ranked([dir], undefined, planOf(join(dir, "plan.md")));
   list(sorted(r.curve.steps.map((s) => planShown(s))), sorted(["The rest of console: 7 false", "for...in: 9b true", "Namespaces: null"]), "the plan items");
   assert(formatRanking(r, true).includes("(plan item 9b, done)"), formatRanking(r, true));
