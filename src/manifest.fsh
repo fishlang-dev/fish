@@ -6,19 +6,25 @@ import { validCrate } from "./rust.fsh";
 
 // A package another depends on, from a local path, a git repository pinned to a commit, or the
 // registry by a version range, and where its entry is in the depending package's `fish.toml`.
-export type Dependency = { name: string; start: usize; end: usize } & ({ path: string } | { git: string; rev: string } | { version: string });
+// `capabilities` is what the depending package grants it, when it says.
+export type Dependency = { name: string; start: usize; end: usize; capabilities?: Capability[] } & ({ path: string } | { git: string; rev: string } | { version: string });
 
 // A package as its `fish.toml` describes it, `dir` being where that file was found; `lib` is
 // what a package depending on it imports, `entry` the program it builds.
 // `edition`: "ts-compat" marks TypeScript not yet migrated, which a build refuses and `fishc lint`
 // reads.
 // `rustDependencies` is the `[rust-dependencies]` table, when the manifest has one.
-export type Manifest = { name: string; version: string; entry: string; lib: string; edition: Edition; dependencies: Dependency[]; rustDependencies?: RustDependency[]; registry?: string; dir: string };
+// `capabilities` is what the package says it uses of what a dependency must be granted.
+export type Manifest = { name: string; version: string; entry: string; lib: string; edition: Edition; capabilities: Capability[]; dependencies: Dependency[]; rustDependencies?: RustDependency[]; registry?: string; dir: string };
 // A Rust crate the package's `declare module "rust:<crate>"` declarations call, in Cargo's terms.
 export type RustDependency = {
   name: string; start: usize; end: usize; version?: string; features?: string[]; defaultFeatures?: boolean; path?: string; git?: string; rev?: string; tag?: string; branch?: string;
 };
 export type Edition = "native" | "ts-compat";
+// What a dependency's code may reach beyond computing: the network, files, C and other native
+// code, `unsafe`, and other programs.
+export type Capability = "net" | "fs" | "ffi" | "unsafe" | "spawn";
+export const CAPABILITIES: Capability[] = ["net", "fs", "ffi", "unsafe", "spawn"];
 
 export const MANIFEST = "fish.toml";
 
@@ -76,7 +82,7 @@ class TomlReader {
   }
 
   /** @throws {CompileError} */
-  key(this: Mut<this>): Spanned<string> {
+  key(this: Mut<this>, dotted: boolean = false): Spanned<string> {
     const start = this.at;
     if (this.char(this.at) === '"' || this.char(this.at) === "'") {
       const s = this.string();
@@ -84,7 +90,7 @@ class TomlReader {
     }
     while (/^[A-Za-z0-9_-]$/.test(this.char(this.at))) this.at++;
     if (this.at === start) throw new CompileError("E0904", "expected a key here", start, start + 1);
-    if (this.char(this.at) === ".") throw unread(this.at, "a dotted key");
+    if (this.char(this.at) === "." && !dotted) throw unread(this.at, "a dotted key");
     return { value: this.src.slice(start as i64, this.at as i64), start, end: this.at };
   }
 
@@ -230,7 +236,13 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
       const array = r.char(r.at + 1) === "[";
       r.at += array ? 2 : 1;
       r.space();
-      const name = r.key();
+      // `[dependencies.x]` is the one dotted name a manifest has: x's table under [dependencies].
+      let name = r.key(true);
+      while (r.char(r.at) === ".") {
+        r.at++;
+        const part = r.key(true);
+        name = { value: `${name.value}.${part.value}`, start: name.start, end: part.end };
+      }
       r.space();
       if (!r.ahead(array ? "]]" : "]")) throw new CompileError("E0904", `expected '${array ? "]]" : "]"}' to close the table's name`, r.at, r.at + 1);
       r.at += array ? 2 : 1;
@@ -260,8 +272,12 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
 /** @throws {CompileError} */
 export function readManifest(src: string, dir: string): Manifest {
   const tables = parseToml(src);
-  const known = new Map<string, string[]>([["", []], ["package", ["name", "version", "entry", "lib", "edition"]], ["dependencies", []], ["rust-dependencies", []], ["registry", ["url"]]]);
+  const known = new Map<string, string[]>([["", []], ["package", ["name", "version", "entry", "lib", "edition", "capabilities"]], ["dependencies", []], ["rust-dependencies", []], ["registry", ["url"]]]);
   for (const [name, found] of tables) {
+    if (name.startsWith("dependencies.")) {
+      if (Array.isArray(found)) throw new CompileError("E0905", `a dependency is one table; write [${name}] once`, found[0]!.start, found[0]!.end);
+      continue;
+    }
     const keys = known.get(name);
     const missing = `a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies] and [registry]`;
     if (Array.isArray(found)) throw new CompileError("E0905", missing, found[0]!.start, found[0]!.end);
@@ -288,6 +304,16 @@ export function readManifest(src: string, dir: string): Manifest {
   let dependencies: Dependency[] = [];
   const listed = tables.get("dependencies");
   if (listed !== undefined && !Array.isArray(listed)) for (const e of listed.keys.values()) dependencies.push(dependency(e.key, e.value));
+  for (const [tableName, found] of tables) {
+    if (!tableName.startsWith("dependencies.") || Array.isArray(found)) continue;
+    const named = tableName.slice("dependencies.".length as i64);
+    // The header's span stands for the key, and the table for its value.
+    const key: Spanned<string> = { value: named, start: found.start, end: found.end };
+    if (dependencies.some((d) => d.name === named)) throw new CompileError("E0905", `'${named}' is listed under [dependencies] already; give it in one place`, found.start, found.end);
+    const value: SpannedValue = { value: found.keys.clone(), start: found.start, end: found.end };
+    dependencies.push(dependency(key, value));
+  }
+  const capabilities = capabilityList(pkg.keys.get("capabilities"));
   let rustDependencies: RustDependency[] | undefined = undefined;
   const crates = tables.get("rust-dependencies");
   if (crates !== undefined && !Array.isArray(crates)) {
@@ -313,7 +339,26 @@ export function readManifest(src: string, dir: string): Manifest {
       registry = written;
     }
   }
-  return { name: name.value, version: version.value, entry, lib, edition: chosen, dependencies, rustDependencies, registry, dir };
+  return { name: name.value, version: version.value, entry, lib, edition: chosen, capabilities, dependencies, rustDependencies, registry, dir };
+}
+
+// A `capabilities = ["net", ...]` list, each name one of the five and given once; none when absent.
+/** @throws {CompileError} */
+function capabilityList(found: Ref<{ key: Spanned<string>; value: SpannedValue } | undefined>): Capability[] {
+  if (found === undefined) return [];
+  const form = `'capabilities' is a list of ${CAPABILITIES.map((c) => `"${c}"`).join(", ")}, as in capabilities = ["net"]`;
+  const list: Ref<TomlValue> = found.value.value;
+  if (!Array.isArray(list)) throw new CompileError("E0905", form, found.value.start, found.value.end);
+  let all: Capability[] = [];
+  for (const v of list) {
+    const written: Ref<TomlValue> = v.value;
+    if (typeof written !== "string") throw new CompileError("E0905", form, v.start, v.end);
+    const known = CAPABILITIES.find((c) => c === written);
+    if (known === undefined) throw new CompileError("E0905", `'${written}' isn't a capability; ${form}`, v.start, v.end);
+    if (all.includes(known)) throw new CompileError("E0905", `'${written}' is listed twice`, v.start, v.end);
+    all.push(known);
+  }
+  return all;
 }
 
 // The string at `field` in `keys`, if it is there; anything else there is refused, with how a
@@ -414,8 +459,9 @@ function dependency(key: Ref<Spanned<string>>, value: Ref<SpannedValue>): Depend
   if (!(value.value instanceof Map)) throw new CompileError("E0905", form, value.start, value.end);
   const entries: Ref<Entries> = value.value;
   for (const { key: k } of entries.values()) {
-    if (!["version", "path", "git", "rev"].includes(k.value)) throw new CompileError("E0905", `a dependency has no key '${k.value}'; it has version, path, or git and rev`, k.start, k.end);
+    if (!["version", "path", "git", "rev", "capabilities"].includes(k.value)) throw new CompileError("E0905", `a dependency has no key '${k.value}'; it has version, path, or git and rev, and capabilities`, k.start, k.end);
   }
+  const capabilities = entries.has("capabilities") ? capabilityList(entries.get("capabilities")) : undefined;
   const version = textIn(entries, "version", false);
   const path = textIn(entries, "path", false);
   const git = textIn(entries, "git", false);
@@ -428,14 +474,14 @@ function dependency(key: Ref<Spanned<string>>, value: Ref<SpannedValue>): Depend
   if (version !== undefined) {
     if (rev !== undefined) throw new CompileError("E0905", "rev pins a git dependency; a registry one is chosen by its version range", rev.start, rev.end);
     if (parseRange(version.value) === undefined) throw new CompileError("E0905", `'${version.value}' isn't a version range; write one as package.json does, as in "^1.2.0" or ">=1.0.0 <2.0.0"`, version.start, version.end);
-    return { name, start, end, version: version.value };
+    return { name, start, end, capabilities, version: version.value };
   }
-  if (path !== undefined) return { name, start, end, path: path.value };
+  if (path !== undefined) return { name, start, end, capabilities, path: path.value };
   if (git === undefined) throw new CompileError("E0905", form, value.start, value.end);
   if (git.value.startsWith("-")) throw new CompileError("E0905", "a git URL can't start with '-'", git.start, git.end);
   if (rev === undefined) throw new CompileError("E0905", "a git dependency is pinned to a commit, as in rev = \"3f2a9c1\"; branches and tags move", value.start, value.end);
   if (!/^[0-9a-f]{7,40}$/.test(rev.value)) throw new CompileError("E0905", "rev is a commit's hash, 7 to 40 lowercase hex digits; branches and tags move", rev.start, rev.end);
-  return { name, start, end, git: git.value, rev: rev.value };
+  return { name, start, end, capabilities, git: git.value, rev: rev.value };
 }
 
 // The nearest `fish.toml` at or above `from`.

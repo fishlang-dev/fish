@@ -870,6 +870,7 @@ To fix it, write it the way the message says: 'let' or 'const' for 'var', a new 
   E0907: { title: "an import that clashes with another name in its file" },
   E0908: { title: "a Node built-in Fish doesn't have, or uses differently" },
   E0909: { title: "a source file larger than the compiler takes" },
+  E0910: { title: "a dependency using a capability it doesn't state or isn't granted" },
 
   E1001: { title: "an operation that needs 'unsafe'" },
   E1002: { title: "invalid C function declaration" },
