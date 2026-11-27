@@ -1988,7 +1988,8 @@ async function main(): Promise<void> {
   if (command === "check" && target !== undefined && values.out === undefined && !release && !llvm && lib === undefined) {
     try {
       const start = performance.now();
-      const made = checkedFile(sessionFor(), target);
+      // Nothing but the warnings is read once the check ends, so it keeps what a plain build keeps.
+      const made = checkedFile(plain(sessionFor()), target);
       reportTimings(made.session, FRONT_END, start);
       for (const w of made.warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
     } catch (e) {
