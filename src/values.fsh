@@ -1189,12 +1189,15 @@ export class Expressions<C extends Context> implements Union<C> {
   /** @throws {CompileError} */
   private match(this: Mut<this>, e: Ref<Extract<Expr, { kind: "match" }>>, wanted: boolean): Type {
     const subject = this.read(e.subject);
-    const owning = made(e.subject);
+    const checkingNow = this.ctx.checking();
+    const tbNow = this.ctx.tables();
+    const instNow = tbNow.arenas.instanceOf(checkingNow);
+    const owning = made(tbNow.typing, instNow.types, instNow.coercions, instNow.calls, instNow.copiesOut, tbNow.computed, tbNow.jsMembers, tbNow.jsStatics, tbNow.jsExports, tbNow.rewrites, cloneExpr(e.subject));
     let given: [Expr, Type][] = [];
     for (const arm of e.arms) {
       this.ctx.enterArm();
       try {
-        this.pattern(arm.pattern, subject, !owning);
+        this.pattern(arm.pattern, subject, !owning, arm.guard !== undefined);
         if (arm.guard !== undefined) this.condition(arm.guard);
         if (arm.body.kind === "block") {
           let gives = this.ctx.block(arm.body, wanted);
@@ -1445,7 +1448,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // `None`, before it is a binding. A borrowing binding of a part that isn't Copy is a shared
   // reference to it.
   /** @throws {CompileError} */
-  private pattern(this: Mut<this>, p: Ref<Pattern>, type: Type, borrowing: boolean): void {
+  private pattern(this: Mut<this>, p: Ref<Pattern>, type: Type, borrowing: boolean, noMove: boolean): void {
     const whole = this.recOf(type);
     const members: Type[] = whole?.kind === "union" ? whole.members.slice() : [type];
     const optional = members.includes("null");
@@ -1470,7 +1473,13 @@ export class Expressions<C extends Context> implements Union<C> {
           this.recordPattern(p, type, { kind: "literal", value, member: named[0]! });
           return;
         }
-        const bound = borrowing && !this.ctx.typing().isCopy(type) ? this.ctx.tables().typing.refType(type, false) : type;
+        const typingNow = this.ctx.typing();
+        const nonCopyable = typingNow.holdsMoveOnly(type) || typingNow.holdsPart(type, (u) => {
+          const r = typingNow.recOf(u);
+          return r !== undefined && (r.kind === "unknown" || r.kind === "dyn" || (r.kind === "union" && r.unknown === true));
+        }, false, true);
+        const mustBorrow = borrowing || (noMove && nonCopyable);
+        const bound = mustBorrow && !this.ctx.typing().isCopy(type) ? this.ctx.tables().typing.refType(type, false) : type;
         this.ctx.bind(p.name, bound, { id: p.id, kind: "ident", name: p.name, start: p.start, end: p.end });
         { this.recordPattern(p, type, { kind: "any" }); return; }
       }
@@ -1496,7 +1505,7 @@ export class Expressions<C extends Context> implements Union<C> {
       case "variant": {
         if (p.name === "Some" && optional && p.args?.length === 1) {
           const inner = this.ctx.tables().typing.unionType(members.filter((m) => m !== "null"));
-          this.pattern(p.args[0]!, inner, borrowing);
+          this.pattern(p.args[0]!, inner, borrowing, noMove);
           { this.recordPattern(p, type, { kind: "some", inner, arg: clonePattern(p.args[0]!) }); return; }
         }
         const member = this.enumMember(p);
@@ -1513,7 +1522,7 @@ export class Expressions<C extends Context> implements Union<C> {
         let args: Pattern[] = [];
         if (p.args !== undefined) {
           for (let i: usize = 0; i < p.args.length; i++) {
-            this.pattern(p.args[i]!, this.ctx.typing().rec(v).fields[i]!.type, borrowing);
+            this.pattern(p.args[i]!, this.ctx.typing().rec(v).fields[i]!.type, borrowing, noMove);
             args.push(clonePattern(p.args[i]!));
           }
         }
@@ -1533,12 +1542,18 @@ export class Expressions<C extends Context> implements Union<C> {
         let shapes: Type[] = [];
         for (const m of members) if (this.shapeMatches(m, p, keys)) shapes.push(m);
         if (shapes.length === 0) throw this.neverMatches(p, type);
+        let cantMove = noMove || shapes.length > 1;
+        if (!cantMove && shapes.length === 1) {
+          const lowShape = this.ctx.tables().typing.lower(shapes[0]!);
+          const lowKind = this.kindOf(lowShape);
+          if ((lowKind !== "object" && lowKind !== "class") || this.ctx.typing().disposable(lowShape)) cantMove = true;
+        }
         let fields: [string, Pattern, Type][] = [];
         for (let i: usize = 0; i < p.props.length; i++) {
           let held: Type[] = [];
           for (const m of shapes) held.push(objectFields(this.ctx.tables().typing, m as Shape).find((f) => f.name === keys[i])!.type);
           const ft = this.ctx.tables().typing.unionType(held);
-          this.pattern(p.props[i]!.value, ft, borrowing);
+          this.pattern(p.props[i]!.value, ft, borrowing, cantMove);
           fields.push([keys[i]!, clonePattern(p.props[i]!.value), ft]);
         }
         { this.recordPattern(p, type, { kind: "object", shapes, fields }); return; }
@@ -1554,13 +1569,13 @@ export class Expressions<C extends Context> implements Union<C> {
         let items: Pattern[] = [];
         for (const item of p.elements) {
           if (item === undefined) continue;
-          this.pattern(item, element, borrowing);
+          this.pattern(item, element, borrowing, noMove);
           items.push(clonePattern(item));
         }
         { this.recordPattern(p, type, { kind: "array", element, items }); return; }
       }
       case "or": {
-        for (const alt of p.patterns) this.pattern(alt, type, borrowing);
+        for (const alt of p.patterns) this.pattern(alt, type, borrowing, noMove);
         for (const alt of p.patterns) for (const b of bindings(alt)) if (this.ctx.held().locals.getById(b.id) !== undefined) throw unsupported("alternatives binding names", p);
         let alternatives: Pattern[] = [];
         for (const alt of p.patterns) alternatives.push(clonePattern(alt));

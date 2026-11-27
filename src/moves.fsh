@@ -123,6 +123,8 @@ const SYNTHETIC: usize = 1_000_000_000_000;
 const FOREVER: f64 = 1e300;
 // The place a temporary or a copy stands for: a reference into one can't be returned.
 const TEMPORARY = "temporary";
+// Prefix for a fresh match subject's synthetic place: a borrowing binding of it can't outlive the match.
+const MATCH_TEMP = "match ";
 
 // A way out of a try that passes through its finally, and what the times it was taken had in
 // common.
@@ -199,6 +201,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   consumed = new Set<usize>();
   // Whether the body stores a value holding references into `this`.
   keepsInThis = false;
+  // Active fresh `match` expressions whose temporary subject is dropped when the match ends.
+  matchTemps: { place: string; start: usize; end: usize }[] = [];
 
   constructor(cx: Mut<MoveCx<T, B, I>>, origins: Origin[]) {
     const instance = cx.instance;
@@ -670,7 +674,11 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         if (cx.instance.jumps.has(s)) {
           const arm = cx.instance.jumps.get(s)!;
           const [consume, discarded] = this.arms.get(arm.id)!;
-          if (s.value !== undefined) this.expr(cx, s.value, consume, discarded);
+          if (s.value !== undefined) {
+            const given = this.moveOnlyConsume(cx, s.value, s.value, consume, "this match", discarded);
+            this.expr(cx, s.value, given, discarded);
+            this.rejectMatchTempReturn(cx, s.value, arm.id);
+          }
           this.jumping(cx, { id: arm.id, start: arm.start, end: arm.end }, "break");
           this.state = null;
           return;
@@ -908,80 +916,107 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       case "match": {
         this.expr(cx, e.subject);
         const place = this.key(cx, e.subject);
+        const subjectType = cx.instance.types.get(e.subject);
+        const freshSubject = place === undefined && (subjectType === undefined || !this.isRef(cx, subjectType));
+        const subjectPlace = `${MATCH_TEMP}${e.id}`;
         let entry = join(this.state, null);
         let after: State = null;
-        for (const arm of e.arms) {
-          this.state = join(entry, null);
-          let bound: LocalId[] = [];
-          for (const b of bindings(arm.pattern)) {
-            const local = cx.instance.locals.getById(b.id);
-            if (local !== undefined) bound.push(local);
-          }
-          // Each time an arm is entered, its bindings are new, as a loop's `let` is.
-          for (const local of bound) this.revive(cx, String(cx.tables.arenas.localOf(local).id));
-          let borrowing: LocalId[] = [];
-          for (const l of bound) if (this.isRef(cx, cx.tables.arenas.localOf(l).type)) borrowing.push(l);
-          for (const holderId of borrowing) {
-            const key = -(cx.tables.arenas.localOf(holderId).id as f64) - 1_000_000;
-            if (place !== undefined && this.state !== null) this.state.loans.set(key, { place, mutable: false, start: e.subject.start, end: e.subject.end, holders: new Set([holderId]) });
-            // Through a reference, the binding holds what that reference borrows, a reference a
-            // call gave included.
-            this.inherit(cx, holderId, e.subject);
-            if (place === undefined && this.fromCallProjected(cx, e.subject)) this.holdProjected(cx, holderId, e.subject);
-          }
-          if (arm.guard !== undefined) {
-            const at = -(arm.guard.start as f64) - 1;
-            if (place !== undefined && this.state !== null) this.state.loans.set(at, { place, mutable: false, start: arm.guard.start, end: arm.guard.end, holders: new Set(), guard: true });
-            this.guarding.add(arm.guard.start);
-            this.expr(cx, arm.guard);
-            this.guarding.delete(arm.guard.start);
-            if (this.state !== null) this.state.loans.delete(at);
-            const passed = join(this.state, null);
-            this.state = join(passed, null);
+        if (freshSubject) this.matchTemps.push({ place: subjectPlace, start: e.start, end: e.end });
+        try {
+          for (const arm of e.arms) {
+            this.state = join(entry, null);
+            let bound: LocalId[] = [];
+            let boundPatType = new Map<LocalId, Type>();
+            for (const b of bindings(arm.pattern)) {
+              const local = cx.instance.locals.getById(b.id);
+              if (local !== undefined) {
+                bound.push(local);
+                const pinfo = cx.instance.patterns.getById(b.id);
+                if (pinfo !== undefined) boundPatType.set(local, pinfo.type);
+              }
+            }
+            // Each time an arm is entered, its bindings are new, as a loop's `let` is.
+            for (const local of bound) this.revive(cx, String(cx.tables.arenas.localOf(local).id));
+            let borrowing: LocalId[] = [];
+            for (const l of bound) if (this.isRef(cx, cx.tables.arenas.localOf(l).type)) borrowing.push(l);
+            for (const holderId of borrowing) {
+              const key = -(cx.tables.arenas.localOf(holderId).id as f64) - 1_000_000;
+              if (place !== undefined && this.state !== null) this.state.loans.set(key, { place, mutable: false, start: e.subject.start, end: e.subject.end, holders: new Set([holderId]) });
+              // Through a reference, the binding holds what that reference borrows, a reference a
+              // call gave included.
+              this.inherit(cx, holderId, e.subject);
+              if (place === undefined && this.fromCallProjected(cx, e.subject)) this.holdProjected(cx, holderId, e.subject);
+              const localType = cx.tables.arenas.localOf(holderId).type;
+              const patType = boundPatType.get(holderId);
+              const borrowsSubject = patType === undefined || patType !== localType;
+              if (freshSubject && borrowsSubject && this.state !== null) {
+                this.state.loans.set(key - 0.5, { place: subjectPlace, mutable: false, start: e.subject.start, end: e.subject.end, holders: new Set([holderId]) });
+              }
+            }
+            if (arm.guard !== undefined) {
+              const at = -(arm.guard.start as f64) - 1;
+              if (place !== undefined && this.state !== null) this.state.loans.set(at, { place, mutable: false, start: arm.guard.start, end: arm.guard.end, holders: new Set(), guard: true });
+              this.guarding.add(arm.guard.start);
+              this.expr(cx, arm.guard);
+              this.guarding.delete(arm.guard.start);
+              if (this.state !== null) this.state.loans.delete(at);
+              const passed = join(this.state, null);
+              this.state = join(passed, null);
+              for (const holder of borrowing) this.release(cx, holder);
+              entry = join(entry, this.state);
+              this.state = passed;
+            }
+            if (arm.body.kind === "block") {
+              this.arms.set(arm.body.id, [consume, discarded]);
+              this.exits.set(arm.body.id, null);
+              this.statement(cx, arm.body);
+              this.state = join(this.state, (this.exits.get(arm.body.id) ?? null));
+              const gone9 = [...this.scoped(cx, arm.body), ...bound];
+              this.dropped(cx, gone9, arm.body.end);
+            } else {
+              const given = this.moveOnlyConsume(cx, e, arm.body, consume, "this match", discarded);
+              this.expr(cx, arm.body, given, discarded);
+              if (freshSubject && !discarded) this.rejectMatchTempValue(cx, arm.body, subjectPlace, e.end);
+              this.dropped(cx, bound, arm.body.end);
+            }
             for (const holder of borrowing) this.release(cx, holder);
-            entry = join(entry, this.state);
-            this.state = passed;
+            after = join(after, this.state);
           }
-          if (arm.body.kind === "block") {
-            this.arms.set(arm.body.id, [consume, discarded]);
-            this.exits.set(arm.body.id, null);
-            this.statement(cx, arm.body);
-            this.state = join(this.state, (this.exits.get(arm.body.id) ?? null));
-            const gone9 = [...this.scoped(cx, arm.body), ...bound];
-            this.dropped(cx, gone9, arm.body.end);
-          } else {
-            this.expr(cx, arm.body, consume, discarded);
-            this.dropped(cx, bound, arm.body.end);
-          }
-          for (const holder of borrowing) this.release(cx, holder);
-          after = join(after, this.state);
+        } finally {
+          if (freshSubject) this.matchTemps.pop();
         }
         this.state = after;
+        if (freshSubject) this.checkMatchTemp(cx, subjectPlace, e.end, true);
         return;
       }
       case "conditional": {
         this.expr(cx, e.cond);
         if (!cx.instance.types.has(e.then)) {
-          this.expr(cx, e.else, consume, discarded);
+          const elseGiven = this.moveOnlyConsume(cx, e, e.else, consume, "this conditional");
+          this.expr(cx, e.else, elseGiven, discarded);
           return;
         }
         if (!cx.instance.types.has(e.else)) {
-          this.expr(cx, e.then, consume, discarded);
+          const thenGiven = this.moveOnlyConsume(cx, e, e.then, consume, "this conditional");
+          this.expr(cx, e.then, thenGiven, discarded);
           return;
         }
+        const thenGiven = this.moveOnlyConsume(cx, e, e.then, consume, "this conditional");
+        const elseGiven = this.moveOnlyConsume(cx, e, e.else, consume, "this conditional");
         const before = join(this.state, null);
-        this.expr(cx, e.then, consume, discarded);
+        this.expr(cx, e.then, thenGiven, discarded);
         const then = join(this.state, null);
         this.state = before;
-        this.expr(cx, e.else, consume, discarded);
+        this.expr(cx, e.else, elseGiven, discarded);
         this.state = join(then, this.state);
         return;
       }
       case "binary": {
-        // `a ?? b` hands over whichever it gives; a Rust value, which is never copied, always.
-        const given = e.op === "??" ? (consume ?? (cx.tables.typing.holdsPart(cx.instance.types.get(e)!, (u) => rustClassOf(cx.tables.typing, u) !== undefined) ? `'${PLACE}' moved here: '??' hands over the Rust value it holds` : cx.tables.typing.holdsMoveOnly(cx.instance.types.get(e)!) ? `'${PLACE}' moved here: '??' hands over the value it holds, which has a '[Symbol.dispose]' method and is never copied` : undefined)) : undefined;
-        if (e.op === "??") this.outOfBorrow(cx, e.left, e, consume);
-        this.expr(cx, e.left, given);
+        // `a ?? b` hands over whichever it gives; a Rust or disposable value, which is never copied, always.
+        const leftGiven = e.op === "??" ? this.moveOnlyConsume(cx, e, e.left, consume, "'??'") : undefined;
+        const rightGiven = e.op === "??" ? this.moveOnlyConsume(cx, e, e.right, consume, "'??'") : undefined;
+        if (e.op === "??") this.outOfBorrow(cx, e.left, e, leftGiven);
+        this.expr(cx, e.left, leftGiven);
         const comparing = e.op === "===" || e.op === "!==";
         if (comparing) {
           let loanIdx: { n: usize } = { n: 0 };
@@ -989,7 +1024,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         }
         // The right side of `&&`, `||` and `??` may not run.
         const before = join(this.state, null);
-        this.expr(cx, e.right, given);
+        this.expr(cx, e.right, rightGiven);
         if (comparing) this.releaseCallAt(e.id);
         if (e.op === "&&" || e.op === "||" || e.op === "??") this.state = join(before, this.state);
         return;
@@ -1033,7 +1068,8 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
         this.expr(cx, e.value, `'${PLACE}' moved here into the pipe's '%'; use '${PLACE}.clone()' to keep a copy`);
         this.revive(cx, place);
         if (holds) this.rehold(cx, local, e.value);
-        this.expr(cx, e.body, consume, discarded);
+        const given = this.moveOnlyConsume(cx, e, e.body, consume, "this pipe", discarded);
+        this.expr(cx, e.body, given, discarded);
         this.release(cx, local);
         return;
       }
@@ -1065,6 +1101,50 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       default:
         assert(false, `the move checker has no case for '${e.kind}' expressions`);
     }
+  }
+
+  private isUnknownType(cx: Ref<MoveCx<T, B, I>>, u: Type): boolean {
+    const r = cx.tables.typing.recOf(u);
+    return r !== undefined && (r.kind === "unknown" || (r.kind === "union" && r.unknown === true));
+  }
+
+  // Finds the move-only (or opaque `unknown`) type behind widening/pass-through wrappers on a
+  // branch/operand (e.g. a disposable class boxed into a `Dyn` or `unknown` by `as` or coercion).
+  // Does not unwrap union-narrowing or structural-projection `as` casts that leave a copyable result.
+  private unwrappedMoveOnly(cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>): Type | undefined {
+    const t = cx.instance.types.get(e);
+    if (t !== undefined) {
+      const deref = this.deref(cx, t);
+      if (cx.tables.typing.holdsMoveOnly(deref)) return deref;
+    }
+    if (e.kind === "satisfies" || e.kind === "unsafe") return this.unwrappedMoveOnly(cx, e.expr);
+    if (e.kind === "as") {
+      if (narrowsUnion(cx.tables.typing, cx.instance, this.coercions, e)) return undefined;
+      if (t !== undefined && cx.tables.typing.holdsPart(t, (u) => cx.tables.typing.kindOf(u) === "dyn" || this.isUnknownType(cx, u))) {
+        return this.unwrappedMoveOnly(cx, e.expr);
+      }
+      return undefined;
+    }
+    if (e.kind === "nonNull" && redundantBang(e)) return this.unwrappedMoveOnly(cx, e.expr);
+    if (t !== undefined) {
+      const deref = this.deref(cx, t);
+      if (cx.tables.typing.holdsPart(deref, (u) => cx.tables.typing.kindOf(u) === "dyn" || this.isUnknownType(cx, u), false, true)) return deref;
+    }
+    return undefined;
+  }
+
+  // Synthesizes a move reason for expression forms (`conditional`, `match`, `pipe`, `??`) whose
+  // codegen always evaluates drop-requiring results via `owned()`, so move-only, `Dyn`, and
+  // `unknown` branches move cleanly without over-consuming copyable branches in mixed unions.
+  moveOnlyConsume(cx: Mut<MoveCx<T, B, I>>, e: Ref<Expr>, branch: Ref<Expr>, consume: string | undefined, what: string, discarded: boolean = false): string | undefined {
+    if (consume !== undefined) return consume;
+    if (discarded || !cx.instance.types.has(e) || cx.instance.types.get(e) === "void") return undefined;
+    const t = this.unwrappedMoveOnly(cx, branch);
+    if (t === undefined) return undefined;
+    if (cx.tables.typing.holdsPart(t, (u) => rustClassOf(cx.tables.typing, u) !== undefined)) return `'${PLACE}' moved here: ${what} hands over the Rust value it holds`;
+    if (cx.tables.typing.holdsMoveOnly(t)) return `'${PLACE}' moved here: ${what} hands over the value it holds, which has a '[Symbol.dispose]' method and is never copied`;
+    if (cx.tables.typing.holdsPart(t, (u) => cx.tables.typing.kindOf(u) === "dyn", false, true)) return `'${PLACE}' moved here: ${what} hands over its 'Dyn' value`;
+    return `'${PLACE}' moved here: ${what} hands over its 'unknown' value, which moves because what it holds isn't known`;
   }
 
   // A value that may keep references given to it holds them: a holder variable, or `this`, which
@@ -1574,7 +1654,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   // own mutable loan does not self-conflict while later operands or case tests still cannot
   // mutate or move the underlying place.
   lendBorrowDirect(this: Mut<this>, place: string, at: Ref<Spot>, callName: string, callAt: usize, ownerStart: usize, idx: Mut<{ n: usize }>): void {
-    if (this.state === null || place === TEMPORARY || place.startsWith("param ")) return;
+    if (this.state === null || place === TEMPORARY || place.startsWith(MATCH_TEMP) || place.startsWith("param ")) return;
     const k = partKey(ownerStart, idx.n);
     idx.n++;
     this.state.loans.set(k, { place, mutable: false, start: at.start, end: at.end, holders: new Set<LocalId>(), call: callName, callAt });
@@ -2380,7 +2460,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     const type = this.coercions.get(e.id) ?? cx.instance.types.get(e)!;
     if (!cx.tables.typing.holdsRef(type)) return;
     for (const place of this.pointsInto(cx, e)) {
-      if (place === TEMPORARY) {
+      if (place === TEMPORARY || place.startsWith(MATCH_TEMP)) {
         throw new CompileError("E0204", `can't ${verb} a reference to a temporary or a copy, which is gone once the function returns; ${instead}`, e.start, e.end);
       }
       let param: usize | undefined = undefined;
@@ -2742,8 +2822,61 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     return join(this.state, null);
   }
 
+  // Rejects an arm value whose reference points into a fresh match subject that drops at match end.
+  /** @throws {CompileError} */
+  private rejectMatchTempValue(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, val: Ref<Expr>, subjectPlace: string, end: usize): void {
+    const t = this.coercions.get(val.id) ?? cx.instance.types.get(val);
+    if (t === undefined || !cx.tables.typing.holdsRef(t)) return;
+    if (this.pointsInto(cx, val).includes(subjectPlace)) {
+      throw new CompileError("E0204", `matched value doesn't live long enough: this arm returns a reference into the matched temporary`, val.start, val.end, {
+        message: `the matched value is dropped here, at the end of the 'match'; bind it in a variable before the 'match' instead`,
+        start: end, end,
+      });
+    }
+  }
+
+  /** @throws {CompileError} */
+  private rejectMatchTempReturn(this: Mut<this>, cx: Mut<MoveCx<T, B, I>>, val: Ref<Expr>, _armId: usize): void {
+    if (this.matchTemps.length === 0) return;
+    const t = this.coercions.get(val.id) ?? cx.instance.types.get(val);
+    if (t === undefined || !cx.tables.typing.holdsRef(t)) return;
+    const places = this.pointsInto(cx, val);
+    for (let i = this.matchTemps.length; i > 0; i--) {
+      const mtPlace = this.matchTemps[i - 1]!.place;
+      const mtEnd = this.matchTemps[i - 1]!.end;
+      if (places.includes(mtPlace)) {
+        throw new CompileError("E0204", `matched value doesn't live long enough: this arm returns a reference into the matched temporary`, val.start, val.end, {
+          message: `the matched value is dropped here, at the end of the 'match'; bind it in a variable before the 'match' instead`,
+          start: mtEnd, end: mtEnd,
+        });
+      }
+    }
+  }
+
+  // Ensures no outer holder retains a borrow of a fresh match subject once control leaves the match.
+  /** @throws {CompileError} */
+  private checkMatchTemp(this: Mut<this>, cx: Ref<MoveCx<T, B, I>>, subjectPlace: string, end: usize, prune: boolean): void {
+    if (this.state === null) return;
+    let deadKeys: f64[] = [];
+    for (const [k, loan] of this.state.loans) {
+      if (loan.place !== subjectPlace) continue;
+      let outside: LocalId[] = [];
+      for (const h of loan.holders) if ((this.last.get(h) ?? -1) > (end as f64)) outside.push(h);
+      if (outside.length > 0) {
+        const holders = this.named(cx, outside).join(" and ");
+        throw new CompileError("E0204", `matched value doesn't live long enough: ${holders} still ${outside.length > 1 ? "borrow" : "borrows"} it after the 'match' ends`, loan.start, loan.end, {
+          message: `the matched value is dropped here, at the end of the 'match'; bind it in a variable before the 'match' instead`,
+          start: end, end,
+        });
+      }
+      if (prune) deadKeys.push(k);
+    }
+    for (const k of deadKeys) this.state.loans.delete(k);
+  }
+
   // An error raised here goes to the innermost catch, which runs from this state too, and any
   // `finally` it leaves through.
+  /** @throws {CompileError} */
   raising(this: Mut<this>, cx: Ref<MoveCx<T, B, I>>): void {
     if (this.frames.length === 0) return;
     // A literal being built inside the `try` is abandoned by the error, so what its parts
@@ -2751,6 +2884,12 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
     const i = this.frames.length - 1;
     const from = this.frames[i]!.start;
     const to = this.frames[i]!.end;
+    for (let m = this.matchTemps.length; m > 0; m--) {
+      const mtStart = this.matchTemps[m - 1]!.start;
+      const mtEnd = this.matchTemps[m - 1]!.end;
+      const mtPlace = this.matchTemps[m - 1]!.place;
+      if (mtStart >= from && mtEnd <= to) this.checkMatchTemp(cx, mtPlace, mtEnd, false);
+    }
     let ats: f64[] = [];
     let abandoned: Loan[] = [];
     if (this.state !== null) {
@@ -2771,7 +2910,14 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
   }
 
   // A `break` or `continue` reaches its target, or first the innermost finally between them.
+  /** @throws {CompileError} */
   jumping(this: Mut<this>, cx: Ref<MoveCx<T, B, I>>, target: Ref<Site>, which: "break" | "continue"): void {
+    for (let m = this.matchTemps.length; m > 0; m--) {
+      const mtStart = this.matchTemps[m - 1]!.start;
+      const mtEnd = this.matchTemps[m - 1]!.end;
+      const mtPlace = this.matchTemps[m - 1]!.place;
+      if (target.start < mtStart || target.end > mtEnd) this.checkMatchTemp(cx, mtPlace, mtEnd, false);
+    }
     for (let i = this.frames.length; i > 0; i--) {
       const frame: Ref<Frame> = this.frames[i - 1]!;
       if (frame.kind === "catch") continue;
