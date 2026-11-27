@@ -11952,6 +11952,21 @@ export async function create(file: string, paths: string[], options: ZipPackOpti
 `,
   // Spans in a program's own code, imported as std:trace. Their state is std's own, which serve
   // shares, so what is here only wraps it.
+  // Files of the package read while compiling, imported as std:comptime. fish.toml lists which,
+  // as globs under [comptime] reads; comptime runs these, and a program running one panics.
+  comptime: String.raw`
+// The file at the path, relative to the directory holding fish.toml, as UTF-8 text.
+export function readText(path: string): string {
+  assert(false, "readText runs only while compiling: call it in a comptime block or expression, or a top-level const");
+  return path;
+}
+
+// The file at the path, relative to the directory holding fish.toml, as its bytes.
+export function readBytes(path: string): u8[] {
+  assert(false, "readBytes runs only while compiling: call it in a comptime block or expression, or a top-level const");
+  return [];
+}
+`,
   // Structured logging, imported as std:log: each entry one JSON line on stderr.
   log: String.raw`
 // An entry's extra fields: any value with a JSON form, an object's fields joining the entry's own.
@@ -12878,7 +12893,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log", "comptime"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.

@@ -15,7 +15,8 @@ export type Dependency = { name: string; start: usize; end: usize; capabilities?
 // reads.
 // `rustDependencies` is the `[rust-dependencies]` table, when the manifest has one.
 // `capabilities` is what the package says it uses of what a dependency must be granted.
-export type Manifest = { name: string; version: string; entry: string; lib: string; edition: Edition; capabilities: Capability[]; dependencies: Dependency[]; rustDependencies?: RustDependency[]; registry?: string; dir: string };
+// `reads`: the globs `[comptime] reads` lists, the package's files comptime may read.
+export type Manifest = { name: string; version: string; entry: string; lib: string; edition: Edition; capabilities: Capability[]; dependencies: Dependency[]; rustDependencies?: RustDependency[]; registry?: string; reads?: string[]; dir: string };
 // A Rust crate the package's `declare module "rust:<crate>"` declarations call, in Cargo's terms.
 export type RustDependency = {
   name: string; start: usize; end: usize; version?: string; features?: string[]; defaultFeatures?: boolean; path?: string; git?: string; rev?: string; tag?: string; branch?: string;
@@ -272,14 +273,14 @@ export function parseToml(src: string): Map<string, Table | Table[]> {
 /** @throws {CompileError} */
 export function readManifest(src: string, dir: string): Manifest {
   const tables = parseToml(src);
-  const known = new Map<string, string[]>([["", []], ["package", ["name", "version", "entry", "lib", "edition", "capabilities"]], ["dependencies", []], ["rust-dependencies", []], ["registry", ["url"]]]);
+  const known = new Map<string, string[]>([["", []], ["package", ["name", "version", "entry", "lib", "edition", "capabilities"]], ["dependencies", []], ["rust-dependencies", []], ["registry", ["url"]], ["comptime", ["reads"]]]);
   for (const [name, found] of tables) {
     if (name.startsWith("dependencies.")) {
       if (Array.isArray(found)) throw new CompileError("E0905", `a dependency is one table; write [${name}] once`, found[0]!.start, found[0]!.end);
       continue;
     }
     const keys = known.get(name);
-    const missing = `a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies] and [registry]`;
+    const missing = `a manifest has no table [${name}]; it has [package], [dependencies], [rust-dependencies], [registry] and [comptime]`;
     if (Array.isArray(found)) throw new CompileError("E0905", missing, found[0]!.start, found[0]!.end);
     if (keys === undefined) throw new CompileError("E0905", missing, found.start, found.end);
     for (const { key } of found.keys.values()) {
@@ -339,7 +340,31 @@ export function readManifest(src: string, dir: string): Manifest {
       registry = written;
     }
   }
-  return { name: name.value, version: version.value, entry, lib, edition: chosen, capabilities, dependencies, rustDependencies, registry, dir };
+  const section = tables.get("comptime");
+  const reads = readsList(section);
+  let made: Manifest = { name: name.value, version: version.value, entry, lib, edition: chosen, capabilities, dependencies, rustDependencies, registry, dir };
+  if (reads !== undefined) made.reads = reads;
+  return made;
+}
+
+// `[comptime] reads = ["assets/*.txt", ...]`: globs relative to the package's directory, none
+// absolute or reaching out of it with '..'.
+/** @throws {CompileError} */
+function readsList(table: Ref<Table | Table[] | undefined>): string[] | undefined {
+  if (table === undefined || Array.isArray(table)) return undefined;
+  const found = table.keys.get("reads");
+  if (found === undefined) return undefined;
+  const form = "'reads' is a list of globs relative to the package, as in reads = [\"assets/*.txt\", \"schemas/**/*.json\"]";
+  const list = found.value.value;
+  if (!Array.isArray(list)) throw new CompileError("E0905", form, found.value.start, found.value.end);
+  let out: string[] = [];
+  for (const g of list) {
+    const glob: Ref<TomlValue> = g.value;
+    if (typeof glob !== "string") throw new CompileError("E0905", form, g.start, g.end);
+    if (glob === "" || glob.startsWith("/") || glob.split("/").includes("..")) throw new CompileError("E0905", `'${glob}' reaches outside the package; a glob is relative to the directory holding fish.toml, with no '..'`, g.start, g.end);
+    out.push(glob);
+  }
+  return out;
 }
 
 // A `capabilities = ["net", ...]` list, each name one of the five and given once; none when absent.
