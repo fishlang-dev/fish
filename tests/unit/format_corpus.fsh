@@ -43,6 +43,7 @@ const SOURCES: string[] = [
   "src/bindc.fsh",
   "src/bundle.fsh",
   "src/callbacks.fsh",
+  "src/capabilities.fsh",
   "src/casemap.fsh",
   "src/check.fsh",
   "src/checkcache.fsh",
@@ -104,6 +105,7 @@ const SOURCES: string[] = [
   "src/parser.fsh",
   "src/patterns.fsh",
   "src/perfect.fsh",
+  "src/playground.fsh",
   "src/printer.fsh",
   "src/program.fsh",
   "src/publish.fsh",
@@ -121,6 +123,7 @@ const SOURCES: string[] = [
   "src/rustshim.fsh",
   "src/scripts.fsh",
   "src/semver.fsh",
+  "src/serverless.fsh",
   "src/sizes.fsh",
   "src/split.fsh",
   "src/std.fsh",
@@ -139,6 +142,7 @@ const SOURCES: string[] = [
   "src/values.fsh",
   "src/walk.fsh",
   "src/warnings.fsh",
+  "src/wasi.fsh",
   "src/watch.fsh",
 ];
 
@@ -337,6 +341,7 @@ test("src/astgen.fsh formats keeping its comments, parses back to the same tree 
 test("src/bindc.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/bindc.fsh"));
 test("src/bundle.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/bundle.fsh"));
 test("src/callbacks.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/callbacks.fsh"));
+test("src/capabilities.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/capabilities.fsh"));
 test("src/casemap.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/casemap.fsh"));
 test("src/check.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/check.fsh"));
 test("src/checkcache.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/checkcache.fsh"));
@@ -397,6 +402,7 @@ test("src/parseargs.fsh formats keeping its comments, parses back to the same tr
 test("src/parser.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/parser.fsh"));
 test("src/patterns.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/patterns.fsh"));
 test("src/perfect.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/perfect.fsh"));
+test("src/playground.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/playground.fsh"));
 test("src/printer.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/printer.fsh"));
 test("src/program.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/program.fsh"));
 test("src/publish.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/publish.fsh"));
@@ -414,6 +420,7 @@ test("src/rust.fsh formats keeping its comments, parses back to the same tree an
 test("src/rustshim.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/rustshim.fsh"));
 test("src/scripts.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/scripts.fsh"));
 test("src/semver.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/semver.fsh"));
+test("src/serverless.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/serverless.fsh"));
 test("src/sizes.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/sizes.fsh"));
 test("src/split.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/split.fsh"));
 test("src/std.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/std.fsh"));
@@ -432,6 +439,7 @@ test("src/unsupported.fsh formats keeping its comments, parses back to the same 
 test("src/values.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/values.fsh"), { timeout: 60_000 });
 test("src/walk.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/walk.fsh"));
 test("src/warnings.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/warnings.fsh"));
+test("src/wasi.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/wasi.fsh"));
 test("src/watch.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/watch.fsh"));
 
 test("the corpus is counted", () => {

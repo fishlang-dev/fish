@@ -37,8 +37,10 @@ export function playground(root: string, data: string): Router {
     const body = await req.bytes();
     if (body.length === 0) return text("nothing to share\n", 400);
     if (body.length > LIMIT) return text(`a shared program is at most ${LIMIT} bytes\n`, 413);
+    const source = new TextDecoder().decode(body);
     try {
-      return Response.json({ id: kept(data, new TextDecoder().decode(body)) });
+      const id = await spawnBlocking(() => kept(data, source));
+      return Response.json({ id });
     } catch (e) {
       return text(`can't keep it: ${e.message}\n`, 500);
     }
@@ -46,9 +48,12 @@ export function playground(root: string, data: string): Router {
   app.get("/api/share/:id", async (req) => {
     const id = req.param("id");
     const file = join(data, `${id}.fsh`);
-    if (!ID.test(id) || !existsSync(file)) return text("no program is shared under that link\n", 404);
+    if (!ID.test(id)) return text("no program is shared under that link\n", 404);
+    const there = await spawnBlocking(() => existsSync(file));
+    if (!there) return text("no program is shared under that link\n", 404);
     try {
-      return text(readFileSync(file, "utf8"), 200);
+      const program = await spawnBlocking(() => readFileSync(file, "utf8"));
+      return text(program, 200);
     } catch (e) {
       return text(`can't read it: ${e.message}\n`, 500);
     }

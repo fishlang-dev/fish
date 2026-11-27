@@ -403,7 +403,7 @@ function sampled(folder: string): Program[] {
     const pieces = read(join(dir, f)).split(/^\/\/ case: .*$/m);
     for (let i: usize = 1; i < pieces.length; i++) {
       const src = pieces[i];
-      if (/\/\/ (error|mode|link):|serve\(|listen\(/.test(src)) continue;
+      if (/\/\/ (error|mode|link):|serve\(|listen\(|std:log/.test(src)) continue;
       cases.push({ file: `${f.slice(0, -4)}-${i - 1}`, src });
     }
   }

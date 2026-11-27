@@ -4,8 +4,7 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { answer } from "../../src/playground.fsh";
-import { invalid } from "../../study/server.fsh";
-import { summarize, type EventRow } from "../../study/summary.fsh";
+import { invalid, summarize, type EventRow } from "../../study/summary.fsh";
 import { TASKS } from "../../study/tasks.fsh";
 import { fishc, freePort, removed, root, same, scratch, text } from "./support.fsh";
 
@@ -32,7 +31,7 @@ test("the summary counts each session once per task, takes the median time to so
   ];
   const all = summarize(events);
   same(all.map((s) => s.task).join(","), TASKS.map((t) => t.id).join(","), "one row per task, in order");
-  const lend = all[0]!;
+  const lend = all[0]!.clone();
   same(`${lend.started} ${lend.compiles} ${lend.solved} ${lend.gaveUp} ${lend.medianMs ?? -1}`, "3 3 2 1 7000", "lend");
   same(lend.errors.map(([c, n]) => `${c}=${n}`).join(" "), "E0201=2 E0202=1", "the errors met");
   same(`${all[1]!.started} ${all[1]!.medianMs ?? -1}`, "1 -1", "a task nobody solved");
