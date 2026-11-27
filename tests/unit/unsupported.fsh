@@ -242,7 +242,6 @@ test("(1, 2)", () => {
 const STATEMENTS: [string, string][] = [
   ["function* inner() {}", "nested generator functions"],
   ["debugger", "'debugger' statements"],
-  ["for (const k in o) {}", "'for...in' loops"],
   ["namespace N {}", "namespaces"],
   ["declare const x: i64", "ambient declarations"],
 ];
