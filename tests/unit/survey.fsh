@@ -186,6 +186,7 @@ test("forms that look alike are told apart", () => {
   countsAre("const Bun = { spawn() {} };\nfunction f() {\n  Bun.spawn();\n}\n", []);
   countsAre('import { which, sleep, serve } from "bun";\nimport { password } from "bun";\n', ["bunModules: 1"]);
   countsAre("type F = (x: number) => void;\nconst g = function () { return 1; };\n", ["A9: 1"]);
+  countsAre("const g = function* () { yield 1; };\n", ["generatorExpressions: 1"]);
   countsAre("declare const DEV: boolean;\nlet a = 1;\nexport let b = 2;\nfor (const x of [1]) {}\n", ["A4: 2"]);
   countsAre("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n", []);
   countsAre('"use strict";\nsetup();\n', ["G7: 1"]);
