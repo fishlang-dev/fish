@@ -333,3 +333,48 @@ async function main() {
   const v = await both(id);
   console.log(v);
 }
+// case: instantiation_expression_values
+// expect: 5 x
+// expect: 3,3 1,2
+// expect: 7
+// `f<T>` as a value is the one instance of f those type arguments make, stored or passed.
+function id<T>(x: T): T {
+  return x;
+}
+function twice<T>(x: T): T[] {
+  return [x, x];
+}
+function apply(f: (x: i64) => i64, x: i64): i64 {
+  return f(x);
+}
+function main() {
+  const n = id<i64>;
+  const s = id<string>;
+  console.log(n(5), s("x"));
+  const t = twice<i64>;
+  console.log(t(3).join(","), [1, 2].map(id<i64>).join(","));
+  console.log(apply(id<i64>, 7));
+}
+// case: instantiation_expression_typed_by_arguments
+// error: argument of type 'string' is not assignable to parameter of type 'i64'
+function id<T>(x: T): T {
+  return x;
+}
+function main() {
+  const n = id<i64>;
+  console.log(n("no"));
+}
+// case: instantiation_expression_count
+// error: expected 1 type argument, but got 2
+function id<T>(x: T): T {
+  return x;
+}
+function main() {
+  const n = id<i64, string>;
+}
+// case: instantiation_expression_of_a_value
+// error: instantiation expressions of anything but a generic function's name are not supported yet
+function main() {
+  const o = { id: <T>(x: T): T => x };
+  const f = o.id<i64>;
+}
