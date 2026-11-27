@@ -66,7 +66,7 @@ function equivalents(): Map<string, Equivalent> {
   add(m, ["inquirer", "prompts"], PLANNED("Interactive prompts"));
   add(m, ["jest", "vitest", "mocha"], PLANNED("Jest-style test API"));
   m.set("@grpc/grpc-js", IN_STD("std:grpc, with messages and services as @message classes and @service interfaces"));
-  m.set("@aws-sdk/client-s3", PLANNED("S3-compatible storage client"));
+  add(m, ["@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner"], IN_STD("std:s3's S3Client, as Bun's"));
   add(m, ["argon2", "jsonwebtoken", "jose"], IN_STD("std:auth's signJwt, verifyJwt, hashPassword and verifyPassword (and their Sync forms)"));
   add(m, ["bcryptjs", "bcrypt"], IN_STD("std:auth's hashPassword, which hashes with argon2id rather than bcrypt"));
   return m;
