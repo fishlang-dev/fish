@@ -62,6 +62,7 @@ const SOURCES: string[] = [
   "src/doc.fsh",
   "src/docs.fsh",
   "src/edits.fsh",
+  "src/elide.fsh",
   "src/enums.fsh",
   "src/explain.fsh",
   "src/expressions.fsh",
@@ -102,6 +103,7 @@ const SOURCES: string[] = [
   "src/parseargs.fsh",
   "src/parser.fsh",
   "src/patterns.fsh",
+  "src/perfect.fsh",
   "src/printer.fsh",
   "src/program.fsh",
   "src/publish.fsh",
@@ -353,6 +355,7 @@ test("src/diag.fsh formats keeping its comments, parses back to the same tree an
 test("src/doc.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/doc.fsh"));
 test("src/docs.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/docs.fsh"));
 test("src/edits.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/edits.fsh"));
+test("src/elide.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/elide.fsh"));
 test("src/enums.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/enums.fsh"));
 test("src/explain.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/explain.fsh"));
 test("src/expressions.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/expressions.fsh"));
@@ -393,6 +396,7 @@ test("src/overloads.fsh formats keeping its comments, parses back to the same tr
 test("src/parseargs.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/parseargs.fsh"));
 test("src/parser.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/parser.fsh"));
 test("src/patterns.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/patterns.fsh"));
+test("src/perfect.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/perfect.fsh"));
 test("src/printer.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/printer.fsh"));
 test("src/program.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/program.fsh"));
 test("src/publish.fsh formats keeping its comments, parses back to the same tree and formats the same again", () => roundTrips("src/publish.fsh"));
