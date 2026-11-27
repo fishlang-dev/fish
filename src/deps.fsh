@@ -41,6 +41,7 @@ function equivalents(): Map<string, Equivalent> {
   add(m, ["@opentelemetry/api", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/sdk-trace-base", "@opentelemetry/exporter-trace-otlp-http"], IN_STD("the std:trace module"));
   add(m, ["pg", "postgres"], IN_STD("the postgres module's Pool"));
   add(m, ["better-sqlite3", "sqlite3"], IN_STD("std:sqlite's Database"));
+  m.set("kysely", IN_STD("std:query's Kysely, compiling to SQL for std:postgres and std:sqlite"));
   add(m, ["tar", "tar-stream", "tar-fs"], IN_STD("the std:tar module"));
   add(m, ["adm-zip", "jszip", "yauzl", "yazl", "unzipper", "extract-zip"], IN_STD("the std:zip module"));
   m.set("archiver", IN_STD("the std:zip and std:tar modules"));
