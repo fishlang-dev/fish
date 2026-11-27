@@ -1126,6 +1126,10 @@ static int64_t fsh_poison_count = 0;
 // How many locks this thread holds, so a call into JS under one, which could wait forever on a
 // callback JS runs that takes the same lock, is refused.
 static _Thread_local int32_t fsh_locks_held = 0;
+#ifdef FSH_LOCK_ORDER
+// How many locks lock-order checking has this thread holding.
+static _Thread_local int32_t fsh_order_depth = 0;
+#endif
 // The RwLock words this thread reads under, innermost last.
 static _Thread_local int32_t **fsh_reading = NULL;
 static _Thread_local int64_t fsh_reading_count = 0, fsh_reading_capacity = 0;
@@ -1155,6 +1159,10 @@ void fsh_rt_panic(const char *message) {
   }
   fsh_locks_held = 0;
   fsh_token = 0;
+#ifdef FSH_LOCK_ORDER
+  // The locks it held stay held, poisoned, under the token it gives up.
+  fsh_order_depth = 0;
+#endif
   fflush(NULL);
   fputs(message, stderr);
   if (strncmp(message, "panicked at ", 12) == 0) fsh_panic_line = message;
@@ -1973,6 +1981,16 @@ int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {
     if (u != v) return u < v ? -1 : 1;
   }
   return x < a->length ? 1 : y < b->length ? -1 : 0;
+}
+
+// FNV-1a over the first 16 UTF-16 units from seed, as the compiler's stringHash computes it for
+// the strings a many-armed switch or match tests.
+uint32_t fsh_rt_str_hash(fsh_str *s, uint32_t seed) {
+  uint32_t h = 2166136261u ^ seed;
+  int64_t at = 0;
+  int half = 0;
+  for (int n = 0; n < 16 && at < s->length; n++) h = (h ^ fsh_next((const unsigned char *)s->bytes, &at, &half)) * 16777619u;
+  return h;
 }
 
 // A lone surrogate prints as U+FFFD, as a terminal shows one JavaScript prints.
@@ -5602,6 +5620,7 @@ static int fsh_poison_holder(int32_t holder) {
   return found;
 }
 
+#ifndef FSH_LOCK_ORDER
 // 2 when a task panicked holding the lock, which stays held, so the caller panics too.
 int32_t fsh_rt_lock(int32_t *word) {
   int32_t me = fsh_me();
@@ -5623,6 +5642,274 @@ void fsh_rt_unlock(int32_t *word) {
   fsh_locks_held--;
   __atomic_store_n(word, 0, __ATOMIC_RELEASE);
 }
+#else
+// Lock-order checking, in debug builds only, as Linux's lockdep does it. Each Lock and shared
+// value is given an id where it is made, kept in its word while it is free as minus the id, so
+// it moves with the value; a word of 0 is a lock made while compiling, given an id when first
+// taken. Every "A held while B was taken" is an edge in one graph of all threads' takings, and
+// a taking whose edge would close a cycle panics, naming both locks, whether or not the threads
+// ever met: two tasks taking them in those orders at once would wait on each other forever.
+// ponytail: ids and edges are kept for the program's life, about 24 bytes per lock ever made and
+// per new pair taken together, which a debug server making a lock per request grows by.
+typedef struct { int32_t to; const char *held; const char *taken; } fsh_order_edge;
+typedef struct { const char *made; fsh_order_edge *edges; int32_t count, capacity; } fsh_order_lock;
+static pthread_mutex_t fsh_order_mutex = PTHREAD_MUTEX_INITIALIZER;
+static fsh_order_lock *fsh_order_locks = NULL;
+static int32_t fsh_order_count = 0, fsh_order_capacity = 0;
+// The id of the lock at each word, set as it is taken, so a thread waiting on a held lock, whose
+// word holds its holder's token, knows which lock it waits on. Open addressing; never shrinks.
+typedef struct { int32_t *word; int32_t id; } fsh_order_slot;
+static fsh_order_slot *fsh_order_words = NULL;
+static int64_t fsh_order_used = 0, fsh_order_size = 0;
+// The locks this thread holds, innermost last: the word, what it held while free, its id and
+// where it was taken. Lock callbacks can't await, so they end innermost first.
+typedef struct { int32_t *word; int32_t free; int32_t id; const char *at; } fsh_order_held;
+static _Thread_local fsh_order_held *fsh_order_stack = NULL;
+static _Thread_local int32_t fsh_order_room = 0;
+
+static void *fsh_order_grow(void *p, size_t n) {
+  void *q = realloc(p, n);
+  if (!q) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return q;
+}
+
+// A new lock's id, from 1; made is its "panicked at" line, or null for one made while compiling.
+static int32_t fsh_order_new(const char *made) {
+  if (fsh_order_count == fsh_order_capacity) {
+    fsh_order_capacity = fsh_order_capacity ? fsh_order_capacity * 2 : 64;
+    fsh_order_locks = fsh_order_grow(fsh_order_locks, (size_t)fsh_order_capacity * sizeof *fsh_order_locks);
+  }
+  fsh_order_locks[fsh_order_count] = (fsh_order_lock){ made, NULL, 0, 0 };
+  return ++fsh_order_count;
+}
+
+// The word a new lock starts with: minus its id.
+int32_t fsh_rt_lock_new(const char *made) {
+  pthread_mutex_lock(&fsh_order_mutex);
+  int32_t id = fsh_order_new(made);
+  pthread_mutex_unlock(&fsh_order_mutex);
+  return -id;
+}
+
+static uint64_t fsh_order_hash(int32_t *word) {
+  return ((uint64_t)(uintptr_t)word >> 2) * 0x9E3779B97F4A7C15ull;
+}
+
+static fsh_order_slot *fsh_order_find(int32_t *word) {
+  uint64_t i = fsh_order_hash(word) & (uint64_t)(fsh_order_size - 1);
+  while (fsh_order_words[i].word && fsh_order_words[i].word != word) i = (i + 1) & (uint64_t)(fsh_order_size - 1);
+  return &fsh_order_words[i];
+}
+
+static void fsh_order_place(int32_t *word, int32_t id) {
+  if ((fsh_order_used + 1) * 2 > fsh_order_size) {
+    fsh_order_slot *old = fsh_order_words;
+    int64_t size = fsh_order_size;
+    fsh_order_size = size ? size * 2 : 256;
+    fsh_order_words = calloc((size_t)fsh_order_size, sizeof *fsh_order_words);
+    if (!fsh_order_words) fsh_order_grow(NULL, (size_t)-1);
+    for (int64_t i = 0; i < size; i++) if (old[i].word) *fsh_order_find(old[i].word) = old[i];
+    free(old);
+  }
+  fsh_order_slot *slot = fsh_order_find(word);
+  if (!slot->word) fsh_order_used++;
+  slot->word = word;
+  slot->id = id;
+}
+
+// Where a "panicked at <place>:" line points, as "<place>".
+static int fsh_order_place_length(const char *line) {
+  return (int)strlen(line) - 12 - 2;
+}
+
+// "the lock made at <place>", or how a lock made while compiling is named.
+static void fsh_order_name(char **out, size_t *left, int32_t id) {
+  const char *made = fsh_order_locks[id - 1].made;
+  int n = made ? snprintf(*out, *left, "the lock made at %.*s", fsh_order_place_length(made), made + 12) : snprintf(*out, *left, "a lock made while compiling");
+  if (n < 0 || (size_t)n >= *left) n = (int)*left - 1;
+  *out += n;
+  *left -= (size_t)n;
+}
+
+static void fsh_order_text(char **out, size_t *left, const char *text) {
+  int n = snprintf(*out, *left, "%s", text);
+  if (n < 0 || (size_t)n >= *left) n = (int)*left - 1;
+  *out += n;
+  *left -= (size_t)n;
+}
+
+static void fsh_order_at(char **out, size_t *left, const char *at) {
+  int n = at ? snprintf(*out, *left, "%.*s", fsh_order_place_length(at), at + 12) : snprintf(*out, *left, "a place not known");
+  if (n < 0 || (size_t)n >= *left) n = (int)*left - 1;
+  *out += n;
+  *left -= (size_t)n;
+}
+
+// Whether the graph already has from -> to.
+static int fsh_order_has(int32_t from, int32_t to) {
+  fsh_order_lock *l = &fsh_order_locks[from - 1];
+  for (int32_t i = 0; i < l->count; i++) if (l->edges[i].to == to) return 1;
+  return 0;
+}
+
+// A path from -> ... -> to, as the edge each lock on it was reached by, or 0 when there is none.
+static int fsh_order_path(int32_t from, int32_t to, const fsh_order_edge **via) {
+  int32_t *stack = fsh_order_grow(NULL, (size_t)fsh_order_count * sizeof(int32_t));
+  int32_t depth = 0;
+  for (int32_t i = 0; i < fsh_order_count; i++) via[i] = NULL;
+  static const fsh_order_edge start = { 0, NULL, NULL };
+  via[from - 1] = &start;
+  stack[depth++] = from;
+  int found = 0;
+  while (depth > 0 && !found) {
+    fsh_order_lock *l = &fsh_order_locks[stack[--depth] - 1];
+    for (int32_t i = 0; i < l->count; i++) {
+      int32_t next = l->edges[i].to;
+      if (via[next - 1]) continue;
+      via[next - 1] = &l->edges[i];
+      if (next == to) {
+        found = 1;
+        break;
+      }
+      stack[depth++] = next;
+    }
+  }
+  free(stack);
+  return found;
+}
+
+// Panics, taking lock id at at while holding the lock of h, as the path from id to h's lock
+// says something took them the other way round.
+static void fsh_order_refuse(int32_t id, const char *at, const fsh_order_held *h, const fsh_order_edge **via) {
+  // The path, read back from h's lock to id.
+  int32_t chain[64];
+  int32_t n = 0;
+  for (int32_t at_id = h->id; at_id != id && n < 64; ) {
+    chain[n++] = at_id;
+    const fsh_order_edge *e = via[at_id - 1];
+    int32_t back = 0;
+    for (int32_t i = 0; i < fsh_order_count && !back; i++) {
+      fsh_order_lock *l = &fsh_order_locks[i];
+      if (e >= l->edges && e < l->edges + l->count) back = i + 1;
+    }
+    at_id = back;
+  }
+  chain[n++] = id;
+  size_t size = 4096;
+  char *message = fsh_order_grow(NULL, size);
+  char *out = message;
+  size_t left = size;
+  int w = snprintf(out, left, "%s", at ? at : "panicked at a place not known:\n");
+  out += w;
+  left -= (size_t)w;
+  fsh_order_text(&out, &left, "lock order inversion: this takes ");
+  fsh_order_name(&out, &left, id);
+  fsh_order_text(&out, &left, " while holding ");
+  fsh_order_name(&out, &left, h->id);
+  fsh_order_text(&out, &left, ", taken at ");
+  fsh_order_at(&out, &left, h->at);
+  fsh_order_text(&out, &left, ", but before");
+  // chain runs from id back up to h's lock reversed: chain[n - 1] is id, chain[0] h's lock.
+  for (int32_t i = n - 1; i > 0; i--) {
+    const fsh_order_edge *e = via[chain[i - 1] - 1];
+    fsh_order_text(&out, &left, i == n - 1 ? " " : ", and ");
+    fsh_order_name(&out, &left, chain[i]);
+    fsh_order_text(&out, &left, " was held, taken at ");
+    fsh_order_at(&out, &left, e->held);
+    fsh_order_text(&out, &left, ", while ");
+    fsh_order_name(&out, &left, chain[i - 1]);
+    fsh_order_text(&out, &left, " was taken at ");
+    fsh_order_at(&out, &left, e->taken);
+  }
+  fsh_order_text(&out, &left, "; two tasks taking them in these orders at once would wait on each other forever, so take them in one order everywhere\n");
+  pthread_mutex_unlock(&fsh_order_mutex);
+  fsh_rt_panic(message);
+}
+
+// Records this thread's held locks as held while lock id is taken at at, under the mutex,
+// panicking instead if one of those edges would close a cycle.
+static void fsh_order_check(int32_t id, const char *at) {
+  const fsh_order_edge **via = NULL;
+  for (int32_t i = 0; i < fsh_order_depth; i++) {
+    const fsh_order_held *h = &fsh_order_stack[i];
+    if (h->id == id || fsh_order_has(h->id, id)) continue;
+    if (!via) via = fsh_order_grow(NULL, (size_t)fsh_order_count * sizeof *via);
+    if (fsh_order_path(id, h->id, via)) fsh_order_refuse(id, at, h, via);
+    fsh_order_lock *l = &fsh_order_locks[h->id - 1];
+    if (l->count == l->capacity) {
+      l->capacity = l->capacity ? l->capacity * 2 : 4;
+      l->edges = fsh_order_grow(l->edges, (size_t)l->capacity * sizeof *l->edges);
+    }
+    l->edges[l->count++] = (fsh_order_edge){ id, h->at, at };
+  }
+  free(via);
+}
+
+// Takes a Lock's word as fsh_rt_lock does, at at, a "panicked at" line, first checking the
+// order it is taken in against every other taking of the program's.
+int32_t fsh_rt_lock_at(int32_t *word, const char *at) {
+  int32_t me = fsh_me();
+  if (__atomic_load_n(word, __ATOMIC_RELAXED) == me) return 1;
+  int checked = 0;
+  for (int spins = 0;; spins++) {
+    int32_t seen = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    if (seen <= 0) {
+      pthread_mutex_lock(&fsh_order_mutex);
+      // A word of 0 is given its id by whoever first takes it, here under the mutex.
+      int32_t id = seen < 0 ? -seen : fsh_order_new(NULL);
+      if (!checked) fsh_order_check(id, at);
+      checked = 1;
+      fsh_order_place(word, id);
+      pthread_mutex_unlock(&fsh_order_mutex);
+      if (__atomic_compare_exchange_n(word, &seen, me, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        if (fsh_order_depth == fsh_order_room) {
+          fsh_order_room = fsh_order_room ? fsh_order_room * 2 : 8;
+          fsh_order_stack = fsh_order_grow(fsh_order_stack, (size_t)fsh_order_room * sizeof *fsh_order_stack);
+        }
+        fsh_order_stack[fsh_order_depth++] = (fsh_order_held){ word, -id, id, at };
+        fsh_locks_held++;
+        return 0;
+      }
+      continue;
+    }
+    if (!checked) {
+      // Held by another thread: the lock it waits on is known by its word, so a cycle that
+      // would leave both threads waiting is reported rather than waited out.
+      pthread_mutex_lock(&fsh_order_mutex);
+      fsh_order_slot *slot = fsh_order_size ? fsh_order_find(word) : NULL;
+      if (slot && slot->word) {
+        fsh_order_check(slot->id, at);
+        checked = 1;
+      }
+      pthread_mutex_unlock(&fsh_order_mutex);
+    }
+    if (spins >= 64) {
+      if (fsh_poison_holder(seen)) return 2;
+      sched_yield();
+    }
+  }
+}
+
+int32_t fsh_rt_lock(int32_t *word) {
+  return fsh_rt_lock_at(word, NULL);
+}
+
+// Gives the word back what it held while free, its id.
+void fsh_rt_unlock(int32_t *word) {
+  fsh_locks_held--;
+  int32_t free_word = 0;
+  for (int32_t i = fsh_order_depth - 1; i >= 0; i--) {
+    if (fsh_order_stack[i].word != word) continue;
+    free_word = fsh_order_stack[i].free;
+    fsh_order_stack[i] = fsh_order_stack[--fsh_order_depth];
+    break;
+  }
+  __atomic_store_n(word, free_word, __ATOMIC_RELEASE);
+}
+#endif
 
 // An RwLock's word: 0 free, n > 0 held by n readers, or minus the token of the thread writing.
 // A writer waiting for readers to leave sets FSH_WRITER_WAITING beside their count, and new
@@ -12496,6 +12783,132 @@ void fsh_rt_zlib_take(fsh_zlib_run *r, uint8_t *out) {
   if (r->length > 0) memcpy(out, r->data, (size_t)r->length);
   free(r->data);
   free(r);
+}
+
+// A deflate stream kept open across a streamed body's chunks; bits picks the format as above.
+z_stream *fsh_rt_zlib_open(int64_t bits, int64_t level) {
+  z_stream *s = fsh_zlib_grow(NULL, sizeof *s);
+  memset(s, 0, sizeof *s);
+  if (deflateInit2(s, (int)level, Z_DEFLATED, (int)bits, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return s;
+}
+
+// Deflates one chunk, flushed with Z_SYNC_FLUSH so what it gives can be sent at once, or with
+// finish the last, ending the stream. result is as fsh_rt_zlib_run's; take the bytes with
+// fsh_rt_zlib_take.
+fsh_zlib_run *fsh_rt_zlib_push(z_stream *s, const uint8_t *data, int64_t length, int64_t finish, int64_t *result) {
+  fsh_zlib_run *r = fsh_zlib_grow(NULL, sizeof *r);
+  size_t cap = deflateBound(s, (uLong)length) + 64;
+  r->data = fsh_zlib_grow(NULL, cap);
+  r->length = 0;
+  const uint8_t *next = data;
+  int64_t left = length;
+  for (;;) {
+    if (s->avail_in == 0 && left > 0) {
+      s->next_in = (Bytef *)next;
+      s->avail_in = left > FSH_ZLIB_CHUNK ? FSH_ZLIB_CHUNK : (uInt)left;
+      next += s->avail_in;
+      left -= s->avail_in;
+    }
+    if ((size_t)r->length == cap) {
+      cap *= 2;
+      r->data = fsh_zlib_grow(r->data, cap);
+    }
+    size_t room = cap - (size_t)r->length;
+    s->next_out = r->data + r->length;
+    s->avail_out = room > UINT_MAX ? UINT_MAX : (uInt)room;
+    uInt before = s->avail_out;
+    int err = deflate(s, left > 0 ? Z_NO_FLUSH : finish ? Z_FINISH : Z_SYNC_FLUSH);
+    r->length += before - s->avail_out;
+    if (err == Z_STREAM_END) break;
+    if (err != Z_OK && err != Z_BUF_ERROR) return fsh_zlib_fail(s, r, err, "Zlib error", result);
+    // A flush is complete once deflate leaves room in the output.
+    if (!finish && left == 0 && s->avail_in == 0 && s->avail_out != 0) break;
+  }
+  result[0] = 0;
+  result[1] = 0;
+  result[2] = r->length;
+  return r;
+}
+
+void fsh_rt_zlib_close(z_stream *s) {
+  deflateEnd(s);
+  free(s);
+}
+`;
+
+// The brotli half of the runtime, a unit of its own compiled into a program, with libbrotlienc
+// linked, only when its IR calls it. An encoder is kept open across a body's chunks, as the
+// zlib half's deflate streams are, and each chunk's output is copied out as a zlib run's is.
+export const BROTLI_NATIVE = String.raw`
+#include <brotli/encode.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct { uint8_t *data; int64_t length; } fsh_brotli_run;
+
+static void *fsh_brotli_grow(void *p, size_t n) {
+  void *q = realloc(p, n ? n : 1);
+  if (!q) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return q;
+}
+
+BrotliEncoderState *fsh_rt_brotli_open(int64_t quality) {
+  BrotliEncoderState *s = BrotliEncoderCreateInstance(NULL, NULL, NULL);
+  if (!s) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  BrotliEncoderSetParameter(s, BROTLI_PARAM_QUALITY, (uint32_t)quality);
+  return s;
+}
+
+// Compresses one chunk, flushed so what it gives can be sent at once, or with finish the last,
+// ending the stream. result is [failed, 0, length]; take the bytes with fsh_rt_brotli_take.
+fsh_brotli_run *fsh_rt_brotli_push(BrotliEncoderState *s, const uint8_t *data, int64_t length, int64_t finish, int64_t *result) {
+  fsh_brotli_run *r = fsh_brotli_grow(NULL, sizeof *r);
+  size_t cap = (size_t)length + 1024;
+  r->data = fsh_brotli_grow(NULL, cap);
+  r->length = 0;
+  size_t in = (size_t)length;
+  const uint8_t *next = data;
+  BrotliEncoderOperation op = finish ? BROTLI_OPERATION_FINISH : BROTLI_OPERATION_FLUSH;
+  result[0] = 0;
+  for (;;) {
+    if ((size_t)r->length == cap) {
+      cap *= 2;
+      r->data = fsh_brotli_grow(r->data, cap);
+    }
+    size_t room = cap - (size_t)r->length;
+    uint8_t *at = r->data + r->length;
+    if (!BrotliEncoderCompressStream(s, op, &in, &next, &room, &at, NULL)) {
+      result[0] = 1;
+      break;
+    }
+    r->length = at - r->data;
+    if (in == 0 && !BrotliEncoderHasMoreOutput(s) && (!finish || BrotliEncoderIsFinished(s))) break;
+  }
+  result[1] = 0;
+  result[2] = r->length;
+  return r;
+}
+
+void fsh_rt_brotli_take(fsh_brotli_run *r, uint8_t *out) {
+  if (r->length > 0) memcpy(out, r->data, (size_t)r->length);
+  free(r->data);
+  free(r);
+}
+
+void fsh_rt_brotli_close(BrotliEncoderState *s) {
+  BrotliEncoderDestroyInstance(s);
 }
 `;
 

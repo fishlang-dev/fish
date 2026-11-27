@@ -53,7 +53,7 @@ function equivalents(): Map<string, Equivalent> {
   add(m, ["execa", "cross-spawn"], PLANNED("Streaming child processes"));
   add(m, ["node-cron", "cron"], PLANNED("Scheduled jobs"));
   m.set("cors", PLANNED("CORS middleware"));
-  m.set("compression", PLANNED("Response compression"));
+  m.set("compression", IN_STD("std:compress's compress"));
   m.set("express-rate-limit", PLANNED("Rate-limiting middleware"));
   add(m, ["cookie", "cookie-parser"], IN_STD("req.cookies and res.cookies"));
   add(m, ["serve-static", "@fastify/static", "koa-static", "sirv"], IN_STD("Router.static"));
