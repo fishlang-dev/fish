@@ -19,6 +19,7 @@ import { createPackage, type Edition, fieldError, findManifest, loadManifest, MA
 import { parse, parseWithComments, type Stmt } from "./parser.fsh";
 import type { Ids } from "./nodes.fsh";
 import { addonOf } from "./addon.fsh";
+import { mobileOf, typeName, type Mobile } from "./mobile.fsh";
 import { bundle } from "./bundle.fsh";
 import { JS_NATIVE } from "./js_native.fsh";
 import { BROTLI_NATIVE, NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
@@ -54,6 +55,7 @@ import { split } from "./split.fsh";
 import { withDebugInfo } from "./debuginfo.fsh";
 import { jsModule, type JsModule } from "./jsgen.fsh";
 import { watchProgram, type Rebuilt } from "./watch.fsh";
+import { develop, HANDLERS_C, HOST_C, hostSource, stateShapes, type Handlers } from "./dev.fsh";
 import { cachedScript, keepScript, scriptBuildPath } from "./scripts.fsh";
 import { type Kept } from "./incremental.fsh";
 import { checkedProgram, checkedSource, Queries } from "./queries.fsh";
@@ -232,9 +234,10 @@ export function runtimeNames(): Set<string> {
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
 // `<name>.h` declaring its exports beside it. Gives the warnings.
 /** @throws {CompileError | Error | IoError | JsonError} */
-// `addon` is the C glue of a Node addon, which is then built at `out` itself, finding N-API's
-// functions in the process that loads it, with no header.
-export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), debug = false, addon?: string): CompileError[] {
+// `glue` is C compiled into the library, a Node addon's or a mobile module's, whose caller writes
+// any header itself. A shared library with glue is built at `out` itself, finding what the glue
+// leaves undefined, such as N-API's functions, in the process that loads it.
+export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), debug = false, glue?: string): CompileError[] {
   const src = readFileSync(file, "utf8");
   let { core, caches } = apart(session);
   core.build = buildFor(core.build, target.triple, release);
@@ -260,11 +263,16 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
       const extension = darwin ? "dylib" : "so";
-      const glue = addon === undefined ? [...none] : ["-x", "c", addon!, "-x", "none", ...(darwin ? ["-undefined", "dynamic_lookup"] : none)];
-      const written = addon === undefined ? join(dirname(out), `lib${name}.${extension}`) : out;
-      run(["clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, ...glue, "-funwind-tables", "-o", written, optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)], ir);
+      const glued = glue === undefined ? [...none] : ["-x", "c", glue!, "-x", "none", ...(darwin ? ["-undefined", "dynamic_lookup"] : none)];
+      const written = glue === undefined ? join(dirname(out), `lib${name}.${extension}`) : out;
+      run([target.cc ?? "clang", ...target.compile, ...target.link, "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, ...glued, "-funwind-tables", "-o", written, optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(ir, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)], ir);
     } else {
-      run(["clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize, ...g], ir);
+      run([target.cc ?? "clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize, ...g], ir);
+      if (glue !== undefined) {
+        const glueObject = join(dir, "glue.o");
+        run([target.cc ?? "clang", ...target.compile, "-c", "-fPIC", "-x", "c", glue!, "-o", glueObject, optimize, ...g]);
+        objects.push(glueObject);
+      }
       const archive = shim !== undefined ? join(dir, "fish.a") : join(dirname(out), `lib${name}.a`);
       if (target.ar !== "ar" && Bun.which(target.ar) === null) throw new Error(`fishc build: a static library for ${target.triple} is archived with llvm-ar, which isn't on PATH; install LLVM and put its bin directory on PATH, or build with --lib=shared`);
       run([target.ar, "rcs", archive, fish, ...objects]);
@@ -274,11 +282,74 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
     }
     let exported: Ref<Instance>[] = [];
     for (const i of compiledOf(checked)) if (bodyOf(checked.tables.arenas, i).exported === true) exported.push(i);
-    if (addon === undefined) writeFileSync(join(dirname(out), `${name}.h`), header(name, checked.tables, exported));
+    if (glue === undefined) writeFileSync(join(dirname(out), `${name}.h`), header(name, checked.tables, exported));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
   return made.checked.warnings;
+}
+
+// `fishc dev`'s builds: with `handlers`, the program as a shared library its host loads, its serve
+// answering through the host; else the host, an executable. `glue` is the C half it links. Gives
+// the warnings and the shapes of the state the handlers keep; `looked` is given the files read.
+/** @throws {CompileError | Error | IoError | JsonError} */
+export function buildDev(session: BuildSession, file: string, out: string, glue: string, handlers: boolean, looked: Mut<string[]>): { warnings: CompileError[]; shapes: string } {
+  const src = readFileSync(file, "utf8");
+  let { core, caches } = apart(session);
+  core.build = buildFor(core.build, undefined, false, handlers);
+  // The handlers are checked with std's dev section, which no other build of the program shares.
+  core.checkCache = false;
+  const made = compiledIn(newCompilation(core), src, file, false, "unwind", false, false, false, looked);
+  const ir = made.ir;
+  const checked: Ref<Checked> = made.checked;
+  if (rustShim(made.loaded.rust, checked) !== undefined) throw new Error("fishc dev: a program calling Rust isn't reloaded in place yet; run it with 'fishc watch'");
+  const target = hostTarget();
+  const darwin = process.platform === "darwin";
+  let building = together(newSession(), caches);
+  let objects: string[] = [];
+  for (const o of cachedObjects(building, runtimeUnits(ir, false, handlers, copyTarget(target)))) objects.push(o);
+  for (const o of mathObjects(building, [...target.compile])) objects.push(o);
+  // Each load's own calls stay its own, never bound to a later load's or the host's.
+  const shared: string[] = !handlers ? [] : darwin ? ["-shared", "-fPIC"] : ["-shared", "-fPIC", "-Wl,-Bsymbolic"];
+  const dl: string[] = darwin ? [] : ["-ldl"];
+  const dir = mkdtempSync(join(tmpdir(), "fishc-dev-"));
+  try {
+    const c = join(dir, "glue.c");
+    writeFileSync(c, glue);
+    run(["clang", ...target.compile, ...target.link, ...shared, "-x", "ir", "-", "-x", "c", c, "-x", "none", ...objects, "-funwind-tables", ...threading(target), "-o", out, "-O0", "-lm", ...runtimeLinks(ir, target), ...dl], ir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return { warnings: made.checked.warnings, shapes: handlers ? stateShapes(ir) : "" };
+}
+
+// What one of `fishc dev`'s builds takes: the source, where the build goes, and --locked.
+type DevBuild = { file: string; out: string; locked: boolean };
+
+// The host `fishc dev` serves through, built once from its generated source.
+function devHost(b: Ref<DevBuild>): boolean {
+  try {
+    let looked: string[] = [];
+    buildDev(sessionWith(b.locked, false), b.file, b.out, HOST_C, false, looked);
+    return true;
+  } catch (e) {
+    console.error(`fishc: ${(e as { message: string }).message}`);
+    return false;
+  }
+}
+
+// One build of the handlers at `out`, its warnings or error shown as `fishc watch` shows them.
+function devHandlers(b: Ref<DevBuild>, out: string): Handlers {
+  let loaded: string[] = [];
+  try {
+    const made = buildDev(sessionWith(b.locked, false), b.file, out, HANDLERS_C, true, loaded);
+    for (const w of made.warnings) console.error(painted(w, b.file, textOf(b.file), "warning"));
+    return { built: true, loaded, shapes: made.shapes };
+  } catch (e) {
+    if (e instanceof CompileError) console.error(painted(e, b.file, textOf(b.file)));
+    else console.error(`fishc: ${(e as { message: string }).message}`);
+    return { built: false, loaded, shapes: "" };
+  }
 }
 
 // Runs a command to its end with `stdin` as its input when given, throwing its stderr if it fails.
@@ -1971,6 +2042,130 @@ function buildAddon(session: BuildSession, file: string, out: string | undefined
   }
 }
 
+// `fishc build --mobile ios|android|react-native`: the file's exports as a module an app calls, in
+// `<name>-<platform>` beside it unless `out` says where. A panic aborts, since unwinding into Swift
+// or JNI frames is undefined. Gives the exit code.
+/** @throws {IoError} */
+function buildMobile(fresh: () => BuildSession, file: string, platform: string, out: string | undefined, release: boolean, debug: boolean, sysroot: string | undefined): i64 {
+  const src = readFileSync(file, "utf8");
+  const name = basename(file, ".fsh");
+  const output = resolve(out ?? join(dirname(file), `${name}-${platform}`));
+  const dir = mkdtempSync(join(tmpdir(), "fishc-mobile-"));
+  const entry = join(dir, "mobile.fsh");
+  try {
+    const from = relative(dir, resolve(file));
+    const made = mobileOf(src, from.startsWith(".") ? from : `./${from}`, name);
+    writeFileSync(entry, made.fish);
+    mkdirSync(output, { recursive: true });
+    const type = typeName(name);
+    writeFileSync(join(output, `${type}.h`), made.header);
+    let warnings: CompileError[] = [];
+    if (platform === "ios") warnings = buildIos(fresh, entry, dir, output, made, release, debug);
+    else if (platform === "android") warnings = buildAndroid(fresh, entry, dir, output, made, release, debug, sysroot);
+    else {
+      writeFileSync(join(output, `Native${type}.ts`), made.spec);
+      writeFileSync(join(output, `Native${type}Module.h`), made.module);
+    }
+    for (const w of warnings) console.error(painted(w, file, src, "warning"));
+    return 0;
+  } catch (e) {
+    if (e instanceof CompileError) console.error(existsSync(entry) ? painted(e, entry, readFileSync(entry, "utf8")) : painted(e, file, src));
+    else console.error((e as { message: string }).message);
+    return 1;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// The iOS SDK `sdk` names, iphoneos or iphonesimulator, as Xcode has it.
+/** @throws {Error | IoError} */
+function iosSdk(sdk: string): string {
+  const missing = "fishc build: building for iOS needs Xcode with its iOS SDKs; install Xcode, then run 'sudo xcode-select -s /Applications/Xcode.app'";
+  if (process.platform !== "darwin" || Bun.which("xcrun") === null) throw new Error(missing);
+  const found = Bun.spawnSync(["xcrun", "--sdk", sdk, "--show-sdk-path"]);
+  const path = new TextDecoder().decode(found.stdout).trim();
+  if (found.exitCode !== 0 || path === "") throw new Error(missing);
+  return path;
+}
+
+// A static library for the device and one for the simulator on both CPUs, joined as
+// `<Name>.xcframework` with the header and a module map, and the Swift wrapper beside it.
+/** @throws {CompileError | Error | IoError | JsonError} */
+function buildIos(fresh: () => BuildSession, entry: string, dir: string, output: string, made: Ref<Mobile>, release: boolean, debug: boolean): CompileError[] {
+  const type = typeName(made.name);
+  const lib = `lib${made.name}.a`;
+  const glue = join(dir, "glue.c");
+  writeFileSync(glue, made.glue);
+  const slices: [string, string, string][] = [["arm64-apple-ios13.0", "iphoneos", "device"], ["arm64-apple-ios13.0-simulator", "iphonesimulator", "sim-arm64"], ["x86_64-apple-ios13.0-simulator", "iphonesimulator", "sim-x86_64"]];
+  let warnings: CompileError[] = [];
+  for (const [triple, sdk, slice] of slices) {
+    const root = iosSdk(sdk);
+    mkdirSync(join(dir, slice));
+    const target: Target = { triple, compile: ["-target", triple, "-isysroot", root, "-Wno-override-module"], link: [], ar: "ar" };
+    warnings = buildLibrary(fresh(), entry, join(dir, slice, lib), "static", release, "abort", [], target, debug, glue);
+  }
+  mkdirSync(join(dir, "sim"));
+  run(["lipo", "-create", join(dir, "sim-arm64", lib), join(dir, "sim-x86_64", lib), "-output", join(dir, "sim", lib)]);
+  const headers = join(dir, "headers");
+  mkdirSync(headers);
+  writeFileSync(join(headers, `${type}.h`), made.header);
+  writeFileSync(join(headers, "module.modulemap"), made.modulemap);
+  const framework = join(output, `${type}.xcframework`);
+  rmSync(framework, { recursive: true, force: true });
+  run(["xcodebuild", "-create-xcframework", "-library", join(dir, "device", lib), "-headers", headers, "-library", join(dir, "sim", lib), "-headers", headers, "-output", framework]);
+  writeFileSync(join(output, `${type}.swift`), made.swift);
+  return warnings;
+}
+
+// Orders NDK versions like 27.1.12297006 by their numbers.
+function newerNdk(a: string, b: string): i64 {
+  const x = a.split(".").map((p) => Number(p));
+  const y = b.split(".").map((p) => Number(p));
+  for (let i = 0; i < x.length && i < y.length; i++) if (x[i]! !== y[i]!) return y[i]! > x[i]! ? 1 : -1;
+  return (y.length as i64) - (x.length as i64);
+}
+
+// The NDK's clang: from `--sysroot`, ANDROID_NDK_HOME, or the newest NDK in the Android SDK.
+/** @throws {Error | IoError} */
+function ndkClang(given: string | undefined): string {
+  const install = "install one with Android Studio's SDK Manager or 'sdkmanager \"ndk;<version>\"', or give its directory with --sysroot <dir> or ANDROID_NDK_HOME";
+  let ndk = given ?? process.env.ANDROID_NDK_HOME ?? "";
+  if (ndk === "") {
+    const home = process.env.HOME ?? "";
+    const sdk = process.env.ANDROID_HOME ?? (process.platform === "darwin" ? join(home, "Library", "Android", "sdk") : join(home, "Android", "Sdk"));
+    let versions: string[] = existsSync(join(sdk, "ndk")) ? readdirSync(join(sdk, "ndk")).filter((v) => /^\d+(\.\d+)*$/.test(v)) : [];
+    versions.sort(newerNdk);
+    if (versions.length === 0) throw new Error(`fishc build: building for Android needs the Android NDK, and ${join(sdk, "ndk")} has none; ${install}`);
+    ndk = join(sdk, "ndk", versions[0]!);
+  }
+  const host = process.platform === "darwin" ? "darwin-x86_64" : "linux-x86_64";
+  const clang = join(resolve(ndk), "toolchains", "llvm", "prebuilt", host, "bin", "clang");
+  if (!existsSync(clang)) throw new Error(`fishc build: ${resolve(ndk)} isn't an Android NDK for this machine: it has no ${clang}; ${install}`);
+  return clang;
+}
+
+// A shared library per ABI under `jniLibs`, built by the NDK's clang for API 28 with the JNI glue,
+// and the Kotlin wrapper beside them. Bionic has getentropy and posix_spawn, which the runtime
+// calls, from API 28.
+/** @throws {CompileError | Error | IoError | JsonError} */
+function buildAndroid(fresh: () => BuildSession, entry: string, dir: string, output: string, made: Ref<Mobile>, release: boolean, debug: boolean, sysroot: string | undefined): CompileError[] {
+  const clang = ndkClang(sysroot);
+  const glue = join(dir, "jni.c");
+  writeFileSync(glue, made.jni);
+  const abis: [string, string, string[]][] = [["aarch64-linux-android28", "arm64-v8a", ["-fno-global-isel"]], ["x86_64-linux-android28", "x86_64", []]];
+  let warnings: CompileError[] = [];
+  for (const [triple, abi, extra] of abis) {
+    const at = join(output, "jniLibs", abi);
+    mkdirSync(at, { recursive: true });
+    let session = fresh();
+    session.cc = clang;
+    const target: Target = { triple, compile: ["-target", triple, "-Wno-override-module", ...extra], link: [], ar: "ar", cc: clang };
+    warnings = buildLibrary(session, entry, join(at, `lib${made.name}.so`), "shared", release, "abort", [], target, debug, glue);
+  }
+  writeFileSync(join(output, `${typeName(made.name)}.kt`), made.kotlin);
+  return warnings;
+}
+
 // Runs `binary` with `args` on this process's standard streams, giving its exit code, or 128 plus
 // the signal's number when a signal ended it, as a shell reports it.
 /** @throws {IoError} */
@@ -2052,6 +2247,7 @@ async function main(): Promise<void> {
           static: { type: "boolean" },
           dockerfile: { type: "boolean" },
           addon: { type: "boolean" },
+          mobile: { type: "string" },
           types: { type: "boolean" },
           json: { type: "boolean" },
           rank: { type: "boolean" },
@@ -2484,7 +2680,7 @@ async function main(): Promise<void> {
   let target = file;
   let out = values.out;
   // With no file, the package around the working directory is built, as cargo builds one.
-  if ((command === "build" || command === "check" || command === "run" || command === "watch") && file === undefined && lib === undefined) {
+  if ((command === "build" || command === "check" || command === "run" || command === "watch" || command === "dev") && file === undefined && lib === undefined) {
     const found = findManifest(process.cwd()) ?? fail(`fishc ${command ?? ""}: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
     try {
       const manifest = loadManifest(found, "entry");
@@ -2556,6 +2752,36 @@ async function main(): Promise<void> {
         }
       },
     });
+  }
+  if (command === "dev") {
+    if (target === undefined || positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "locked") || values.panic !== "unwind") fail(usageOf("dev"));
+    const entry = target!;
+    const scratch = mkdtempSync(join(tmpdir(), "fishc-dev-"));
+    const hostFile = join(scratch, "host.fsh");
+    writeFileSync(hostFile, hostSource(join(scratch, "current")));
+    // What each callback takes, its own copy, since a closure owns what it captures.
+    const forHost: DevBuild = { file: hostFile, out: join(scratch, "host"), locked };
+    const forHandlers: DevBuild = { file: `${entry}`, out: "", locked };
+    const removing = `${scratch}`;
+    await develop({
+      entry,
+      dir: scratch,
+      manifest: findManifest(dirname(resolve(entry))),
+      host: () => devHost(forHost),
+      handlers: (out) => devHandlers(forHandlers, out),
+      done: () => {
+        try {
+          rmSync(removing, { recursive: true, force: true });
+        } catch (_e) {
+          // The scratch directory is the system's temporary one, which it clears in time.
+        }
+      },
+    });
+  }
+  if (command === "build" && values.mobile !== undefined) {
+    const platform = values.mobile!;
+    if (file === undefined || (platform !== "ios" && platform !== "android" && platform !== "react-native") || values.addon === true || lib !== undefined || llvm || values.static === true || values.target !== undefined || values.sanitize !== undefined || values["pgo-instrument"] === true || values.pgo !== undefined || leaks || profile !== false || links.length > 0 || (values.sysroot !== undefined && platform !== "android")) fail(usageOf("build"));
+    process.exit(buildMobile(sessionFor, file!, platform, values.out, release, values.debug === true, values.sysroot));
   }
   if (command === "build" && values.addon === true) {
     if (file === undefined || lib !== undefined || llvm || values.static === true || values.target !== undefined || values.sanitize !== undefined || values["pgo-instrument"] === true || values.pgo !== undefined || leaks || profile !== false || links.length > 0) fail(usageOf("build"));
