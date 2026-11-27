@@ -1,4 +1,5 @@
 // A program loaded, its macros expanded and its files linked, as every compile and check starts.
+import { checkCapabilities } from "./capabilities.fsh";
 import { check, type Checked } from "./check.fsh";
 import { newCompilation, stageEnd, stageStart, type Compilation, type Session } from "./compilation.fsh";
 import { CompileError, copyNames, named, type Names, type Source } from "./diag.fsh";
@@ -43,6 +44,8 @@ export function expanded(compilation: Mut<Compilation>, loaded: Mut<Loaded>, lib
   stripTests(loaded);
   stripFuzz(loaded);
   expandMacros(compilation, loaded, library, (round, macros) => check(round, macros, false, true));
+  // After macros, so what a dependency's own macros write is held to its capabilities too.
+  checkCapabilities(loaded);
   stageEnd(compilation.session, "macros", started);
   started = stageStart(compilation.session);
   const program = flatten(compilation, loaded, library);

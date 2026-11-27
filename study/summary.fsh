@@ -1,0 +1,62 @@
+// What the study's events say per task: how many people started it, how often they compiled, how
+// many solved it or gave up, how long solving took, and the errors they met most.
+import { TASKS } from "./tasks.fsh";
+
+// One recorded event: `kind` is start, compile, solved or giveup; `codes` the error codes a
+// compile gave, comma-separated; `ms` the time since the task was started.
+export type EventRow = { session: string; task: string; kind: string; codes: string; ms: i64; at: i64 };
+export type TaskSummary = { task: string; title: string; started: i64; compiles: i64; solved: i64; gaveUp: i64; medianMs: i64 | null; errors: [string, i64][] };
+
+export const KINDS = ["start", "compile", "solved", "giveup"];
+
+// An event as the page sends it, before it is checked.
+export type EventIn = { session: string; task: string; kind: string; codes: string[]; ms: i64 };
+
+// A day: a task left open longer than this isn't timing anything.
+const MAX_MS: i64 = 24 * 60 * 60 * 1000;
+
+// Why an event can't be recorded, or "" when it can.
+export function invalid(e: Ref<EventIn>): string {
+  if (!/^[0-9a-f]{32}$/.test(e.session)) return "the session id is 32 hex digits";
+  if (!TASKS.some((t) => t.id === e.task)) return `there is no task '${e.task}'`;
+  if (!KINDS.includes(e.kind)) return `an event is one of ${KINDS.join(", ")}`;
+  if (e.codes.length > 20 || e.codes.some((c) => !/^[EW]\d{4}$/.test(c))) return "codes are at most 20 diagnostic codes, as E0201";
+  if (e.ms < 0 || e.ms > MAX_MS) return "ms is the time since the task started, at most a day";
+  return "";
+}
+
+function median(xs: Mut<i64[]>): i64 | null {
+  if (xs.length === 0) return null;
+  xs.sort((a, b) => a - b);
+  const mid = xs.length / 2;
+  return xs.length % 2 === 1 ? xs[mid]! : (xs[mid - 1]! + xs[mid]!) / 2;
+}
+
+// Each task's summary, in the tasks' order; a session counts once per task for started, solved
+// and given up.
+export function summarize(events: Ref<EventRow[]>): TaskSummary[] {
+  let out: TaskSummary[] = [];
+  for (const t of TASKS) {
+    let started = new Set<string>();
+    let solved = new Set<string>();
+    let gaveUp = new Set<string>();
+    let compiles: i64 = 0;
+    let times: i64[] = [];
+    let counts = new Map<string, i64>();
+    for (const e of events) {
+      if (e.task !== t.id) continue;
+      if (e.kind === "start") started.add(e.session);
+      else if (e.kind === "compile") {
+        compiles++;
+        if (e.codes !== "") for (const c of e.codes.split(",")) counts.set(c, (counts.get(c) ?? 0) + 1);
+      } else if (e.kind === "solved" && !solved.has(e.session)) {
+        solved.add(e.session);
+        times.push(e.ms);
+      } else if (e.kind === "giveup") gaveUp.add(e.session);
+    }
+    let errors: [string, i64][] = [...counts.entries()];
+    errors.sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0] < b[0] ? -1 : 1));
+    out.push({ task: t.id, title: t.title, started: started.size as i64, compiles, solved: solved.size as i64, gaveUp: gaveUp.size as i64, medianMs: median(times), errors: errors.slice(0, 5) });
+  }
+  return out;
+}

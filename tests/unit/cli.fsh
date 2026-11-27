@@ -59,7 +59,7 @@ test("a package's entry and its errors are found through the manifest", () => {
   const gone = dir(root, "gone", [["fish.toml", `[package]\nname = "gone"\nversion = "1.0.0"\nentry = "src/app.fsh"\n`]]);
   same(firstLine(fishcIn(gone, ["build"]).err), `fish.toml:4:9: error[E0905]: the entry 'src/app.fsh' doesn't exist; create it, or name another with entry = "..."`, "a missing entry");
   const typo = dir(root, "typo", [["fish.toml", `[package]\nname = "typo"\nverison = "1.0.0"\n`]]);
-  same(firstLine(fishcIn(typo, ["build"]).err), "fish.toml:3:1: error[E0905]: [package] has no key 'verison'; it has name, version, entry, lib, edition", "a misspelled key");
+  same(firstLine(fishcIn(typo, ["build"]).err), "fish.toml:3:1: error[E0905]: [package] has no key 'verison'; it has name, version, entry, lib, edition, capabilities", "a misspelled key");
   removed(root);
 }, { timeout: 30_000 });
 

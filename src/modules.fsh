@@ -38,7 +38,8 @@ export type Module = { path: string; file: string; base: usize; src: string; sta
 export type Package = { specifier: string; dir: string; at: Span };
 // `rust`: each Rust crate the program imports, with the directory of the Fish package listing it.
 // `links` is what linking made of each file, kept once the program is linked.
-export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[]; links?: Linked[] };
+// `fish` is the program's Fish packages, its own first, when it has a fish.toml.
+export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[]; links?: Linked[]; fish?: FishPackage[] };
 export type RustCrate = { dependency: RustDependency; dir: string };
 
 // What reads a file the program imports before the disk does: an editor's unsaved text, or
@@ -55,12 +56,16 @@ function readWith(read: Ref<Reader>, path: string): string {
   return given !== undefined ? given : readFileSync(path, "utf8");
 }
 
+// An entry named `memory:<name>` is only the text given for it, with no file or package around
+// it, as a program written in the playground is: it may import std's modules and nothing else.
+export const MEMORY = "memory:";
+
 // Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
 // `read`, before the disk: an editor's unsaved text is newer than the disk's. The program's files are noted in the
 // compilation's `files`.
 /** @throws {CompileError | Error | IoError} */
 export function load(compilation: Mut<Compilation>, entry: string, src: string = readFileSync(entry, "utf8"), read?: (path: string) => string | undefined, fish?: FishPackage[]): Loaded {
-  let loader = new Loader(entry, fish !== undefined ? fish : resolvePackages(entry, compilation.session.locking));
+  let loader = new Loader(entry, fish !== undefined ? fish : entry.startsWith(MEMORY) ? undefined : resolvePackages(entry, compilation.session.locking));
   try {
     loader.visit(compilation, read, entry, src, entry);
   } catch (e) {
@@ -70,7 +75,7 @@ export function load(compilation: Mut<Compilation>, entry: string, src: string =
   for (const m of loader.modules) compilation.files.push({ base: m.base, file: m.base === 0 ? basename(entry) : m.file, src: m.src, std: m.path.startsWith("std:") });
   // std's text sits past every file's, so it goes last, where an offset past them finds it.
   const sources = withStd(loader.sources);
-  return { modules: loader.modules, sources, packages: loader.packages, rust: loader.rust };
+  return { modules: loader.modules, sources, packages: loader.packages, rust: loader.rust, fish: loader.fish };
 }
 
 function withStd(sources: Ref<Source[]>): Source[] {
@@ -112,8 +117,9 @@ class Loader {
   /** @throws {CompileError | Error | IoError} */
   visit(this: Mut<this>, cx: Mut<Compilation>, read: Ref<Reader>, path: string, text: string, file: string): Module {
     const std = path.startsWith("std:");
-    if (!std) cx.looked.push(resolve(path));
-    const key = std ? path : realpathSync(path);
+    const memory = path.startsWith(MEMORY);
+    if (!std && !memory) cx.looked.push(resolve(path));
+    const key = std || memory ? path : realpathSync(path);
     const known = this.byPath.get(key);
     if (known !== undefined) return known;
     const base = this.modules.length * (FILE_SPAN as usize);
@@ -205,6 +211,7 @@ class Loader {
       throw new CompileError("E0902", `'${specifier}' names no module: std's modules are named 'std:'${now}`, s.start, s.end);
     }
     if (specifier.startsWith("std:")) throw new CompileError("E0902", `std has no module named '${specifier.slice("std:".length as i64)}'; it has ${stdModuleNames().map((n) => `'${n}'`).join(", ")}`, s.start, s.end);
+    if (path.startsWith(MEMORY)) throw new CompileError("E0901", `'${specifier}' can't be imported here: this program is one file, which may import std's modules, as 'std:fs'`, s.start, s.end);
     if (!/^\.\.?(\/|$)/.test(specifier)) return this.packageModule(cx, path, specifier, s, importing);
     // A dependency builds from its own files, which its checksum covers, and reaches others by name,
     // whether the path climbs out as written or through a link.

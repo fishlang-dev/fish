@@ -370,6 +370,24 @@ export function comptimeBody<H extends ComptimeHost>(host: Mut<H>, instance: Ins
   }
 }
 
+// Runs the function `instance`, which takes no arguments, as a program's `main()` would run: what
+// it printed, in order, and the failure that stopped it, if one did.
+export function runMain<H extends ComptimeHost>(host: Mut<H>, instance: InstanceId): { printed: [Value, Type][][]; failure?: CompileError } {
+  const body = bodyOf(host.tables.arenas, host.tables.arenas.instanceOf(instance));
+  const site: Span = { start: body.start, end: body.end };
+  let run = new Interpreter(host);
+  run.printing = true;
+  let failure: CompileError | undefined = undefined;
+  try {
+    const _v = run.call(instance, [], undefined, site);
+  } catch (e) {
+    failure = run.failure(e as Failure, site);
+  } finally {
+    run.finish();
+  }
+  return { printed: run.printed, failure };
+}
+
 const constName = (arenas: Ref<Arenas>, c: InstanceId) => bodyOf(arenas, arenas.instanceOf(c)).name.slice("const ".length as i64);
 
 // What comptime code may throw out of a run.
@@ -377,6 +395,10 @@ type Failure = CompileError | Stop | Return | Jump | Thrown;
 
 class Interpreter<H extends ComptimeHost> {
   host: Mut<H>;
+  // When set, `console.*` calls are kept here, each its arguments' values and types, rather than
+  // refused: how the playground runs `main()`.
+  printing = false;
+  printed: [Value, Type][][] = [];
   // When the run started, for the compilation's timings.
   private started: Started;
 
@@ -1175,7 +1197,16 @@ class Interpreter<H extends ComptimeHost> {
   /** @throws {CompileError | Jump | Stop | Thrown} */
   private callExpr(this: Mut<this>, f: usize, e: Ref<Extract<Expr, { kind: "call" }>>, type: Type): Value | Short {
     const callee: Ref<Expr> = e.callee;
-    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") this.refuse("printing", e);
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") {
+      if (!this.printing) this.refuse("printing", e);
+      let line: [Value, Type][] = [];
+      for (const a of e.args) {
+        const t = this.typeOf(f, a);
+        line.push([copyValue(this.valueOf(f, a)), t]);
+      }
+      this.printed.push(line);
+      return undefined;
+    }
     if (this.host.tables.clocks.get(e) === "Math.random") this.random("'Math.random'", e);
     // A data-carrying enum's member, as `Shape.Circle(2)`.
     const r = typeof type === "string" ? undefined : this.host.tables.typing.rec(type);
@@ -2475,7 +2506,7 @@ function toF32(v: bigint): f64 {
 }
 
 // A value as `String(x)` and templates write it; an f32 as the shortest decimal naming it.
-function display(value: Ref<Value>, type: Type | undefined): string {
+export function display(value: Ref<Value>, type: Type | undefined): string {
   if (isMember(value)) return display(payload(value), type);
   const v = value;
   if (typeof v === "number" && type === "f32") return shortestF32(v);

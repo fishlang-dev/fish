@@ -2039,8 +2039,19 @@ type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHan
 // A router's routes and middleware, shared so each middleware's next can hold them.
 type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
 
+// A value a route's handler gives or throws that makes its own response, as axum's trait does.
+// A Response is given as it is, a thrown string as a 500's text, and any other error a handler
+// throws as a 500 that says nothing of it.
+interface IntoResponse {
+  intoResponse(): Response;
+}
+
 // Serves HTTP/1.1 on hostname and port, or a socket path, each connection on a task of its own.
 async function serve(options: ServeOptions, handler: (req: Request) => Promise<Response>): Promise<void> throws IoError {
+  if (__platformServes()) {
+    await __platformServe(handler);
+    return;
+  }
   const unix = options.unix;
   if (unix !== null && (options.port !== null || options.hostname !== null)) throw new IoError("serve takes either a 'unix' socket path or a 'port' and 'hostname', not both");
   let hostname = "0.0.0.0";
@@ -2574,6 +2585,12 @@ class Router {
     return null;
   }
 
+  // The router with state its handlers and middleware are given, as axum's with_state: each
+  // request gets a clone, so the state is a handle such as a pool or a shared<T>.
+  state<S>(this: Own<this>, state: S): StateRouter<S> {
+    return new StateRouter<S>(this, state);
+  }
+
   // The router as the handler serve takes; the handler owns it.
   handler(this: Own<this>): ServeHandler {
     const router = this;
@@ -2611,9 +2628,62 @@ class Router {
   }
 }
 
+// A Router whose handlers take (req, state) and whose middleware take (req, state, next).
+class StateRouter<S> {
+  private router: Router;
+  private held: S;
+
+  constructor(router: Router, held: S) {
+    this.router = router;
+    this.held = held;
+  }
+
+  use(this: Mut<this>, middleware: (req: Request, state: S, next: __routerNext) => Promise<Response>) {
+    const state = this.held.clone();
+    this.router.use(async (req: Request, next: __routerNext) => {
+      const res = await middleware(req, state.clone(), next);
+      return res;
+    });
+  }
+
+  get(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.get(path, this.bound(handler)); }
+  post(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.post(path, this.bound(handler)); }
+  put(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.put(path, this.bound(handler)); }
+  patch(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.patch(path, this.bound(handler)); }
+  delete(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.delete(path, this.bound(handler)); }
+  all(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.all(path, this.bound(handler)); }
+  route(this: Mut<this>, method: string, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.route(method, path, this.bound(handler)); }
+
+  // A plain router's routes under a prefix, as Router.route mounts one.
+  mount(this: Mut<this>, prefix: string, child: Router) { this.router.route(prefix, child); }
+
+  static(this: Mut<this>, prefix: string, root: string) { this.router.static(prefix, root); }
+
+  async handle(req: Request): Promise<Response> {
+    const res = await this.router.handle(req);
+    return res;
+  }
+
+  handler(this: Own<this>): ServeHandler {
+    const router = this;
+    return async (req: Request) => {
+      const res = await router.handle(req);
+      return res;
+    };
+  }
+
+  private bound(this: Ref<this>, handler: (req: Request, state: S) => Promise<Response>): ServeHandler {
+    const state = this.held.clone();
+    return async (req: Request) => {
+      const res = await handler(req, state.clone());
+      return res;
+    };
+  }
+}
+
 // What the checker writes around a route's handler that says its types: a 400 saying why the
-// body isn't the JSON its type reads, a 204 for a handler giving nothing, and what a handler
-// gives as JSON.
+// body isn't the JSON its type reads, a 204 for a handler giving nothing, what a handler gives as
+// JSON or as its own response, and the response for what it throws, chosen by the error's type.
 function __routerRefused(message: string): Response {
   return new Response(message, { status: 400 });
 }
@@ -2626,6 +2696,25 @@ function __routerEmpty(): Response {
 // write it as the type's layout, an empty optional field as null where the type leaves it out.
 function __routerJson<T>(data: Ref<T>): Response {
   let res = new Response(JSON.stringify(data));
+  res.headers.set("content-type", "application/json");
+  return res;
+}
+
+function __routerInto(value: IntoResponse): Response {
+  return value.intoResponse();
+}
+
+function __routerGiven(res: Response): Response {
+  return res;
+}
+
+function __routerText(message: string): Response {
+  return new Response(message, { status: 500 });
+}
+
+// The error is dropped unread: its message may say what a client shouldn't see.
+function __routerFailed<E>(_error: E): Response {
+  let res = new Response("{\\"error\\":\\"Internal Server Error\\"}", { status: 500 });
   res.headers.set("content-type", "application/json");
   return res;
 }
@@ -3273,8 +3362,16 @@ class Http1 {
     return b;
   }
 
+  // The handler's task is the request's, so the request ID it sets here is what std:log's entries
+  // carry in it and every task it spawns, across awaits; the response echoes it.
   static async handle(handler: ServeHandler, req: Request): Promise<Response> {
-    return await handler(req);
+    const given = req.headers.get("x-request-id");
+    const id = given !== null && __logUsable(given) ? given : __traceHex([__traceFresh()[0]]);
+    const slot = __logBegin(id.clone());
+    let res = await handler(req);
+    __logEnd(slot);
+    res.headers.set("x-request-id", id);
+    return res;
   }
 
   // The client's next bytes, nothing once the stream ends or the server stops, or null once the
@@ -3814,6 +3911,49 @@ type __traceTarget = { host: string; port: i64; authority: string; path: string 
 const __traceMode = new Atomic(0);
 // The delay is the OpenTelemetry batch processor's default, five seconds.
 const __traceHeld = new Lock<__traceSettings>({ endpoint: "", service: "", delay: 5000, armed: false, timer: 0, spans: [] });
+
+declare function fsh_rt_log_get(): i64;
+declare function fsh_rt_log_set(request: i64): void;
+
+// The request IDs of the requests being served, keyed by the number the task holding one carries,
+// which only a number fits in.
+// ponytail: a handler that panics leaves its entry behind; remove it where serve catches the
+// panic if a server that panics often grows.
+const __logIds = new Lock<Map<i64, string>>(new Map<i64, string>());
+const __logNext = new Atomic(0);
+
+// Whether a client's x-request-id is one to keep: visible ASCII, at most 128 characters.
+function __logUsable(id: string): boolean {
+  if (id.length === 0 || id.length > 128) return false;
+  for (let i: usize = 0; i < id.length; i++) {
+    const c = id.charCodeAt(i) as i64;
+    if (c < 33 || c > 126) return false;
+  }
+  return true;
+}
+
+// Makes id the current task's request ID, giving the number it is kept under.
+function __logBegin(id: string): i64 {
+  const n = __logNext.add(1) + 1;
+  __logIds.update((m) => { m.set(n, id); });
+  unsafe { fsh_rt_log_set(n) };
+  return n;
+}
+
+function __logEnd(n: i64): void {
+  __logIds.update((m) => { m.delete(n); });
+  unsafe { fsh_rt_log_set(0) };
+}
+
+// The request ID of the request the current task serves, or "" outside one.
+function __logRequest(): string {
+  const n = unsafe { fsh_rt_log_get() };
+  if (n === 0) return "";
+  return __logIds.update((m): string => {
+    const id = m.get(n);
+    return id === null ? "" : id.clone();
+  });
+}
 
 // The current context: a trace id's halves, the current span's id and its flags, all 0 outside
 // any span. It belongs to the task, so it follows one through its awaits.
@@ -5304,7 +5444,7 @@ const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date", "RangeError", "Html"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
 export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection", "Http2", "Http2Hpack", "Http2Stream"]);
-const HTTP_NAMES = ["fetch", "serve", "Router", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+const HTTP_NAMES = ["fetch", "serve", "Router", "StateRouter", "IntoResponse", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE: usize = 2 ** 40;
@@ -11806,6 +11946,57 @@ export async function create(file: string, paths: string[], options: ZipPackOpti
 `,
   // Spans in a program's own code, imported as std:trace. Their state is std's own, which serve
   // shares, so what is here only wraps it.
+  // Structured logging, imported as std:log: each entry one JSON line on stderr.
+  log: String.raw`
+// An entry's extra fields: any value with a JSON form, an object's fields joining the entry's own.
+export interface LogFields {}
+
+// Writes one line, {"ts", "level", "msg", "requestId"?, ...fields}, when the level is at least
+// FISH_LOG's (debug, info, warn or error; info when unset or anything else). requestId is that of
+// the request the calling task serves, inside serve.
+export function debug(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(0, message, JSON.stringify(fields));
+  else entry(0, message, "");
+}
+
+export function info(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(1, message, JSON.stringify(fields));
+  else entry(1, message, "");
+}
+
+export function warn(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(2, message, JSON.stringify(fields));
+  else entry(2, message, "");
+}
+
+export function error(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(3, message, JSON.stringify(fields));
+  else entry(3, message, "");
+}
+
+const LEVELS = ["debug", "info", "warn", "error"];
+
+// ponytail: FISH_LOG is read for every entry; keep it once read if a hot path logs at a level
+// that's off.
+function least(): i64 {
+  const named = process.env["FISH_LOG"];
+  if (named === null) return 1;
+  const at = LEVELS.indexOf(named.toLowerCase());
+  return at < 0 ? 1 : at;
+}
+
+// An object's fields go into the entry; any other JSON value goes in as "fields".
+function entry(level: i64, message: string, fields: string): void {
+  if (level < least()) return;
+  let line = '{"ts":' + JSON.stringify(new Date().toISOString()) + ',"level":"' + LEVELS[level as usize] + '","msg":' + JSON.stringify(message);
+  const id = __logRequest();
+  if (id.length > 0) line += ',"requestId":' + JSON.stringify(id);
+  if (fields.startsWith("{")) {
+    if (fields.length > 2) line += "," + fields.slice(1, (fields.length as i64) - 1);
+  } else if (fields.length > 0) line += ',"fields":' + fields;
+  console.error(line + "}");
+}
+`,
   trace: String.raw`
 // endpoint is the collector's base URL, as OTEL_EXPORTER_OTLP_ENDPOINT is, and "" turns tracing
 // off whatever the environment says; serviceName is the service the spans are from; batchDelay
@@ -12681,7 +12872,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
@@ -13273,7 +13464,125 @@ class ConcurrentMap<K, V> {
   }
 }
 `;
-export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD + CONCURRENT;
+// How serve runs for a build target with a server of its own, one of three: a socket's, as here,
+// AWS Lambda's runtime API, or an edge module's one request.
+const PLATFORM_SOCKET = String.raw`
+function __platformServes(): boolean {
+  return false;
+}
+async function __platformServe(_handler: ServeHandler): Promise<void> {}
+`;
+
+// serve in a Lambda function's bootstrap: with Lambda's runtime API named in the environment, each
+// invocation, an HTTP API or function URL event in payload format 2.0, is a request for the
+// handler, and its response the invocation's result. Run anywhere else, it serves as itself.
+const PLATFORM_LAMBDA = String.raw`
+type __LambdaHttp = { method: string };
+type __LambdaContext = { http: __LambdaHttp; domainName?: string };
+type __LambdaEvent = { rawPath: string; rawQueryString?: string; headers?: Map<string, string>; cookies?: string[]; body?: string; isBase64Encoded?: boolean; requestContext: __LambdaContext };
+// Read through the runtime, since std's own source has no 'process' to name.
+function __lambdaApi(): string | null {
+  const value = unsafe { fsh_rt_getenv(cString("AWS_LAMBDA_RUNTIME_API")) };
+  if (unsafe { value.isNull() }) return null;
+  return unsafe { fromCString(value) };
+}
+function __platformServes(): boolean {
+  return __lambdaApi() !== null;
+}
+function __lambdaRequest(event: string): Request throws JsonError | TypeError {
+  const e = JSON.parse<__LambdaEvent>(event);
+  const query = e.rawQueryString ?? "";
+  const host = e.requestContext.domainName ?? "localhost";
+  let headers = new Headers();
+  const given: Ref<Map<string, string> | null> = e.headers;
+  if (given !== null) for (const [name, value] of given) headers.append(name.clone(), value.clone());
+  const cookies: Ref<string[] | null> = e.cookies;
+  if (cookies !== null && cookies.length > 0) headers.set("cookie", cookies.join("; "));
+  const text = e.body ?? "";
+  const body: u8[] = e.isBase64Encoded === true ? u8.fromBase64(text) : new TextEncoder().encode(text);
+  return new Request("https://" + host + e.rawPath + (query.length > 0 ? "?" + query : ""), { method: e.requestContext.http.method, headers, body });
+}
+// The response in payload format 2.0, its body always base64 so bytes pass as they are.
+// ponytail: a header named twice keeps its last value, as a JSON object can hold one.
+async function __lambdaReply(res: Response): Promise<string> {
+  const bytes = await res.bytes();
+  let headers = "";
+  let cookies = "";
+  for (let i: usize = 0; i < res.headers.names.length; i++) {
+    const name = res.headers.names[i]!;
+    const value = res.headers.values[i]!;
+    if (name === "set-cookie") cookies += (cookies.length > 0 ? "," : "") + JSON.stringify(value);
+    else headers += (headers.length > 0 ? "," : "") + JSON.stringify(name) + ":" + JSON.stringify(value);
+  }
+  return '{"statusCode":' + String(res.status) + ',"headers":{' + headers + '},"cookies":[' + cookies + '],"body":' + JSON.stringify(bytes.toBase64()) + ',"isBase64Encoded":true}';
+}
+// An event the handler can't be given is the invocation's error; a runtime API that stops
+// answering is the sandbox going away, so serve returns.
+async function __platformServe(handler: ServeHandler): Promise<void> {
+  const base = "http://" + (__lambdaApi() ?? "") + "/2018-06-01/runtime/invocation/";
+  while (true) {
+    try {
+      const next = await fetch(base + "next");
+      const id = next.headers.get("lambda-runtime-aws-request-id") ?? "";
+      const event = await next.text();
+      let reply = "";
+      let failure = "";
+      try {
+        const req = __lambdaRequest(event);
+        const res = await handler(req);
+        reply = await __lambdaReply(res);
+      } catch (e) {
+        failure = e.message;
+      }
+      if (failure.length > 0) await fetch(base + id + "/error", { method: "POST", body: '{"errorMessage":' + JSON.stringify(failure) + ',"errorType":"InvalidEvent"}' });
+      else await fetch(base + id + "/response", { method: "POST", body: reply });
+    } catch (e) {
+      console.error("serve: Lambda's runtime API stopped answering: " + e.message);
+      return;
+    }
+  }
+}
+`;
+
+// serve in an edge module: one request read as JSON from standard input, { method, url, headers
+// as [name, value] pairs, body in base64 }, answered as { status, headers, body } on standard
+// output. The loader fishc writes beside the module turns a Workers fetch into that exchange.
+const PLATFORM_EDGE = String.raw`
+type __EdgeRequest = { method: string; url: string; headers: string[][]; body: string };
+function __platformServes(): boolean {
+  return true;
+}
+async function __edgeReply(res: Response): Promise<string> {
+  const bytes = await res.bytes();
+  let out = '{"status":' + String(res.status) + ',"headers":[';
+  for (let i: usize = 0; i < res.headers.names.length; i++) {
+    if (i > 0) out += ",";
+    out += "[" + JSON.stringify(res.headers.names[i]!) + "," + JSON.stringify(res.headers.values[i]!) + "]";
+  }
+  return out + '],"body":' + JSON.stringify(bytes.toBase64()) + "}";
+}
+function __edgeRequest(text: string): Request throws JsonError | TypeError {
+  const asked = JSON.parse<__EdgeRequest>(text);
+  let headers = new Headers();
+  for (const pair of asked.headers) if (pair.length === 2) headers.append(pair[0]!.clone(), pair[1]!.clone());
+  const body = u8.fromBase64(asked.body);
+  return new Request(asked.url, { method: asked.method, headers, body });
+}
+async function __platformServe(handler: ServeHandler): Promise<void> {
+  let input: u8[] = [];
+  const given = __stdinTake(1);
+  if (given !== null) input = given;
+  let reply = '{"status":400,"headers":[],"body":""}';
+  try {
+    const req = __edgeRequest(new TextDecoder().decode(input));
+    const res = await handler(req);
+    reply = await __edgeReply(res);
+  } catch (_e) {}
+  console.log(reply);
+}
+`;
+
+export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD + CONCURRENT + PLATFORM_SOCKET + PLATFORM_LAMBDA + PLATFORM_EDGE;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -13291,7 +13600,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD, CONCURRENT]) {
+  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD, CONCURRENT, PLATFORM_SOCKET, PLATFORM_LAMBDA, PLATFORM_EDGE]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -13321,6 +13630,14 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let htmls = sections.shift()!;
   let simds = sections.shift()!;
   let concurrent = sections.shift()!;
+  let sockets = sections.shift()!;
+  let lambda = sections.shift()!;
+  let edge = sections.shift()!;
+  // A serverless or edge target's serve answers through its platform, which reads its requests
+  // with fetch or from standard input.
+  const target = compilation.session.build?.triple ?? "";
+  const lambdaBuild = target === "lambda" || target === "lambda-arm64";
+  const edgeBuild = target === "edge";
   renamed(json, { kind: "json" });
   renamed(jsonName, { kind: "json" });
   let astNames: string[] = [];
@@ -13334,8 +13651,8 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
   // The std:trace module's code names __traceOn, and what it wraps is sent through Http1.
-  const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn"]);
-  const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
+  const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn", "__logRequest"]);
+  const fetchUsed = httpUsed && (lambdaBuild || uses(written, fetching, ["fetch"]));
   const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentionsName(written, "Request"));
   // The libraries a program gets by naming them; JsError also comes with any package.
   const jsonUsed = uses(written, json, ["Json", "JSON"]);
@@ -13346,7 +13663,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const bufferUsed = mentionsName(written, "Buffer") || mentionsName(written, "BufferEncoding");
   const btoaUsed = uses(written, btoa, ["btoa"]);
   const atobUsed = uses(written, atob, ["atob"]);
-  const readingUsed = uses(written, reading, ["readLine", "__stdinTake", "prompt"]);
+  const readingUsed = (httpUsed && edgeBuild) || uses(written, reading, ["readLine", "__stdinTake", "prompt"]);
   // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
   // btoa, atob and Buffer call them too.
   const encoding = httpUsed || bufferUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);
@@ -13357,7 +13674,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const typing = (dataViewUsed && dataView.length > 0) || mentionsTypedArray(written);
   let chosen: Stmt[] = prelude;
   if (dated) chosen = chosen.concat(dates);
-  if (httpUsed) chosen = chosen.concat(http).concat(tracing);
+  if (httpUsed) chosen = chosen.concat(http).concat(tracing).concat(lambdaBuild ? lambda : edgeBuild ? edge : sockets);
   if (fetchUsed) chosen = chosen.concat(fetching);
   if (httpUsed && !urlWanted) chosen = chosen.concat(served);
   if (httpUsed || urlWanted) chosen = chosen.concat(core);

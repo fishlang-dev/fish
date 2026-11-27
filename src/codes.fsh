@@ -702,11 +702,11 @@ To fix it, check the spelling (the message suggests a near match when there is o
   E0511: {
     title: "invalid typed route handler",
     long: {
-      text: `A handler given to a Router says its types: a second parameter is the type the request's body is read as from JSON, and a written return type that isn't a Response is what the handler answers with as JSON. Such a handler takes at most those two parameters, takes no body on a GET route, since a GET request carries none, and can't throw yet.
+      text: `A handler given to a Router says its types: a second parameter is the type the request's body is read as from JSON, and a written return type that isn't a Response is what the handler answers with, as JSON or, for a type with 'intoResponse()', as the response it makes. A StateRouter's handler takes the router's state second and the body third. Such a handler takes at most those parameters, writes the body's type, and takes no body on a GET route, since a GET request carries none.
 
 Hono and Express handlers read the body themselves, with 'await c.req.json()' or a body parser, and nothing checks it against a type.
 
-To fix it, take the request alone or the request and the body, add a route that reads a body with 'post', 'put' or 'patch', and catch an error inside the handler, giving back a Response for it.`,
+To fix it, take the request alone or the request and the body, write the body's type, and add a route that reads a body with 'post', 'put' or 'patch'.`,
       example: `type NewUser = { name: string };
 async function main(): Promise<void> {
   let app = new Router();
@@ -870,6 +870,7 @@ To fix it, write it the way the message says: 'let' or 'const' for 'var', a new 
   E0907: { title: "an import that clashes with another name in its file" },
   E0908: { title: "a Node built-in Fish doesn't have, or uses differently" },
   E0909: { title: "a source file larger than the compiler takes" },
+  E0910: { title: "a dependency using a capability it doesn't state or isn't granted" },
 
   E1001: { title: "an operation that needs 'unsafe'" },
   E1002: { title: "invalid C function declaration" },

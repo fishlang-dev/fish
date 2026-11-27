@@ -12,8 +12,8 @@ import { cachedSession } from "./mathlib.fsh";
 import { CompileError, copyNames, formatError, movedOffset, type BorrowEvent, type Names, type Source } from "./diag.fsh";
 import { load, type Loaded, type RustCrate } from "./modules.fsh";
 import { resolvePackages } from "./dependencies.fsh";
-import { pack, prepare, submit, unsafeDependencies } from "./publish.fsh";
-import { openIndex, registryUrl } from "./registry_index.fsh";
+import { pack, prepare, submit, unsafeDependencies, upload } from "./publish.fsh";
+import { openIndex, registryUrl, sparseBase, useRegistry } from "./registry_index.fsh";
 import { formatVersion, parseRange, maxSatisfying, type Version } from "./semver.fsh";
 import { createPackage, type Edition, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.fsh";
 import { parse, parseWithComments, type Stmt } from "./parser.fsh";
@@ -24,7 +24,9 @@ import { JS_NATIVE } from "./js_native.fsh";
 import { BROTLI_NATIVE, NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
 import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
-import { copyTarget, dockerfile, dockerfilePath, findBrotli, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, instrumented, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, staticTarget, withFlags, type Target } from "./target.fsh";
+import { copyTarget, dockerfile, dockerfilePath, findBrotli, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, forTarget, instrumented, isLambda, isWasm, isWindows, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, staticTarget, threading, withFlags, type Target } from "./target.fsh";
+import { browserFiles, loader } from "./wasi.fsh";
+import { zipped } from "./serverless.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
 import { EXERCISES, exerciseText, FOLDER } from "./learn.fsh";
 import { commandNamed, helpOf, overview, usageOf, VERSION } from "./commands.fsh";
@@ -326,7 +328,7 @@ function built(session: BuildSession, file: string, out: string, release: boolea
 function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>, profile: Profiling = false): { ir: string; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession } {
   let made = compiledKept(core, file, release, panic, leaks, debug, looked, undefined, undefined, false, profile);
   const instrumenting = stageStart(made.kept.checked.tables.session);
-  const ir = instrumented(made.ir, target);
+  const ir = forTarget(instrumented(made.ir, target), target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
   if (shim !== undefined) refuseForeignRust(target);
   stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
@@ -349,7 +351,7 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
   core.build = buildFor(core.build, target.triple, release);
   let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest, keep, profile);
   const instrumenting = stageStart(made.kept.checked.tables.session);
-  const ir = instrumented(made.ir, target);
+  const ir = forTarget(instrumented(made.ir, target), target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
   if (shim !== undefined) refuseForeignRust(target);
   stageEnd(made.kept.checked.tables.session, "instrument", instrumenting);
@@ -1442,7 +1444,8 @@ export function runtimeUnits(ir: string, release: boolean, pic = false, target: 
   const js = callsEngine(ir);
   const openssl = callsTls(ir) ? findOpenSsl(target) : undefined;
   const none: string[] = [];
-  const flags = [...target.compile, "-funwind-tables", "-pthread", ...optimization(release, target), ...(pic ? ["-fPIC"] : none), ...(js ? ["-I", engineDir()] : none)];
+  if (js && isWasm(target.triple)) throw new IoError(`fishc build: npm packages run in the JS engine, which isn't built for ${target.triple}; build without --target, or without the package`);
+  const flags = [...target.compile, "-funwind-tables", ...threading(target), ...optimization(release, target), ...(pic ? ["-fPIC"] : none), ...(js ? ["-I", engineDir()] : none)];
   const tls = openssl === undefined ? "" : "missing" in openssl ? "-tls-missing" : "-tls";
   const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}${profile === true ? "-profile" : profile === "heap" ? "-heap-profile" : ""}`;
   // A debug build's runtime checks the order Locks are taken in.
@@ -1489,7 +1492,7 @@ function withoutGlobalIsel(release: boolean, target: Ref<Target>): boolean {
 // already, linked with `objects`.
 function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = hostTarget(), program: string[] = ["-x", "ir", "-"], cc = "clang"): string[] {
   const none: string[] = [];
-  return [cc, ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, ...optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)];
+  return [cc, ...target.compile, ...target.link, ...program, "-x", "none", ...objects, "-funwind-tables", ...threading(target), "-o", out, ...optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)];
 }
 
 // What computes a checked program's top-level consts for the repl: every function is checked.
@@ -2033,6 +2036,7 @@ async function main(): Promise<void> {
           "allow-dirty": { type: "boolean" },
           submit: { type: "boolean" },
           fork: { type: "string" },
+          registry: { type: "string" },
           yes: { type: "boolean" },
           check: { type: "boolean" },
           fix: { type: "boolean" },
@@ -2067,8 +2071,10 @@ async function main(): Promise<void> {
     }
   })();
   // The options given, as Node's parseArgs keys them: those on the command line and `panic`'s default.
+  // --registry applies to whatever reads the registry, so no command's own flags list it.
   let flags: string[] = [];
-  for (const [k, v] of Object.entries(values)) if (v !== undefined) flags.push(k);
+  for (const [k, v] of Object.entries(values)) if (v !== undefined && k !== "registry") flags.push(k);
+  if (values.registry !== undefined) useRegistry(values.registry);
   const links: string[] = values.link === undefined ? [] : [...values.link];
   // Each build compiles within a session of its own, since a check uses up the one it is given.
   const locked = values.locked === true;
@@ -2358,7 +2364,10 @@ async function main(): Promise<void> {
       if (packed.unsafe.length === 0 && deps.length === 0) console.log(`no unsafe in ${packed.manifest.name} or its dependencies`);
       for (const u of packed.unsafe) console.log(`unsafe: ${u.file}:${u.line}:${u.col} ${u.what}`);
       for (const d of deps) console.log(`unsafe: the dependency '${d.name}' ${d.text} uses unsafe`);
-      if (values["dry-run"] !== true) {
+      if (values["dry-run"] !== true && sparseBase(registryUrl(packed.manifest)) !== undefined) {
+        if (submitting) fail("fishc publish: --submit opens a pull request against a git index; a registry server takes the release itself");
+        console.log(`published ${packed.manifest.name} ${packed.manifest.version} to ${upload(packed)}`);
+      } else if (values["dry-run"] !== true) {
         const prepared = prepare(packed);
         console.log(`prepared ${prepared.branch} in ${prepared.clone}: ${prepared.archive} and its index line`);
         if (!submitting) console.log(`run 'fishc publish --submit' to push it to your fork and open a pull request`);
@@ -2551,11 +2560,31 @@ async function main(): Promise<void> {
   if (profiles.length > 0 && !release) fail("fishc build: '--pgo' optimizes a release build; add '--release'");
   if ((instrumenting || profiles.length > 0) && (llvm || lib !== undefined || sanitize !== undefined)) fail(`fishc build: '${pgo}' applies to an executable clang builds, so it doesn't go with '--emit-llvm', '--lib' or '--sanitize'`);
   if (values.dockerfile === true && values.static !== true) fail("fishc build: '--dockerfile' writes an image holding only the binary, which needs it built with '--static'");
+  const wasm = values.target !== undefined && isWasm(values.target);
+  if (wasm) {
+    const what = `fishc build: a ${values.target ?? ""} build is a WebAssembly module`;
+    if (lib !== undefined) fail(`${what} a WASI runtime starts, not a library; leave out '--lib'`);
+    if (values.static === true) fail(`${what}, which holds everything it links already; leave out '--static'`);
+    if (sanitize !== undefined) fail(`${what}, and clang has no sanitizer runtimes for wasm32; leave out '--sanitize'`);
+    if (instrumenting || profiles.length > 0) fail(`${what}, and clang has no profile runtime for wasm32; leave out '${pgo}'`);
+    if (profile !== false) fail(`${what}, and WASI has no signals to sample or report a profile with; leave out '${profile === "heap" ? "--heap-profile" : "--profile"}'`);
+    // --panic defaults to unwind, so only one written out is refused.
+    if (panicName === "unwind" && Bun.argv.some((a) => a === "--panic" || a.startsWith("--panic="))) fail(`${what}, which can't unwind, so a panic in it prints its message and exits with 101; leave out '--panic=unwind'`);
+  }
+  if (values.target !== undefined && isWindows(values.target)) {
+    const what = `fishc build: a ${values.target} build`;
+    if (lib !== undefined) fail(`${what} is an executable; libraries for Windows aren't built yet, so leave out '--lib'`);
+    if (values.static === true) fail(`${what} links its C runtime and threads into the executable already; leave out '--static'`);
+    if (sanitize !== undefined) fail(`${what} has no sanitizer runtime in llvm-mingw; leave out '--sanitize'`);
+    if (profile !== false) fail(`${what} has no signals to sample or report a profile with; leave out '${profile === "heap" ? "--heap-profile" : "--profile"}'`);
+  }
+  // A module never unwinds: WASI preview 1 has no exceptions to unwind with.
+  const panicking: Panic = wasm ? "abort" : panic;
   try {
     if (llvm) {
       const start = performance.now();
       let looked: string[] = [];
-      const made = compiledIn(newCompilation(plain(sessionFor())), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked, profile);
+      const made = compiledIn(newCompilation(plain(sessionFor())), readFileSync(target!, "utf8"), target!, release, panicking, lib !== undefined, leaks, values.debug === true, looked, profile);
       reportTimings(made.checked.tables.session, [...FRONT_END, "codegen"], start);
       process.stdout.write(made.ir);
     } else {
@@ -2569,7 +2598,12 @@ async function main(): Promise<void> {
       const platform = instrumenting ? withFlags(sanitizing, [...PGO_INSTRUMENT]) : profiles.length > 0 ? withFlags(sanitizing, pgoUse(profiles)) : sanitizing;
       // A sanitizer's report names .fsh lines only when the program carries line tables.
       const debug = values.debug === true || sanitized;
-      const binary = out ?? basename(target!, ".fsh");
+      const lambda = isLambda(platform.triple);
+      const named = out ?? `${basename(target!, ".fsh")}${wasm ? (values.target === "browser" || values.target === "edge" ? ".js" : ".wasm") : isWindows(platform.triple) ? ".exe" : lambda ? ".zip" : ""}`;
+      const page = values.target === "browser" || values.target === "edge" ? browserFiles(named) : undefined;
+      // A Lambda function's executable is built as bootstrap, then zipped where the build was asked to write.
+      const scratch = lambda ? mkdtempSync(join(tmpdir(), "fishc-lambda-")) : undefined;
+      const binary = page !== undefined ? page.module : scratch !== undefined ? join(scratch, "bootstrap") : named;
       const image = values.dockerfile === true ? dockerfilePath(binary) : undefined;
       try {
         let warnings: CompileError[] = [];
@@ -2577,9 +2611,16 @@ async function main(): Promise<void> {
         else {
           const start = performance.now();
           let looked: string[] = [];
-          const made = built(sessionFor(), target!, binary, release || instrumenting, panic, [...links], copyTarget(platform), leaks, debug, looked, profile);
+          let session = sessionFor();
+          if (platform.cc !== undefined) session.cc = platform.cc;
+          const made = built(session, target!, binary, release || instrumenting, panicking, [...links], copyTarget(platform), leaks, debug, looked, profile);
           reportTimings(made.session, [...FRONT_END, "codegen", ...NATIVE_STAGES], start);
           warnings = made.warnings;
+        }
+        if (page !== undefined) writeFileSync(page.loader, loader(basename(page.module), values.target === "edge"));
+        if (scratch !== undefined) {
+          writeFileSync(named, zipped("bootstrap", readFileSync(binary)));
+          rmSync(scratch, { recursive: true, force: true });
         }
         if (image !== undefined) writeFileSync(image, dockerfile(binary));
         for (const w of warnings) console.error(painted(w, target!, readFileSync(target!, "utf8"), "warning"));

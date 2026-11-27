@@ -6444,7 +6444,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.jsonRaw(w, typeof literal.value === "string" ? JSON.stringify(literal.value) : literalText(literal.value));
       return;
     }
-    if (t === "null") {
+    if (t === "null" || t === "never") {
       this.jsonRaw(w, "null");
       return;
     }
@@ -14145,7 +14145,7 @@ class Codegen implements PrintHost, ComptimeHost {
       const call = this.panic === "abort" ? `  %r = call ${type} ${this.symbol(this.futureOf.get(future)!)}(ptr %frame, ptr %task)` : `  %r = invoke ${type} ${this.symbol(this.futureOf.get(future)!)}(ptr %frame, ptr %task) to label %polled unwind label %pad`;
       const dropFrame = this.helperBody((cg, v) => cg.dispose(v, future));
       const dropOutput = this.outputDrop(future);
-      const line = `define internal i32 ${name(this, "poll")}(ptr %task, ptr %frame) ${UNWINDS} {`;
+      const line = `define internal i32 ${name(this, "poll")}(ptr %task, ptr %frame) ${this.unwinds} {`;
       const line2 = `define internal void ${name(this, "drop")}(ptr %frame) ${this.unwinds} {`;
       const line3 = `define internal void ${name(this, "output")}(ptr %out) ${this.unwinds} {`;
       this.out.push(line);

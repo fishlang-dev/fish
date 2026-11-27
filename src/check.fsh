@@ -6734,9 +6734,11 @@ class BodyChecker implements Context, GuardHost {
         this.scoped(s.id, "block", s.block);
         let sites = this.state.handlers.pop()!;
         const awaited = s.param !== undefined && s.param.kind === "ident" && s.param.name.startsWith(thrownName(""));
+        // The try made around a route's handler catches whatever it throws, which may be nothing.
+        const routed = s.param !== undefined && s.param.kind === "ident" && s.param.name === "router error";
         // The scope of an `await using` binding with nothing in it to throw needs no handler, and
         // is the block it would have been.
-        if (sites.length === 0 && awaited) {
+        if (sites.length === 0 && (awaited || routed)) {
           const bodyId = this.f().bodyId;
           const edited = this.cx.tables.rewrites.listIn(bodyId, s.id, "block");
           this.cx.tables.rewrites.replaceStmt(s, { id: 0, kind: "block", body: s.block.map((x) => cloneStmt(x)), start: s.start, end: s.end });
