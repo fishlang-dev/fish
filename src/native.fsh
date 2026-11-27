@@ -12497,6 +12497,132 @@ void fsh_rt_zlib_take(fsh_zlib_run *r, uint8_t *out) {
   free(r->data);
   free(r);
 }
+
+// A deflate stream kept open across a streamed body's chunks; bits picks the format as above.
+z_stream *fsh_rt_zlib_open(int64_t bits, int64_t level) {
+  z_stream *s = fsh_zlib_grow(NULL, sizeof *s);
+  memset(s, 0, sizeof *s);
+  if (deflateInit2(s, (int)level, Z_DEFLATED, (int)bits, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return s;
+}
+
+// Deflates one chunk, flushed with Z_SYNC_FLUSH so what it gives can be sent at once, or with
+// finish the last, ending the stream. result is as fsh_rt_zlib_run's; take the bytes with
+// fsh_rt_zlib_take.
+fsh_zlib_run *fsh_rt_zlib_push(z_stream *s, const uint8_t *data, int64_t length, int64_t finish, int64_t *result) {
+  fsh_zlib_run *r = fsh_zlib_grow(NULL, sizeof *r);
+  size_t cap = deflateBound(s, (uLong)length) + 64;
+  r->data = fsh_zlib_grow(NULL, cap);
+  r->length = 0;
+  const uint8_t *next = data;
+  int64_t left = length;
+  for (;;) {
+    if (s->avail_in == 0 && left > 0) {
+      s->next_in = (Bytef *)next;
+      s->avail_in = left > FSH_ZLIB_CHUNK ? FSH_ZLIB_CHUNK : (uInt)left;
+      next += s->avail_in;
+      left -= s->avail_in;
+    }
+    if ((size_t)r->length == cap) {
+      cap *= 2;
+      r->data = fsh_zlib_grow(r->data, cap);
+    }
+    size_t room = cap - (size_t)r->length;
+    s->next_out = r->data + r->length;
+    s->avail_out = room > UINT_MAX ? UINT_MAX : (uInt)room;
+    uInt before = s->avail_out;
+    int err = deflate(s, left > 0 ? Z_NO_FLUSH : finish ? Z_FINISH : Z_SYNC_FLUSH);
+    r->length += before - s->avail_out;
+    if (err == Z_STREAM_END) break;
+    if (err != Z_OK && err != Z_BUF_ERROR) return fsh_zlib_fail(s, r, err, "Zlib error", result);
+    // A flush is complete once deflate leaves room in the output.
+    if (!finish && left == 0 && s->avail_in == 0 && s->avail_out != 0) break;
+  }
+  result[0] = 0;
+  result[1] = 0;
+  result[2] = r->length;
+  return r;
+}
+
+void fsh_rt_zlib_close(z_stream *s) {
+  deflateEnd(s);
+  free(s);
+}
+`;
+
+// The brotli half of the runtime, a unit of its own compiled into a program, with libbrotlienc
+// linked, only when its IR calls it. An encoder is kept open across a body's chunks, as the
+// zlib half's deflate streams are, and each chunk's output is copied out as a zlib run's is.
+export const BROTLI_NATIVE = String.raw`
+#include <brotli/encode.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct { uint8_t *data; int64_t length; } fsh_brotli_run;
+
+static void *fsh_brotli_grow(void *p, size_t n) {
+  void *q = realloc(p, n ? n : 1);
+  if (!q) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return q;
+}
+
+BrotliEncoderState *fsh_rt_brotli_open(int64_t quality) {
+  BrotliEncoderState *s = BrotliEncoderCreateInstance(NULL, NULL, NULL);
+  if (!s) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  BrotliEncoderSetParameter(s, BROTLI_PARAM_QUALITY, (uint32_t)quality);
+  return s;
+}
+
+// Compresses one chunk, flushed so what it gives can be sent at once, or with finish the last,
+// ending the stream. result is [failed, 0, length]; take the bytes with fsh_rt_brotli_take.
+fsh_brotli_run *fsh_rt_brotli_push(BrotliEncoderState *s, const uint8_t *data, int64_t length, int64_t finish, int64_t *result) {
+  fsh_brotli_run *r = fsh_brotli_grow(NULL, sizeof *r);
+  size_t cap = (size_t)length + 1024;
+  r->data = fsh_brotli_grow(NULL, cap);
+  r->length = 0;
+  size_t in = (size_t)length;
+  const uint8_t *next = data;
+  BrotliEncoderOperation op = finish ? BROTLI_OPERATION_FINISH : BROTLI_OPERATION_FLUSH;
+  result[0] = 0;
+  for (;;) {
+    if ((size_t)r->length == cap) {
+      cap *= 2;
+      r->data = fsh_brotli_grow(r->data, cap);
+    }
+    size_t room = cap - (size_t)r->length;
+    uint8_t *at = r->data + r->length;
+    if (!BrotliEncoderCompressStream(s, op, &in, &next, &room, &at, NULL)) {
+      result[0] = 1;
+      break;
+    }
+    r->length = at - r->data;
+    if (in == 0 && !BrotliEncoderHasMoreOutput(s) && (!finish || BrotliEncoderIsFinished(s))) break;
+  }
+  result[1] = 0;
+  result[2] = r->length;
+  return r;
+}
+
+void fsh_rt_brotli_take(fsh_brotli_run *r, uint8_t *out) {
+  if (r->length > 0) memcpy(out, r->data, (size_t)r->length);
+  free(r->data);
+  free(r);
+}
+
+void fsh_rt_brotli_close(BrotliEncoderState *s) {
+  BrotliEncoderDestroyInstance(s);
+}
 `;
 
 // The SQLite half of the runtime, a unit of its own compiled into a program, with -lsqlite3

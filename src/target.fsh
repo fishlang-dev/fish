@@ -250,8 +250,8 @@ export function instrumented(ir: string, target: Ref<Target>): string {
   return ir.replace(/^(define [^\n]*\))( uwtable| \{$)/gm, `$1 ${attribute}$2`);
 }
 
-// Where OpenSSL is for a target: the flags to compile and link the TLS runtime with, or why it
-// isn't there.
+// Where OpenSSL, or libbrotlienc, is for a target: the flags to compile and link its runtime
+// with, or why it isn't there.
 export type OpenSsl = { compile: string[]; link: string[] } | { missing: string };
 
 const LIBS = ["-lssl", "-lcrypto"];
@@ -259,11 +259,11 @@ const INSTALL = "install it (brew install openssl@3 on macOS, apt install libssl
 
 // OpenSSL for `target`: on this machine through pkg-config, else Homebrew's openssl@3, else the
 // system's headers; for another target or a sysroot, only in the sysroot, never this machine's.
-// What pkg-config says OpenSSL is compiled and linked with, if it is there and knows.
-function pkgConfigFlags(): string[] | undefined {
+// What pkg-config says a package is compiled and linked with, if it is there and knows.
+function pkgConfigFlags(name: string): string[] | undefined {
   if (Bun.which("pkg-config") === null) return undefined;
   try {
-    const asked = Bun.spawnSync(["pkg-config", "--cflags", "--libs", "openssl"]);
+    const asked = Bun.spawnSync(["pkg-config", "--cflags", "--libs", name]);
     if (asked.exitCode !== 0) return undefined;
     return new TextDecoder().decode(asked.stdout).trim().split(/\s+/).filter((f) => f !== "");
   } catch (_e) {
@@ -281,13 +281,35 @@ export function findOpenSsl(target: Ref<Target>): OpenSsl {
     const where = sysroot === undefined ? "no sysroot was given" : `the sysroot ${sysroot} has no OpenSSL headers`;
     return { missing: `TLS needs OpenSSL built for ${target.triple}, and ${where}; install OpenSSL's headers and libraries into a sysroot for that target and build the program again` };
   }
-  const flags = pkgConfigFlags();
+  const flags = pkgConfigFlags("openssl");
   if (flags !== undefined) return { compile: flags.filter((f) => f.startsWith("-I")), link: flags.filter((f) => !f.startsWith("-I")) };
   for (const dir of ["/opt/homebrew/opt/openssl@3", "/usr/local/opt/openssl@3"]) {
     if (existsSync(join(dir, "include", "openssl", "ssl.h"))) return { compile: ["-I", join(dir, "include")], link: ["-L", join(dir, "lib"), ...LIBS] };
   }
   if (existsSync("/usr/include/openssl/ssl.h")) return { compile: [], link: [...LIBS] };
   return { missing: `TLS needs OpenSSL, which wasn't found when this program was built; ${INSTALL}` };
+}
+
+const BROTLI = ["-lbrotlienc", "-lbrotlicommon"];
+
+// libbrotlienc for `target`, which std:compress's brotli runtime is compiled and linked with:
+// found as OpenSSL is, through pkg-config, Homebrew's prefix or the system's headers, and only in
+// the sysroot for another target; or why it isn't there.
+export function findBrotli(target: Ref<Target>): OpenSsl {
+  const at = target.compile.indexOf("--sysroot");
+  const sysroot = at >= 0 ? target.compile[(at + 1) as usize] : undefined;
+  if (sysroot !== undefined || target.compile.includes("-target")) {
+    if (sysroot !== undefined && existsSync(join(sysroot, "usr", "include", "brotli", "encode.h"))) return { compile: [], link: [...BROTLI] };
+    const where = sysroot === undefined ? "no sysroot was given" : `the sysroot ${sysroot} has no brotli headers`;
+    return { missing: `fishc build: std:compress needs libbrotlienc built for ${target.triple}, and ${where}; install brotli's headers and libraries into a sysroot for that target and build the program again` };
+  }
+  const flags = pkgConfigFlags("libbrotlienc");
+  if (flags !== undefined) return { compile: flags.filter((f) => f.startsWith("-I")), link: flags.filter((f) => !f.startsWith("-I")) };
+  for (const dir of ["/opt/homebrew/opt/brotli", "/usr/local/opt/brotli"]) {
+    if (existsSync(join(dir, "include", "brotli", "encode.h"))) return { compile: ["-I", join(dir, "include")], link: ["-L", join(dir, "lib"), ...BROTLI] };
+  }
+  if (existsSync("/usr/include/brotli/encode.h")) return { compile: [], link: [...BROTLI] };
+  return { missing: "fishc build: std:compress needs libbrotlienc, which wasn't found; install brotli (brew install brotli on macOS, apt install libbrotli-dev on Debian and Ubuntu, apk add brotli-dev on Alpine) and build the program again" };
 }
 
 // The OS, CPU and libc `std:build` names for a build of `info`.
