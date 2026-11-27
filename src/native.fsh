@@ -4880,6 +4880,9 @@ struct fsh_task {
   // Its trace context: the two halves of a trace id, the current span's id and the trace's
   // flags, all zero outside any span. A task starts with a copy of its spawner's.
   int64_t trace[4];
+  // The request std:log names its entries with, as std's table keys it, 0 outside any; inherited
+  // as the trace context is.
+  int64_t log;
   char memory[];
 };
 
@@ -4930,6 +4933,7 @@ static fsh_task *fsh_main_task = NULL;
 // outside any task, as a program with no async main does, has the thread's own.
 static _Thread_local fsh_task *fsh_current = NULL;
 static _Thread_local int64_t fsh_trace_root[4];
+static _Thread_local int64_t fsh_log_root;
 // Set by the claim that starts the timer task, for the task its thread makes next: the timer
 // task has no context, so a timer's callback starts a trace of its own, whichever span was
 // current when the first timer was set.
@@ -5171,6 +5175,7 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   t->await_target = 0;
   if (fsh_timeouts_starting) memset(t->trace, 0, sizeof t->trace);
   else memcpy(t->trace, fsh_current ? fsh_current->trace : fsh_trace_root, sizeof t->trace);
+  t->log = fsh_timeouts_starting ? 0 : fsh_current ? fsh_current->log : fsh_log_root;
   fsh_timeouts_starting = 0;
   pthread_mutex_lock(&fsh_alive_lock);
   t->prev = NULL;
@@ -5216,6 +5221,15 @@ void fsh_rt_trace_get(int64_t *out) {
 
 void fsh_rt_trace_set(const int64_t *words) {
   memcpy(fsh_current ? fsh_current->trace : fsh_trace_root, words, sizeof fsh_trace_root);
+}
+
+int64_t fsh_rt_log_get(void) {
+  return fsh_current ? fsh_current->log : fsh_log_root;
+}
+
+void fsh_rt_log_set(int64_t request) {
+  if (fsh_current) fsh_current->log = request;
+  else fsh_log_root = request;
 }
 
 // The environment and the random source under names only std's tracing declares: a std module

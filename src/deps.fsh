@@ -37,7 +37,7 @@ function equivalents(): Map<string, Equivalent> {
   m.set("uuid", IN_STD("crypto.randomUUID, for v4 only"));
   m.set("nanoid", IN_STD("crypto.getRandomValues, to build IDs from"));
   add(m, ["dayjs", "date-fns", "moment", "luxon"], PLANNED("Date parsing and formatting"));
-  add(m, ["pino", "winston", "bunyan"], PLANNED("Structured logging"));
+  add(m, ["pino", "winston", "bunyan"], IN_STD("std:log"));
   add(m, ["@opentelemetry/api", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/sdk-trace-base", "@opentelemetry/exporter-trace-otlp-http"], IN_STD("the std:trace module"));
   add(m, ["pg", "postgres"], IN_STD("the postgres module's Pool"));
   add(m, ["better-sqlite3", "sqlite3"], IN_STD("std:sqlite's Database"));
