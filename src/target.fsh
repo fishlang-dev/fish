@@ -7,7 +7,7 @@ import { cacheDir } from "./mathlib.fsh";
 // Build targets: the four v1 platforms and Linux over musl for static binaries, named by their
 // Rust triples, and the clang flags that build for one from the host fishc runs on.
 
-export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl", "wasm32-wasip1", "browser", "x86_64-w64-windows-gnu", "aarch64-w64-windows-gnu", "lambda", "lambda-arm64", "edge"];
+export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl", "wasm32-wasip1", "browser", "x86_64-w64-windows-gnu", "aarch64-w64-windows-gnu", "lambda", "lambda-arm64", "edge", "thumbv7em-none-eabihf", "riscv32imc-unknown-none-elf"];
 
 // A WebAssembly module over WASI preview 1, the same module with a JavaScript loader giving it
 // those calls in a page, and one answering a request a Workers-style fetch hands it.
@@ -19,6 +19,9 @@ const lambdaCpu = (triple: string) => (triple === "lambda-arm64" ? "aarch64" : "
 
 // Windows over the MinGW ABI, with UCRT as its C library.
 export const isWindows = (triple: string) => triple.endsWith("-w64-windows-gnu");
+
+// A microcontroller with no OS: a Cortex-M4F or an ESP32-C3's RISC-V core.
+export const isBareMetal = (triple: string) => triple === "thumbv7em-none-eabihf" || triple === "riscv32imc-unknown-none-elf";
 
 // `compile` goes to every clang compile, and `compile` then `link` to the final link. The host's
 // own target has both empty, so its builds and cache keys are what they were before targets.
@@ -75,6 +78,7 @@ export function hostTriple(platform: string = process.platform, arch: string = p
 export function resolveTarget(triple: string | undefined, sysroot: string | undefined, given?: string, which?: (tool: string) => string | null, found?: (path: string) => boolean): Target {
   if (triple !== undefined && isWasm(triple)) return wasmTarget(triple, sysroot, which, found);
   if (triple !== undefined && isWindows(triple)) return windowsTarget(triple, sysroot, found);
+  if (triple !== undefined && isBareMetal(triple)) return bareMetalTarget(triple, which, found);
   if (triple !== undefined && isLambda(triple)) return { ...staticTarget(resolveTarget(`${lambdaCpu(triple)}-unknown-linux-musl`, sysroot, given, which)), triple };
   const host = given ?? hostTriple();
   // Cached objects compile in an empty directory of their own, where a relative path means nothing.
@@ -151,6 +155,40 @@ function windowsTarget(triple: string, sysroot: string | undefined, found?: (pat
 // SEH form, which libunwind gives as GCC does.
 export function forTarget(ir: string, target: Ref<Target>): string {
   return isWindows(target.triple) ? ir.replaceAll("@__gcc_personality_v0", "@__gcc_personality_seh0") : ir;
+}
+
+// Homebrew's LLVM, whose clang has the ARM and RISC-V backends Apple's lacks.
+const BREW_CLANGS = ["/opt/homebrew/opt/llvm/bin/clang", "/usr/local/opt/llvm/bin/clang"];
+
+// Where `gcc` keeps libgcc for a core built with `cpu`, or "" when it can't say.
+function libgccOf(gcc: string, cpu: Ref<string[]>): string {
+  try {
+    const asked = Bun.spawnSync([gcc, ...cpu, "-print-libgcc-file-name"]);
+    return asked.exitCode === 0 ? new TextDecoder().decode(asked.stdout).trim() : "";
+  } catch (_e) {
+    return "";
+  }
+}
+
+// A microcontroller build: clang for the core with nothing of the host's, linked by lld with
+// libgcc from the GNU bare-metal toolchain, whose helpers do the 64-bit and floating-point
+// arithmetic the core has no instructions for.
+/** @throws {Error} */
+function bareMetalTarget(triple: string, which?: (tool: string) => string | null, found?: (path: string) => boolean): Target {
+  const exists = (path: string): boolean => (found === undefined ? existsSync(path) : found(path));
+  const lookup = (tool: string): string | null => (which === undefined ? Bun.which(tool) : which(tool));
+  const arm = triple.startsWith("thumb");
+  const cc = process.platform === "darwin" ? BREW_CLANGS.find((c) => exists(c)) : lookup("clang") ?? undefined;
+  if (cc === undefined) throw new Error(`fishc build: building for ${triple} needs clang with the ${arm ? "ARM" : "RISC-V"} backend, which Apple's clang lacks; install it with 'brew install llvm lld'`);
+  if (lookup("ld.lld") === null) throw new Error(`fishc build: building for ${triple} links with ld.lld, which isn't on PATH; install it with 'brew install lld', or your package manager's lld package`);
+  const cpu = arm ? ["-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv4-sp-d16"] : ["-march=rv32imc", "-mabi=ilp32"];
+  const gccs = arm ? ["arm-none-eabi-gcc"] : ["riscv64-elf-gcc", "riscv64-unknown-elf-gcc"];
+  const gcc = gccs.find((g) => lookup(g) !== null);
+  const install = arm ? "'brew install arm-none-eabi-gcc', or your package manager's gcc-arm-none-eabi" : "'brew install riscv64-elf-gcc', or your package manager's gcc-riscv64-unknown-elf";
+  if (gcc === undefined) throw new Error(`fishc build: building for ${triple} links libgcc from the GNU bare-metal toolchain, and ${gccs.join(" or ")} isn't on PATH; install it with ${install}`);
+  const libgcc = libgccOf(gcc!, cpu);
+  if (libgcc === "" || !exists(libgcc)) throw new Error(`fishc build: ${gcc!} has no libgcc for ${triple}; install a build of it with multilibs for ${arm ? "Cortex-M4 hard float" : "rv32imc"}`);
+  return { triple, compile: [`--target=${arm ? triple : "riscv32-unknown-elf"}`, ...cpu, "-Wno-override-module", "-ffreestanding", "-fno-builtin", "-fno-exceptions", "-ffunction-sections", "-fdata-sections"], link: ["-nostdlib", "-static", "-fuse-ld=lld", "-Wl,--gc-sections", libgcc], ar: "llvm-ar", cc };
 }
 
 // The flags that give a build threads: none for wasm32-wasip1, whose runtime runs on one.

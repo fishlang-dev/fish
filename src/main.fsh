@@ -20,12 +20,13 @@ import { parse, parseWithComments, type Stmt } from "./parser.fsh";
 import type { Ids } from "./nodes.fsh";
 import { addonOf } from "./addon.fsh";
 import { mobileOf, typeName, type Mobile } from "./mobile.fsh";
+import { bareMetalRefusal, boardSource, linkerScript } from "./mcu.fsh";
 import { bundle } from "./bundle.fsh";
 import { JS_NATIVE } from "./js_native.fsh";
 import { BROTLI_NATIVE, NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
 import { cachedObjects, files, MATH_RUNTIME, mathObjects, mathObjectsAsync, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
-import { copyTarget, dockerfile, dockerfilePath, findBrotli, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, forTarget, instrumented, isLambda, isWasm, isWindows, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, staticTarget, threading, withFlags, type Target } from "./target.fsh";
+import { copyTarget, dockerfile, isBareMetal, dockerfilePath, findBrotli, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, forTarget, instrumented, isLambda, isWasm, isWindows, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, staticTarget, threading, withFlags, type Target } from "./target.fsh";
 import { browserFiles, loader } from "./wasi.fsh";
 import { zipped } from "./serverless.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
@@ -323,6 +324,40 @@ function devHandlers(b: Ref<DevBuild>, out: string): Handlers {
     else console.error(`fishc: ${(e as { message: string }).message}`);
     return { built: false, loaded, shapes: "" };
   }
+}
+
+// A microcontroller build: the program's IR and the board file linked by lld at `out` as one
+// ELF image, with no runtime. A panic halts, so the build's panics abort. A symbol the link
+// doesn't find is something the program needs from a runtime there isn't, said by name.
+/** @throws {CompileError | Error | IoError | JsonError} */
+function buildBareMetal(session: BuildSession, file: string, out: string, release: boolean, target: Target, arena: usize | undefined, debug: boolean): CompileError[] {
+  const src = readFileSync(file, "utf8");
+  let { core } = apart(session);
+  core.build = buildFor(core.build, target.triple, release);
+  let looked: string[] = [];
+  const made = compiledIn(newCompilation(core), src, file, release, "abort", false, false, debug, looked);
+  // A debug build's frame chain is thread-local, and a board runs one thread with no TLS.
+  const ir = made.ir.replace("@fsh_rt_frames = external thread_local global ptr", "@fsh_rt_frames = global ptr null");
+  const dir = mkdtempSync(join(tmpdir(), "fishc-mcu-"));
+  try {
+    const board = join(dir, "board.c");
+    const script = join(dir, "link.ld");
+    writeFileSync(board, boardSource(arena));
+    writeFileSync(script, linkerScript(target.triple));
+    const none: string[] = [];
+    const args = [target.cc ?? "clang", ...target.compile, "-x", "ir", "-", "-x", "c", board, "-x", "none", `-Wl,-T,${script}`, ...target.link, "-o", out, release ? "-O2" : "-O0", ...(debug ? ["-g"] : none)];
+    const done = Bun.spawnSync(args, { stdin: new TextEncoder().encode(ir) });
+    if (done.exitCode !== 0) {
+      const err = new TextDecoder().decode(done.stderr);
+      let missing: string[] = [];
+      for (const m of err.matchAll(/undefined symbol: ([\w.$]+)/g)) missing.push(m[1]!);
+      if (missing.length > 0) throw new Error(bareMetalRefusal(target.triple, missing, arena !== undefined));
+      throw new Error(`clang failed:\n${err}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return made.checked.warnings;
 }
 
 // Runs a command to its end with `stdin` as its input when given, throwing its stderr if it fails.
@@ -2221,6 +2256,7 @@ async function main(): Promise<void> {
           dockerfile: { type: "boolean" },
           addon: { type: "boolean" },
           mobile: { type: "string" },
+          arena: { type: "string" },
           types: { type: "boolean" },
           json: { type: "boolean" },
           rank: { type: "boolean" },
@@ -2797,6 +2833,17 @@ async function main(): Promise<void> {
     // --panic defaults to unwind, so only one written out is refused.
     if (panicName === "unwind" && Bun.argv.some((a) => a === "--panic" || a.startsWith("--panic="))) fail(`${what}, which can't unwind, so a panic in it prints its message and exits with 101; leave out '--panic=unwind'`);
   }
+  const bare = values.target !== undefined && isBareMetal(values.target);
+  if (values.arena !== undefined && !bare) fail("fishc build: '--arena' declares a microcontroller build's heap; build with '--target thumbv7em-none-eabihf' or '--target riscv32imc-unknown-none-elf'");
+  const arenaBytes = values.arena === undefined ? undefined : wholeNumber(values.arena) ?? fail(`fishc build: '--arena' takes the arena's size in bytes, a whole number above 0, not '${values.arena}'`);
+  if (bare) {
+    const what = `fishc build: a ${values.target ?? ""} build has no runtime`;
+    if (lib !== undefined) fail(`${what}; it is an image for the board, not a library, so leave out '--lib'`);
+    if (values.static === true || values.dockerfile === true) fail(`${what} and links everything it holds already; leave out '--static'`);
+    if (sanitize !== undefined || instrumenting || profiles.length > 0 || profile !== false || leaks) fail(`${what} to report from; leave out '--sanitize', '--pgo', '--profile', '--heap-profile' and '--leaks'`);
+    if (links.length > 0) fail(`${what} and links no C libraries; leave out '--link'`);
+    if (Bun.argv.some((a) => a === "--panic" || a.startsWith("--panic="))) fail(`${what}, and a panic there halts; leave out '--panic'`);
+  }
   if (values.target !== undefined && isWindows(values.target)) {
     const what = `fishc build: a ${values.target} build`;
     if (lib !== undefined) fail(`${what} is an executable; libraries for Windows aren't built yet, so leave out '--lib'`);
@@ -2834,6 +2881,7 @@ async function main(): Promise<void> {
       try {
         let warnings: CompileError[] = [];
         if (lib !== undefined) warnings = buildLibrary(sessionFor(), target!, binary, lib, release, panic, [...links], copyTarget(platform), debug);
+        else if (bare) warnings = buildBareMetal(sessionFor(), target!, binary, release, copyTarget(platform), arenaBytes, debug);
         else {
           const start = performance.now();
           let looked: string[] = [];
