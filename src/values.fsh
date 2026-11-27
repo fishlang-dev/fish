@@ -2068,6 +2068,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const fn: Expr = made ? { id: nextId(this.ctx.tables().ids), kind: "topic", start: f.start, end: f.end } : cloneExpr(f);
       const run: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: fn, typeArgs: [], args: [], optional: false, start: f.start, end: f.end };
       if (f.kind !== "arrow") this.ctx.tables().blockingRuns.add(cloneExpr(run));
+      this.ctx.tables().blockingTasks.add(f.start);
       const arrow: Expr = { id: nextId(this.ctx.tables().ids), kind: "arrow", move: false, async: true, typeParams: [], params: [], returnType: undefined, body: run, start: f.start, end: f.end };
       const task: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: cloneExpr(arrow), typeArgs: [], args: [], optional: false, start: f.start, end: f.end };
       const spawned: Expr = made ? { id: nextId(this.ctx.tables().ids), kind: "pipe", value: cloneExpr(f), body: task, start: f.start, end: f.end } : arrow;

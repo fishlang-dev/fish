@@ -6075,6 +6075,7 @@ function checkPath(path: string): void throws IoError {
   if (path.includes("\0")) throw invalid("The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received '" + path.replaceAll("\0", "\\x00") + "'");
 }
 
+@blocking
 export function openSync(path: string, flags: string | i64 = "r", mode: i64 = 0o666): i64 throws IoError {
   checkPath(path);
   let bits = 0;
@@ -6090,6 +6091,7 @@ export function openSync(path: string, flags: string | i64 = "r", mode: i64 = 0o
   return fd;
 }
 
+@blocking
 export function closeSync(fd: i64): void throws IoError {
   checkFd(fd);
   const r = unsafe { fsh_rt_fd_call(3, fd, 0) };
@@ -6099,6 +6101,7 @@ export function closeSync(fd: i64): void throws IoError {
 // What's read lands at offset; a null or -1 position reads from the file's own, which moves.
 export function readSync(fd: i64, buffer: Mut<u8[]>): i64 throws IoError;
 export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64, length: i64, position?: i64 | null): i64 throws IoError;
+@blocking
 export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64 = 0, length?: i64, position?: i64 | null): i64 throws IoError {
   checkFd(fd, false);
   // length |= 0, which FileHandle's read doesn't do.
@@ -6124,6 +6127,7 @@ function readInto(fd: i64, buffer: Mut<u8[]>, offset: i64, n: i64, position: i64
 // writes at the file's own.
 export function writeSync(fd: i64, buffer: Ref<u8[]>, offset?: i64 | null, length?: i64 | null, position?: i64 | null): i64 throws IoError;
 export function writeSync(fd: i64, text: string, position?: i64 | null, encoding?: "utf8" | "utf-8"): i64 throws IoError;
+@blocking
 export function writeSync(fd: i64, data: Ref<string | u8[]>, second?: i64 | null, third?: i64 | "utf8" | "utf-8" | null, position?: i64 | null): i64 throws IoError {
   checkFd(fd, false);
   if (typeof data === "string") {
@@ -6148,6 +6152,7 @@ function written(fd: i64, bytes: Ref<u8[]>, offset: i64, n: i64, position: i64):
   return r;
 }
 
+@blocking
 export function fstatSync(fd: i64): Stats throws IoError {
   checkFd(fd);
   let out: i64[] = new Array(8).fill(0);
@@ -6193,6 +6198,7 @@ class FsConstants {
 }
 
 // A negative length truncates to nothing.
+@blocking
 export function ftruncateSync(fd: i64, len: i64 = 0): void throws IoError {
   if (len < -SAFE || len > SAFE) throw outOfRange("len", ">= -9007199254740991 && <= 9007199254740991", len);
   checkFd(fd);
@@ -6200,6 +6206,7 @@ export function ftruncateSync(fd: i64, len: i64 = 0): void throws IoError {
   if (r < 0) throw failed(r, "ftruncate", null);
 }
 
+@blocking
 export function fchmodSync(fd: i64, mode: i64): void throws IoError {
   checkMode(mode);
   checkFd(fd);
@@ -6207,6 +6214,7 @@ export function fchmodSync(fd: i64, mode: i64): void throws IoError {
   if (r < 0) throw failed(r, "fchmod", null);
 }
 
+@blocking
 export function fsyncSync(fd: i64): void throws IoError {
   checkFd(fd);
   const r = unsafe { fsh_rt_fd_call(2, fd, 0) };
@@ -8044,6 +8052,7 @@ async function watchAborted(signal: AbortSignal): Promise<string | null> {
   fs: String.raw`
 // A descriptor is read to its end from where it is. Standard input goes through readLine's
 // buffer, so what a line read took is still read here.
+@blocking
 export function readFileSync(path: string | i64): u8[] throws IoError {
   if (typeof path === "string") return fileReadSync(path);
   if (path === 0) {
@@ -8060,28 +8069,33 @@ export function readFileSync(path: string | i64): u8[] throws IoError {
   }
 }
 
+@blocking
 export function readFileSyncText(path: string | i64): string throws IoError {
   const bytes = readFileSync(path);
   return new TextDecoder().decode(bytes);
 }
 
+@blocking
 export function writeFileSync(path: string, data: string | u8[]): void throws IoError {
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
   fileWriteSync(path, bytes);
 }
 
+@blocking
 export function existsSync(path: string): boolean {
   return pathExists(path);
 }
 
 export function statSync(path: string, options?: { throwIfNoEntry?: true }): Stats throws IoError;
 export function statSync(path: string, options: { throwIfNoEntry: false }): Stats | undefined throws IoError;
+@blocking
 export function statSync(path: string, options?: { throwIfNoEntry?: boolean }): Stats | undefined throws IoError {
   return pathStats(path, true, options?.throwIfNoEntry ?? true);
 }
 
 export function lstatSync(path: string, options?: { throwIfNoEntry?: true }): Stats throws IoError;
 export function lstatSync(path: string, options: { throwIfNoEntry: false }): Stats | undefined throws IoError;
+@blocking
 export function lstatSync(path: string, options?: { throwIfNoEntry?: boolean }): Stats | undefined throws IoError {
   return pathStats(path, false, options?.throwIfNoEntry ?? true);
 }
@@ -8089,6 +8103,7 @@ export function lstatSync(path: string, options?: { throwIfNoEntry?: boolean }):
 export function readdirSync(path: string): string[] throws IoError;
 export function readdirSync(path: string, options: { withFileTypes?: false }): string[] throws IoError;
 export function readdirSync(path: string, options: { withFileTypes: true }): Dirent[] throws IoError;
+@blocking
 export function readdirSync(path: string, options?: { withFileTypes?: boolean }): string[] | Dirent[] throws IoError {
   const names = dirRead(path);
   if (!(options?.withFileTypes ?? false)) return names;
@@ -8104,16 +8119,19 @@ export function readdirSync(path: string, options?: { withFileTypes?: boolean })
   return entries;
 }
 
+@blocking
 export function realpathSync(path: string): string throws IoError {
   return pathReal(path);
 }
 
+@blocking
 export function mkdtempSync(prefix: string): string throws IoError {
   return dirTemp(prefix);
 }
 
 export type RmOptions = { recursive?: boolean; force?: boolean };
 
+@blocking
 export function rmSync(path: string, options: RmOptions = {}): void throws IoError {
   pathRemove(path, options.recursive ?? false, options.force ?? false);
 }
@@ -8121,27 +8139,32 @@ export function rmSync(path: string, options: RmOptions = {}): void throws IoErr
 export type MakeDirectoryOptions = { recursive?: boolean; mode?: i64 };
 
 // The first directory made with recursive, as the prefix of path spells it; otherwise undefined.
+@blocking
 export function mkdirSync(path: string, options: MakeDirectoryOptions | i64 = {}): string | undefined throws IoError {
   if (typeof options === "number") return dirMake(path, false, options);
   return dirMake(path, options.recursive ?? false, options.mode ?? 0o777);
 }
 
+@blocking
 export function renameSync(oldPath: string, newPath: string): void throws IoError {
   pathRename(oldPath, newPath);
 }
 
 export const constants = new FsConstants();
 
+@blocking
 export function copyFileSync(src: string, dest: string, mode: i64 = 0): void throws IoError {
   fileCopy(src, dest, mode);
 }
 
+@blocking
 export function unlinkSync(path: string): void throws IoError {
   pathUnlink(path);
 }
 
 ${FILES}
 
+@blocking
 export function accessSync(path: string, mode: i64 = 0): void throws IoError {
   pathAccess(path, mode);
 }
@@ -8153,11 +8176,13 @@ function seconds(time: f64 | Date): f64 {
   return time < 0 && time - time === 0 ? (Date.now() as f64) / 1000 : time;
 }
 
+@blocking
 export function utimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
   pathUtimes(path, seconds(atime), seconds(mtime), true);
 }
 
 // A link's own times, not its target's.
+@blocking
 export function lutimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
   pathUtimes(path, seconds(atime), seconds(mtime), false);
 }
@@ -8206,19 +8231,23 @@ function fileMode(mode: i64 | string): i64 throws IoError {
   return n as i64;
 }
 
+@blocking
 export function chmodSync(path: string, mode: i64 | string): void throws IoError {
   pathChmod(path, fileMode(mode));
 }
 
 // The link type matters only on Windows, so it is checked and then unused.
+@blocking
 export function symlinkSync(target: string, path: string, _type: "dir" | "file" | "junction" | null = null): void throws IoError {
   pathLink(target, path, true);
 }
 
+@blocking
 export function linkSync(existingPath: string, newPath: string): void throws IoError {
   pathLink(existingPath, newPath, false);
 }
 
+@blocking
 export function readlinkSync(path: string): string throws IoError {
   return pathReadLink(path);
 }
@@ -8299,31 +8328,38 @@ function checked(inflating: boolean, bits: i64, level: i64, input: Ref<u8[]>, li
   return out;
 }
 
+@blocking
 export function gzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(false, 31, data, options);
 }
 
+@blocking
 export function gunzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, 31, data, options);
 }
 
+@blocking
 export function deflateSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(false, 15, data, options);
 }
 
+@blocking
 export function inflateSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, 15, data, options);
 }
 
+@blocking
 export function deflateRawSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(false, -15, data, options);
 }
 
+@blocking
 export function inflateRawSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, -15, data, options);
 }
 
 // Gzip or zlib, whichever the input's header says.
+@blocking
 export function unzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, 47, data, options);
 }
@@ -8391,6 +8427,7 @@ export class SpawnSyncReturns<T> {
   }
 }
 
+@blocking
 export function spawnSync(command: string, args: string[] = [], options: SpawnSyncOptions = {}): SpawnSyncReturns<u8[]> {
   const input = options.input ?? "";
   const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
@@ -8430,23 +8467,28 @@ function executed(r: SpawnSyncReturns<u8[]>, command: string): u8[] throws IoErr
   throw new ExecError(message, r.status, r.signal, r.stdout, r.stderr);
 }
 
+@blocking
 export function execFileSync(file: string, args: string[] = [], options: SpawnSyncOptions = {}): u8[] throws IoError | ExecError {
   const named = [file, ...args].join(" ");
   return executed(spawnSync(file, args, options), named);
 }
 
+@blocking
 export function execFileSyncText(file: string, args: string[] = [], options: SpawnSyncOptions = {}): string throws IoError | ExecError {
   return new TextDecoder().decode(execFileSync(file, args, options));
 }
 
+@blocking
 export function execSync(command: string, options: SpawnSyncOptions = {}): u8[] throws IoError | ExecError {
   return executed(spawnSync("/bin/sh", ["-c", command], options), command);
 }
 
+@blocking
 export function execSyncText(command: string, options: SpawnSyncOptions = {}): string throws IoError | ExecError {
   return new TextDecoder().decode(execSync(command, options));
 }
 
+@blocking
 export function spawnSyncText(command: string, args: string[] = [], options: SpawnSyncOptions = {}): SpawnSyncReturns<string> {
   const r = spawnSync(command, args, options);
   const text = new TextDecoder();
@@ -9240,6 +9282,7 @@ export async function hashPassword(password: string): Promise<string> throws Pas
 
 // The same hash made on the calling thread, for code with no runtime running, such as a CLI tool;
 // in an async function it holds its worker for the whole hash, so use hashPassword there.
+@blocking
 export function hashPasswordSync(password: string): string throws PasswordError {
   return __hashPassword(password);
 }
@@ -9259,6 +9302,7 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
 
 // The same check made on the calling thread, for code with no runtime running; in an async
 // function use verifyPassword.
+@blocking
 export function verifyPasswordSync(password: string, hash: string): boolean throws PasswordError {
   return __verifyPassword(password, hash);
 }
@@ -11421,6 +11465,7 @@ async function sleeping(ms: i64): Promise<void> {
   await sleep(ms);
 }
 
+@blocking
 export function sleepSync(ms: i64): void {
   let left = ms;
   while (left > 0) {
@@ -11554,6 +11599,7 @@ function signalName(n: i64): string {
 // Runs a command to its end. stdin is /dev/null unless given, and stdout and stderr are piped
 // unless asked otherwise; env, when given, is the child's whole environment, and its PATH, when
 // it has one, is where the command is looked for.
+@blocking
 export function spawnSync(cmd: string[], options: SpawnOptions = {}): SyncSubprocess throws IoError {
   const [file, input, flags, pairs] = spawnPlan(cmd, options, null, options.stdout ?? "pipe", options.stderr ?? "pipe");
   const [pid, status, signo, stdout, stderr] = processSpawn(file, cmd, options.cwd ?? "", input, flags, pairs);
