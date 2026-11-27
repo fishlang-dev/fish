@@ -910,6 +910,26 @@ To fix it, remove it, or name it with a leading '_' when it is unused on purpose
   },
   W0002: { title: "unreachable code" },
   W0003: { title: "a route left out of the OpenAPI document" },
+  W0005: {
+    title: "a reference-counted type that can hold itself",
+    long: {
+      text: `In a file in the reference-counted edition, '// @fish-edition rc', a field of one of the file's
+types leads back to that type, so objects can hold each other in a cycle. Reference counting never
+frees a cycle: each object in it keeps the next one's count above zero. It is a warning, so the
+program still builds.
+
+To fix it, make one link of the cycle a 'Weak', which reaches the object through 'upgrade()' without
+keeping it alive, as a child's link to its parent usually is.`,
+      example: `// @fish-edition rc
+class Node {
+  next: Node | null = null;
+}`,
+      fixed: `// @fish-edition rc
+class Node {
+  next: Weak<Node> = new Weak<Node>();
+}`,
+    },
+  },
   W0004: {
     title: "a blocking call in an async function",
     long: {

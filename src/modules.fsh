@@ -9,10 +9,11 @@ import { jsDeclaration, jsOverloads, referenced } from "./js.fsh";
 import { DeclarationReader, findTypings, type Declared, type Exports } from "./typings.fsh";
 import { parse, type ClassMember, type ClassNode, type Declarator, type EnumMember, type Expr, type Func, type Interface, type MatchArm, type ObjectProp, type Param, type Pattern, type PatternProp, type Span, type Specifier, type Stmt, type SwitchCase, type TupleElement, type TypeAlias, type TypeMember, type TypeNode, type TypeParam } from "./parser.fsh";
 import { fishFiles } from "./fmt.fsh";
-import { MANIFEST, type RustDependency } from "./manifest.fsh";
+import { MANIFEST, type Edition, type RustDependency } from "./manifest.fsh";
 import { HANDLE, RUST_NAME, rustSymbol, type RustTables } from "./rust.fsh";
 import { ENGINE_HOOK, STD, STD_MODULES, STD_ONLY, STD_VALUES, stdModule, stdModuleNames } from "./std.fsh";
-import { refuseCompat } from "./migrate.fsh";
+import { editionOf, refuseCompat } from "./migrate.fsh";
+import { lowerRcEdition } from "./refcounted.fsh";
 import { unsupported } from "./unsupported.fsh";
 import { dup, forEachChild, nextId, someNode, nodeIdOf, NodeMap, Rewrites, shiftSpansStmt, shiftSpansStmts, walk, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
 import { cloneClassMember, cloneExpr, cloneStmt, rebuiltStmts, type Replacements } from "./rebuild.fsh";
@@ -29,10 +30,11 @@ import { buildFacts, buildModule } from "./target.fsh";
 // `whole`: a package's module an import names whole, as a namespace, reached through its name.
 // `owner`: on a Fish package's lib, the package, whose other files' exports are private to it.
 // `pkg`: the directory of the Fish package a file belongs to, when the program has a fish.toml.
+// `rc`: the file is in the reference-counted edition, and was lowered as it loaded.
 // The module each import and re-export names, by the statement; named apart so the type can hold
 // the module type it is part of.
 export type Targets = NodeMap<Stmt, Module>;
-export type Module = { path: string; file: string; base: usize; src: string; statements: Stmt[]; targets: Targets; globals: Map<string, Module>; whole?: boolean; owner?: { name: string; dir: string; lib: string }; pkg?: string };
+export type Module = { path: string; file: string; base: usize; src: string; statements: Stmt[]; targets: Targets; globals: Map<string, Module>; whole?: boolean; owner?: { name: string; dir: string; lib: string }; pkg?: string; rc?: true };
 // `packages`: each package specifier the program imports, by the directory its import resolves
 // from, its index naming it in the bundle.
 export type Package = { specifier: string; dir: string; at: Span };
@@ -170,6 +172,16 @@ class Loader {
       const global = this.std(cx, read, name);
       globals.set(name, global);
     }
+    if (!std && this.editionAt(key, text) === "rc") {
+      const crossing = this.crossing(statements, targets);
+      let warned = lowerRcEdition(cx.ids, statements, crossing);
+      if (warned.length > 0) {
+        let all: CompileError[] = cx.editionWarnings !== undefined ? cx.editionWarnings!.map((w) => w.clone()) : [];
+        while (warned.length > 0) all.push(warned.shift()!);
+        cx.editionWarnings = all;
+      }
+      this.modules[index]!.rc = true;
+    }
     this.modules[index]!.statements = statements;
     this.modules[index]!.targets = targets;
     this.modules[index]!.globals = globals;
@@ -230,6 +242,26 @@ class Loader {
     const text = readWith(read, target);
     const shown = relative(dirname(this.entry), target);
     return this.visit(cx, read, target, text, shown !== "" ? shown : target);
+  }
+
+  // The edition a file is in, by its directive or its package's.
+  /** @throws {CompileError | IoError} */
+  editionAt(this: Ref<this>, key: string, text: string): Edition {
+    return editionOf(text, this.fish !== undefined ? packageOf(this.fish, key)?.manifest.edition : undefined);
+  }
+
+  // The names a file in the reference-counted edition imports from Fish files in the ownership
+  // edition, which take what it passes them by value.
+  /** @throws {CompileError | IoError} */
+  crossing(this: Ref<this>, statements: Ref<Stmt[]>, targets: Ref<Targets>): Set<string> {
+    let out = new Set<string>();
+    for (const s of statements) {
+      if (s.kind !== "import" || s.named === undefined) continue;
+      const t = targets.get(s);
+      if (t === undefined || t.path.startsWith("std:") || !t.path.endsWith(".fsh") || this.editionAt(t.path, t.src) === "rc") continue;
+      for (const n of s.named!) if (!n.typeOnly) out.add(n.alias ?? n.name);
+    }
+    return out;
   }
 
   // A declaration file a package's declarations come from: given its own place in the program's
@@ -810,6 +842,7 @@ export function reparsedFile(ids: Mut<Ids>, loaded: Ref<Loaded>, index: usize, t
   if (m.base > 0) shiftSpansStmts(parsed, m.base);
   lowerImportMeta(ids, parsed, m.path, index === 0);
   if (parsed.some((s) => isRustBlock(s))) return { statements: [], fallback: "the file declares Rust" };
+  if (m.rc === true) return { statements: [], fallback: "the file is in the reference-counted edition" };
   // What a macro made of the file is in the program, which the file as written isn't.
   if (parsed.some((s) => decorated(s))) return { statements: [], fallback: "the file has decorators or macros" };
   const known = m.targets.ids();
