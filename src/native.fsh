@@ -4521,21 +4521,28 @@ struct fsh_task {
 static void *fsh_output(fsh_task *t) { return t->memory + t->frame_size; }
 
 // A worker's queue: a ring of tasks, guarded by its own lock, which other workers steal from.
+// The lock is a spin lock, held for a few loads and stores: a mutex that a thief contends for
+// sleeps in the kernel, which costs more than the work it guards.
 typedef struct {
-  pthread_mutex_t lock;
+  int32_t lock;
   fsh_task **ring;
   int64_t head, count, capacity;
 } fsh_queue;
 
 static int64_t fsh_workers = 0;
 static fsh_queue *fsh_queues = NULL;
-static fsh_queue fsh_injected = { PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0, 0 };
+static fsh_queue fsh_injected = { 0, NULL, 0, 0, 0 };
 static pthread_t *fsh_threads = NULL;
 static _Thread_local int64_t fsh_worker = -1;
 // Workers with nothing to do wait here until a task is queued or the runtime stops.
 static pthread_mutex_t fsh_park = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fsh_parked = PTHREAD_COND_INITIALIZER;
 static int64_t fsh_queued = 0;
+// Workers waiting on fsh_parked, and workers awake with nothing to run that are looking for a
+// task. Queuing one wakes a parked worker only when none is looking, so on a busy runtime a wake
+// costs no lock and no system call, as Go's and tokio's schedulers do.
+static int64_t fsh_idle = 0;
+static int64_t fsh_searching = 0;
 static int32_t fsh_stopping = 0;
 static int64_t fsh_stopped = 0;
 static pthread_cond_t fsh_left = PTHREAD_COND_INITIALIZER;
@@ -4561,8 +4568,24 @@ static int64_t fsh_blocking_live = 0;
 // these, or the blocks that thread is about to free would be counted as leaks.
 static int64_t fsh_blocking_ending = 0;
 
+static void fsh_relax(void);
+
+static void fsh_queue_lock(fsh_queue *q) {
+  for (int spins = 0; __atomic_exchange_n(&q->lock, 1, __ATOMIC_ACQUIRE); spins++) {
+    // Its holder may have been preempted, so a long wait gives up the processor.
+    while (__atomic_load_n(&q->lock, __ATOMIC_RELAXED)) {
+      if (++spins > 100) sched_yield();
+      else fsh_relax();
+    }
+  }
+}
+
+static void fsh_queue_unlock(fsh_queue *q) {
+  __atomic_store_n(&q->lock, 0, __ATOMIC_RELEASE);
+}
+
 static void fsh_push(fsh_queue *q, fsh_task *t) {
-  pthread_mutex_lock(&q->lock);
+  fsh_queue_lock(q);
   if (q->count == q->capacity) {
     int64_t capacity = q->capacity ? q->capacity * 2 : 64;
     fsh_task **ring = malloc(capacity * sizeof(fsh_task *));
@@ -4573,33 +4596,45 @@ static void fsh_push(fsh_queue *q, fsh_task *t) {
     q->capacity = capacity;
   }
   q->ring[(q->head + q->count) % q->capacity] = t;
-  q->count++;
-  pthread_mutex_unlock(&q->lock);
+  __atomic_store_n(&q->count, q->count + 1, __ATOMIC_RELAXED);
+  fsh_queue_unlock(q);
 }
 
-static fsh_task *fsh_pop(fsh_queue *q) {
-  pthread_mutex_lock(&q->lock);
+// A queue holding fewer than least tasks is passed over without its lock.
+static fsh_task *fsh_pop(fsh_queue *q, int64_t least) {
+  if (__atomic_load_n(&q->count, __ATOMIC_RELAXED) < least) return NULL;
+  fsh_queue_lock(q);
   fsh_task *t = NULL;
-  if (q->count > 0) {
+  if (q->count >= least) {
     t = q->ring[q->head];
     q->head = (q->head + 1) % q->capacity;
-    q->count--;
+    __atomic_store_n(&q->count, q->count - 1, __ATOMIC_RELAXED);
   }
-  pthread_mutex_unlock(&q->lock);
+  fsh_queue_unlock(q);
   return t;
 }
 
 static void fsh_pool_task(fsh_task *t);
+
+// Wakes a parked worker unless one is already looking for a task. The counts are sequentially
+// consistent against a parking worker's, which counts itself idle before it reads fsh_queued:
+// either this sees it idle, or it sees the task queued and doesn't wait.
+static void fsh_notify(void) {
+  if (__atomic_load_n(&fsh_searching, __ATOMIC_SEQ_CST) > 0 || __atomic_load_n(&fsh_idle, __ATOMIC_SEQ_CST) == 0) return;
+  // Taking the lock waits out a worker between counting itself idle and waiting; the signal is
+  // sent after, so the worker it wakes doesn't then wait for the lock.
+  pthread_mutex_lock(&fsh_park);
+  pthread_mutex_unlock(&fsh_park);
+  pthread_cond_signal(&fsh_parked);
+}
 
 // Queues a task: on the waking worker's own queue, or from any other thread on the shared
 // one, then lets a parked worker know. A blocking task goes to the blocking pool instead.
 static void fsh_schedule(fsh_task *t) {
   if (t->blocking) return fsh_pool_task(t);
   fsh_push(fsh_worker >= 0 ? &fsh_queues[fsh_worker] : &fsh_injected, t);
-  pthread_mutex_lock(&fsh_park);
-  __atomic_fetch_add(&fsh_queued, 1, __ATOMIC_RELAXED);
-  pthread_cond_signal(&fsh_parked);
-  pthread_mutex_unlock(&fsh_park);
+  __atomic_fetch_add(&fsh_queued, 1, __ATOMIC_SEQ_CST);
+  fsh_notify();
 }
 
 struct fsh_group;
@@ -4692,27 +4727,73 @@ static void fsh_run(fsh_task *t) {
   if (blocking) __atomic_sub_fetch(&fsh_blocking_ending, 1, __ATOMIC_RELEASE);
 }
 
-static fsh_task *fsh_next_task(int64_t me) {
-  fsh_task *t = fsh_pop(&fsh_queues[me]);
-  if (!t) t = fsh_pop(&fsh_injected);
-  for (int64_t i = 1; !t && i < fsh_workers; i++) t = fsh_pop(&fsh_queues[(me + i) % fsh_workers]);
-  if (t) __atomic_fetch_sub(&fsh_queued, 1, __ATOMIC_RELAXED);
+// The next task for a worker: its own queue's first, else the shared queue's, else one taken
+// from another worker's queue holding at least least tasks.
+static fsh_task *fsh_next_task(int64_t me, int64_t least) {
+  fsh_task *t = fsh_pop(&fsh_queues[me], 1);
+  if (!t) t = fsh_pop(&fsh_injected, 1);
+  for (int64_t i = 1; !t && i < fsh_workers; i++) t = fsh_pop(&fsh_queues[(me + i) % fsh_workers], least);
+  if (t) __atomic_fetch_sub(&fsh_queued, 1, __ATOMIC_SEQ_CST);
   return t;
+}
+
+static int64_t fsh_now(void);
+
+static void fsh_relax(void) {
+#if defined(__x86_64__)
+  __builtin_ia32_pause();
+#elif defined(__aarch64__)
+  __asm__ volatile("yield");
+#endif
+}
+
+// A worker that ran out of tasks looks for one a while before it parks, since on a busy
+// runtime another is likely queued within microseconds and parking and waking cost system
+// calls. A worker's only task is left to it at first: it is likely queued by the task that
+// worker is polling, which will soon end its poll and run it there, warm in its cache, as Go
+// leaves a running worker's next goroutine.
+static fsh_task *fsh_search(int64_t me) {
+  int64_t start = fsh_now();
+  for (int64_t spins = 0;; spins++) {
+    int64_t waited = spins % 64 == 63 ? fsh_now() - start : 0;
+    if (waited > 50000 || __atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) return NULL;
+    fsh_task *t = fsh_next_task(me, waited > 10000 ? 1 : 2);
+    if (t) return t;
+    for (int i = 0; i < 8; i++) fsh_relax();
+  }
 }
 
 static void *fsh_work(void *arg) {
   fsh_worker = (int64_t)arg;
+  int32_t searching = 0;
   // A stopping runtime runs nothing more, however much is queued.
   while (!__atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) {
-    fsh_task *t = fsh_next_task(fsh_worker);
+    fsh_task *t = fsh_next_task(fsh_worker, 2);
+    // At most two workers look at once; the rest park.
+    if (!t && (searching || __atomic_load_n(&fsh_searching, __ATOMIC_SEQ_CST) < 2)) {
+      if (!searching) __atomic_fetch_add(&fsh_searching, 1, __ATOMIC_SEQ_CST);
+      searching = 1;
+      t = fsh_search(fsh_worker);
+    }
+    if (searching) {
+      searching = 0;
+      // The last looker to find a task hands the looking on, for whatever else is queued.
+      if (__atomic_sub_fetch(&fsh_searching, 1, __ATOMIC_SEQ_CST) == 0 && t && __atomic_load_n(&fsh_queued, __ATOMIC_SEQ_CST) > 0) fsh_notify();
+    }
     if (t) {
       fsh_run(t);
       continue;
     }
     pthread_mutex_lock(&fsh_park);
-    while (__atomic_load_n(&fsh_queued, __ATOMIC_RELAXED) <= 0 && !fsh_stopping) pthread_cond_wait(&fsh_parked, &fsh_park);
+    __atomic_fetch_add(&fsh_idle, 1, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&fsh_queued, __ATOMIC_SEQ_CST) <= 0 && !fsh_stopping) pthread_cond_wait(&fsh_parked, &fsh_park);
+    __atomic_fetch_sub(&fsh_idle, 1, __ATOMIC_SEQ_CST);
     pthread_mutex_unlock(&fsh_park);
+    // Woken, it looks for the task it was woken for.
+    searching = 1;
+    __atomic_fetch_add(&fsh_searching, 1, __ATOMIC_SEQ_CST);
   }
+  if (searching) __atomic_fetch_sub(&fsh_searching, 1, __ATOMIC_SEQ_CST);
   pthread_mutex_lock(&fsh_park);
   fsh_stopped++;
   pthread_cond_broadcast(&fsh_left);
@@ -4870,7 +4951,8 @@ static void fsh_timer_add(int64_t deadline, fsh_task *task, struct fsh_signal *s
     fsh_timer_swap(at, (at - 1) / 2);
     at = (at - 1) / 2;
   }
-  pthread_cond_signal(&fsh_timer_changed);
+  // The timer thread waits for the earliest deadline, so only a new earliest one changes its wait.
+  if (at == 0) pthread_cond_signal(&fsh_timer_changed);
   pthread_mutex_unlock(&fsh_timer_lock);
 }
 
@@ -6147,8 +6229,16 @@ static void fsh_io_wait(int fd, int32_t writing, fsh_task *task) {
     __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
     fsh_interests[fsh_interest_count++] = (fsh_interest){ fd, writing, task };
   }
+#ifdef __APPLE__
+  // A kqueue filter is armed for the socket alone, whoever else waits on it, so the system call
+  // is made outside the lock. Arming one already taken, or a descriptor closed and reused since,
+  // at worst wakes a waiter early, which finds nothing to read and waits again.
+  pthread_mutex_unlock(&fsh_io_lock);
+  fsh_io_arm(fd, writing);
+#else
   fsh_io_arm(fd, writing);
   pthread_mutex_unlock(&fsh_io_lock);
+#endif
 }
 
 // Takes out the interests in a socket that are ready, or all of them when it is closing, and
@@ -8488,7 +8578,6 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   fsh_workers = cores > 0 ? cores : 1;
   fsh_queues = calloc(fsh_workers, sizeof(fsh_queue));
   fsh_threads = calloc(fsh_workers, sizeof(pthread_t));
-  for (int64_t i = 0; i < fsh_workers; i++) pthread_mutex_init(&fsh_queues[i].lock, NULL);
   fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size);
   // The reactor is ready before any task can wait on a socket.
   fsh_io_start();
