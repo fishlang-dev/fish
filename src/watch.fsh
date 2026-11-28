@@ -1,4 +1,5 @@
-import { listedFiles, readsOf } from "./reads.fsh";
+import { readsOf } from "./manifest.fsh";
+import { listedFiles } from "./reads.fsh";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { watch } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";

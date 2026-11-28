@@ -85,14 +85,16 @@ async function work(n: i64): Promise<i64> {
   await sleep(20);
   return n * 2;
 }
-async function main() {
+async function main(): Promise<void> throws IoError {
   const words = ["wasm", "runs", "fish"];
   let counts = new Map<string, i64>();
-  for (const w of words) counts.set(w, w.length);
+  for (const w of words) counts.set(w, w.length as i64);
   const started = Date.now();
   const a = spawn(work(20));
   const b = spawn(work(1));
-  console.log(words.join(" "), counts.get("fish") ?? 0, await a, await b, Math.sqrt(2.0));
+  const ra = await a;
+  const rb = await b;
+  console.log(words.join(" "), counts.get("fish") ?? 0, ra, rb, Math.sqrt(2.0));
   console.log(Date.now() - started >= 20, readFileSync("data.txt", "utf8").trim());
   const xs: i64[] = [];
   console.log(xs[words.length]);

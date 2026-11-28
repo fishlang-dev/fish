@@ -276,6 +276,6 @@ test("the usage text lists --leaks", () => {
   const root = scratch("fish-leaks-");
   const bad = fishc(root, ["build", "x.fsh", "--panic=no"]);
   assert(bad.code === 2, `exited with ${bad.code}`);
-  assert(bad.err.includes("[--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm]"), `stderr:\n${bad.err}`);
+  assert(bad.err.includes("[--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--arena <bytes>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm]"), `stderr:\n${bad.err}`);
   removed(root);
 }, { timeout: 60_000 });

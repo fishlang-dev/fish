@@ -308,8 +308,9 @@ function inPlace(): string[] {
     "check.fsh: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.fsh: if (inserted !== undefined && inserted.length > 0",
     "modules.fsh: let removed = l.body.splice(at, 1);", "modules.fsh: l.body.splice(at, 0, {", "macros.fsh: statements.splice(", "modules.fsh: if (startsMain(statements[i]!)) statements.splice(",
     // a kept check's class node given a member's body read again, so a generic class's later
-    // instances read it, which the node owns there;
-    "check.fsh: m.body = cloneStmts(statements);",
+    // instances read it, and its own function given its body read again, so inferring borrows
+    // reads the edit, which the node owns there;
+    "check.fsh: m.body = cloneStmts(statements);", "check.fsh: if (r.owner === undefined && s.kind === \"function\" && s.name === r.name) s.body = cloneStmts(statements);",
     // a file's statements lent to linking and put back where they were;
     "modules.fsh: let taken = m.statements.splice(0);",
     // a package's function just made, given the overloads it lists before any tree holds it;

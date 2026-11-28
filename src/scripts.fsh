@@ -5,9 +5,9 @@ import { existsSync, readFileSync, realpathSync, renameSync, writeFileSync } fro
 import { dirname, join } from "node:path";
 import { compilerDigest } from "./checkcache.fsh";
 import { LOCKFILE } from "./dependencies.fsh";
-import { findManifest } from "./manifest.fsh";
+import { findManifest, readsOf } from "./manifest.fsh";
 import { cacheDir, partial } from "./mathlib.fsh";
-import { listedFiles, readsOf } from "./reads.fsh";
+import { listedFiles } from "./reads.fsh";
 
 function sha256(text: string): string {
   let hash = createHash("sha256");

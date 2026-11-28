@@ -1250,7 +1250,8 @@ class Interpreter<H extends ComptimeHost> {
       if (!this.printing) this.refuse("printing", e);
       let line: [Value, Type][] = [];
       for (const a of e.args) {
-        const t = this.typeOf(f, a);
+        // The checker types no string literal it prints, since codegen folds it into the format.
+        const t: Type = a.kind === "string" ? "string" : this.typeOf(f, a);
         line.push([copyValue(this.valueOf(f, a)), t]);
       }
       this.printed.push(line);

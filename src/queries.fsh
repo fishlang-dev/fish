@@ -3,7 +3,8 @@
 // rebuild whose files all read as they did is not checked again, and one after an edit checks only
 // the bodies that changed. `fishc build`, `fishc check` and `fishc watch` all drive it; the
 // language server holds one per program, and the cache on disk reads and writes one here.
-import { listedFiles, readsOf } from "./reads.fsh";
+import { listedFiles } from "./reads.fsh";
+import { readsOf } from "./manifest.fsh";
 import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import type { InstanceId } from "./arenas.fsh";

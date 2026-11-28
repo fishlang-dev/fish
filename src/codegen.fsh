@@ -22,6 +22,7 @@ import { assignedNames, closureAssigned } from "./flow.fsh";
 import { callbacksOnlyCalled, calledThrough } from "./callbacks.fsh";
 import { fileEnd, fileStart, partEnd, partStart, type Started, type Tables } from "./compilation.fsh";
 import { allWords, byteSize } from "./sizes.fsh";
+import { isWasm } from "./target.fsh";
 import type { Kind, Verdict } from "./narrow.fsh";
 
 // Every instance to compile, as records.
@@ -2912,7 +2913,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${v} = load ${vt}, ptr ${slot}`);
       const held = this.recOf(this.tables.typing.rec(t).value);
       if (held !== undefined && held.kind !== "handle" && held.kind !== "interior") {
-        const line = `call ${vt} ${this.helper("copy", this.tables.typing.rec(t).value as Exclude<Type, string>)}(${vt} ${v})`;
+        const line = `call ${vt} ${this.helper("copy", this.tables.typing.rec(t).value as Exclude<Type, string>)}(${this.glueArgument(this.tables.typing.rec(t).value, v)})`;
         this.unwinding(line, made, (cg: Mut<Codegen>) => cg.emit(`call void @fsh_rt_map_free(ptr ${copy})`));
         this.emit(`store ${vt} ${made}, ptr ${slot}`);
       } else {
@@ -6292,7 +6293,7 @@ class Codegen implements PrintHost, ComptimeHost {
     }
     // A copy may panic part way, on a Dyn whose value can't be copied.
     const result = this.temp();
-    const line = `call ${this.llvm(type)} ${this.helper("copy", type as Exclude<Type, string>)}(${this.llvm(type)} ${v})`;
+    const line = `call ${this.llvm(type)} ${this.helper("copy", type as Exclude<Type, string>)}(${this.glueArgument(type, v)})`;
     this.unwinding(line, result);
     return result;
   }
@@ -6330,7 +6331,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(line);
       return;
     }
-    const line2 = `call void ${this.helper("drop", type as Exclude<Type, string>)}(${this.llvm(type)} ${v})`;
+    const line2 = `call void ${this.helper("drop", type as Exclude<Type, string>)}(${this.glueArgument(type, v)})`;
     this.emit(line2);
   }
 
@@ -6394,6 +6395,22 @@ class Codegen implements PrintHost, ComptimeHost {
       this.emit(`${x} = extractvalue ${t} ${v}, ${i}`);
       this.dispose(x, part);
     }
+  }
+
+  // A value larger than BY_POINTER reaches its drop or copy through the address of a slot holding
+  // it: WebAssembly splits an aggregate parameter into one parameter per scalar, and wasmtime
+  // refuses a function taking more than 1000, as an async function's frame can.
+  byPointerGlue(type: Type): boolean {
+    return isWasm(this.tables.session.build?.triple ?? "") && byteSize(this.tables.typing, type) > BY_POINTER;
+  }
+
+  // The argument a drop or copy helper takes `v` of `type` as.
+  glueArgument(this: Mut<this>, type: Type, v: string): string {
+    const t = this.llvm(type);
+    if (!this.byPointerGlue(type)) return `${t} ${v}`;
+    const slot = this.alloca(t);
+    this.emit(`store ${t} ${v}, ptr ${slot}`);
+    return `ptr ${slot}`;
   }
 
   // The function that drops what a value of an aggregate type owns, or returns a copy of it,
@@ -6541,8 +6558,10 @@ class Codegen implements PrintHost, ComptimeHost {
       }
     }
     this.emit(kind === "drop" ? "ret void" : `ret ${t} ${result}`);
-    this.out.push(`define internal ${kind === "drop" ? "void" : t} ${name}(${t} %v) ${this.unwinds} {`);
+    const indirect = this.byPointerGlue(type);
+    this.out.push(`define internal ${kind === "drop" ? "void" : t} ${name}(${indirect ? "ptr %v.at" : `${t} %v`}) ${this.unwinds} {`);
     this.out.push("entry:");
+    if (indirect) this.out.push(`  %v = load ${t}, ptr %v.at`);
     for (const pushed of this.allocas) this.out.push(pushed);
     for (const pushed of this.body) this.out.push(pushed);
     this.out.push("}");
@@ -8748,7 +8767,7 @@ class Codegen implements PrintHost, ComptimeHost {
       }
       // An element's copy may panic: the elements copied so far, and the buffer, go with it.
       const made = cg.temp();
-      const line3 = `call ${t} ${cg.helper("copy", element as Exclude<Type, string>)}(${t} ${v})`;
+      const line3 = `call ${t} ${cg.helper("copy", element as Exclude<Type, string>)}(${cg.glueArgument(element, v)})`;
       cg.unwinding(line3, made, (cg: Mut<Codegen>) => {
         const built2 = cg.built(copy, i, i);
         cg.dispose(built2, type);
@@ -11336,6 +11355,8 @@ class Codegen implements PrintHost, ComptimeHost {
 
 
   run(this: Mut<this>, e: Ref<Extract<Expr, { kind: "call" }>>): string | undefined {
+    // std's __devKeep is a function the checker resolves like any other, so this comes first.
+    if (e.callee.kind === "ident" && e.callee.name === "__devKeep" && this.tables.session.build?.dev === true) return this.devKept(e);
     const target = this.callOf(e);
     const pair = (target !== undefined ? this.pairOf(e.callee) : undefined);
     if (pair !== undefined && target !== undefined) {
@@ -11414,7 +11435,6 @@ class Codegen implements PrintHost, ComptimeHost {
         if (!this.cur().types.has(e)) this.pending.push({ v: result, type: this.cur().types.get(e.callee)! });
         return result;
       }
-      if (e.callee.kind === "ident" && e.callee.name === "__devKeep" && this.tables.session.build?.dev === true) return this.devKept(e);
       // `ptrOf(r)` and `mutPtrOf(m)`: the address its argument is lent at.
       if (e.callee.kind === "ident" && (e.callee.name === "ptrOf" || e.callee.name === "mutPtrOf")) return this.value(e.args[0]!);
       if (e.callee.kind === "ident" && e.callee.name === "nullPtr") return "null";
@@ -14658,13 +14678,20 @@ class Codegen implements PrintHost, ComptimeHost {
   }
 
 
+  // wasi-libc's start calls a `main` taking arguments as `__main_argc_argv`, the name clang's C
+  // front end gives it; a newer LLVM no longer renames an IR `@main`, so the module names it so.
+  mainHead(): string {
+    const symbol = isWasm(this.tables.session.build?.triple ?? "") ? "__main_argc_argv" : "main";
+    return `define i32 @${symbol}(i32 %argc, ptr %argv) ${this.unwinds} {`;
+  }
+
   entry(this: Mut<this>): string[] {
     if (this.inst(this.main).future !== undefined) {
       const part = this.inst(this.main).future!;
       return this.driver(part);
     }
     // The runtime keeps the program's arguments for `process.argv`.
-    if (this.inst(this.main).throws === undefined) return [`define i32 @main(i32 %argc, ptr %argv) ${this.unwinds} {`, "  call void @fsh_rt_args(i32 %argc, ptr %argv)", '  call void @"fsh.main"()', "  ret i32 0", "}"];
+    if (this.inst(this.main).throws === undefined) return [this.mainHead(), "  call void @fsh_rt_args(i32 %argc, ptr %argv)", '  call void @"fsh.main"()', "  ret i32 0", "}"];
     this.current = this.main;
     [this.allocas, this.body, this.temps, this.labels, this.block] = [[], [], 0, 0, "entry"];
     const type = this.resultType(this.main);
@@ -14686,7 +14713,7 @@ class Codegen implements PrintHost, ComptimeHost {
     const part2 = this.inst(this.main).throws!;
     this.dispose(error, part2);
     this.emit("ret i32 1");
-    return [`define i32 @main(i32 %argc, ptr %argv) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}"];
+    return [this.mainHead(), "entry:", ...this.allocas, ...this.body, "}"];
   }
 
 
@@ -14720,7 +14747,7 @@ class Codegen implements PrintHost, ComptimeHost {
       this.dispose(error, this.tables.typing.rec(future).throws!);
       this.emit("ret i32 1");
     } else this.emit("unreachable");
-    return [`define i32 @main(i32 %argc, ptr %argv) ${this.unwinds} {`, "entry:", ...this.allocas, ...this.body, "}"];
+    return [this.mainHead(), "entry:", ...this.allocas, ...this.body, "}"];
   }
 
 

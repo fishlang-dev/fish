@@ -42,7 +42,7 @@ export function warnings(tables: Ref<Tables>, compiled: Ref<InstanceId[]>, requi
   for (const id of compiled) {
     const i = tables.arenas.instanceOf(id);
     const b = bodyOf(tables.arenas, i);
-    if (b.start >= STD_BASE || tables.generated.has(b)) continue;
+    if (inStd(tables, b.start) || tables.generated.has(b)) continue;
     for (const [node, lid] of i.locals) {
       if (!tables.declarations.has(node.id)) continue;
       const l = tables.arenas.localOf(lid);
@@ -64,7 +64,7 @@ export function warnings(tables: Ref<Tables>, compiled: Ref<InstanceId[]>, requi
   for (const id of compiled) {
     const i = tables.arenas.instanceOf(id);
     const b = bodyOf(tables.arenas, i);
-    if (b.start < STD_BASE && !tables.generated.has(b)) unreachableIn(tables, b.body, i, unreachable);
+    if (!inStd(tables, b.start) && !tables.generated.has(b)) unreachableIn(tables, b.body, i, unreachable);
   }
   let all: CompileError[] = [];
   for (let entries = [...found.values()]; entries.length > 0; ) {

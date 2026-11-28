@@ -294,8 +294,8 @@ test("no module that calls back into its host keeps state of its own", () => {
 function checkerReaches(): string[] {
   return [
     "arenas", "ast", "callbacks", "check", "classes", "compilation", "comptime", "declarations", "defaults", "diag", "edits", "enums", "expressions", "flow", "generics", "ids",
-    "interfaces", "jsx", "keys", "lexer", "locals", "match", "moves", "narrow", "nodes", "operators", "overloads", "parseargs", "parser", "patterns", "program",
-    "quote", "rebuild", "regex", "registry", "resolve", "rust", "sizes", "std", "suggest", "typefns", "types", "typing", "unions", "unsupported", "values",
+    "interfaces", "jsx", "keys", "lexer", "locals", "match", "moves", "narrow", "nodes", "operators", "overloads", "ownership", "parseargs", "parser", "patterns", "program",
+    "quote", "reads", "rebuild", "regex", "registry", "resolve", "rust", "sizes", "std", "suggest", "typefns", "types", "typing", "unions", "unsupported", "values",
     "walk", "warnings",
   ];
 }

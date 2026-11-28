@@ -17,7 +17,7 @@ test("a program that checks is run through the interpreter, its printing kept in
 });
 
 test("an ownership error is placed by line and column and explained", () => {
-  const a = answer(`function take(s: string[]): usize {\n  return s.length;\n}\n\nfunction main() {\n  const xs = ["a"];\n  take(xs);\n  console.log(xs.length);\n}\n`);
+  const a = answer(`export function take(s: string[]): usize {\n  return s.length;\n}\n\nfunction main() {\n  const xs = ["a"];\n  take(xs);\n  console.log(xs.length);\n}\n`);
   assert(a.diagnostics.length > 0 && a.diagnostics[0]!.code === "E0201" && a.diagnostics[0]!.line === 8, `the diagnostics: ${codes(a)}`);
   assert(a.explain.includes("move"), `the explanation:\n${a.explain}`);
   assert(!a.ran && a.output.length === 0, "a program with errors doesn't run");
@@ -49,7 +49,7 @@ for i in $(seq 100); do curl -s -o /dev/null "http://127.0.0.1:$port/" && break;
 base="http://127.0.0.1:$port"
 id=$(curl -s -X POST --data-binary 'function main() {}' "$base/api/share" | sed 's/.*"id":"\\([0-9a-f]*\\)".*/\\1/')
 again=$(curl -s -X POST --data-binary 'function main() {}' "$base/api/share" | sed 's/.*"id":"\\([0-9a-f]*\\)".*/\\1/')
-echo "same $([ "$id" = "$again" ] && echo yes) $(echo -n "$id" | wc -c | tr -d ' ')"
+echo "same $([ "$id" = "$again" ] && echo yes) $(printf %s "$id" | wc -c | tr -d ' ')"
 echo "back $(curl -s "$base/api/share/$id")|$(curl -s -o /dev/null -w '%{content_type}' "$base/api/share/$id")"
 echo "unknown $(curl -s -o /dev/null -w '%{http_code}' "$base/api/share/000000000000")"
 echo "bad $(curl -s -o /dev/null -w '%{http_code}' "$base/api/share/..%2f..%2fetc")"

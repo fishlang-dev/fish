@@ -1648,12 +1648,29 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
       if (r.func === undefined) continue;
       const f: Ref<Declared> = r.func!;
       if (this.tables.published !== undefined && this.tables.published!.has(f.name)) continue;
-      if (f.params.some((p) => p.type !== undefined && !writtenRef(p.type))) return "a function whose parameters' borrows may be inferred has a new signature";
+      // Only a function inference took up, or one whose parameters it could now lend, may change.
+      const id = this.byName.get(r.name);
+      const was = this.instancingState.borrowCandidates.some((c) => c.name === r.name);
+      if (was || id === undefined || f.params.some((p) => p.type !== undefined && this.mayLend(id!, p.type!))) return "a function whose parameters' borrows may be inferred has a new signature";
     }
     if (this.instancingState.borrowCandidates.length === 0) return undefined;
     for (const r of replaced) if (!this.programWith(r)) return "an exported function's body changed";
     const modes = inferModes(this.tables.typing, this.program, this.instancingState.borrowCandidates);
     return modesText(modes) !== this.instancingState.inferredBorrows ? "the edit changes which parameters are inferred to be borrowed" : undefined;
+  }
+
+  // Whether a parameter written as `t` is one inference could lend: no written reference, and a
+  // type it lends, or one that doesn't resolve, which a check afresh reports.
+  private mayLend(this: Mut<this>, id: BodyId, t: Ref<TypeNode>): boolean {
+    if (writtenRef(t)) return false;
+    let resolved: Type = "i64";
+    try {
+      resolved = this.resolveSigned(id, new Map<string, Type>(), t);
+    } catch (_e) {
+      // Resolving throws only a CompileError.
+      return true;
+    }
+    return lendable(this.tables.typing, resolved);
   }
 
   // Puts a body read again in place in the program's own statements, or says it can't: an

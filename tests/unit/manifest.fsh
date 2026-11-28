@@ -263,6 +263,6 @@ test("a dependency can come from the workspace, alone or with capabilities, and 
   const d = read.dependencies[0]!.clone();
   assert(d.name === "u" && "workspace" in d && d.capabilities !== undefined && d.capabilities!.join(",") === "fs", "the dependency from the workspace");
   is(refused(pkg + `[dependencies]\nu = { workspace = false }\n`), "fish.toml:5:19: error[E0905]: 'workspace' is true, taking the dependency from the workspace's [workspace.dependencies]", "workspace = false");
-  is(refused(pkg + `[dependencies]\nu = { workspace = true, version = "^1.0.0" }\n`), "fish.toml:4:25: error[E0905]: a dependency from the workspace takes where it comes from there; 'version' doesn't go with workspace = true", "a version beside it");
+  is(refused(pkg + `[dependencies]\nu = { workspace = true, version = "^1.0.0" }\n`), "fish.toml:5:25: error[E0905]: a dependency from the workspace takes where it comes from there; 'version' doesn't go with workspace = true", "a version beside it");
   is(refused(pkg + `[workspace]\nmember = ["b"]\n`), "fish.toml:5:1: error[E0905]: [workspace] has no key 'member'; it has members", "a misspelled [workspace] key");
 });

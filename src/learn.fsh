@@ -23,9 +23,9 @@ export const EXERCISES: Exercise[] = [
     why: "Passing an owned array to a function moves it there: `total` owns it now, and `scores` can't be used after the call.",
     error: "E0201",
     hint: "Have `total` borrow the array instead: take `xs: Ref<i64[]>`, and the caller keeps `scores`.",
-    code: "function total(xs: i64[]): i64 {\n  let t = 0;\n  for (const x of xs) t += x;\n  return t;\n}\n\nfunction main() {\n  const scores = [3, 4, 5];\n  console.log(total(scores));\n  console.log(scores.length);\n}\n",
+    code: "export function total(xs: i64[]): i64 {\n  let t = 0;\n  for (const x of xs) t += x;\n  return t;\n}\n\nfunction main() {\n  const scores = [3, 4, 5];\n  console.log(total(scores));\n  console.log(scores.length);\n}\n",
     solved:
-      "function total(xs: Ref<i64[]>): i64 {\n  let t = 0;\n  for (const x of xs) t += x;\n  return t;\n}\n\nfunction main() {\n  const scores = [3, 4, 5];\n  console.log(total(scores));\n  console.log(scores.length);\n}\n",
+      "export function total(xs: Ref<i64[]>): i64 {\n  let t = 0;\n  for (const x of xs) t += x;\n  return t;\n}\n\nfunction main() {\n  const scores = [3, 4, 5];\n  console.log(total(scores));\n  console.log(scores.length);\n}\n",
   },
   {
     file: "02_clones.fsh",

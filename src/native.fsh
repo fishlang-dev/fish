@@ -909,8 +909,9 @@ typedef struct fsh_str {
 // unused ones zero, so two small strings are equal exactly when their words are. A block is at
 // least 8-byte aligned, so its address never has the low bit set. Code reading a string's fields
 // opens it first: a small string is copied into a block on the caller's stack, a view, which
-// counts as a literal and lives as long as the caller's frame, so nothing may keep it.
-#define FSH_SMALL 7
+// counts as a literal and lives as long as the caller's frame, so nothing may keep it. A 32-bit
+// pointer, as wasm32's is, has room for three bytes.
+#define FSH_SMALL ((int)sizeof(void *) - 1)
 
 static inline int fsh_small(const fsh_str *s) {
   return ((uintptr_t)s & 1) != 0;

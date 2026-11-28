@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { CompileError } from "./diag.fsh";
+import type { Reads } from "./reads.fsh";
 import { parseRange } from "./semver.fsh";
 import { validCrate } from "./rust.fsh";
 import { inherited } from "./workspace.fsh";
@@ -536,6 +537,20 @@ export function findManifest(from: string): string | undefined {
     const file = join(dir, MANIFEST);
     if (existsSync(file)) return file;
     if (dirname(dir) === dir) return undefined;
+  }
+}
+
+// The reads the package holding `entry` declares, or undefined when it has no manifest or lists
+// none. A manifest that doesn't read is reported by the load, which reads it first.
+export function readsOf(entry: string): Reads | undefined {
+  try {
+    const manifest = findManifest(dirname(resolve(entry)));
+    if (manifest === undefined) return undefined;
+    const dir = realpathSync(dirname(manifest!));
+    const globs = readManifest(readFileSync(manifest!, "utf8"), dir).reads;
+    return globs !== undefined && globs!.length > 0 ? { dir, globs: [...globs!] } : undefined;
+  } catch (_e) {
+    return undefined;
   }
 }
 

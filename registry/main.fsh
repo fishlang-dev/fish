@@ -17,7 +17,25 @@ import { S3Client } from "std:s3";
 import * as log from "std:log";
 
 // What every handler is given: the database and where archives go.
-type Registry = { db: Database; archives: string; bucket: string; base: string };
+// A class, since the router hands each request a clone of its state, and a Database is cloned only
+// by its own 'clone()'.
+class Registry {
+  db: Database;
+  archives: string;
+  bucket: string;
+  base: string;
+
+  constructor(db: Database, archives: string, bucket: string, base: string) {
+    this.db = db;
+    this.archives = archives;
+    this.bucket = bucket;
+    this.base = base;
+  }
+
+  clone(): Registry {
+    return new Registry(this.db.clone(), this.archives.clone(), this.bucket.clone(), this.base.clone());
+  }
+}
 
 type PackageRow = { name: string; owner: string };
 type VersionRow = { version: string; sha256: string; dependencies: string; unsafe: i64; yanked: i64; downloads: i64; published: string };
@@ -267,7 +285,7 @@ async function main(): Promise<void> throws SqliteError | RowError | IoError {
   const archives = env("REGISTRY_ARCHIVES", "archives");
   const bucket = env("REGISTRY_S3_BUCKET", "");
   if (bucket === "") mkdirSync(archives, { recursive: true });
-  const state: Registry = { db, archives, bucket, base: env("REGISTRY_URL", "").replace(/\/+$/, "") };
+  const state = new Registry(db, archives, bucket, env("REGISTRY_URL", "").replace(/\/+$/, ""));
   let app = new Router().state(state);
   app.get("/index/config.json", config);
   app.get("/index/:prefix/:name", indexFile);

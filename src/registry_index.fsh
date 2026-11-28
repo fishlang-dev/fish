@@ -29,6 +29,14 @@ export class Index {
     if (sparseBase(this.url) !== undefined && validName(name)) fetchSparse(this.url, this.dir, join(name.slice(0, 2), name));
     return versions(this.url, this.dir, name);
   }
+
+  // The package's versions, none when the index doesn't have the package.
+  /** @throws {Error | IoError} */
+  listed(name: string): IndexEntry[] {
+    if (sparseBase(this.url) !== undefined && validName(name)) fetchSparse(this.url, this.dir, join(name.slice(0, 2), name));
+    if (validName(name) && !existsSync(join(this.dir, name.slice(0, 2), name))) return [];
+    return versions(this.url, this.dir, name);
+  }
 }
 
 // The registry `--registry` named, ahead of every other source, once main has read it.

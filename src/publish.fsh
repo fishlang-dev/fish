@@ -123,7 +123,7 @@ function publishedManifest(file: string, manifest: Ref<Manifest>): string {
 /** @throws {CompileError | Error | IoError} */
 function publishedVersion(sibling: Ref<Member>, manifest: Ref<Manifest>, root: string): string {
   const own = readManifest(readFileSync(join(sibling.dir, MANIFEST), "utf8"), sibling.dir);
-  const released = openIndex(registryUrl(manifest), true).versions(own.name);
+  const released = openIndex(registryUrl(manifest), true).listed(own.name);
   if (!released.some((e) => e.text === own.version && !e.yanked)) {
     const near = relative(root, sibling.dir);
     throw new Error(`'${own.name}' is the workspace's member at '${near !== "" ? near : "."}', and the registry doesn't have its version ${own.version} yet; publish it first, with 'fishc publish -p ${own.name}'`);

@@ -137,8 +137,8 @@ test("a form the js target can't compile is refused at its span", () => {
   write(join(dir, "main.fsh"), `function main() {
   const n: i64 = 2;
   const s = match (n) {
-    1 => "one",
-    _ => "many",
+    case 1 => "one",
+    case _ => "many",
   };
   console.log(s);
 }

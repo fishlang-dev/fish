@@ -63,10 +63,13 @@ post() { curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: applic
 echo "tasks $(curl -s "$base/api/tasks" | grep -o '"id":"[a-z]*"' | tr '\\n' ' ')"
 echo "no consent $(post /api/sessions '{"consent":false}')"
 id=$(curl -s -X POST --data '{"consent":true}' "$base/api/sessions" | sed 's/.*"id":"\\([0-9a-f]*\\)".*/\\1/')
-echo "id $(echo -n "$id" | wc -c | tr -d ' ')"
-echo "event $(post /api/events "{\\"session\\":\\"$id\\",\\"task\\":\\"lend\\",\\"kind\\":\\"compile\\",\\"codes\\":[\\"E0201\\"],\\"ms\\":1500}")"
-echo "bad kind $(post /api/events "{\\"session\\":\\"$id\\",\\"task\\":\\"lend\\",\\"kind\\":\\"typed\\",\\"codes\\":[],\\"ms\\":1}")"
-echo "unknown session $(post /api/events "{\\"session\\":\\"$(printf '0%.0s' $(seq 32))\\",\\"task\\":\\"lend\\",\\"kind\\":\\"start\\",\\"codes\\":[],\\"ms\\":0}")"
+echo "id $(printf %s "$id" | wc -c | tr -d ' ')"
+event='{"session":"'"$id"'","task":"lend","kind":"compile","codes":["E0201"],"ms":1500}'
+typed='{"session":"'"$id"'","task":"lend","kind":"typed","codes":[],"ms":1}'
+unknown='{"session":"'"$(printf '0%.0s' $(seq 32))"'","task":"lend","kind":"start","codes":[],"ms":0}'
+echo "event $(post /api/events "$event")"
+echo "bad kind $(post /api/events "$typed")"
+echo "unknown session $(post /api/events "$unknown")"
 echo "not json $(post /api/events 'nope')"
 echo "export $(curl -s "$base/export.json" | grep -o '"codes":"[A-Z0-9,]*"') $(curl -s "$base/export.json" | grep -o '"kind":"[a-z]*"')"
 echo "summary $(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$base/summary") $(curl -s "$base/summary" | grep -c 'E0201 &times; 1')"

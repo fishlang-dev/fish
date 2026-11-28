@@ -19,7 +19,7 @@ fn main() {
     println!("{} {}", total, v.len());
 }
 `,
-    fish: `function sum(v: i64[]): i64 {
+    fish: `export function sum(v: i64[]): i64 {
   let total = 0;
   for (const x of v) total += x;
   return total;
@@ -31,7 +31,7 @@ function main() {
   console.log(total, v.length);
 }
 `,
-    solution: `function sum(v: Ref<i64[]>): i64 {
+    solution: `export function sum(v: Ref<i64[]>): i64 {
   let total = 0;
   for (const x of v) total += x;
   return total;

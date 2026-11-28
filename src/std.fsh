@@ -243,13 +243,21 @@ function __propPick(r: Mut<PropRandom>, n: i64): i64 {
 function __propLength(r: Mut<PropRandom>, size: i64): i64 {
   return r.below(size / 4 + 2);
 }
-const __PROP_PIECES: string[] = ["a", "b", "z", "A", "Z", "0", "9", " ", "-", "_", ".", "/", "%", "é", "ß", "中", "😀", "\\u0000", "\\n"];
+// The tables are local: a function reading a top-level const has it baked in, and is emitted again
+// on every incremental build, which every program would pay for this prelude function.
 function __propString(r: Mut<PropRandom>, size: i64): string {
+  const pieces: string[] = ["a", "b", "z", "A", "Z", "0", "9", " ", "-", "_", ".", "/", "%", "é", "ß", "中", "😀", "\\u0000", "\\n"];
+  // Printable ASCII, 32 to 126, sliced rather than built with String.fromCharCode, which a
+  // program may shadow with a String of its own.
+  const ascii = " !\\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\\\]^_\`abcdefghijklmnopqrstuvwxyz{|}~";
   const n = __propLength(r, size);
   let s = "";
   for (let i = 0; i < n; i++) {
-    if (r.below(3) === 0) s += __PROP_PIECES[r.below(__PROP_PIECES.length as i64) as usize];
-    else s += String.fromCharCode((32 + r.below(95)) as u16);
+    if (r.below(3) === 0) s += pieces[r.below(pieces.length as i64) as usize];
+    else {
+      const k = r.below(95);
+      s += ascii.slice(k, k + 1);
+    }
   }
   return s;
 }
@@ -2756,9 +2764,9 @@ class StateRouter<S> {
   }
 
   use(this: Mut<this>, middleware: (req: Request, state: S, next: __routerNext) => Promise<Response>) {
-    const state = this.held.clone();
+    const state = shared(this.held.clone());
     this.router.use(async (req: Request, next: __routerNext) => {
-      const res = await middleware(req, state.clone(), next);
+      const res = await middleware(req, state.update((s) => s.clone()), next);
       return res;
     });
   }
@@ -2783,18 +2791,18 @@ class StateRouter<S> {
     return res;
   }
 
+  // The routes already hold their own clones of the state, so the router alone answers; an async
+  // closure can't hold the state, which may have a disposer.
   handler(this: Own<this>): ServeHandler {
-    const router = this;
-    return async (req: Request) => {
-      const res = await router.handle(req);
-      return res;
-    };
+    return this.router.handler();
   }
 
+  // The state is held through a shared, since an async closure can't hold a value with a disposer,
+  // such as a Database, itself; each request is given its own clone.
   private bound(this: Ref<this>, handler: (req: Request, state: S) => Promise<Response>): ServeHandler {
-    const state = this.held.clone();
+    const state = shared(this.held.clone());
     return async (req: Request) => {
-      const res = await handler(req, state.clone());
+      const res = await handler(req, state.update((s) => s.clone()));
       return res;
     };
   }
@@ -14020,6 +14028,10 @@ async function __devAnswer(job: i64, handler: ServeHandler): Promise<void> {
   const bytes = new TextEncoder().encode(reply);
   unsafe { fishdev_reply(job, ptrOf(bytes[0]), bytes.length as i64) };
 }
+// cString can't be used inside an async function, so the C calls taking one are made here.
+function __devListen(hostname: string, port: i64): void {
+  unsafe { fishdev_listen(cString(hostname), port) };
+}
 async function __platformServe(options: Ref<ServeOptions>, handler: ServeHandler): Promise<void> {
   let hostname = "0.0.0.0";
   const h = options.hostname;
@@ -14027,7 +14039,7 @@ async function __platformServe(options: Ref<ServeOptions>, handler: ServeHandler
   let port: i64 = 8000;
   const p = options.port;
   if (p !== null) port = p;
-  unsafe { fishdev_listen(cString(hostname), port) };
+  __devListen(hostname, port);
   const boxed: ServeHandler = handler;
   while (true) {
     const job = await spawnBlocking(() => unsafe { fishdev_next() });
@@ -14068,8 +14080,11 @@ function __devAnswered(text: string): Response throws JsonError | TypeError {
   for (const pair of r.headers) if (pair.length === 2) headers.append(pair[0]!.clone(), pair[1]!.clone());
   return new Response(u8.fromBase64(r.body), { status: r.status, headers });
 }
+function __devStart(control: string): i64 {
+  return unsafe { fishdev_host_start(cString(control)) };
+}
 async function __devHost(control: string): Promise<void> throws IoError {
-  if (unsafe { fishdev_host_start(cString(control)) } !== 0) throw new IoError("fishc dev: the host has no handlers to load");
+  if (__devStart(control) !== 0) throw new IoError("fishc dev: the host has no handlers to load");
   const port = await spawnBlocking(() => unsafe { fishdev_host_port() });
   const hostname = unsafe { fromCString(fishdev_host_hostname()) };
   const shown = hostname === "0.0.0.0" ? "localhost" : hostname.clone();

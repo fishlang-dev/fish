@@ -1,26 +1,11 @@
 // The files comptime may read: those a package's `fish.toml` lists under `[comptime] reads`, as
 // globs relative to the package's directory. Each matching file is part of what a check and a
 // script's build are keyed by, so changing one rebuilds what read it.
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
-import { findManifest, readManifest } from "./manifest.fsh";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { join, relative, resolve, sep } from "node:path";
 
 // A package's directory, by its real path, and the globs its manifest lets comptime read.
 export type Reads = { dir: string; globs: string[] };
-
-// The reads the package holding `entry` declares, or undefined when it has no manifest or lists
-// none. A manifest that doesn't read is reported by the load, which reads it first.
-export function readsOf(entry: string): Reads | undefined {
-  try {
-    const manifest = findManifest(dirname(resolve(entry)));
-    if (manifest === undefined) return undefined;
-    const dir = realpathSync(dirname(manifest!));
-    const globs = readManifest(readFileSync(manifest!, "utf8"), dir).reads;
-    return globs !== undefined && globs!.length > 0 ? { dir, globs: [...globs!] } : undefined;
-  } catch (_e) {
-    return undefined;
-  }
-}
 
 // Whether one name matches one glob segment: `*` any run of characters, `?` one, and everything
 // else itself.

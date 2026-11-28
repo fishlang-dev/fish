@@ -2806,8 +2806,8 @@ export class Expressions<C extends Context> implements Union<C> {
     for (const t of e.typeArgs) typeArgs.push(cloneTypeNode(t));
     const call: Expr = { id: nextId(this.ctx.tables().ids), kind: "call", callee: { id: nextId(this.ctx.tables().ids), kind: "ident", name: name!, ...at }, typeArgs, args: names.map((n): Expr => ({ id: nextId(this.ctx.tables().ids), kind: "ident", name: n, ...at })), optional: false, ...at };
     const returnType = f.returnType === undefined ? undefined : substituted(this.ctx.tables().ids, f.returnType!, given);
-    let made: Extract<Expr, { kind: "arrow" }> = { id: 0, kind: "arrow", move: false, async: false, typeParams: [], params, returnType, body: call, ...at };
-    if (f.throws !== undefined) made.throws = substituted(this.ctx.tables().ids, f.throws!, given);
+    const throws = f.throws === undefined ? undefined : substituted(this.ctx.tables().ids, f.throws!, given);
+    let made: Extract<Expr, { kind: "arrow" }> = { id: 0, kind: "arrow", move: false, async: false, typeParams: [], params, returnType, throws, body: call, ...at };
     const tables = this.ctx.tables();
     const arrow = tables.rewrites.replace(e, made);
     this.ctx.tables().madeArrows.add(cloneExpr(arrow));

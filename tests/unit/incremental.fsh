@@ -356,6 +356,21 @@ test("a function's signature edit is checked again with every body naming it", (
   assert(said.join("; ") === "kept same; kept same", said.join("; "));
 }, { timeout: 120_000 });
 
+test("a signature edit to a function whose parameters ownership inference may lend checks afresh", () => {
+  const uses = `import { size } from "./lib.fsh";
+
+function main() {
+  console.log(size([1, 2]));
+}
+`;
+  const lib = `export function size(xs: i64[]): i64 {
+  return xs.length as i64;
+}
+`;
+  const said = editedIn(uses, lib, [["size(xs: i64[]): i64 {\n  return xs.length", "size(ys: i64[]): i64 {\n  return ys.length"]]);
+  assert(said.join("; ") === "afresh same", said.join("; "));
+}, { timeout: 120_000 });
+
 test("a closure naming an edited signature is checked again with the body it is written in", () => {
   const uses = `import { place } from "./lib.fsh";
 

@@ -72,7 +72,9 @@ export function answer(src: string): Answer {
     for (const line of run.printed) out.output.push(printedLine(host.tables.typing, line));
     if (run.failure === undefined) out.ran = true;
     else {
-      const stop = diagnostic(src, run.failure, "error");
+      // The error spans the run's site, main() itself; its note is where inside it the run stopped.
+      const at = run.failure.note !== undefined ? run.failure.note!.start : run.failure.start;
+      const stop = locate(src, at <= src.length ? at : src.length);
       out.note = run.failure.message.startsWith("this comptime code panicked: ")
         ? `main() panicked at line ${stop.line}: ${run.failure.message.slice("this comptime code panicked: ".length as i64)}`
         : `the playground runs main() in the compiler's interpreter, which stopped at line ${stop.line}: ${run.failure.message}; a native build runs it`;

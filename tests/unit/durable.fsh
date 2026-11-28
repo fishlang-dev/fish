@@ -28,7 +28,8 @@ async function job(run: Durable, label: string): Promise<string> {
 
 async function main(): Promise<void> throws SqliteError {
   const store = await SqliteStore.open(process.argv[2]!);
-  console.log(await job(new Durable(store, "job-1"), process.argv[3]!));
+  const out: string = await job(new Durable(store, "job-1"), process.argv[3]!);
+  console.log(out);
 }
 `;
 

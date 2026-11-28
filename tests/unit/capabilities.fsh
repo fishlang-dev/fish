@@ -44,7 +44,7 @@ function refuses(got: Ref<Got>, part: string, what: string): void {
 test("a dependency stating and granted what it uses is checked, and the program itself may use anything", () => {
   const root = scratch("fish-caps-");
   pkg(root, "files", `capabilities = ["fs"]`, "", "lib.fsh", READS);
-  const app = pkg(root, "app", "", `files = { path = "../files", capabilities = ["fs"] }\n`, "main.fsh", `import { spawnSync } from "node:child_process";\nimport { load } from "files";\nfunction main() {\n  const _r = spawnSync("true", []);\n  console.log(load("x"));\n}\n`);
+  const app = pkg(root, "app", "", `files = { path = "../files", capabilities = ["fs"] }\n`, "main.fsh", `import { spawnSync } from "node:child_process";\nimport { load } from "files";\nfunction main(): void throws IoError {\n  const _r = spawnSync("true", []);\n  console.log(load("x"));\n}\n`);
   passes(check(app), "granted inline");
   write(join(app, "fish.toml"), `[package]\nname = "app"\nversion = "0.1.0"\n[dependencies.files]\npath = "../files"\ncapabilities = ["fs", "net"]\n`);
   passes(check(app), "granted under [dependencies.files], with more than it uses");
@@ -70,10 +70,10 @@ test("a dependency the program doesn't grant what it uses is refused, and a use 
   pkg(root, "files", `capabilities = ["fs"]`, "", "lib.fsh", READS);
   const app = pkg(root, "app", "", `files = { path = "../files" }\n`, "main.fsh", MAIN);
   refuses(check(app), `files/src/lib.fsh:1:1: error[E0910]: this program doesn't grant the dependency 'files' fs, which it uses here, by importing 'node:fs'; grant it in fish.toml with capabilities = ["fs"] under [dependencies.files]`, "no grant");
-  pkg(root, "wrap", "", `files = { path = "../files" }\n`, "lib.fsh", `import { load } from "files";\nexport function wrapped(p: string): string { return load(p); }\n`);
-  const outer = pkg(root, "outer", "", `wrap = { path = "../wrap", capabilities = ["fs"] }\n`, "main.fsh", `import { wrapped } from "wrap";\nfunction main() { console.log(wrapped("x")); }\n`);
+  pkg(root, "wrap", "", `files = { path = "../files" }\n`, "lib.fsh", `import { load } from "files";\nexport function wrapped(p: string): string throws IoError { return load(p); }\n`);
+  const outer = pkg(root, "outer", "", `wrap = { path = "../wrap", capabilities = ["fs"] }\n`, "main.fsh", `import { wrapped } from "wrap";\nfunction main(): void throws IoError { console.log(wrapped("x")); }\n`);
   refuses(check(outer), "error[E0910]: the package 'wrap' uses fs here, through its dependency 'files', by importing 'node:fs', which its fish.toml doesn't state", "an inherited use not stated");
-  pkg(root, "wrap", `capabilities = ["fs"]`, `files = { path = "../files" }\n`, "lib.fsh", `import { load } from "files";\nexport function wrapped(p: string): string { return load(p); }\n`);
+  pkg(root, "wrap", `capabilities = ["fs"]`, `files = { path = "../files" }\n`, "lib.fsh", `import { load } from "files";\nexport function wrapped(p: string): string throws IoError { return load(p); }\n`);
   passes(check(outer), "an inherited use stated and granted");
   write(join(outer, "fish.toml"), `[package]\nname = "outer"\nversion = "0.1.0"\n[dependencies]\nwrap = { path = "../wrap" }\n`);
   refuses(check(outer), "error[E0910]: this program doesn't grant the dependency 'wrap' fs, which it uses here, through its dependency 'files'", "an inherited use not granted");
