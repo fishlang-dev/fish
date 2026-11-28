@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import type { Subprocess } from "bun";
 import { relative } from "node:path";
@@ -57,6 +58,23 @@ function bare(e: Ref<Expr>): boolean {
   if (e.kind === "arrow") return e.params.length === 0 && e.typeParams.length === 0;
   if (e.kind === "function") return !e.generator && e.params.length === 0 && e.typeParams.length === 0;
   return false;
+}
+
+// The names of the tests the file at `path` declares, from its parse alone, so a run can build only
+// the files it needs; undefined when it can't be read, doesn't parse or holds a malformed test,
+// which its build reports.
+export function testNamesIn(path: string): string[] | undefined {
+  let ids: Ids = { last: 0 };
+  let names: string[] = [];
+  try {
+    for (const s of parse(readFileSync(path, "utf8"), ids)) {
+      const found = testOf(s);
+      if (found !== undefined) names.push(found.name);
+    }
+  } catch (e) {
+    return undefined;
+  }
+  return names;
 }
 
 // Leaves every file's tests out, as a build does before checking.
