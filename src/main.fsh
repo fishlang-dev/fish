@@ -17,7 +17,7 @@ import { pack, prepare, submit, unsafeDependencies } from "./publish.fsh";
 import { openIndex, registryUrl } from "./registry_index.fsh";
 import { formatVersion, parseRange, maxSatisfying, type Version } from "./semver.fsh";
 import { createPackage, type Edition, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.fsh";
-import { parse, parseWithComments, type Stmt } from "./parser.fsh";
+import { parse, parseWithComments, type Span, type Stmt } from "./parser.fsh";
 import type { Ids } from "./nodes.fsh";
 import { bundle } from "./bundle.fsh";
 import { JS_NATIVE } from "./js_native.fsh";
@@ -29,14 +29,14 @@ import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTr
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
 import { serveLsp } from "./lsp.fsh";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.fsh";
-import { dependencies, hideMains, harnessImports, harnessMain, liftTests, runDefaults, runTests, stopTests, testNamesIn, type RunOptions, type Test } from "./tests.fsh";
+import { dependencies, hideMains, harnessImports, harnessMain, liftTests, runDefaults, runTests, stopTests, testFunctions, testNamesIn, type Outcome, type RunOptions, type Test } from "./tests.fsh";
 import { formatRanking, rank, readPlan, type Plan } from "./rank.fsh";
 import { compare, formatComparison, formatReport, readReport, sources, survey, type Report as SurveyReport } from "./survey.fsh";
 import { explain } from "./codes.fsh";
 import { explainBorrows, functionsIn } from "./explain.fsh";
 import { openapiOf } from "./openapi.fsh";
 import { complete, entries, program, REPL_VALUE, shown, thrownBy, type Entry, type ReplState } from "./repl.fsh";
-import { comptimeBody } from "./comptime.fsh";
+import { comptimeBody, comptimeTest } from "./comptime.fsh";
 import type { InstanceId } from "./arenas.fsh";
 import type { Checked, Instance } from "./check.fsh";
 import type { Type, Typing } from "./typing.fsh";
@@ -794,11 +794,17 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
   return made.checked.warnings;
 }
 
+// The tests a build found, in declaration order, and the outcomes of those that ran in the
+// interpreter, by index.
+export type BuiltTests = { tests: Test[]; ran: Map<usize, Outcome> };
+
 // Builds the tests of `files`, `.fsh` files of the package at `dir`, into one program at `out`,
-// unless they have none, and gives them in declaration order. Each file is loaded through a
-// generated entry, the harness, whose `main` runs one test by its index.
+// unless they have none, and gives them. Each file is loaded through a generated entry, the
+// harness, whose `main` runs one test by its index. With `interpret`, the tests whose name holds
+// `wanted`, or all of them, first run in the comptime interpreter, and the program is linked only
+// when one of them does what comptime code can't.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function buildTests(session: BuildSession, dir: string, files: Ref<string[]>, out: string, release = false): Test[] {
+export function buildTests(session: BuildSession, dir: string, files: Ref<string[]>, out: string, release = false, interpret = false, wanted: string | undefined = undefined): BuiltTests {
   // The harness is read as the manifest's path, which every package has and no `.fsh` file is, so
   // the files' names are written from the package's directory.
   const entry = join(dir, MANIFEST);
@@ -808,12 +814,15 @@ export function buildTests(session: BuildSession, dir: string, files: Ref<string
   let loaded = load(compilation, entry, src);
   let tests: Test[] = [];
   let program: Stmt[] = [];
+  let functions: string[] = [];
+  let ran = new Map<usize, Outcome>();
   try {
     let paths: string[] = [];
     for (const f of files) paths.push(realpathSync(f));
     tests = liftTests(compilation, loaded.modules, paths);
-    if (tests.length === 0) return tests;
+    if (tests.length === 0) return { tests, ran };
     hideMains(compilation, loaded.modules);
+    functions = testFunctions(tests, loaded.modules);
     let main = harnessMain(compilation.ids, tests, loaded.modules);
     while (main.length > 0) loaded.modules[0]!.statements.push(main.shift()!);
     program = expanded(compilation, loaded, false);
@@ -821,7 +830,16 @@ export function buildTests(session: BuildSession, dir: string, files: Ref<string
     if (e instanceof CompileError) throw sourced(e, copyNames(compilation.names), loaded.sources);
     throw e;
   }
-  const checked = checkedProgram(compilation, program, false, loaded.sources).checked;
+  const names = copyNames(compilation.names);
+  let checked = checkedProgram(compilation, program, false, loaded.sources).checked;
+  if (interpret) {
+    let host = new ReplHost(checked.tables);
+    ran = interpreted(host, checked.instances, tests, functions, wanted, { src, file: relative(process.cwd(), entry), names, sources: loaded.sources });
+    const instances = checked.instances;
+    const warnings = checked.warnings;
+    checked = { instances, tables: host.tables, warnings };
+    if (tests.every((t) => ran.has(t.index) || (wanted !== undefined && !t.name.includes(wanted)))) return { tests, ran };
+  }
   const sources = [...loaded.sources];
   const made = generated(checked, loaded, { src, file: entry, release, panic: "unwind", sources, harness: true });
   const shim = rustShim(made.loaded.rust, made.checked);
@@ -830,7 +848,33 @@ export function buildTests(session: BuildSession, dir: string, files: Ref<string
   let building = together(made.checked.tables.session, caches);
   let none = new Map<string, string[]>();
   linked(building, nativesOf(made.ir, release, host, false), halves, out, release, [], shim, host, false, false, none);
-  return tests;
+  return { tests, ran };
+}
+
+// What an interpreted test's failure is rendered against: the harness's text and name, and the
+// names and files of its compilation.
+type Rendering = { src: string; file: string; names: Names; sources: Ref<Source[]> };
+
+// Runs each of `tests` whose name holds `wanted`, or every one, in the comptime interpreter,
+// `functions` naming the function each is linked as: one that returns passes; one that panics,
+// fails an assert or throws fails with where it did; one doing what comptime code can't, such as
+// I/O, has no outcome, left for its native build.
+function interpreted(host: Mut<ReplHost>, instances: Ref<InstanceId[]>, tests: Ref<Test[]>, functions: Ref<string[]>, wanted: string | undefined, shown: Ref<Rendering>): Map<usize, Outcome> {
+  let ids = new Map<string, InstanceId>();
+  for (const id of instances) ids.set(host.tables.arenas.instanceOf(id).symbol, id);
+  let ran = new Map<usize, Outcome>();
+  for (const t of tests) {
+    if (wanted !== undefined && !t.name.includes(wanted)) continue;
+    // Linking keeps a test function's spelling, as no other file can write it.
+    const id = ids.get(functions[t.index]!.replace(/-fsh\d+$/, ""));
+    if (id === undefined) continue;
+    const body = bodyOf(host.tables.arenas, host.tables.arenas.instanceOf(id));
+    const site: Span = { start: body.start, end: body.end };
+    const run = comptimeTest(host, id, site);
+    if (run.kind === "passed") ran.set(t.index, { passed: true, output: "" });
+    else if (run.kind === "failed") ran.set(t.index, { passed: false, output: `${formatError(sourced(run.error, copyNames(shown.names), shown.sources), shown.file, shown.src, run.label)}\n` });
+  }
+  return ran;
 }
 
 // Runs the tests of the package at `dir` whose name holds `filter`, or every test of the file
@@ -874,14 +918,15 @@ async function testsIn(session: BuildSession, dir: string, out: string, filter: 
 async function testFiles(session: BuildSession, dir: string, out: string, files: Ref<string[]>, wanted: string | undefined, release: boolean, options: Ref<RunOptions>): Promise<i64> {
   let running = new Set<i32>();
   try {
-    const tests = buildTests(session, dir, files, out, release);
+    const built = buildTests(session, dir, files, out, release, options.interpret, wanted);
+    const tests = built.tests;
     if (tests.length === 0) {
       console.log("no tests found");
       return 0;
     }
     const chosen = wanted === undefined ? tests : tests.filter((t) => t.name.includes(wanted));
     if (chosen.length > 0) {
-      const code = await Promise.race([runTests(running, out, chosen, dir, options), signalled("SIGINT", 130), signalled("SIGTERM", 143)]);
+      const code = await Promise.race([runTests(running, out, chosen, dir, options, built.ran), signalled("SIGINT", 130), signalled("SIGTERM", 143)]);
       // Interrupted, the tests still running and what they started end.
       stopTests(running);
       return code;
@@ -1421,7 +1466,8 @@ function clangArgs(out: string, release: boolean, links: string[], objects: stri
   return ["clang", ...target.compile, ...target.link, ...linkerFlags(target), ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, ...optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)];
 }
 
-// What computes a checked program's top-level consts for the repl: every function is checked.
+// What runs comptime code over a checked program, every function of which is checked: the repl's
+// top-level consts, and the tests of `fishc test --interpret`.
 class ReplHost {
   tables: Tables;
 
@@ -1885,6 +1931,7 @@ async function main(): Promise<void> {
           timeout: { type: "string" },
           jobs: { type: "string" },
           watch: { type: "boolean" },
+          interpret: { type: "boolean" },
           fn: { type: "string" },
           top: { type: "string" },
           names: { type: "string" },
@@ -2041,11 +2088,12 @@ async function main(): Promise<void> {
   }
   if (command === "test") {
     // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
-    const usage = "usage: fishc test [<file> | <filter>] [--release] [--timeout <ms>] [--jobs <n>] [--watch]";
-    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "timeout" && k !== "jobs" && k !== "watch") || values.panic !== "unwind") fail(usage);
+    const usage = "usage: fishc test [<file> | <filter>] [--release] [--timeout <ms>] [--jobs <n>] [--watch | --interpret]";
+    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "timeout" && k !== "jobs" && k !== "watch" && k !== "interpret") || values.panic !== "unwind" || (values.watch === true && values.interpret === true)) fail(usage);
     let options = runDefaults();
     if (values.timeout !== undefined) options.timeout = wholeNumber(values.timeout) ?? fail(`fishc test: --timeout takes a whole number of milliseconds above 0, not '${values.timeout}'`);
     if (values.jobs !== undefined) options.jobs = wholeNumber(values.jobs) ?? fail(`fishc test: --jobs takes a whole number of tests above 0, not '${values.jobs}'`);
+    options.interpret = values.interpret === true;
     const found = findManifest(process.cwd()) ?? fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
     if (values.watch === true) {
       const watched = await watchTests(sessionFor, dirname(found!), file, values.release === true, options);
