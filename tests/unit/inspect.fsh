@@ -31,9 +31,12 @@ function compare(name: string, source: string): void {
   write(script, generator());
   const gen = reference(`inspect-${name}-trees`, `${generator()}\n${source}`, () => ranFor("bun", [script, values]));
   same(gen.stderr, "", "building the trees");
-  const helper = "static fsh_insp *text(const char *p, int64_t n) { fsh_str *s = fsh_str_of(p, n); fsh_insp *v = fsh_rt_insp_string(s); fsh_rt_str_release(s); return v; }";
+  const helper = "static fsh_insp *text(const char *p, int64_t n) { fsh_str *s = fsh_str_of(p, n); fsh_insp *v = fsh_rt_insp_string(s); fsh_rt_str_release(s); return v; }\nstatic void shown(fsh_str *s) { FSH_OPEN(s); fwrite(s->bytes, 1, s->length, stdout); }";
+  // The recorded statements read the string's fields directly, which a string short enough to be
+  // held in its pointer word has none of, so each is printed through a view.
+  const statements = gen.stdout.replaceAll("fwrite(s->bytes, 1, s->length, stdout);", "shown(s);");
   const file = join(tmp, "test.c");
-  write(file, `${NATIVE}\n${helper}\nint main(void) {\n${gen.stdout}\nreturn 0;\n}\n`);
+  write(file, `${NATIVE}\n${helper}\nint main(void) {\n${statements}\nreturn 0;\n}\n`);
   const out = join(tmp, "test");
   const clang = spawnSync("clang", [file, "-o", out, "-lm"]);
   assert(clang.status === 0, `clang failed: ${text(clang.stderr)}`);

@@ -11749,7 +11749,10 @@ class Codegen implements PrintHost, ComptimeHost {
       const a = args[i]!;
       const part2 = this.inst(target).signature![i]!;
       const rustCrossing2 = rustCrossing(this.tables.typing, part2);
-      const crossed2 = this.rustPass(rustCrossing2, part2, a.slice(a.lastIndexOf(" ") + 1), given, false);
+      // The value follows its type, and a constant one, such as a union's, has spaces of its own.
+      const llvm = this.llvm(part2);
+      assert(a.startsWith(`${llvm} `), `internal error: a Rust argument '${a}' isn't a '${llvm}'`);
+      const crossed2 = this.rustPass(rustCrossing2, part2, a.slice((llvm.length + 1) as i64), given, false);
       for (const x of crossed2) passed.push(x);
     }
     const gives = rustGiven(this.tables.typing, this.tables.arenas, this.inst(target));

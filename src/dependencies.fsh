@@ -328,7 +328,7 @@ function lock(locking: Ref<Locking>, packages: Ref<Package[]>): void {
 // An error at the program's own request for the package it is about, or its first one.
 /** @throws {IoError} */
 function blamed(first: Ref<Map<string, Blame>>, e: unknown, about: string | undefined): CompileError {
-  const message = e instanceof Error ? e.message : "it failed";
+  const message = e instanceof Error ? e.message : e instanceof IoError ? e.message : "it failed";
   const name = about ?? (e instanceof Unresolved ? e.pkg : undefined);
   const at = first.get(name ?? "");
   if (at !== undefined) return failure(at, message);
@@ -440,9 +440,11 @@ function unpacked(index: Ref<Index>, entry: Ref<IndexEntry>): string {
       writeFileSync(join(work, f.path), f.data);
     }
     const sum = checksumOf(work);
-    // A copy here whose files were changed by hand is moved aside; any other build unpacking this
-    // archive now writes these same files.
-    if (existsSync(dir) && intact(dir) === undefined) {
+    // A copy here whose files were changed by hand since its marker was written is moved aside;
+    // any other build unpacking this archive now writes these same files. One with no marker yet
+    // is another build's, moved in whole and about to be marked, and moving it would pull it out
+    // from under that build's own check of it.
+    if (existsSync(`${dir}.files`) && intact(dir) === undefined) {
       try {
         renameSync(dir, changed);
       } catch (_e) {

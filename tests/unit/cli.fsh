@@ -291,7 +291,7 @@ test("fishc build and run --timings print every stage, saying which objects were
   const first = fishcIn(p, ["build", "main.fsh", "--timings"], cache.clone());
   same(names(first.err), all, "the first build's stages");
   const firstNote = stages(first.err)[8].note ?? "";
-  assert(/^built runtime, std, .+; 0 cached$/.test(firstNote), `the first build's runtime note: ${firstNote}`);
+  assert(/^built program, runtime, std, .+; 0 cached$/.test(firstNote), `the first build's runtime note: ${firstNote}`);
   const again = fishcIn(p, ["build", "main.fsh", "--timings"], cache);
   assert(again.code === 0, `the second build exited with ${again.code}`);
   const againNote = stages(again.err)[8].note ?? "";
