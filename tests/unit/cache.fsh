@@ -6,7 +6,6 @@
 // parsed-tree cache to test. The slower tests take two-minute limits.
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { argv } from "node:process";
 import { CompileError, formatError } from "../../src/diag.fsh";
@@ -511,7 +510,12 @@ async function bothWays(p: Program): Promise<string> {
   return `${p.file}: split ${JSON.stringify(a)}, one module ${JSON.stringify(b)}`;
 }
 
-test("split and one-module dev builds of sampled test programs behave alike", async () => {
+// The sampled programs are built in parts, each its own test, so they spread across the run's jobs
+// instead of one test setting the run's length. Part `part` of `PARTS` takes every `PARTS`-th
+// program from its own place, one at a time, since the parts already run side by side.
+const PARTS: usize = 16;
+
+async function sampledAlike(part: usize): Promise<void> {
   const root = childRoot();
   if (root === "") {
     const r = scratch("fish-cache-");
@@ -521,16 +525,77 @@ test("split and one-module dev builds of sampled test programs behave alike", as
   }
   const programs = sampled(join(root, "sampled"));
   assert(programs.length > 50, `only ${programs.length} sampled programs`);
-  const width = availableParallelism() as usize;
   let differing: string[] = [];
-  for (let at: usize = 0; at < programs.length; at += width) {
-    let batch: Promise<string>[] = [];
-    for (let i = at; i < at + width && i < programs.length; i++) batch.push(bothWays(programs[i].clone()));
-    const results = await Promise.all(batch);
-    for (const r of results) if (r !== "") differing.push(r);
+  for (let i = part; i < programs.length; i += PARTS) {
+    const r = await bothWays(programs[i].clone());
+    if (r !== "") differing.push(r);
   }
   assert(differing.length === 0, differing.join("\n"));
-}, { timeout: 1_800_000 });
+}
+
+test("split and one-module dev builds of sampled test programs behave alike, part 1 of 16", async () => {
+  await sampledAlike(0);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 2 of 16", async () => {
+  await sampledAlike(1);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 3 of 16", async () => {
+  await sampledAlike(2);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 4 of 16", async () => {
+  await sampledAlike(3);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 5 of 16", async () => {
+  await sampledAlike(4);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 6 of 16", async () => {
+  await sampledAlike(5);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 7 of 16", async () => {
+  await sampledAlike(6);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 8 of 16", async () => {
+  await sampledAlike(7);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 9 of 16", async () => {
+  await sampledAlike(8);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 10 of 16", async () => {
+  await sampledAlike(9);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 11 of 16", async () => {
+  await sampledAlike(10);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 12 of 16", async () => {
+  await sampledAlike(11);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 13 of 16", async () => {
+  await sampledAlike(12);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 14 of 16", async () => {
+  await sampledAlike(13);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 15 of 16", async () => {
+  await sampledAlike(14);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 16 of 16", async () => {
+  await sampledAlike(15);
+}, { timeout: 600_000 });
 
 test("giving a session the build caches again keeps the ones it has", () => {
   let session = buildSession(newSession());
