@@ -25,7 +25,7 @@ import { NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./nativ
 import { objectOf } from "./macho.fsh";
 import { cachedObjects, files, MATH_RUNTIME, NATIVE_UNIT, mathObjects, mathObjectsAsync, mathUnits, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
-import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, linkerFlags, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, staticTarget, withFlags, type Target } from "./target.fsh";
+import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, linkerFlags, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, sizeTarget, staticTarget, withFlags, type Target } from "./target.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
 import { serveLsp } from "./lsp.fsh";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.fsh";
@@ -1274,7 +1274,7 @@ export function runtimeUnits(ir: Ref<string[]>, release: boolean, pic = false, t
 // its sanitizers: at -O0, clang for AArch64 misreads large aggregates passed by value to an
 // address-sanitized function, so the program would quietly do something else.
 function optimization(release: boolean, target: Ref<Target>): string[] {
-  if (release) return ["-O2"];
+  if (release) return target.size === true ? ["-Oz"] : ["-O2"];
   if (target.sanitize !== undefined) return ["-O1"];
   return withoutGlobalIsel(release, target) ? ["-O0", "-fno-global-isel"] : ["-O0"];
 }
@@ -1713,16 +1713,21 @@ async function main(): Promise<void> {
     await serveLsp();
     return;
   }
-  // A bare `--lib` builds the default kind, a static library.
+  // A bare `--lib` builds the default kind, a static library; `--release=size` is a release build
+  // tuned for size.
+  const given = Bun.argv.slice(2);
+  const profile = given.find((a) => a.startsWith("--release=") && a !== "--release=size");
+  if (profile !== undefined) fail(`fishc: '${profile}' isn't a release profile; give '--release' or '--release=size'`);
   const { values, positionals } = (() => {
     try {
       return parseArgs({
-        args: Bun.argv.slice(2).map((a) => (a === "--lib" ? "--lib=static" : a)),
+        args: given.flatMap((a) => (a === "--lib" ? ["--lib=static"] : a === "--release=size" ? ["--release", "--release-size"] : [a])),
         allowPositionals: true,
         options: {
           out: { type: "string", short: "o" },
           "emit-llvm": { type: "boolean" },
           release: { type: "boolean" },
+          "release-size": { type: "boolean" },
           panic: { type: "string", default: "unwind" },
           link: { type: "string", multiple: true },
           lib: { type: "string" },
@@ -2013,7 +2018,9 @@ async function main(): Promise<void> {
   const libName = values.lib;
   const lib: Library | undefined = libName === undefined ? undefined : libName === "shared" ? "shared" : "static";
   const release = values.release === true;
+  const size = values["release-size"] === true;
   const leaks = values.leaks === true;
+  if (size && command !== "build") fail(`fishc ${command ?? ""}: '--release=size' tunes a build's binary for size; build with 'fishc build --release=size'`);
   if ((values["pgo-instrument"] === true || values.pgo !== undefined) && command !== "build") fail(`fishc ${command ?? ""}: profile-guided optimization is a build's; build with 'fishc build --pgo-instrument', run the binary it writes, then 'fishc build --release --pgo default.profraw'`);
   if (values.sanitize !== undefined && command !== "build") fail(`fishc ${command ?? ""}: '--sanitize' instruments a build; build with 'fishc build --sanitize address|thread', then run the binary it writes`);
   let target = file;
@@ -2097,7 +2104,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--linker system|lld|mold] [--backend native|llvm] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--backend native|llvm] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release[=size]] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--linker system|lld|mold] [--backend native|llvm] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--backend native|llvm] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
@@ -2117,6 +2124,7 @@ async function main(): Promise<void> {
   if (instrumenting && profiles.length > 0) fail("fishc build: '--pgo-instrument' writes the binary a profile is taken from, and '--pgo' builds with one; build with one of them");
   if (profiles.length > 0 && !release) fail("fishc build: '--pgo' optimizes a release build; add '--release'");
   if ((instrumenting || profiles.length > 0) && (llvm || lib !== undefined || sanitize !== undefined)) fail(`fishc build: '${pgo}' applies to an executable clang builds, so it doesn't go with '--emit-llvm', '--lib' or '--sanitize'`);
+  if (size && (llvm || lib !== undefined || sanitize !== undefined)) fail("fishc build: '--release=size' tunes an executable clang links, so it doesn't go with '--emit-llvm', '--lib' or '--sanitize'");
   if (values.dockerfile === true && values.static !== true) fail("fishc build: '--dockerfile' writes an image holding only the binary, which needs it built with '--static'");
   try {
     if (llvm) {
@@ -2132,7 +2140,7 @@ async function main(): Promise<void> {
       const resolved = resolveTarget(values.target, sysroot);
       const base = values.static === true ? staticTarget(resolved) : resolved;
       const sanitized = sanitize !== undefined;
-      const sanitizing = sanitize !== undefined ? sanitizedTarget(base, sanitize) : base;
+      const sanitizing = sanitize !== undefined ? sanitizedTarget(base, sanitize) : size ? sizeTarget(base) : base;
       const platform = linking(instrumenting ? withFlags(sanitizing, [...PGO_INSTRUMENT]) : profiles.length > 0 ? withFlags(sanitizing, pgoUse(profiles)) : sanitizing);
       // A sanitizer's report names .fsh lines only when the program carries line tables.
       const debug = values.debug === true || sanitized;
