@@ -22,7 +22,7 @@ async function main(): Promise<void> {
   }
 }
 // case: fs_unknown_member
-// error: 'node:fs/promises' has no export named 'readdir'
+// error: 'std:fs/promises' has no export named 'readdir'
 import * as fs from "node:fs/promises";
 async function main(): Promise<void> {
   fs.readdir(".");
@@ -56,14 +56,14 @@ async function main(): Promise<void> {
 }
 // case: fs_sync_in_async
 // expect: true fish
-// The blocking calls work inside async functions, as Node lets them.
+// The blocking calls work inside async functions.
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 async function main(): Promise<void> throws IoError {
   writeFileSync("/tmp/fish-sync-in-async.txt", "fish");
   console.log(existsSync("/tmp/fish-sync-in-async.txt"), readFileSync("/tmp/fish-sync-in-async.txt", "utf8"));
 }
 // case: fs_sync_unknown_member
-// error: 'node:fs' has no export named 'appendFileSync'
+// error: 'std:fs' has no export named 'appendFileSync'
 import * as fs from "node:fs";
 function main(): void { fs.appendFileSync("x"); }
 // case: fs_read_sync_offset_without_length
@@ -193,4 +193,70 @@ function main(): void throws IoError {
   console.log(readFileSync(r, "utf8"));
   closeSync(r);
   rmSync(dir, { recursive: true });
+}
+// case: fs_handle_read_overflow_release
+// mode: release
+// expect: overflow: ERR_OUT_OF_RANGE
+// expect: past: ERR_OUT_OF_RANGE
+// expect: min: ERR_OUT_OF_RANGE
+// expect: ok: 5 hello
+// FileHandle.read must not overflow offset + length in release builds (F-2393).
+import { open } from "node:fs/promises";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+async function main(): Promise<void> throws IoError {
+  const dir = mkdtempSync(join(tmpdir(), "fish-f2393-"));
+  const file = join(dir, "data.txt");
+  writeFileSync(file, "hello world from fish");
+  const fh = await open(file, "r");
+  let buf: u8[] = new Array(16).fill(0 as u8);
+  try {
+    const _r = await fh.read(buf, 1, 9223372036854775807, 0);
+    console.log("overflow: allowed");
+  } catch (e) {
+    console.log("overflow:", e.code);
+  }
+  try {
+    const _r = await fh.read(buf, 100, 1, 0);
+    console.log("past: allowed");
+  } catch (e) {
+    console.log("past:", e.code);
+  }
+  try {
+    const _r = await fh.read(buf, -9223372036854775807 - 1, null, 0);
+    console.log("min: allowed");
+  } catch (e) {
+    console.log("min:", e.code);
+  }
+  const got = await fh.read(buf, 0, 5, 0);
+  console.log("ok:", got.bytesRead, new TextDecoder().decode(buf.slice(0, got.bytesRead)));
+  await fh.close();
+  rmSync(dir, { recursive: true });
+}
+// case: fs_detached_pool_job_at_shutdown
+// expect: exiting
+// Detached async file pool jobs in flight at shutdown must not UAF fsh_injected.ring (F-2493).
+import { readFile } from "node:fs/promises";
+
+async function reader(): Promise<i64> {
+  let n: i64 = 0;
+  for (let i = 0; i < 8; i++) {
+    try {
+      const data = await readFile("/dev/null");
+      n += data.length as i64;
+    } catch (_e) {
+      return n;
+    }
+  }
+  return n;
+}
+
+async function main() {
+  for (let i = 0; i < 16; i++) {
+    const _h = spawn(reader());
+  }
+  await yieldNow();
+  console.log("exiting");
 }

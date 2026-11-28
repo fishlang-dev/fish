@@ -1,0 +1,11 @@
+script 8693621c30f8a122980eb6db4eb8f2e116f4946c0feee5ee0e9e5413f33af24b
+status 0
+stdout 51
+out 1
+err 1
+out 2 { a: 1 }
+warn { b: [ 1 ] }
+out 3
+
+stderr 0
+

@@ -1,9 +1,10 @@
 // What the unit tests share: reading files, which fails the test rather than throwing, running the
 // native fishc, and reading the flags the native fishc compiles the runtime with.
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // The repository's root.
 export function root(): string {
@@ -46,6 +47,87 @@ export function same(got: string, want: string, what: string): void {
   assert(got === want, `${what}:\n--- expected\n${want}\n--- got\n${got}`);
 }
 
+// How a reference runtime answered a script: how it exited and what it wrote.
+export type Answer = { status: i64; stdout: string; stderr: string };
+
+// Node's or Bun's answer for `script`, as recorded under `key` in tests/unit/references. The tests
+// run neither runtime: `run`, which does, is called only when scripts/references.fsh sets
+// FISH_REFERENCES=record, and what it gives is written there. A recording made for another script
+// fails the test, since its answer isn't this script's.
+export function reference(key: string, script: string, run: () => Answer): Answer {
+  const file = join(import.meta.dir, "references", `${key}.txt`);
+  const hash = createHash("sha256").update(script).digest("hex");
+  if ((process.env.FISH_REFERENCES ?? "") === "record") {
+    const got = run();
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, `script ${hash}\nstatus ${got.status}\nstdout ${got.stdout.length}\n${got.stdout}\nstderr ${got.stderr.length}\n${got.stderr}\n`);
+    } catch (e) {
+      assert(false, `can't write ${file}: ${e.message}`);
+    }
+    return got;
+  }
+  const again = "record it with 'fishc run scripts/references.fsh'";
+  let recorded = "";
+  try {
+    recorded = readFileSync(file, "utf8");
+  } catch (_e) {
+    assert(false, `no reference answer is recorded for '${key}'; ${again}`);
+  }
+  const head = /^script ([0-9a-f]+)\nstatus (-?\d+)\nstdout (\d+)\n/.exec(recorded);
+  if (head === null) {
+    assert(false, `${file} isn't a recorded answer; ${again}`);
+    return { status: -1, stdout: "", stderr: "" };
+  }
+  assert(head[1]! === hash, `the answer recorded for '${key}' is another script's; ${again}`);
+  const from = head[0]!.length as i64;
+  const wrote = parseInt(head[3]!) ?? 0;
+  const rest = recorded.slice(from + wrote + 1);
+  const tail = /^stderr (\d+)\n/.exec(rest);
+  if (tail === null) {
+    assert(false, `${file} isn't a recorded answer; ${again}`);
+    return { status: -1, stdout: "", stderr: "" };
+  }
+  const start = tail[0]!.length as i64;
+  return { status: parseInt(head[2]!) ?? -1, stdout: recorded.slice(from, from + wrote), stderr: rest.slice(start, start + (parseInt(tail[1]!) ?? 0)) };
+}
+
+// The key of an answer that differs between systems, as a file call's does: one recording for each.
+export function onSystem(key: string): string {
+  return `${key}.${process.platform}`;
+}
+
+// A command run now, as an answer to record. Only a `run` given to `reference` calls this, so the
+// tests run Node and Bun only when scripts/references.fsh asks.
+export function ranFor(command: string, args: string[], cwd?: string): Answer {
+  const run = cwd === undefined ? spawnSync(command, args) : spawnSync(command, args, { cwd });
+  const failed = run.error;
+  if (failed !== null) assert(false, `can't run ${command}: ${failed.message}`);
+  return { status: run.status ?? -1, stdout: text(run.stdout), stderr: text(run.stderr) };
+}
+
+// The CPU time this process has used, in microseconds.
+declare function clock(): i64;
+
+// Fails the test unless `run` takes time linear in the size it is given: under 3.2 times as long
+// for 2n as for n, where linear work takes about 2 and quadratic about 4. A ratio holds on a machine
+// of any speed, which a limit in milliseconds doesn't. The time is the process's own, so tests
+// running beside it don't add to it, and each is the fastest of three runs.
+export function linear(n: usize, run: (size: usize) => void): void {
+  let small: i64 = 0;
+  let large: i64 = 0;
+  for (let round = 0; round < 3; round++) {
+    const started = unsafe { clock() };
+    run(n);
+    const half = unsafe { clock() };
+    run(2 * n);
+    const done = unsafe { clock() };
+    if (round === 0 || half - started < small) small = half - started;
+    if (round === 0 || done - half < large) large = done - half;
+  }
+  assert(large * 10 < small * 32, `size ${2 * n} took ${large / 1000}ms and size ${n} took ${small / 1000}ms, over 3.2 times as long`);
+}
+
 // Bytes as UTF-8 text.
 export function text(bytes: Ref<u8[]>): string {
   return new TextDecoder().decode(bytes);
@@ -84,11 +166,13 @@ export function built(dir: string, name: string, source: string): string {
   return out;
 }
 
-// A TCP port on 127.0.0.1 that was free a moment ago, asked of a Node child process, for a server
-// that can't report the port it bound.
+// A TCP port on 127.0.0.1 that was free a moment ago, for a server that can't report the port it
+// bound: a Fish program binds port 0, prints the port the system gave it, and lets it go.
 export function freePort(): i64 {
-  const script = `const s = require("node:net").createServer().listen(0, "127.0.0.1", () => { console.log(s.address().port); s.close(); });`;
-  const run = spawnSync("node", ["-e", script]);
+  const dir = scratch("fish-port-");
+  const out = built(dir, "port", `async function main(): Promise<void> throws IoError {\n  const listener = await TcpListener.bind("127.0.0.1", 0);\n  console.log(listener.port);\n}\n`);
+  const run = spawnSync(out, []);
+  removed(dir);
   const port = parseInt(text(run.stdout).trim());
   assert(port !== null, `no free port: ${text(run.stderr)}`);
   return port;

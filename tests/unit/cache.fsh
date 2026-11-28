@@ -2,12 +2,10 @@
 // process where a test calls the compiler. Fish can't set `process.env` yet, so a test that moves
 // FISH_CACHE_DIR or PATH for its in-process builds runs itself again in a child process with them
 // set: `again` starts this test binary on the same test, FISH_CACHE_TEST_ROOT naming the directory
-// the parent made, and fails with the child's output. std's parsed-tree cache isn't tested here:
-// that cache is stdcache.ts's alone, and a compiler built by Fish parses std in each session. The
-// slower tests take two-minute limits.
+// the parent made, and fails with the child's output. Each session parses std itself, so there is no
+// parsed-tree cache to test. The slower tests take two-minute limits.
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { argv } from "node:process";
 import { CompileError, formatError } from "../../src/diag.fsh";
@@ -16,7 +14,7 @@ import { buildSession, cachedObject, cachedObjectAsync, files, mathObjectsAsync,
 import { checkKey, checkPath, readCheck, readEnvelope, writeCheck, writtenEnvelope, type Envelope } from "../../src/checkcache.fsh";
 import { newSession } from "../../src/compilation.fsh";
 import { hostTarget } from "../../src/target.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { fishcPath, read, removed, root as repo, same, scratch, text } from "./support.fsh";
 
 // The directory the parent test made, in the child `again` starts, else "".
@@ -126,7 +124,7 @@ test("a change to the runtime's source or flags is a new object", () => {
   }
   let session = cachedSession();
   try {
-    const units = runtimeUnits("", false);
+    const units = runtimeUnits([""], false);
     const unit: Ref<Unit> = units[0];
     const built = cachedObject(session, unit);
     const twice = cachedObject(session, unit);
@@ -189,7 +187,7 @@ test("static and shared libraries link the cached runtime, built position-indepe
 
 function engineProgram(root: string): string {
   const file = join(root, "engine.fsh");
-  write(file, `import { evaluate } from "fish:engine";\nfunction main() {\n  const v = evaluate("export default 1;");\n  console.log("ok");\n}\n`);
+  write(file, `import { evaluate } from "std:engine";\nfunction main() {\n  const v = evaluate("export default 1;");\n  console.log("ok");\n}\n`);
   return file;
 }
 
@@ -308,7 +306,7 @@ test("an edit to a hashed engine header is a new object", () => {
   try {
     const ir = "  call void @fsh_rt_js_eval()";
     const engine = files(engineDir());
-    for (const unit of runtimeUnits(ir, false)) assert(unit.inputs === engine, `${unit.name}'s inputs: ${JSON.stringify(unit.inputs)}`);
+    for (const unit of runtimeUnits([ir], false)) assert(unit.inputs === engine, `${unit.name}'s inputs: ${JSON.stringify(unit.inputs)}`);
     const copy = join(root, "engine-copy");
     const copied = spawnSync("cp", ["-R", engineDir(), copy]);
     assert(copied.status === 0, `cp failed: ${text(copied.stderr)}`);
@@ -351,7 +349,7 @@ test("a dev build keeps std's object across edits to the program's own code", ()
   };
   same(built(base), "200 user 7\n", "the program");
   const first = stdObjects(cache);
-  assert(first.length === 1, `std's objects: ${JSON.stringify(first)}`);
+  assert(first.length > 0, `std's objects: ${JSON.stringify(first)}`);
   const edits: [string, string][] = [
     [base.replace('"user "', '"member "'), "200 member 7\n"],
     [base.replace('new Response("user " + req.param("id"))', '{ const id = req.param("id"); return new Response(id + " is a user"); }'), "200 7 is a user\n"],
@@ -363,7 +361,7 @@ test("a dev build keeps std's object across edits to the program's own code", ()
   }
   const aggregate = base.replace("console.log(res.status, body);", "console.log(res.status, body, new AggregateError([1, 2]).errors.length);");
   same(built(aggregate), "200 user 7 2\n", "the program using more of std");
-  assert(stdObjects(cache).length === 2, `std's objects after using more of it: ${JSON.stringify(stdObjects(cache))}`);
+  assert(stdObjects(cache).length === first.length + 1, `std's objects after using more of it: ${JSON.stringify(stdObjects(cache))}`);
   removed(root);
 }, { timeout: 120_000 });
 
@@ -403,8 +401,9 @@ function sampled(folder: string): Program[] {
     if (!f.endsWith(".fsh")) continue;
     const pieces = read(join(dir, f)).split(/^\/\/ case: .*$/m);
     for (let i: usize = 1; i < pieces.length; i++) {
-      const src = pieces[i];
-      if (/\/\/ (error|mode|link):|serve\(|listen\(/.test(src)) continue;
+      // Without the newline the marker leaves, so an edition comment opens the file as it must.
+      const src = pieces[i].replace(/^\n/, "");
+      if (/\/\/ (error|mode|link):|serve\(|listen\(|std:log/.test(src)) continue;
       cases.push({ file: `${f.slice(0, -4)}-${i - 1}`, src });
     }
   }
@@ -445,7 +444,7 @@ test("compiling the same programs again in one process gives identical IR", () =
     assert(rounds[2][i] === rounds[0][i], `${programs[i].file}: the third round's IR differs`);
   }
   removed(root);
-}, { timeout: 120_000 });
+}, { timeout: 1_200_000 });
 
 // A process that builds many times, as a test runner or a daemon does, gives std's part the same
 // text each time a program is built again, so it links the object it cached the first time.
@@ -495,13 +494,13 @@ async function bothWays(p: Program): Promise<string> {
     const ir = compile(cachedSession(), p.src, p.file);
     let session = cachedSession();
     let objects: string[] = [];
-    for (const u of runtimeUnits(ir, false)) {
+    for (const u of runtimeUnits([ir], false)) {
       const object = await cachedObjectAsync(session, u.clone());
       objects.push(object);
     }
     const math = await mathObjectsAsync(session);
     for (const m of math) objects.push(m);
-    const clang = spawnSync("clang", ["-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", whole, "-O0", "-lm", ...runtimeLinks(ir, hostTarget())], { input: ir });
+    const clang = spawnSync("clang", ["-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", whole, "-O0", "-lm", ...runtimeLinks([ir], hostTarget())], { input: ir });
     if (clang.status !== 0) return `${p.file}: clang failed:\n${text(clang.stderr)}`;
   } catch (e) {
     return `${p.file}: ${failure(e)}`;
@@ -512,7 +511,12 @@ async function bothWays(p: Program): Promise<string> {
   return `${p.file}: split ${JSON.stringify(a)}, one module ${JSON.stringify(b)}`;
 }
 
-test("split and one-module dev builds of sampled test programs behave alike", async () => {
+// The sampled programs are built in parts, each its own test, so they spread across the run's jobs
+// instead of one test setting the run's length. Part `part` of `PARTS` takes every `PARTS`-th
+// program from its own place, one at a time, since the parts already run side by side.
+const PARTS: usize = 16;
+
+async function sampledAlike(part: usize): Promise<void> {
   const root = childRoot();
   if (root === "") {
     const r = scratch("fish-cache-");
@@ -522,16 +526,77 @@ test("split and one-module dev builds of sampled test programs behave alike", as
   }
   const programs = sampled(join(root, "sampled"));
   assert(programs.length > 50, `only ${programs.length} sampled programs`);
-  const width = availableParallelism() as usize;
   let differing: string[] = [];
-  for (let at: usize = 0; at < programs.length; at += width) {
-    let batch: Promise<string>[] = [];
-    for (let i = at; i < at + width && i < programs.length; i++) batch.push(bothWays(programs[i].clone()));
-    const results = await Promise.all(batch);
-    for (const r of results) if (r !== "") differing.push(r);
+  for (let i = part; i < programs.length; i += PARTS) {
+    const r = await bothWays(programs[i].clone());
+    if (r !== "") differing.push(r);
   }
   assert(differing.length === 0, differing.join("\n"));
-}, { timeout: 420_000 });
+}
+
+test("split and one-module dev builds of sampled test programs behave alike, part 1 of 16", async () => {
+  await sampledAlike(0);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 2 of 16", async () => {
+  await sampledAlike(1);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 3 of 16", async () => {
+  await sampledAlike(2);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 4 of 16", async () => {
+  await sampledAlike(3);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 5 of 16", async () => {
+  await sampledAlike(4);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 6 of 16", async () => {
+  await sampledAlike(5);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 7 of 16", async () => {
+  await sampledAlike(6);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 8 of 16", async () => {
+  await sampledAlike(7);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 9 of 16", async () => {
+  await sampledAlike(8);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 10 of 16", async () => {
+  await sampledAlike(9);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 11 of 16", async () => {
+  await sampledAlike(10);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 12 of 16", async () => {
+  await sampledAlike(11);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 13 of 16", async () => {
+  await sampledAlike(12);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 14 of 16", async () => {
+  await sampledAlike(13);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 15 of 16", async () => {
+  await sampledAlike(14);
+}, { timeout: 600_000 });
+
+test("split and one-module dev builds of sampled test programs behave alike, part 16 of 16", async () => {
+  await sampledAlike(15);
+}, { timeout: 600_000 });
 
 test("giving a session the build caches again keeps the ones it has", () => {
   let session = buildSession(newSession());

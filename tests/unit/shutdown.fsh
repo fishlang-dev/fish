@@ -1,10 +1,11 @@
 // Signals, process.shutdown and serve's drain. Each program runs under
-// `sh`, which starts a Node driver in the background and then execs the program, so the test sees
-// the program's own exit code and signal. The driver, given the program's pid and the file its
-// stderr goes to, waits for the program's ready lines, sends its signals, acts as its clients, and
-// writes what it saw to a file once done: one fact per line, a name, a tab and a JSON string.
+// `sh`, which starts a driver, a Fish program built beside it, in the background and then execs the
+// program, so the test sees the program's own exit code and signal. The driver, given the program's
+// pid and the file its stderr goes to, waits for the program's ready lines, sends its signals, acts
+// as its clients, and writes what it saw to a file once done: one fact per line, a name, a tab and
+// a JSON string.
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { built, removed, same, scratch, text } from "./support.fsh";
 
@@ -12,56 +13,129 @@ import { built, removed, same, scratch, text } from "./support.fsh";
 // the driver's facts.
 type Run = { code: i64 | null; signal: string | null; stdout: string; stderr: string; facts: string };
 
-// What every driver starts with: waiting for a stderr line, for the program to exit, and writing
-// the facts once its own `drive()` ends, or the error that stopped it.
+// What every driver starts with: waiting for a stderr line, for the program to exit, the clients
+// the tests share, and writing the facts once its own `drive()` ends, or the error that stopped it.
 function prelude(): string {
-  return String.raw`const fs = require("node:fs");
-const net = require("node:net");
-const pid = Number(process.argv[2]);
-const errFile = process.argv[3];
-const doneFile = process.argv[4];
-const facts = {};
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const stderr = () => { try { return fs.readFileSync(errFile, "utf8"); } catch { return ""; } };
-const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
-async function line(text) {
+  return String.raw`import { readFileSync, renameSync, writeFileSync } from "node:fs";
+
+type Facts = Map<string, string>;
+
+function pid(): i64 {
+  return parseInt(process.argv[2]) ?? 0;
+}
+
+function stderr(): string {
+  try {
+    return readFileSync(process.argv[3], "utf8");
+  } catch (_e) {
+    return "";
+  }
+}
+
+function alive(): boolean {
+  try {
+    return process.kill(pid(), 0);
+  } catch (_e) {
+    return false;
+  }
+}
+
+// The first whole stderr line that is text, or starts with it when prefix is set.
+function seen(err: string, text: string, prefix: boolean): string | null {
+  let lines = err.split("\n");
+  lines.pop();
+  for (const l of lines) if (prefix ? l.startsWith(text) : l === text) return l;
+  return null;
+}
+
+async function waited(text: string, prefix: boolean): Promise<string> throws Error | IoError {
   const deadline = Date.now() + 10000;
-  for (;;) {
-    const found = stderr().split("\n").slice(0, -1).find((l) => (typeof text === "string" ? l === text : text.test(l)));
-    if (found !== undefined) return found;
-    if (!alive()) throw new Error("the program exited before " + String(text) + "; stderr: " + JSON.stringify(stderr()));
+  while (true) {
+    const err = await spawnBlocking(() => stderr());
+    const found = seen(err, text, prefix);
+    if (found !== null) return found;
+    if (!alive()) throw new Error("the program exited before " + text + "; stderr: " + JSON.stringify(err));
     if (Date.now() > deadline) {
-      process.kill(pid, "SIGKILL");
-      throw new Error("timed out waiting for " + String(text) + "; stderr so far: " + JSON.stringify(stderr()));
+      process.kill(pid(), "SIGKILL");
+      throw new Error("timed out waiting for " + text + "; stderr so far: " + JSON.stringify(err));
     }
     await sleep(10);
   }
 }
-async function exited() {
+
+async function line(text: string): Promise<void> throws Error | IoError {
+  await waited(text, false);
+}
+
+async function port(): Promise<i64> throws Error | IoError {
+  const l = await waited("listening ", true);
+  const p = parseInt(l.slice(10));
+  if (p === null) throw new Error("not a port: " + l);
+  return p!;
+}
+
+async function exited(): Promise<void> throws Error | IoError {
   const deadline = Date.now() + 10000;
   while (alive()) {
     if (Date.now() > deadline) {
-      process.kill(pid, "SIGKILL");
+      process.kill(pid(), "SIGKILL");
       throw new Error("timed out waiting for the program to exit");
     }
     await sleep(10);
   }
 }
-const port = async () => Number((await line(/^listening \d+$/)).split(" ")[1]);
-function finish() {
-  fs.writeFileSync(doneFile + ".part", Object.entries(facts).map(([k, v]) => k + "\t" + JSON.stringify(String(v))).join("\n"));
-  fs.renameSync(doneFile + ".part", doneFile);
-}
-drive().then(finish, (e) => { facts.error = e.message; finish(); });
-`;
+
+function url(p: i64, path: string): string {
+  return "http://127.0.0.1:" + String(p) + path;
 }
 
-function write(path: string, contents: string): void {
+// A GET's status and body, as JSON's [status, body].
+async function got(p: i64, path: string): Promise<string> throws IoError | AbortError | TypeError {
+  const res = await fetch(url(p, path));
+  const body = await res.text();
+  return "[" + String(res.status) + "," + JSON.stringify(body) + "]";
+}
+
+async function request(p: i64, head: string): Promise<TcpStream> throws IoError | AbortError {
+  const socket = await TcpStream.connect("127.0.0.1", p);
+  await socket.write(new TextEncoder().encode(head));
+  return socket;
+}
+
+// Reads until the connection ends, it fails, or ms pass, giving which of "end", "error" and
+// "timeout" it was, and everything read.
+async function drained(socket: Ref<TcpStream>, ms: i64): Promise<[string, u8[]]> {
+  const signal = AbortSignal.timeout(ms);
+  let all: u8[] = [];
   try {
-    writeFileSync(path, contents);
+    while (true) {
+      const more = await socket.read(65536, signal.clone());
+      if (more.length === 0) return ["end", all];
+      for (const b of more) all.push(b);
+    }
   } catch (e) {
-    assert(false, `can't write ${path}: ${e.message}`);
+    if (e instanceof AbortError) return ["timeout", all];
+    return ["error", all];
   }
+  return ["end", all];
+}
+
+async function main(): Promise<void> {
+  let facts: Facts = new Map<string, string>();
+  try {
+    await drive(facts);
+  } catch (e) {
+    facts.set("error", e.message);
+  }
+  let out: string[] = [];
+  for (const [k, v] of facts) out.push(k + "\t" + JSON.stringify(v));
+  const done = process.argv[4];
+  try {
+    writeFileSync(done + ".part", out.join("\n"));
+    renameSync(done + ".part", done);
+  } catch (_e) {}
+}
+`;
 }
 
 function readText(path: string): string {
@@ -73,15 +147,17 @@ function readText(path: string): string {
   }
 }
 
-// Runs `binary` with FISH_LEAKS set, driven by `driver`, the body of an async `drive()`; with `fifo`,
-// its stdout goes to a FIFO nobody reads. Its stderr must report no leaks.
-function run(tmp: string, binary: string, driver: string, fifo: boolean): Run {
+// Runs `binary` with FISH_LEAKS set, driven by `driver`, the body of an async `drive()` with the
+// top-level declarations in `helpers` beside it; with `fifo`, its stdout goes to a FIFO nobody
+// reads. Its stderr must report no leaks.
+function run(tmp: string, binary: string, driver: string, fifo: boolean, helpers: string = ""): Run {
   const err = join(tmp, "stderr");
   const done = join(tmp, "facts");
-  const drv = join(tmp, "drive.cjs");
-  write(drv, `${prelude()}\nasync function drive() {\n${driver}\n}\n`);
+  // A driver that records no facts names its parameter as unused, which the build would warn about.
+  const named = driver.includes("facts.") ? "facts" : "_facts";
+  const drv = built(tmp, "drive", `${prelude()}\n${helpers}\nasync function drive(${named}: Mut<Facts>): Promise<void> throws Error | IoError | AbortError | TypeError {\n${driver}\n}\n`);
   const script = `err=$1 bin=$2 drv=$3 done=$4 fifo=$5
-node "$drv" $$ "$err" "$done" > /dev/null 2>&1 &
+"$drv" $$ "$err" "$done" > /dev/null 2>&1 &
 if [ -n "$fifo" ]; then
   mkfifo "$fifo" && exec 3<> "$fifo"
   exec env FISH_LEAKS=1 "$bin" 2> "$err" >&3
@@ -137,7 +213,7 @@ function aborted(): string {
 
 function abortedBy(signal: string): void {
   const tmp = scratch("fish-shutdown-");
-  const r = run(tmp, built(tmp, `aborted_${signal}`, aborted()), `await line("ready");\nprocess.kill(pid, "${signal}");`, false);
+  const r = run(tmp, built(tmp, `aborted_${signal}`, aborted()), `await line("ready");\nprocess.kill(pid(), "${signal}");`, false);
   ended(r, "aborted true true\n", 0, null);
   removed(tmp);
 }
@@ -169,7 +245,7 @@ function ignored(): string {
 
 function signalledTwice(signal: string, code: i64): void {
   const tmp = scratch("fish-shutdown-");
-  const r = run(tmp, built(tmp, `ignored_${signal}`, ignored()), `await line("ready");\nprocess.kill(pid, "${signal}");\nawait line("noticed");\nprocess.kill(pid, "${signal}");`, false);
+  const r = run(tmp, built(tmp, `ignored_${signal}`, ignored()), `await line("ready");\nprocess.kill(pid(), "${signal}");\nawait line("noticed");\nprocess.kill(pid(), "${signal}");`, false);
   ended(r, "before\nnoticed\n", code, null);
   removed(tmp);
 }
@@ -190,7 +266,7 @@ test("a program that never names process.shutdown dies at its first SIGINT", () 
   console.log("never");
 }
 `);
-  const r = run(tmp, binary, `await line("ready");\nprocess.kill(pid, "SIGINT");`, false);
+  const r = run(tmp, binary, `await line("ready");\nprocess.kill(pid(), "SIGINT");`, false);
   ended(r, "", null, "SIGINT");
   removed(tmp);
 }, { timeout: 60_000 });
@@ -209,23 +285,36 @@ function slow(): string {
 
 test("serve stops accepting at SIGINT and finishes the request in flight", () => {
   const tmp = scratch("fish-shutdown-");
-  // Whether a new connection to the port is refused, rather than accepted into the backlog.
   const r = run(tmp, built(tmp, "slow", slow()), String.raw`const p = await port();
-const refused = () => new Promise((resolve) => {
-  const socket = net.connect(p, "127.0.0.1");
-  socket.once("connect", () => { socket.destroy(); resolve(false); });
-  socket.once("error", () => resolve(true));
-});
-const answer = fetch("http://127.0.0.1:" + p + "/").then(async (res) => [res.status, await res.text()]);
+const answering = spawn(answered(p));
 await line("handling");
-process.kill(pid, "SIGINT");
+process.kill(pid(), "SIGINT");
 // The listener closes once the accept loop sees the signal; until then a probe may still land.
 const deadline = Date.now() + 1500;
 let closed = false;
-while (!closed && Date.now() < deadline) closed = await refused();
-facts.closed = closed;
-facts.answer = JSON.stringify(await Promise.race([answer, sleep(10000).then(() => "no answer")]));
-await exited();`, false);
+while (!closed && Date.now() < deadline) closed = await refused(p);
+facts.set("closed", String(closed));
+const answer = await answering;
+facts.set("answer", answer);
+await exited();`, false, String.raw`// Whether a new connection to the port is refused, rather than accepted into the backlog.
+async function refused(p: i64): Promise<boolean> {
+  try {
+    const _socket = await TcpStream.connect("127.0.0.1", p);
+    return false;
+  } catch (_e) {
+    return true;
+  }
+}
+
+async function answered(p: i64): Promise<string> {
+  try {
+    const res = await fetch(url(p, "/"), { signal: AbortSignal.timeout(10000) });
+    const body = await res.text();
+    return "[" + String(res.status) + "," + JSON.stringify(body) + "]";
+  } catch (e) {
+    return "no answer: " + e.message;
+  }
+}`);
   same(fact(r, "closed"), "true", "whether the listener closed");
   same(fact(r, "answer"), `[200,"done slowly"]`, "the request in flight's answer");
   ended(r, "after serve\n", 0, null);
@@ -240,7 +329,7 @@ test("serve given its own signal leaves SIGINT alone", () => {
   console.log("after serve");
 }
 `);
-  const r = run(tmp, binary, `await line("listening");\nprocess.kill(pid, "SIGINT");`, false);
+  const r = run(tmp, binary, `await line("listening");\nprocess.kill(pid(), "SIGINT");`, false);
   ended(r, "", null, "SIGINT");
   removed(tmp);
 }, { timeout: 60_000 });
@@ -255,7 +344,7 @@ test("a second SIGINT exits even while stdout is stuck on a full pipe", () => {
 }
 `);
   // Long enough for the loop to fill the pipe and block in a write holding stdout's lock.
-  const r = run(tmp, binary, `await line("ready");\nawait sleep(500);\nprocess.kill(pid, "SIGINT");\nawait sleep(100);\nprocess.kill(pid, "SIGINT");`, true);
+  const r = run(tmp, binary, `await line("ready");\nawait sleep(500);\nprocess.kill(pid(), "SIGINT");\nawait sleep(100);\nprocess.kill(pid(), "SIGINT");`, true);
   ended(r, "", 130, null);
   removed(tmp);
 }, { timeout: 60_000 });
@@ -277,20 +366,13 @@ async function main(): Promise<void> throws IoError {
 test("a stream to a client that stops reading ends at SIGINT, freeing its connection", () => {
   const tmp = scratch("fish-shutdown-");
   const r = run(tmp, built(tmp, "firehose", firehose()), String.raw`const p = await port();
-const socket = net.connect(p, "127.0.0.1");
-socket.write("GET / HTTP/1.1\r\nHost: h\r\n\r\n");
+const socket = await request(p, "GET / HTTP/1.1\r\nHost: h\r\n\r\n");
 // Nothing is read until the server's writes have filled both sides' buffers and block.
-socket.pause();
 await sleep(500);
-process.kill(pid, "SIGINT");
+process.kill(pid(), "SIGINT");
 await exited();
-const ended = new Promise((resolve) => {
-  socket.on("end", () => resolve(true));
-  socket.on("error", () => resolve(true));
-});
-socket.resume();
-facts.ended = await Promise.race([ended, sleep(5000).then(() => false)]);
-socket.destroy();`, false);
+const [how, _bytes] = await drained(socket, 5000);
+facts.set("ended", String(how !== "timeout"));`, false);
   ended(r, "after serve\n", 0, null);
   same(fact(r, "ended"), "true", "whether the connection ended");
   removed(tmp);
@@ -299,28 +381,63 @@ socket.destroy();`, false);
 test("a stream's write under way at SIGINT gets a second's grace, then the stream ends cleanly", () => {
   const tmp = scratch("fish-shutdown-");
   const r = run(tmp, built(tmp, "firehose_grace", firehose()), String.raw`const p = await port();
-const socket = net.connect(p, "127.0.0.1");
-let text = "";
-const ended = new Promise((resolve) => {
-  socket.on("data", (d) => (text = (text + d.toString()).slice(-16)));
-  socket.on("end", () => resolve(true));
-  socket.on("error", () => resolve(false));
-});
-socket.write("GET / HTTP/1.1\r\nHost: h\r\n\r\n");
-socket.pause();
+const socket = await request(p, "GET / HTTP/1.1\r\nHost: h\r\n\r\n");
 await sleep(500);
-process.kill(pid, "SIGINT");
+process.kill(pid(), "SIGINT");
 // Reading again within the second lets the blocked write and the last chunk go out.
 await sleep(200);
-socket.resume();
-facts.ended = await Promise.race([ended, sleep(5000).then(() => false)]);
-facts.tail = text;
+const [how, bytes] = await drained(socket, 5000);
+facts.set("ended", String(how === "end"));
+const from = bytes.length > 16 ? (bytes.length - 16) as i64 : 0;
+facts.set("tail", new TextDecoder().decode(bytes.slice(from)));
 await exited();`, false);
   same(fact(r, "ended"), "true", "whether the stream ended");
   assert(fact(r, "tail").endsWith("\r\n0\r\n\r\n"), `the stream ended with ${JSON.stringify(fact(r, "tail"))}`);
   ended(r, "after serve\n", 0, null);
   removed(tmp);
 }, { timeout: 60_000 });
+
+// A client that sends its request, shuts down its side for writing and reads everything until the
+// server closes, through libc's sockets since a TcpStream can't half-close. Reads give up after ten
+// seconds, so a server that never closes fails the test rather than hanging it.
+function halfClose(): string {
+  return String.raw`declare function socket(domain: i32, kind: i32, protocol: i32): i32;
+declare function connect(fd: i32, address: Ptr<u8>, length: u32): i32;
+declare function setsockopt(fd: i32, level: i32, name: i32, value: Ptr<u8>, length: u32): i32;
+declare function send(fd: i32, data: Ptr<u8>, length: usize, flags: i32): i64;
+declare function recv(fd: i32, data: MutPtr<u8>, length: usize, flags: i32): i64;
+declare function shutdown(fd: i32, how: i32): i32;
+declare function close(fd: i32): i32;
+
+function halfClosed(p: i64, head: string): string throws Error {
+  const darwin = process.platform === "darwin";
+  // sockaddr_in for 127.0.0.1, which on macOS starts with its length.
+  let address: u8[] = darwin ? [16, 2] : [2, 0];
+  for (const b of [(p >> 8) & 255, p & 255, 127, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]) address.push(b as u8);
+  // A struct timeval of ten seconds, as SO_RCVTIMEO takes it.
+  let timeout: u8[] = [10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  const bytes = new TextEncoder().encode(head);
+  let buffer: u8[] = new Array<u8>(65536).fill(0);
+  let all: u8[] = [];
+  const fd = unsafe { socket(2, 1, 0) };
+  if (fd < 0) throw new Error("no socket");
+  try {
+    if (unsafe { connect(fd, ptrOf(address[0]), 16) } !== 0) throw new Error("can't connect");
+    if (unsafe { setsockopt(fd, darwin ? 0xffff : 1, darwin ? 0x1006 : 20, ptrOf(timeout[0]), 16) } !== 0) throw new Error("can't set a read timeout");
+    if (unsafe { send(fd, ptrOf(bytes[0]), bytes.length, 0) } !== (bytes.length as i64)) throw new Error("can't send the request");
+    if (unsafe { shutdown(fd, 1) } !== 0) throw new Error("can't half-close");
+    while (true) {
+      const n = unsafe { recv(fd, mutPtrOf(buffer[0]), 65536, 0) };
+      if (n < 0) throw new Error("the read failed or timed out after " + new TextDecoder().decode(all));
+      if (n === 0) break;
+      for (let i = 0; i < n; i++) all.push(buffer[i as usize]);
+    }
+  } finally {
+    unsafe { close(fd) };
+  }
+  return new TextDecoder().decode(all);
+}`;
+}
 
 // A half-closed client looks the same as one that has gone, so its end of the stream ends a
 // streamed body as Node's server does: the head goes out, the body is cut short with no last
@@ -343,15 +460,9 @@ async function main(): Promise<void> throws IoError {
 }
 `);
   const r = run(tmp, binary, String.raw`const p = await port();
-facts.received = await new Promise((resolve) => {
-  const socket = net.connect({ port: p, host: "127.0.0.1", allowHalfOpen: true });
-  let text = "";
-  socket.on("data", (d) => (text += d.toString()));
-  socket.on("end", () => resolve(text));
-  socket.write("GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n", () => socket.end());
-});
-await fetch("http://127.0.0.1:" + p + "/stop").then((res) => res.text());
-await exited();`, false);
+facts.set("received", halfClosed(p, "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"));
+const _stopped = await got(p, "/stop");
+await exited();`, false, halfClose());
   const received = fact(r, "received");
   assert(received.startsWith("HTTP/1.1 200 OK\r\n"), `received ${JSON.stringify(received)}`);
   assert(received.includes("transfer-encoding: chunked\r\n"), `no chunked encoding in ${JSON.stringify(received)}`);
@@ -375,21 +486,18 @@ test("a handler that panics gets its request a bare 500, and the server keeps se
 `);
   // One raw HTTP/1.1 request, and everything the server sends until it closes the connection.
   const r = run(tmp, binary, String.raw`const p = await port();
-facts.failed = await new Promise((resolve, reject) => {
-  const socket = net.connect(p, "127.0.0.1", () => socket.write("GET /boom HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n"));
-  let got = "";
-  socket.on("data", (d) => (got += d.toString()));
-  socket.on("end", () => resolve(got));
-  socket.on("error", reject);
-});
+const socket = await request(p, "GET /boom HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n");
+const [how, bytes] = await drained(socket, 10000);
+if (how !== "end") throw new Error("the panicking request's connection ended with " + how);
+facts.set("failed", new TextDecoder().decode(bytes));
 await line("index out of bounds: the len is 1 but the index is 5");
-let answers = [];
+let answers: string[] = [];
 for (const path of ["/a", "/boom", "/b"]) {
-  const answer = await fetch("http://127.0.0.1:" + p + path);
-  answers.push([answer.status, await answer.text()]);
+  const answer = await got(p, path);
+  answers.push(answer);
 }
-facts.answers = JSON.stringify(answers);
-process.kill(pid, "SIGTERM");
+facts.set("answers", "[" + answers.join(",") + "]");
+process.kill(pid(), "SIGTERM");
 await exited();`, false);
   const failed = fact(r, "failed");
   assert(failed.startsWith("HTTP/1.1 500 Internal Server Error\r\n"), `the panicking request got ${JSON.stringify(failed)}`);
@@ -437,13 +545,13 @@ test("a Router route that panics answers 500 while the other routes keep working
 }
 `);
   const r = run(tmp, binary, String.raw`const p = await port();
-let answers = [];
+let answers: string[] = [];
 for (const path of ["/users/1", "/boom", "/users/2", "/boom", "/users/3"]) {
-  const answer = await fetch("http://127.0.0.1:" + p + path);
-  answers.push([answer.status, await answer.text()]);
+  const answer = await got(p, path);
+  answers.push(answer);
 }
-facts.answers = JSON.stringify(answers);
-process.kill(pid, "SIGTERM");
+facts.set("answers", "[" + answers.join(",") + "]");
+process.kill(pid(), "SIGTERM");
 await exited();`, false);
   same(fact(r, "answers"), `[[200,"user 1"],[500,""],[200,"user 2"],[500,""],[200,"user 3"]]`, "the answers");
   ended(r, "after serve\n", 0, null);

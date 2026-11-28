@@ -55,3 +55,12 @@ async function main(): Promise<void> throws IoError | AbortError | TypeError | P
   const rows = await pool.query<Plain>("select 1 as x");
   console.log(rows.length);
 }
+// case: postgres_beside_the_http_library
+// expect: 200 x 
+import { Pool } from "postgres";
+async function main() {
+  const pools: Pool[] = [];
+  const r = new Response("x");
+  const body = await r.text();
+  console.log(r.status, body, pools.length === 0 ? "" : "pooled");
+}

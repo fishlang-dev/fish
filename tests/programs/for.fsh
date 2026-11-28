@@ -251,3 +251,42 @@ function main() {
   for (const s of (xs.length > 1 ? xs : ys) satisfies string[]) console.log(s);
   console.log(xs.length);
 }
+// case: for_comma_heads
+// expect: 0 9
+// expect: 1 8
+// expect: 2 7
+// expect: done 3 6
+// expect: 1 2
+// Comma expressions in a for loop's initializer and update, and as a statement, run in order;
+// `continue` still runs every part of the update.
+function main() {
+  let i = 0;
+  let j = 0;
+  for (i = 0, j = 9; i < j; i++, j--) {
+    if (i === 3) break;
+    if (i > 5) continue;
+    console.log(i, j);
+  }
+  console.log("done", i, j);
+  let a = 0;
+  let b = 0;
+  a++, b += 2;
+  console.log(a, b);
+}
+// case: for_comma_continue
+// expect: 4 4
+function main() {
+  let n = 0;
+  let k = 0;
+  for (let i = 0; i < 4; i++, k++) {
+    if (i % 2 === 0) continue;
+  }
+  for (let i = 0; i < 4; n++, i++) continue;
+  console.log(n, k);
+}
+// case: comma_as_a_value
+// error: comma expressions used as values are not supported yet
+function main() {
+  let a = 0;
+  const x = (a++, a);
+}

@@ -3,9 +3,9 @@ import { CASEMAP } from "./casemap.fsh";
 // The C half of the runtime, compiled by the same clang call as a program's IR. Its entry
 // points are named `fsh_rt_*`.
 
-// Every allocation goes through fsh_rt_alloc and fsh_rt_free, which count what is live. With
-// FISH_LEAKS=1 in the environment, a program reports at exit how many blocks it never freed; a
-// --leaks build always reports them, grouped by where each was allocated.
+// Every allocation goes through fsh_rt_alloc and fsh_rt_free. With FISH_LEAKS=1 in the
+// environment they count what is live, and a program reports at exit how many blocks it never
+// freed; a --leaks build always reports them, grouped by where each was allocated.
 //
 // A string is a block: a reference count, its length in bytes, a pointer to its bytes, the
 // block it shares them with when it is a slice, its UTF-16 length once known (-1 before), its
@@ -22,47 +22,777 @@ export const NATIVE = String.raw`
 #endif
 #include <math.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#ifndef __wasi__
 #include <unwind.h>
+#endif
 #include <pthread.h>
 #include <sched.h>
-#include <unistd.h>
 #include <time.h>
 #include <errno.h>
-#include <pwd.h>
 #include <limits.h>
-#include <sys/random.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/ioctl.h>
 #include <dirent.h>
-#include <ftw.h>
 #include <signal.h>
+#ifdef _WIN32
+// Windows, through MinGW-w64 and UCRT: the POSIX calls the runtime makes, given over Winsock and
+// Win32. A socket is a Winsock handle the runtime holds as an int, as every handle fits in 32
+// bits; the sockets made here are remembered, so close, read, write and fcntl know a socket from
+// a C runtime descriptor. What Windows has no form of (child processes, signals beyond Ctrl-C,
+// users, file watching) fails with ENOSYS where it is called.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <afunix.h>
+#include <windows.h>
+#include <winternl.h>
+#include <mswsock.h>
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#include <unistd.h>
+#include <sys/utime.h>
+
+typedef int uid_t_fsh;
+#define uid_t uid_t_fsh
+typedef int gid_t;
+typedef unsigned long sigset_t;
+typedef unsigned long nfds_t_fsh;
+#define nfds_t nfds_t_fsh
+
+__attribute__((constructor)) static void fsh_win_start(void) {
+  WSADATA data;
+  WSAStartup(MAKEWORD(2, 2), &data);
+  // Bytes are written as they are, as on every other platform: no CRLF in place of a newline.
+  _setmode(0, _O_BINARY);
+  _setmode(1, _O_BINARY);
+  _setmode(2, _O_BINARY);
+  _set_fmode(_O_BINARY);
+}
+
+// The IR prints to stderr with dprintf, which UCRT doesn't have.
+int dprintf(int fd, const char *format, ...) {
+  va_list args, again;
+  va_start(args, format);
+  va_copy(again, args);
+  char small[512];
+  int n = vsnprintf(small, sizeof small, format, args);
+  va_end(args);
+  char *text = small;
+  if (n >= (int)sizeof small) {
+    text = malloc((size_t)n + 1);
+    vsnprintf(text, (size_t)n + 1, format, again);
+  }
+  va_end(again);
+  if (n > 0) _write(fd, text, (unsigned)n);
+  if (text != small) free(text);
+  return n;
+}
+
+// The sockets live now, by handle. ponytail: one table under one lock, scanned linearly on a
+// collision; a hash set sized to the open sockets if thousands are open at once.
+#define FSH_WIN_SOCKETS 65536
+static int fsh_win_socket_table[FSH_WIN_SOCKETS];
+static SRWLOCK fsh_win_socket_lock = SRWLOCK_INIT;
+static int fsh_win_socket_slot(int fd, int adding) {
+  unsigned h = ((unsigned)fd >> 2) % FSH_WIN_SOCKETS;
+  for (int i = 0; i < FSH_WIN_SOCKETS; i++, h = (h + 1) % FSH_WIN_SOCKETS) {
+    if (fsh_win_socket_table[h] == fd + 1) return (int)h;
+    if (fsh_win_socket_table[h] == 0) return adding ? (int)h : -1;
+  }
+  return -1;
+}
+static void fsh_win_socket_add(int fd) {
+  AcquireSRWLockExclusive(&fsh_win_socket_lock);
+  int at = fsh_win_socket_slot(fd, 1);
+  if (at >= 0) fsh_win_socket_table[at] = fd + 1;
+  ReleaseSRWLockExclusive(&fsh_win_socket_lock);
+}
+// A slot emptied is marked -1, so the probes that passed it go on.
+static void fsh_win_socket_remove(int fd) {
+  AcquireSRWLockExclusive(&fsh_win_socket_lock);
+  int at = fsh_win_socket_slot(fd, 0);
+  if (at >= 0) fsh_win_socket_table[at] = -1;
+  ReleaseSRWLockExclusive(&fsh_win_socket_lock);
+}
+static int fsh_win_is_socket(int fd) {
+  AcquireSRWLockShared(&fsh_win_socket_lock);
+  int at = fsh_win_socket_slot(fd, 0);
+  ReleaseSRWLockShared(&fsh_win_socket_lock);
+  return at >= 0;
+}
+
+// Winsock's errors as the errno values the runtime reads.
+static int fsh_win_errno(int e) {
+  switch (e) {
+  case WSAEWOULDBLOCK: return EAGAIN;
+  case WSAEINPROGRESS: return EINPROGRESS;
+  case WSAEALREADY: return EALREADY;
+  case WSAEINTR: return EINTR;
+  case WSAEBADF: case WSAENOTSOCK: return EBADF;
+  case WSAEACCES: return EACCES;
+  case WSAEFAULT: return EFAULT;
+  case WSAEINVAL: return EINVAL;
+  case WSAEMFILE: return EMFILE;
+  case WSAEMSGSIZE: return EMSGSIZE;
+  case WSAEAFNOSUPPORT: return EAFNOSUPPORT;
+  case WSAEADDRINUSE: return EADDRINUSE;
+  case WSAEADDRNOTAVAIL: return EADDRNOTAVAIL;
+  case WSAENETDOWN: return ENETDOWN;
+  case WSAENETUNREACH: return ENETUNREACH;
+  case WSAENETRESET: return ENETRESET;
+  case WSAECONNABORTED: return ECONNABORTED;
+  case WSAECONNRESET: return ECONNRESET;
+  case WSAENOBUFS: return ENOBUFS;
+  case WSAEISCONN: return EISCONN;
+  case WSAENOTCONN: return ENOTCONN;
+  case WSAESHUTDOWN: return EPIPE;
+  case WSAETIMEDOUT: return ETIMEDOUT;
+  case WSAECONNREFUSED: return ECONNREFUSED;
+  case WSAEHOSTUNREACH: return EHOSTUNREACH;
+  default: return EIO;
+  }
+}
+static int fsh_win_failed(void) {
+  errno = fsh_win_errno(WSAGetLastError());
+  return -1;
+}
+
+static int fsh_win_socket(int domain, int type, int protocol) {
+  SOCKET s = WSASocketW(domain, type, protocol, NULL, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+  if (s == INVALID_SOCKET) return fsh_win_failed();
+  fsh_win_socket_add((int)s);
+  return (int)s;
+}
+static int fsh_win_accept(int fd, struct sockaddr *at, socklen_t *n) {
+  SOCKET s = accept((SOCKET)fd, at, n);
+  if (s == INVALID_SOCKET) return fsh_win_failed();
+  fsh_win_socket_add((int)s);
+  return (int)s;
+}
+static int fsh_win_close(int fd) {
+  if (!fsh_win_is_socket(fd)) return _close(fd);
+  fsh_win_socket_remove(fd);
+  return closesocket((SOCKET)fd) == 0 ? 0 : fsh_win_failed();
+}
+static ssize_t fsh_win_read(int fd, void *data, size_t n) {
+  if (!fsh_win_is_socket(fd)) return _read(fd, data, (unsigned)(n > INT_MAX ? INT_MAX : n));
+  int got = recv((SOCKET)fd, data, (int)(n > INT_MAX ? INT_MAX : n), 0);
+  return got >= 0 ? got : fsh_win_failed();
+}
+static ssize_t fsh_win_write(int fd, const void *data, size_t n) {
+  if (!fsh_win_is_socket(fd)) return _write(fd, data, (unsigned)(n > INT_MAX ? INT_MAX : n));
+  int put = send((SOCKET)fd, data, (int)(n > INT_MAX ? INT_MAX : n), 0);
+  return put >= 0 ? put : fsh_win_failed();
+}
+static ssize_t fsh_win_recv(int fd, void *data, size_t n, int flags) {
+  int got = recv((SOCKET)fd, data, (int)(n > INT_MAX ? INT_MAX : n), flags);
+  return got >= 0 ? got : fsh_win_failed();
+}
+static ssize_t fsh_win_send(int fd, const void *data, size_t n, int flags) {
+  int put = send((SOCKET)fd, data, (int)(n > INT_MAX ? INT_MAX : n), flags);
+  return put >= 0 ? put : fsh_win_failed();
+}
+static ssize_t fsh_win_sendto(int fd, const void *data, size_t n, int flags, const struct sockaddr *to, socklen_t len) {
+  int put = sendto((SOCKET)fd, data, (int)n, flags, to, len);
+  return put >= 0 ? put : fsh_win_failed();
+}
+static ssize_t fsh_win_recvfrom(int fd, void *data, size_t n, int flags, struct sockaddr *from, socklen_t *len) {
+  int got = recvfrom((SOCKET)fd, data, (int)n, flags, from, len);
+  return got >= 0 ? got : fsh_win_failed();
+}
+static int fsh_win_connect(int fd, const struct sockaddr *at, socklen_t n) {
+  if (connect((SOCKET)fd, at, n) == 0) return 0;
+  int e = WSAGetLastError();
+  errno = e == WSAEWOULDBLOCK ? EINPROGRESS : fsh_win_errno(e);
+  return -1;
+}
+static int fsh_win_bind(int fd, const struct sockaddr *at, socklen_t n) {
+  return bind((SOCKET)fd, at, n) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_listen(int fd, int backlog) {
+  return listen((SOCKET)fd, backlog) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_shutdown(int fd, int how) {
+  return shutdown((SOCKET)fd, how) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_getsockname(int fd, struct sockaddr *at, socklen_t *n) {
+  return getsockname((SOCKET)fd, at, n) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_getpeername(int fd, struct sockaddr *at, socklen_t *n) {
+  return getpeername((SOCKET)fd, at, n) == 0 ? 0 : fsh_win_failed();
+}
+// Winsock takes a send or receive timeout as milliseconds, not a timeval.
+static int fsh_win_setsockopt(int fd, int level, int name, const void *value, socklen_t n) {
+  if (level == SOL_SOCKET && (name == SO_RCVTIMEO || name == SO_SNDTIMEO) && n == sizeof(struct timeval)) {
+    const struct timeval *t = value;
+    DWORD ms = (DWORD)(t->tv_sec * 1000 + t->tv_usec / 1000);
+    return setsockopt((SOCKET)fd, level, name, (const char *)&ms, sizeof ms) == 0 ? 0 : fsh_win_failed();
+  }
+  // SO_REUSEADDR on Windows lets another socket take a port in use; exclusive use is the default
+  // the runtime wants.
+  if (level == SOL_SOCKET && name == SO_REUSEADDR) return 0;
+  return setsockopt((SOCKET)fd, level, name, (const char *)value, n) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_getsockopt(int fd, int level, int name, void *value, socklen_t *n) {
+  return getsockopt((SOCKET)fd, level, name, (char *)value, n) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_ioctl(int fd, unsigned long request, ...) {
+  va_list args;
+  va_start(args, request);
+  void *arg = va_arg(args, void *);
+  va_end(args);
+  if (request != (unsigned long)FIONREAD && request != (unsigned long)FIONBIO) {
+    errno = ENOTTY;
+    return -1;
+  }
+  return ioctlsocket((SOCKET)fd, (long)request, (u_long *)arg) == 0 ? 0 : fsh_win_failed();
+}
+static int fsh_win_poll(struct pollfd *fds, unsigned long n, int ms) {
+  int ready = WSAPoll(fds, n, ms);
+  return ready >= 0 ? ready : fsh_win_failed();
+}
+
+#define F_GETFD 1
+#define F_SETFD 2
+#define F_GETFL 3
+#define F_SETFL 4
+#define F_DUPFD_CLOEXEC 1030
+#define FD_CLOEXEC 1
+#define O_NONBLOCK 0x10000000
+#define O_CLOEXEC _O_NOINHERIT
+#define O_SYNC 0
+#define O_NOFOLLOW 0
+#define SOCK_CLOEXEC 0
+#define SHUT_RD SD_RECEIVE
+#define SHUT_WR SD_SEND
+#define SHUT_RDWR SD_BOTH
+#define MSG_NOSIGNAL_FSH 0
+// A socket's blocking mode is all that F_SETFL changes; Windows handles aren't inherited unless
+// asked, so close-on-exec is already so.
+static int fsh_win_fcntl(int fd, int command, ...) {
+  va_list args;
+  va_start(args, command);
+  long value = va_arg(args, long);
+  va_end(args);
+  int socket = fsh_win_is_socket(fd);
+  switch (command) {
+  case F_GETFD:
+    return socket || _get_osfhandle(fd) != -1 ? 0 : (errno = EBADF, -1);
+  case F_SETFD:
+  case F_GETFL:
+    return 0;
+  case F_SETFL: {
+    if (!socket) return 0;
+    u_long on = (value & O_NONBLOCK) != 0;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &on) == 0 ? 0 : fsh_win_failed();
+  }
+  case F_DUPFD_CLOEXEC:
+    return _dup(fd);
+  }
+  errno = EINVAL;
+  return -1;
+}
+
+static int fsh_win_pipe(int fds[2]) {
+  return _pipe(fds, 65536, _O_BINARY | _O_NOINHERIT);
+}
+static int fsh_win_pipe2(int fds[2], int flags) {
+  return fsh_win_pipe(fds);
+}
+
+// A stat with nanosecond times, as the runtime reads them; Windows keeps 100ns ticks.
+struct fsh_win_stat {
+  dev_t st_dev;
+  ino_t st_ino;
+  unsigned short st_mode;
+  short st_nlink;
+  short st_uid;
+  short st_gid;
+  dev_t st_rdev;
+  int64_t st_size;
+  struct timespec st_atim, st_mtim, st_ctim, st_birthtim;
+  int64_t st_blksize, st_blocks;
+};
+static void fsh_win_times(struct fsh_win_stat *out, const struct _stat64 *in) {
+  out->st_dev = in->st_dev;
+  out->st_ino = in->st_ino;
+  out->st_mode = in->st_mode;
+  out->st_nlink = in->st_nlink;
+  out->st_uid = in->st_uid;
+  out->st_gid = in->st_gid;
+  out->st_rdev = in->st_rdev;
+  out->st_size = in->st_size;
+  out->st_atim = (struct timespec){ in->st_atime, 0 };
+  out->st_mtim = (struct timespec){ in->st_mtime, 0 };
+  out->st_ctim = (struct timespec){ in->st_ctime, 0 };
+  out->st_birthtim = out->st_ctim;
+  out->st_blksize = 4096;
+  out->st_blocks = (in->st_size + 511) / 512;
+}
+// The 100ns ticks since 1601 a handle's times are in, as seconds and nanoseconds since 1970.
+static struct timespec fsh_win_filetime(FILETIME t) {
+  int64_t ticks = ((int64_t)t.dwHighDateTime << 32 | t.dwLowDateTime) - 116444736000000000LL;
+  return (struct timespec){ (time_t)(ticks / 10000000), (long)(ticks % 10000000) * 100 };
+}
+static void fsh_win_exact(struct fsh_win_stat *out, HANDLE h) {
+  FILETIME made, read, written;
+  if (h == INVALID_HANDLE_VALUE || !GetFileTime(h, &made, &read, &written)) return;
+  out->st_atim = fsh_win_filetime(read);
+  out->st_mtim = fsh_win_filetime(written);
+  out->st_ctim = out->st_mtim;
+  out->st_birthtim = fsh_win_filetime(made);
+}
+static int fsh_win_fstat(int fd, struct fsh_win_stat *out) {
+  struct _stat64 in;
+  if (_fstat64(fd, &in) != 0) return -1;
+  fsh_win_times(out, &in);
+  fsh_win_exact(out, (HANDLE)_get_osfhandle(fd));
+  return 0;
+}
+static int fsh_win_stat(const char *path, struct fsh_win_stat *out) {
+  struct _stat64 in;
+  if (_stat64(path, &in) != 0) return -1;
+  fsh_win_times(out, &in);
+  HANDLE h = CreateFileA(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  fsh_win_exact(out, h);
+  if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+  return 0;
+}
+#define S_ISLNK(m) 0
+#define S_IFLNK 0120000
+#define S_ISSOCK(m) 0
+
+static char *fsh_win_realpath(const char *path, char *out) {
+  DWORD attributes = GetFileAttributesA(path);
+  if (attributes == INVALID_FILE_ATTRIBUTES) {
+    errno = ENOENT;
+    return NULL;
+  }
+  char *made = _fullpath(out, path, PATH_MAX);
+  if (!made) return NULL;
+  for (char *p = made; *p; p++) if (*p == '\\') *p = '/';
+  return made;
+}
+
+static ssize_t fsh_win_pread(int fd, void *data, size_t n, int64_t at) {
+  OVERLAPPED place = { 0 };
+  place.Offset = (DWORD)at;
+  place.OffsetHigh = (DWORD)(at >> 32);
+  DWORD got = 0;
+  if (ReadFile((HANDLE)_get_osfhandle(fd), data, (DWORD)(n > 0x7fffffff ? 0x7fffffff : n), &got, &place)) return got;
+  if (GetLastError() == ERROR_HANDLE_EOF) return 0;
+  errno = EIO;
+  return -1;
+}
+static ssize_t fsh_win_pwrite(int fd, const void *data, size_t n, int64_t at) {
+  OVERLAPPED place = { 0 };
+  place.Offset = (DWORD)at;
+  place.OffsetHigh = (DWORD)(at >> 32);
+  DWORD put = 0;
+  if (WriteFile((HANDLE)_get_osfhandle(fd), data, (DWORD)(n > 0x7fffffff ? 0x7fffffff : n), &put, &place)) return put;
+  errno = EIO;
+  return -1;
+}
+static int fsh_win_fsync(int fd) { return _commit(fd); }
+static int fsh_win_ftruncate(int fd, int64_t length) {
+  errno = _chsize_s(fd, length);
+  return errno == 0 ? 0 : -1;
+}
+static int fsh_win_fchmod(int fd, int mode) { return 0; }
+static int fsh_win_fchown(int fd, int uid, int gid) { return 0; }
+static int fsh_win_mkdir(const char *path, int mode) { return _mkdir(path); }
+static int fsh_win_unsupported(void) {
+  errno = ENOSYS;
+  return -1;
+}
+#define readlink(path, out, n) (fsh_win_unsupported())
+#define symlink(from, to) (CreateSymbolicLinkA(to, from, SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) ? 0 : (errno = EPERM, -1))
+#define link(from, to) (CreateHardLinkA(to, from, NULL) ? 0 : (errno = EPERM, -1))
+#define AT_FDCWD -100
+#define AT_SYMLINK_NOFOLLOW 0x100
+static int fsh_win_utimensat(int dir, const char *path, const struct timespec t[2], int flags) {
+  struct __utimbuf64 times = { t[0].tv_sec, t[1].tv_sec };
+  return _utime64(path, &times);
+}
+static int fsh_win_futimens(int fd, const struct timespec t[2]) {
+  struct __utimbuf64 times = { t[0].tv_sec, t[1].tv_sec };
+  return _futime64(fd, &times);
+}
+
+static struct tm *gmtime_r(const time_t *t, struct tm *out) { return gmtime_s(out, t) == 0 ? out : NULL; }
+static struct tm *localtime_r(const time_t *t, struct tm *out) { return localtime_s(out, t) == 0 ? out : NULL; }
+#define flockfile(f) _lock_file(f)
+#define funlockfile(f) _unlock_file(f)
+#define ftrylockfile(f) (_lock_file(f), 0)
+static int unsetenv(const char *name) { return _putenv_s(name, ""); }
+static int setenv(const char *name, const char *value, int overwrite) {
+  if (!overwrite && getenv(name)) return 0;
+  return _putenv_s(name, value);
+}
+
+NTSTATUS WINAPI BCryptGenRandom(void *algorithm, unsigned char *at, ULONG count, ULONG flags);
+static ssize_t getrandom(void *at, size_t count, unsigned flags) {
+  return BCryptGenRandom(NULL, at, (ULONG)count, 2) == 0 ? (ssize_t)count : (errno = EIO, -1);
+}
+static int getentropy(void *at, size_t count) { return getrandom(at, count, 0) == (ssize_t)count ? 0 : -1; }
+
+#define _SC_NPROCESSORS_ONLN 84
+static long sysconf(int name) {
+  SYSTEM_INFO info;
+  GetSystemInfo(&info);
+  return name == _SC_NPROCESSORS_ONLN ? (long)info.dwNumberOfProcessors : -1;
+}
+
+// The home directory is the profile's.
+struct passwd { char *pw_name; char *pw_dir; };
+static int getuid(void) { return 0; }
+static int getpwuid_r(int uid, struct passwd *pw, char *buffer, size_t size, struct passwd **found) {
+  const char *home = getenv("USERPROFILE");
+  *found = NULL;
+  if (!home || strlen(home) >= size) return ENOENT;
+  strcpy(buffer, home);
+  pw->pw_dir = buffer;
+  pw->pw_name = buffer;
+  *found = pw;
+  return 0;
+}
+
+// Ctrl-C reaches a console program as SIGINT, and Ctrl-Break as SIGBREAK; signal() is the
+// whole of what the C runtime has.
+#define SIGHUP 1
+#define SIGQUIT 3
+#define SIGTRAP 5
+#define SIGBUS 7
+#define SIGKILL 9
+#define SIGUSR1 10
+#define SIGUSR2 12
+#define SIGPIPE 13
+#define SIGALRM 14
+#define SIGCHLD 17
+#define SIGCONT 18
+#define SIGSTOP 19
+#define SIGTSTP 20
+#define SIGTTIN 26
+#define SIGTTOU 27
+#define SIGURG 23
+#define SIGXCPU 24
+#define SIGXFSZ 25
+#define SIGVTALRM 28
+#define SIGPROF 29
+#define SIGWINCH 30
+#define SIGIO 31
+#define SIGSYS 32
+struct sigaction { void (*sa_handler)(int); sigset_t sa_mask; int sa_flags; };
+#define SA_RESTART 0
+#define SIG_BLOCK 0
+#define SIG_SETMASK 2
+static int sigemptyset(sigset_t *set) { *set = 0; return 0; }
+static int sigaddset(sigset_t *set, int sig) { return 0; }
+static int sigismember(const sigset_t *set, int sig) { return 0; }
+static int sigpending(sigset_t *set) { *set = 0; return 0; }
+static int sigwait(const sigset_t *set, int *sig) { return ENOSYS; }
+static int pthread_sigmask_fsh(int how, const sigset_t *set, sigset_t *old) { if (old) *old = 0; return 0; }
+#undef pthread_sigmask
+#define pthread_sigmask pthread_sigmask_fsh
+static int sigaction(int sig, const struct sigaction *a, struct sigaction *old) {
+  if (sig != SIGINT && sig != SIGTERM && sig != SIGBREAK) return fsh_win_unsupported();
+  return a && signal(sig, a->sa_handler) == SIG_ERR ? -1 : 0;
+}
+static int kill(int pid, int sig) { return fsh_win_unsupported(); }
+
+// Child processes need CreateProcess, which isn't built yet: a spawn fails with ENOSYS.
+#define WNOHANG 1
+#define WIFEXITED(s) 1
+#define WEXITSTATUS(s) ((s) >> 8 & 0xff)
+#define WIFSIGNALED(s) 0
+#define WTERMSIG(s) 0
+static int waitpid(int pid, int *status, int options) { errno = ECHILD; return -1; }
+typedef int posix_spawn_file_actions_t;
+typedef int posix_spawnattr_t;
+#define POSIX_SPAWN_SETPGROUP 2
+#define posix_spawn_file_actions_init(a) 0
+#define posix_spawn_file_actions_destroy(a) 0
+#define posix_spawn_file_actions_adddup2(a, from, to) 0
+#define posix_spawn_file_actions_addopen(a, fd, path, flags, mode) 0
+#define posix_spawn_file_actions_addchdir_np(a, path) 0
+#define posix_spawnattr_init(a) 0
+#define posix_spawnattr_destroy(a) 0
+#define posix_spawnattr_setflags(a, flags) 0
+#define posix_spawnattr_setpgroup(a, group) 0
+#define posix_spawn(pid, path, a, at, argv, envp) ENOSYS
+#define posix_spawnp(pid, file, a, at, argv, envp) ENOSYS
+
+// A tree removed depth first, as nftw walks it with FTW_DEPTH.
+#define FTW_PHYS 1
+#define FTW_DEPTH 8
+#define FTW_F 0
+#define FTW_D 1
+#define FTW_DP 5
+struct FTW { int base; int level; };
+static int fsh_win_nftw(const char *path, int (*visit)(const char *, const struct fsh_win_stat *, int, struct FTW *), int open, int flags) {
+  struct fsh_win_stat st;
+  if (fsh_win_stat(path, &st) != 0) return -1;
+  struct FTW at = { 0, 0 };
+  if (S_ISDIR(st.st_mode)) {
+    DIR *d = opendir(path);
+    if (!d) return -1;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+      if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+      size_t n = strlen(path) + strlen(e->d_name) + 2;
+      char *child = malloc(n);
+      snprintf(child, n, "%s/%s", path, e->d_name);
+      int r = fsh_win_nftw(child, visit, open, flags);
+      free(child);
+      if (r != 0) {
+        closedir(d);
+        return r;
+      }
+    }
+    closedir(d);
+    return visit(path, &st, FTW_DP, &at);
+  }
+  return visit(path, &st, FTW_F, &at);
+}
+
+#define close fsh_win_close
+#define read fsh_win_read
+#define write fsh_win_write
+#define recv fsh_win_recv
+#define send fsh_win_send
+#define sendto fsh_win_sendto
+#define recvfrom fsh_win_recvfrom
+#define socket fsh_win_socket
+#define accept fsh_win_accept
+#define accept4(fd, at, n, flags) fsh_win_accept(fd, at, n)
+#define connect fsh_win_connect
+#define bind fsh_win_bind
+#define listen fsh_win_listen
+#define shutdown fsh_win_shutdown
+#define getsockname fsh_win_getsockname
+#define getpeername fsh_win_getpeername
+#define setsockopt fsh_win_setsockopt
+#define getsockopt fsh_win_getsockopt
+#define ioctl fsh_win_ioctl
+#define poll fsh_win_poll
+#define fcntl fsh_win_fcntl
+#define pipe fsh_win_pipe
+#define pipe2 fsh_win_pipe2
+#define stat fsh_win_stat
+#define fstat fsh_win_fstat
+#define lstat fsh_win_stat
+#define realpath fsh_win_realpath
+#define pread fsh_win_pread
+#define pwrite fsh_win_pwrite
+#define fsync fsh_win_fsync
+#define ftruncate fsh_win_ftruncate
+#define fchmod fsh_win_fchmod
+#define fchown fsh_win_fchown
+#define mkdir fsh_win_mkdir
+#define utimensat fsh_win_utimensat
+#define futimens fsh_win_futimens
+#define nftw fsh_win_nftw
+struct inotify_event { int wd; uint32_t mask, cookie, len; char name[]; };
+#define IN_MODIFY 2
+#define IN_ATTRIB 4
+#define IN_MOVED_FROM 64
+#define IN_MOVED_TO 128
+#define IN_CREATE 256
+#define IN_DELETE 512
+#define IN_DELETE_SELF 1024
+#define IN_MOVE_SELF 2048
+#define IN_IGNORED 0x8000
+#define IN_ISDIR 0x40000000
+#define IN_ONLYDIR 0x1000000
+#define IN_CLOEXEC 0
+#define IN_NONBLOCK 0
+static int inotify_init1(int flags) { return fsh_win_unsupported(); }
+static int inotify_add_watch(int q, const char *path, uint32_t mask) { return fsh_win_unsupported(); }
+#else
+#include <unistd.h>
+#ifndef __wasi__
+#include <pwd.h>
+#endif
+#include <sys/random.h>
+#include <sys/ioctl.h>
+#include <ftw.h>
+#ifndef __wasi__
 #include <spawn.h>
-#include <poll.h>
 #include <sys/wait.h>
+#endif
+#include <poll.h>
 #include <sys/socket.h>
+#ifndef __wasi__
 #include <sys/un.h>
+#endif
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
-#include <netdb.h>
+#endif
 #ifdef __APPLE__
+#include <netdb.h>
 #include <sys/event.h>
 #include <mach-o/dyld.h>
+#elif defined(_WIN32)
+#elif defined(__wasi__)
+// WASI preview 1 has no processes, signals, users, name lookups, file watching or readiness
+// polling beyond poll_oneoff, and wasi-libc declares none of them. They are given here as calls
+// that fail with ENOSYS, so the runtime's code for them compiles unchanged, and a program that
+// reaches one gets that error where it called. The reactors never start: the scheduler runs on one
+// thread.
+#include <sys/mman.h>
+struct passwd { char *pw_name; char *pw_dir; };
+static inline uid_t getuid(void) { return 0; }
+static inline int getpwuid_r(uid_t uid, struct passwd *pw, char *buffer, size_t size, struct passwd **found) { *found = NULL; return ENOSYS; }
+static inline int kill(pid_t pid, int sig) { errno = ENOSYS; return -1; }
+static inline int fchown(int fd, uid_t uid, gid_t gid) { errno = ENOSYS; return -1; }
+static inline char *mkdtemp(char *template) { errno = ENOSYS; return NULL; }
+struct sigaction { void (*sa_handler)(int); sigset_t sa_mask; int sa_flags; };
+#define SA_RESTART 0
+static inline int sigemptyset(sigset_t *set) { *set = 0; return 0; }
+static inline int sigaction(int sig, const struct sigaction *a, struct sigaction *old) { errno = ENOSYS; return -1; }
+struct addrinfo { int ai_flags, ai_family, ai_socktype, ai_protocol; socklen_t ai_addrlen; struct sockaddr *ai_addr; char *ai_canonname; struct addrinfo *ai_next; };
+#define EAI_NONAME -2
+#define EAI_SYSTEM -11
+static inline int getaddrinfo(const char *host, const char *port, const struct addrinfo *hints, struct addrinfo **found) { *found = NULL; return EAI_NONAME; }
+static inline void freeaddrinfo(struct addrinfo *a) {}
+static inline const char *gai_strerror(int code) { return "name lookups aren't available under WASI"; }
+struct epoll_event { uint32_t events; union { void *ptr; int fd; uint64_t u64; } data; };
+#define EPOLLIN 1
+#define EPOLLOUT 4
+#define EPOLLERR 8
+#define EPOLLHUP 16
+#define EPOLLONESHOT (1u << 30)
+#define EPOLL_CTL_ADD 1
+#define EPOLL_CTL_DEL 2
+#define EPOLL_CTL_MOD 3
+#define EPOLL_CLOEXEC 0
+static inline int epoll_create1(int flags) { errno = ENOSYS; return -1; }
+static inline int epoll_ctl(int q, int op, int fd, struct epoll_event *e) { errno = ENOSYS; return -1; }
+static inline int epoll_wait(int q, struct epoll_event *e, int n, int ms) { errno = ENOSYS; return -1; }
+#define EFD_NONBLOCK 0
+#define EFD_CLOEXEC 0
+static inline int eventfd(unsigned value, int flags) { errno = ENOSYS; return -1; }
+struct inotify_event { int wd; uint32_t mask, cookie, len; char name[]; };
+#define IN_MODIFY 2
+#define IN_ATTRIB 4
+#define IN_MOVED_FROM 64
+#define IN_MOVED_TO 128
+#define IN_CREATE 256
+#define IN_DELETE 512
+#define IN_DELETE_SELF 1024
+#define IN_MOVE_SELF 2048
+#define IN_IGNORED 0x8000
+#define IN_ISDIR 0x40000000
+#define IN_ONLYDIR 0x1000000
+#define IN_CLOEXEC 0
+#define IN_NONBLOCK 0
+static inline int inotify_init1(int flags) { errno = ENOSYS; return -1; }
+static inline int inotify_add_watch(int q, const char *path, uint32_t mask) { errno = ENOSYS; return -1; }
+static inline int inotify_rm_watch(int q, int wd) { errno = ENOSYS; return -1; }
+#define EAI_AGAIN -3
+#define SIG_BLOCK 0
+#define SIG_SETMASK 2
+static inline int sigaddset(sigset_t *set, int sig) { return 0; }
+static inline int sigismember(const sigset_t *set, int sig) { return 0; }
+static inline int sigpending(sigset_t *set) { *set = 0; return 0; }
+static inline int sigwait(const sigset_t *set, int *sig) { return ENOSYS; }
+static inline int pthread_sigmask(int how, const sigset_t *set, sigset_t *old) { if (old) *old = 0; return 0; }
+#define WNOHANG 1
+#define WIFEXITED(s) 1
+#define WEXITSTATUS(s) ((s) >> 8 & 0xff)
+#define WIFSIGNALED(s) 0
+#define WTERMSIG(s) 0
+static inline pid_t waitpid(pid_t pid, int *status, int options) { errno = ECHILD; return -1; }
+typedef int posix_spawn_file_actions_t;
+typedef int posix_spawnattr_t;
+#define POSIX_SPAWN_SETPGROUP 2
+static inline int posix_spawn_file_actions_init(posix_spawn_file_actions_t *a) { return 0; }
+static inline int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *a) { return 0; }
+static inline int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *a, int from, int to) { return 0; }
+static inline int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *a, int fd, const char *path, int flags, mode_t mode) { return 0; }
+static inline int posix_spawn_file_actions_addchdir_np(posix_spawn_file_actions_t *a, const char *path) { return 0; }
+static inline int posix_spawnattr_init(posix_spawnattr_t *a) { return 0; }
+static inline int posix_spawnattr_destroy(posix_spawnattr_t *a) { return 0; }
+static inline int posix_spawnattr_setflags(posix_spawnattr_t *a, short flags) { return 0; }
+static inline int posix_spawnattr_setpgroup(posix_spawnattr_t *a, pid_t group) { return 0; }
+static inline int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *a, const posix_spawnattr_t *at, char *const argv[], char *const envp[]) { return ENOSYS; }
+static inline int posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *a, const posix_spawnattr_t *at, char *const argv[], char *const envp[]) { return ENOSYS; }
+#ifndef SO_REUSEADDR
+#define SO_REUSEADDR 2
+#endif
+#ifndef SO_ERROR
+#define SO_ERROR 4
+#endif
+#ifndef SO_SNDBUF
+#define SO_SNDBUF 7
+#endif
+#ifndef SO_ACCEPTCONN
+#define SO_ACCEPTCONN 30
+#endif
+#ifndef SO_RCVTIMEO
+#define SO_RCVTIMEO 66
+#endif
+#ifndef SO_SNDTIMEO
+#define SO_SNDTIMEO 67
+#endif
+static inline int socket(int domain, int type, int protocol) { errno = ENOSYS; return -1; }
+static inline int bind(int fd, const struct sockaddr *at, socklen_t n) { errno = ENOSYS; return -1; }
+static inline int listen(int fd, int backlog) { errno = ENOSYS; return -1; }
+static inline int connect(int fd, const struct sockaddr *at, socklen_t n) { errno = ENOSYS; return -1; }
+static inline int setsockopt(int fd, int level, int name, const void *value, socklen_t n) { errno = ENOSYS; return -1; }
+static inline int getsockname(int fd, struct sockaddr *at, socklen_t *n) { errno = ENOSYS; return -1; }
+static inline int getpeername(int fd, struct sockaddr *at, socklen_t *n) { errno = ENOSYS; return -1; }
+static inline ssize_t sendto(int fd, const void *data, size_t n, int flags, const struct sockaddr *to, socklen_t len) { errno = ENOSYS; return -1; }
+static inline ssize_t recvfrom(int fd, void *data, size_t n, int flags, struct sockaddr *from, socklen_t *len) { errno = ENOSYS; return -1; }
+struct sockaddr_un { sa_family_t sun_family; char sun_path[108]; };
 #else
+#include <netdb.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #endif
 
 // Tasks run on several threads, so everything they share is counted atomically.
 static int64_t fsh_live = 0;
+// Whether blocks are counted, -1 until the first allocation asks. Only a leak report reads the
+// count, and one counter every thread writes at each allocation and free slows a server down, so
+// a program not asked for its leaks counts nothing. A top-level const's constructor may allocate
+// before any of this file's run, which is why the first allocation reads the environment.
+#ifdef FSH_LEAK_SITES
+static int32_t fsh_counting = 1;
+#else
+static int32_t fsh_counting = -1;
+#endif
+
+static int32_t fsh_counts(void) {
+  int32_t counting = __atomic_load_n(&fsh_counting, __ATOMIC_RELAXED);
+  if (counting < 0) {
+    const char *check = getenv("FISH_LEAKS");
+    counting = check && check[0] == '1';
+    __atomic_store_n(&fsh_counting, counting, __ATOMIC_RELAXED);
+  }
+  return counting;
+}
 // Set when the program ends with tasks still running, whose memory is never freed.
 static int32_t fsh_abandoned = 0;
 // File jobs the blocking pool holds, whose memory is still live when a program ends mid-read.
 static int64_t fsh_pool_busy = 0;
+// Set once runtime teardown begins; checked before injecting tasks or aborting process.shutdown.
+static int32_t fsh_stopping = 0;
+// Set while fsh_shutdown_watch is aborting process.shutdown.
+static int32_t fsh_shutdown_busy = 0;
+
+#ifdef FSH_HEAP_PROFILE
+// A --heap-profile build's blocks each start with a header saying how big the block is and, for
+// the sampled few, which stack the profile charged it to, so a free can take it back.
+typedef struct fsh_hblock { int64_t stack; int64_t size; } fsh_hblock;
+static void fsh_heap_alloc(fsh_hblock *h);
+static void fsh_heap_free(fsh_hblock *h);
+#endif
 
 #ifdef FSH_LEAK_SITES
 // A --leaks build's blocks each start with a header naming the allocation's site, on one list
@@ -78,6 +808,13 @@ void *fsh_rt_alloc(int64_t size) {
   // A size the header would overflow fails as one malloc can't give.
   fsh_block *b = size < 0 || size > INT64_MAX - (int64_t)sizeof(fsh_block) ? NULL : malloc(sizeof(fsh_block) + size);
   void *p = b ? b + 1 : NULL;
+#elif defined(FSH_HEAP_PROFILE)
+  fsh_hblock *h = size < 0 || size > INT64_MAX - (int64_t)sizeof(fsh_hblock) ? NULL : malloc(sizeof(fsh_hblock) + size);
+  void *p = h ? h + 1 : NULL;
+  if (h) {
+    h->size = size;
+    fsh_heap_alloc(h);
+  }
 #else
   void *p = malloc(size);
 #endif
@@ -85,7 +822,7 @@ void *fsh_rt_alloc(int64_t size) {
     fputs("out of memory\n", stderr);
     exit(101);
   }
-  __atomic_fetch_add(&fsh_live, 1, __ATOMIC_RELAXED);
+  if (fsh_counts()) __atomic_fetch_add(&fsh_live, 1, __ATOMIC_RELAXED);
 #ifdef FSH_LEAK_SITES
   fsh_site(b);
   b->size = size;
@@ -101,7 +838,7 @@ void *fsh_rt_alloc(int64_t size) {
 
 void fsh_rt_free(void *p) {
   if (!p) return;
-  __atomic_fetch_sub(&fsh_live, 1, __ATOMIC_RELAXED);
+  if (fsh_counts()) __atomic_fetch_sub(&fsh_live, 1, __ATOMIC_RELAXED);
 #ifdef FSH_LEAK_SITES
   fsh_block *b = (fsh_block *)p - 1;
   pthread_mutex_lock(&fsh_blocks_lock);
@@ -109,6 +846,10 @@ void fsh_rt_free(void *p) {
   b->next->prev = b->prev;
   pthread_mutex_unlock(&fsh_blocks_lock);
   p = b;
+#elif defined(FSH_HEAP_PROFILE)
+  fsh_hblock *h = (fsh_hblock *)p - 1;
+  if (h->stack != 0) fsh_heap_free(h);
+  p = h;
 #endif
   free(p);
 }
@@ -136,21 +877,20 @@ static void fsh_leak_report(void);
 #endif
 
 __attribute__((destructor)) static void fsh_leaks(void) {
-  if (__atomic_load_n(&fsh_pool_busy, __ATOMIC_ACQUIRE) != 0) fsh_abandoned = 1;
+  __atomic_store_n(&fsh_stopping, 1, __ATOMIC_SEQ_CST);
+  if (__atomic_load_n(&fsh_pool_busy, __ATOMIC_SEQ_CST) != 0 || __atomic_load_n(&fsh_shutdown_busy, __ATOMIC_SEQ_CST) != 0) fsh_abandoned = 1;
   if (fsh_constants_drop && !fsh_abandoned) fsh_constants_drop();
   if (fsh_shutdown_end && !fsh_abandoned) fsh_shutdown_end();
-  const char *check = getenv("FISH_LEAKS");
-#ifdef FSH_LEAK_SITES
-  check = "1";
-#endif
-  if (check && check[0] == '1' && fsh_engine_end && !fsh_abandoned && !fsh_panic_began) fsh_engine_end();
+  // A program that never allocated never asked, and has nothing to report.
+  int32_t check = __atomic_load_n(&fsh_counting, __ATOMIC_RELAXED) > 0;
+  if (check && fsh_engine_end && !fsh_abandoned && !fsh_panic_began) fsh_engine_end();
   int64_t live = __atomic_load_n(&fsh_live, __ATOMIC_RELAXED);
   // After a panic, what JS frames it unwound held is still live in the engine, not leaked.
   int32_t held = fsh_engine_end && fsh_panic_began;
 #ifdef FSH_LEAK_SITES
   if (live != 0 && !fsh_abandoned && !held) fsh_leak_report();
 #else
-  if (check && check[0] == '1' && live != 0 && !fsh_abandoned && !held) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)live);
+  if (check && live != 0 && !fsh_abandoned && !held) fprintf(stderr, "fish: leaked %lld allocations\n", (long long)live);
 #endif
 }
 
@@ -164,19 +904,68 @@ typedef struct fsh_str {
   char own[];
 } fsh_str;
 
+// A string of FSH_SMALL bytes or fewer is held in its pointer word, with no block and no count:
+// the low bit set, its length in bits 1 to 3, and its bytes in the word's upper seven bytes,
+// unused ones zero, so two small strings are equal exactly when their words are. A block is at
+// least 8-byte aligned, so its address never has the low bit set. Code reading a string's fields
+// opens it first: a small string is copied into a block on the caller's stack, a view, which
+// counts as a literal and lives as long as the caller's frame, so nothing may keep it. A 32-bit
+// pointer, as wasm32's is, has room for three bytes.
+#define FSH_SMALL ((int)sizeof(void *) - 1)
+
+static inline int fsh_small(const fsh_str *s) {
+  return ((uintptr_t)s & 1) != 0;
+}
+
+static fsh_str *fsh_small_of(const char *bytes, int64_t length) {
+  uint64_t w = 1 | (uint64_t)length << 1;
+  for (int64_t i = 0; i < length; i++) w |= (uint64_t)(unsigned char)bytes[i] << (8 * (i + 1));
+  return (fsh_str *)(uintptr_t)w;
+}
+
+typedef struct {
+  char own[8];
+  fsh_str s;
+} fsh_view;
+
+static fsh_str *fsh_open(fsh_str *s, fsh_view *v) {
+  if (!fsh_small(s)) return s;
+  uint64_t w = (uint64_t)(uintptr_t)s;
+  int64_t n = (int64_t)(w >> 1 & 7);
+  for (int64_t i = 0; i < 8; i++) v->own[i] = i < n ? (char)(w >> (8 * (i + 1))) : 0;
+  v->s.count = -1;
+  v->s.length = n;
+  v->s.bytes = v->own;
+  v->s.base = NULL;
+  v->s.units = -1;
+  v->s.crumbs = NULL;
+  return &v->s;
+}
+
+// Rebinds s to a string whose fields can be read, for the rest of the enclosing block.
+#define FSH_OPEN(s) fsh_view s##_view; s = fsh_open(s, &s##_view)
+
+static inline int64_t fsh_len(const fsh_str *s) {
+  return fsh_small(s) ? (int64_t)((uintptr_t)s >> 1 & 7) : s->length;
+}
+
+// A string's UTF-16 length when it is known without counting, or -1.
+static int64_t fsh_known_units(fsh_str *s);
+
 // A string may be shared between tasks on different threads, so its count changes atomically.
 void fsh_rt_str_retain(fsh_str *s) {
-  if (s && __atomic_load_n(&s->count, __ATOMIC_RELAXED) >= 0) __atomic_fetch_add(&s->count, 1, __ATOMIC_RELAXED);
+  if (s && !fsh_small(s) && __atomic_load_n(&s->count, __ATOMIC_RELAXED) >= 0) __atomic_fetch_add(&s->count, 1, __ATOMIC_RELAXED);
 }
 
 void fsh_rt_str_release(fsh_str *s) {
-  if (!s || __atomic_load_n(&s->count, __ATOMIC_RELAXED) < 0 || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  if (!s || fsh_small(s) || __atomic_load_n(&s->count, __ATOMIC_RELAXED) < 0 || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
   fsh_rt_str_release(s->base);
   fsh_rt_free(s->crumbs);
   fsh_rt_free(s);
 }
 
-// A new block holding room for length bytes of its own, its UTF-16 length not yet known.
+// A new block holding room for length bytes of its own, its UTF-16 length not yet known. Code
+// that fills it may leave a short string in a block; fsh_str_done makes that small.
 static fsh_str *fsh_str_new(int64_t length) {
   fsh_str *s = fsh_rt_alloc(sizeof(fsh_str) + length);
   s->count = 1;
@@ -189,9 +978,18 @@ static fsh_str *fsh_str_new(int64_t length) {
 }
 
 static fsh_str *fsh_str_of(const char *bytes, int64_t length) {
+  if (length <= FSH_SMALL) return fsh_small_of(bytes, length);
   fsh_str *s = fsh_str_new(length);
   memcpy(s->own, bytes, length);
   return s;
+}
+
+// A block just filled, made small when it is short enough.
+static fsh_str *fsh_str_done(fsh_str *s) {
+  if (s->length > FSH_SMALL) return s;
+  fsh_str *small = fsh_small_of(s->bytes, s->length);
+  fsh_rt_free(s);
+  return small;
 }
 
 // Text is WTF-8: UTF-8, plus a lone surrogate in its 3-byte form, as JavaScript strings may
@@ -203,6 +1001,7 @@ static uint32_t fsh_three(const unsigned char *p) { return (p[0] & 0x0F) << 12 |
 // The code point at byte at in s, as a new string, moving at past it; NULL past the end. A
 // lone surrogate's 3-byte form is a code point of its own, as JavaScript's iterator gives one.
 fsh_str *fsh_rt_str_next(fsh_str *s, int64_t *at) {
+  FSH_OPEN(s);
   if (*at >= s->length) return NULL;
   const unsigned char *p = (const unsigned char *)s->bytes + *at;
   int64_t n = p[0] < 0x80 ? 1 : p[0] < 0xE0 ? 2 : p[0] < 0xF0 ? 3 : 4;
@@ -216,16 +1015,21 @@ fsh_str *fsh_rt_str_next(fsh_str *s, int64_t *at) {
 fsh_str *fsh_rt_str_join(fsh_str **parts, int64_t n) {
   int64_t length = 0, units = 0;
   for (int64_t i = 0; i < n; i++) {
-    length += parts[i]->length;
-    int64_t known = __atomic_load_n(&parts[i]->units, __ATOMIC_ACQUIRE);
+    length += fsh_len(parts[i]);
+    int64_t known = fsh_known_units(parts[i]);
     units = units < 0 || known < 0 ? -1 : units + known;
   }
-  fsh_str *s = fsh_str_new(length);
-  unsigned char *at = (unsigned char *)s->own;
+  // Joining only ever shortens at a pair, so a short total is built on the stack.
+  char small[FSH_SMALL + 1];
+  fsh_str *s = length <= FSH_SMALL ? NULL : fsh_str_new(length);
+  unsigned char *own = s ? (unsigned char *)s->own : (unsigned char *)small;
+  unsigned char *at = own;
   for (int64_t i = 0; i < n; i++) {
-    const unsigned char *from = (const unsigned char *)parts[i]->bytes;
-    int64_t size = parts[i]->length;
-    if (size >= 3 && at - (unsigned char *)s->own >= 3 && fsh_high_at(at - 3) && fsh_low_at(from)) {
+    fsh_str *part = parts[i];
+    FSH_OPEN(part);
+    const unsigned char *from = (const unsigned char *)part->bytes;
+    int64_t size = part->length;
+    if (size >= 3 && at - own >= 3 && fsh_high_at(at - 3) && fsh_low_at(from)) {
       uint32_t code = 0x10000 + ((fsh_three(at - 3) - 0xD800) << 10) + (fsh_three(from) - 0xDC00);
       at -= 3;
       *at++ = 0xF0 | code >> 18;
@@ -238,9 +1042,10 @@ fsh_str *fsh_rt_str_join(fsh_str **parts, int64_t n) {
     memcpy(at, from, size);
     at += size;
   }
-  s->length = at - (unsigned char *)s->own;
+  if (!s) return fsh_small_of(small, at - own);
+  s->length = at - own;
   s->units = units;
-  return s;
+  return fsh_str_done(s);
 }
 
 fsh_str *fsh_rt_str_concat(fsh_str *a, fsh_str *b) {
@@ -287,8 +1092,11 @@ static uint32_t fsh_next(const unsigned char *s, int64_t *at, int *half) {
   return 0xDC00 + ((code - 0x10000) & 0x3FF);
 }
 
-// The UTF-16 length, counted once and kept.
+// The UTF-16 length, counted once and kept; a small string's is counted each time.
 int64_t fsh_rt_str_units(fsh_str *s) {
+  // A small string of ASCII bytes, the usual one, has a unit per byte.
+  if (fsh_small(s) && ((uint64_t)(uintptr_t)s & 0x8080808080808000ull) == 0) return fsh_len(s);
+  FSH_OPEN(s);
   int64_t known = __atomic_load_n(&s->units, __ATOMIC_ACQUIRE);
   if (known >= 0) return known;
   int64_t at = 0, n = 0;
@@ -299,6 +1107,10 @@ int64_t fsh_rt_str_units(fsh_str *s) {
   }
   __atomic_store_n(&s->units, n, __ATOMIC_RELEASE);
   return n;
+}
+
+static int64_t fsh_known_units(fsh_str *s) {
+  return fsh_small(s) ? fsh_rt_str_units(s) : __atomic_load_n(&s->units, __ATOMIC_ACQUIRE);
 }
 
 // Breadcrumbs: where every 64th UTF-16 unit is, as its character's byte offset times two, plus
@@ -323,6 +1135,7 @@ static void fsh_crumbs(fsh_str *s, int64_t units) {
 // of a pair. All-ASCII text is indexed directly; other text walks on from the breadcrumb at
 // or before i, at most 63 units.
 static int64_t fsh_seek(fsh_str *s, int64_t i, int *half) {
+  FSH_OPEN(s);
   *half = 0;
   int64_t units = fsh_rt_str_units(s);
   if (units == s->length) return i;
@@ -344,6 +1157,7 @@ static int64_t fsh_seek(fsh_str *s, int64_t i, int *half) {
 }
 
 uint16_t fsh_rt_str_unit(fsh_str *s, int64_t i) {
+  FSH_OPEN(s);
   int half;
   int64_t at = fsh_seek(s, i, &half);
   return fsh_next((const unsigned char *)s->bytes, &at, &half);
@@ -364,9 +1178,7 @@ fsh_str *fsh_rt_str_at(fsh_str *s, int64_t i) {
     bytes[n++] = 0x80 | (u >> 6 & 0x3F);
     bytes[n++] = 0x80 | (u & 0x3F);
   }
-  fsh_str *one = fsh_str_of(bytes, n);
-  one->units = 1;
-  return one;
+  return fsh_str_of(bytes, n);
 }
 
 // s.at(i): the one-unit string, a negative i counting from the end, or NULL past either end.
@@ -397,6 +1209,7 @@ int64_t fsh_rt_str_code_point_at(fsh_str *s, int64_t i) {
 // Searching. A search with no lone surrogate matches whole characters, so it compares bytes;
 // one holding a lone surrogate may match half of a pair, so it compares UTF-16 units.
 static int fsh_has_lone(fsh_str *s) {
+  FSH_OPEN(s);
   const unsigned char *p = (const unsigned char *)s->bytes;
   for (int64_t i = 0; i + 1 < s->length; i++) if (p[i] == 0xED && p[i + 1] >= 0xA0) return 1;
   return 0;
@@ -404,6 +1217,7 @@ static int fsh_has_lone(fsh_str *s) {
 
 // The UTF-16 units of s, in a buffer the caller frees.
 static uint16_t *fsh_utf16(fsh_str *s) {
+  FSH_OPEN(s);
   uint16_t *units = fsh_rt_alloc((fsh_rt_str_units(s) + 1) * sizeof(uint16_t));
   int64_t at = 0, n = 0;
   int half = 0;
@@ -437,6 +1251,8 @@ static int64_t fsh_start_at(fsh_str *s, int64_t i) {
 // A match's unit is counted from where the search started, whose unit is known, so repeated
 // searches along a string take linear time.
 int64_t fsh_rt_str_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
+  FSH_OPEN(s);
+  FSH_OPEN(needle);
   int64_t n = fsh_rt_str_units(s);
   from = fsh_clamp(from, n);
   if (needle->length == 0) return from;
@@ -449,6 +1265,9 @@ int64_t fsh_rt_str_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
     unit++;
   }
   for (int64_t at = start; at + needle->length <= s->length; at++) {
+    const char *first = memchr(s->bytes + at, needle->bytes[0], s->length - needle->length + 1 - at);
+    if (!first) break;
+    at = first - s->bytes;
     if (memcmp(s->bytes + at, needle->bytes, needle->length) != 0) continue;
     if (n == s->length) return at;
     int h = 0;
@@ -460,6 +1279,8 @@ int64_t fsh_rt_str_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
 
 // Where needle last occurs in s starting at or before unit from, by units, or -1.
 int64_t fsh_rt_str_last_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
+  FSH_OPEN(s);
+  FSH_OPEN(needle);
   int64_t n = fsh_rt_str_units(s), m = fsh_rt_str_units(needle);
   from = fsh_clamp(from, n);
   if (m > n) return -1;
@@ -495,6 +1316,8 @@ int64_t fsh_rt_str_last_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
 }
 
 int32_t fsh_rt_str_starts_with(fsh_str *s, fsh_str *needle, int64_t position) {
+  FSH_OPEN(s);
+  FSH_OPEN(needle);
   int64_t n = fsh_rt_str_units(s), m = fsh_rt_str_units(needle);
   position = fsh_clamp(position, n);
   if (m == 0) return 1;
@@ -506,6 +1329,8 @@ int32_t fsh_rt_str_starts_with(fsh_str *s, fsh_str *needle, int64_t position) {
 }
 
 int32_t fsh_rt_str_ends_with(fsh_str *s, fsh_str *needle, int64_t end) {
+  FSH_OPEN(s);
+  FSH_OPEN(needle);
   int64_t n = fsh_rt_str_units(s), m = fsh_rt_str_units(needle);
   end = fsh_clamp(end, n);
   if (m == 0) return 1;
@@ -535,6 +1360,7 @@ static int fsh_put(char *out, uint32_t u) {
 
 // Bytes [a, b) of s, starting and ending at characters, sharing the block they live in.
 static fsh_str *fsh_share(fsh_str *s, int64_t a, int64_t b) {
+  if (b - a <= FSH_SMALL) return fsh_small_of(s->bytes + a, b - a);
   fsh_str *slice = fsh_rt_alloc(sizeof(fsh_str));
   slice->count = 1;
   slice->length = b - a;
@@ -552,11 +1378,8 @@ static fsh_str *fsh_share(fsh_str *s, int64_t a, int64_t b) {
 // ponytail: a slice keeps its whole base alive, as a Swift substring does; copy small slices
 // if pinned memory shows up.
 static fsh_str *fsh_sub(fsh_str *s, int64_t from, int64_t to) {
-  if (from == to) {
-    fsh_str *empty = fsh_str_new(0);
-    empty->units = 0;
-    return empty;
-  }
+  if (from == to) return fsh_small_of("", 0);
+  FSH_OPEN(s);
   int cut_start, cut_end;
   int64_t a = fsh_seek(s, from, &cut_start), b = fsh_seek(s, to, &cut_end);
   const unsigned char *bytes = (const unsigned char *)s->bytes;
@@ -576,8 +1399,9 @@ static fsh_str *fsh_sub(fsh_str *s, int64_t from, int64_t to) {
     at = b;
     if (cut_end) out += fsh_put(out, fsh_next(bytes, &at, &half));
     slice->length = out - slice->own;
+    slice = fsh_str_done(slice);
   }
-  slice->units = to - from;
+  if (!fsh_small(slice)) slice->units = to - from;
   return slice;
 }
 
@@ -604,6 +1428,7 @@ fsh_str *fsh_rt_str_substring(fsh_str *s, int64_t start, int64_t end, int32_t en
 // program without one.
 __attribute__((weak)) const int32_t fsh_panic_abort = 0;
 
+#ifndef __wasi__
 static _Unwind_Reason_Code fsh_unwound(int version, _Unwind_Action actions, _Unwind_Exception_Class kind,
                                        struct _Unwind_Exception *exception, struct _Unwind_Context *context, void *data) {
   if (actions & _UA_END_OF_STACK) {
@@ -612,6 +1437,7 @@ static _Unwind_Reason_Code fsh_unwound(int version, _Unwind_Action actions, _Unw
   }
   return _URC_NO_REASON;
 }
+#endif
 
 // Every panic: the message, after what was already printed, then an abort, or an unwind that
 // runs each frame's drops and exits with 101 once it reaches the end of the stack.
@@ -625,6 +1451,11 @@ static _Thread_local int32_t fsh_token = 0;
 // is making. A release build never touches it.
 typedef struct fsh_frame { const char *site; const char *name; struct fsh_frame *prev; } fsh_frame;
 _Thread_local fsh_frame *fsh_rt_frames = NULL;
+#ifdef FSH_PROFILE
+static int fsh_prof_register(void);
+static void fsh_prof_unregister(int slot);
+static int fsh_prof_is_active(void);
+#endif
 // Where the task this thread is polling was spawned, and the panic's "panicked at" line.
 static _Thread_local const char *fsh_spawned_at = NULL;
 static _Thread_local const char *fsh_panic_line = NULL;
@@ -710,6 +1541,328 @@ static void fsh_leak_report(void) {
 }
 #endif
 
+#ifdef FSH_HEAP_PROFILE
+// The heap profiler: about one allocation in each 512 KiB allocated is sampled, by a countdown of
+// bytes each thread draws from an exponential distribution, as Go's and tcmalloc's are, so a
+// sample stands for 1 / (1 - e^(-size / 512 KiB)) allocations of its size. A sample charges the
+// program's frames at that moment to a stack; its free takes back the live share. SIGUSR1 and the
+// program's exit each write the profile, in pprof's format, to heap.<pid>.<n>.pb, or to the path
+// FISH_HEAP_PROFILE names with .<n> added.
+#define FSH_HEAP_RATE 524288.0
+#define FSH_HEAP_DEPTH 64
+
+typedef struct {
+  int32_t depth;
+  const char *names[FSH_HEAP_DEPTH];
+  const char *sites[FSH_HEAP_DEPTH];
+  uint64_t hash;
+  double alloc_n, alloc_b, live_n, live_b;
+} fsh_heap_stack;
+
+static pthread_mutex_t fsh_heap_lock = PTHREAD_MUTEX_INITIALIZER;
+static fsh_heap_stack *fsh_heap_stacks = NULL;
+static int64_t fsh_heap_count = 0, fsh_heap_cap = 0;
+// Open addressing over the stacks by hash: each slot holds a stack's index + 1.
+static int64_t *fsh_heap_index = NULL;
+static int64_t fsh_heap_slots = 0;
+static _Thread_local double fsh_heap_left = -1;
+static _Thread_local uint64_t fsh_heap_seed = 0;
+static int32_t fsh_heap_snapshots = 0;
+
+static double fsh_heap_draw(void) {
+  if (fsh_heap_seed == 0) fsh_heap_seed = ((uint64_t)(uintptr_t)&fsh_heap_seed) ^ ((uint64_t)time(NULL) << 20) ^ 0x9E3779B97F4A7C15ULL;
+  fsh_heap_seed ^= fsh_heap_seed << 13;
+  fsh_heap_seed ^= fsh_heap_seed >> 7;
+  fsh_heap_seed ^= fsh_heap_seed << 17;
+  double u = ((double)(fsh_heap_seed >> 11) + 1.0) / 9007199254740993.0;
+  return -log(u) * FSH_HEAP_RATE;
+}
+
+static double fsh_heap_scale(int64_t size) {
+  double p = 1.0 - exp(-(double)size / FSH_HEAP_RATE);
+  return p > 0 ? 1.0 / p : 1.0;
+}
+
+static void fsh_heap_grow(void) {
+  int64_t slots = fsh_heap_slots ? fsh_heap_slots * 2 : 1024;
+  int64_t *index = calloc((size_t)slots, sizeof(int64_t));
+  if (!index) return;
+  for (int64_t i = 0; i < fsh_heap_count; i++) {
+    int64_t at = (int64_t)(fsh_heap_stacks[i].hash & (uint64_t)(slots - 1));
+    while (index[at]) at = (at + 1) & (slots - 1);
+    index[at] = i + 1;
+  }
+  free(fsh_heap_index);
+  fsh_heap_index = index;
+  fsh_heap_slots = slots;
+}
+
+// The stack the frames running now are, made if it's new; -1 when there's no room.
+static int64_t fsh_heap_stack_now(void) {
+  fsh_heap_stack s;
+  s.depth = 0;
+  s.hash = 1469598103934665603ULL;
+  for (fsh_frame *f = fsh_rt_frames; f && s.depth < FSH_HEAP_DEPTH; f = f->prev) {
+    s.names[s.depth] = f->name;
+    s.sites[s.depth] = f->site;
+    s.hash = (s.hash ^ (uint64_t)(uintptr_t)f->name) * 1099511628211ULL;
+    s.hash = (s.hash ^ (uint64_t)(uintptr_t)f->site) * 1099511628211ULL;
+    s.depth++;
+  }
+  if (fsh_heap_count * 2 >= fsh_heap_slots) fsh_heap_grow();
+  if (!fsh_heap_slots) return -1;
+  int64_t at = (int64_t)(s.hash & (uint64_t)(fsh_heap_slots - 1));
+  while (fsh_heap_index[at]) {
+    fsh_heap_stack *o = &fsh_heap_stacks[fsh_heap_index[at] - 1];
+    if (o->hash == s.hash && o->depth == s.depth && memcmp(o->names, s.names, sizeof(char *) * s.depth) == 0 && memcmp(o->sites, s.sites, sizeof(char *) * s.depth) == 0) return fsh_heap_index[at] - 1;
+    at = (at + 1) & (fsh_heap_slots - 1);
+  }
+  if (fsh_heap_count == fsh_heap_cap) {
+    int64_t cap = fsh_heap_cap ? fsh_heap_cap * 2 : 256;
+    fsh_heap_stack *grown = realloc(fsh_heap_stacks, (size_t)cap * sizeof *grown);
+    if (!grown) return -1;
+    fsh_heap_stacks = grown;
+    fsh_heap_cap = cap;
+  }
+  s.alloc_n = s.alloc_b = s.live_n = s.live_b = 0;
+  fsh_heap_stacks[fsh_heap_count] = s;
+  fsh_heap_index[at] = fsh_heap_count + 1;
+  return fsh_heap_count++;
+}
+
+static void fsh_heap_alloc(fsh_hblock *h) {
+  h->stack = 0;
+  if (fsh_heap_left < 0) fsh_heap_left = fsh_heap_draw();
+  fsh_heap_left -= (double)h->size;
+  if (fsh_heap_left >= 0) return;
+  fsh_heap_left = fsh_heap_draw();
+  double scale = fsh_heap_scale(h->size);
+  pthread_mutex_lock(&fsh_heap_lock);
+  int64_t i = fsh_heap_stack_now();
+  if (i >= 0) {
+    fsh_heap_stack *s = &fsh_heap_stacks[i];
+    s->alloc_n += scale;
+    s->alloc_b += scale * (double)h->size;
+    s->live_n += scale;
+    s->live_b += scale * (double)h->size;
+    h->stack = i + 1;
+  }
+  pthread_mutex_unlock(&fsh_heap_lock);
+}
+
+static void fsh_heap_free(fsh_hblock *h) {
+  double scale = fsh_heap_scale(h->size);
+  pthread_mutex_lock(&fsh_heap_lock);
+  fsh_heap_stack *s = &fsh_heap_stacks[h->stack - 1];
+  s->live_n -= scale;
+  s->live_b -= scale * (double)h->size;
+  pthread_mutex_unlock(&fsh_heap_lock);
+}
+
+// pprof's protobuf, written by hand: varints, and messages built into buffers of their own so
+// their lengths are known before they are written.
+typedef struct { uint8_t *data; size_t length, capacity; } fsh_pb;
+
+static void fsh_pb_bytes(fsh_pb *b, const void *data, size_t n) {
+  if (b->length + n > b->capacity) {
+    size_t cap = b->capacity ? b->capacity : 256;
+    while (cap < b->length + n) cap *= 2;
+    uint8_t *grown = realloc(b->data, cap);
+    if (!grown) return;
+    b->data = grown;
+    b->capacity = cap;
+  }
+  memcpy(b->data + b->length, data, n);
+  b->length += n;
+}
+
+static void fsh_pb_varint(fsh_pb *b, uint64_t v) {
+  uint8_t out[10];
+  size_t n = 0;
+  do {
+    out[n] = (uint8_t)(v & 0x7F);
+    v >>= 7;
+    if (v) out[n] |= 0x80;
+    n++;
+  } while (v);
+  fsh_pb_bytes(b, out, n);
+}
+
+static void fsh_pb_int(fsh_pb *b, int field, uint64_t v) {
+  fsh_pb_varint(b, (uint64_t)field << 3);
+  fsh_pb_varint(b, v);
+}
+
+static void fsh_pb_sub(fsh_pb *b, int field, fsh_pb *inner) {
+  fsh_pb_varint(b, ((uint64_t)field << 3) | 2);
+  fsh_pb_varint(b, inner->length);
+  fsh_pb_bytes(b, inner->data, inner->length);
+  inner->length = 0;
+}
+
+// The string table, deduplicated by a linear scan.
+// ponytail: linear lookups; a hash would matter only for profiles with tens of thousands of names.
+typedef struct { const char **items; int64_t count, capacity; } fsh_pb_strings;
+
+static int64_t fsh_pb_string(fsh_pb_strings *t, const char *s, size_t n) {
+  for (int64_t i = 0; i < t->count; i++) if (strlen(t->items[i]) == n && memcmp(t->items[i], s, n) == 0) return i;
+  if (t->count == t->capacity) {
+    int64_t cap = t->capacity ? t->capacity * 2 : 64;
+    const char **grown = realloc(t->items, (size_t)cap * sizeof(char *));
+    if (!grown) return 0;
+    t->items = grown;
+    t->capacity = cap;
+  }
+  char *copy = malloc(n + 1);
+  if (!copy) return 0;
+  memcpy(copy, s, n);
+  copy[n] = 0;
+  t->items[t->count] = copy;
+  return t->count++;
+}
+
+// A frame's site, "file:line:col", split into its file and line; a frame with none is line 0.
+static void fsh_heap_site(const char *site, const char **file, size_t *file_length, int64_t *line) {
+  *file = "";
+  *file_length = 0;
+  *line = 0;
+  if (!site) return;
+  const char *col = strrchr(site, ':');
+  const char *at = col;
+  while (at && at > site && at[-1] != ':') at--;
+  if (!col || at == site) {
+    *file = site;
+    *file_length = strlen(site);
+    return;
+  }
+  *file = site;
+  *file_length = (size_t)(at - 1 - site);
+  *line = atoll(at);
+}
+
+static void fsh_heap_write(void) {
+  pthread_mutex_lock(&fsh_heap_lock);
+  int32_t n = ++fsh_heap_snapshots;
+  char path[1100];
+  const char *named = getenv("FISH_HEAP_PROFILE");
+  if (named && named[0]) snprintf(path, sizeof path, "%s.%d", named, n);
+  else snprintf(path, sizeof path, "heap.%d.%d.pb", (int)getpid(), n);
+  fsh_pb out = { 0 }, msg = { 0 }, inner = { 0 }, line = { 0 };
+  fsh_pb_strings strings = { 0 };
+  fsh_pb_string(&strings, "", 0);
+  const char *types[4][2] = { { "alloc_objects", "count" }, { "alloc_space", "bytes" }, { "inuse_objects", "count" }, { "inuse_space", "bytes" } };
+  for (int i = 0; i < 4; i++) {
+    fsh_pb_int(&msg, 1, (uint64_t)fsh_pb_string(&strings, types[i][0], strlen(types[i][0])));
+    fsh_pb_int(&msg, 2, (uint64_t)fsh_pb_string(&strings, types[i][1], strlen(types[i][1])));
+    fsh_pb_sub(&out, 1, &msg);
+  }
+  // A location and a function for each frame of each stack: their ids are the frame's place
+  // across the stacks, so nothing needs deduplicating but the strings.
+  uint64_t next = 1;
+  double total = 0;
+  for (int64_t i = 0; i < fsh_heap_count; i++) {
+    fsh_heap_stack *s = &fsh_heap_stacks[i];
+    uint64_t first = next;
+    for (int32_t d = 0; d < s->depth; d++, next++) {
+      const char *file;
+      size_t file_length;
+      int64_t at;
+      fsh_heap_site(s->sites[d], &file, &file_length, &at);
+      const char *name = s->names[d] ? s->names[d] : "<runtime>";
+      int64_t named_at = fsh_pb_string(&strings, name, strlen(name));
+      int64_t file_at = fsh_pb_string(&strings, file, file_length);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_int(&msg, 2, (uint64_t)named_at);
+      fsh_pb_int(&msg, 3, (uint64_t)named_at);
+      fsh_pb_int(&msg, 4, (uint64_t)file_at);
+      fsh_pb_sub(&out, 5, &msg);
+      fsh_pb_int(&line, 1, next);
+      fsh_pb_int(&line, 2, (uint64_t)at);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_sub(&msg, 4, &line);
+      fsh_pb_sub(&out, 4, &msg);
+    }
+    if (s->depth == 0) {
+      int64_t named_at = fsh_pb_string(&strings, "<runtime>", 9);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_int(&msg, 2, (uint64_t)named_at);
+      fsh_pb_int(&msg, 3, (uint64_t)named_at);
+      fsh_pb_sub(&out, 5, &msg);
+      fsh_pb_int(&line, 1, next);
+      fsh_pb_int(&msg, 1, next);
+      fsh_pb_sub(&msg, 4, &line);
+      fsh_pb_sub(&out, 4, &msg);
+      next++;
+    }
+    for (uint64_t id = first; id < next; id++) fsh_pb_varint(&inner, id);
+    fsh_pb_sub(&msg, 1, &inner);
+    double values[4] = { s->alloc_n, s->alloc_b, s->live_n, s->live_b };
+    for (int v = 0; v < 4; v++) fsh_pb_varint(&inner, (uint64_t)(int64_t)(values[v] + 0.5));
+    fsh_pb_sub(&msg, 2, &inner);
+    fsh_pb_sub(&out, 2, &msg);
+    total += s->live_b;
+  }
+  fsh_pb_int(&msg, 1, (uint64_t)fsh_pb_string(&strings, "space", 5));
+  fsh_pb_int(&msg, 2, (uint64_t)fsh_pb_string(&strings, "bytes", 5));
+  fsh_pb_sub(&out, 11, &msg);
+  for (int64_t i = 0; i < strings.count; i++) {
+    size_t length = strlen(strings.items[i]);
+    fsh_pb_varint(&out, (6 << 3) | 2);
+    fsh_pb_varint(&out, length);
+    fsh_pb_bytes(&out, strings.items[i], length);
+  }
+  int64_t stacks = fsh_heap_count;
+  pthread_mutex_unlock(&fsh_heap_lock);
+  fsh_pb_int(&out, 12, (uint64_t)FSH_HEAP_RATE);
+  FILE *f = fopen(path, "wb");
+  if (!f || fwrite(out.data, 1, out.length, f) != out.length) fprintf(stderr, "fish heap profile: can't write '%s' (%s)\n", path, strerror(errno));
+  else fprintf(stderr, "fish heap profile: %lld stacks, %.0f bytes live, written to %s\n", (long long)stacks, total, path);
+  if (f) fclose(f);
+  for (int64_t i = 0; i < strings.count; i++) free((void *)strings.items[i]);
+  free(strings.items);
+  free(out.data);
+  free(msg.data);
+  free(inner.data);
+  free(line.data);
+}
+
+// SIGUSR1 wakes a thread of the profiler's own, which writes the profile outside the handler.
+static int fsh_heap_pipe[2] = { -1, -1 };
+
+static void fsh_heap_signal(int n) {
+  (void)n;
+  char one = 1;
+  ssize_t wrote = write(fsh_heap_pipe[1], &one, 1);
+  (void)wrote;
+}
+
+static void *fsh_heap_waiter(void *unused) {
+  (void)unused;
+  char one;
+  while (read(fsh_heap_pipe[0], &one, 1) == 1 || errno == EINTR) fsh_heap_write();
+  return NULL;
+}
+
+__attribute__((constructor)) static void fsh_heap_start(void) {
+  if (pipe(fsh_heap_pipe) != 0) return;
+  fcntl(fsh_heap_pipe[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_heap_pipe[1], F_SETFD, FD_CLOEXEC);
+  pthread_t waiter;
+  if (pthread_create(&waiter, NULL, fsh_heap_waiter, NULL) != 0) return;
+  pthread_detach(waiter);
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = fsh_heap_signal;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  sigaction(SIGUSR1, &sa, NULL);
+}
+
+__attribute__((destructor)) static void fsh_heap_end(void) {
+  fsh_heap_write();
+}
+#endif
+
 static void fsh_panic_at(const char *at) {
   fflush(NULL);
   fputs(at, stderr);
@@ -723,7 +1876,7 @@ static void fsh_backtrace(void) {
   if (!fsh_rt_frames) return;
   fputs("stack backtrace:\n", stderr);
   const char *at = fsh_panic_line && strncmp(fsh_panic_line, "panicked at ", 12) == 0 ? fsh_panic_line + 12 : NULL;
-  if (at && (strncmp(at, "<fish std>", 10) == 0 || strncmp(at, "node:", 5) == 0 || strncmp(at, "fish:", 5) == 0)) at = NULL;
+  if (at && (strncmp(at, "<fish std>", 10) == 0 || strncmp(at, "std:", 4) == 0)) at = NULL;
   int64_t n = 0;
   for (fsh_frame *f = fsh_rt_frames; f; f = f->prev, n++) {
     if (n == 64) {
@@ -762,6 +1915,10 @@ static int64_t fsh_poison_count = 0;
 // How many locks this thread holds, so a call into JS under one, which could wait forever on a
 // callback JS runs that takes the same lock, is refused.
 static _Thread_local int32_t fsh_locks_held = 0;
+#ifdef FSH_LOCK_ORDER
+// How many locks lock-order checking has this thread holding.
+static _Thread_local int32_t fsh_order_depth = 0;
+#endif
 // The RwLock words this thread reads under, innermost last.
 static _Thread_local int32_t **fsh_reading = NULL;
 static _Thread_local int64_t fsh_reading_count = 0, fsh_reading_capacity = 0;
@@ -771,7 +1928,9 @@ static _Thread_local int64_t fsh_reading_count = 0, fsh_reading_capacity = 0;
 static _Thread_local int32_t fsh_in_js = 0;
 
 void fsh_rt_panic(const char *message) {
+#ifndef __wasi__
   static _Thread_local struct _Unwind_Exception exception;
+#endif
   if (!fsh_reason_given) {
     const char *nl = strncmp(message, "panicked ", 9) == 0 ? strchr(message, '\n') : NULL;
     const char *reason = nl ? nl + 1 : message;
@@ -791,6 +1950,10 @@ void fsh_rt_panic(const char *message) {
   }
   fsh_locks_held = 0;
   fsh_token = 0;
+#ifdef FSH_LOCK_ORDER
+  // The locks it held stay held, poisoned, under the token it gives up.
+  fsh_order_depth = 0;
+#endif
   fflush(NULL);
   fputs(message, stderr);
   if (strncmp(message, "panicked at ", 12) == 0) fsh_panic_line = message;
@@ -799,13 +1962,21 @@ void fsh_rt_panic(const char *message) {
   // An unwind pops no frame, and a drop it runs may panic again: that panic starts from nothing,
   // rather than walking frames the unwind already left. A task's poller gets its own stack back.
   fsh_rt_frames = NULL;
+#ifdef __wasi__
+  // A module can't unwind, and WASI has no signal to abort with, so a panic ends it as one that
+  // unwound to the end of the stack does.
+  fsh_panic_began = 1;
+  exit(101);
+#endif
   if (fsh_panic_abort) abort();
   if (fsh_in_js > 0) {
     fsh_panic_began = 1;
     exit(101);
   }
+#ifndef __wasi__
   exception.exception_class = 0x46495348; // "FISH"
   _Unwind_ForcedUnwind(&exception, fsh_unwound, NULL);
+#endif
   fsh_panic_began = 1;
   exit(101);
 }
@@ -900,25 +2071,6 @@ void fsh_rt_array_reverse(fsh_array *a, int64_t size) {
   }
 }
 
-// A stable merge sort of n elements of size bytes each, by the sign of cmp(env, a, b), using a
-// buffer of n elements. Each pair of runs merges into the buffer and is copied back before the
-// next, so the array holds every element exactly once whenever a comparator runs, and a panic
-// in one leaves it whole for its drop.
-void fsh_rt_sort(char *data, int64_t n, int64_t size, int32_t (*cmp)(void *, void *, void *), void *env, char *buffer) {
-  for (int64_t width = 1; width < n; width *= 2) {
-    for (int64_t low = 0; low + width < n; low += 2 * width) {
-      int64_t mid = low + width, high = low + 2 * width < n ? low + 2 * width : n;
-      int64_t i = low, j = mid, k = low;
-      // The right run's element goes first only when it orders strictly before, which keeps
-      // equal elements in their order.
-      while (i < mid && j < high) memcpy(buffer + size * k++, data + size * (cmp(env, data + size * j, data + size * i) < 0 ? j++ : i++), size);
-      if (i < mid) memcpy(buffer + size * k, data + size * i, size * (mid - i)), k += mid - i;
-      if (j < high) memcpy(buffer + size * k, data + size * j, size * (high - j));
-      memcpy(data + size * low, buffer + size * low, size * (high - low));
-    }
-  }
-}
-
 // An array's buffer for this many bytes, or none for no elements.
 void *fsh_rt_array_alloc(int64_t bytes) {
   return bytes == 0 ? NULL : fsh_rt_alloc(bytes);
@@ -957,12 +2109,124 @@ typedef struct {
   void (*drop_value)(void *);
 } fsh_map;
 
+// Deterministic simulation mode: activated when FISH_SIM_SEED is set in the environment.
+// Drives map seeding, PRNG, virtual monotonic/wall clocks, single-threaded task scheduling,
+// and an in-memory virtual TCP network with fault injection. Zero overhead when unset.
+static int32_t fsh_sim_inited = 0;
+static int32_t fsh_sim_active = 0;
+static uint64_t fsh_sim_seed_val = 0;
+static uint64_t fsh_sim_user_rng[4];
+static uint64_t fsh_sim_sched_rng[4];
+static int64_t fsh_sim_now_ns = 0;
+static const int64_t FSH_SIM_EPOCH_MS = 1704067200000LL; // 2024-01-01T00:00:00.000Z
+// Set on WASI, which gives a module one thread: the simulation's scheduler runs its tasks, on the
+// real clocks, with the OS's randomness and without the fault injection.
+static int32_t fsh_sim_real = 0;
+#define FSH_VIRTUAL (fsh_sim_active && !fsh_sim_real)
+
+// The real monotonic clock, which the scheduler's time follows when it runs on real time.
+static int64_t fsh_mono_ns(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
+}
+
+static void fsh_sim_tick(void) {
+  if (fsh_sim_real) fsh_sim_now_ns = fsh_mono_ns();
+}
+
+static uint64_t fsh_sim_splitmix64(uint64_t *state) {
+  uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+  return z ^ (z >> 31);
+}
+
+static uint64_t fsh_sim_rotl64(uint64_t x, int k) {
+  return (x << k) | (x >> (64 - k));
+}
+
+static uint64_t fsh_sim_next_u64(uint64_t s[4]) {
+  const uint64_t result = fsh_sim_rotl64(s[1] * 5, 7) * 9;
+  const uint64_t t = s[1] << 17;
+  s[2] ^= s[0];
+  s[3] ^= s[1];
+  s[1] ^= s[2];
+  s[0] ^= s[3];
+  s[2] ^= t;
+  s[3] = fsh_sim_rotl64(s[3], 45);
+  return result;
+}
+
+static double fsh_sim_next_f64(uint64_t s[4]) {
+  return (double)(fsh_sim_next_u64(s) >> 11) * 0x1.0p-53;
+}
+
+static void fsh_sim_init(void) {
+  if (fsh_sim_inited) return;
+  fsh_sim_inited = 1;
+  const char *env = getenv("FISH_SIM_SEED");
+#ifdef __wasi__
+  if (!env || !env[0]) {
+    fsh_sim_active = 1;
+    fsh_sim_real = 1;
+    fsh_sim_tick();
+    uint64_t seed = 0;
+    if (getentropy(&seed, sizeof seed) != 0) seed = (uint64_t)fsh_sim_now_ns;
+    uint64_t ss = seed ^ 0xbf58476d1ce4e5b9ULL;
+    for (int i = 0; i < 4; i++) fsh_sim_sched_rng[i] = fsh_sim_splitmix64(&ss);
+    return;
+  }
+#endif
+  if (!env || !env[0]) return;
+  const char *p = env;
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+  if (!*p || *p == '-' || *p == '+') {
+    fprintf(stderr, "fish sim: invalid FISH_SIM_SEED '%s' (expected unsigned 64-bit integer)\n", env);
+    fsh_abandoned = 1;
+    exit(2);
+  }
+  errno = 0;
+  char *end = NULL;
+  unsigned long long parsed = strtoull(p, &end, 10);
+  if (errno == ERANGE || end == p) {
+    fprintf(stderr, "fish sim: invalid FISH_SIM_SEED '%s' (expected unsigned 64-bit integer)\n", env);
+    fsh_abandoned = 1;
+    exit(2);
+  }
+  while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r') end++;
+  if (*end != '\0') {
+    fprintf(stderr, "fish sim: invalid FISH_SIM_SEED '%s' (expected unsigned 64-bit integer)\n", env);
+    fsh_abandoned = 1;
+    exit(2);
+  }
+  fsh_sim_active = 1;
+  fsh_sim_seed_val = (uint64_t)parsed;
+  fsh_sim_now_ns = 0;
+  uint64_t su = fsh_sim_seed_val ^ 0x9e3779b97f4a7c15ULL;
+  uint64_t ss = fsh_sim_seed_val ^ 0xbf58476d1ce4e5b9ULL;
+  for (int i = 0; i < 4; i++) {
+    fsh_sim_user_rng[i] = fsh_sim_splitmix64(&su);
+    fsh_sim_sched_rng[i] = fsh_sim_splitmix64(&ss);
+  }
+}
+
+__attribute__((constructor)) static void fsh_sim_boot(void) {
+  fsh_sim_init();
+}
+
 // Set once before main, so every thread hashes with the same seed. A top-level const's table is
 // made by another constructor, which may run first, so whichever comes first seeds it.
 static uint64_t fsh_map_seed = 0;
 
 __attribute__((constructor)) static void fsh_map_seeding(void) {
+  fsh_sim_init();
   if (fsh_map_seed != 0) return;
+  if (FSH_VIRTUAL) {
+    uint64_t st = fsh_sim_seed_val ^ 0x243f6a8885a308d3ULL;
+    fsh_map_seed = fsh_sim_splitmix64(&st) | 1;
+    return;
+  }
   if (getentropy(&fsh_map_seed, sizeof fsh_map_seed) != 0) fsh_map_seed = (uint64_t)(intptr_t)&fsh_map_seed;
   fsh_map_seed |= 1;
 }
@@ -971,9 +2235,26 @@ __attribute__((constructor)) static void fsh_map_seeding(void) {
 static uint64_t fsh_map_hash(fsh_map *m, int64_t bits) {
   uint64_t h = fsh_map_seed;
   if (m->strings) {
+    // The bytes eight at a time, the last word padded with zeros, then the length, so a small
+    // string hashes from its word as the same text in a block does.
     fsh_str *s = (fsh_str *)(intptr_t)bits;
-    h ^= 0xcbf29ce484222325ull;
-    for (int64_t i = 0; i < s->length; i++) h = (h ^ (unsigned char)s->bytes[i]) * 0x100000001b3ull;
+    int64_t length = fsh_len(s);
+    if (fsh_small(s)) {
+      if (length > 0) h = (h ^ (uint64_t)bits >> 8) * 0x9e3779b97f4a7c15ull;
+    } else {
+      int64_t i = 0;
+      for (; i + 8 <= length; i += 8) {
+        uint64_t w;
+        memcpy(&w, s->bytes + i, 8);
+        h = (h ^ w) * 0x9e3779b97f4a7c15ull;
+      }
+      if (i < length) {
+        uint64_t w = 0;
+        memcpy(&w, s->bytes + i, length - i);
+        h = (h ^ w) * 0x9e3779b97f4a7c15ull;
+      }
+    }
+    h ^= (uint64_t)length;
   } else {
     h ^= (uint64_t)bits;
   }
@@ -982,9 +2263,21 @@ static uint64_t fsh_map_hash(fsh_map *m, int64_t bits) {
   return h ^ (h >> 31);
 }
 
+// A key's hash as a table of such keys hashes it, from its top half: a table picks its slot from
+// the bottom bits, so a ConcurrentMap picking a shard from the same bits would crowd each shard.
+uint64_t fsh_rt_key_hash(int64_t bits, int32_t strings) {
+  fsh_map m = {0};
+  m.strings = strings;
+  return fsh_map_hash(&m, bits) >> 32;
+}
+
 static int fsh_map_same(fsh_map *m, int64_t a, int64_t b) {
   if (!m->strings) return a == b;
+  if (a == b) return 1;
   fsh_str *x = (fsh_str *)(intptr_t)a, *y = (fsh_str *)(intptr_t)b;
+  if (fsh_small(x) && fsh_small(y)) return 0;
+  FSH_OPEN(x);
+  FSH_OPEN(y);
   return x->length == y->length && memcmp(x->bytes, y->bytes, x->length) == 0;
 }
 
@@ -1087,6 +2380,7 @@ static int fsh_dict_index_cmp(const void *a, const void *b) {
 
 // Whether a key is an array index: a canonical decimal integer below 2^32 - 1.
 static int fsh_dict_numeric(fsh_str *s, uint64_t *n) {
+  FSH_OPEN(s);
   if (s->length == 0 || s->length > 10 || (s->length > 1 && s->bytes[0] == '0')) return 0;
   uint64_t v = 0;
   for (int64_t i = 0; i < s->length; i++) {
@@ -1226,6 +2520,7 @@ static int fsh_space(uint32_t c) {
 
 // Trims whitespace from the start (1), the end (2) or both (3), sharing what is left.
 fsh_str *fsh_rt_str_trim(fsh_str *s, int32_t sides) {
+  FSH_OPEN(s);
   const unsigned char *p = (const unsigned char *)s->bytes;
   int64_t a = 0, b = s->length;
   int half = 0;
@@ -1280,6 +2575,7 @@ static fsh_str *fsh_parts_join(fsh_parts *p) {
 // $& the match, $ and a backtick (0x60) what comes before it, and $' what comes after, as
 // JavaScript's replace and replaceAll with a string pattern read it.
 static void fsh_replacement(fsh_parts *p, fsh_str *s, fsh_str *replacement, int64_t at, int64_t end, int64_t n) {
+  FSH_OPEN(replacement);
   const char *r = replacement->bytes;
   int64_t from = 0;
   for (int64_t i = 0; i + 1 < replacement->length; i++) {
@@ -1351,7 +2647,7 @@ static fsh_str *fsh_from_points(const uint32_t *points, int64_t n) {
   }
   s->length = at - (char *)s->own;
   s->units = units;
-  return s;
+  return fsh_str_done(s);
 }
 
 // String.fromCharCode: UTF-16 units.
@@ -1386,11 +2682,8 @@ static void fsh_too_long(const char *at) {
 
 fsh_str *fsh_rt_str_repeat(fsh_str *s, int64_t count, const char *at) {
   if (count < 0) fsh_too_long(at);
-  if (count == 0 || s->length == 0) {
-    fsh_str *empty = fsh_str_new(0);
-    empty->units = 0;
-    return empty;
-  }
+  FSH_OPEN(s);
+  if (count == 0 || s->length == 0) return fsh_small_of("", 0);
   if (count > FSH_MAX_BYTES / s->length) fsh_too_long(at);
   const unsigned char *b = (const unsigned char *)s->bytes;
   // A string ending in a lone high surrogate and starting with a lone low one joins a pair at
@@ -1409,7 +2702,7 @@ fsh_str *fsh_rt_str_repeat(fsh_str *s, int64_t count, const char *at) {
   for (int64_t i = 0; i < count; i++) memcpy(result->own + i * s->length, s->bytes, s->length);
   int64_t known = __atomic_load_n(&s->units, __ATOMIC_ACQUIRE);
   result->units = known >= 0 ? known * count : -1;
-  return result;
+  return fsh_str_done(result);
 }
 
 // JavaScript's padStart (start) or padEnd: the fill, a space by default, repeated and cut to
@@ -1421,7 +2714,7 @@ fsh_str *fsh_rt_str_pad(fsh_str *s, int64_t length, fsh_str *fill, int32_t start
   int64_t m = fsh_rt_str_units(fill);
   // An empty fill leaves the string as it is, however long it was asked to be. A length too
   // long to make panics before anything is held, so the unwind has nothing here to drop.
-  if (m > 0 && (length < 0 || (length > n && (length - n) / m > FSH_MAX_BYTES / fill->length))) {
+  if (m > 0 && (length < 0 || (length > n && (length - n) / m > FSH_MAX_BYTES / fsh_len(fill)))) {
     fsh_rt_str_release(space);
     fsh_too_long(at);
   }
@@ -1463,10 +2756,12 @@ void fsh_rt_panic_index(const char *at, int64_t length, int64_t index) {
 // An assertion's panic, its message the reason; at is the "panicked at" line. The message is
 // released here, as the panic unwinds past the statement that would release it.
 void fsh_rt_panic_assert(const char *at, fsh_str *message) {
-  size_t length = message ? message->length : 0;
+  fsh_str *text = message ? message : fsh_small_of("", 0);
+  FSH_OPEN(text);
+  size_t length = text->length;
   fsh_panic_at(at);
-  if (length > 0) fwrite(message->bytes, 1, length, stderr);
-  fsh_panic_reason(length > 0 ? message->bytes : "", length);
+  if (length > 0) fwrite(text->bytes, 1, length, stderr);
+  fsh_panic_reason(length > 0 ? text->bytes : "", length);
   fsh_rt_str_release(message);
   fsh_rt_panic("\n");
 }
@@ -1494,7 +2789,8 @@ void fsh_rt_panic_rust(const char *at, fsh_rust_message *reason) {
   fsh_rt_panic("\n");
 }
 
-// A Fish string's bytes for Rust to read, WTF-8, a lone surrogate in its 3-byte form.
+// A Fish string's bytes for Rust to read, WTF-8, a lone surrogate in its 3-byte form. Rust reads
+// a small string's bytes from its word itself, so s is a block.
 const char *fsh_rt_rust_str_bytes(fsh_str *s, int64_t *length) {
   *length = s ? s->length : 0;
   return s ? s->bytes : "";
@@ -1513,6 +2809,9 @@ void fsh_rt_rust_dropped(fsh_rust_message **caught, const char *at) {
 // a < b, a === b and a > b as -1, 0 and 1, by UTF-16 code units as JavaScript orders strings.
 // Past the bytes they share, both are read unit by unit from the character they differ in.
 int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {
+  if (a == b) return 0;
+  FSH_OPEN(a);
+  FSH_OPEN(b);
   int64_t n = a->length < b->length ? a->length : b->length;
   int64_t i = 0;
   while (i < n && a->bytes[i] == b->bytes[i]) i++;
@@ -1526,9 +2825,21 @@ int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {
   return x < a->length ? 1 : y < b->length ? -1 : 0;
 }
 
+// FNV-1a over the first 16 UTF-16 units from seed, as the compiler's stringHash computes it for
+// the strings a many-armed switch or match tests.
+uint32_t fsh_rt_str_hash(fsh_str *s, uint32_t seed) {
+  FSH_OPEN(s);
+  uint32_t h = 2166136261u ^ seed;
+  int64_t at = 0;
+  int half = 0;
+  for (int n = 0; n < 16 && at < s->length; n++) h = (h ^ fsh_next((const unsigned char *)s->bytes, &at, &half)) * 16777619u;
+  return h;
+}
+
 // A lone surrogate prints as U+FFFD, as a terminal shows one JavaScript prints.
 void fsh_rt_str_print(int32_t stream, fsh_str *s) {
   FILE *out = stream == 2 ? stderr : stdout;
+  FSH_OPEN(s);
   const unsigned char *p = (const unsigned char *)s->bytes, *end = p + s->length, *from = p;
   for (; p + 2 < end; p++) {
     if (!fsh_high_at(p) && !fsh_low_at(p)) continue;
@@ -1543,6 +2854,7 @@ void fsh_rt_str_print(int32_t stream, fsh_str *s) {
 // A NUL-terminated copy of a string's bytes for C, freed with fsh_rt_free; NULL when the string
 // holds a NUL, which C would take for its end.
 char *fsh_rt_str_cstring(fsh_str *s) {
+  FSH_OPEN(s);
   if (memchr(s->bytes, 0, s->length)) return NULL;
   char *c = fsh_rt_alloc(s->length + 1);
   memcpy(c, s->bytes, s->length);
@@ -1553,6 +2865,11 @@ char *fsh_rt_str_cstring(fsh_str *s) {
 // A string of n bytes of UTF-8, decoded as the web's TextDecoder does: each byte that can't
 // start a sequence, and each longest start of one that is cut short or broken, becomes U+FFFD.
 static fsh_str *fsh_from_utf8(const unsigned char *p, size_t n) {
+  if (n <= FSH_SMALL) {
+    size_t ascii = 0;
+    while (ascii < n && p[ascii] < 0x80) ascii++;
+    if (ascii == n) return fsh_small_of((const char *)p, n);
+  }
   fsh_str *s = fsh_str_new(n * 3);
   unsigned char *at = (unsigned char *)s->own;
   for (size_t i = 0; i < n;) {
@@ -1574,7 +2891,7 @@ static fsh_str *fsh_from_utf8(const unsigned char *p, size_t n) {
     }
   }
   s->length = at - (unsigned char *)s->own;
-  return s;
+  return fsh_str_done(s);
 }
 
 // A string of a C string's bytes up to its NUL.
@@ -1613,6 +2930,8 @@ void fsh_rt_dyn_free(char *p) {
 
 // Milliseconds on the monotonic clock.
 int64_t fsh_rt_now_ms(void) {
+  fsh_sim_init();
+  if (FSH_VIRTUAL) return fsh_sim_now_ns / 1000000;
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
@@ -1620,7 +2939,8 @@ int64_t fsh_rt_now_ms(void) {
 
 // The time now as an HTTP Date header writes it, like "Sun, 06 Nov 1994 08:49:37 GMT".
 fsh_str *fsh_rt_http_date(void) {
-  time_t now = time(NULL);
+  fsh_sim_init();
+  time_t now = FSH_VIRTUAL ? (time_t)(FSH_SIM_EPOCH_MS / 1000 + fsh_sim_now_ns / 1000000000) : time(NULL);
   struct tm at;
   gmtime_r(&now, &at);
   char text[64];
@@ -1631,6 +2951,7 @@ fsh_str *fsh_rt_http_date(void) {
 // 'new TextEncoder().encode(s)': its UTF-8 bytes, a lone surrogate becoming U+FFFD, whose
 // encoding is as long.
 void fsh_rt_utf8_encode(fsh_array *out, fsh_str *s) {
+  FSH_OPEN(s);
   out->data = fsh_rt_array_alloc(s->length);
   out->length = out->capacity = s->length;
   if (!s->length) return;
@@ -1646,16 +2967,22 @@ void fsh_rt_utf8_encode(fsh_array *out, fsh_str *s) {
   }
 }
 
+// A number's decimal digits, written back from the end of text, with a minus when negative.
+static char *fsh_decimal(uint64_t v, int negative, char *end) {
+  char *at = end;
+  do *--at = (char)('0' + v % 10); while ((v /= 10) != 0);
+  if (negative) *--at = '-';
+  return at;
+}
+
 fsh_str *fsh_rt_str_from_i64(int64_t v) {
-  char text[24];
-  int n = snprintf(text, sizeof text, "%lld", (long long)v);
-  return fsh_str_of(text, n);
+  char text[24], *at = fsh_decimal(v < 0 ? 0 - (uint64_t)v : (uint64_t)v, v < 0, text + sizeof text);
+  return fsh_str_of(at, text + sizeof text - at);
 }
 
 fsh_str *fsh_rt_str_from_u64(uint64_t v) {
-  char text[24];
-  int n = snprintf(text, sizeof text, "%llu", (unsigned long long)v);
-  return fsh_str_of(text, n);
+  char text[24], *at = fsh_decimal(v, 0, text + sizeof text);
+  return fsh_str_of(at, text + sizeof text - at);
 }
 
 static char *fsh_format(double x, int single, char *out) {
@@ -1738,6 +3065,7 @@ static int fsh_digit(unsigned char c) {
 // JavaScript's parseInt, its NaN as a false result: white space, a sign, '0x' when the radix is
 // 16 or not given (0), then the longest run of digits. A value past the i64 range is false too.
 int fsh_rt_parse_int(fsh_str *s, int64_t radix, int64_t *out) {
+  FSH_OPEN(s);
   const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
   int64_t n = s ? s->length : 0, i = fsh_js_skip(p, n);
   int negative = i < n && p[i] == '-';
@@ -1795,6 +3123,7 @@ static double fsh_js_strtod(const unsigned char *p, int64_t length) {
 // JavaScript's parseFloat, its NaN as a false result: white space, then the longest decimal
 // literal with an optional sign.
 int fsh_rt_parse_float(fsh_str *s, double *out) {
+  FSH_OPEN(s);
   const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
   int64_t n = s ? s->length : 0, i = fsh_js_skip(p, n);
   int64_t sign = i < n && (p[i] == '-' || p[i] == '+');
@@ -1807,6 +3136,7 @@ int fsh_rt_parse_float(fsh_str *s, double *out) {
 // JavaScript's Number of a string, its NaN as a false result: the whole string less white space
 // at both ends is empty, giving 0, a '0x', '0o' or '0b' integer, or a decimal literal.
 int fsh_rt_parse_number(fsh_str *s, double *out) {
+  FSH_OPEN(s);
   const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
   int64_t n = s ? s->length : 0, i = fsh_js_skip(p, n);
   for (int64_t k = 1; n > i && k <= 3 && k <= n - i;) {
@@ -1901,8 +3231,90 @@ fsh_str *fsh_rt_int_to_fixed(int64_t v, int32_t is_signed, int64_t f) {
     s->own[n] = '.';
     memset(s->own + n + 1, '0', f);
   }
-  return s;
+  return fsh_str_done(s);
 }
+fsh_str *fsh_rt_str_from_f32(float x);
+
+// toString(radix) on an integer: its exact digits, as a bigint's.
+fsh_str *fsh_rt_int_radix(__int128 v, int32_t is_signed, int64_t radix) {
+  int negative = is_signed && v < 0;
+  unsigned __int128 rest = negative ? -(unsigned __int128)v : (unsigned __int128)v;
+  char text[130];
+  int at = sizeof text;
+  do {
+    text[--at] = "0123456789abcdefghijklmnopqrstuvwxyz"[(int)(rest % (unsigned)radix)];
+    rest /= (unsigned)radix;
+  } while (rest);
+  if (negative) text[--at] = '-';
+  return fsh_str_of(text + at, sizeof text - at);
+}
+
+// The exponent of x read as an integer times 2 to it, as V8's Double::Exponent gives it.
+static int fsh_double_exponent(double x) {
+  uint64_t bits;
+  memcpy(&bits, &x, sizeof bits);
+  int biased = (int)((bits >> 52) & 0x7ff);
+  return biased == 0 ? -1074 : biased - 1075;
+}
+
+// toString(radix) on a float, as V8's DoubleToRadixCString writes it: fraction digits only
+// while they still tell doubles apart, rounded half to even, and integer digits past the
+// double's precision written as zeros. Radix 10 is String(x).
+fsh_str *fsh_rt_float_radix(double x, int32_t single, int64_t radix) {
+  if (radix == 10) return single ? fsh_rt_str_from_f32((float)x) : fsh_rt_str_from_f64(x);
+  if (x != x) return fsh_rt_str_from_cstring("NaN");
+  if (isinf(x)) return fsh_rt_str_from_cstring(x < 0 ? "-Infinity" : "Infinity");
+  static const char chars[] = "0123456789abcdefghijklmnopqrstuvwxyz";
+  char buffer[2200];
+  int integer_cursor = sizeof buffer / 2;
+  int fraction_cursor = integer_cursor;
+  int negative = x < 0;
+  if (negative) x = -x;
+  double integer = floor(x);
+  double fraction = x - integer;
+  double delta = 0.5 * (nextafter(x, INFINITY) - x);
+  if (delta < nextafter(0.0, 1.0)) delta = nextafter(0.0, 1.0);
+  if (fraction >= delta) {
+    buffer[fraction_cursor++] = '.';
+    do {
+      fraction *= radix;
+      delta *= radix;
+      int digit = (int)fraction;
+      buffer[fraction_cursor++] = chars[digit];
+      fraction -= digit;
+      if (fraction > 0.5 || (fraction == 0.5 && (digit & 1))) {
+        if (fraction + delta > 1) {
+          for (;;) {
+            fraction_cursor--;
+            if (fraction_cursor == (int)sizeof buffer / 2) {
+              integer += 1;
+              break;
+            }
+            char c = buffer[fraction_cursor];
+            int last = c > '9' ? c - 'a' + 10 : c - '0';
+            if (last + 1 < radix) {
+              buffer[fraction_cursor++] = chars[last + 1];
+              break;
+            }
+          }
+          break;
+        }
+      }
+    } while (fraction >= delta);
+  }
+  while (fsh_double_exponent(integer / radix) > 0) {
+    integer /= radix;
+    buffer[--integer_cursor] = '0';
+  }
+  do {
+    double remainder = fmod(integer, (double)radix);
+    buffer[--integer_cursor] = chars[(int)remainder];
+    integer = (integer - remainder) / radix;
+  } while (integer > 0);
+  if (negative) buffer[--integer_cursor] = '-';
+  return fsh_str_of(buffer + integer_cursor, fraction_cursor - integer_cursor);
+}
+
 char *fsh_rt_format_f32(float x, char *out) { return x == 0 && signbit(x) ? strcpy(out, "-0") : fsh_format(x, 1, out); }
 
 fsh_str *fsh_rt_str_from_f64(double x) {
@@ -1945,6 +3357,24 @@ void fsh_rt_json_raw(fsh_json_out *w, const char *p, int64_t n) {
   memcpy(w->bytes + w->length, p, n);
   w->length += n;
 }
+
+#ifdef __linux__
+// A checked 128-bit multiply, which LLVM calls for and libgcc doesn't have: the product, wrapped,
+// and whether it overflowed. Weak, so compiler-rt's own is the one used where that is linked.
+__attribute__((weak)) __int128 __muloti4(__int128 a, __int128 b, int *overflow) {
+  const __int128 lowest = (__int128)((unsigned __int128)1 << 127);
+  const __int128 highest = ~lowest;
+  __int128 product = (__int128)((unsigned __int128)a * (unsigned __int128)b);
+  *overflow = 0;
+  if (a == lowest) { *overflow = b != 0 && b != 1; return product; }
+  if (b == lowest) { *overflow = a != 0 && a != 1; return product; }
+  __int128 x = a < 0 ? -a : a;
+  __int128 y = b < 0 ? -b : b;
+  if (x < 2 || y < 2) return product;
+  *overflow = (a < 0) == (b < 0) ? x > highest / y : x > lowest / -y;
+  return product;
+}
+#endif
 
 // A 128-bit integer's decimal digits, which printf can't write: its length in out, which holds 41.
 static int fsh_digits128(unsigned __int128 magnitude, int negative, char *out) {
@@ -2324,6 +3754,7 @@ unsigned __int128 fsh_rt_big_low(const fsh_big *a) {
 // The nearest double, as Number(x) gives.
 double fsh_rt_big_f64(const fsh_big *a) {
   fsh_str *text = fsh_rt_big_text(a, 10);
+  FSH_OPEN(text);
   double x = fsh_js_strtod((const unsigned char *)text->bytes, text->length);
   fsh_rt_str_release(text);
   return x;
@@ -2363,6 +3794,7 @@ void fsh_rt_json_f64(fsh_json_out *w, double x, int32_t single) {
 // A string as JSON.stringify writes it: quotes, backslashes and control characters escaped, and
 // a lone surrogate as its escape of four hex digits, so the text is well-formed UTF-8.
 void fsh_rt_json_string(fsh_json_out *w, fsh_str *s) {
+  FSH_OPEN(s);
   const unsigned char *p = (const unsigned char *)s->bytes;
   int64_t n = s->length, from = 0, i = 0;
   fsh_rt_json_raw(w, "\"", 1);
@@ -2411,6 +3843,7 @@ fsh_str *fsh_rt_json_done(fsh_json_out *w) {
 // when a union tries its members in turn.
 typedef struct fsh_json_in {
   const unsigned char *p;
+  char small[8];
   int64_t n, at, depth;
   char *path;
   int64_t path_length, path_room;
@@ -2425,7 +3858,10 @@ typedef struct fsh_json_in {
 
 fsh_json_in *fsh_rt_json_in(fsh_str *s) {
   fsh_json_in *r = fsh_rt_alloc(sizeof(fsh_json_in));
-  r->p = (const unsigned char *)s->bytes;
+  // A small string's view ends with this call, so the reader keeps its own copy of the bytes.
+  FSH_OPEN(s);
+  if (s == &s_view.s) memcpy(r->small, s_view.own, sizeof r->small);
+  r->p = s == &s_view.s ? (const unsigned char *)r->small : (const unsigned char *)s->bytes;
   r->n = s->length;
   r->at = 0;
   r->depth = 0;
@@ -2464,6 +3900,7 @@ static void fsh_json_path(fsh_json_in *r, const char *p, int64_t n) {
 
 // The path's length before a field's name or an element's index goes on it, to go back to.
 int64_t fsh_rt_json_field_path(fsh_json_in *r, fsh_str *key) {
+  FSH_OPEN(key);
   int64_t mark = r->path_length;
   fsh_json_path(r, ".", 1);
   fsh_json_path(r, key->bytes, key->length);
@@ -2753,6 +4190,7 @@ int32_t fsh_rt_json_text(fsh_json_in *r, fsh_str **out, const char *what) {
 
 // Whether a string read is the given text, as a key or an enum member's name.
 int32_t fsh_rt_json_same(fsh_str *s, const char *text, int64_t n) {
+  FSH_OPEN(s);
   return s->length == n && memcmp(s->bytes, text, n) == 0;
 }
 
@@ -2848,7 +4286,7 @@ int32_t fsh_rt_json_end(fsh_json_in *r) {
   return fsh_json_error(r, message);
 }
 
-// Node's os module, over libc. Each string is written to a buffer of the calling thread's,
+// The os module, over libc. Each string is written to a buffer of the calling thread's,
 // which the Fish side copies at once.
 static __thread char fsh_os_text[4096];
 
@@ -2858,7 +4296,7 @@ const char *fsh_rt_os_hostname(void) {
   return fsh_os_text;
 }
 
-// TMPDIR, TMP or TEMP, else /tmp, without a trailing slash, as Node gives it.
+// TMPDIR, TMP or TEMP, else /tmp, without a trailing slash.
 const char *fsh_rt_os_tmpdir(void) {
   const char *names[] = {"TMPDIR", "TMP", "TEMP"};
   const char *dir = NULL;
@@ -2913,7 +4351,7 @@ int64_t fsh_rt_os_parallelism(void) {
   return n > 0 ? n : 1;
 }
 
-// The program's arguments, kept from main for process.argv, which Node gives as the runtime's
+// The program's arguments, kept from main for process.argv, which holds the runtime's
 // path, the script's, then the arguments; a Fish program is both, so its path comes twice.
 static int32_t fsh_argc = 0;
 static char **fsh_argv = NULL;
@@ -2948,7 +4386,7 @@ const char *fsh_rt_arg(int64_t i) {
 }
 
 // The working directory, in the calling thread's buffer, as path.resolve starts from it. One the
-// system can't give, deleted or too long, is a panic, as Node throws for it.
+// system can't give, deleted or too long, is a panic.
 const char *fsh_rt_cwd(void) {
   if (getcwd(fsh_os_text, sizeof fsh_os_text)) return fsh_os_text;
   char message[256];
@@ -2982,6 +4420,8 @@ const char *fsh_rt_env_at(int64_t i) {
 
 // Date.now(): the wall clock's milliseconds since the Unix epoch.
 int64_t fsh_rt_date_now(void) {
+  fsh_sim_init();
+  if (FSH_VIRTUAL) return FSH_SIM_EPOCH_MS + fsh_sim_now_ns / 1000000;
   struct timespec t;
   clock_gettime(CLOCK_REALTIME, &t);
   return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
@@ -2989,6 +4429,11 @@ int64_t fsh_rt_date_now(void) {
 
 // The wall clock's nanoseconds since the Unix epoch, as OTLP writes a span's times.
 int64_t fsh_rt_unix_nanos(void) {
+  fsh_sim_init();
+  if (FSH_VIRTUAL) {
+    int64_t base = FSH_SIM_EPOCH_MS * 1000000LL;
+    return fsh_sim_now_ns > INT64_MAX - base ? INT64_MAX : base + fsh_sim_now_ns;
+  }
   struct timespec t;
   clock_gettime(CLOCK_REALTIME, &t);
   return (int64_t)t.tv_sec * 1000000000 + t.tv_nsec;
@@ -2997,8 +4442,27 @@ int64_t fsh_rt_unix_nanos(void) {
 // Fills count bytes from the OS's secure random source: arc4random_buf on macOS, which can't fail,
 // and getrandom(2) on Linux, which blocks only until the pool is first seeded at boot.
 void fsh_rt_random_fill(uint8_t *at, int64_t count) {
+  fsh_sim_init();
+  if (FSH_VIRTUAL) {
+    while (count > 0) {
+      uint64_t w = fsh_sim_next_u64(fsh_sim_user_rng);
+      int64_t n = count < 8 ? count : 8;
+      memcpy(at, &w, (size_t)n);
+      at += n;
+      count -= n;
+    }
+    return;
+  }
 #ifdef __APPLE__
   arc4random_buf(at, (size_t)count);
+#elif defined(__wasi__)
+  // WASI's random_get, which getentropy calls, takes at most 256 bytes at a time.
+  while (count > 0) {
+    int64_t n = count < 256 ? count : 256;
+    if (getentropy(at, (size_t)n) != 0) fsh_rt_panic("the OS's secure random source failed\n");
+    at += n;
+    count -= n;
+  }
 #else
   while (count > 0) {
     ssize_t got = getrandom(at, (size_t)count, 0);
@@ -3188,12 +4652,14 @@ __attribute__((constructor)) static void fsh_start_clock(void) {
 }
 
 double fsh_rt_performance_now(void) {
+  fsh_sim_init();
+  if (FSH_VIRTUAL) return (double)fsh_sim_now_ns / 1e6;
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (double)(t.tv_sec - fsh_started.tv_sec) * 1e3 + (double)(t.tv_nsec - fsh_started.tv_nsec) / 1e6;
 }
 
-// process.exit: output flushed and the process ended at once, as Node ends it, so what is still
+// process.exit: output flushed and the process ended at once, so what is still
 // alive isn't reported as leaked.
 void fsh_rt_exit(int64_t code) {
   fflush(NULL);
@@ -3222,10 +4688,10 @@ typedef struct fsh_insp {
   int64_t count, room;
   // An ARRAY's, Map's or Set's size, of which the first 100 are kept.
   int64_t size;
-  // An Error's OBJECT, its text the bracketed header Node prints in place of its stack, and
+  // An Error's OBJECT, its text the bracketed header printed in place of its stack, and
   // what it is past the depth, its class's name bracketed.
   int32_t error;
-  // An OBJECT whose bracketed keys are written as they are, as Node writes keys it shows itself.
+  // An OBJECT whose bracketed keys are written as they are, unquoted and unescaped.
   int32_t shown;
   char *cut;
 } fsh_insp;
@@ -3296,6 +4762,7 @@ fsh_insp *fsh_rt_insp_text(const char *text) {
 // A bigint as console.log shows one, its digits then 'n'.
 fsh_insp *fsh_rt_insp_bigint(const struct fsh_big *n) {
   fsh_str *digits = fsh_rt_big_text(n, 10);
+  FSH_OPEN(digits);
   char *text = fsh_rt_alloc(digits->length + 2);
   memcpy(text, digits->bytes, digits->length);
   text[digits->length] = 'n';
@@ -3334,7 +4801,7 @@ fsh_insp *fsh_rt_insp_u64(uint64_t n) {
   return v;
 }
 
-// A float as Node prints a number: as String(x) writes it, and -0 as -0.
+// A float as String(x) writes it, and -0 as -0.
 fsh_insp *fsh_rt_insp_f64(double x, int32_t single) {
   char text[40];
   if (x == 0 && signbit(x)) strcpy(text, "-0");
@@ -3345,11 +4812,13 @@ fsh_insp *fsh_rt_insp_f64(double x, int32_t single) {
 }
 
 fsh_insp *fsh_rt_insp_string(fsh_str *s) {
+  FSH_OPEN(s);
   return fsh_insp_new(FSH_INSP_STRING, s->bytes, s->length);
 }
 
 // Text printed as it is, unquoted, which it takes over.
 fsh_insp *fsh_rt_insp_raw(fsh_str *s) {
+  FSH_OPEN(s);
   fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, s->bytes, s->length);
   fsh_rt_str_release(s);
   return v;
@@ -3365,6 +4834,7 @@ void fsh_rt_insp_field(fsh_insp *object, const char *key, fsh_insp *value) {
 
 // A dictionary's entry, its key known only at run time.
 void fsh_rt_insp_entry(fsh_insp *object, fsh_str *key, fsh_insp *value) {
+  FSH_OPEN(key);
   fsh_insp_add_n(object, value, key->bytes, key->length);
 }
 
@@ -3374,8 +4844,8 @@ fsh_insp *fsh_rt_insp_list(int32_t kind, int64_t size) {
   return v;
 }
 
-// An element, member, key or value; those past the first 100 are dropped, as Node prints only
-// those and counts the rest.
+// An element, member, key or value; those past the first 100 are dropped and
+// counted as how many more there are.
 void fsh_rt_insp_push(fsh_insp *list, fsh_insp *item) {
   int64_t limit = list->kind == FSH_INSP_MAP ? 200 : list->kind == FSH_INSP_VARIANT ? INT64_MAX : 100;
   if (list->count >= limit) fsh_insp_free(item);
@@ -3437,7 +4907,7 @@ static char *fsh_sb_done(fsh_sb *b) {
   return b->p;
 }
 
-// An ArrayBuffer as Node shows one: its first 100 bytes in hex, then its length.
+// An ArrayBuffer: its first 100 bytes in hex, then its length.
 fsh_insp *fsh_rt_insp_buffer(const uint8_t *data, int64_t length) {
   fsh_insp *v = fsh_rt_insp_object("ArrayBuffer");
   v->shown = 1;
@@ -3461,7 +4931,7 @@ fsh_insp *fsh_rt_insp_buffer(const uint8_t *data, int64_t length) {
   return v;
 }
 
-// A Buffer as Node shows one at any depth: its first 50 bytes in hex, then how many more.
+// A Buffer at any depth: its first 50 bytes in hex, then how many more.
 fsh_insp *fsh_rt_insp_node_buffer(const uint8_t *data, int64_t length) {
   fsh_sb b = {0};
   fsh_sb_str(&b, "<Buffer ");
@@ -3482,9 +4952,11 @@ fsh_insp *fsh_rt_insp_node_buffer(const uint8_t *data, int64_t length) {
   return v;
 }
 
-// An Error as Node prints one with no stack lines: its name and message, the class's name when
-// it differs and the error's name ends in Error, as Node's improveStack writes them, bracketed.
+// An Error with no stack lines: its name and message, the class's name when
+// it differs and the error's name ends in Error, bracketed.
 fsh_insp *fsh_rt_insp_error(const char *cls, fsh_str *name, fsh_str *message) {
+  FSH_OPEN(name);
+  FSH_OPEN(message);
   fsh_sb b = {0};
   fsh_sb_str(&b, "[");
   int64_t n = name->length;
@@ -3521,7 +4993,7 @@ fsh_insp *fsh_rt_insp_error(const char *cls, fsh_str *name, fsh_str *message) {
   return v;
 }
 
-// A UTF-8 text's length in UTF-16 units, as JavaScript counts a string, which Node's layout
+// A UTF-8 text's length in UTF-16 units, as JavaScript counts a string, which the layout
 // measures with.
 static int64_t fsh_units(const char *p, int64_t n) {
   int64_t units = 0;
@@ -3834,7 +5306,7 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
   if (v->kind == FSH_INSP_MAP || v->kind == FSH_INSP_SET)
     while (fields < v->count && v->keys[v->count - 1 - fields]) fields++;
   // An Error with nothing to show beside its header is its header; past the depth, its class.
-  // A header of several lines is indented as Node indents it, to where it is written.
+  // A header of several lines is indented to where it is written.
   if (v->error && size == 0) return fsh_insp_indented(v->text, c->indent);
   if (v->error && recurse > 2) return fsh_insp_copy(v->cut);
   // On the heap, sized to the text, a class's name or an Error's header, which may be long.
@@ -3903,9 +5375,9 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     }
     fsh_sb b = {0};
     const char *key = v->keys[i];
-    // An Error's '[cause]' and '[errors]' are written as Node writes keys it shows itself.
+    // An Error's '[cause]' and '[errors]' are written unquoted, as keys shown in brackets are.
     int64_t length = v->lengths[i];
-    // An own key named __proto__ is bracketed, as Node writes it apart from the prototype.
+    // An own key named __proto__ is bracketed, so it reads apart from the prototype.
     if (length == 9 && strcmp(key, "__proto__") == 0) fsh_sb_str(&b, "['__proto__']");
     else if ((fsh_insp_identifier(key) && (int64_t)strlen(key) == length) || ((v->error || v->shown) && key[0] == '[')) fsh_sb_str(&b, key);
     else fsh_insp_quote(&b, key, length);
@@ -3932,8 +5404,8 @@ static char *fsh_insp_value(fsh_ictx *c, fsh_insp *v, int64_t recurse) {
     output[n++] = fsh_sb_done(&b);
   }
   c->indent -= 2;
-  // A hidden key comes after the elements; as Node reads the array at each entry's index, the
-  // columns pad as text unless there are elements past the entries shown. As in Node, only an
+  // A hidden key comes after the elements; as the array is read at each entry's index, the
+  // columns pad as text unless there are elements past the entries shown. Only an
   // entry past the 100th is kept out of them.
   if (hidden) {
     char text[64];
@@ -3964,7 +5436,7 @@ fsh_str *fsh_rt_insp_done(fsh_insp *v) {
   return s;
 }
 
-// A tree laid out at an inspect depth. Node's default depth 2 starts at 0, so depth d starts
+// A tree laid out at an inspect depth. The default depth 2 starts at 0, so depth d starts
 // at 2 - d, which the trees codegen builds are also cut by.
 static char *fsh_insp_at(fsh_insp *v, int64_t depth, int hidden) {
   fsh_ictx c = {0, 0, hidden};
@@ -3978,7 +5450,10 @@ fsh_sb *fsh_rt_text_new(void) {
   return b;
 }
 
-void fsh_rt_text_add(fsh_sb *b, fsh_str *s) { fsh_sb_put(b, s->bytes, s->length); }
+void fsh_rt_text_add(fsh_sb *b, fsh_str *s) {
+  FSH_OPEN(s);
+  fsh_sb_put(b, s->bytes, s->length);
+}
 
 void fsh_rt_text_raw(fsh_sb *b, const char *s) { fsh_sb_str(b, s); }
 
@@ -4046,8 +5521,10 @@ static void fsh_farg_number(fsh_sb *b, double x) {
 // A scalar as console.log prints it on its own.
 static void fsh_farg_plain(fsh_sb *b, fsh_farg *a) {
   char t[32];
+  fsh_str *text = a->text;
+  FSH_OPEN(text);
   switch (a->kind) {
-    case FSH_FARG_STRING: fsh_sb_put(b, a->text->bytes, a->text->length); break;
+    case FSH_FARG_STRING: fsh_sb_put(b, text->bytes, text->length); break;
     case FSH_FARG_INT: snprintf(t, sizeof t, "%lld", (long long)a->whole); fsh_sb_str(b, t); break;
     case FSH_FARG_UINT: snprintf(t, sizeof t, "%llu", (unsigned long long)a->whole); fsh_sb_str(b, t); break;
     case FSH_FARG_FLOAT:
@@ -4055,8 +5532,8 @@ static void fsh_farg_plain(fsh_sb *b, fsh_farg *a) {
       else fsh_farg_number(b, a->number);
       break;
     case FSH_FARG_BOOL: fsh_sb_str(b, a->whole ? "true" : "false"); break;
-    case FSH_FARG_DIGITS: fsh_sb_put(b, a->text->bytes, a->text->length); break;
-    case FSH_FARG_BIGINT: fsh_sb_put(b, a->text->bytes, a->text->length); fsh_sb_str(b, "n"); break;
+    case FSH_FARG_DIGITS: fsh_sb_put(b, text->bytes, text->length); break;
+    case FSH_FARG_BIGINT: fsh_sb_put(b, text->bytes, text->length); fsh_sb_str(b, "n"); break;
     default: fsh_sb_str(b, "null"); break;
   }
 }
@@ -4093,6 +5570,7 @@ static fsh_str *fsh_farg_string(fsh_farg *a) {
 // JavaScript's parseInt with no radix, as a double: digits after white space, a sign and '0x',
 // NaN when none start the text, -0 for a negative zero.
 static double fsh_js_parse_int(fsh_str *s) {
+  FSH_OPEN(s);
   const unsigned char *p = (const unsigned char *)s->bytes;
   int64_t n = s->length, i = fsh_js_skip(p, n);
   int negative = i < n && p[i] == '-';
@@ -4165,9 +5643,11 @@ fsh_str *fsh_rt_format(fsh_farg *args, int64_t n, const char *where) {
   fsh_sb b = {0};
   int64_t a = 0;
   const char *join = "";
-  if (n > 1 && args[0].kind == FSH_FARG_STRING) {
-    const char *f = args[0].text->bytes;
-    int64_t length = args[0].text->length, last = 0;
+  fsh_str *format = n > 1 && args[0].kind == FSH_FARG_STRING ? args[0].text : NULL;
+  FSH_OPEN(format);
+  if (format) {
+    const char *f = format->bytes;
+    int64_t length = format->length, last = 0;
     for (int64_t i = 0; i < length - 1; i++) {
       if (f[i] != '%') continue;
       char next = f[++i];
@@ -4238,6 +5718,7 @@ static int fsh_in(const uint32_t (*ranges)[2], int64_t n, uint32_t cp) {
 
 // The code points of WTF-8 text, a lone surrogate as itself, in a buffer the caller frees.
 static uint32_t *fsh_code_points(fsh_str *s, int64_t *n) {
+  FSH_OPEN(s);
   uint32_t *cps = fsh_rt_alloc((s->length + 1) * sizeof(uint32_t));
   const unsigned char *p = (const unsigned char *)s->bytes;
   *n = 0;
@@ -4275,6 +5756,7 @@ static int fsh_final_sigma(const uint32_t *cps, int64_t n, int64_t i) {
 // JavaScript's toUpperCase (upper) or toLowerCase, code point by code point. A code point may
 // become up to three, each at most three times its bytes, so three times the length is room.
 fsh_str *fsh_rt_str_case(fsh_str *s, int32_t upper) {
+  FSH_OPEN(s);
   int64_t n;
   uint32_t *cps = fsh_code_points(s, &n);
   fsh_str *out = fsh_str_new(s->length * 3);
@@ -4309,7 +5791,7 @@ fsh_str *fsh_rt_str_case(fsh_str *s, int32_t upper) {
   }
   out->length = at - out->own;
   fsh_rt_free(cps);
-  return out;
+  return fsh_str_done(out);
 }
 
 // The async runtime: tasks polled by one worker thread per core.
@@ -4341,6 +5823,17 @@ struct fsh_task {
   // In a debug build, the call that spawned it, which its backtraces end with: for a task std
   // spawned with none of the program's frames below, the call that spawned the task doing so.
   const char *spawned;
+  // Task inspector metadata: immutable fields set before linking onto fsh_alive; polls and
+  // awaiting* updated atomically on the worker polling this task.
+  int64_t id;
+  const char *name;
+  const char *spawn_site;
+  int64_t created_ns;
+  int64_t polls;
+  uint32_t wait_seq;
+  const char *awaiting;
+  const char *await_site;
+  int64_t await_target;
   // The task group it was spawned into, which it holds a count on, and the glue that moves the
   // error it threw out of its output into the group, as the type the group's await throws.
   struct fsh_group *group;
@@ -4348,28 +5841,54 @@ struct fsh_task {
   // Its trace context: the two halves of a trace id, the current span's id and the trace's
   // flags, all zero outside any span. A task starts with a copy of its spawner's.
   int64_t trace[4];
+  // The request std:log names its entries with, as std's table keys it, 0 outside any; inherited
+  // as the trace context is.
+  int64_t log;
   char memory[];
 };
 
+static int64_t fsh_now(void);
+static int64_t fsh_next_task_id = 0;
+
 static void *fsh_output(fsh_task *t) { return t->memory + t->frame_size; }
 
+// Records what a task is about to park on, with the active user await site when frames are on.
+// Uses an even/odd seqlock so concurrent snapshots never read a torn tuple across polls.
+static void fsh_task_wait(fsh_task *t, const char *what, int64_t target) {
+  if (!t) return;
+  uint32_t seq = __atomic_load_n(&t->wait_seq, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 1, __ATOMIC_RELAXED);
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  const char *site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
+  __atomic_store_n(&t->await_site, site, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->await_target, target, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->awaiting, what, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 2, __ATOMIC_RELEASE);
+}
+
 // A worker's queue: a ring of tasks, guarded by its own lock, which other workers steal from.
+// The lock is a spin lock, held for a few loads and stores: a mutex that a thief contends for
+// sleeps in the kernel, which costs more than the work it guards.
 typedef struct {
-  pthread_mutex_t lock;
+  int32_t lock;
   fsh_task **ring;
   int64_t head, count, capacity;
 } fsh_queue;
 
 static int64_t fsh_workers = 0;
 static fsh_queue *fsh_queues = NULL;
-static fsh_queue fsh_injected = { PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0, 0 };
+static fsh_queue fsh_injected = { 0, NULL, 0, 0, 0 };
 static pthread_t *fsh_threads = NULL;
 static _Thread_local int64_t fsh_worker = -1;
 // Workers with nothing to do wait here until a task is queued or the runtime stops.
 static pthread_mutex_t fsh_park = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fsh_parked = PTHREAD_COND_INITIALIZER;
 static int64_t fsh_queued = 0;
-static int32_t fsh_stopping = 0;
+// Workers waiting on fsh_parked, and workers awake with nothing to run that are looking for a
+// task. Queuing one wakes a parked worker only when none is looking, so on a busy runtime a wake
+// costs no lock and no system call, as Go's and tokio's schedulers do.
+static int64_t fsh_idle = 0;
+static int64_t fsh_searching = 0;
 static int64_t fsh_stopped = 0;
 static pthread_cond_t fsh_left = PTHREAD_COND_INITIALIZER;
 // The tasks not yet done, dropped when the runtime stops; and how the program ends.
@@ -4382,6 +5901,7 @@ static fsh_task *fsh_main_task = NULL;
 // outside any task, as a program with no async main does, has the thread's own.
 static _Thread_local fsh_task *fsh_current = NULL;
 static _Thread_local int64_t fsh_trace_root[4];
+static _Thread_local int64_t fsh_log_root;
 // Set by the claim that starts the timer task, for the task its thread makes next: the timer
 // task has no context, so a timer's callback starts a trace of its own, whichever span was
 // current when the first timer was set.
@@ -4390,9 +5910,32 @@ static _Thread_local int32_t fsh_timeouts_starting = 0;
 static fsh_task *fsh_timeouts_task = NULL;
 // Blocking tasks not yet done, which the runtime's end can't drop while a pool thread may poll one.
 static int64_t fsh_blocking_live = 0;
+// Blocking tasks done whose pool thread is still letting go of them. The runtime's end waits for
+// these, or the blocks that thread is about to free would be counted as leaks.
+static int64_t fsh_blocking_ending = 0;
 
-static void fsh_push(fsh_queue *q, fsh_task *t) {
-  pthread_mutex_lock(&q->lock);
+static void fsh_relax(void);
+
+static void fsh_queue_lock(fsh_queue *q) {
+  for (int spins = 0; __atomic_exchange_n(&q->lock, 1, __ATOMIC_ACQUIRE); spins++) {
+    // Its holder may have been preempted, so a long wait gives up the processor.
+    while (__atomic_load_n(&q->lock, __ATOMIC_RELAXED)) {
+      if (++spins > 100) sched_yield();
+      else fsh_relax();
+    }
+  }
+}
+
+static void fsh_queue_unlock(fsh_queue *q) {
+  __atomic_store_n(&q->lock, 0, __ATOMIC_RELEASE);
+}
+
+static int fsh_push_checked(fsh_queue *q, fsh_task *t, int check_stopping) {
+  fsh_queue_lock(q);
+  if (check_stopping && __atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) {
+    fsh_queue_unlock(q);
+    return 0;
+  }
   if (q->count == q->capacity) {
     int64_t capacity = q->capacity ? q->capacity * 2 : 64;
     fsh_task **ring = malloc(capacity * sizeof(fsh_task *));
@@ -4403,33 +5946,67 @@ static void fsh_push(fsh_queue *q, fsh_task *t) {
     q->capacity = capacity;
   }
   q->ring[(q->head + q->count) % q->capacity] = t;
-  q->count++;
-  pthread_mutex_unlock(&q->lock);
+  __atomic_store_n(&q->count, q->count + 1, __ATOMIC_RELAXED);
+  fsh_queue_unlock(q);
+  return 1;
 }
 
-static fsh_task *fsh_pop(fsh_queue *q) {
-  pthread_mutex_lock(&q->lock);
+static void fsh_push(fsh_queue *q, fsh_task *t) {
+  (void)fsh_push_checked(q, t, 0);
+}
+
+// A queue holding fewer than least tasks is passed over without its lock.
+static fsh_task *fsh_pop(fsh_queue *q, int64_t least) {
+  if (__atomic_load_n(&q->count, __ATOMIC_RELAXED) < least) return NULL;
+  fsh_queue_lock(q);
   fsh_task *t = NULL;
-  if (q->count > 0) {
+  if (q->count >= least) {
     t = q->ring[q->head];
     q->head = (q->head + 1) % q->capacity;
-    q->count--;
+    __atomic_store_n(&q->count, q->count - 1, __ATOMIC_RELAXED);
   }
-  pthread_mutex_unlock(&q->lock);
+  fsh_queue_unlock(q);
   return t;
 }
 
 static void fsh_pool_task(fsh_task *t);
 
+// Wakes a parked worker unless one is already looking for a task. The counts are sequentially
+// consistent against a parking worker's, which counts itself idle before it reads fsh_queued:
+// either this sees it idle, or it sees the task queued and doesn't wait.
+static void fsh_notify(void) {
+  if (__atomic_load_n(&fsh_searching, __ATOMIC_SEQ_CST) > 0 || __atomic_load_n(&fsh_idle, __ATOMIC_SEQ_CST) == 0) return;
+  // Taking the lock waits out a worker between counting itself idle and waiting; the signal is
+  // sent after, so the worker it wakes doesn't then wait for the lock.
+  pthread_mutex_lock(&fsh_park);
+  pthread_mutex_unlock(&fsh_park);
+  pthread_cond_signal(&fsh_parked);
+}
+
+static fsh_task **fsh_sim_ready = NULL;
+static int64_t fsh_sim_ready_count = 0, fsh_sim_ready_cap = 0;
+
+static void fsh_sim_ready_push(fsh_task *t) {
+  if (fsh_sim_ready_count == fsh_sim_ready_cap) {
+    int64_t cap = fsh_sim_ready_cap ? fsh_sim_ready_cap * 2 : 64;
+    fsh_sim_ready = realloc(fsh_sim_ready, (size_t)cap * sizeof(fsh_task *));
+    fsh_sim_ready_cap = cap;
+  }
+  fsh_sim_ready[fsh_sim_ready_count++] = t;
+}
+
 // Queues a task: on the waking worker's own queue, or from any other thread on the shared
 // one, then lets a parked worker know. A blocking task goes to the blocking pool instead.
 static void fsh_schedule(fsh_task *t) {
+  if (fsh_sim_active) {
+    fsh_sim_ready_push(t);
+    return;
+  }
   if (t->blocking) return fsh_pool_task(t);
-  fsh_push(fsh_worker >= 0 ? &fsh_queues[fsh_worker] : &fsh_injected, t);
-  pthread_mutex_lock(&fsh_park);
-  __atomic_fetch_add(&fsh_queued, 1, __ATOMIC_RELAXED);
-  pthread_cond_signal(&fsh_parked);
-  pthread_mutex_unlock(&fsh_park);
+  if (fsh_worker >= 0) fsh_push(&fsh_queues[fsh_worker], t);
+  else if (!fsh_push_checked(&fsh_injected, t, 1)) return;
+  __atomic_fetch_add(&fsh_queued, 1, __ATOMIC_SEQ_CST);
+  fsh_notify();
 }
 
 struct fsh_group;
@@ -4469,6 +6046,14 @@ static void fsh_unlink(fsh_task *t) {
 // where it stopped and its reason kept for whoever awaits it, as tokio's tasks do.
 static void fsh_run(fsh_task *t) {
   __atomic_store_n(&t->state, FSH_RUNNING, __ATOMIC_RELEASE);
+  __atomic_fetch_add(&t->polls, 1, __ATOMIC_RELAXED);
+  uint32_t seq = __atomic_load_n(&t->wait_seq, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 1, __ATOMIC_RELAXED);
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  __atomic_store_n(&t->await_site, NULL, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->await_target, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->awaiting, NULL, __ATOMIC_RELAXED);
+  __atomic_store_n(&t->wait_seq, seq + 2, __ATOMIC_RELEASE);
   // A task's stack starts at its own root, whoever polls it, and a panic it unwound with leaves
   // its frames behind for this reset to drop.
   fsh_frame *frames = fsh_rt_frames;
@@ -4508,36 +6093,93 @@ static void fsh_run(fsh_task *t) {
   if (t == fsh_main_task || t == fsh_timeouts_task) pthread_cond_broadcast(&fsh_finished);
   pthread_mutex_unlock(&fsh_alive_lock);
   // Before the joiner wakes, so a main that ends once it is woken sees this one done.
-  if (t->blocking) __atomic_sub_fetch(&fsh_blocking_live, 1, __ATOMIC_RELEASE);
+  int32_t blocking = t->blocking;
+  if (blocking) {
+    __atomic_add_fetch(&fsh_blocking_ending, 1, __ATOMIC_RELEASE);
+    __atomic_sub_fetch(&fsh_blocking_live, 1, __ATOMIC_RELEASE);
+  }
   if (t->group) fsh_group_done(t->group, t, result);
   if (joiner) {
     fsh_rt_wake(joiner);
     fsh_task_release(joiner);
   }
   fsh_task_release(t);
+  if (blocking) __atomic_sub_fetch(&fsh_blocking_ending, 1, __ATOMIC_RELEASE);
 }
 
-static fsh_task *fsh_next_task(int64_t me) {
-  fsh_task *t = fsh_pop(&fsh_queues[me]);
-  if (!t) t = fsh_pop(&fsh_injected);
-  for (int64_t i = 1; !t && i < fsh_workers; i++) t = fsh_pop(&fsh_queues[(me + i) % fsh_workers]);
-  if (t) __atomic_fetch_sub(&fsh_queued, 1, __ATOMIC_RELAXED);
+// The next task for a worker: its own queue's first, else the shared queue's, else one taken
+// from another worker's queue holding at least least tasks.
+static fsh_task *fsh_next_task(int64_t me, int64_t least) {
+  fsh_task *t = fsh_pop(&fsh_queues[me], 1);
+  if (!t) t = fsh_pop(&fsh_injected, 1);
+  for (int64_t i = 1; !t && i < fsh_workers; i++) t = fsh_pop(&fsh_queues[(me + i) % fsh_workers], least);
+  if (t) __atomic_fetch_sub(&fsh_queued, 1, __ATOMIC_SEQ_CST);
   return t;
+}
+
+static int64_t fsh_now(void);
+
+static void fsh_relax(void) {
+#if defined(__x86_64__)
+  __builtin_ia32_pause();
+#elif defined(__aarch64__)
+  __asm__ volatile("yield");
+#endif
+}
+
+// A worker that ran out of tasks looks for one a while before it parks, since on a busy
+// runtime another is likely queued within microseconds and parking and waking cost system
+// calls. A worker's only task is left to it at first: it is likely queued by the task that
+// worker is polling, which will soon end its poll and run it there, warm in its cache, as Go
+// leaves a running worker's next goroutine.
+static fsh_task *fsh_search(int64_t me) {
+  int64_t start = fsh_now();
+  for (int64_t spins = 0;; spins++) {
+    int64_t waited = spins % 64 == 63 ? fsh_now() - start : 0;
+    if (waited > 50000 || __atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) return NULL;
+    fsh_task *t = fsh_next_task(me, waited > 10000 ? 1 : 2);
+    if (t) return t;
+    for (int i = 0; i < 8; i++) fsh_relax();
+  }
 }
 
 static void *fsh_work(void *arg) {
   fsh_worker = (int64_t)arg;
+  int32_t searching = 0;
+#ifdef FSH_PROFILE
+  int prof_slot = fsh_prof_register();
+#endif
   // A stopping runtime runs nothing more, however much is queued.
   while (!__atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) {
-    fsh_task *t = fsh_next_task(fsh_worker);
+    fsh_task *t = fsh_next_task(fsh_worker, 2);
+    // At most two workers look at once; the rest park.
+    if (!t && (searching || __atomic_load_n(&fsh_searching, __ATOMIC_SEQ_CST) < 2)) {
+      if (!searching) __atomic_fetch_add(&fsh_searching, 1, __ATOMIC_SEQ_CST);
+      searching = 1;
+      t = fsh_search(fsh_worker);
+    }
+    if (searching) {
+      searching = 0;
+      // The last looker to find a task hands the looking on, for whatever else is queued.
+      if (__atomic_sub_fetch(&fsh_searching, 1, __ATOMIC_SEQ_CST) == 0 && t && __atomic_load_n(&fsh_queued, __ATOMIC_SEQ_CST) > 0) fsh_notify();
+    }
     if (t) {
       fsh_run(t);
       continue;
     }
     pthread_mutex_lock(&fsh_park);
-    while (__atomic_load_n(&fsh_queued, __ATOMIC_RELAXED) <= 0 && !fsh_stopping) pthread_cond_wait(&fsh_parked, &fsh_park);
+    __atomic_fetch_add(&fsh_idle, 1, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&fsh_queued, __ATOMIC_SEQ_CST) <= 0 && !__atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) pthread_cond_wait(&fsh_parked, &fsh_park);
+    __atomic_fetch_sub(&fsh_idle, 1, __ATOMIC_SEQ_CST);
     pthread_mutex_unlock(&fsh_park);
+    // Woken, it looks for the task it was woken for.
+    searching = 1;
+    __atomic_fetch_add(&fsh_searching, 1, __ATOMIC_SEQ_CST);
   }
+  if (searching) __atomic_fetch_sub(&fsh_searching, 1, __ATOMIC_SEQ_CST);
+#ifdef FSH_PROFILE
+  fsh_prof_unregister(prof_slot);
+#endif
   pthread_mutex_lock(&fsh_park);
   fsh_stopped++;
   pthread_cond_broadcast(&fsh_left);
@@ -4547,7 +6189,7 @@ static void *fsh_work(void *arg) {
 
 // A new task for a future's frame, which it takes over: alive, and with one more reference for
 // whoever made it. Not yet queued.
-static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
+static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site, int32_t blocking) {
   fsh_task *t = fsh_rt_alloc(sizeof(fsh_task) + frame_size + output_size);
   memcpy(t->memory, frame, frame_size);
   t->frame_size = frame_size;
@@ -4556,7 +6198,7 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   t->drop = drop;
   t->drop_output = drop_output;
   t->outcome = 0;
-  t->blocking = 0;
+  t->blocking = blocking;
   t->refs = 2;
   t->joiner = NULL;
   t->panic = NULL;
@@ -4564,8 +6206,18 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   t->fail = NULL;
   t->state = FSH_QUEUED;
   t->spawned = fsh_rt_frames ? fsh_rt_frames->site : fsh_spawned_at;
+  t->id = __atomic_add_fetch(&fsh_next_task_id, 1, __ATOMIC_RELAXED);
+  t->name = name ? name : "";
+  t->spawn_site = site ? site : t->spawned;
+  t->created_ns = fsh_now();
+  t->polls = 0;
+  t->wait_seq = 0;
+  t->awaiting = NULL;
+  t->await_site = NULL;
+  t->await_target = 0;
   if (fsh_timeouts_starting) memset(t->trace, 0, sizeof t->trace);
   else memcpy(t->trace, fsh_current ? fsh_current->trace : fsh_trace_root, sizeof t->trace);
+  t->log = fsh_timeouts_starting ? 0 : fsh_current ? fsh_current->log : fsh_log_root;
   fsh_timeouts_starting = 0;
   pthread_mutex_lock(&fsh_alive_lock);
   t->prev = NULL;
@@ -4576,18 +6228,20 @@ static fsh_task *fsh_task_new(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn dr
   return t;
 }
 
-// The same, queued.
-fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+static void fsh_rt_start_background(void);
+
+// The same, queued. In a library nothing started the runtime, so its first spawn does.
+fsh_task *fsh_rt_spawn(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  if (!fsh_queues && !fsh_sim_active) fsh_rt_start_background();
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 0);
   fsh_schedule(t);
   return t;
 }
 
 // The same, every poll run on the blocking pool, so it may block or compute for long without
 // holding up a worker.
-fsh_task *fsh_rt_spawn_blocking(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
-  t->blocking = 1;
+fsh_task *fsh_rt_spawn_blocking(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 1);
   __atomic_add_fetch(&fsh_blocking_live, 1, __ATOMIC_RELAXED);
   fsh_schedule(t);
   return t;
@@ -4595,8 +6249,8 @@ fsh_task *fsh_rt_spawn_blocking(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn 
 
 // The same, its first poll run here and now, as a JS callback's first part runs where it is
 // called; the task is queued only if that poll waits.
-fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+fsh_task *fsh_rt_spawn_now(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 0);
   fsh_run(t);
   return t;
 }
@@ -4609,6 +6263,15 @@ void fsh_rt_trace_get(int64_t *out) {
 
 void fsh_rt_trace_set(const int64_t *words) {
   memcpy(fsh_current ? fsh_current->trace : fsh_trace_root, words, sizeof fsh_trace_root);
+}
+
+int64_t fsh_rt_log_get(void) {
+  return fsh_current ? fsh_current->log : fsh_log_root;
+}
+
+void fsh_rt_log_set(int64_t request) {
+  if (fsh_current) fsh_current->log = request;
+  else fsh_log_root = request;
 }
 
 // The environment and the random source under names only std's tracing declares: a std module
@@ -4637,7 +6300,9 @@ int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out, const char *at, fs
     }
     if (outcome == 3) {
       char reason[1100];
-      int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)t->panic->length, t->panic->bytes);
+      fsh_str *panic = t->panic;
+      FSH_OPEN(panic);
+      int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)panic->length, panic->bytes);
       fsh_panic_at(at);
       fputs(reason, stderr);
       fsh_panic_reason(reason, n < (int)sizeof reason ? (size_t)n : sizeof reason - 1);
@@ -4651,7 +6316,9 @@ int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out, const char *at, fs
     __atomic_fetch_add(&waiter->refs, 1, __ATOMIC_RELAXED);
     t->joiner = waiter;
   }
+  int64_t target_id = t->id;
   pthread_mutex_unlock(&fsh_alive_lock);
+  fsh_task_wait(waiter, "join", target_id);
   return 0;
 }
 
@@ -4659,20 +6326,27 @@ int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out, const char *at, fs
 // deadline passes. Each entry holds a reference to its task.
 // A timer wakes a sleeping task, or with a signal, aborts it for 'AbortSignal.timeout'.
 // A sleep's timer is tagged with the sleep's frame, so cancelling one leaves its task's others.
-typedef struct { int64_t deadline; fsh_task *task; struct fsh_signal *signal; void *tag; } fsh_timer;
+typedef struct { int64_t deadline; uint64_t seq; fsh_task *task; struct fsh_signal *signal; void *tag; } fsh_timer;
 void fsh_rt_signal_abort(struct fsh_signal *s);
 void fsh_rt_signal_release(struct fsh_signal *s);
 static pthread_mutex_t fsh_timer_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fsh_timer_changed = PTHREAD_COND_INITIALIZER;
 static fsh_timer *fsh_timers = NULL;
 static int64_t fsh_timer_count = 0, fsh_timer_capacity = 0;
+static uint64_t fsh_timer_seq = 0;
 static int32_t fsh_timers_stopping = 0;
 static pthread_t fsh_timer_thread;
 
 static int64_t fsh_now(void) {
+  fsh_sim_init();
+  if (FSH_VIRTUAL) return fsh_sim_now_ns;
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   return (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
+}
+
+static int fsh_timer_before(fsh_timer a, fsh_timer b) {
+  return a.deadline < b.deadline || (a.deadline == b.deadline && a.seq < b.seq);
 }
 
 static void fsh_timer_swap(int64_t a, int64_t b) {
@@ -4688,12 +6362,13 @@ static void fsh_timer_add(int64_t deadline, fsh_task *task, struct fsh_signal *s
     fsh_timers = realloc(fsh_timers, fsh_timer_capacity * sizeof(fsh_timer));
   }
   int64_t at = fsh_timer_count++;
-  fsh_timers[at] = (fsh_timer){ deadline, task, signal, tag };
-  while (at > 0 && fsh_timers[(at - 1) / 2].deadline > fsh_timers[at].deadline) {
+  fsh_timers[at] = (fsh_timer){ deadline, ++fsh_timer_seq, task, signal, tag };
+  while (at > 0 && fsh_timer_before(fsh_timers[at], fsh_timers[(at - 1) / 2])) {
     fsh_timer_swap(at, (at - 1) / 2);
     at = (at - 1) / 2;
   }
-  pthread_cond_signal(&fsh_timer_changed);
+  // The timer thread waits for the earliest deadline, so only a new earliest one changes its wait.
+  if (at == 0 && !fsh_sim_active) pthread_cond_signal(&fsh_timer_changed);
   pthread_mutex_unlock(&fsh_timer_lock);
 }
 
@@ -4702,8 +6377,8 @@ static fsh_timer fsh_timer_take(void) {
   fsh_timers[0] = fsh_timers[--fsh_timer_count];
   for (int64_t at = 0;;) {
     int64_t least = at, left = at * 2 + 1, right = left + 1;
-    if (left < fsh_timer_count && fsh_timers[left].deadline < fsh_timers[least].deadline) least = left;
-    if (right < fsh_timer_count && fsh_timers[right].deadline < fsh_timers[least].deadline) least = right;
+    if (left < fsh_timer_count && fsh_timer_before(fsh_timers[left], fsh_timers[least])) least = left;
+    if (right < fsh_timer_count && fsh_timer_before(fsh_timers[right], fsh_timers[least])) least = right;
     if (least == at) break;
     fsh_timer_swap(at, least);
     at = least;
@@ -4714,14 +6389,14 @@ static fsh_timer fsh_timer_take(void) {
 // Takes the timer at a place in the heap out of it, under the timers' lock.
 static void fsh_timer_remove(int64_t at) {
   fsh_timers[at] = fsh_timers[--fsh_timer_count];
-  while (at > 0 && fsh_timers[(at - 1) / 2].deadline > fsh_timers[at].deadline) {
+  while (at > 0 && fsh_timer_before(fsh_timers[at], fsh_timers[(at - 1) / 2])) {
     fsh_timer_swap(at, (at - 1) / 2);
     at = (at - 1) / 2;
   }
   for (;;) {
     int64_t least = at, left = at * 2 + 1, right = left + 1;
-    if (left < fsh_timer_count && fsh_timers[left].deadline < fsh_timers[least].deadline) least = left;
-    if (right < fsh_timer_count && fsh_timers[right].deadline < fsh_timers[least].deadline) least = right;
+    if (left < fsh_timer_count && fsh_timer_before(fsh_timers[left], fsh_timers[least])) least = left;
+    if (right < fsh_timer_count && fsh_timer_before(fsh_timers[right], fsh_timers[least])) least = right;
     if (least == at) break;
     fsh_timer_swap(at, least);
     at = least;
@@ -4792,7 +6467,7 @@ static void *fsh_timing(void *arg) {
 // The callbacks setTimeout and setInterval set, earliest first and ties in the order set, which
 // the prelude's one timer task runs in turn. Each holds its callable's block and vtable.
 // ponytail: a sorted array, inserted into in O(n); a heap if programs keep many timers
-// weak: a timer that runs while the program does but doesn't keep it running, as Node's unref.
+// weak: a timer that runs while the program does but doesn't keep it running, as an unref'd one.
 typedef struct { int64_t deadline, id, every; void *block; void **vtable; int32_t weak; } fsh_timeout;
 static pthread_mutex_t fsh_timeouts_lock = PTHREAD_MUTEX_INITIALIZER;
 static fsh_timeout *fsh_timeouts = NULL;
@@ -4850,12 +6525,14 @@ void fsh_rt_timeouts_task(fsh_task *task) {
   pthread_mutex_unlock(&fsh_alive_lock);
 }
 
-// Sets a timer for a callable, its delay at least 1 ms as Node's is, giving its id.
+// Sets a timer for a callable, its delay at least 1 ms, giving its id.
 int64_t fsh_rt_timeout_set(void *block, void **vtable, int64_t ms, int32_t repeat) {
   if (ms < 1 || ms > 2147483647) ms = 1;
   pthread_mutex_lock(&fsh_timeouts_lock);
   int64_t id = ++fsh_timeout_ids;
-  fsh_timeout_insert((fsh_timeout){ fsh_now() + ms * 1000000, id, repeat ? ms : 0, block, vtable, 0 });
+  int64_t now = fsh_now();
+  int64_t dl = ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000;
+  fsh_timeout_insert((fsh_timeout){ dl, id, repeat ? ms : 0, block, vtable, 0 });
   fsh_task *waiter = fsh_timeouts_changed();
   pthread_mutex_unlock(&fsh_timeouts_lock);
   fsh_timeouts_wake(waiter);
@@ -4907,7 +6584,7 @@ int32_t fsh_rt_timeout_next(fsh_task *task, void **out) {
     out[1] = t.vtable;
     if (t.every) {
       out[0] = ((void *(*)(void *))t.vtable[1])(t.block);
-      t.deadline = now + t.every * 1000000;
+      t.deadline = t.every > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + t.every * 1000000;
       fsh_timeout_insert(t);
     }
     result = 1;
@@ -4925,6 +6602,7 @@ int32_t fsh_rt_timeout_next(fsh_task *task, void **out) {
     __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
     fsh_timer_add(arm, task, NULL, &fsh_timeouts);
   }
+  if (result == 0) fsh_task_wait(task, "timer_loop", 0);
   return result;
 }
 
@@ -4949,14 +6627,20 @@ int32_t fsh_rt_sleep(int64_t *frame, fsh_task *task) {
     *state = 1;
     __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
     fsh_timer_add(*deadline, task, NULL, frame);
+    fsh_task_wait(task, "sleep", 0);
     return 0;
   }
-  if (*state != 0) return fsh_now() >= *deadline;
+  if (*state != 0) {
+    if (fsh_now() >= *deadline) return 1;
+    fsh_task_wait(task, "sleep", 0);
+    return 0;
+  }
   *state = 1;
   int64_t ms = *deadline > 0 ? *deadline : 0, now = fsh_now();
   *deadline = ms > (INT64_MAX - now) / 1000000 ? INT64_MAX : now + ms * 1000000;
   __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
   fsh_timer_add(*deadline, task, NULL, frame);
+  fsh_task_wait(task, "sleep", 0);
   return 0;
 }
 
@@ -4979,8 +6663,8 @@ void fsh_rt_print_end(int32_t stream) {
 }
 
 // process.stdout.write and process.stderr.write go through console.log's buffers and locks, so
-// what they write keeps its place among printed lines. What they write is flushed at once, as
-// Node's is: a pipe is fully buffered, and a program answering a reader through one, as a language
+// what they write keeps its place among printed lines. What they write is flushed at once,
+// since a pipe is fully buffered, and a program answering a reader through one, as a language
 // server does, would otherwise say nothing until it exits.
 void fsh_rt_stream_write(int32_t stream, const char *bytes, int64_t length) {
   fsh_rt_print_begin(stream);
@@ -5017,6 +6701,7 @@ static int fsh_poison_holder(int32_t holder) {
   return found;
 }
 
+#ifndef FSH_LOCK_ORDER
 // 2 when a task panicked holding the lock, which stays held, so the caller panics too.
 int32_t fsh_rt_lock(int32_t *word) {
   int32_t me = fsh_me();
@@ -5038,6 +6723,274 @@ void fsh_rt_unlock(int32_t *word) {
   fsh_locks_held--;
   __atomic_store_n(word, 0, __ATOMIC_RELEASE);
 }
+#else
+// Lock-order checking, in debug builds only, as Linux's lockdep does it. Each Lock and shared
+// value is given an id where it is made, kept in its word while it is free as minus the id, so
+// it moves with the value; a word of 0 is a lock made while compiling, given an id when first
+// taken. Every "A held while B was taken" is an edge in one graph of all threads' takings, and
+// a taking whose edge would close a cycle panics, naming both locks, whether or not the threads
+// ever met: two tasks taking them in those orders at once would wait on each other forever.
+// ponytail: ids and edges are kept for the program's life, about 24 bytes per lock ever made and
+// per new pair taken together, which a debug server making a lock per request grows by.
+typedef struct { int32_t to; const char *held; const char *taken; } fsh_order_edge;
+typedef struct { const char *made; fsh_order_edge *edges; int32_t count, capacity; } fsh_order_lock;
+static pthread_mutex_t fsh_order_mutex = PTHREAD_MUTEX_INITIALIZER;
+static fsh_order_lock *fsh_order_locks = NULL;
+static int32_t fsh_order_count = 0, fsh_order_capacity = 0;
+// The id of the lock at each word, set as it is taken, so a thread waiting on a held lock, whose
+// word holds its holder's token, knows which lock it waits on. Open addressing; never shrinks.
+typedef struct { int32_t *word; int32_t id; } fsh_order_slot;
+static fsh_order_slot *fsh_order_words = NULL;
+static int64_t fsh_order_used = 0, fsh_order_size = 0;
+// The locks this thread holds, innermost last: the word, what it held while free, its id and
+// where it was taken. Lock callbacks can't await, so they end innermost first.
+typedef struct { int32_t *word; int32_t free; int32_t id; const char *at; } fsh_order_held;
+static _Thread_local fsh_order_held *fsh_order_stack = NULL;
+static _Thread_local int32_t fsh_order_room = 0;
+
+static void *fsh_order_grow(void *p, size_t n) {
+  void *q = realloc(p, n);
+  if (!q) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return q;
+}
+
+// A new lock's id, from 1; made is its "panicked at" line, or null for one made while compiling.
+static int32_t fsh_order_new(const char *made) {
+  if (fsh_order_count == fsh_order_capacity) {
+    fsh_order_capacity = fsh_order_capacity ? fsh_order_capacity * 2 : 64;
+    fsh_order_locks = fsh_order_grow(fsh_order_locks, (size_t)fsh_order_capacity * sizeof *fsh_order_locks);
+  }
+  fsh_order_locks[fsh_order_count] = (fsh_order_lock){ made, NULL, 0, 0 };
+  return ++fsh_order_count;
+}
+
+// The word a new lock starts with: minus its id.
+int32_t fsh_rt_lock_new(const char *made) {
+  pthread_mutex_lock(&fsh_order_mutex);
+  int32_t id = fsh_order_new(made);
+  pthread_mutex_unlock(&fsh_order_mutex);
+  return -id;
+}
+
+static uint64_t fsh_order_hash(int32_t *word) {
+  return ((uint64_t)(uintptr_t)word >> 2) * 0x9E3779B97F4A7C15ull;
+}
+
+static fsh_order_slot *fsh_order_find(int32_t *word) {
+  uint64_t i = fsh_order_hash(word) & (uint64_t)(fsh_order_size - 1);
+  while (fsh_order_words[i].word && fsh_order_words[i].word != word) i = (i + 1) & (uint64_t)(fsh_order_size - 1);
+  return &fsh_order_words[i];
+}
+
+static void fsh_order_place(int32_t *word, int32_t id) {
+  if ((fsh_order_used + 1) * 2 > fsh_order_size) {
+    fsh_order_slot *old = fsh_order_words;
+    int64_t size = fsh_order_size;
+    fsh_order_size = size ? size * 2 : 256;
+    fsh_order_words = calloc((size_t)fsh_order_size, sizeof *fsh_order_words);
+    if (!fsh_order_words) fsh_order_grow(NULL, (size_t)-1);
+    for (int64_t i = 0; i < size; i++) if (old[i].word) *fsh_order_find(old[i].word) = old[i];
+    free(old);
+  }
+  fsh_order_slot *slot = fsh_order_find(word);
+  if (!slot->word) fsh_order_used++;
+  slot->word = word;
+  slot->id = id;
+}
+
+// Where a "panicked at <place>:" line points, as "<place>".
+static int fsh_order_place_length(const char *line) {
+  return (int)strlen(line) - 12 - 2;
+}
+
+// "the lock made at <place>", or how a lock made while compiling is named.
+static void fsh_order_name(char **out, size_t *left, int32_t id) {
+  const char *made = fsh_order_locks[id - 1].made;
+  int n = made ? snprintf(*out, *left, "the lock made at %.*s", fsh_order_place_length(made), made + 12) : snprintf(*out, *left, "a lock made while compiling");
+  if (n < 0 || (size_t)n >= *left) n = (int)*left - 1;
+  *out += n;
+  *left -= (size_t)n;
+}
+
+static void fsh_order_text(char **out, size_t *left, const char *text) {
+  int n = snprintf(*out, *left, "%s", text);
+  if (n < 0 || (size_t)n >= *left) n = (int)*left - 1;
+  *out += n;
+  *left -= (size_t)n;
+}
+
+static void fsh_order_at(char **out, size_t *left, const char *at) {
+  int n = at ? snprintf(*out, *left, "%.*s", fsh_order_place_length(at), at + 12) : snprintf(*out, *left, "a place not known");
+  if (n < 0 || (size_t)n >= *left) n = (int)*left - 1;
+  *out += n;
+  *left -= (size_t)n;
+}
+
+// Whether the graph already has from -> to.
+static int fsh_order_has(int32_t from, int32_t to) {
+  fsh_order_lock *l = &fsh_order_locks[from - 1];
+  for (int32_t i = 0; i < l->count; i++) if (l->edges[i].to == to) return 1;
+  return 0;
+}
+
+// A path from -> ... -> to, as the edge each lock on it was reached by, or 0 when there is none.
+static int fsh_order_path(int32_t from, int32_t to, const fsh_order_edge **via) {
+  int32_t *stack = fsh_order_grow(NULL, (size_t)fsh_order_count * sizeof(int32_t));
+  int32_t depth = 0;
+  for (int32_t i = 0; i < fsh_order_count; i++) via[i] = NULL;
+  static const fsh_order_edge start = { 0, NULL, NULL };
+  via[from - 1] = &start;
+  stack[depth++] = from;
+  int found = 0;
+  while (depth > 0 && !found) {
+    fsh_order_lock *l = &fsh_order_locks[stack[--depth] - 1];
+    for (int32_t i = 0; i < l->count; i++) {
+      int32_t next = l->edges[i].to;
+      if (via[next - 1]) continue;
+      via[next - 1] = &l->edges[i];
+      if (next == to) {
+        found = 1;
+        break;
+      }
+      stack[depth++] = next;
+    }
+  }
+  free(stack);
+  return found;
+}
+
+// Panics, taking lock id at at while holding the lock of h, as the path from id to h's lock
+// says something took them the other way round.
+static void fsh_order_refuse(int32_t id, const char *at, const fsh_order_held *h, const fsh_order_edge **via) {
+  // The path, read back from h's lock to id.
+  int32_t chain[64];
+  int32_t n = 0;
+  for (int32_t at_id = h->id; at_id != id && n < 64; ) {
+    chain[n++] = at_id;
+    const fsh_order_edge *e = via[at_id - 1];
+    int32_t back = 0;
+    for (int32_t i = 0; i < fsh_order_count && !back; i++) {
+      fsh_order_lock *l = &fsh_order_locks[i];
+      if (e >= l->edges && e < l->edges + l->count) back = i + 1;
+    }
+    at_id = back;
+  }
+  chain[n++] = id;
+  size_t size = 4096;
+  char *message = fsh_order_grow(NULL, size);
+  char *out = message;
+  size_t left = size;
+  int w = snprintf(out, left, "%s", at ? at : "panicked at a place not known:\n");
+  out += w;
+  left -= (size_t)w;
+  fsh_order_text(&out, &left, "lock order inversion: this takes ");
+  fsh_order_name(&out, &left, id);
+  fsh_order_text(&out, &left, " while holding ");
+  fsh_order_name(&out, &left, h->id);
+  fsh_order_text(&out, &left, ", taken at ");
+  fsh_order_at(&out, &left, h->at);
+  fsh_order_text(&out, &left, ", but before");
+  // chain runs from id back up to h's lock reversed: chain[n - 1] is id, chain[0] h's lock.
+  for (int32_t i = n - 1; i > 0; i--) {
+    const fsh_order_edge *e = via[chain[i - 1] - 1];
+    fsh_order_text(&out, &left, i == n - 1 ? " " : ", and ");
+    fsh_order_name(&out, &left, chain[i]);
+    fsh_order_text(&out, &left, " was held, taken at ");
+    fsh_order_at(&out, &left, e->held);
+    fsh_order_text(&out, &left, ", while ");
+    fsh_order_name(&out, &left, chain[i - 1]);
+    fsh_order_text(&out, &left, " was taken at ");
+    fsh_order_at(&out, &left, e->taken);
+  }
+  fsh_order_text(&out, &left, "; two tasks taking them in these orders at once would wait on each other forever, so take them in one order everywhere\n");
+  pthread_mutex_unlock(&fsh_order_mutex);
+  fsh_rt_panic(message);
+}
+
+// Records this thread's held locks as held while lock id is taken at at, under the mutex,
+// panicking instead if one of those edges would close a cycle.
+static void fsh_order_check(int32_t id, const char *at) {
+  const fsh_order_edge **via = NULL;
+  for (int32_t i = 0; i < fsh_order_depth; i++) {
+    const fsh_order_held *h = &fsh_order_stack[i];
+    if (h->id == id || fsh_order_has(h->id, id)) continue;
+    if (!via) via = fsh_order_grow(NULL, (size_t)fsh_order_count * sizeof *via);
+    if (fsh_order_path(id, h->id, via)) fsh_order_refuse(id, at, h, via);
+    fsh_order_lock *l = &fsh_order_locks[h->id - 1];
+    if (l->count == l->capacity) {
+      l->capacity = l->capacity ? l->capacity * 2 : 4;
+      l->edges = fsh_order_grow(l->edges, (size_t)l->capacity * sizeof *l->edges);
+    }
+    l->edges[l->count++] = (fsh_order_edge){ id, h->at, at };
+  }
+  free(via);
+}
+
+// Takes a Lock's word as fsh_rt_lock does, at at, a "panicked at" line, first checking the
+// order it is taken in against every other taking of the program's.
+int32_t fsh_rt_lock_at(int32_t *word, const char *at) {
+  int32_t me = fsh_me();
+  if (__atomic_load_n(word, __ATOMIC_RELAXED) == me) return 1;
+  int checked = 0;
+  for (int spins = 0;; spins++) {
+    int32_t seen = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+    if (seen <= 0) {
+      pthread_mutex_lock(&fsh_order_mutex);
+      // A word of 0 is given its id by whoever first takes it, here under the mutex.
+      int32_t id = seen < 0 ? -seen : fsh_order_new(NULL);
+      if (!checked) fsh_order_check(id, at);
+      checked = 1;
+      fsh_order_place(word, id);
+      pthread_mutex_unlock(&fsh_order_mutex);
+      if (__atomic_compare_exchange_n(word, &seen, me, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+        if (fsh_order_depth == fsh_order_room) {
+          fsh_order_room = fsh_order_room ? fsh_order_room * 2 : 8;
+          fsh_order_stack = fsh_order_grow(fsh_order_stack, (size_t)fsh_order_room * sizeof *fsh_order_stack);
+        }
+        fsh_order_stack[fsh_order_depth++] = (fsh_order_held){ word, -id, id, at };
+        fsh_locks_held++;
+        return 0;
+      }
+      continue;
+    }
+    if (!checked) {
+      // Held by another thread: the lock it waits on is known by its word, so a cycle that
+      // would leave both threads waiting is reported rather than waited out.
+      pthread_mutex_lock(&fsh_order_mutex);
+      fsh_order_slot *slot = fsh_order_size ? fsh_order_find(word) : NULL;
+      if (slot && slot->word) {
+        fsh_order_check(slot->id, at);
+        checked = 1;
+      }
+      pthread_mutex_unlock(&fsh_order_mutex);
+    }
+    if (spins >= 64) {
+      if (fsh_poison_holder(seen)) return 2;
+      sched_yield();
+    }
+  }
+}
+
+int32_t fsh_rt_lock(int32_t *word) {
+  return fsh_rt_lock_at(word, NULL);
+}
+
+// Gives the word back what it held while free, its id.
+void fsh_rt_unlock(int32_t *word) {
+  fsh_locks_held--;
+  int32_t free_word = 0;
+  for (int32_t i = fsh_order_depth - 1; i >= 0; i--) {
+    if (fsh_order_stack[i].word != word) continue;
+    free_word = fsh_order_stack[i].free;
+    fsh_order_stack[i] = fsh_order_stack[--fsh_order_depth];
+    break;
+  }
+  __atomic_store_n(word, free_word, __ATOMIC_RELEASE);
+}
+#endif
 
 // An RwLock's word: 0 free, n > 0 held by n readers, or minus the token of the thread writing.
 // A writer waiting for readers to leave sets FSH_WRITER_WAITING beside their count, and new
@@ -5280,7 +7233,10 @@ int32_t fsh_rt_semaphore_acquire(fsh_semaphore *s, fsh_task *task, fsh_permit **
   else fsh_wait_on(&s->waiting, task, tag);
   pthread_mutex_unlock(&s->lock);
   if (mine) fsh_task_release(mine);
-  if (!taken) return 0;
+  if (!taken) {
+    fsh_task_wait(task, "semaphore", 0);
+    return 0;
+  }
   fsh_rt_block_retain(&s->count);
   fsh_permit *p = fsh_rt_alloc(sizeof(fsh_permit));
   p->count = 1;
@@ -5361,6 +7317,7 @@ int32_t fsh_rt_channel_send(fsh_channel *c, void *value, fsh_task *task, void *t
   if (c->length == c->capacity) {
     fsh_wait_on(&c->senders, task, tag);
     pthread_mutex_unlock(&c->lock);
+    fsh_task_wait(task, "channel.send", 0);
     return 0;
   }
   memcpy(c->ring + (c->head + c->length) % c->capacity * c->size, value, c->size);
@@ -5384,6 +7341,7 @@ int32_t fsh_rt_channel_receive(fsh_channel *c, void *out, fsh_task *task, void *
     if (closed) memset(out, 0, c->size);
     else fsh_wait_on(&c->receivers, task, tag);
     pthread_mutex_unlock(&c->lock);
+    if (!closed) fsh_task_wait(task, "channel.receive", 0);
     return closed ? 2 : 0;
   }
   memcpy(out, c->ring + c->head * c->size, c->size);
@@ -5682,8 +7640,8 @@ void fsh_rt_group_drop(fsh_group *g) {
 
 // Starts a future as a task of the group, which waits for it and gives no handle to it: the
 // runtime's reference is the task's only one, and the task holds a count on the group.
-void fsh_rt_group_spawn(fsh_group *g, fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void (*fail)(void *, void *), void *frame, int64_t frame_size, int64_t output_size) {
-  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size);
+void fsh_rt_group_spawn(fsh_group *g, fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void (*fail)(void *, void *), void *frame, int64_t frame_size, int64_t output_size, const char *name, const char *site) {
+  fsh_task *t = fsh_task_new(poll, drop, drop_output, frame, frame_size, output_size, name, site, 0);
   t->refs = 1;
   __atomic_fetch_add(&g->count, 1, __ATOMIC_RELAXED);
   t->group = g;
@@ -5754,13 +7712,16 @@ int32_t fsh_rt_group_wait(fsh_group *g, fsh_task *waiter, void *out, const char 
   if (old) fsh_task_release(old);
   if (panic) {
     char reason[1100];
-    int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)panic->length, panic->bytes);
+    fsh_str *text = panic;
+    FSH_OPEN(text);
+    int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)text->length, text->bytes);
     fsh_rt_str_release(panic);
     fsh_panic_at(at);
     fputs(reason, stderr);
     fsh_panic_reason(reason, n < (int)sizeof reason ? (size_t)n : sizeof reason - 1);
     fsh_rt_panic("\ncatch what can fail inside the group's tasks, or 'spawn' one and await 'handle.join()' to catch its panic\n");
   }
+  if (result == 0 && !running) fsh_task_wait(waiter, "task_group", 0);
   return result;
 }
 
@@ -5814,7 +7775,14 @@ static void *fsh_shutdown_watch(void *arg) {
     if (got < 0 && errno == EINTR) continue;
     if (got <= 0) return NULL;
     if (seen++ == 0) {
-      fsh_rt_signal_abort(&fsh_shutdown);
+      __atomic_store_n(&fsh_shutdown_busy, 1, __ATOMIC_SEQ_CST);
+      if (!__atomic_load_n(&fsh_stopping, __ATOMIC_SEQ_CST)) fsh_rt_signal_abort(&fsh_shutdown);
+      __atomic_store_n(&fsh_shutdown_busy, 0, __ATOMIC_SEQ_CST);
+      if (__atomic_load_n(&fsh_stopping, __ATOMIC_SEQ_CST)) {
+        pthread_mutex_lock(&fsh_park);
+        pthread_cond_signal(&fsh_left);
+        pthread_mutex_unlock(&fsh_park);
+      }
       continue;
     }
     fsh_shutdown_code = 128 + number;
@@ -5829,15 +7797,20 @@ static void *fsh_shutdown_watch(void *arg) {
 
 static void fsh_shutdown_waiters_free(void) {
   pthread_mutex_lock(&fsh_shutdown.lock);
-  fsh_waiters_free(&fsh_shutdown.waiting);
+  fsh_waiters w = fsh_shutdown.waiting;
   fsh_shutdown.waiting = (fsh_waiters){ NULL, 0, 0 };
   pthread_mutex_unlock(&fsh_shutdown.lock);
+  fsh_waiters_free(&w);
 }
 
 static void fsh_shutdown_start(void) {
+  fsh_sim_init();
   fsh_shutdown.count = 1;
   pthread_mutex_init(&fsh_shutdown.lock, NULL);
   fsh_shutdown_end = fsh_shutdown_waiters_free;
+  // In deterministic simulation mode, never spawn a background signal-watcher thread that would
+  // race on fsh_sim_ready; leave default SIGINT/SIGTERM process termination in place.
+  if (fsh_sim_active) return;
   const char *failed = "fish: the shutdown signal couldn't be set up, so SIGINT and SIGTERM end the program at once\n";
   if (pipe(fsh_shutdown_pipe) != 0) return (void)fputs(failed, stderr);
   fcntl(fsh_shutdown_pipe[0], F_SETFD, FD_CLOEXEC);
@@ -5901,6 +7874,9 @@ static void fsh_signals_start(void) {
 // Starts counting signal n, giving how many have arrived so far, or -1 when it can't be caught.
 int64_t fsh_rt_signal_listen(int64_t n) {
   if (n < 1 || n > 64 || n == SIGKILL || n == SIGSTOP) return -1;
+#ifdef FSH_PROFILE
+  if (n == SIGPROF && fsh_prof_is_active()) return -1;
+#endif
   pthread_once(&fsh_signals_once, fsh_signals_start);
   if (!fsh_signals_ready) return -1;
   struct sigaction caught;
@@ -5921,8 +7897,8 @@ int64_t fsh_rt_kill(int64_t pid, int64_t sig) {
   return kill((pid_t)pid, (int)sig) == 0 ? 0 : errno;
 }
 
-// The reactor: a thread waiting on kqueue (macOS) or epoll (Linux) for the sockets tasks wait
-// on. Each interest is one task waiting for one socket to be readable or writable, once; the
+// The reactor: a thread waiting on kqueue (macOS), epoll (Linux) or an I/O completion port
+// (Windows) for the sockets tasks wait on. Each interest is one task waiting for one socket to be readable or writable, once; the
 // list holds a count on each task, so shutdown can give back those never woken.
 // ponytail: one list scanned under one lock; keep interests per socket if many connections wait.
 typedef struct { int fd; int32_t writing; fsh_task *task; } fsh_interest;
@@ -5932,8 +7908,43 @@ static int64_t fsh_interest_count = 0, fsh_interest_capacity = 0;
 static int fsh_poller = -1;
 static int32_t fsh_io_stopping = 0;
 static pthread_t fsh_io_thread;
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_WIN32)
 static int fsh_io_wake = -1;
+#endif
+
+#ifdef _WIN32
+// Windows tells readiness through AFD, the driver beneath Winsock, as wepoll and mio ask it: a
+// poll of one socket for one direction is an I/O request on a handle to AFD that the completion
+// port completes once the socket is ready, so it is one-shot as kqueue's and epoll's interests are.
+#define FSH_AFD_RECEIVE 0x0001
+#define FSH_AFD_SEND 0x0004
+#define FSH_AFD_DISCONNECT 0x0008
+#define FSH_AFD_ABORT 0x0010
+#define FSH_AFD_LOCAL_CLOSE 0x0020
+#define FSH_AFD_ACCEPT 0x0080
+#define FSH_AFD_CONNECT_FAIL 0x0100
+#define FSH_AFD_FAILED (FSH_AFD_DISCONNECT | FSH_AFD_ABORT | FSH_AFD_LOCAL_CLOSE | FSH_AFD_CONNECT_FAIL)
+typedef struct { HANDLE handle; ULONG events; NTSTATUS status; } fsh_afd_handle;
+typedef struct { LARGE_INTEGER timeout; ULONG count; ULONG exclusive; fsh_afd_handle handles[1]; } fsh_afd_poll;
+typedef struct { IO_STATUS_BLOCK io; fsh_afd_poll poll; int fd; int32_t writing; } fsh_afd_op;
+static HANDLE fsh_iocp = NULL;
+static HANDLE fsh_afd = NULL;
+
+static void fsh_afd_open(void) {
+  fsh_iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+  static WCHAR name[] = L"\\Device\\Afd\\Fish";
+  UNICODE_STRING path = { sizeof name - sizeof(WCHAR), sizeof name, name };
+  OBJECT_ATTRIBUTES attributes;
+  InitializeObjectAttributes(&attributes, &path, 0, NULL, NULL);
+  IO_STATUS_BLOCK io;
+  if (NtCreateFile(&fsh_afd, SYNCHRONIZE, &attributes, &io, NULL, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN, 0, NULL, 0) != 0) {
+    fputs("fish: can't open AFD to wait on sockets\n", stderr);
+    fsh_abandoned = 1;
+    exit(101);
+  }
+  CreateIoCompletionPort(fsh_afd, fsh_iocp, 0, 0);
+  SetFileCompletionNotificationModes(fsh_afd, FILE_SKIP_SET_EVENT_ON_HANDLE);
+}
 #endif
 
 // Arms the kernel for what is still wanted of a socket: on epoll one registration covers both
@@ -5943,6 +7954,25 @@ static void fsh_io_arm(int fd, int32_t writing) {
   struct kevent change;
   EV_SET(&change, fd, writing ? EVFILT_WRITE : EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, NULL);
   kevent(fsh_poller, &change, 1, NULL, 0, NULL);
+#elif defined(_WIN32)
+  // The poll goes to the base socket, beneath any layered service provider.
+  SOCKET base = (SOCKET)fd;
+  DWORD bytes = 0;
+  WSAIoctl((SOCKET)fd, SIO_BASE_HANDLE, NULL, 0, &base, sizeof base, &bytes, NULL, NULL);
+  fsh_afd_op *op = calloc(1, sizeof *op);
+  op->fd = fd;
+  op->writing = writing;
+  op->poll.timeout.QuadPart = INT64_MAX;
+  op->poll.count = 1;
+  op->poll.handles[0].handle = (HANDLE)base;
+  op->poll.handles[0].events = FSH_AFD_FAILED | (writing ? FSH_AFD_SEND : FSH_AFD_RECEIVE | FSH_AFD_ACCEPT);
+  op->io.Status = STATUS_PENDING;
+  NTSTATUS status = NtDeviceIoControlFile(fsh_afd, NULL, NULL, op, &op->io, 0x00012024, &op->poll, sizeof op->poll, &op->poll, sizeof op->poll);
+  // A request that fails at once never reaches the port: its waiters are woken to find out why.
+  if (status != 0 && status != STATUS_PENDING) {
+    free(op);
+    PostQueuedCompletionStatus(fsh_iocp, 0, (ULONG_PTR)fd + 2, NULL);
+  }
 #else
   (void)writing;
   uint32_t events = EPOLLONESHOT;
@@ -5968,8 +7998,16 @@ static void fsh_io_wait(int fd, int32_t writing, fsh_task *task) {
     __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
     fsh_interests[fsh_interest_count++] = (fsh_interest){ fd, writing, task };
   }
+#ifdef __APPLE__
+  // A kqueue filter is armed for the socket alone, whoever else waits on it, so the system call
+  // is made outside the lock. Arming one already taken, or a descriptor closed and reused since,
+  // at worst wakes a waiter early, which finds nothing to read and waits again.
+  pthread_mutex_unlock(&fsh_io_lock);
+  fsh_io_arm(fd, writing);
+#else
   fsh_io_arm(fd, writing);
   pthread_mutex_unlock(&fsh_io_lock);
+#endif
 }
 
 // Takes out the interests in a socket that are ready, or all of them when it is closing, and
@@ -5985,7 +8023,7 @@ static void fsh_io_take(int fd, int32_t readable, int32_t writable, int32_t clos
     woken[count++] = in->task;
     fsh_interests[i] = fsh_interests[--fsh_interest_count];
   }
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_WIN32)
   for (int64_t i = 0; !closing && i < fsh_interest_count; i++) {
     if (fsh_interests[i].fd == fd) {
       fsh_io_arm(fd, fsh_interests[i].writing);
@@ -6015,6 +8053,21 @@ static void *fsh_io_loop(void *arg) {
       int32_t error = (events[i].flags & (EV_EOF | EV_ERROR)) != 0;
       fsh_io_ready(fd, events[i].filter == EVFILT_READ || error, events[i].filter == EVFILT_WRITE || error);
     }
+#elif defined(_WIN32)
+    OVERLAPPED_ENTRY events[64];
+    ULONG n = 0;
+    if (!GetQueuedCompletionStatusEx(fsh_iocp, events, 64, &n, INFINITE, FALSE)) n = 0;
+    for (ULONG i = 0; i < n; i++) {
+      fsh_afd_op *op = (fsh_afd_op *)events[i].lpOverlapped;
+      // A key past 1 is a poll that failed as it was asked, for the socket it names.
+      if (!op) {
+        if (events[i].lpCompletionKey > 1) fsh_io_ready((int)(events[i].lpCompletionKey - 2), 1, 1);
+        continue;
+      }
+      int32_t error = op->io.Status != 0 || (op->poll.handles[0].events & FSH_AFD_FAILED) != 0;
+      fsh_io_ready(op->fd, !op->writing || error, op->writing || error);
+      free(op);
+    }
 #else
     struct epoll_event events[64];
     int n = epoll_wait(fsh_poller, events, 64, -1);
@@ -6034,6 +8087,8 @@ static void fsh_io_start(void) {
   struct kevent wake;
   EV_SET(&wake, 0, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
   kevent(fsh_poller, &wake, 1, NULL, 0, NULL);
+#elif defined(_WIN32)
+  fsh_afd_open();
 #else
   fsh_poller = epoll_create1(EPOLL_CLOEXEC);
   fsh_io_wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -6050,6 +8105,8 @@ static void fsh_io_stop(void) {
   struct kevent wake;
   EV_SET(&wake, 0, EVFILT_USER, 0, NOTE_TRIGGER, 0, NULL);
   kevent(fsh_poller, &wake, 1, NULL, 0, NULL);
+#elif defined(_WIN32)
+  PostQueuedCompletionStatus(fsh_iocp, 0, 1, NULL);
 #else
   uint64_t one = 1;
   (void)!write(fsh_io_wake, &one, sizeof one);
@@ -6064,10 +8121,16 @@ static void fsh_io_stop(void) {
   pthread_mutex_unlock(&fsh_io_lock);
   for (int64_t i = 0; i < count; i++) fsh_task_release(left[i].task);
   free(left);
+#ifdef _WIN32
+  // Polls still pending complete into the port as it closes, and their memory goes with the process.
+  CloseHandle(fsh_afd);
+  CloseHandle(fsh_iocp);
+#else
   close(fsh_poller);
   fsh_poller = -1;
 #ifndef __APPLE__
   close(fsh_io_wake);
+#endif
 #endif
 }
 
@@ -6081,7 +8144,9 @@ void fsh_rt_file_job_release(struct fsh_file_job *job);
 // whose connections are, also has its TLS state and the TLS runtime's calls for it, which only
 // that runtime sets, so a program without TLS links no TLS library.
 struct fsh_tls_ops;
-typedef struct { int64_t count; int fd; int32_t tried; int64_t deadline; struct fsh_file_job *lookup; void *tls; const struct fsh_tls_ops *tls_ops; } fsh_socket;
+struct fsh_sim_sock;
+static void fsh_sim_sock_close(struct fsh_sim_sock *s);
+typedef struct { int64_t count; int fd; int32_t tried; int64_t deadline; struct fsh_file_job *lookup; void *tls; const struct fsh_tls_ops *tls_ops; struct fsh_sim_sock *sim; } fsh_socket;
 typedef struct fsh_tls_ops {
   int32_t (*read)(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *out, fsh_str **message);
   int32_t (*write)(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_task *task, fsh_str **message);
@@ -6116,12 +8181,14 @@ static fsh_socket *fsh_socket_new(int fd) {
   s->lookup = NULL;
   s->tls = NULL;
   s->tls_ops = NULL;
+  s->sim = NULL;
   return s;
 }
 
 void fsh_rt_socket_release(fsh_socket *s) {
   if (!s || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
   if (s->tls) s->tls_ops->release(s);
+  if (s->sim) fsh_sim_sock_close(s->sim);
   if (s->fd >= 0) {
     if (fsh_poller >= 0) fsh_io_forget(s->fd);
     close(s->fd);
@@ -6138,7 +8205,7 @@ static void fsh_connect_untimed(fsh_socket *s, fsh_task *task) {
 }
 
 // A failed call's IoError message: what was being done, and the system's reason.
-// An errno's Node code and libuv's wording for it, as Node's errors give them.
+// An errno's code, as ENOENT, and libuv's wording for it, which errors carry.
 static const struct { int number; const char *code, *text; } fsh_errnos[] = {
   {ENOENT, "ENOENT", "no such file or directory"}, {EACCES, "EACCES", "permission denied"},
   {EISDIR, "EISDIR", "illegal operation on a directory"}, {ENOTDIR, "ENOTDIR", "not a directory"},
@@ -6183,7 +8250,7 @@ static int32_t fsh_io_parts(fsh_str **error, const char *message, const char *co
   return 5;
 }
 
-// A socket call's failure: Fish's message with the system's reason, and Node's code and system
+// A socket call's failure: Fish's message with the system's reason, and its code and system
 // call.
 static int32_t fsh_io_failed(fsh_str **error, const char *doing, const char *syscall) {
   static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -6196,8 +8263,8 @@ static int32_t fsh_io_failed(fsh_str **error, const char *doing, const char *sys
   return fsh_io_parts(error, message, code, syscall, NULL);
 }
 
-// A file call's failure, in Node's words: "ENOENT: no such file or directory, open 'x'". A call
-// on an open file, as read, names no path, as Node's doesn't.
+// A file call's failure, worded as "ENOENT: no such file or directory, open 'x'". A call
+// on an open file, as read, names no path.
 static int32_t fsh_fs_failed(fsh_str **error, int number, const char *syscall, const char *path) {
   char code[32], text[200];
   fsh_errno_words(number, code, sizeof code, text, sizeof text);
@@ -6249,7 +8316,7 @@ void fsh_rt_file_job_release(fsh_file_job *job) {
   fsh_rt_free(job);
 }
 
-// Reads a whole file, as Node's readFile does: open, read until the end, close. A failure
+// Reads a whole file: open, read until the end, close. A failure
 // leaves its errno and system call.
 static void fsh_read_whole(const char *path, fsh_array *data, int *error, const char **syscall) {
   int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -6283,7 +8350,7 @@ static void fsh_read_whole(const char *path, fsh_array *data, int *error, const 
   close(fd);
 }
 
-// Writes a whole file, creating it or emptying it first, as Node's writeFile does.
+// Writes a whole file, creating it or emptying it first.
 static void fsh_write_whole(const char *path, const fsh_array *data, int *error, const char **syscall) {
   int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
   if (fd < 0) {
@@ -6378,7 +8445,7 @@ int32_t fsh_rt_fs_exists(fsh_str *path) {
 }
 
 // statSync and lstatSync: size, mode, kind (1 a file, 2 a directory, 3 a symbolic link, 0
-// anything else) and the modification time in milliseconds, as Node's Stats has them.
+// anything else) and the modification time in milliseconds, as Stats has them.
 int32_t fsh_rt_fs_stat(fsh_str *path, int32_t follow, int64_t *out, double *mtime, fsh_str **error) {
   const char *syscall = follow ? "stat" : "lstat";
   char *c = fsh_rt_str_cstring(path);
@@ -6406,7 +8473,7 @@ static int fsh_by_name(const void *a, const void *b) {
   return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-// readdirSync: the names in a directory, without . and .., sorted as Node's scandir sorts them.
+// readdirSync: the names in a directory, without . and .., sorted by byte order.
 int32_t fsh_rt_fs_readdir(fsh_str *path, fsh_array *out, fsh_str **error) {
   out->data = NULL;
   out->length = out->capacity = 0;
@@ -6444,7 +8511,7 @@ int32_t fsh_rt_fs_readdir(fsh_str *path, fsh_array *out, fsh_str **error) {
   return 1;
 }
 
-// realpathSync: the resolved path. As Node's walk does, the path is first made absolute and
+// realpathSync: the resolved path. The path is first made absolute and
 // normalised, so ".." takes back the part before it whether that is a link or not, and an empty
 // path is the working directory. A failure names the part the walk stops at, followed a part at a
 // time: a missing part fails its lstat, and a link that can't be followed its stat, each named
@@ -6516,7 +8583,7 @@ int32_t fsh_rt_fs_realpath(fsh_str *path, fsh_str **out, fsh_str **error) {
   return result;
 }
 
-// mkdtempSync: a new directory named by the prefix and six random characters, as Node makes it.
+// mkdtempSync: a new directory named by the prefix and six random characters.
 int32_t fsh_rt_fs_mkdtemp(fsh_str *prefix, fsh_str **out, fsh_str **error) {
   char *c = fsh_rt_str_cstring(prefix);
   if (!c) return fsh_fs_failed(error, EINVAL, "mkdtemp", "");
@@ -6535,7 +8602,7 @@ int32_t fsh_rt_fs_mkdtemp(fsh_str *prefix, fsh_str **out, fsh_str **error) {
   return result;
 }
 
-// mkdirSync. With recursive, Node's MKDirpSync walk: a prefix missing its parent is retried after
+// mkdirSync. With recursive, a walk up: a prefix missing its parent is retried after
 // the prefix cut at its last '/', so *out is the first directory made as that prefix spells it,
 // or NULL when every one existed. A failure names the path as given.
 int32_t fsh_rt_fs_mkdir(fsh_str *path, int32_t recursive, int64_t mode, fsh_str **out, fsh_str **error) {
@@ -6585,7 +8652,7 @@ int32_t fsh_rt_fs_mkdir(fsh_str *path, int32_t recursive, int64_t mode, fsh_str 
   return result;
 }
 
-// A two-path call's failure, in Node's words: "ENOENT: no such file or directory, rename 'a' -> 'b'",
+// A two-path call's failure, worded as "ENOENT: no such file or directory, rename 'a' -> 'b'",
 // its path the first.
 static int32_t fsh_fs_failed_two(fsh_str **error, int number, const char *syscall, const char *from, const char *to) {
   char code[32], text[200];
@@ -6687,7 +8754,7 @@ static int fsh_copy_file(const char *from, const char *to, int64_t mode) {
 }
 
 // copyFileSync, its mode the bits of COPYFILE_EXCL (1), COPYFILE_FICLONE (2) and
-// COPYFILE_FICLONE_FORCE (4), checked first as Node checks it.
+// COPYFILE_FICLONE_FORCE (4), checked before the copy.
 int32_t fsh_rt_fs_copyfile(fsh_str *from, fsh_str *to, int64_t mode, fsh_str **error) {
   if (mode < 0 || mode > 7) return fsh_io_parts(error, "mode is out of range: >= 0 && <= 7", "ERR_OUT_OF_RANGE", "", NULL);
   char *a = fsh_rt_str_cstring(from), *b = fsh_rt_str_cstring(to);
@@ -6713,7 +8780,7 @@ void fsh_rt_errno_words(int64_t number, char *code, int64_t code_size, char *tex
   fsh_errno_words((int)number, code, (size_t)code_size, text, (size_t)text_size);
 }
 
-// Node's string flags for open, as libuv's table reads them, in this system's bits; -1 for one
+// The string flags for open, as libuv's table reads them, in this system's bits; -1 for one
 // it doesn't know.
 int64_t fsh_rt_fd_flags(const char *s) {
   size_t length = strlen(s);
@@ -6764,7 +8831,7 @@ static double fsh_stat_ms(struct timespec t) {
 
 // What Stats holds: size, mode, kind (1 a file, 2 a directory, 3 a link, 0 anything else), nlink,
 // dev, ino, uid and gid in out, and the modification, access, change and birth times in
-// milliseconds in times. Linux's stat has no birth time, so it is 0 there, as Node gives it on a
+// milliseconds in times. Linux's stat has no birth time, so it is 0 there, as on any
 // file system without one.
 static void fsh_stat_fill(const struct stat *st, int64_t *out, double *times) {
   out[0] = st->st_size;
@@ -7112,7 +9179,9 @@ static int64_t fsh_watch_take(fsh_watch *w, uint8_t *out, int64_t size, int64_t 
   return fsh_watch_put(w, out, size, at, 'c', name);
 }
 #else
+#if !defined(__wasi__) && !defined(_WIN32)
 #include <sys/inotify.h>
+#endif
 // inotify watches a directory's files itself; a recursive watch adds each directory below.
 static void fsh_watch_add(fsh_watch *w, const char *rel, int dir) {
   char *path = fsh_watch_join(w->root, rel);
@@ -7189,7 +9258,7 @@ static int64_t fsh_watch_take(fsh_watch *w, uint8_t *out, int64_t size, int64_t 
 }
 #endif
 
-// The watcher for a path, or -errno: ENOENT for a missing one, as Node's watch throws.
+// The watcher for a path, or -errno: ENOENT for a missing one.
 int64_t fsh_rt_watch_open(const char *path, int64_t recursive) {
   struct stat st;
   if (stat(path, &st) != 0) return -errno;
@@ -7254,7 +9323,7 @@ void fsh_rt_watch_close(int64_t handle) {
   fsh_watch_release(w);
 }
 
-// accessSync, its mode the bits of R_OK, W_OK and X_OK, checked first as Node checks it.
+// accessSync, its mode the bits of R_OK, W_OK and X_OK, checked before the call.
 int32_t fsh_rt_fs_access(fsh_str *path, int64_t mode, fsh_str **error) {
   if (mode < 0 || mode > 7) return fsh_io_parts(error, "mode is out of range: >= 0 && <= 7", "ERR_OUT_OF_RANGE", "", NULL);
   char *c = fsh_rt_str_cstring(path);
@@ -7264,7 +9333,7 @@ int32_t fsh_rt_fs_access(fsh_str *path, int64_t mode, fsh_str **error) {
   return result;
 }
 
-// chmodSync, its mode already checked by std as Node checks it.
+// chmodSync, its mode already checked by std.
 int32_t fsh_rt_fs_chmod(fsh_str *path, int64_t mode, fsh_str **error) {
   char *c = fsh_rt_str_cstring(path);
   if (!c) return fsh_fs_failed(error, EINVAL, "chmod", "");
@@ -7339,7 +9408,7 @@ static struct timespec fsh_utime_spec(double time) {
 }
 
 // utimesSync, or with follow 0 lutimesSync, its times in seconds; NaN and the infinities are
-// refused first, atime before mtime, as Node refuses them.
+// refused first, atime before mtime.
 int32_t fsh_rt_fs_utimes(fsh_str *path, double atime, double mtime, int32_t follow, fsh_str **error) {
   double times[2] = {atime, mtime};
   for (int i = 0; i < 2; i++) {
@@ -7357,15 +9426,16 @@ int32_t fsh_rt_fs_utimes(fsh_str *path, double atime, double mtime, int32_t foll
   return result;
 }
 
+// An entry another process removed since the walk listed it is gone already, which is no failure.
 static int fsh_remove_one(const char *path, const struct stat *st, int kind, struct FTW *walk) {
   (void)st;
   (void)kind;
   (void)walk;
-  return remove(path);
+  return remove(path) != 0 && errno != ENOENT;
 }
 
 // rmSync: a file, or with recursive a directory and all inside it; force passes over a missing
-// path. Node's own words for a directory given without recursive.
+// path. A directory given without recursive has its own message.
 int32_t fsh_rt_fs_rm(fsh_str *path, int32_t recursive, int32_t force, fsh_str **error) {
   char *c = fsh_rt_str_cstring(path);
   if (!c) return fsh_fs_failed(error, EINVAL, "lstat", "");
@@ -7386,7 +9456,7 @@ int32_t fsh_rt_fs_rm(fsh_str *path, int32_t recursive, int32_t force, fsh_str **
   return result;
 }
 
-// A signal's name, as Node gives a child's: "SIGTERM", or NULL for one it doesn't name.
+// A signal's name, as a child's is given: "SIGTERM", or NULL for one it doesn't name.
 const char *fsh_rt_signal_name(int64_t number) {
   static const struct { int number; const char *name; } names[] = {
     { SIGHUP, "SIGHUP" }, { SIGINT, "SIGINT" }, { SIGQUIT, "SIGQUIT" }, { SIGILL, "SIGILL" }, { SIGTRAP, "SIGTRAP" },
@@ -7443,7 +9513,7 @@ typedef struct {
 // Writes input to a child's stdin and reads its stdout and stderr until both close, then waits for
 // it: numbers gets its pid, exit status (-1 when a signal ended it) and signal (0 for none). Gives
 // 0, or the errno that stopped it. With at_exit, reading also stops once the child itself has
-// exited, taking what its pipes already hold, as Bun's exited does: a process it left running in
+// exited, taking what its pipes already hold: a process it left running in
 // the background may hold the pipes open long after.
 static int fsh_child_wait(pid_t pid, int in_fd, int out_fd, int err_fd, const uint8_t *input, int64_t length, int64_t *numbers, fsh_array *out, fsh_array *err, int at_exit) {
   int failure = 0;
@@ -7547,7 +9617,7 @@ int32_t fsh_rt_spawn_finish(int64_t handle, int64_t *numbers, fsh_array *out, fs
 // spawnSync: runs a command found on PATH with its arguments, in cwd unless that is empty,
 // writing input to its stdin and reading its stdout and stderr until both close, then waiting for
 // it. Gives 1 with numbers its pid, exit status (-1 when a signal ended it) and signal (0 for
-// none), or 5 with the IoError's parts, in Node's words, when it couldn't start. flags holds two
+// none), or 5 with the IoError's parts when it couldn't start. flags holds two
 // bits per stream from stdin up, 0 piped, 1 inherited and 2 /dev/null; bit 6 has env, "K=V"
 // strings, replace the environment; bit 7 words a failure as Bun does; bit 8 has args begin with
 // argv[0]; bit 9 only starts the child, giving its pid and a handle that fsh_rt_spawn_finish takes;
@@ -7608,7 +9678,15 @@ int32_t fsh_rt_spawn_sync(fsh_str *command, const fsh_array *args, fsh_str *cwd,
       posix_spawnattr_setpgroup(&attributes, 0);
     }
     posix_spawnattr_setflags(&attributes, spawn_flags);
-    failure = posix_spawnp(&pid, file, &actions, &attributes, argv, envp);
+    // A relative command with a slash is looked for in the child's directory. The system is given
+    // its whole path, since macOS can start one from there and still answer ENOENT.
+    char whole[PATH_MAX], here[PATH_MAX];
+    const char *path = file;
+    if (dir && file[0] != '/' && strchr(file, '/')) {
+      int n = dir[0] == '/' ? snprintf(whole, sizeof whole, "%s/%s", dir, file) : getcwd(here, sizeof here) ? snprintf(whole, sizeof whole, "%s/%s/%s", here, dir, file) : -1;
+      if (n > 0 && (size_t)n < sizeof whole) path = whole;
+    }
+    failure = posix_spawnp(&pid, path, &actions, &attributes, argv, envp);
     posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
   }
@@ -7677,6 +9755,9 @@ static void fsh_pool_run(fsh_file_job *job) {
 
 static void *fsh_pool_work(void *arg) {
   (void)arg;
+#ifdef FSH_PROFILE
+  int prof_slot = fsh_prof_register();
+#endif
   pthread_mutex_lock(&fsh_pool_lock);
   for (;;) {
     while (!fsh_pool_head) {
@@ -7689,6 +9770,9 @@ static void *fsh_pool_work(void *arg) {
       if (waited == ETIMEDOUT && !fsh_pool_head) {
         fsh_pool_threads--;
         pthread_mutex_unlock(&fsh_pool_lock);
+#ifdef FSH_PROFILE
+        fsh_prof_unregister(prof_slot);
+#endif
         return NULL;
       }
     }
@@ -7703,14 +9787,16 @@ static void *fsh_pool_work(void *arg) {
       continue;
     }
 #ifdef FSH_LEAK_SITES
-    fsh_frame submitter = { job->site, job->name, NULL };
-    fsh_rt_frames = job->name ? &submitter : NULL;
+    volatile fsh_frame submitter = { job->site, job->name, NULL };
+    __atomic_signal_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&fsh_rt_frames, job->name ? (fsh_frame *)&submitter : NULL, __ATOMIC_RELAXED);
 #endif
     if (job->op == 0) fsh_file_read(job);
     else if (job->op == 1) fsh_file_write(job);
     else fsh_host_lookup(job);
 #ifdef FSH_LEAK_SITES
-    fsh_rt_frames = NULL;
+    __atomic_store_n(&fsh_rt_frames, NULL, __ATOMIC_RELAXED);
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
 #endif
     // Under the pool's lock, so a poll from another task can't hand the job over meanwhile.
     pthread_mutex_lock(&fsh_pool_lock);
@@ -7720,7 +9806,11 @@ static void *fsh_pool_work(void *arg) {
     fsh_rt_wake(task);
     fsh_task_release(task);
     fsh_rt_file_job_release(job);
-    __atomic_sub_fetch(&fsh_pool_busy, 1, __ATOMIC_RELEASE);
+    if (__atomic_sub_fetch(&fsh_pool_busy, 1, __ATOMIC_SEQ_CST) == 0 && __atomic_load_n(&fsh_stopping, __ATOMIC_SEQ_CST)) {
+      pthread_mutex_lock(&fsh_park);
+      pthread_cond_signal(&fsh_left);
+      pthread_mutex_unlock(&fsh_park);
+    }
     pthread_mutex_lock(&fsh_pool_lock);
   }
 }
@@ -7751,12 +9841,23 @@ static void fsh_pool_enqueue(fsh_file_job *job) {
 }
 
 static void fsh_pool_submit(fsh_file_job *job) {
+  if (fsh_sim_active) {
+    if (job->op == 0) fsh_file_read(job);
+    else if (job->op == 1) fsh_file_write(job);
+    else fsh_host_lookup(job);
+    fsh_task *task = job->task;
+    __atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+    fsh_rt_wake(task);
+    fsh_task_release(task);
+    fsh_rt_file_job_release(job);
+    return;
+  }
   pthread_mutex_lock(&fsh_pool_lock);
 #ifdef FSH_LEAK_SITES
   job->site = fsh_rt_frames ? fsh_rt_frames->site : NULL;
   job->name = fsh_rt_frames ? fsh_rt_frames->name : NULL;
 #endif
-  __atomic_add_fetch(&fsh_pool_busy, 1, __ATOMIC_RELAXED);
+  __atomic_add_fetch(&fsh_pool_busy, 1, __ATOMIC_SEQ_CST);
   fsh_pool_enqueue(job);
   pthread_mutex_unlock(&fsh_pool_lock);
 }
@@ -7810,9 +9911,13 @@ int32_t fsh_rt_file_poll(fsh_str *path, fsh_array *bytes, fsh_file_job **job_at,
     job->task = task;
     *job_at = job;
     fsh_pool_submit(job);
+    fsh_task_wait(task, op == 0 ? "file.read" : "file.write", 0);
     return 0;
   }
-  if (!fsh_job_done(job, task)) return 0;
+  if (!fsh_job_done(job, task)) {
+    fsh_task_wait(task, op == 0 ? "file.read" : "file.write", 0);
+    return 0;
+  }
   if (job->error) return fsh_fs_failed(error, job->error, job->syscall, strcmp(job->syscall, "open") == 0 ? job->path : NULL);
   if (op == 0) {
     *out = job->data;
@@ -7847,15 +9952,702 @@ static int fsh_address(fsh_str *host, int64_t port, struct sockaddr_storage *at,
   return !reason[0];
 }
 
+// In-memory virtual TCP network and fault injection for deterministic simulation mode.
+// Active only when FISH_SIM_SEED is set; zero impact on real sockets.
+enum {
+  FSH_SIM_EV_ACCEPT = 1,
+  FSH_SIM_EV_CONN_FAIL = 2,
+  FSH_SIM_EV_DATA = 3,
+  FSH_SIM_EV_EOF = 4,
+  FSH_SIM_EV_RESET = 5,
+};
+
+typedef struct fsh_sim_sock {
+  int64_t refs;
+  int32_t kind; // 0 listener, 1 stream
+  int32_t closed;
+  int32_t peer_eof;
+  int32_t peer_reset;
+  int32_t connect_state; // 0 connected, 1 connecting, 2 failed
+  int connect_errno;
+  char host[64];
+  uint16_t port;
+  char peer_host[64];
+  uint16_t peer_port;
+  int64_t last_deliver_at;
+  struct fsh_sim_sock *peer;
+  fsh_waiters waiters;
+  // Listener pending accepted connections.
+  fsh_socket **accept_q;
+  int64_t accept_head, accept_count, accept_cap;
+  // Stream receive buffer.
+  uint8_t *rx;
+  int64_t rx_head, rx_len, rx_cap;
+} fsh_sim_sock;
+
+typedef struct {
+  int64_t deliver_at;
+  uint64_t seq;
+  int32_t kind;
+  int err;
+  fsh_sim_sock *dst;
+  fsh_socket *conn;
+  uint8_t *data;
+  int64_t len;
+} fsh_sim_event;
+
+typedef struct {
+  char a[96];
+  char b[96];
+} fsh_sim_partition_rule;
+
+static fsh_sim_sock **fsh_sim_listeners = NULL;
+static int64_t fsh_sim_listener_count = 0, fsh_sim_listener_cap = 0;
+static fsh_sim_event *fsh_sim_events = NULL;
+static int64_t fsh_sim_event_count = 0, fsh_sim_event_cap = 0;
+static fsh_sim_partition_rule *fsh_sim_partitions = NULL;
+static int64_t fsh_sim_partition_count = 0, fsh_sim_partition_cap = 0;
+static int64_t fsh_sim_delay_min_ms = 0, fsh_sim_delay_max_ms = 0;
+static double fsh_sim_drop_rate = 0.0;
+static uint16_t fsh_sim_next_port = 10000;
+static int32_t fsh_sim_stopping = 0;
+
+static void fsh_sim_sock_retain(fsh_sim_sock *s) {
+  if (s) s->refs++;
+}
+
+static void fsh_sim_sock_release(fsh_sim_sock *s) {
+  if (!s || --s->refs > 0) return;
+  fsh_waiters_free(&s->waiters);
+  free(s->accept_q);
+  free(s->rx);
+  fsh_rt_free(s);
+}
+
+static void fsh_sim_wake_all(fsh_waiters *w) {
+  fsh_waiters list = *w;
+  *w = (fsh_waiters){ NULL, 0, 0 };
+  for (int64_t i = 0; i < list.count; i++) {
+    if (fsh_sim_stopping) fsh_task_release(list.tasks[i].task);
+    else fsh_wake_waiter(list.tasks[i].task);
+  }
+  fsh_rt_free(list.tasks);
+}
+
+static int fsh_sim_event_before(fsh_sim_event a, fsh_sim_event b) {
+  return a.deliver_at < b.deliver_at || (a.deliver_at == b.deliver_at && a.seq < b.seq);
+}
+
+static void fsh_sim_event_swap(int64_t a, int64_t b) {
+  fsh_sim_event t = fsh_sim_events[a];
+  fsh_sim_events[a] = fsh_sim_events[b];
+  fsh_sim_events[b] = t;
+}
+
+static void fsh_sim_event_push(fsh_sim_event ev) {
+  if (fsh_sim_event_count == fsh_sim_event_cap) {
+    int64_t cap = fsh_sim_event_cap ? fsh_sim_event_cap * 2 : 64;
+    fsh_sim_events = realloc(fsh_sim_events, (size_t)cap * sizeof(fsh_sim_event));
+    fsh_sim_event_cap = cap;
+  }
+  ev.seq = ++fsh_timer_seq;
+  int64_t at = fsh_sim_event_count++;
+  fsh_sim_events[at] = ev;
+  while (at > 0 && fsh_sim_event_before(fsh_sim_events[at], fsh_sim_events[(at - 1) / 2])) {
+    fsh_sim_event_swap(at, (at - 1) / 2);
+    at = (at - 1) / 2;
+  }
+}
+
+static fsh_sim_event fsh_sim_event_pop(void) {
+  fsh_sim_event taken = fsh_sim_events[0];
+  fsh_sim_events[0] = fsh_sim_events[--fsh_sim_event_count];
+  for (int64_t at = 0;;) {
+    int64_t least = at, left = at * 2 + 1, right = left + 1;
+    if (left < fsh_sim_event_count && fsh_sim_event_before(fsh_sim_events[left], fsh_sim_events[least])) least = left;
+    if (right < fsh_sim_event_count && fsh_sim_event_before(fsh_sim_events[right], fsh_sim_events[least])) least = right;
+    if (least == at) break;
+    fsh_sim_event_swap(at, least);
+    at = least;
+  }
+  return taken;
+}
+
+static int64_t fsh_sim_sample_delay_ns(void) {
+  if (fsh_sim_delay_max_ms <= 0) return 0;
+  uint64_t span = (uint64_t)(fsh_sim_delay_max_ms - fsh_sim_delay_min_ms);
+  int64_t ms = fsh_sim_delay_min_ms;
+  if (span > 0) {
+    uint64_t range = span + 1ULL;
+    uint64_t off = range == 0 ? fsh_sim_next_u64(fsh_sim_sched_rng) : (fsh_sim_next_u64(fsh_sim_sched_rng) % range);
+    if (off > (uint64_t)(INT64_MAX - ms)) ms = INT64_MAX;
+    else ms += (int64_t)off;
+  }
+  if (ms > (INT64_MAX - fsh_sim_now_ns) / 1000000) return INT64_MAX - fsh_sim_now_ns;
+  return ms * 1000000LL;
+}
+
+static int64_t fsh_sim_next_deliver_at(fsh_sim_sock *sender) {
+  int64_t d = fsh_sim_sample_delay_ns();
+  int64_t at = fsh_sim_now_ns + d;
+  if (sender && at < sender->last_deliver_at) at = sender->last_deliver_at;
+  if (sender) sender->last_deliver_at = at;
+  return at;
+}
+
+static int fsh_sim_should_drop(void) {
+  if (fsh_sim_drop_rate <= 0.0) return 0;
+  if (fsh_sim_drop_rate >= 1.0) return 1;
+  return fsh_sim_next_f64(fsh_sim_sched_rng) < fsh_sim_drop_rate;
+}
+
+static int fsh_sim_endpoint_match(const char *rule, const char *host, uint16_t port) {
+  if (strcmp(rule, "*") == 0) return 1;
+  if (strcmp(rule, host) == 0) return 1;
+  char full[96];
+  snprintf(full, sizeof full, "%s:%u", host, (unsigned)port);
+  if (strcmp(rule, full) == 0) return 1;
+  if (strchr(host, ':') != NULL) {
+    snprintf(full, sizeof full, "[%s]:%u", host, (unsigned)port);
+    if (strcmp(rule, full) == 0) return 1;
+  }
+  return 0;
+}
+
+static int fsh_sim_is_partitioned(const char *h1, uint16_t p1, const char *h2, uint16_t p2) {
+  for (int64_t i = 0; i < fsh_sim_partition_count; i++) {
+    const char *a = fsh_sim_partitions[i].a;
+    const char *b = fsh_sim_partitions[i].b;
+    if ((fsh_sim_endpoint_match(a, h1, p1) && fsh_sim_endpoint_match(b, h2, p2)) ||
+        (fsh_sim_endpoint_match(a, h2, p2) && fsh_sim_endpoint_match(b, h1, p1))) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int fsh_sim_host_matches(const char *listener_host, const char *target_host) {
+  if (strcmp(listener_host, target_host) == 0) return 1;
+  if (strcmp(listener_host, "::") == 0) return 1;
+  if (strcmp(listener_host, "0.0.0.0") == 0 && strchr(target_host, ':') == NULL) return 1;
+  return 0;
+}
+
+static int fsh_sim_port_in_use(const char *host, uint16_t port) {
+  for (int64_t i = 0; i < fsh_sim_listener_count; i++) {
+    fsh_sim_sock *l = fsh_sim_listeners[i];
+    if (!l->closed && l->port == port && (fsh_sim_host_matches(l->host, host) || fsh_sim_host_matches(host, l->host))) return 1;
+  }
+  return 0;
+}
+
+static uint16_t fsh_sim_alloc_port(const char *host) {
+  for (int tries = 0; tries < 50000; tries++) {
+    uint16_t p = fsh_sim_next_port++;
+    if (fsh_sim_next_port > 60000) fsh_sim_next_port = 10000;
+    if (!fsh_sim_port_in_use(host, p)) return p;
+  }
+  return 0;
+}
+
+static fsh_socket *fsh_sim_socket_new(int32_t kind, const char *host, uint16_t port) {
+  fsh_sim_sock *sim = fsh_rt_alloc(sizeof(fsh_sim_sock));
+  memset(sim, 0, sizeof *sim);
+  sim->refs = 1;
+  sim->kind = kind;
+  snprintf(sim->host, sizeof sim->host, "%s", host);
+  sim->port = port;
+  fsh_socket *s = fsh_rt_alloc(sizeof(fsh_socket));
+  memset(s, 0, sizeof *s);
+  s->count = 1;
+  s->fd = -1;
+  s->sim = sim;
+  return s;
+}
+
+static void fsh_sim_listener_add(fsh_sim_sock *l) {
+  if (fsh_sim_listener_count == fsh_sim_listener_cap) {
+    int64_t cap = fsh_sim_listener_cap ? fsh_sim_listener_cap * 2 : 16;
+    fsh_sim_listeners = realloc(fsh_sim_listeners, (size_t)cap * sizeof(fsh_sim_sock *));
+    fsh_sim_listener_cap = cap;
+  }
+  fsh_sim_listeners[fsh_sim_listener_count++] = l;
+}
+
+static void fsh_sim_listener_remove(fsh_sim_sock *l) {
+  for (int64_t i = 0; i < fsh_sim_listener_count; i++) {
+    if (fsh_sim_listeners[i] == l) {
+      fsh_sim_listeners[i] = fsh_sim_listeners[--fsh_sim_listener_count];
+      return;
+    }
+  }
+}
+
+static fsh_sim_sock *fsh_sim_listener_find(const char *host, uint16_t port) {
+  for (int64_t i = 0; i < fsh_sim_listener_count; i++) {
+    fsh_sim_sock *l = fsh_sim_listeners[i];
+    if (!l->closed && l->port == port && fsh_sim_host_matches(l->host, host)) return l;
+  }
+  return NULL;
+}
+
+static void fsh_sim_sock_close(fsh_sim_sock *s) {
+  s->closed = 1;
+  if (s->kind == 0) {
+    fsh_sim_listener_remove(s);
+    while (s->accept_count > 0) {
+      fsh_socket *conn = s->accept_q[s->accept_head];
+      s->accept_head = (s->accept_head + 1) % s->accept_cap;
+      s->accept_count--;
+      fsh_rt_socket_release(conn);
+    }
+    fsh_sim_wake_all(&s->waiters);
+  } else {
+    fsh_sim_wake_all(&s->waiters);
+    fsh_sim_sock *peer = s->peer;
+    s->peer = NULL;
+    if (peer) {
+      if (!peer->closed && !fsh_sim_stopping) {
+        int64_t at = fsh_sim_next_deliver_at(s);
+        fsh_sim_sock_retain(peer);
+        fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_EOF, 0, peer, NULL, NULL, 0 });
+      }
+      fsh_sim_sock_release(peer);
+    }
+  }
+  fsh_sim_sock_release(s);
+}
+
+static void fsh_sim_deliver_event(fsh_sim_event ev) {
+  if (ev.kind == FSH_SIM_EV_ACCEPT) {
+    fsh_sim_sock *l = ev.dst;
+    fsh_socket *srv_sock = ev.conn;
+    fsh_sim_sock *srv = srv_sock->sim;
+    fsh_sim_sock *cli = srv->peer;
+    int part = cli ? (fsh_sim_is_partitioned(cli->host, cli->port, l->host, l->port) || fsh_sim_is_partitioned(cli->host, cli->port, srv->host, srv->port)) : 0;
+    if (l->closed || part || !cli || cli->closed) {
+      if (cli && !cli->closed && cli->connect_state == 1) {
+        cli->connect_state = 2;
+        cli->connect_errno = l->closed ? ECONNREFUSED : EHOSTUNREACH;
+        fsh_sim_wake_all(&cli->waiters);
+      }
+      fsh_rt_socket_release(srv_sock);
+    } else {
+      if (l->accept_count == l->accept_cap) {
+        int64_t cap = l->accept_cap ? l->accept_cap * 2 : 16;
+        fsh_socket **q = malloc((size_t)cap * sizeof(fsh_socket *));
+        for (int64_t i = 0; i < l->accept_count; i++) q[i] = l->accept_q[(l->accept_head + i) % l->accept_cap];
+        free(l->accept_q);
+        l->accept_q = q;
+        l->accept_head = 0;
+        l->accept_cap = cap;
+      }
+      l->accept_q[(l->accept_head + l->accept_count) % l->accept_cap] = srv_sock;
+      l->accept_count++;
+      cli->connect_state = 0;
+      fsh_sim_wake_all(&l->waiters);
+      fsh_sim_wake_all(&cli->waiters);
+    }
+    fsh_sim_sock_release(l);
+  } else if (ev.kind == FSH_SIM_EV_CONN_FAIL) {
+    fsh_sim_sock *cli = ev.dst;
+    if (!cli->closed && cli->connect_state == 1) {
+      cli->connect_state = 2;
+      cli->connect_errno = ev.err;
+      fsh_sim_wake_all(&cli->waiters);
+    }
+    fsh_sim_sock_release(cli);
+  } else if (ev.kind == FSH_SIM_EV_DATA) {
+    fsh_sim_sock *dst = ev.dst;
+    if (!dst->closed && !dst->peer_reset && ev.len > 0) {
+      if (fsh_sim_is_partitioned(dst->peer_host, dst->peer_port, dst->host, dst->port)) {
+        dst->peer_reset = 1;
+        fsh_sim_wake_all(&dst->waiters);
+      } else {
+        if (dst->rx_head + dst->rx_len + ev.len > dst->rx_cap) {
+          if (dst->rx_head > 0 && dst->rx_len > 0) memmove(dst->rx, dst->rx + dst->rx_head, (size_t)dst->rx_len);
+          dst->rx_head = 0;
+          if (dst->rx_len + ev.len > dst->rx_cap) {
+            int64_t cap = dst->rx_cap ? dst->rx_cap * 2 : 4096;
+            while (cap < dst->rx_len + ev.len) cap *= 2;
+            dst->rx = realloc(dst->rx, (size_t)cap);
+            dst->rx_cap = cap;
+          }
+        }
+        memcpy(dst->rx + dst->rx_head + dst->rx_len, ev.data, (size_t)ev.len);
+        dst->rx_len += ev.len;
+        fsh_sim_wake_all(&dst->waiters);
+      }
+    }
+    free(ev.data);
+    fsh_sim_sock_release(dst);
+  } else if (ev.kind == FSH_SIM_EV_EOF) {
+    fsh_sim_sock *dst = ev.dst;
+    if (!dst->closed) {
+      dst->peer_eof = 1;
+      fsh_sim_wake_all(&dst->waiters);
+    }
+    fsh_sim_sock_release(dst);
+  } else if (ev.kind == FSH_SIM_EV_RESET) {
+    fsh_sim_sock *dst = ev.dst;
+    if (!dst->closed) {
+      dst->peer_reset = 1;
+      fsh_sim_wake_all(&dst->waiters);
+    }
+    fsh_sim_sock_release(dst);
+  }
+}
+
+static void fsh_sim_fire_due(void) {
+  for (;;) {
+    int has_t = fsh_timer_count > 0 && fsh_timers[0].deadline <= fsh_sim_now_ns;
+    int has_e = fsh_sim_event_count > 0 && fsh_sim_events[0].deliver_at <= fsh_sim_now_ns;
+    if (!has_t && !has_e) break;
+    int take_t = 0;
+    if (has_t && !has_e) take_t = 1;
+    else if (has_t && has_e) {
+      take_t = fsh_timers[0].deadline < fsh_sim_events[0].deliver_at ||
+        (fsh_timers[0].deadline == fsh_sim_events[0].deliver_at && fsh_timers[0].seq < fsh_sim_events[0].seq);
+    }
+    if (take_t) {
+      fsh_timer due = fsh_timer_take();
+      fsh_timer_fire(due, 1);
+    } else {
+      fsh_sim_event ev = fsh_sim_event_pop();
+      fsh_sim_deliver_event(ev);
+    }
+  }
+}
+
+static int fsh_sim_next_event_ns(int64_t *out) {
+  int found = 0;
+  int64_t best = 0;
+  if (fsh_timer_count > 0) {
+    best = fsh_timers[0].deadline;
+    found = 1;
+  }
+  if (fsh_sim_event_count > 0 && (!found || fsh_sim_events[0].deliver_at < best)) {
+    best = fsh_sim_events[0].deliver_at;
+    found = 1;
+  }
+  if (found) *out = best;
+  return found;
+}
+
+static void fsh_sim_drain_events(void) {
+  while (fsh_sim_event_count > 0) {
+    fsh_sim_event ev = fsh_sim_event_pop();
+    free(ev.data);
+    if (ev.conn) fsh_rt_socket_release(ev.conn);
+    if (ev.dst) fsh_sim_sock_release(ev.dst);
+  }
+  free(fsh_sim_events);
+  fsh_sim_events = NULL;
+  fsh_sim_event_cap = 0;
+}
+
+static void fsh_sim_free_globals(void) {
+  free(fsh_sim_ready);
+  fsh_sim_ready = NULL;
+  fsh_sim_ready_count = fsh_sim_ready_cap = 0;
+  free(fsh_sim_listeners);
+  fsh_sim_listeners = NULL;
+  fsh_sim_listener_count = fsh_sim_listener_cap = 0;
+  free(fsh_sim_partitions);
+  fsh_sim_partitions = NULL;
+  fsh_sim_partition_count = fsh_sim_partition_cap = 0;
+}
+
+static int fsh_sim_normalize_host(fsh_str *host, int64_t port, char out[64], int allow_localhost, fsh_str **message) {
+  char *text = fsh_rt_str_cstring(host);
+  if (allow_localhost && text && strcmp(text, "localhost") == 0) {
+    fsh_rt_free(text);
+    if (port < 0 || port > 65535) {
+      struct sockaddr_storage dummy;
+      fsh_address(host, port, &dummy, message);
+      return 0;
+    }
+    snprintf(out, 64, "127.0.0.1");
+    return 1;
+  }
+  fsh_rt_free(text);
+  struct sockaddr_storage at;
+  if (!fsh_address(host, port, &at, message)) return 0;
+  if (at.ss_family == AF_INET) {
+    inet_ntop(AF_INET, &((struct sockaddr_in *)&at)->sin_addr, out, 64);
+  } else {
+    inet_ntop(AF_INET6, &((struct sockaddr_in6 *)&at)->sin6_addr, out, 64);
+  }
+  return 1;
+}
+
+// Public C entry points for the std:sim module.
+int32_t fsh_rt_sim_enabled(void) {
+  fsh_sim_init();
+  return FSH_VIRTUAL;
+}
+
+uint64_t fsh_rt_sim_seed(void) {
+  fsh_sim_init();
+  return fsh_sim_seed_val;
+}
+
+int64_t fsh_rt_sim_now(void) {
+  fsh_sim_init();
+  return FSH_VIRTUAL ? fsh_sim_now_ns / 1000000 : fsh_rt_now_ms();
+}
+
+void fsh_rt_sim_advance(int64_t ms) {
+  fsh_sim_init();
+  if (!FSH_VIRTUAL || ms <= 0) return;
+  if (ms > (INT64_MAX - fsh_sim_now_ns) / 1000000) fsh_sim_now_ns = INT64_MAX;
+  else fsh_sim_now_ns += ms * 1000000LL;
+  fsh_sim_fire_due();
+}
+
+void fsh_rt_sim_partition(const char *a, const char *b) {
+  fsh_sim_init();
+  if (!FSH_VIRTUAL || !a || !b) return;
+  char ka[96], kb[96];
+  snprintf(ka, sizeof ka, "%s", a);
+  snprintf(kb, sizeof kb, "%s", b);
+  for (int64_t i = 0; i < fsh_sim_partition_count; i++) {
+    if ((strcmp(fsh_sim_partitions[i].a, ka) == 0 && strcmp(fsh_sim_partitions[i].b, kb) == 0) ||
+        (strcmp(fsh_sim_partitions[i].a, kb) == 0 && strcmp(fsh_sim_partitions[i].b, ka) == 0)) {
+      return;
+    }
+  }
+  if (fsh_sim_partition_count == fsh_sim_partition_cap) {
+    int64_t cap = fsh_sim_partition_cap ? fsh_sim_partition_cap * 2 : 8;
+    fsh_sim_partitions = realloc(fsh_sim_partitions, (size_t)cap * sizeof(fsh_sim_partition_rule));
+    fsh_sim_partition_cap = cap;
+  }
+  snprintf(fsh_sim_partitions[fsh_sim_partition_count].a, sizeof fsh_sim_partitions[0].a, "%s", ka);
+  snprintf(fsh_sim_partitions[fsh_sim_partition_count].b, sizeof fsh_sim_partitions[0].b, "%s", kb);
+  fsh_sim_partition_count++;
+}
+
+void fsh_rt_sim_heal(const char *a, const char *b) {
+  fsh_sim_init();
+  if (!FSH_VIRTUAL || !a || !b) return;
+  char ka[96], kb[96];
+  snprintf(ka, sizeof ka, "%s", a);
+  snprintf(kb, sizeof kb, "%s", b);
+  for (int64_t i = 0; i < fsh_sim_partition_count;) {
+    if ((strcmp(fsh_sim_partitions[i].a, ka) == 0 && strcmp(fsh_sim_partitions[i].b, kb) == 0) ||
+        (strcmp(fsh_sim_partitions[i].a, kb) == 0 && strcmp(fsh_sim_partitions[i].b, ka) == 0)) {
+      fsh_sim_partitions[i] = fsh_sim_partitions[--fsh_sim_partition_count];
+    } else {
+      i++;
+    }
+  }
+}
+
+void fsh_rt_sim_set_delay(int64_t min_ms, int64_t max_ms) {
+  fsh_sim_init();
+  if (!FSH_VIRTUAL) return;
+  if (min_ms < 0) min_ms = 0;
+  if (max_ms < min_ms) max_ms = min_ms;
+  fsh_sim_delay_min_ms = min_ms;
+  fsh_sim_delay_max_ms = max_ms;
+}
+
+void fsh_rt_sim_set_drop_rate(double rate) {
+  fsh_sim_init();
+  if (!FSH_VIRTUAL) return;
+  if (isnan(rate) || rate < 0.0) rate = 0.0;
+  if (rate > 1.0) rate = 1.0;
+  fsh_sim_drop_rate = rate;
+}
+
+void fsh_rt_sim_reset_faults(void) {
+  fsh_sim_init();
+  if (!FSH_VIRTUAL) return;
+  fsh_sim_partition_count = 0;
+  fsh_sim_delay_min_ms = 0;
+  fsh_sim_delay_max_ms = 0;
+  fsh_sim_drop_rate = 0.0;
+}
+
+// A restart: serve's TCP listener handed to a new copy of the program, named to it in
+// FISH_LISTEN_FDS, with FISH_READY_FD the pipe it says on that it listens. The old process stops
+// accepting only once it has, so no connection is refused in between.
+
+// The port a descriptor listens on for TCP, or -1 when it isn't a listening TCP socket.
+static int64_t fsh_listening_port(int fd) {
+  int listening = 0;
+  socklen_t n = sizeof listening;
+  struct sockaddr_storage at;
+  socklen_t size = sizeof at;
+  // macOS answers SO_ACCEPTCONN with ENOPROTOOPT; there, a stream socket with no peer listens.
+  if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &listening, &n) < 0) {
+    int type = 0;
+    socklen_t typed = sizeof type;
+    struct sockaddr_storage peer;
+    socklen_t peer_size = sizeof peer;
+    listening = getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &typed) == 0 && type == SOCK_STREAM && getpeername(fd, (struct sockaddr *)&peer, &peer_size) < 0 && errno == ENOTCONN;
+  }
+  if (!listening) return -1;
+  if (getsockname(fd, (struct sockaddr *)&at, &size) < 0 || (at.ss_family != AF_INET && at.ss_family != AF_INET6)) return -1;
+  return ntohs(at.ss_family == AF_INET6 ? ((struct sockaddr_in6 *)&at)->sin6_port : ((struct sockaddr_in *)&at)->sin_port);
+}
+
+// Whether a listener was handed over and taken, the only case in which this process says it is
+// ready: one that bound a socket of its own isn't serving where the old one was.
+static int32_t fsh_adopted = 0;
+
+// The listener the process that started this one handed over, for a bind on its port, taken once.
+static int fsh_inherited_listener(int64_t port) {
+  const char *named = getenv("FISH_LISTEN_FDS");
+  if (named == NULL) return -1;
+  char *end = NULL;
+  long fd = strtol(named, &end, 10);
+  unsetenv("FISH_LISTEN_FDS");
+  if (end == named || *end != 0 || fd < 3 || fd > INT_MAX) return -1;
+  int64_t bound = fsh_listening_port((int)fd);
+  if (bound < 0) return -1;
+  if (port != 0 && bound != port) {
+    close((int)fd);
+    return -1;
+  }
+  fsh_adopted = 1;
+  return (int)fd;
+}
+
+// Tells the process that started this one for a restart that it listens, once; closing the pipe
+// unwritten tells it the handover failed.
+void fsh_rt_restart_ready(void) {
+  const char *named = getenv("FISH_READY_FD");
+  if (named == NULL) return;
+  long fd = strtol(named, NULL, 10);
+  unsetenv("FISH_READY_FD");
+  if (fd < 3 || fd > INT_MAX) return;
+  if (fsh_adopted) {
+    char one = 1;
+    ssize_t wrote = write((int)fd, &one, 1);
+    (void)wrote;
+  }
+  close((int)fd);
+}
+
+static pid_t fsh_restart_pid = 0;
+
+// Starts this program again, with its arguments and environment, handing it the listener on
+// port: the reading end of the pipe it says it listens on, or -1 with errno.
+int64_t fsh_rt_restart_spawn(int64_t port) {
+  int listener = -1;
+  // ponytail: scans descriptors for the listener; a handle passed from serve would skip it.
+  for (int i = 3; i < 65536 && listener < 0; i++) if (fcntl(i, F_GETFD) >= 0 && fsh_listening_port(i) == port) listener = i;
+  if (listener < 0) {
+    errno = EBADF;
+    return -1;
+  }
+  // A copy without close-on-exec is handed over: macOS's spawn closes a close-on-exec descriptor
+  // even when it is dup2'd onto itself.
+  listener = dup(listener);
+  if (listener < 0) return -1;
+  int ready[2];
+  if (pipe(ready) < 0) {
+    close(listener);
+    return -1;
+  }
+  fcntl(ready[0], F_SETFD, FD_CLOEXEC);
+  extern char **environ;
+  int64_t count = 0;
+  while (environ[count] != NULL) count++;
+  char **envp = fsh_rt_alloc((count + 3) * sizeof(char *));
+  int64_t at = 0;
+  for (int64_t i = 0; i < count; i++) if (strncmp(environ[i], "FISH_LISTEN_FDS=", 16) != 0 && strncmp(environ[i], "FISH_READY_FD=", 14) != 0) envp[at++] = environ[i];
+  char listen_var[48], ready_var[48];
+  snprintf(listen_var, sizeof listen_var, "FISH_LISTEN_FDS=%d", listener);
+  snprintf(ready_var, sizeof ready_var, "FISH_READY_FD=%d", ready[1]);
+  envp[at++] = listen_var;
+  envp[at++] = ready_var;
+  envp[at] = NULL;
+  char **argv = fsh_rt_alloc((fsh_argc + 2) * sizeof(char *));
+  argv[0] = fsh_exe;
+  for (int32_t i = 1; i < fsh_argc; i++) argv[i] = fsh_argv[i];
+  argv[fsh_argc > 0 ? fsh_argc : 1] = NULL;
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  // A descriptor dup2'd onto itself is kept by POSIX_SPAWN_CLOEXEC_DEFAULT.
+  for (int fd = 0; fd < 3; fd++) posix_spawn_file_actions_adddup2(&actions, fd, fd);
+  posix_spawn_file_actions_adddup2(&actions, listener, listener);
+  posix_spawn_file_actions_adddup2(&actions, ready[1], ready[1]);
+  posix_spawnattr_t attributes;
+  posix_spawnattr_init(&attributes);
+#ifdef __APPLE__
+  posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT);
+#endif
+  fflush(NULL);
+  pid_t pid = 0;
+  int failure = posix_spawn(&pid, fsh_exe, &actions, &attributes, argv, envp);
+  posix_spawnattr_destroy(&attributes);
+  posix_spawn_file_actions_destroy(&actions);
+  fsh_rt_free(envp);
+  fsh_rt_free(argv);
+  close(ready[1]);
+  close(listener);
+  if (failure) {
+    close(ready[0]);
+    errno = failure;
+    return -1;
+  }
+  fsh_restart_pid = pid;
+  return ready[0];
+}
+
+// Waits up to ms for the new process to say it listens: 1 when it did, 0 when it ended first, -1
+// when it took too long, and is stopped.
+int64_t fsh_rt_restart_wait(int64_t fd, int64_t ms) {
+  struct pollfd p = { (int)fd, POLLIN, 0 };
+  int r;
+  do r = poll(&p, 1, (int)ms); while (r < 0 && errno == EINTR);
+  int64_t said = -1;
+  char one = 0;
+  if (r > 0) said = read((int)fd, &one, 1) == 1 ? 1 : 0;
+  close((int)fd);
+  if (said == -1 && fsh_restart_pid > 0) kill(fsh_restart_pid, SIGKILL);
+  // A new process that ended or was stopped is reaped; one that listens lives on past this one.
+  if (said != 1 && fsh_restart_pid > 0) waitpid(fsh_restart_pid, NULL, 0);
+  fsh_restart_pid = 0;
+  return said;
+}
+
 // 'TcpListener.bind(host, port)': listening at once, or 5 with the reason.
 int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    char norm[64];
+    if (!fsh_sim_normalize_host(host, port, norm, 0, message)) return 5;
+    uint16_t bound = (uint16_t)port;
+    if (bound == 0) {
+      bound = fsh_sim_alloc_port(norm);
+      if (bound == 0) {
+        errno = EADDRNOTAVAIL;
+        return fsh_io_failed(message, "can't listen there", "listen");
+      }
+    } else if (fsh_sim_port_in_use(norm, bound)) {
+      errno = EADDRINUSE;
+      return fsh_io_failed(message, "can't listen there", "listen");
+    }
+    *out = fsh_sim_socket_new(0, norm, bound);
+    fsh_sim_listener_add((*out)->sim);
+    return 1;
+  }
+  // A restart hands over the listener before its old process stops accepting.
+  int inherited = fsh_inherited_listener(port);
+  if (inherited >= 0) {
+    *out = fsh_socket_new(inherited);
+    return 1;
+  }
   struct sockaddr_storage at;
   if (!fsh_address(host, port, &at, message)) return 5;
   int fd = socket(at.ss_family, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
   if (fd < 0) return fsh_io_failed(message, "can't make a socket", "socket");
   int on = 1, off = 0;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
-  // "::" takes IPv4 clients too, as Node's listen does unless asked for IPv6 only.
+  // "::" takes IPv4 clients too, unless asked for IPv6 only.
   if (at.ss_family == AF_INET6) setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);
   if (bind(fd, (struct sockaddr *)&at, FSH_ADDRESS_SIZE(&at)) < 0 || listen(fd, 128) < 0) {
     int32_t failed = fsh_io_failed(message, "can't listen there", "listen");
@@ -7867,6 +10659,7 @@ int32_t fsh_rt_tcp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str *
 }
 
 int64_t fsh_rt_tcp_port(fsh_socket *s) {
+  if (s->sim) return (int64_t)s->sim->port;
   struct sockaddr_storage at;
   socklen_t size = sizeof at;
   if (getsockname(s->fd, (struct sockaddr *)&at, &size) < 0) return -1;
@@ -7877,6 +10670,22 @@ int64_t fsh_rt_tcp_port(fsh_socket *s) {
 // Polls 'accept()': a new connection, a wait for one, or 5 with the reason.
 // A client that gave up before it was accepted is skipped, as servers expect.
 int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out, fsh_str **message) {
+  if (listener->sim) {
+    fsh_sim_sock *l = listener->sim;
+    if (l->accept_count > 0) {
+      *out = l->accept_q[l->accept_head];
+      l->accept_head = (l->accept_head + 1) % l->accept_cap;
+      l->accept_count--;
+      return 1;
+    }
+    if (l->closed) {
+      errno = EBADF;
+      return fsh_io_failed(message, "can't accept a connection", "accept");
+    }
+    fsh_wait_on(&l->waiters, task, listener);
+    fsh_task_wait(task, "tcp.accept", 0);
+    return 0;
+  }
   int fd;
   while ((fd = FSH_ACCEPT(listener->fd)) < 0 && (errno == EINTR || errno == ECONNABORTED || errno == EPROTO)) {}
   if (fd >= 0) {
@@ -7889,6 +10698,7 @@ int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out
   }
   if (errno == EAGAIN || errno == EWOULDBLOCK) {
     fsh_io_wait(listener->fd, 0, task);
+    fsh_task_wait(task, "tcp.accept", 0);
     return 0;
   }
   return fsh_io_failed(message, "can't accept a connection", "accept");
@@ -7899,6 +10709,15 @@ int32_t fsh_rt_tcp_accept(fsh_socket *listener, fsh_task *task, fsh_socket **out
 void fsh_rt_socket_leave(fsh_socket *s, fsh_task *task) {
   if (!s) return;
   fsh_connect_untimed(s, task);
+  if (s->sim) {
+    fsh_waiters *w = &s->sim->waiters;
+    for (int64_t i = 0; i < w->count;) {
+      if (w->tasks[i].task != task) { i++; continue; }
+      memmove(w->tasks + i, w->tasks + i + 1, (size_t)(--w->count - i) * sizeof(fsh_waiter));
+      fsh_task_release(task);
+    }
+    return;
+  }
   pthread_mutex_lock(&fsh_io_lock);
   fsh_task **left = NULL;
   int64_t count = 0;
@@ -7920,7 +10739,35 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
     snprintf(text, sizeof text, "'read' needs room for at least 1 byte, not %lld", (long long)max);
     return fsh_io_parts(message, text, "EINVAL", "read", NULL);
   }
-  if (s->tls) return s->tls_ops->read(s, max, task, out, message);
+  if (s->tls) {
+    int32_t r = s->tls_ops->read(s, max, task, out, message);
+    if (r == 0) fsh_task_wait(task, "tcp.read", 0);
+    return r;
+  }
+  if (s->sim) {
+    fsh_sim_sock *st = s->sim;
+    if (st->rx_len > 0) {
+      int64_t n = st->rx_len < max ? st->rx_len : max;
+      char *data = fsh_rt_alloc(n);
+      memcpy(data, st->rx + st->rx_head, (size_t)n);
+      st->rx_head += n;
+      st->rx_len -= n;
+      if (st->rx_len == 0) st->rx_head = 0;
+      *out = (fsh_array){ data, n, n };
+      return 1;
+    }
+    if (st->peer_reset) {
+      errno = ECONNRESET;
+      return fsh_io_failed(message, "can't read", "read");
+    }
+    if (st->peer_eof || !st->peer) {
+      *out = (fsh_array){ NULL, 0, 0 };
+      return 1;
+    }
+    fsh_wait_on(&st->waiters, task, s);
+    fsh_task_wait(task, "tcp.read", 0);
+    return 0;
+  }
   // Received onto the stack, so the array holds just what came, however much room was asked for.
   char buffer[65536];
   ssize_t n = recv(s->fd, buffer, (size_t)(max < (int64_t)sizeof buffer ? max : (int64_t)sizeof buffer), 0);
@@ -7936,6 +10783,7 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
   }
   if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
     fsh_io_wait(s->fd, 0, task);
+    fsh_task_wait(task, "tcp.read", 0);
     return 0;
   }
   return fsh_io_failed(message, "can't read", "read");
@@ -7943,7 +10791,46 @@ int32_t fsh_rt_tcp_read(fsh_socket *s, int64_t max, fsh_task *task, fsh_array *o
 
 // Polls 'write(bytes)': sends what is left past *written, waiting while the socket is full.
 int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_task *task, fsh_str **message) {
-  if (s->tls) return s->tls_ops->write(s, bytes, written, task, message);
+  if (s->tls) {
+    int32_t r = s->tls_ops->write(s, bytes, written, task, message);
+    if (r == 0) fsh_task_wait(task, "tcp.write", 0);
+    return r;
+  }
+  if (s->sim) {
+    fsh_sim_sock *st = s->sim;
+    if (st->closed || st->peer_reset) {
+      errno = ECONNRESET;
+      return fsh_io_failed(message, "can't write", "write");
+    }
+    if (!st->peer || st->peer->closed) {
+      errno = EPIPE;
+      return fsh_io_failed(message, "can't write", "write");
+    }
+    if (*written < bytes->length) {
+      int64_t len = bytes->length - *written;
+      int64_t at = fsh_sim_next_deliver_at(st);
+      if (fsh_sim_is_partitioned(st->host, st->port, st->peer->host, st->peer->port)) {
+        st->peer_reset = 1;
+        fsh_sim_sock_retain(st->peer);
+        fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_RESET, 0, st->peer, NULL, NULL, 0 });
+        errno = EHOSTUNREACH;
+        return fsh_io_failed(message, "can't write", "write");
+      }
+      if (fsh_sim_should_drop()) {
+        st->peer_reset = 1;
+        fsh_sim_sock_retain(st->peer);
+        fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_RESET, 0, st->peer, NULL, NULL, 0 });
+        errno = ECONNRESET;
+        return fsh_io_failed(message, "can't write", "write");
+      }
+      uint8_t *buf = malloc((size_t)len);
+      memcpy(buf, bytes->data + *written, (size_t)len);
+      fsh_sim_sock_retain(st->peer);
+      fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_DATA, 0, st->peer, NULL, buf, len });
+      *written = bytes->length;
+    }
+    return 1;
+  }
   while (*written < bytes->length) {
 #ifdef MSG_NOSIGNAL
     ssize_t n = send(s->fd, bytes->data + *written, (size_t)(bytes->length - *written), MSG_NOSIGNAL);
@@ -7957,6 +10844,7 @@ int32_t fsh_rt_tcp_write(fsh_socket *s, fsh_array *bytes, int64_t *written, fsh_
     if (errno == EINTR) continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       fsh_io_wait(s->fd, 1, task);
+      fsh_task_wait(task, "tcp.write", 0);
       return 0;
     }
     return fsh_io_failed(message, "can't write", "write");
@@ -8013,6 +10901,80 @@ static int32_t fsh_connect_from(fsh_socket **socket_at, fsh_file_job *job, int32
 // next. ponytail: sequential Happy Eyeballs; RFC 8305 keeps the slow attempt going alongside the
 // next, so a slow but working first address can lose to the second here.
 int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, fsh_task *task, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    fsh_socket *s = *socket_at;
+    if (!s) {
+      char target_host[64];
+      char *raw_host = fsh_rt_str_cstring(host);
+      int is_localhost = raw_host && strcmp(raw_host, "localhost") == 0;
+      fsh_rt_free(raw_host);
+      if (!fsh_sim_normalize_host(host, port, target_host, 1, message)) return 5;
+      fsh_sim_sock *l = port > 0 ? fsh_sim_listener_find(target_host, (uint16_t)port) : NULL;
+      if (!l && is_localhost && port > 0) {
+        fsh_sim_sock *l6 = fsh_sim_listener_find("::1", (uint16_t)port);
+        if (l6) {
+          l = l6;
+          snprintf(target_host, sizeof target_host, "::1");
+        }
+      }
+      const char *local_host = strchr(target_host, ':') != NULL ? "::1" : "127.0.0.1";
+      uint16_t local_port = fsh_sim_alloc_port(local_host);
+      if (local_port == 0) {
+        errno = EADDRNOTAVAIL;
+        return fsh_io_failed(message, "can't connect", "connect");
+      }
+      s = *socket_at = fsh_sim_socket_new(1, local_host, local_port);
+      fsh_sim_sock *cli = s->sim;
+      snprintf(cli->peer_host, sizeof cli->peer_host, "%s", target_host);
+      cli->peer_port = (uint16_t)port;
+      cli->connect_state = 1;
+      int64_t delay_ns = fsh_sim_sample_delay_ns();
+      int64_t at = fsh_sim_now_ns + delay_ns;
+      int64_t min_fail_at = fsh_sim_now_ns > INT64_MAX - 1000000LL ? INT64_MAX : fsh_sim_now_ns + 1000000LL;
+      int part = l && (fsh_sim_is_partitioned(cli->host, cli->port, l->host, l->port) || fsh_sim_is_partitioned(cli->host, cli->port, target_host, (uint16_t)port));
+      if (!l) {
+        fsh_sim_sock_retain(cli);
+        fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_CONN_FAIL, ECONNREFUSED, cli, NULL, NULL, 0 });
+      } else if (part) {
+        int64_t fail_at = delay_ns > 0 ? at : min_fail_at;
+        fsh_sim_sock_retain(cli);
+        fsh_sim_event_push((fsh_sim_event){ fail_at, 0, FSH_SIM_EV_CONN_FAIL, EHOSTUNREACH, cli, NULL, NULL, 0 });
+      } else if (fsh_sim_should_drop()) {
+        int64_t fail_at = delay_ns > 0 ? at : min_fail_at;
+        fsh_sim_sock_retain(cli);
+        fsh_sim_event_push((fsh_sim_event){ fail_at, 0, FSH_SIM_EV_CONN_FAIL, ECONNRESET, cli, NULL, NULL, 0 });
+      } else {
+        fsh_socket *srv_sock = fsh_sim_socket_new(1, target_host, l->port);
+        fsh_sim_sock *srv = srv_sock->sim;
+        snprintf(srv->peer_host, sizeof srv->peer_host, "%s", cli->host);
+        srv->peer_port = cli->port;
+        srv->connect_state = 0;
+        cli->peer = srv;
+        fsh_sim_sock_retain(srv);
+        srv->peer = cli;
+        fsh_sim_sock_retain(cli);
+        fsh_sim_sock_retain(l);
+        fsh_sim_event_push((fsh_sim_event){ at, 0, FSH_SIM_EV_ACCEPT, 0, l, srv_sock, NULL, 0 });
+      }
+      fsh_wait_on(&cli->waiters, task, s);
+      fsh_task_wait(task, "tcp.connect", 0);
+      return 0;
+    }
+    fsh_sim_sock *cli = s->sim;
+    if (cli->connect_state == 1) {
+      fsh_wait_on(&cli->waiters, task, s);
+      fsh_task_wait(task, "tcp.connect", 0);
+      return 0;
+    }
+    if (cli->connect_state == 2) {
+      errno = cli->connect_errno;
+      return fsh_io_failed(message, "can't connect", "connect");
+    }
+    *out = s;
+    *socket_at = NULL;
+    return 1;
+  }
   fsh_socket *s = *socket_at;
   if (!s) {
     struct sockaddr_storage at;
@@ -8038,13 +11000,17 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
       s->fd = -1;
       s->lookup = job;
       fsh_pool_submit(job);
+      fsh_task_wait(task, "dns", 0);
       return 0;
     }
   } else if (s->fd < 0) {
     fsh_file_job *job = s->lookup;
-    if (!fsh_job_done(job, task)) return 0;
+    if (!fsh_job_done(job, task)) {
+      fsh_task_wait(task, "dns", 0);
+      return 0;
+    }
     if (job->error) {
-      // Node's codes: a name with no address is ENOTFOUND, a resolver that couldn't answer EAI_AGAIN.
+      // A name with no address is ENOTFOUND, a resolver that couldn't answer EAI_AGAIN.
       const char *code = job->error == EAI_AGAIN ? "EAI_AGAIN" : "ENOTFOUND";
       size_t size = strlen(job->path) + 32;
       char *text = fsh_rt_alloc(size);
@@ -8067,6 +11033,7 @@ int32_t fsh_rt_tcp_connect(fsh_socket **socket_at, fsh_str *host, int64_t port, 
       if (getpeername(s->fd, (struct sockaddr *)&peer, &peer_size) == 0) break;
       if (errno == ENOTCONN && (!s->deadline || fsh_now() < s->deadline)) {
         fsh_io_wait(s->fd, 1, task);
+        fsh_task_wait(task, "tcp.connect", 0);
         return 0;
       }
       // Past its deadline the attempt gives way to the next address. A refusal that lands after
@@ -8123,6 +11090,11 @@ static char *fsh_unix_address(fsh_str *path, struct sockaddr_un *at, const char 
 // 'UnixListener.bind(path)': listening at once, or 5 with the reason. A file already at the path
 // is the system's EADDRINUSE: it is never removed to make room.
 int32_t fsh_rt_unix_bind(fsh_str *path, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    errno = ENOTSUP;
+    return fsh_io_failed(message, "Unix sockets are not supported in simulation mode", "listen");
+  }
   struct sockaddr_un at;
   char *text = fsh_unix_address(path, &at, "listen", message);
   if (!text) return 5;
@@ -8140,8 +11112,13 @@ int32_t fsh_rt_unix_bind(fsh_str *path, fsh_socket **out, fsh_str **message) {
 }
 
 // Polls 'UnixStream.connect(path)': the frame keeps the socket while it connects. A listener with
-// a full backlog is the system's EAGAIN on Linux, given as is, as Node does.
+// a full backlog is the system's EAGAIN on Linux, given as is.
 int32_t fsh_rt_unix_connect(fsh_socket **socket_at, fsh_str *path, fsh_task *task, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    errno = ENOTSUP;
+    return fsh_io_failed(message, "Unix sockets are not supported in simulation mode", "connect");
+  }
   fsh_socket *s = *socket_at;
   struct sockaddr_un at;
   char *text = fsh_unix_address(path, &at, "connect", message);
@@ -8155,6 +11132,7 @@ int32_t fsh_rt_unix_connect(fsh_socket **socket_at, fsh_str *path, fsh_task *tas
       if (connect(fd, (struct sockaddr *)&at, sizeof at) < 0) {
         if (errno == EINPROGRESS || errno == EINTR) {
           fsh_io_wait(fd, 1, task);
+          fsh_task_wait(task, "unix.connect", 0);
           fsh_rt_free(text);
           return 0;
         }
@@ -8207,6 +11185,11 @@ static int fsh_udp_address(fsh_socket *s, fsh_str *host, int64_t port, struct so
 
 // 'UdpSocket.bind(host, port)': bound at once, or 5 with the reason.
 int32_t fsh_rt_udp_bind(fsh_str *host, int64_t port, fsh_socket **out, fsh_str **message) {
+  fsh_sim_init();
+  if (fsh_sim_active) {
+    errno = ENOTSUP;
+    return fsh_io_failed(message, "UDP sockets are not supported in simulation mode", "bind");
+  }
   struct sockaddr_storage at;
   if (!fsh_udp_address(NULL, host, port, &at, "bind", message)) return 5;
   int fd = socket(at.ss_family, SOCK_DGRAM | FSH_SOCK_CLOEXEC, 0);
@@ -8245,6 +11228,7 @@ int32_t fsh_rt_udp_send(fsh_socket *s, fsh_array *bytes, fsh_str *host, int64_t 
     if (errno == EINTR) continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       fsh_io_wait(s->fd, 1, task);
+      fsh_task_wait(task, "udp.send", 0);
       return 0;
     }
     return fsh_io_failed(message, "can't send", "send");
@@ -8276,6 +11260,7 @@ int32_t fsh_rt_udp_receive(fsh_socket *s, fsh_task *task, fsh_array *out, fsh_st
     if (errno == EINTR) continue;
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
       fsh_io_wait(s->fd, 0, task);
+      fsh_task_wait(task, "udp.receive", 0);
       return 0;
     }
     return fsh_io_failed(message, "can't receive", "recvfrom");
@@ -8292,18 +11277,1247 @@ void fsh_rt_handle_drop(fsh_task *t) {
   if (t) fsh_task_release(t);
 }
 
+// Task inspector: thread-safe live snapshots of active tasks formatted as JSON, plain text, or
+// HTML. Every internal buffer uses malloc/free so inspecting never triggers runtime leak counts.
+typedef struct {
+  int64_t id;
+  const char *name;
+  int32_t state;
+  int32_t blocking;
+  const char *awaiting;
+  const char *await_site;
+  int64_t await_target;
+  int64_t age_ms;
+  const char *spawn_site;
+  int64_t polls;
+} fsh_task_snap;
+
+typedef struct { char *data; size_t len, cap; int failed; } fsh_buf;
+
+static void fsh_buf_grow(fsh_buf *b, size_t need) {
+  if (b->failed) return;
+  if (need > SIZE_MAX - b->len - 1) {
+    free(b->data);
+    b->data = NULL;
+    b->len = b->cap = 0;
+    b->failed = 1;
+    return;
+  }
+  size_t required = b->len + need + 1;
+  if (required <= b->cap) return;
+  size_t cap = b->cap ? b->cap : 256;
+  while (cap < required) {
+    if (cap > SIZE_MAX / 2) { cap = required; break; }
+    cap *= 2;
+  }
+  char *next = realloc(b->data, cap);
+  if (!next) {
+    free(b->data);
+    b->data = NULL;
+    b->len = b->cap = 0;
+    b->failed = 1;
+    return;
+  }
+  b->data = next;
+  b->cap = cap;
+}
+
+static void fsh_buf_putn(fsh_buf *b, const char *s, size_t n) {
+  fsh_buf_grow(b, n);
+  if (b->failed || !b->data) return;
+  memcpy(b->data + b->len, s, n);
+  b->len += n;
+  b->data[b->len] = 0;
+}
+
+static void fsh_buf_puts(fsh_buf *b, const char *s) {
+  if (s) fsh_buf_putn(b, s, strlen(s));
+}
+
+static void fsh_buf_printf(fsh_buf *b, const char *fmt, ...) {
+  char tmp[256];
+  va_list ap, ap2;
+  va_start(ap, fmt);
+  va_copy(ap2, ap);
+  int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+  va_end(ap);
+  if (n >= 0 && (size_t)n < sizeof tmp) {
+    fsh_buf_putn(b, tmp, (size_t)n);
+  } else if (n > 0) {
+    char *big = malloc((size_t)n + 1);
+    if (big) {
+      vsnprintf(big, (size_t)n + 1, fmt, ap2);
+      fsh_buf_putn(b, big, (size_t)n);
+      free(big);
+    }
+  }
+  va_end(ap2);
+}
+
+static void fsh_buf_json(fsh_buf *b, const char *s) {
+  fsh_buf_putn(b, "\"", 1);
+  if (s) {
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+      if (*p == '"') fsh_buf_putn(b, "\\\"", 2);
+      else if (*p == '\\') fsh_buf_putn(b, "\\\\", 2);
+      else if (*p == '\n') fsh_buf_putn(b, "\\n", 2);
+      else if (*p == '\r') fsh_buf_putn(b, "\\r", 2);
+      else if (*p == '\t') fsh_buf_putn(b, "\\t", 2);
+      else if (*p < 0x20) fsh_buf_printf(b, "\\u%04x", (unsigned)*p);
+      else fsh_buf_putn(b, (const char *)p, 1);
+    }
+  }
+  fsh_buf_putn(b, "\"", 1);
+}
+
+static void fsh_buf_html(fsh_buf *b, const char *s) {
+  if (!s) return;
+  for (const char *p = s; *p; p++) {
+    if (*p == '&') fsh_buf_puts(b, "&amp;");
+    else if (*p == '<') fsh_buf_puts(b, "&lt;");
+    else if (*p == '>') fsh_buf_puts(b, "&gt;");
+    else if (*p == '"') fsh_buf_puts(b, "&quot;");
+    else fsh_buf_putn(b, p, 1);
+  }
+}
+
+static int fsh_snap_cmp(const void *a, const void *b) {
+  int64_t x = ((const fsh_task_snap *)a)->id;
+  int64_t y = ((const fsh_task_snap *)b)->id;
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static const char *fsh_state_label(int32_t state) {
+  switch (state) {
+    case FSH_RUNNING: return "running";
+    case FSH_QUEUED:
+    case FSH_NOTIFIED: return "runnable";
+    case FSH_IDLE: return "waiting";
+    default: return "done";
+  }
+}
+
+static void fsh_await_label(char *out, size_t size, const fsh_task_snap *s) {
+  if (!s->awaiting || !s->awaiting[0]) {
+    out[0] = 0;
+    return;
+  }
+  if (s->await_target > 0) snprintf(out, size, "%s #%lld", s->awaiting, (long long)s->await_target);
+  else snprintf(out, size, "%s", s->awaiting);
+}
+
+// Copies every alive task's metadata under fsh_alive_lock, then sorts by task id.
+static fsh_task_snap *fsh_tasks_snapshot(int64_t *count_out) {
+  pthread_mutex_lock(&fsh_alive_lock);
+  int64_t n = 0;
+  for (fsh_task *t = fsh_alive; t; t = t->next) n++;
+  fsh_task_snap *snaps = n > 0 ? malloc((size_t)n * sizeof(fsh_task_snap)) : NULL;
+  int64_t now = fsh_now();
+  int64_t i = 0;
+  if (snaps) {
+    for (fsh_task *t = fsh_alive; t && i < n; t = t->next, i++) {
+      int32_t state = __atomic_load_n(&t->state, __ATOMIC_ACQUIRE);
+      const char *awaiting = NULL;
+      const char *await_site = NULL;
+      int64_t target = 0;
+      if (state == FSH_IDLE) {
+        for (int tries = 0; tries < 8; tries++) {
+          uint32_t s1 = __atomic_load_n(&t->wait_seq, __ATOMIC_ACQUIRE);
+          if (s1 & 1u) continue;
+          const char *w = __atomic_load_n(&t->awaiting, __ATOMIC_RELAXED);
+          const char *as = __atomic_load_n(&t->await_site, __ATOMIC_RELAXED);
+          int64_t tg = __atomic_load_n(&t->await_target, __ATOMIC_RELAXED);
+          __atomic_thread_fence(__ATOMIC_ACQUIRE);
+          uint32_t s2 = __atomic_load_n(&t->wait_seq, __ATOMIC_RELAXED);
+          if (s1 == s2) {
+            awaiting = w;
+            await_site = as;
+            target = tg;
+            break;
+          }
+        }
+      }
+      int64_t age = now >= t->created_ns ? (now - t->created_ns) / 1000000 : 0;
+      snaps[i] = (fsh_task_snap){
+        t->id,
+        t->name ? t->name : "",
+        state,
+        t->blocking,
+        awaiting,
+        await_site,
+        target,
+        age,
+        t->spawn_site,
+        __atomic_load_n(&t->polls, __ATOMIC_RELAXED),
+      };
+    }
+  }
+  pthread_mutex_unlock(&fsh_alive_lock);
+  if (snaps && i > 1) qsort(snaps, (size_t)i, sizeof(fsh_task_snap), fsh_snap_cmp);
+  *count_out = i;
+  return snaps;
+}
+
+char *fsh_rt_tasks_json(void) {
+  int64_t n = 0;
+  fsh_task_snap *snaps = fsh_tasks_snapshot(&n);
+  fsh_buf b = { NULL, 0, 0 };
+  fsh_buf_puts(&b, "[");
+  for (int64_t i = 0; i < n; i++) {
+    if (i > 0) fsh_buf_puts(&b, ",");
+    char await_text[96];
+    fsh_await_label(await_text, sizeof await_text, &snaps[i]);
+    fsh_buf_printf(&b, "{\"id\":%lld,\"name\":", (long long)snaps[i].id);
+    fsh_buf_json(&b, snaps[i].name);
+    fsh_buf_puts(&b, ",\"state\":");
+    fsh_buf_json(&b, fsh_state_label(snaps[i].state));
+    fsh_buf_puts(&b, ",\"awaiting\":");
+    fsh_buf_json(&b, await_text);
+    fsh_buf_puts(&b, ",\"awaitSite\":");
+    fsh_buf_json(&b, snaps[i].await_site ? snaps[i].await_site : "");
+    fsh_buf_printf(&b, ",\"ageMs\":%lld,\"spawnSite\":", (long long)snaps[i].age_ms);
+    fsh_buf_json(&b, snaps[i].spawn_site ? snaps[i].spawn_site : "");
+    fsh_buf_printf(&b, ",\"blocking\":%s,\"polls\":%lld}", snaps[i].blocking ? "true" : "false", (long long)snaps[i].polls);
+  }
+  fsh_buf_puts(&b, "]");
+  free(snaps);
+  return b.data;
+}
+
+char *fsh_rt_tasks_table(void) {
+  int64_t n = 0;
+  fsh_task_snap *snaps = fsh_tasks_snapshot(&n);
+  fsh_buf b = { NULL, 0, 0 };
+  if (n == 0) {
+    fsh_buf_puts(&b, "no live tasks\n");
+    free(snaps);
+    return b.data;
+  }
+  fsh_buf_printf(&b, "%-6s %-9s %-10s %-7s %-18s %-24s %s\n", "ID", "STATE", "AGE", "POLLS", "AWAITING", "NAME", "SPAWN SITE");
+  for (int64_t i = 0; i < n; i++) {
+    char await_text[96];
+    fsh_await_label(await_text, sizeof await_text, &snaps[i]);
+    char age_text[32];
+    snprintf(age_text, sizeof age_text, "%lldms", (long long)snaps[i].age_ms);
+    const char *what = await_text[0] ? await_text : "-";
+    const char *name = snaps[i].name[0] ? snaps[i].name : "-";
+    const char *site = snaps[i].spawn_site && snaps[i].spawn_site[0] ? snaps[i].spawn_site : "-";
+    fsh_buf_printf(&b, "%-6lld %-9s %-10s %-7lld %-18s %-24s %s\n",
+      (long long)snaps[i].id, fsh_state_label(snaps[i].state), age_text, (long long)snaps[i].polls, what, name, site);
+  }
+  free(snaps);
+  return b.data;
+}
+
+void fsh_rt_tasks_free(char *p) {
+  free(p);
+}
+
+static char *fsh_tasks_html(void) {
+  int64_t n = 0;
+  fsh_task_snap *snaps = fsh_tasks_snapshot(&n);
+  fsh_buf b = { NULL, 0, 0 };
+  fsh_buf_puts(&b,
+    "<!doctype html><html><head><meta charset=\"utf-8\">"
+    "<title>Fish Task Inspector</title>"
+    "<noscript><meta http-equiv=\"refresh\" content=\"1\"></noscript>"
+    "<style>"
+    "body{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin:20px;color:#111;background:#fafafa}"
+    "h1{font-size:16px;margin:0 0 8px}p{font-size:12px;color:#555;margin:0 0 12px}"
+    "table{border-collapse:collapse;width:100%;font-size:13px;background:#fff}"
+    "th,td{border:1px solid #ddd;padding:6px 8px;text-align:left;vertical-align:top}"
+    "th{background:#f0f0f0}"
+    "</style></head><body>"
+    "<h1>Fish Task Inspector</h1>"
+    "<p id=\"meta\">");
+  fsh_buf_printf(&b, "%lld live task%s</p>", (long long)n, n == 1 ? "" : "s");
+  fsh_buf_puts(&b,
+    "<table><thead><tr>"
+    "<th>ID</th><th>State</th><th>Age</th><th>Polls</th><th>Awaiting</th><th>Await Site</th><th>Name</th><th>Spawn Site</th><th>Pool</th>"
+    "</tr></thead><tbody id=\"rows\">");
+  for (int64_t i = 0; i < n; i++) {
+    char await_text[96];
+    fsh_await_label(await_text, sizeof await_text, &snaps[i]);
+    fsh_buf_printf(&b, "<tr><td>%lld</td><td>", (long long)snaps[i].id);
+    fsh_buf_html(&b, fsh_state_label(snaps[i].state));
+    fsh_buf_printf(&b, "</td><td>%lldms</td><td>%lld</td><td>", (long long)snaps[i].age_ms, (long long)snaps[i].polls);
+    fsh_buf_html(&b, await_text[0] ? await_text : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_html(&b, snaps[i].await_site && snaps[i].await_site[0] ? snaps[i].await_site : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_html(&b, snaps[i].name[0] ? snaps[i].name : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_html(&b, snaps[i].spawn_site && snaps[i].spawn_site[0] ? snaps[i].spawn_site : "-");
+    fsh_buf_puts(&b, "</td><td>");
+    fsh_buf_puts(&b, snaps[i].blocking ? "blocking" : "worker");
+    fsh_buf_puts(&b, "</td></tr>");
+  }
+  fsh_buf_puts(&b,
+    "</tbody></table>"
+    "<script>"
+    "function cell(tr,v){var td=document.createElement('td');td.textContent=v;tr.appendChild(td);}"
+    "function tick(){fetch('/tasks.json').then(function(r){return r.json();}).then(function(ts){"
+    "var tb=document.getElementById('rows');tb.textContent='';"
+    "document.getElementById('meta').textContent=ts.length+' live task'+(ts.length===1?'':'s');"
+    "for(var i=0;i<ts.length;i++){var t=ts[i],tr=document.createElement('tr');"
+    "cell(tr,String(t.id));cell(tr,t.state);cell(tr,t.ageMs+'ms');cell(tr,String(t.polls));"
+    "cell(tr,t.awaiting||'-');cell(tr,t.awaitSite||'-');cell(tr,t.name||'-');"
+    "cell(tr,t.spawnSite||'-');cell(tr,t.blocking?'blocking':'worker');tb.appendChild(tr);}"
+    "}).catch(function(){});}"
+    "setInterval(tick,500);"
+    "</script></body></html>\n");
+  free(snaps);
+  return b.data;
+}
+
+static int fsh_inspect_fd = -1;
+static int fsh_inspect_pipe[2] = { -1, -1 };
+static pthread_t fsh_inspect_thread;
+static int fsh_inspect_running = 0;
+static int32_t fsh_inspect_stopping = 0;
+static char fsh_inspect_host[64] = "127.0.0.1";
+
+static void fsh_inspect_write_all(int fd, const char *data, size_t len, int64_t deadline) {
+  size_t off = 0;
+  while (off < len && !__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE) && fsh_now() < deadline) {
+#ifdef MSG_NOSIGNAL
+    ssize_t n = send(fd, data + off, len - off, MSG_NOSIGNAL);
+#else
+    ssize_t n = send(fd, data + off, len - off, 0);
+#endif
+    if (n > 0) { off += (size_t)n; continue; }
+    if (n < 0 && errno == EINTR) continue;
+    break;
+  }
+}
+
+static void fsh_inspect_reply(int fd, const char *status, const char *type, const char *body, size_t len) {
+  char head[256];
+  int hlen = snprintf(head, sizeof head,
+    "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+    status, type, len);
+  int64_t deadline = fsh_now() + 2000000000LL;
+  if (hlen > 0 && (size_t)hlen < sizeof head) fsh_inspect_write_all(fd, head, (size_t)hlen, deadline);
+  if (body && len > 0) fsh_inspect_write_all(fd, body, len, deadline);
+}
+
+static int fsh_ascii_ieq(const char *a, const char *b, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    unsigned char ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+    if (ca >= 'A' && ca <= 'Z') ca += 32;
+    if (cb >= 'A' && cb <= 'Z') cb += 32;
+    if (ca != cb) return 0;
+  }
+  return 1;
+}
+
+// Guards against DNS rebinding from untrusted browser origins by requiring Host to match
+// loopback or the configured bind host.
+static int fsh_inspect_host_ok(const char *req) {
+  const char *p = strchr(req, '\n');
+  while (p) {
+    p++;
+    if (*p == '\r' || *p == '\n' || !*p) break;
+    if (fsh_ascii_ieq(p, "host:", 5)) {
+      const char *v = p + 5;
+      while (*v == ' ' || *v == '\t') v++;
+      const char *e = v;
+      while (*e && *e != '\r' && *e != '\n') e++;
+      while (e > v && (e[-1] == ' ' || e[-1] == '\t')) e--;
+      // Strip optional :port (handling bracketed IPv6 [::1]:port).
+      const char *host_end = e;
+      if (v < e && *v == '[') {
+        const char *rb = memchr(v, ']', (size_t)(e - v));
+        if (rb) host_end = rb + 1;
+      } else {
+        for (const char *c = v; c < e; c++) if (*c == ':') { host_end = c; break; }
+      }
+      size_t hlen = (size_t)(host_end - v);
+      if (hlen == 9 && fsh_ascii_ieq(v, "localhost", 9)) return 1;
+      if (hlen == 9 && memcmp(v, "127.0.0.1", 9) == 0) return 1;
+      if (hlen == 5 && memcmp(v, "[::1]", 5) == 0) return 1;
+      size_t blen = strlen(fsh_inspect_host);
+      if (blen > 0 && hlen == blen && fsh_ascii_ieq(v, fsh_inspect_host, blen)) return 1;
+      return 0;
+    }
+    p = strchr(p, '\n');
+  }
+  return 0;
+}
+
+static void fsh_inspect_handle(int c) {
+  struct timeval tv = { 1, 0 };
+  setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+#ifdef SO_NOSIGPIPE
+  int on = 1;
+  setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
+#endif
+  char req[8192];
+  size_t total = 0;
+  int complete = 0;
+  int64_t deadline = fsh_now() + 1000000000LL;
+  while (total < sizeof req - 1 && !__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE) && fsh_now() < deadline) {
+    ssize_t n = recv(c, req + total, sizeof req - 1 - total, 0);
+    if (n > 0) {
+      if (memchr(req + total, 0, (size_t)n) != NULL) {
+        const char *msg = "bad request\n";
+        fsh_inspect_reply(c, "400 Bad Request", "text/plain; charset=utf-8", msg, strlen(msg));
+        return;
+      }
+      total += (size_t)n;
+      req[total] = 0;
+      if (strstr(req, "\r\n\r\n") || strstr(req, "\n\n")) {
+        complete = 1;
+        break;
+      }
+      continue;
+    }
+    if (n < 0 && errno == EINTR) continue;
+    break;
+  }
+  if (total == 0) return;
+  if (!complete) {
+    if (total == sizeof req - 1) {
+      const char *msg = "request header fields too large\n";
+      fsh_inspect_reply(c, "431 Request Header Fields Too Large", "text/plain; charset=utf-8", msg, strlen(msg));
+    }
+    return;
+  }
+  req[total] = 0;
+  if (!fsh_inspect_host_ok(req)) {
+    const char *msg = "forbidden host\n";
+    fsh_inspect_reply(c, "403 Forbidden", "text/plain; charset=utf-8", msg, strlen(msg));
+    return;
+  }
+  if (strncmp(req, "GET ", 4) != 0) {
+    const char *msg = "method not allowed\n";
+    fsh_inspect_reply(c, "405 Method Not Allowed", "text/plain; charset=utf-8", msg, strlen(msg));
+    return;
+  }
+  char *path = req + 4;
+  char *end = path;
+  while (*end && *end != ' ' && *end != '?' && *end != '\r' && *end != '\n') end++;
+  *end = 0;
+  if (strcmp(path, "/") == 0) {
+    char *html = fsh_tasks_html();
+    fsh_inspect_reply(c, "200 OK", "text/html; charset=utf-8", html ? html : "", html ? strlen(html) : 0);
+    free(html);
+  } else if (strcmp(path, "/tasks.json") == 0 || strcmp(path, "/json") == 0) {
+    char *json = fsh_rt_tasks_json();
+    fsh_inspect_reply(c, "200 OK", "application/json", json ? json : "[]", json ? strlen(json) : 2);
+    free(json);
+  } else if (strcmp(path, "/tasks") == 0 || strcmp(path, "/text") == 0) {
+    char *text = fsh_rt_tasks_table();
+    fsh_inspect_reply(c, "200 OK", "text/plain; charset=utf-8", text ? text : "", text ? strlen(text) : 0);
+    free(text);
+  } else {
+    const char *msg = "not found\n";
+    fsh_inspect_reply(c, "404 Not Found", "text/plain; charset=utf-8", msg, strlen(msg));
+  }
+}
+
+// Runs on a dedicated thread outside the worker pool so the inspector stays reachable even when
+// every Fish worker is blocked.
+static void *fsh_inspector_loop(void *arg) {
+  (void)arg;
+  while (!__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE)) {
+    struct pollfd fds[2];
+    fds[0].fd = fsh_inspect_fd;
+    fds[0].events = POLLIN;
+    fds[0].revents = 0;
+    fds[1].fd = fsh_inspect_pipe[0];
+    fds[1].events = POLLIN;
+    fds[1].revents = 0;
+    int r = poll(fds, 2, -1);
+    if (r < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) break;
+    if (fds[0].revents & POLLIN) {
+      while (!__atomic_load_n(&fsh_inspect_stopping, __ATOMIC_ACQUIRE)) {
+        int c = FSH_ACCEPT(fsh_inspect_fd);
+        if (c < 0) {
+          if (errno == EINTR || errno == ECONNABORTED || errno == EPROTO) continue;
+          break;
+        }
+        int fl = fcntl(c, F_GETFL, 0);
+        if (fl >= 0) fcntl(c, F_SETFL, fl & ~O_NONBLOCK);
+        fcntl(c, F_SETFD, FD_CLOEXEC);
+        fsh_inspect_handle(c);
+        shutdown(c, SHUT_WR);
+        close(c);
+      }
+    }
+  }
+  return NULL;
+}
+
+static int fsh_inspect_parse_port(const char *s, int *out) {
+  if (!s || !s[0]) return 0;
+  long v = 0;
+  for (const char *p = s; *p; p++) {
+    if (*p < '0' || *p > '9') return 0;
+    v = v * 10 + (*p - '0');
+    if (v > 65535) return 0;
+  }
+  *out = (int)v;
+  return 1;
+}
+
+static void fsh_inspector_start(void) {
+  const char *spec = getenv("FISH_INSPECT");
+  if (!spec || !spec[0] || strcmp(spec, "0") == 0 || strcmp(spec, "false") == 0) return;
+  char host[64] = "127.0.0.1";
+  int port = 9229;
+  if (strcmp(spec, "1") == 0 || strcmp(spec, "true") == 0) {
+    // Default loopback address and port.
+  } else if (fsh_inspect_parse_port(spec, &port)) {
+    // Port-only shorthand binds loopback.
+  } else {
+    const char *colon = strrchr(spec, ':');
+    if (!colon || colon == spec || (size_t)(colon - spec) >= sizeof host || !fsh_inspect_parse_port(colon + 1, &port)) {
+      fprintf(stderr, "fish inspector: invalid FISH_INSPECT '%s' (expected 1, <port>, or <host>:<port>)\n", spec);
+      return;
+    }
+    memcpy(host, spec, (size_t)(colon - spec));
+    host[colon - spec] = 0;
+    if (strcmp(host, "localhost") == 0) strcpy(host, "127.0.0.1");
+  }
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof addr);
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((uint16_t)port);
+  if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+    fprintf(stderr, "fish inspector: invalid FISH_INSPECT host '%s'\n", host);
+    return;
+  }
+  if (pipe(fsh_inspect_pipe) != 0) {
+    fprintf(stderr, "fish inspector: failed to create wakeup pipe\n");
+    return;
+  }
+  fcntl(fsh_inspect_pipe[0], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_inspect_pipe[1], F_SETFD, FD_CLOEXEC);
+  fcntl(fsh_inspect_pipe[0], F_SETFL, O_NONBLOCK);
+  fcntl(fsh_inspect_pipe[1], F_SETFL, O_NONBLOCK);
+  int fd = socket(AF_INET, SOCK_STREAM | FSH_SOCK_CLOEXEC, 0);
+  if (fd < 0) {
+    fprintf(stderr, "fish inspector: failed to create socket\n");
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+    return;
+  }
+  fcntl(fd, F_SETFD, FD_CLOEXEC);
+  fcntl(fd, F_SETFL, O_NONBLOCK);
+  int on = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+  if (bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(fd, 16) != 0) {
+    fprintf(stderr, "fish inspector: failed to listen on %s:%d (%s)\n", host, port, strerror(errno));
+    close(fd);
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+    return;
+  }
+  socklen_t alen = sizeof addr;
+  int bound = port;
+  if (getsockname(fd, (struct sockaddr *)&addr, &alen) == 0) bound = ntohs(addr.sin_port);
+  snprintf(fsh_inspect_host, sizeof fsh_inspect_host, "%s", host);
+  __atomic_store_n(&fsh_inspect_stopping, 0, __ATOMIC_RELEASE);
+  fsh_inspect_fd = fd;
+  if (pthread_create(&fsh_inspect_thread, NULL, fsh_inspector_loop, NULL) != 0) {
+    close(fd);
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_fd = fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+    return;
+  }
+  fsh_inspect_running = 1;
+  if ((ntohl(addr.sin_addr.s_addr) >> 24) != 127) {
+    fprintf(stderr, "fish inspector: warning: binding non-loopback address %s:%d without authentication\n", host, bound);
+  }
+  fprintf(stderr, "fish inspector listening on http://%s:%d\n", host, bound);
+  fflush(stderr);
+}
+
+static void fsh_inspector_stop(int detach) {
+  if (!fsh_inspect_running) return;
+  __atomic_store_n(&fsh_inspect_stopping, 1, __ATOMIC_RELEASE);
+  char b = 1;
+  ssize_t ignored = write(fsh_inspect_pipe[1], &b, 1);
+  (void)ignored;
+  if (detach) {
+    pthread_detach(fsh_inspect_thread);
+  } else {
+    pthread_join(fsh_inspect_thread, NULL);
+    close(fsh_inspect_fd);
+    close(fsh_inspect_pipe[0]);
+    close(fsh_inspect_pipe[1]);
+    fsh_inspect_fd = fsh_inspect_pipe[0] = fsh_inspect_pipe[1] = -1;
+  }
+  fsh_inspect_running = 0;
+}
+
+#ifdef FSH_PROFILE
+// Sampling profiler: a dedicated sampler thread sends SIGPROF to registered threads (main,
+// async workers, and blocking pool threads). Each target's async-signal-safe handler walks its
+// own fsh_rt_frames shadow stack into a lock-free ring buffer; the sampler drains the ring into
+// an aggregated stack table and writes a folded-stack or interactive SVG flame graph on exit.
+#define FSH_PROF_MAX_THREADS 1024
+#define FSH_PROF_MAX_DEPTH 64
+#define FSH_PROF_RING 4096
+
+typedef struct {
+  pthread_t tid;
+  int32_t active;
+} fsh_prof_slot;
+
+typedef struct {
+  int32_t depth;
+  const char *names[FSH_PROF_MAX_DEPTH];
+} fsh_prof_sample;
+
+typedef struct {
+  char *stack;
+  uint64_t hash;
+  uint64_t count;
+} fsh_prof_entry;
+
+static pthread_mutex_t fsh_prof_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fsh_prof_cond = PTHREAD_COND_INITIALIZER;
+static fsh_prof_slot fsh_prof_slots[FSH_PROF_MAX_THREADS];
+// Separate 16 KB state array so fsh_prof_drain avoids scanning 2+ MB of sample payloads per tick.
+static int32_t fsh_prof_states[FSH_PROF_RING];
+static fsh_prof_sample fsh_prof_ring[FSH_PROF_RING];
+static uint64_t fsh_prof_write = 0;
+static int32_t fsh_prof_enabled = 0;
+static int32_t fsh_prof_stopping = 0;
+static int32_t fsh_prof_in_flight = 0;
+static int32_t fsh_prof_started = 0;
+static int fsh_prof_main_slot = -1;
+static int64_t fsh_prof_hz = 997;
+static int64_t fsh_prof_threads_seen = 0;
+static char fsh_prof_out[1024] = "fish-profile.svg";
+static pthread_t fsh_prof_thread;
+static fsh_prof_entry *fsh_prof_entries = NULL;
+static size_t fsh_prof_cap = 0;
+static size_t fsh_prof_count = 0;
+static uint64_t fsh_prof_total = 0;
+
+static int fsh_prof_is_active(void) {
+  return __atomic_load_n(&fsh_prof_enabled, __ATOMIC_ACQUIRE) != 0;
+}
+
+static int fsh_prof_register(void) {
+  if (!__atomic_load_n(&fsh_prof_started, __ATOMIC_ACQUIRE) && !__atomic_load_n(&fsh_prof_enabled, __ATOMIC_ACQUIRE)) {
+    // Allow main thread registration during constructor before fsh_prof_started flips to 1.
+    if (fsh_prof_main_slot != -2) return -1;
+  }
+  // Force macOS Mach-O lazy TLV allocation on this thread before SIGPROF can arrive here.
+  (void)__atomic_load_n(&fsh_rt_frames, __ATOMIC_RELAXED);
+  pthread_mutex_lock(&fsh_prof_lock);
+  int found = -1;
+  for (int i = 0; i < FSH_PROF_MAX_THREADS; i++) {
+    if (!fsh_prof_slots[i].active) {
+      fsh_prof_slots[i].tid = pthread_self();
+      fsh_prof_slots[i].active = 1;
+      __atomic_fetch_add(&fsh_prof_threads_seen, 1, __ATOMIC_RELAXED);
+      found = i;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&fsh_prof_lock);
+  return found;
+}
+
+static void fsh_prof_unregister(int slot) {
+  if (slot < 0 || slot >= FSH_PROF_MAX_THREADS) return;
+  pthread_mutex_lock(&fsh_prof_lock);
+  fsh_prof_slots[slot].active = 0;
+  pthread_mutex_unlock(&fsh_prof_lock);
+}
+
+static void fsh_prof_handler(int sig) {
+  (void)sig;
+  int saved_errno = errno;
+  __atomic_fetch_add(&fsh_prof_in_flight, 1, __ATOMIC_SEQ_CST);
+  if (__atomic_load_n(&fsh_prof_enabled, __ATOMIC_SEQ_CST)) {
+    fsh_frame *f = __atomic_load_n(&fsh_rt_frames, __ATOMIC_RELAXED);
+    __atomic_signal_fence(__ATOMIC_ACQUIRE);
+    if (f) {
+      const char *tmp[FSH_PROF_MAX_DEPTH];
+      int32_t depth = 0;
+      while (f && depth < FSH_PROF_MAX_DEPTH) {
+        tmp[depth++] = f->name ? f->name : "<unknown>";
+        f = f->prev;
+      }
+      if (depth > 0) {
+        uint64_t idx = __atomic_fetch_add(&fsh_prof_write, 1, __ATOMIC_RELAXED) & (FSH_PROF_RING - 1);
+        int32_t expected = 0;
+        if (__atomic_compare_exchange_n(&fsh_prof_states[idx], &expected, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
+          fsh_prof_ring[idx].depth = depth;
+          for (int32_t i = 0; i < depth; i++) fsh_prof_ring[idx].names[i] = tmp[depth - 1 - i];
+          __atomic_store_n(&fsh_prof_states[idx], 2, __ATOMIC_RELEASE);
+        }
+      }
+    }
+  }
+  __atomic_fetch_sub(&fsh_prof_in_flight, 1, __ATOMIC_SEQ_CST);
+  errno = saved_errno;
+}
+
+static uint64_t fsh_prof_hash(const char *s) {
+  uint64_t h = 14695981039346656037ULL;
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    h ^= (uint64_t)*p;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+static void fsh_prof_table_grow(void) {
+  size_t new_cap = fsh_prof_cap ? fsh_prof_cap * 2 : 256;
+  fsh_prof_entry *next = calloc(new_cap, sizeof(fsh_prof_entry));
+  if (!next) return;
+  for (size_t i = 0; i < fsh_prof_cap; i++) {
+    if (!fsh_prof_entries[i].stack) continue;
+    size_t mask = new_cap - 1;
+    size_t pos = (size_t)(fsh_prof_entries[i].hash & mask);
+    while (next[pos].stack) pos = (pos + 1) & mask;
+    next[pos] = fsh_prof_entries[i];
+  }
+  free(fsh_prof_entries);
+  fsh_prof_entries = next;
+  fsh_prof_cap = new_cap;
+}
+
+static void fsh_prof_record(const char *const *names, int32_t depth) {
+  size_t len = 0;
+  for (int32_t i = 0; i < depth; i++) len += strlen(names[i]) + (i > 0 ? 1 : 0);
+  char *stack = malloc(len + 1);
+  if (!stack) return;
+  char *w = stack;
+  for (int32_t i = 0; i < depth; i++) {
+    if (i > 0) *w++ = ';';
+    size_t n = strlen(names[i]);
+    memcpy(w, names[i], n);
+    w += n;
+  }
+  *w = 0;
+  uint64_t h = fsh_prof_hash(stack);
+  if (fsh_prof_count * 2 >= fsh_prof_cap) fsh_prof_table_grow();
+  if (!fsh_prof_entries || fsh_prof_cap == 0) { free(stack); return; }
+  size_t mask = fsh_prof_cap - 1;
+  size_t pos = (size_t)(h & mask);
+  size_t checked = 0;
+  while (fsh_prof_entries[pos].stack) {
+    if (fsh_prof_entries[pos].hash == h && strcmp(fsh_prof_entries[pos].stack, stack) == 0) {
+      fsh_prof_entries[pos].count++;
+      fsh_prof_total++;
+      free(stack);
+      return;
+    }
+    if (++checked >= fsh_prof_cap) { free(stack); return; }
+    pos = (pos + 1) & mask;
+  }
+  if (fsh_prof_count + 1 >= fsh_prof_cap) { free(stack); return; }
+  fsh_prof_entries[pos].stack = stack;
+  fsh_prof_entries[pos].hash = h;
+  fsh_prof_entries[pos].count = 1;
+  fsh_prof_count++;
+  fsh_prof_total++;
+}
+
+static void fsh_prof_drain(void) {
+  for (size_t i = 0; i < FSH_PROF_RING; i++) {
+    if (__atomic_load_n(&fsh_prof_states[i], __ATOMIC_ACQUIRE) == 2) {
+      int32_t d = fsh_prof_ring[i].depth;
+      const char *names[FSH_PROF_MAX_DEPTH];
+      if (d > FSH_PROF_MAX_DEPTH) d = FSH_PROF_MAX_DEPTH;
+      for (int32_t k = 0; k < d; k++) names[k] = fsh_prof_ring[i].names[k];
+      __atomic_store_n(&fsh_prof_states[i], 0, __ATOMIC_RELEASE);
+      if (d > 0) fsh_prof_record(names, d);
+    }
+  }
+}
+
+static void *fsh_prof_sampler(void *arg) {
+  (void)arg;
+  sigset_t mask;
+  sigemptyset(&mask);
+  sigaddset(&mask, SIGPROF);
+  pthread_sigmask(SIG_BLOCK, &mask, NULL);
+  int64_t step_ns = 1000000000LL / fsh_prof_hz;
+  if (step_ns < 100000LL) step_ns = 100000LL;
+  for (;;) {
+    pthread_mutex_lock(&fsh_prof_lock);
+    if (fsh_prof_stopping) {
+      pthread_mutex_unlock(&fsh_prof_lock);
+      break;
+    }
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_nsec += (long)step_ns;
+    until.tv_sec += until.tv_nsec / 1000000000L;
+    until.tv_nsec %= 1000000000L;
+    pthread_cond_timedwait(&fsh_prof_cond, &fsh_prof_lock, &until);
+    if (fsh_prof_stopping) {
+      pthread_mutex_unlock(&fsh_prof_lock);
+      break;
+    }
+    // Hold fsh_prof_lock while sending SIGPROF so no registered thread can unregister and exit
+    // before pthread_kill runs; the handler never acquires fsh_prof_lock.
+    for (int i = 0; i < FSH_PROF_MAX_THREADS; i++) {
+      if (fsh_prof_slots[i].active) pthread_kill(fsh_prof_slots[i].tid, SIGPROF);
+    }
+    pthread_mutex_unlock(&fsh_prof_lock);
+    fsh_prof_drain();
+  }
+  return NULL;
+}
+
+// Orders '\0' < ';' < all other bytes so children ("foo;bar") always sort immediately after their
+// parent ("foo") rather than being split by sibling names like "foo2" or "foo.bar".
+static int fsh_prof_entry_cmp(const void *a, const void *b) {
+  const unsigned char *p = (const unsigned char *)((const fsh_prof_entry *)a)->stack;
+  const unsigned char *q = (const unsigned char *)((const fsh_prof_entry *)b)->stack;
+  while (*p && *p == *q) { p++; q++; }
+  int ca = *p == 0 ? 0 : *p == ';' ? 1 : (int)*p + 2;
+  int cb = *q == 0 ? 0 : *q == ';' ? 1 : (int)*q + 2;
+  return ca < cb ? -1 : ca > cb ? 1 : 0;
+}
+
+static void fsh_buf_xml(fsh_buf *b, const char *s) {
+  if (!s) return;
+  for (const char *p = s; *p; p++) {
+    if (*p == '&') fsh_buf_puts(b, "&amp;");
+    else if (*p == '<') fsh_buf_puts(b, "&lt;");
+    else if (*p == '>') fsh_buf_puts(b, "&gt;");
+    else if (*p == '"') fsh_buf_puts(b, "&quot;");
+    else if (*p == '\'') fsh_buf_puts(b, "&apos;");
+    else fsh_buf_putn(b, p, 1);
+  }
+}
+
+typedef struct {
+  int32_t depth;
+  uint64_t x_start;
+  uint64_t samples;
+  char *name;
+} fsh_fg_rect;
+
+typedef struct {
+  char *name;
+  uint64_t x_start;
+  uint64_t samples;
+} fsh_fg_open;
+
+static void fsh_fg_push_rect(fsh_fg_rect **rects, size_t *count, size_t *cap, int32_t depth, uint64_t x_start, uint64_t samples, const char *name) {
+  if (!name) return;
+  if (*count == *cap) {
+    size_t ncap = *cap ? *cap * 2 : 128;
+    fsh_fg_rect *next = realloc(*rects, ncap * sizeof(fsh_fg_rect));
+    if (!next) return;
+    *rects = next;
+    *cap = ncap;
+  }
+  char *copy = strdup(name);
+  if (!copy) return;
+  (*rects)[(*count)++] = (fsh_fg_rect){ depth, x_start, samples, copy };
+}
+
+static int fsh_prof_write_svg(FILE *fp, const fsh_prof_entry *sorted, size_t n, uint64_t total) {
+  fsh_fg_rect *rects = NULL;
+  size_t rcount = 0, rcap = 0;
+  fsh_fg_open open[FSH_PROF_MAX_DEPTH];
+  int32_t open_depth = 0;
+  int32_t max_depth = 0;
+  uint64_t cursor = 0;
+
+  if (total > 0) {
+    fsh_fg_push_rect(&rects, &rcount, &rcap, 0, 0, total, "all");
+  }
+  for (size_t i = 0; i < n; i++) {
+    const char *parts[FSH_PROF_MAX_DEPTH];
+    size_t plen[FSH_PROF_MAX_DEPTH];
+    int32_t depth = 0;
+    const char *p = sorted[i].stack;
+    while (*p && depth < FSH_PROF_MAX_DEPTH) {
+      const char *semi = strchr(p, ';');
+      parts[depth] = p;
+      plen[depth] = semi ? (size_t)(semi - p) : strlen(p);
+      depth++;
+      if (!semi) break;
+      p = semi + 1;
+    }
+    if (depth > max_depth) max_depth = depth;
+    int32_t common = 0;
+    while (common < open_depth && common < depth &&
+           strlen(open[common].name) == plen[common] &&
+           memcmp(open[common].name, parts[common], plen[common]) == 0) {
+      common++;
+    }
+    for (int32_t d = open_depth - 1; d >= common; d--) {
+      fsh_fg_push_rect(&rects, &rcount, &rcap, d + 1, open[d].x_start, open[d].samples, open[d].name);
+      free(open[d].name);
+    }
+    for (int32_t d = 0; d < common; d++) open[d].samples += sorted[i].count;
+    int32_t opened = common;
+    for (int32_t d = common; d < depth; d++) {
+      char *copy = malloc(plen[d] + 1);
+      if (!copy) break;
+      memcpy(copy, parts[d], plen[d]);
+      copy[plen[d]] = 0;
+      open[d] = (fsh_fg_open){ copy, cursor, sorted[i].count };
+      opened = d + 1;
+    }
+    open_depth = opened;
+    cursor += sorted[i].count;
+  }
+  for (int32_t d = open_depth - 1; d >= 0; d--) {
+    fsh_fg_push_rect(&rects, &rcount, &rcap, d + 1, open[d].x_start, open[d].samples, open[d].name);
+    free(open[d].name);
+  }
+
+  int width = 1200;
+  int pad = 10;
+  int frame_h = 18;
+  int header_h = 46;
+  int footer_h = 26;
+  int inner_w = width - pad * 2;
+  int height = header_h + footer_h + (max_depth + 2) * frame_h;
+  int base_y = height - footer_h;
+
+  fsh_buf b = { NULL, 0, 0, 0 };
+  fsh_buf_printf(&b,
+    "<?xml version=\"1.0\" standalone=\"no\"?>\n"
+    "<svg version=\"1.1\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\" xmlns=\"http://www.w3.org/2000/svg\">\n"
+    "<style>"
+    "text{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;fill:#111}"
+    ".fg{cursor:pointer}.fg:hover rect{stroke:#111;stroke-width:0.8}"
+    "</style>\n"
+    "<rect width=\"100%%\" height=\"100%%\" fill=\"#f8f8f5\"/>\n"
+    "<text x=\"%d\" y=\"24\" style=\"font-size:16px;font-weight:bold\">Fish Flame Graph (%llu sample%s)</text>\n"
+    "<text id=\"reset\" x=\"%d\" y=\"24\" text-anchor=\"end\" style=\"cursor:pointer;fill:#444;display:none\">Reset Zoom</text>\n",
+    width, height, width, height, pad, (unsigned long long)total, total == 1 ? "" : "s", width - pad);
+
+  if (total == 0) {
+    fsh_buf_printf(&b, "<text x=\"%d\" y=\"%d\">No stack samples collected.</text>\n", pad, header_h + 18);
+  } else {
+    for (size_t i = 0; i < rcount; i++) {
+      double x = pad + ((double)rects[i].x_start / (double)total) * inner_w;
+      double w = ((double)rects[i].samples / (double)total) * inner_w;
+      if (w < 0.1) continue;
+      int y = base_y - (rects[i].depth + 1) * frame_h;
+      double pct = 100.0 * (double)rects[i].samples / (double)total;
+      uint64_t h = fsh_prof_hash(rects[i].name);
+      int cr = rects[i].depth == 0 ? 225 : (int)(205 + (h % 50));
+      int cg = rects[i].depth == 0 ? 190 : (int)(85 + ((h >> 8) % 125));
+      int cb = rects[i].depth == 0 ? 140 : (int)(25 + ((h >> 16) % 55));
+      fsh_buf_printf(&b, "<g class=\"fg\" data-x=\"%.6f\" data-w=\"%.6f\" data-d=\"%d\"><title>",
+        (double)rects[i].x_start / (double)total, (double)rects[i].samples / (double)total, rects[i].depth);
+      fsh_buf_xml(&b, rects[i].name);
+      fsh_buf_printf(&b, " (%llu sample%s, %.2f%%)</title>", (unsigned long long)rects[i].samples, rects[i].samples == 1 ? "" : "s", pct);
+      fsh_buf_printf(&b, "<rect x=\"%.2f\" y=\"%d\" width=\"%.2f\" height=\"%d\" rx=\"2\" fill=\"rgb(%d,%d,%d)\"/>",
+        x, y, w > 1.0 ? w - 0.5 : w, frame_h - 1, cr, cg, cb);
+      int max_chars = (int)((w - 6.0) / 7.2);
+      fsh_buf_printf(&b, "<text x=\"%.2f\" y=\"%d\">", x + 3.0, y + 13);
+      if (max_chars >= 3) {
+        size_t nlen = strlen(rects[i].name);
+        if ((int)nlen <= max_chars) {
+          fsh_buf_xml(&b, rects[i].name);
+        } else {
+          char cut[128];
+          int keep = max_chars - 2;
+          if (keep > (int)sizeof cut - 4) keep = (int)sizeof cut - 4;
+          if (keep < 1) keep = 1;
+          while (keep > 0 && ((unsigned char)rects[i].name[keep] & 0xC0) == 0x80) keep--;
+          memcpy(cut, rects[i].name, (size_t)keep);
+          cut[keep] = '.';
+          cut[keep + 1] = '.';
+          cut[keep + 2] = 0;
+          fsh_buf_xml(&b, cut);
+        }
+      }
+      fsh_buf_puts(&b, "</text></g>\n");
+    }
+  }
+
+  fsh_buf_printf(&b,
+    "<script><![CDATA[\n"
+    "(function(){\n"
+    "var pad=%d,iw=%d,gs=document.getElementsByClassName('fg'),rst=document.getElementById('reset');\n"
+    "function zoom(zx,zw){\n"
+    "  rst.style.display=(zx>0||zw<1)?'block':'none';\n"
+    "  for(var i=0;i<gs.length;i++){\n"
+    "    var g=gs[i],x=parseFloat(g.getAttribute('data-x')),w=parseFloat(g.getAttribute('data-w'));\n"
+    "    var x0=Math.max(x,zx),x1=Math.min(x+w,zx+zw);\n"
+    "    if(x1<=x0){g.style.display='none';continue;}\n"
+    "    g.style.display='';\n"
+    "    var px=pad+((x0-zx)/zw)*iw,pw=((x1-x0)/zw)*iw;\n"
+    "    var r=g.getElementsByTagName('rect')[0],t=g.getElementsByTagName('text')[0];\n"
+    "    r.setAttribute('x',px.toFixed(2));r.setAttribute('width',Math.max(0.5,pw-0.5).toFixed(2));\n"
+    "    t.setAttribute('x',(px+3).toFixed(2));\n"
+    "  }\n"
+    "}\n"
+    "for(var i=0;i<gs.length;i++){gs[i].addEventListener('click',function(){zoom(parseFloat(this.getAttribute('data-x')),parseFloat(this.getAttribute('data-w')));});}\n"
+    "rst.addEventListener('click',function(){zoom(0,1);});\n"
+    "})();\n"
+    "]]></script>\n</svg>\n", pad, inner_w);
+
+  int ok = !b.failed && b.data != NULL && fwrite(b.data, 1, b.len, fp) == b.len;
+  free(b.data);
+  for (size_t i = 0; i < rcount; i++) free(rects[i].name);
+  free(rects);
+  return ok;
+}
+
+static int fsh_prof_is_folded(const char *path) {
+  size_t len = strlen(path);
+  return (len >= 7 && strcmp(path + len - 7, ".folded") == 0) ||
+         (len >= 4 && strcmp(path + len - 4, ".txt") == 0);
+}
+
+__attribute__((constructor)) static void fsh_prof_init(void) {
+  const char *out = getenv("FISH_PROFILE");
+  if (out && (strcmp(out, "0") == 0 || strcmp(out, "off") == 0 || strcmp(out, "false") == 0)) return;
+  if (out && out[0] && strcmp(out, "1") != 0 && strcmp(out, "true") != 0) {
+    int n = snprintf(fsh_prof_out, sizeof fsh_prof_out, "%s", out);
+    if (n < 0 || (size_t)n >= sizeof fsh_prof_out) {
+      fprintf(stderr, "fish profile: FISH_PROFILE path is too long (max %zu bytes)\n", sizeof fsh_prof_out - 1);
+      return;
+    }
+  }
+  const char *hz_env = getenv("FISH_PROFILE_HZ");
+  if (hz_env && hz_env[0]) {
+    char *end = NULL;
+    long v = strtol(hz_env, &end, 10);
+    if (end && *end == '\0' && v >= 10 && v <= 10000) fsh_prof_hz = v;
+  }
+  fsh_prof_main_slot = -2;
+  fsh_prof_main_slot = fsh_prof_register();
+  struct sigaction sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sa_handler = fsh_prof_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESTART;
+  if (sigaction(SIGPROF, &sa, NULL) != 0) {
+    fsh_prof_unregister(fsh_prof_main_slot);
+    fsh_prof_main_slot = -1;
+    return;
+  }
+  __atomic_store_n(&fsh_prof_enabled, 1, __ATOMIC_SEQ_CST);
+  if (pthread_create(&fsh_prof_thread, NULL, fsh_prof_sampler, NULL) != 0) {
+    __atomic_store_n(&fsh_prof_enabled, 0, __ATOMIC_SEQ_CST);
+    fsh_prof_unregister(fsh_prof_main_slot);
+    fsh_prof_main_slot = -1;
+    return;
+  }
+  __atomic_store_n(&fsh_prof_started, 1, __ATOMIC_RELEASE);
+}
+
+__attribute__((destructor)) static void fsh_prof_fini(void) {
+  if (!__atomic_load_n(&fsh_prof_started, __ATOMIC_ACQUIRE)) return;
+  __atomic_store_n(&fsh_prof_started, 0, __ATOMIC_RELEASE);
+  pthread_mutex_lock(&fsh_prof_lock);
+  fsh_prof_stopping = 1;
+  pthread_cond_broadcast(&fsh_prof_cond);
+  pthread_mutex_unlock(&fsh_prof_lock);
+  pthread_join(fsh_prof_thread, NULL);
+  __atomic_store_n(&fsh_prof_enabled, 0, __ATOMIC_SEQ_CST);
+  for (int i = 0; i < 500 && __atomic_load_n(&fsh_prof_in_flight, __ATOMIC_SEQ_CST) > 0; i++) {
+    struct timespec ts = { 0, 100000 };
+    nanosleep(&ts, NULL);
+  }
+  signal(SIGPROF, SIG_IGN);
+  fsh_prof_unregister(fsh_prof_main_slot);
+  fsh_prof_drain();
+
+  fsh_prof_entry *sorted = fsh_prof_count > 0 ? malloc(fsh_prof_count * sizeof(fsh_prof_entry)) : NULL;
+  size_t n = 0;
+  if (sorted) {
+    for (size_t i = 0; i < fsh_prof_cap; i++) {
+      if (fsh_prof_entries[i].stack) sorted[n++] = fsh_prof_entries[i];
+    }
+    if (n > 1) qsort(sorted, n, sizeof(fsh_prof_entry), fsh_prof_entry_cmp);
+  }
+
+  FILE *fp = fopen(fsh_prof_out, "wb");
+  if (!fp) {
+    fprintf(stderr, "fish profile: failed to write '%s' (%s)\n", fsh_prof_out, strerror(errno));
+  } else {
+    int ok = 1;
+    if (fsh_prof_is_folded(fsh_prof_out)) {
+      for (size_t i = 0; i < n; i++) {
+        if (fprintf(fp, "%s %llu\n", sorted[i].stack, (unsigned long long)sorted[i].count) < 0) { ok = 0; break; }
+      }
+    } else {
+      ok = fsh_prof_write_svg(fp, sorted, n, fsh_prof_total);
+    }
+    if (ferror(fp)) ok = 0;
+    if (fclose(fp) != 0) ok = 0;
+    if (!ok) {
+      fprintf(stderr, "fish profile: failed to write '%s'\n", fsh_prof_out);
+    } else {
+      int64_t threads = __atomic_load_n(&fsh_prof_threads_seen, __ATOMIC_RELAXED);
+      fprintf(stderr, "fish profile: %llu samples across %lld thread%s written to %s\n",
+        (unsigned long long)fsh_prof_total, (long long)threads, threads == 1 ? "" : "s", fsh_prof_out);
+    }
+  }
+
+  free(sorted);
+  for (size_t i = 0; i < fsh_prof_cap; i++) free(fsh_prof_entries[i].stack);
+  free(fsh_prof_entries);
+  fsh_prof_entries = NULL;
+  fsh_prof_cap = fsh_prof_count = 0;
+}
+#endif
+
+// Single-threaded deterministic simulation executor: no worker, timer, reactor, or pool threads.
+static int32_t fsh_sim_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, void *out, const char *name, const char *site) {
+  fsh_sim_stopping = 0;
+  fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size, name, site);
+  for (int phase = 0; phase < 2; phase++) {
+    if (phase == 1) {
+      if (fsh_panicked || fsh_main_task->outcome == 2) break;
+      fsh_timeouts_main_returned();
+    }
+    for (;;) {
+      if (fsh_panicked) break;
+      fsh_sim_tick();
+      if (phase == 0 && __atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) == FSH_DONE) break;
+      if (phase == 1) {
+        int32_t claimed = __atomic_load_n(&fsh_timeouts_claimed, __ATOMIC_ACQUIRE);
+        if (fsh_timeouts_task ? __atomic_load_n(&fsh_timeouts_task->state, __ATOMIC_ACQUIRE) == FSH_DONE : !claimed) break;
+      }
+      fsh_sim_fire_due();
+      if (fsh_sim_ready_count > 0) {
+        // On real time, tasks run in the order they woke, as a native worker's queue runs them.
+        // ponytail: taking the first shifts the rest; a ring buffer if thousands wait at once.
+        fsh_task *t;
+        if (fsh_sim_real) {
+          t = fsh_sim_ready[0];
+          memmove(fsh_sim_ready, fsh_sim_ready + 1, (size_t)(--fsh_sim_ready_count) * sizeof *fsh_sim_ready);
+        } else {
+          int64_t idx = (int64_t)(fsh_sim_next_u64(fsh_sim_sched_rng) % (uint64_t)fsh_sim_ready_count);
+          t = fsh_sim_ready[idx];
+          fsh_sim_ready[idx] = fsh_sim_ready[--fsh_sim_ready_count];
+        }
+        fsh_run(t);
+        continue;
+      }
+      int64_t next_ns = 0;
+      if (fsh_sim_next_event_ns(&next_ns)) {
+        // On real time nothing is due before the next timer, so the thread sleeps until it, in
+        // WASI's poll_oneoff.
+        if (fsh_sim_real && next_ns > fsh_sim_now_ns) {
+          int64_t wait = next_ns - fsh_sim_now_ns;
+          struct timespec for_ = { (time_t)(wait / 1000000000), (long)(wait % 1000000000) };
+          nanosleep(&for_, NULL);
+          fsh_sim_tick();
+        }
+        if (next_ns > fsh_sim_now_ns) fsh_sim_now_ns = next_ns;
+        fsh_sim_fire_due();
+        continue;
+      }
+      if (phase == 0 && __atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) == FSH_DONE) break;
+      if (phase == 1) {
+        int32_t claimed = __atomic_load_n(&fsh_timeouts_claimed, __ATOMIC_ACQUIRE);
+        if (fsh_timeouts_task ? __atomic_load_n(&fsh_timeouts_task->state, __ATOMIC_ACQUIRE) == FSH_DONE : !claimed) break;
+      }
+      if (fsh_sim_real) fputs("fish: deadlock: every task waits, and no timer or network event can wake one\n", stderr);
+      else fprintf(stderr, "fish sim deadlock (seed %llu) at %lldms: no runnable tasks, timers, or network events\n",
+        (unsigned long long)fsh_sim_seed_val, (long long)(fsh_sim_now_ns / 1000000));
+      for (fsh_task *a = fsh_alive; a; a = a->next) {
+        const char *aw = a->awaiting ? a->awaiting : "idle";
+        fprintf(stderr, "  task #%lld (%s): awaiting %s\n", (long long)a->id, a->name && a->name[0] ? a->name : "<anonymous>", aw);
+      }
+      fflush(stderr);
+      fsh_abandoned = 1;
+      exit(101);
+    }
+  }
+  fsh_sim_stopping = 1;
+  fsh_sim_drain_events();
+  while (fsh_timer_count > 0) fsh_timer_fire(fsh_timer_take(), 0);
+  free(fsh_timers);
+  fsh_timers = NULL;
+  fsh_timer_capacity = 0;
+  for (;;) {
+    fsh_task *t = fsh_alive;
+    if (!t) break;
+    fsh_unlink(t);
+    __atomic_store_n(&t->state, FSH_DONE, __ATOMIC_RELEASE);
+    t->drop(t->memory);
+    if (t->joiner) fsh_task_release(t->joiner);
+    t->joiner = NULL;
+    fsh_task_release(t);
+  }
+  while (fsh_timeout_count > 0) {
+    fsh_timeout t = fsh_timeout_take(0);
+    ((void (*)(void *))t.vtable[0])(t.block);
+  }
+  free(fsh_timeouts);
+  fsh_timeouts = NULL;
+  fsh_timeout_capacity = 0;
+  if (fsh_timeouts_waiter) fsh_task_release(fsh_timeouts_waiter);
+  if (fsh_timeouts_task) fsh_task_release(fsh_timeouts_task);
+  fsh_timeouts_waiter = fsh_timeouts_task = NULL;
+  fsh_sim_free_globals();
+  if (fsh_panicked) {
+    fsh_task_release(fsh_main_task);
+    exit(101);
+  }
+  int32_t outcome = fsh_main_task->outcome;
+  memcpy(out, fsh_output(fsh_main_task), output_size);
+  fsh_main_task->outcome = 0;
+  fsh_task_release(fsh_main_task);
+  return outcome;
+}
+
+// The runtime started with no main task, for a library whose host calls in from its own threads:
+// the workers, the reactor and the timer thread, once, left running until the process ends.
+// ponytail: a panicking task here prints its message but nothing waits to end the process with
+// 101, as a program's main thread does; give libraries a panic hook if that matters.
+static pthread_once_t fsh_background_once = PTHREAD_ONCE_INIT;
+static void fsh_background_start(void) {
+  long cores = sysconf(_SC_NPROCESSORS_ONLN);
+  fsh_workers = cores > 0 ? cores : 1;
+  fsh_queue *queues = calloc(fsh_workers, sizeof(fsh_queue));
+  fsh_threads = calloc(fsh_workers, sizeof(pthread_t));
+  fsh_queues = queues;
+  fsh_io_start();
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setstacksize(&attr, 64 << 20);
+  for (int64_t i = 0; i < fsh_workers; i++) {
+    pthread_create(&fsh_threads[i], &attr, fsh_work, (void *)i);
+    pthread_detach(fsh_threads[i]);
+  }
+  pthread_attr_destroy(&attr);
+  pthread_create(&fsh_timer_thread, NULL, fsh_timing, NULL);
+  pthread_detach(fsh_timer_thread);
+}
+static void fsh_rt_start_background(void) {
+  pthread_once(&fsh_background_once, fsh_background_start);
+}
+
 // Runs an async main: starts the workers, runs main as the first task until it is done or a
 // task panics, stops them, drops every task still alive, and gives main's outcome, its poll
 // result copied to out.
-int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, void *out) {
+int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, void *frame, int64_t frame_size, int64_t output_size, void *out, const char *name, const char *site) {
+  fsh_sim_init();
+  if (fsh_sim_active) return fsh_sim_run(poll, drop, drop_output, frame, frame_size, output_size, out, name, site);
   long cores = sysconf(_SC_NPROCESSORS_ONLN);
   fsh_workers = cores > 0 ? cores : 1;
   fsh_queues = calloc(fsh_workers, sizeof(fsh_queue));
   fsh_threads = calloc(fsh_workers, sizeof(pthread_t));
-  for (int64_t i = 0; i < fsh_workers; i++) pthread_mutex_init(&fsh_queues[i].lock, NULL);
-  fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size);
+  fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size, name, site);
   // The reactor is ready before any task can wait on a socket.
   fsh_io_start();
+  fsh_inspector_start();
   // Workers get 64 MiB stacks, since main's calls run on them: deep recursion, as a compiler's
   // over a program's tree, goes as far as it does under a JavaScript engine. Only the pages a
   // thread touches are ever committed.
@@ -8316,7 +12530,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   pthread_mutex_lock(&fsh_alive_lock);
   while (__atomic_load_n(&fsh_main_task->state, __ATOMIC_ACQUIRE) != FSH_DONE && !fsh_panicked) pthread_cond_wait(&fsh_finished, &fsh_alive_lock);
   pthread_mutex_unlock(&fsh_alive_lock);
-  // Pending timers keep the program alive, as Node's do: the timer task runs them, then ends. A
+  // Pending timers keep the program alive: the timer task runs them, then ends. A
   // main that failed ends the program with its error, its timers dropped with the other tasks;
   // a timer task claimed but not yet registered is waited for.
   if (fsh_main_task->outcome != 2) {
@@ -8330,7 +12544,7 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
     pthread_mutex_unlock(&fsh_alive_lock);
   }
   pthread_mutex_lock(&fsh_park);
-  __atomic_store_n(&fsh_stopping, 1, __ATOMIC_RELEASE);
+  __atomic_store_n(&fsh_stopping, 1, __ATOMIC_SEQ_CST);
   pthread_cond_broadcast(&fsh_parked);
   // A worker stops between polls, so one inside a long poll with no await can't be waited for:
   // past a grace period, its task and every other is abandoned rather than dropped.
@@ -8339,9 +12553,10 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   until.tv_nsec += 100000000;
   until.tv_sec += until.tv_nsec / 1000000000;
   until.tv_nsec %= 1000000000;
-  while (fsh_stopped < fsh_workers && pthread_cond_timedwait(&fsh_left, &fsh_park, &until) == 0) {}
-  // A blocking task still on the pool can't be dropped while its thread may be polling it.
-  int stuck = fsh_stopped < fsh_workers || __atomic_load_n(&fsh_blocking_live, __ATOMIC_ACQUIRE) != 0;
+  while ((fsh_stopped < fsh_workers || __atomic_load_n(&fsh_pool_busy, __ATOMIC_SEQ_CST) != 0 || __atomic_load_n(&fsh_shutdown_busy, __ATOMIC_SEQ_CST) != 0) && pthread_cond_timedwait(&fsh_left, &fsh_park, &until) == 0) {}
+  // A blocking task or pool job still active (or a shutdown signal still aborting) can't be dropped
+  // while its thread may still touch runtime state.
+  int stuck = fsh_stopped < fsh_workers || __atomic_load_n(&fsh_blocking_live, __ATOMIC_ACQUIRE) != 0 || __atomic_load_n(&fsh_pool_busy, __ATOMIC_SEQ_CST) != 0 || __atomic_load_n(&fsh_shutdown_busy, __ATOMIC_SEQ_CST) != 0;
   pthread_mutex_unlock(&fsh_park);
   if (stuck) {
     fsh_abandoned = 1;
@@ -8350,19 +12565,27 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
     for (int64_t i = 0; i < fsh_workers; i++) pthread_detach(fsh_threads[i]);
     pthread_detach(fsh_timer_thread);
     pthread_detach(fsh_io_thread);
+    fsh_inspector_stop(1);
     if (fsh_panicked) exit(101);
     memcpy(out, fsh_output(fsh_main_task), output_size);
     return fsh_main_task->outcome;
   }
   for (int64_t i = 0; i < fsh_workers; i++) pthread_join(fsh_threads[i], NULL);
+  // A pool thread is never joined, so one still freeing a task it finished is waited for here.
+  while (__atomic_load_n(&fsh_blocking_ending, __ATOMIC_ACQUIRE) != 0) sched_yield();
   pthread_mutex_lock(&fsh_timer_lock);
   fsh_timers_stopping = 1;
   pthread_cond_signal(&fsh_timer_changed);
   pthread_mutex_unlock(&fsh_timer_lock);
   pthread_join(fsh_timer_thread, NULL);
   fsh_io_stop();
+  fsh_inspector_stop(0);
   while (fsh_timer_count > 0) fsh_timer_fire(fsh_timer_take(), 0);
   free(fsh_timers);
+  if (fsh_shutdown_end) {
+    fsh_shutdown_end();
+    fsh_shutdown_end = NULL;
+  }
   // Every task not done is dropped where it stopped; one dropping may release another.
   for (;;) {
     pthread_mutex_lock(&fsh_alive_lock);
@@ -8390,7 +12613,11 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   if (fsh_timeouts_task) fsh_task_release(fsh_timeouts_task);
   fsh_timeouts_waiter = fsh_timeouts_task = NULL;
   for (int64_t i = 0; i < fsh_workers; i++) free(fsh_queues[i].ring);
+  fsh_queue_lock(&fsh_injected);
   free(fsh_injected.ring);
+  fsh_injected.ring = NULL;
+  fsh_injected.head = fsh_injected.count = fsh_injected.capacity = 0;
+  fsh_queue_unlock(&fsh_injected);
   free(fsh_queues);
   free(fsh_threads);
   if (fsh_panicked) {
@@ -8806,6 +13033,7 @@ static int fsh_rx_backtrack(fsh_rx *r, int64_t from, int anchored, int64_t *out)
 
 // A string's UTF-16 code units, which matching and match positions count in.
 static uint16_t *fsh_rx_units(fsh_str *s, int64_t *count) {
+  FSH_OPEN(s);
   const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
   int64_t n = s ? s->length : 0, k = 0;
   uint16_t *out = fsh_rt_alloc((n + 1) * sizeof(uint16_t));
@@ -8920,6 +13148,7 @@ static void fsh_rx_append(fsh_rx_iter *it, const char *bytes, int64_t n) {
 }
 
 static void fsh_rx_append_str(fsh_rx_iter *it, fsh_str *s) {
+  FSH_OPEN(s);
   if (s) fsh_rx_append(it, s->bytes, s->length);
 }
 
@@ -8959,6 +13188,7 @@ static int64_t fsh_rx_named(const fsh_rx_iter *it, const unsigned char *name, in
 // before and after the match,
 // $n and $nn for an existing group, and $<name> when the pattern names groups.
 void fsh_rt_regex_put_pattern(fsh_rx_iter *it, fsh_str *pattern) {
+  FSH_OPEN(pattern);
   fsh_rx_append_units(it, it->last, it->out[0]);
   const unsigned char *p = pattern ? (const unsigned char *)pattern->bytes : NULL;
   int64_t n = pattern ? pattern->length : 0, groups = it->r.code[0] - 1;
@@ -9103,6 +13333,10 @@ export const TLS_NATIVE = String.raw`
 #include <openssl/x509v3.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/core_names.h>
+#include <openssl/kdf.h>
+#include <openssl/params.h>
+#include <openssl/ecdsa.h>
 
 // A stream's SSL object, or a listener's context its connections are made from. A clone of a
 // stream may read on one thread while another writes, and OpenSSL's calls on one SSL object
@@ -9137,7 +13371,7 @@ static void fsh_tls_loud(sigset_t *before) {
 }
 #endif
 
-// Node's codes for the certificate failures a client meets most.
+// The error codes for the certificate failures a client meets most.
 static const char *fsh_tls_code(long verify) {
   switch (verify) {
     case X509_V_ERR_HOSTNAME_MISMATCH:
@@ -9322,8 +13556,9 @@ static int fsh_tls_host_name(const char *host) {
 
 // Starts TLS as the client on a connected stream, verifying the server's certificate for name, a
 // host name or an IP address, against the PEM certificates in ca, or the system's when ca is
-// empty, as Node's ca option does. Gives why it can't, or an empty string.
-fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
+// empty, as the ca option takes it. Gives why it can't, or an empty string.
+fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca, fsh_str *alpn) {
+  if (s->sim) return fsh_tls_said("TLS is not supported in simulation mode (FISH_SIM_SEED)");
   // A second session would replace the first, leaking it and racing a read through a clone.
   if (s->tls) return fsh_tls_said("the stream already speaks TLS");
   char *host = fsh_rt_str_cstring(name);
@@ -9332,7 +13567,7 @@ fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
     return fsh_tls_said("the server name to verify is empty or holds a NUL byte");
   }
   SSL_CTX *ctx;
-  if (ca->length == 0) {
+  if (fsh_len(ca) == 0) {
     pthread_once(&fsh_tls_system_once, fsh_tls_system_load);
     ctx = fsh_tls_system;
     if (ctx) SSL_CTX_up_ref(ctx);
@@ -9365,7 +13600,7 @@ fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
   }
   SSL_set_fd(ssl, s->fd);
   SSL_set_connect_state(ssl);
-  // An absolute name's trailing dot names the same host, as Node takes it. An address is checked
+  // An absolute name's trailing dot names the same host. An address is checked
   // against the certificate's IP addresses and isn't sent as SNI, which takes only names. Any
   // name OpenSSL can't check against fails here, since a connection without the check would
   // take any certificate a trusted CA signed.
@@ -9385,14 +13620,55 @@ fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
     return fsh_tls_said(text);
   }
   fsh_rt_free(host);
+  // The protocols offered, as "h2,http/1.1", in the wire form ALPN sends: each name after its length.
+  if (fsh_len(alpn) > 0) {
+    char *list = fsh_rt_str_cstring(alpn);
+    unsigned char wire[256];
+    size_t at = 0, from = 0, n = list ? strlen(list) : 0;
+    for (size_t i = 0; list && i <= n; i++) {
+      if (i < n && list[i] != ',') continue;
+      size_t len = i - from;
+      if (len > 0 && len < 256 && at + 1 + len <= sizeof wire) {
+        wire[at++] = (unsigned char)len;
+        memcpy(wire + at, list + from, len);
+        at += len;
+      }
+      from = i + 1;
+    }
+    fsh_rt_free(list);
+    if (at > 0) SSL_set_alpn_protos(ssl, wire, (unsigned int)at);
+  }
   s->tls = fsh_tls_new(ctx, ssl);
   s->tls_ops = &fsh_tls_calls;
   return fsh_tls_said("");
 }
 
+// A server's choice from what a client offers: h2 before http/1.1, and nothing when it offers
+// neither, so a client that asked for something else carries on without ALPN.
+static int fsh_tls_alpn_select(SSL *ssl, const unsigned char **out, unsigned char *outlen, const unsigned char *in, unsigned int inlen, void *arg) {
+  static const unsigned char ours[] = "\x02h2\x08http/1.1";
+  (void)ssl;
+  (void)arg;
+  if (SSL_select_next_proto((unsigned char **)out, outlen, ours, sizeof ours - 1, in, inlen) == OPENSSL_NPN_NEGOTIATED) return SSL_TLSEXT_ERR_OK;
+  return SSL_TLSEXT_ERR_NOACK;
+}
+
+// The protocol ALPN chose for a stream once its handshake is done, or an empty string.
+fsh_str *fsh_rt_tls_protocol(fsh_socket *s) {
+  const unsigned char *p = NULL;
+  unsigned int n = 0;
+  if (s->tls && ((fsh_tls *)s->tls)->ssl) SSL_get0_alpn_selected(((fsh_tls *)s->tls)->ssl, &p, &n);
+  char text[256];
+  if (!p || n >= sizeof text) n = 0;
+  if (n > 0) memcpy(text, p, n);
+  text[n] = 0;
+  return fsh_tls_said(text);
+}
+
 // Has a listener's connections speak TLS as the server, with the PEM certificate chain in cert
 // and its private key in key. Gives why it can't, or an empty string.
 fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
+  if (listener->sim) return fsh_tls_said("TLS is not supported in simulation mode (FISH_SIM_SEED)");
   SSL_CTX *ctx = fsh_tls_context(1);
   if (!ctx) return fsh_tls_said("can't set up TLS");
   const char *why = NULL;
@@ -9418,6 +13694,7 @@ fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
     SSL_CTX_free(ctx);
     return fsh_tls_said(why);
   }
+  SSL_CTX_set_alpn_select_cb(ctx, fsh_tls_alpn_select, NULL);
   listener->tls = fsh_tls_new(ctx, NULL);
   listener->tls_ops = &fsh_tls_calls;
   return fsh_tls_said("");
@@ -9441,6 +13718,128 @@ int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_leng
   return ok;
 }
 
+// std:auth's JWT algorithms by number: HS256 (0), HS384 (1), HS512 (2), RS256 (3), ES256 (4) and
+// EdDSA (5), whose Ed25519 hashes inside the signature.
+static const EVP_MD *fsh_jwt_md(int64_t which) {
+  return which == 1 ? EVP_sha384() : which == 2 ? EVP_sha512() : which == 5 ? NULL : EVP_sha256();
+}
+
+// A PEM key of the kind the algorithm signs with: RSA, P-256 or Ed25519, or NULL.
+static EVP_PKEY *fsh_jwt_key(int64_t which, const uint8_t *key, int64_t length, int private) {
+  BIO *b = BIO_new_mem_buf(key, (int)length);
+  if (b == NULL) return NULL;
+  EVP_PKEY *k = private ? PEM_read_bio_PrivateKey(b, NULL, NULL, NULL) : PEM_read_bio_PUBKEY(b, NULL, NULL, NULL);
+  BIO_free(b);
+  if (k == NULL) return NULL;
+  char group[32] = "";
+  size_t n = 0;
+  int fits = which == 3 ? EVP_PKEY_is_a(k, "RSA") && EVP_PKEY_get_bits(k) >= 2048
+    : which == 4 ? EVP_PKEY_is_a(k, "EC") && EVP_PKEY_get_utf8_string_param(k, OSSL_PKEY_PARAM_GROUP_NAME, group, sizeof group, &n) == 1 && strcmp(group, "prime256v1") == 0
+    : EVP_PKEY_is_a(k, "ED25519");
+  if (!fits) { EVP_PKEY_free(k); return NULL; }
+  return k;
+}
+
+// Signs data with the key into out, which holds 1024 bytes, giving the signature's length; -1
+// when the key isn't one the algorithm takes. ES256's is JWS's 64 bytes of r then s, not DER.
+int64_t fsh_rt_crypto_sign(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, uint8_t *out) {
+  int64_t made = -1;
+  if (which <= 2) {
+    unsigned int n = 0;
+    if (HMAC(fsh_jwt_md(which), key, (int)key_length, data, (size_t)length, out, &n) != NULL) made = n;
+    ERR_clear_error();
+    return made;
+  }
+  EVP_PKEY *k = fsh_jwt_key(which, key, key_length, 1);
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  uint8_t der[1024];
+  size_t n = sizeof der;
+  if (k != NULL && ctx != NULL && EVP_DigestSignInit(ctx, NULL, fsh_jwt_md(which), NULL, k) == 1 && EVP_DigestSign(ctx, der, &n, data, (size_t)length) == 1) {
+    if (which != 4) { memcpy(out, der, n); made = (int64_t)n; }
+    else {
+      const uint8_t *at = der;
+      ECDSA_SIG *sig = d2i_ECDSA_SIG(NULL, &at, (long)n);
+      if (sig != NULL && BN_bn2binpad(ECDSA_SIG_get0_r(sig), out, 32) == 32 && BN_bn2binpad(ECDSA_SIG_get0_s(sig), out + 32, 32) == 32) made = 64;
+      ECDSA_SIG_free(sig);
+    }
+  }
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(k);
+  ERR_clear_error();
+  return made;
+}
+
+// Whether sig is data's signature under the key: 1 when it is, 0 when it isn't, -1 when the key
+// isn't one the algorithm takes. An HMAC is compared in constant time.
+int64_t fsh_rt_crypto_verify(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, const uint8_t *sig, int64_t sig_length) {
+  if (which <= 2) {
+    uint8_t mac[EVP_MAX_MD_SIZE];
+    unsigned int n = 0;
+    int64_t ok = HMAC(fsh_jwt_md(which), key, (int)key_length, data, (size_t)length, mac, &n) != NULL && (int64_t)n == sig_length && CRYPTO_memcmp(mac, sig, n) == 0;
+    ERR_clear_error();
+    return ok;
+  }
+  EVP_PKEY *k = fsh_jwt_key(which, key, key_length, 0);
+  if (k == NULL) { ERR_clear_error(); return -1; }
+  uint8_t der[128];
+  const uint8_t *given = sig;
+  size_t given_length = (size_t)sig_length;
+  int64_t ok = 0;
+  int shaped = 1;
+  if (which == 4) {
+    shaped = 0;
+    ECDSA_SIG *es = sig_length == 64 ? ECDSA_SIG_new() : NULL;
+    BIGNUM *r = es != NULL ? BN_bin2bn(sig, 32, NULL) : NULL;
+    BIGNUM *s = es != NULL ? BN_bin2bn(sig + 32, 32, NULL) : NULL;
+    if (r != NULL && s != NULL && ECDSA_SIG_set0(es, r, s) == 1) {
+      uint8_t *at = der;
+      int n = i2d_ECDSA_SIG(es, &at);
+      if (n > 0) { given = der; given_length = (size_t)n; shaped = 1; }
+    } else { BN_free(r); BN_free(s); }
+    ECDSA_SIG_free(es);
+  }
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  if (shaped && ctx != NULL && EVP_DigestVerifyInit(ctx, NULL, fsh_jwt_md(which), NULL, k) == 1) ok = EVP_DigestVerify(ctx, given, given_length, data, (size_t)length) == 1;
+  EVP_MD_CTX_free(ctx);
+  EVP_PKEY_free(k);
+  ERR_clear_error();
+  return ok;
+}
+
+// A password's hash into out: argon2id (0) with a KiB of memory, b passes and c lanes, run on one
+// thread, or scrypt (1) with N = a, r = b and p = c. 1 when done, 0 when the parameters were
+// refused, -1 when this OpenSSL has no Argon2, which came in 3.2.
+int64_t fsh_rt_crypto_kdf(int64_t kind, const uint8_t *password, int64_t password_length, const uint8_t *salt, int64_t salt_length, int64_t a, int64_t b, int64_t c, uint8_t *out, int64_t out_length) {
+  int64_t ok = 0;
+  if (kind == 1) ok = EVP_PBE_scrypt((const char *)password, (size_t)password_length, salt, (size_t)salt_length, (uint64_t)a, (uint64_t)b, (uint64_t)c, (uint64_t)1 << 31, out, (size_t)out_length) == 1;
+  else {
+#if OPENSSL_VERSION_NUMBER >= 0x30200000L
+    EVP_KDF *kdf = EVP_KDF_fetch(NULL, "ARGON2ID", NULL);
+    EVP_KDF_CTX *ctx = kdf != NULL ? EVP_KDF_CTX_new(kdf) : NULL;
+    if (ctx == NULL) ok = -1;
+    else {
+      uint32_t memory = (uint32_t)a, passes = (uint32_t)b, lanes = (uint32_t)c, threads = 1;
+      OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_PASSWORD, (void *)password, (size_t)password_length),
+        OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT, (void *)salt, (size_t)salt_length),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ITER, &passes),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_THREADS, &threads),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_LANES, &lanes),
+        OSSL_PARAM_construct_uint32(OSSL_KDF_PARAM_ARGON2_MEMCOST, &memory),
+        OSSL_PARAM_construct_end(),
+      };
+      ok = EVP_KDF_derive(ctx, out, (size_t)out_length, params) == 1;
+    }
+    EVP_KDF_CTX_free(ctx);
+    EVP_KDF_free(kdf);
+#else
+    ok = -1;
+#endif
+  }
+  ERR_clear_error();
+  return ok;
+}
+
 // Why the crypto calls can't work: nothing, with OpenSSL linked.
 const char *fsh_rt_crypto_missing(void) {
   return "";
@@ -9451,8 +13850,12 @@ const char *fsh_rt_crypto_missing(void) {
 export function tlsStub(why: string): string {
   const said = JSON.stringify(why);
   return String.raw`
-fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca) {
+fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca, fsh_str *alpn) {
   return fsh_rt_str_from_cstring(${said});
+}
+
+fsh_str *fsh_rt_tls_protocol(fsh_socket *s) {
+  return fsh_rt_str_from_cstring("");
 }
 
 fsh_str *fsh_rt_tls_listen(fsh_socket *listener, fsh_str *cert, fsh_str *key) {
@@ -9463,6 +13866,18 @@ int64_t fsh_rt_crypto_digest(int64_t which, const uint8_t *key, int64_t key_leng
   return 0;
 }
 
+int64_t fsh_rt_crypto_sign(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, uint8_t *out) {
+  return -2;
+}
+
+int64_t fsh_rt_crypto_verify(int64_t which, const uint8_t *key, int64_t key_length, const uint8_t *data, int64_t length, const uint8_t *sig, int64_t sig_length) {
+  return -2;
+}
+
+int64_t fsh_rt_crypto_kdf(int64_t kind, const uint8_t *password, int64_t password_length, const uint8_t *salt, int64_t salt_length, int64_t a, int64_t b, int64_t c, uint8_t *out, int64_t out_length) {
+  return -2;
+}
+
 const char *fsh_rt_crypto_missing(void) {
   return ${said};
 }
@@ -9470,8 +13885,8 @@ const char *fsh_rt_crypto_missing(void) {
 }
 
 // The zlib half of the runtime, a unit of its own compiled into a program, with -lz linked, only
-// when its IR calls it. One call runs a whole compression or decompression into a buffer as Node's
-// sync calls do, then a second copies it out.
+// when its IR calls it. One call runs a whole compression or decompression into a buffer,
+// then a second copies it out.
 export const ZLIB_NATIVE = String.raw`
 #include <limits.h>
 #include <stdint.h>
@@ -9497,7 +13912,7 @@ static void *fsh_zlib_grow(void *p, size_t n) {
   return q;
 }
 
-// A failure as Node reports it: zlib's message when it gave one, else Node's own.
+// A failure: zlib's message when it gave one, else the message passed in.
 static fsh_zlib_run *fsh_zlib_fail(z_stream *s, fsh_zlib_run *r, int err, const char *own, int64_t *result) {
   const char *message = s->msg ? s->msg : own;
   size_t n = strlen(message);
@@ -9521,7 +13936,7 @@ fsh_zlib_run *fsh_rt_zlib_run(int64_t inflating, int64_t bits, int64_t level, co
   memset(&s, 0, sizeof s);
   int err = inflating ? inflateInit2(&s, (int)bits) : deflateInit2(&s, (int)level, Z_DEFLATED, (int)bits, 8, Z_DEFAULT_STRATEGY);
   if (err != Z_OK) return fsh_zlib_fail(&s, r, err, "Init error", result);
-  // Concatenated gzip members are read as one, as Node's gunzip reads them; unzip does so once
+  // Concatenated gzip members are read as one; unzip does so once
   // its input starts as gzip.
   int members = bits == 31 || (bits == 47 && length >= 2 && data[0] == 0x1f && data[1] == 0x8b);
   size_t cap = inflating ? (size_t)length * 4 + 64 : deflateBound(&s, (uLong)length);
@@ -9580,6 +13995,132 @@ void fsh_rt_zlib_take(fsh_zlib_run *r, uint8_t *out) {
   if (r->length > 0) memcpy(out, r->data, (size_t)r->length);
   free(r->data);
   free(r);
+}
+
+// A deflate stream kept open across a streamed body's chunks; bits picks the format as above.
+z_stream *fsh_rt_zlib_open(int64_t bits, int64_t level) {
+  z_stream *s = fsh_zlib_grow(NULL, sizeof *s);
+  memset(s, 0, sizeof *s);
+  if (deflateInit2(s, (int)level, Z_DEFLATED, (int)bits, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return s;
+}
+
+// Deflates one chunk, flushed with Z_SYNC_FLUSH so what it gives can be sent at once, or with
+// finish the last, ending the stream. result is as fsh_rt_zlib_run's; take the bytes with
+// fsh_rt_zlib_take.
+fsh_zlib_run *fsh_rt_zlib_push(z_stream *s, const uint8_t *data, int64_t length, int64_t finish, int64_t *result) {
+  fsh_zlib_run *r = fsh_zlib_grow(NULL, sizeof *r);
+  size_t cap = deflateBound(s, (uLong)length) + 64;
+  r->data = fsh_zlib_grow(NULL, cap);
+  r->length = 0;
+  const uint8_t *next = data;
+  int64_t left = length;
+  for (;;) {
+    if (s->avail_in == 0 && left > 0) {
+      s->next_in = (Bytef *)next;
+      s->avail_in = left > FSH_ZLIB_CHUNK ? FSH_ZLIB_CHUNK : (uInt)left;
+      next += s->avail_in;
+      left -= s->avail_in;
+    }
+    if ((size_t)r->length == cap) {
+      cap *= 2;
+      r->data = fsh_zlib_grow(r->data, cap);
+    }
+    size_t room = cap - (size_t)r->length;
+    s->next_out = r->data + r->length;
+    s->avail_out = room > UINT_MAX ? UINT_MAX : (uInt)room;
+    uInt before = s->avail_out;
+    int err = deflate(s, left > 0 ? Z_NO_FLUSH : finish ? Z_FINISH : Z_SYNC_FLUSH);
+    r->length += before - s->avail_out;
+    if (err == Z_STREAM_END) break;
+    if (err != Z_OK && err != Z_BUF_ERROR) return fsh_zlib_fail(s, r, err, "Zlib error", result);
+    // A flush is complete once deflate leaves room in the output.
+    if (!finish && left == 0 && s->avail_in == 0 && s->avail_out != 0) break;
+  }
+  result[0] = 0;
+  result[1] = 0;
+  result[2] = r->length;
+  return r;
+}
+
+void fsh_rt_zlib_close(z_stream *s) {
+  deflateEnd(s);
+  free(s);
+}
+`;
+
+// The brotli half of the runtime, a unit of its own compiled into a program, with libbrotlienc
+// linked, only when its IR calls it. An encoder is kept open across a body's chunks, as the
+// zlib half's deflate streams are, and each chunk's output is copied out as a zlib run's is.
+export const BROTLI_NATIVE = String.raw`
+#include <brotli/encode.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct { uint8_t *data; int64_t length; } fsh_brotli_run;
+
+static void *fsh_brotli_grow(void *p, size_t n) {
+  void *q = realloc(p, n ? n : 1);
+  if (!q) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  return q;
+}
+
+BrotliEncoderState *fsh_rt_brotli_open(int64_t quality) {
+  BrotliEncoderState *s = BrotliEncoderCreateInstance(NULL, NULL, NULL);
+  if (!s) {
+    fputs("out of memory\n", stderr);
+    exit(101);
+  }
+  BrotliEncoderSetParameter(s, BROTLI_PARAM_QUALITY, (uint32_t)quality);
+  return s;
+}
+
+// Compresses one chunk, flushed so what it gives can be sent at once, or with finish the last,
+// ending the stream. result is [failed, 0, length]; take the bytes with fsh_rt_brotli_take.
+fsh_brotli_run *fsh_rt_brotli_push(BrotliEncoderState *s, const uint8_t *data, int64_t length, int64_t finish, int64_t *result) {
+  fsh_brotli_run *r = fsh_brotli_grow(NULL, sizeof *r);
+  size_t cap = (size_t)length + 1024;
+  r->data = fsh_brotli_grow(NULL, cap);
+  r->length = 0;
+  size_t in = (size_t)length;
+  const uint8_t *next = data;
+  BrotliEncoderOperation op = finish ? BROTLI_OPERATION_FINISH : BROTLI_OPERATION_FLUSH;
+  result[0] = 0;
+  for (;;) {
+    if ((size_t)r->length == cap) {
+      cap *= 2;
+      r->data = fsh_brotli_grow(r->data, cap);
+    }
+    size_t room = cap - (size_t)r->length;
+    uint8_t *at = r->data + r->length;
+    if (!BrotliEncoderCompressStream(s, op, &in, &next, &room, &at, NULL)) {
+      result[0] = 1;
+      break;
+    }
+    r->length = at - r->data;
+    if (in == 0 && !BrotliEncoderHasMoreOutput(s) && (!finish || BrotliEncoderIsFinished(s))) break;
+  }
+  result[1] = 0;
+  result[2] = r->length;
+  return r;
+}
+
+void fsh_rt_brotli_take(fsh_brotli_run *r, uint8_t *out) {
+  if (r->length > 0) memcpy(out, r->data, (size_t)r->length);
+  free(r->data);
+  free(r);
+}
+
+void fsh_rt_brotli_close(BrotliEncoderState *s) {
+  BrotliEncoderDestroyInstance(s);
 }
 `;
 

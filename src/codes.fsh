@@ -367,7 +367,7 @@ To fix it, clone the field you need, as in 'c.log.clone()', or give the class a 
   constructor() { this.log = ["opened"]; }
   [Symbol.dispose](this: Mut<this>): void { console.log(this.log.length); }
 }
-function keep(log: string[]) { console.log(log.length); }
+export function keep(log: string[]) { console.log(log.length); }
 function main() {
   const c = new Conn();
   keep(c.log);
@@ -377,7 +377,7 @@ function main() {
   constructor() { this.log = ["opened"]; }
   [Symbol.dispose](this: Mut<this>): void { console.log(this.log.length); }
 }
-function keep(log: string[]) { console.log(log.length); }
+export function keep(log: string[]) { console.log(log.length); }
 function main() {
   const c = new Conn();
   keep(c.log.clone());
@@ -702,11 +702,11 @@ To fix it, check the spelling (the message suggests a near match when there is o
   E0511: {
     title: "invalid typed route handler",
     long: {
-      text: `A handler given to a Router says its types: a second parameter is the type the request's body is read as from JSON, and a written return type that isn't a Response is what the handler answers with as JSON. Such a handler takes at most those two parameters, takes no body on a GET route, since a GET request carries none, and can't throw yet.
+      text: `A handler given to a Router says its types: a second parameter is the type the request's body is read as from JSON, and a written return type that isn't a Response is what the handler answers with, as JSON or, for a type with 'intoResponse()', as the response it makes. A StateRouter's handler takes the router's state second and the body third. Such a handler takes at most those parameters, writes the body's type, and takes no body on a GET route, since a GET request carries none.
 
 Hono and Express handlers read the body themselves, with 'await c.req.json()' or a body parser, and nothing checks it against a type.
 
-To fix it, take the request alone or the request and the body, add a route that reads a body with 'post', 'put' or 'patch', and catch an error inside the handler, giving back a Response for it.`,
+To fix it, take the request alone or the request and the body, write the body's type, and add a route that reads a body with 'post', 'put' or 'patch'.`,
       example: `type NewUser = { name: string };
 async function main(): Promise<void> {
   let app = new Router();
@@ -861,6 +861,8 @@ To fix it, write it the way the message says: 'let' or 'const' for 'var', a new 
     },
   },
 
+  E0803: { title: "a form the js target doesn't compile yet" },
+
   E0901: { title: "cannot find the file or package an import names" },
   E0902: { title: "an import of a name its module doesn't export" },
   E0903: { title: "an import that crosses a package's boundary" },
@@ -870,6 +872,7 @@ To fix it, write it the way the message says: 'let' or 'const' for 'var', a new 
   E0907: { title: "an import that clashes with another name in its file" },
   E0908: { title: "a Node built-in Fish doesn't have, or uses differently" },
   E0909: { title: "a source file larger than the compiler takes" },
+  E0910: { title: "a dependency using a capability it doesn't state or isn't granted" },
 
   E1001: { title: "an operation that needs 'unsafe'" },
   E1002: { title: "invalid C function declaration" },
@@ -877,6 +880,7 @@ To fix it, write it the way the message says: 'let' or 'const' for 'var', a new 
   E1004: { title: "invalid Rust crate declaration or use" },
   E1005: { title: "a value that can't cross between Fish and JS" },
   E1006: { title: "invalid use of a raw pointer" },
+  E1007: { title: "invalid C struct" },
 
   E1101: { title: "comptime code that failed while compiling" },
   E1102: { title: "invalid comptime parameter or block" },
@@ -885,6 +889,7 @@ To fix it, write it the way the message says: 'let' or 'const' for 'var', a new 
   E1105: { title: "invalid quote" },
   E1106: { title: "invalid test" },
   E1107: { title: "invalid tagged template" },
+  E1108: { title: "invalid @durable function" },
 
   W0001: {
     title: "unused binding",
@@ -906,6 +911,64 @@ To fix it, remove it, or name it with a leading '_' when it is unused on purpose
   },
   W0002: { title: "unreachable code" },
   W0003: { title: "a route left out of the OpenAPI document" },
+  W0005: {
+    title: "a reference-counted type that can hold itself",
+    long: {
+      text: `In a file in the reference-counted edition, '// @fish-edition rc', a field of one of the file's
+types leads back to that type, so objects can hold each other in a cycle. Reference counting never
+frees a cycle: each object in it keeps the next one's count above zero. It is a warning, so the
+program still builds.
+
+To fix it, make one link of the cycle a 'Weak', which reaches the object through 'upgrade()' without
+keeping it alive, as a child's link to its parent usually is.`,
+      example: `// @fish-edition rc
+class Node {
+  next: Node | null = null;
+}`,
+      fixed: `// @fish-edition rc
+class Node {
+  next: Weak<Node> = new Weak<Node>();
+}`,
+    },
+  },
+  W0004: {
+    title: "a blocking call in an async function",
+    long: {
+      text: `An async function calls a function that blocks its thread until it returns, directly or through
+sync functions that call it. While it blocks, no other task scheduled on that thread runs. std
+marks its blocking functions with '@blocking': the '*Sync' file system, zlib, password and
+child_process functions and 'sleepSync'. A program may mark its own, including a C function a
+'declare function' names. It is a warning, so the program still builds.
+
+An async 'main' calling a blocking function itself doesn't warn: it runs before any task it
+starts, so there is nothing yet to hold up. A sync function it calls that blocks still warns.
+
+Node and Bun don't report this; Rust's async runtimes give the same advice.
+
+To fix it, run the call on the blocking pool with 'spawnBlocking', which nothing inside warns
+about, or call the async version of the function.`,
+      example: `import { readFileSync } from "node:fs";
+
+async function load(): Promise<u8[]> throws IoError {
+  return readFileSync("config.toml");
+}
+
+async function main() throws IoError {
+  const text = await load();
+  console.log(text.length);
+}`,
+      fixed: `import { readFileSync } from "node:fs";
+
+async function load(): Promise<u8[]> throws IoError {
+  return await spawnBlocking(() => readFileSync("config.toml"));
+}
+
+async function main() throws IoError {
+  const text = await load();
+  console.log(text.length);
+}`,
+    },
+  },
 };
 
 // What 'fishc explain' prints for `code`, or undefined when no code is that.

@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { built, removed, same, scratch, text } from "./support.fsh";
+import { built, onSystem, ranFor, reference, removed, same, scratch, text } from "./support.fsh";
 
 // What `setup` makes in a directory: a directory with its parents, a file and its text, a symlink
 // from its target, or a file read-only.
@@ -53,10 +53,15 @@ function compare(tmp: string, name: string, imports: string, body: string, setup
   const out = built(tmp, name, `${imports}\n${async ? "async " : ""}function main(): ${async ? "Promise<void>" : "void"} throws IoError {${body}\n}\n`);
   const fish = spawnSync("env", ["FISH_LEAKS=1", out], { cwd: fishDir });
   const script = `const fs = require("node:fs"); const { readFileSync, writeFileSync, existsSync, statSync, lstatSync, readdirSync, realpathSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, chmodSync, readlinkSync, linkSync, constants, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync } = fs; const fsp = require("node:fs/promises"); const { access, utimes, lutimes, chmod, symlink, readlink, link, realpath, open } = fsp; (${async ? "async " : ""}() => {${nodeBody}\n})();`;
-  const node = spawnSync("node", ["-e", script], { cwd: nodeDir });
+  // Node's directory is a new one each run, so its answer is recorded with a name in its place,
+  // and for each system, since what a file call gives differs between them.
+  const node = reference(onSystem(`fs_sync-${name}`), script, () => {
+    const got = ranFor("node", ["-e", script], nodeDir);
+    return { status: got.status, stdout: got.stdout.replaceAll(real(nodeDir), "<dir>"), stderr: got.stderr.replaceAll(real(nodeDir), "<dir>") };
+  });
   same(text(fish.stderr), "", `${name}'s stderr`);
-  same(text(node.stderr), "", "node's stderr");
-  same(text(fish.stdout).replaceAll(real(fishDir), "<dir>"), text(node.stdout).replaceAll(real(nodeDir), "<dir>"), `${name}'s output`);
+  same(node.stderr, "", "node's stderr");
+  same(text(fish.stdout).replaceAll(real(fishDir), "<dir>"), node.stdout, `${name}'s output`);
   return [fishDir, nodeDir];
 }
 
@@ -368,14 +373,15 @@ function linksBody(): string {
   symlinkSync("f", "s1");
   symlinkSync("d", "s2", "dir");
   symlinkSync("nowhere", "s3", "file");
-  symlinkSync("", "s4", null);
+  // An empty target is a link on macOS and ENOENT on Linux; either way both say the same.
+  try { symlinkSync("", "s4", null); console.log(readlinkSync("s4").length); } catch (e) { console.log(e.message, e.code, e.syscall, e.path); }
   await symlink("f", "s5");
   await fsp.symlink("s5", "s6", "junction");
   linkSync("f", "h1");
   await fsp.link("s1", "h2");
   const r6 = await readlink("s6");
   const rl = await fsp.readlink("dl");
-  console.log(readlinkSync("s1"), readlinkSync("s2"), readlinkSync("s3"), readlinkSync("s4").length, r6, rl);
+  console.log(readlinkSync("s1"), readlinkSync("s2"), readlinkSync("s3"), r6, rl);
   console.log(lstatSync("s5").isSymbolicLink(), lstatSync("h1").isSymbolicLink(), statSync("f").size, readFileSync("h2", "utf8"), readFileSync("s6", "utf8"));
   const p6 = await realpath("s6");
   const p2 = await fsp.realpath("d/../s2");
@@ -624,19 +630,23 @@ test("accessSync and access give what node's give", () => {
   removed(tmp);
 }, { timeout: 30_000 });
 
-// Both times of each entry in `dir`, the atimes the programs can't print among them, in
-// nanoseconds as node reads them.
+// The access and change times of the files a test set them on, to the nanosecond, as the system's
+// own `stat` reads them, a link's own and not its target's.
 function times(dir: string): string {
-  const script = `const { lstatSync } = require("node:fs"); const { join } = require("node:path"); console.log(JSON.stringify(["f", "g", "d", "dl", "ln"].map((p) => { const s = lstatSync(join(process.argv[1], p), { bigint: true }); return [p, String(s.atimeNs), String(s.mtimeNs)]; })));`;
-  const run = spawnSync("node", ["-e", script, dir]);
-  same(text(run.stderr), "", "reading the times");
-  return text(run.stdout);
+  const format = process.platform === "darwin" ? ["-f", "%Fa %Fm"] : ["-c", "%.9X %.9Y"];
+  let out: string[] = [];
+  for (const p of ["f", "g", "d", "dl", "ln"]) {
+    const run = spawnSync("stat", [...format, join(dir, p)]);
+    same(text(run.stderr), "", `reading ${p}'s times`);
+    out.push(`${p} ${text(run.stdout).trim()}`);
+  }
+  return out.join("\n");
 }
 
 test("utimesSync, lutimesSync, utimes and lutimes give what node's give", () => {
   const tmp = scratch("fish-fs-sync-");
   const [fishDir, nodeDir] = compare(tmp, "utimes", utimesImports(), utimesBody(), [{ dir: "d" }, { file: "f", text: "hi" }, { file: "g", text: "hi" }, { link: "dl", target: "nowhere" }, { link: "ln", target: "g" }], utimesBody());
-  same(times(fishDir), times(nodeDir), "the times");
+  same(times(fishDir), reference(onSystem("fs_sync-utimes-left"), utimesBody(), () => ({ status: 0, stdout: times(nodeDir), stderr: "" })).stdout, "the times");
   removed(tmp);
 }, { timeout: 30_000 });
 
@@ -653,7 +663,7 @@ function modes(dir: string): string {
 test("chmodSync and chmod give what node's give", () => {
   const tmp = scratch("fish-fs-sync-");
   const [fishDir, nodeDir] = compare(tmp, "chmod", chmodImports(), chmodBody(), [{ dir: "d" }, { file: "f", text: "hi" }, { file: "g", text: "hi" }, { file: "h", text: "hi" }, { file: "i", text: "hi" }, { file: "j", text: "hi" }, { link: "dl", target: "nowhere" }], chmodBody());
-  same(modes(fishDir), modes(nodeDir), "the modes");
+  same(modes(fishDir), reference(onSystem("fs_sync-chmod-left"), chmodBody(), () => ({ status: 0, stdout: modes(nodeDir), stderr: "" })).stdout, "the modes");
   removed(tmp);
 }, { timeout: 30_000 });
 

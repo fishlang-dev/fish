@@ -37,22 +37,23 @@ function equivalents(): Map<string, Equivalent> {
   m.set("uuid", IN_STD("crypto.randomUUID, for v4 only"));
   m.set("nanoid", IN_STD("crypto.getRandomValues, to build IDs from"));
   add(m, ["dayjs", "date-fns", "moment", "luxon"], PLANNED("Date parsing and formatting"));
-  add(m, ["pino", "winston", "bunyan"], PLANNED("Structured logging"));
-  add(m, ["@opentelemetry/api", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/sdk-trace-base", "@opentelemetry/exporter-trace-otlp-http"], IN_STD("the fish:trace module"));
+  add(m, ["pino", "winston", "bunyan"], IN_STD("std:log"));
+  add(m, ["@opentelemetry/api", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/sdk-trace-base", "@opentelemetry/exporter-trace-otlp-http"], IN_STD("the std:trace module"));
   add(m, ["pg", "postgres"], IN_STD("the postgres module's Pool"));
-  add(m, ["better-sqlite3", "sqlite3"], IN_STD("the sqlite module's Database"));
-  add(m, ["tar", "tar-stream", "tar-fs"], IN_STD("the fish:tar module"));
-  add(m, ["adm-zip", "jszip", "yauzl", "yazl", "unzipper", "extract-zip"], IN_STD("the fish:zip module"));
-  m.set("archiver", IN_STD("the fish:zip and fish:tar modules"));
-  add(m, ["ioredis", "redis"], PLANNED("Redis client"));
+  add(m, ["better-sqlite3", "sqlite3"], IN_STD("std:sqlite's Database"));
+  m.set("kysely", IN_STD("std:query's Kysely, compiling to SQL for std:postgres and std:sqlite"));
+  add(m, ["tar", "tar-stream", "tar-fs"], IN_STD("the std:tar module"));
+  add(m, ["adm-zip", "jszip", "yauzl", "yazl", "unzipper", "extract-zip"], IN_STD("the std:zip module"));
+  m.set("archiver", IN_STD("the std:zip and std:tar modules"));
+  add(m, ["ioredis", "redis"], IN_STD("std:redis's createClient"));
   add(m, ["glob", "fast-glob", "globby"], PLANNED("Glob"));
   m.set("fs-extra", PLANNED("Directory operations"));
   m.set("chokidar", PLANNED("File watching"));
   m.set("tmp", PLANNED("Temporary files and directories"));
   add(m, ["execa", "cross-spawn"], PLANNED("Streaming child processes"));
   add(m, ["node-cron", "cron"], PLANNED("Scheduled jobs"));
-  m.set("cors", PLANNED("CORS middleware"));
-  m.set("compression", PLANNED("Response compression"));
+  m.set("cors", IN_STD("std:cors's cors"));
+  m.set("compression", IN_STD("std:compress's compress"));
   m.set("express-rate-limit", PLANNED("Rate-limiting middleware"));
   add(m, ["cookie", "cookie-parser"], IN_STD("req.cookies and res.cookies"));
   add(m, ["serve-static", "@fastify/static", "koa-static", "sirv"], IN_STD("Router.static"));
@@ -64,9 +65,10 @@ function equivalents(): Map<string, Equivalent> {
   m.set("eventemitter3", PLANNED("EventTarget and EventEmitter"));
   add(m, ["inquirer", "prompts"], PLANNED("Interactive prompts"));
   add(m, ["jest", "vitest", "mocha"], PLANNED("Jest-style test API"));
-  m.set("@grpc/grpc-js", PLANNED("gRPC"));
-  m.set("@aws-sdk/client-s3", PLANNED("S3-compatible storage client"));
-  add(m, ["bcryptjs", "bcrypt", "argon2", "jsonwebtoken", "jose"], PLANNED("Auth primitives"));
+  m.set("@grpc/grpc-js", IN_STD("std:grpc, with messages and services as @message classes and @service interfaces"));
+  add(m, ["@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner"], IN_STD("std:s3's S3Client, as Bun's"));
+  add(m, ["argon2", "jsonwebtoken", "jose"], IN_STD("std:auth's signJwt, verifyJwt, hashPassword and verifyPassword (and their Sync forms)"));
+  add(m, ["bcryptjs", "bcrypt"], IN_STD("std:auth's hashPassword, which hashes with argon2id rather than bcrypt"));
   return m;
 }
 

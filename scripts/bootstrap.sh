@@ -1,10 +1,10 @@
 #!/bin/sh
-# Builds fishc from src on a machine with no fishc. When stage0.toml pins a release, its tarball is
-# downloaded and checked against [tarballs], and its fishc runs scripts/build.fsh: no Bun. Otherwise,
-# or with --from-source, the first commit of stage 0's chain is unpacked and its own compiler, run by
-# Bun, runs scripts/build.fsh, which builds stage 0 from source and then fishc with it. Arguments go
-# to scripts/build.fsh. With a fishc already, run that instead:
+# Builds fishc from src on a machine with no fishc: the release stage0.toml pins is downloaded as
+# this machine's tarball and checked against [tarballs], and its fishc runs scripts/build.fsh.
+# Arguments go to scripts/build.fsh. With a fishc already, run that instead:
 #   fishc run scripts/build.fsh -- [-o <fishc>]
+# With --stage0 nothing is built: the released stage 0 is downloaded and checked, and the last line
+# printed is its path, for a caller that only runs scripts with it.
 set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 toml="$root/stage0.toml"
@@ -15,7 +15,6 @@ arch=$(uname -m)
 case "$arch" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; esac
 target="$arch-$(uname -s | tr '[:upper:]' '[:lower:]')"
 sum=$(sed -n "/^\[tarballs\]/,/^\[/s/^\"$target\" = \"\(.*\)\"$/\1/p" "$toml")
-case " $* " in *" --from-source "*) release= ;; esac
 
 if [ -n "$release" ] && [ -n "$sum" ]; then
   cache="${FISH_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/fish}/stage0/$commit"
@@ -34,15 +33,9 @@ if [ -n "$release" ] && [ -n "$sum" ]; then
     tar -xzf "$cache/$name" -C "$cache" --strip-components=1
     rm -f "$cache/$name"
   fi
+  case " $* " in *" --stage0 "*) echo "$cache/bin/fishc"; exit 0 ;; esac
   echo "running scripts/build.fsh with stage 0, $release"
   exec "$cache/bin/fishc" run "$root/scripts/build.fsh" -- "$@"
 fi
-
-first=$(sed -n 's/^chain = \["\([0-9a-f]*\)".*$/\1/p' "$toml")
-first=${first:-$commit}
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-echo "unpacking the compiler at $first, which Bun runs to start the build"
-git -C "$root" archive "$first" | tar -x -C "$work"
-echo "running scripts/build.fsh with Bun; compiling it takes a minute or two before it prints"
-bun "$work/src/main.ts" run "$root/scripts/build.fsh" -- "$@"
+echo "bootstrap: stage0.toml has no stage 0 for $target, since no release was packed on such a machine; its first one is cross-compiled on a machine that has one, as 'A new target' at the top of scripts/build.fsh says" >&2
+exit 1

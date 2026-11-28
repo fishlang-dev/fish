@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { NATIVE } from "../../src/native.fsh";
-import { removed, same, scratch, text } from "./support.fsh";
+import { ranFor, reference, removed, same, scratch, text } from "./support.fsh";
 
 // Bun's script printing the C statements that build and print each value of the array literal in
 // the file it is given: numbers, strings, arrays, plain objects, Maps and Sets, and `Point` objects
@@ -23,23 +23,27 @@ function write(path: string, contents: string): void {
 }
 
 // What the runtime prints for the values of `source`, against what node prints.
-function compare(source: string): void {
+function compare(name: string, source: string): void {
   const tmp = scratch("fish-inspect-");
   const values = join(tmp, "values.js");
   const script = join(tmp, "tree.js");
   write(values, source);
   write(script, generator());
-  const gen = spawnSync("bun", [script, values]);
-  same(text(gen.stderr), "", "building the trees");
-  const helper = "static fsh_insp *text(const char *p, int64_t n) { fsh_str *s = fsh_str_of(p, n); fsh_insp *v = fsh_rt_insp_string(s); fsh_rt_str_release(s); return v; }";
+  const gen = reference(`inspect-${name}-trees`, `${generator()}\n${source}`, () => ranFor("bun", [script, values]));
+  same(gen.stderr, "", "building the trees");
+  const helper = "static fsh_insp *text(const char *p, int64_t n) { fsh_str *s = fsh_str_of(p, n); fsh_insp *v = fsh_rt_insp_string(s); fsh_rt_str_release(s); return v; }\nstatic void shown(fsh_str *s) { FSH_OPEN(s); fwrite(s->bytes, 1, s->length, stdout); }";
+  // The recorded statements read the string's fields directly, which a string short enough to be
+  // held in its pointer word has none of, so each is printed through a view.
+  const statements = gen.stdout.replaceAll("fwrite(s->bytes, 1, s->length, stdout);", "shown(s);");
   const file = join(tmp, "test.c");
-  write(file, `${NATIVE}\n${helper}\nint main(void) {\n${text(gen.stdout)}\nreturn 0;\n}\n`);
+  write(file, `${NATIVE}\n${helper}\nint main(void) {\n${statements}\nreturn 0;\n}\n`);
   const out = join(tmp, "test");
   const clang = spawnSync("clang", [file, "-o", out, "-lm"]);
   assert(clang.status === 0, `clang failed: ${text(clang.stderr)}`);
   const run = spawnSync("env", ["FISH_LEAKS=1", out]);
-  const node = spawnSync("node", ["-e", `class Point { constructor(x, y) { this.x = x; this.y = y; } }\nfor (const v of ${source}) console.log(v);`]);
-  same(text(run.stdout) + text(run.stderr), text(node.stdout), "the layout");
+  const printing = `class Point { constructor(x, y) { this.x = x; this.y = y; } }\nfor (const v of ${source}) console.log(v);`;
+  const node = reference(`inspect-${name}-layout`, printing, () => ranFor("node", ["-e", printing]));
+  same(text(run.stdout) + text(run.stderr), node.stdout, "the layout");
   removed(tmp);
 }
 
@@ -52,9 +56,9 @@ function edges(): string {
 }
 
 test("edge cases lay out as Node lays them out", () => {
-  compare(edges());
+  compare("edges", edges());
 });
 
 test("trees lay out as Node lays out the same values", () => {
-  compare(cases());
+  compare("cases", cases());
 });

@@ -7,7 +7,7 @@ import { shortened, symbolIn, symbolNames } from "../../src/codegen.fsh";
 import { CompileError } from "../../src/diag.fsh";
 import { compile } from "../../src/main.fsh";
 import type { Expr } from "../../src/parser.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { Typing, TypeMap, digest, type ClassType, type Type } from "../../src/typing.fsh";
 import { read, root } from "./support.fsh";
 
@@ -109,7 +109,7 @@ test("instances that read alike get symbols of their own", () => {
   const a = made(arenas, "Box<T>.get");
   const b = made(arenas, "Box<T>.get");
   const c = made(arenas, "Box<U>.get");
-  const names = symbolNames(arenas);
+  const names = symbolNames(arenas, new Typing());
   const got = [symbolIn(arenas, arenas.instanceOf(a), names), symbolIn(arenas, arenas.instanceOf(b), names), symbolIn(arenas, arenas.instanceOf(c), names)].join(" ");
   assert(got === '@"fsh.Box<T>.get~r07hia" @"fsh.Box<T>.get~r07hia.2" @"fsh.Box<U>.get"', got);
 });

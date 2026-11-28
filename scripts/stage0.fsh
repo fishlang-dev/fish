@@ -1,33 +1,24 @@
 // What stage 0 is: the commit stage0.toml pins and the digest its binary is checked against.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-// stage0.toml: the commit stage 0 is built from and each target's digest of its binary. Once stage 0
-// is a release, also its tag, where releases are downloaded from, each target's sha256 of the
-// release's tarball, and the chain of commits it can be built from instead: the first built from
-// TypeScript by Bun, each later one by the one before.
-export type Pinned = { commit: string; digests: Map<string, string>; release?: string; releases?: string; tarballs: Map<string, string>; chain: string[] };
+// stage0.toml: the release stage 0 is, the commit it was cut from, where releases are downloaded
+// from, and each target's digest of its fishc and sha256 of its tarball.
+export type Pinned = { commit: string; digests: Map<string, string>; release?: string; releases?: string; tarballs: Map<string, string> };
 
-// The repository's stage0.toml, read as the few lines it holds: `key = "..."` lines, `chain` as a
-// list of strings, then `"<arch>-<platform>" = "<sha256>"` lines under `[digests]` and `[tarballs]`.
+// The repository's stage0.toml, read as the few lines it holds: `key = "..."` lines, then
+// `"<arch>-<platform>" = "<sha256>"` lines under `[digests]` and `[tarballs]`.
 export function pinned(root: string): Pinned throws IoError | Error {
   const text = readFileSync(join(root, "stage0.toml"), "utf8");
-  let p: Pinned = { commit: "", digests: new Map<string, string>(), tarballs: new Map<string, string>(), chain: [] };
+  let p: Pinned = { commit: "", digests: new Map<string, string>(), tarballs: new Map<string, string>() };
   let section = "";
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
     if (line.startsWith("[") && line.endsWith("]") && !line.includes("=")) {
       section = line;
-      continue;
-    }
-    const list = /^chain\s*=\s*\[(.*)\]$/.exec(line);
-    if (list !== null && section === "") {
-      for (const item of list[1]!.split(",")) {
-        const quoted = /^\s*"([0-9a-f]+)"\s*$/.exec(item);
-        if (quoted !== null) p.chain.push(quoted[1]!);
-      }
       continue;
     }
     const m = /^"?([\w.-]+)"?\s*=\s*"([^"]*)"$/.exec(line);
@@ -40,6 +31,15 @@ export function pinned(root: string): Pinned throws IoError | Error {
   }
   if (p.commit === "") throw new Error("stage0.toml names no commit");
   return p;
+}
+
+// Where fishc keeps what it caches, as the compiler's own cacheDir finds it.
+export function cacheDir(): string {
+  const given = process.env.FISH_CACHE_DIR ?? "";
+  if (given !== "") return given;
+  const xdg = process.env.XDG_CACHE_HOME ?? "";
+  const home = homedir();
+  return join(xdg !== "" ? xdg : home !== "" ? join(home, ".cache") : tmpdir(), "fish");
 }
 
 // This machine's target as stage0.toml names it.
@@ -80,15 +80,13 @@ export function tarballName(release: string, target: string): string {
 
 // stage0.toml written from `p`, the form pinned() reads.
 export function written(p: Ref<Pinned>): string {
-  let out = "# The fishc that builds the compiler: the commit it is built from, and for each target the sha256\n";
-  out += "# of its binary with the Mach-O UUID zeroed and the code signature left out, which every link makes\n";
-  out += "# anew. Once stage 0 is a release, bootstrap.sh downloads its tarball and checks it against\n";
-  out += "# [tarballs]; `chain` rebuilds it from source instead, its first commit built from TypeScript by\n";
-  out += "# Bun and each later one by the one before. Changed by scripts/promote.fsh.\n";
+  let out = "# The fishc that builds the compiler: the release it is, the commit that release was cut from, and\n";
+  out += "# for each target the sha256 of the release's tarball and of its fishc, the binary's taken with the\n";
+  out += "# Mach-O UUID zeroed and the code signature left out, which every link makes anew. bootstrap.sh and\n";
+  out += "# scripts/build.fsh download the tarball and check both. Changed by scripts/promote.fsh.\n";
   out += `commit = "${p.commit}"\n`;
   if (p.release !== undefined) out += `release = "${p.release!}"\n`;
   if (p.releases !== undefined) out += `releases = "${p.releases!}"\n`;
-  if (p.chain.length > 0) out += `chain = [${p.chain.map((c) => `"${c}"`).join(", ")}]\n`;
   out += "\n[digests]\n";
   for (const [k, v] of p.digests) out += `"${k}" = "${v}"\n`;
   if (p.tarballs.size > 0) {

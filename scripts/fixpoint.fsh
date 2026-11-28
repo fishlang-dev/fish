@@ -1,7 +1,7 @@
-// The bootstrap fixpoint, with no Bun: a native fishc given with `--from` builds the compiler's own
+// The bootstrap fixpoint: a native fishc given with `--from` builds the compiler's own
 // source into a second fishc, that one builds a third, and each prints the source's IR. The second
 // and third generations' IR must be identical. Each builds src in place; `--out <dir>` keeps the
-// binaries and IR there. Run by hand: a chain takes about an hour.
+// binaries and IR there. Run by hand: the two builds take about an hour and a half.
 //   fishc run scripts/fixpoint.fsh -- --from <fishc> [--out <dir>]
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, statSync } from "node:fs";

@@ -111,7 +111,7 @@ function planOf(path: string): Plan {
 test("each rule counts what the sample shows", () => {
   list(nonzero(survey(sample())), sorted([
     "parse: 1", "R1: 1", "R2: 1", "R3: 1", "declarators: 1",
-    "forIn: 1", "decorators: 1",
+    "decorators: 1",
     "G1: 3", "G6: 1", "G7: 1", "G8: 1", "G10: 1", "A1: 1", "A2: 1", "A3: 1", "A4: 1", "A8: 1", "A9: 1",
   ]), "counts");
 });
@@ -186,6 +186,7 @@ test("forms that look alike are told apart", () => {
   countsAre("const Bun = { spawn() {} };\nfunction f() {\n  Bun.spawn();\n}\n", []);
   countsAre('import { which, sleep, serve } from "bun";\nimport { password } from "bun";\n', ["bunModules: 1"]);
   countsAre("type F = (x: number) => void;\nconst g = function () { return 1; };\n", ["A9: 1"]);
+  countsAre("const g = function* () { yield 1; };\n", ["generatorExpressions: 1"]);
   countsAre("declare const DEV: boolean;\nlet a = 1;\nexport let b = 2;\nfor (const x of [1]) {}\n", ["A4: 2"]);
   countsAre("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n", []);
   countsAre('"use strict";\nsetup();\n', ["G7: 1"]);
@@ -250,22 +251,30 @@ test("discovery takes .ts, .tsx and .mts, and skips dependencies, hidden directo
   done(dir);
 });
 
+test("JSX is read, and counted as a rewrite to guide", () => {
+  const dir = project([["view.tsx", "const name = 'a';\nconst v = <div class=\"x\">{name}</div>;\nconst w = <p/>;\n"]]);
+  const r = survey(dir);
+  same(`${r.lines} ${r.unread.files}`, "3 0", "lines read and files unread");
+  const jsx = r.rules[rule(r, "jsx", false)]!.count;
+  assert(jsx === 2, `jsx counts ${jsx}`);
+  done(dir);
+});
+
 test("a file that can't be read adds its own blocker, not its lines", () => {
-  const dir = project([["ok.ts", "delete o.k;\n"], ["bad.ts", "let x!: number;\nconst = ;\n"], ["view.tsx", "const v = <div/>;\n"]]);
+  const dir = project([["ok.ts", "delete o.k;\n"], ["bad.ts", "let x!: number;\nconst = ;\n"], ["view.tsx", "const v = <div>;\n"]]);
   const r = survey(dir);
   assert(r.lines === 1, `${r.lines} lines`);
   same(`${r.unread.files} ${r.unread.lines}`, "2 3", "unread files and lines");
   const parse: Ref<RuleCount> = r.waiting[rule(r, "parse", true)]!;
   const note = parse.examples.length > 0 ? parse.examples[0]!.note ?? "" : "";
   assert(note.includes("expected"), `the note: ${note}`);
-  const jsx = r.waiting[rule(r, "jsx", true)]!.count;
-  assert(jsx === 1, `jsx counts ${jsx}`);
+  assert(parse.count === 2, `parse counts ${parse.count}`);
   // Graded per 1000 lines at least; with most lines unread, no grade at all.
   assert(r.score === 13, `score ${r.score}`);
   assert(r.grade === null, `grade ${r.grade ?? "none"}`);
   assert(formatReport(r).includes("no grade: only 25% of the lines could be read"), formatReport(r));
   done(dir);
-  const second = project([["a.tsx", "delete globalThis.x;\nconst v = <div/>;\n"]]);
+  const second = project([["a.tsx", "delete globalThis.x;\nconst v = <div>;\n"]]);
   assert(survey(second).grade === null, "a.tsx is graded");
   done(second);
   const third = project([["a.tsx", "let x!: number;\n"]]);
@@ -312,7 +321,7 @@ test("the JSON lists every rule, with zero counts", () => {
   try {
     const r = JSON.parse<Report>(run.out);
     same(JSON.stringify(r), JSON.stringify(survey(sample())), "the report");
-    assert(r.rules.length + r.waiting.length === 58, `${r.rules.length + r.waiting.length} rules`);
+    assert(r.rules.length + r.waiting.length === 59, `${r.rules.length + r.waiting.length} rules`);
   } catch (e) {
     assert(false, `the JSON doesn't parse as a report: ${e.message}\n${run.out}${run.err}`);
   }
@@ -352,7 +361,7 @@ function steps(r: Ref<Ranking>): string[] {
 }
 
 test("the curve picks the feature freeing the most lines first, and frees a file only once all it needs exist", () => {
-  const one = project([["a.ts", big()], ["b.ts", "for (const k in o) {}\n"], ["c.ts", "namespace N {}\nfor (const k in o) {}\n"]]);
+  const one = project([["a.ts", big()], ["b.ts", "for (k in o) {}\n"], ["c.ts", "namespace N {}\nfor (k in o) {}\n"]]);
   const two = project([["d.ts", "function main(): void {}\n"]]);
   const r = ranked([one, two]);
   same(`${r.curve.start.files} ${r.curve.start.lines} ${r.curve.start.share}`, "1 1 7.1", "the start");
@@ -383,12 +392,12 @@ function selfSteps(r: Ref<Ranking>): string[] {
 }
 
 test("unread files are left out of the steps but not the shares, and the self curve stands alone", () => {
-  const repo = project([["a.ts", big()], ["bad.ts", "const = ;\n"], ["v.tsx", "const v = <div/>;\nconst w = 1;\n"]]);
-  const self = project([["s.ts", "for (const k in o) {}\n"]]);
+  const repo = project([["a.ts", big()], ["bad.ts", "const = ;\n"], ["v.tsx", "const v = <div>;\nconst w = 1;\n"]]);
+  const self = project([["s.ts", "for (k in o) {}\n"]]);
   const r = ranked([repo], self);
   same(`${r.repos[0]!.unread.files} ${r.repos[0]!.unread.lines}`, "2 3", "unread");
   list(r.curve.steps.map((s) => `${s.feature} ${s.portable.share}`), ["The rest of console 76.9"], "the steps");
-  list(r.curve.unread.map((u) => `${u.feature} ${u.files} ${u.lines}`), ["JSX for server-side HTML 1 2", "parser gaps 1 1"], "unread");
+  list(r.curve.unread.map((u) => `${u.feature} ${u.files} ${u.lines}`), ["parser gaps 2 3"], "unread");
   assert(formatRanking(r).includes("also waiting, in files Fish couldn't read"), formatRanking(r));
   list(selfSteps(r), ["for...in 100"], "the self steps");
   done(repo);
@@ -442,7 +451,7 @@ function planShown(s: Ref<Step>): string {
 }
 
 test("a plan names each feature's item and whether it is done", () => {
-  const dir = project([["a.ts", big() + "for (const k in o) {}\nnamespace N {}\n"], ["plan.md", "## Plan\n\n- [ ] 7. **The rest of console** - console.debug\n  - [x] 9b. **for...in** - keys\n"]]);
+  const dir = project([["a.ts", big() + "for (k in o) {}\nnamespace N {}\n"], ["plan.md", "## Plan\n\n- [ ] 7. **The rest of console** - console.debug\n  - [x] 9b. **for...in** - keys\n"]]);
   const r = ranked([dir], undefined, planOf(join(dir, "plan.md")));
   list(sorted(r.curve.steps.map((s) => planShown(s))), sorted(["The rest of console: 7 false", "for...in: 9b true", "Namespaces: null"]), "the plan items");
   assert(formatRanking(r, true).includes("(plan item 9b, done)"), formatRanking(r, true));
@@ -695,7 +704,7 @@ test("dependency classification ignores dev helpers, odd names and odd manifests
   list(described(depsOf(dir)), sorted([
     "constructor: unknown undefined false", "toString: unknown undefined false",
     "bench: pure undefined false", "utils: pure undefined false", "crypto: native undefined false", "shared: pure undefined false",
-    "async-mutex: std Semaphore false", "bcryptjs: planned Auth primitives false", "query-string: std URL and URLSearchParams false", "socket.io: pure undefined true",
+    "async-mutex: std Semaphore false", "bcryptjs: std std:auth's hashPassword, which hashes with argon2id rather than bcrypt false", "query-string: std URL and URLSearchParams false", "socket.io: pure undefined true",
   ]), "the dependencies");
   done(dir);
   const listed = project([["package.json", '{"dependencies":["express"]}'], ["a.ts", "const x = 1;\n"]]);
@@ -723,32 +732,48 @@ test("pg and postgres are replaced by std's postgres module", () => {
   done(dir);
 });
 
-test("better-sqlite3 and sqlite3 are replaced by std's sqlite module", () => {
+test("better-sqlite3 and sqlite3 are replaced by std:sqlite", () => {
   const dir = project([["package.json", '{"dependencies":{"better-sqlite3":"11","sqlite3":"5"}}'], ["a.ts", "const x = 1;\n"]]);
   const d = depsOf(dir);
   same(countsOf(d), "std 2, planned 0, native 0, pure 0, unknown 0", "the counts");
-  list(equivalents(d), ["the sqlite module's Database false", "the sqlite module's Database false"], "the equivalents");
+  list(equivalents(d), ["std:sqlite's Database false", "std:sqlite's Database false"], "the equivalents");
   done(dir);
 });
 
-test("the OpenTelemetry packages are replaced by std's fish:trace module", () => {
+test("the AWS SDK's S3 packages are replaced by std:s3", () => {
+  const dir = project([["package.json", '{"dependencies":{"@aws-sdk/client-s3":"3","@aws-sdk/s3-request-presigner":"3"}}'], ["a.ts", "const x = 1;\n"]]);
+  const d = depsOf(dir);
+  same(countsOf(d), "std 2, planned 0, native 0, pure 0, unknown 0", "the counts");
+  list(equivalents(d), ["std:s3's S3Client, as Bun's false", "std:s3's S3Client, as Bun's false"], "the equivalents");
+  done(dir);
+});
+
+test("kysely is replaced by std:query", () => {
+  const dir = project([["package.json", '{"dependencies":{"kysely":"0.27"}}'], ["a.ts", "const x = 1;\n"]]);
+  const d = depsOf(dir);
+  same(countsOf(d), "std 1, planned 0, native 0, pure 0, unknown 0", "the counts");
+  list(equivalents(d), ["std:query's Kysely, compiling to SQL for std:postgres and std:sqlite false"], "the equivalents");
+  done(dir);
+});
+
+test("the OpenTelemetry packages are replaced by std's std:trace module", () => {
   const dir = project([["package.json", '{"dependencies":{"@opentelemetry/api":"1","@opentelemetry/sdk-node":"0.57","@opentelemetry/exporter-trace-otlp-http":"0.57"}}'], ["a.ts", "const x = 1;\n"]]);
   const d = depsOf(dir);
   same(countsOf(d), "std 3, planned 0, native 0, pure 0, unknown 0", "the counts");
-  const tracing = "the fish:trace module false";
+  const tracing = "the std:trace module false";
   list(equivalents(d), [tracing, tracing, tracing], "the equivalents");
   done(dir);
 });
 
 // Node's own sqlite is synchronous and names its classes otherwise, so an import of it is found
 // as a member std lacks, and the report says where std's is.
-test("node:sqlite is answered by std's sqlite module, bun:sqlite still waits", () => {
+test("node:sqlite is answered by std:sqlite, bun:sqlite still waits", () => {
   const dir = project([
     ["a.ts", 'import { DatabaseSync } from "node:sqlite";\n'],
     ["b.ts", 'import { Database } from "bun:sqlite";\n'],
   ]);
   same(features(dir), `[["Node built-ins"],["Bun's own modules"]]`, "the features");
-  list(builtinsOf(survey(dir)), ["sqlite 1 the sqlite module's Database, each call awaited false"], "the built-ins");
+  list(builtinsOf(survey(dir)), ["sqlite 1 std:sqlite's Database, each call awaited false"], "the built-ins");
   done(dir);
 });
 
@@ -760,7 +785,7 @@ test("ws and the frameworks' WebSocket helpers are replaced by Router.ws", () =>
   done(dir);
 });
 
-test("node:readline waits on nothing, as readLine and the stdin module replace it", () => {
+test("node:readline waits on nothing, as readLine and std:stdin replace it", () => {
   const dir = project([["a.ts", 'import { createInterface } from "node:readline";\n']]);
   same(features(dir), "[[]]", "the features");
   done(dir);
@@ -816,7 +841,7 @@ test("each Node built-in waits on the feature that replaces it, and the ranking 
     ["b.ts", 'import { URL } from "node:url";\nimport qs from "querystring";\n'],
   ]);
   same(features(url), '[[],["Node built-ins","node:querystring"]]', "url");
-  list(builtinsOf(survey(url)), ["querystring 1 node:querystring true", "url 1 url, for fileURLToPath and pathToFileURL false"], "the built-ins");
+  list(builtinsOf(survey(url)), ["querystring 1 node:querystring true", "url 1 std:url, for fileURLToPath and pathToFileURL false"], "the built-ins");
   done(url);
 });
 
@@ -826,7 +851,7 @@ test("child_process's sync calls are std's, and spawn still waits", () => {
     ["b.ts", 'import { spawn } from "child_process";\n'],
   ]);
   same(features(dir), '[[],["Node built-ins"]]', "the features");
-  list(builtinsOf(survey(dir)), ["child_process 1 child_process, for spawnSync, execFileSync and execSync false"], "the built-ins");
+  list(builtinsOf(survey(dir)), ["child_process 1 std:child_process, for spawnSync, execFileSync and execSync false"], "the built-ins");
   done(dir);
 });
 
@@ -966,7 +991,7 @@ test("node:assert ports for its default export and ok, and its other names wait 
   ]);
   same(features(dir), '[[],[],["Node built-ins"],["Node built-ins"]]', "the features");
   const all = survey(dir).builtins;
-  same(all !== undefined ? all.map((x) => `${x.module} ${x.equivalent !== undefined ? x.equivalent.name : "undefined"}`).join(", ") : "none", "assert assert, for the default export and ok", "the built-ins");
+  same(all !== undefined ? all.map((x) => `${x.module} ${x.equivalent !== undefined ? x.equivalent.name : "undefined"}`).join(", ") : "none", "assert std:assert, for the default export and ok", "the built-ins");
   done(dir);
 });
 

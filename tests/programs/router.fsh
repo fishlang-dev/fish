@@ -682,39 +682,272 @@ async function main(): Promise<void> {
   app.get("/point", async (_req): Promise<Point> => new Point(1));
 }
 // case: router_typed_throws
-// error: a route's handler that says its types can't throw yet; catch the error inside the handler and give back a 'Response' for it
+// expect: 409 text/plain;charset=UTF-8 [taken: root]
+// expect: 200 application/json [{"name":"ann"}]
+// A typed handler may throw: an error with 'intoResponse()' answers with the response it makes.
 type NewUser = { name: string };
-class Taken extends Error {}
+class Taken extends Error implements IntoResponse {
+  intoResponse(): Response {
+    return new Response("taken: " + this.message, { status: 409 });
+  }
+}
+async function show(app: Ref<Router>, body: string): Promise<void> {
+  const res = await app.handle(new Request("http://h/users", { method: "POST", body }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
 async function main(): Promise<void> {
   let app = new Router();
   app.post("/users", async (_req, body: NewUser): Promise<NewUser> => {
-    if (body.name === "root") throw new Taken("taken");
+    if (body.name === "root") throw new Taken(body.name);
     return body;
   });
+  await show(app, "{\"name\":\"root\"}");
+  await show(app, "{\"name\":\"ann\"}");
 }
 // case: router_typed_named_throws
-// error: a route's handler that says its types can't throw yet; catch the error inside the handler and give back a 'Response' for it
+// expect: 500 application/json [{"error":"Internal Server Error"}]
+// expect: 200 application/json [{"name":"ann"}]
+// An error without 'intoResponse()' answers a 500 that doesn't say what it was.
 type NewUser = { name: string };
 class Taken extends Error {}
 async function create(_req: Request, body: NewUser): Promise<NewUser> throws Taken {
-  if (body.name === "root") throw new Taken("taken");
+  if (body.name === "root") throw new Taken("secret detail");
   return body;
+}
+async function show(app: Ref<Router>, body: string): Promise<void> {
+  const res = await app.handle(new Request("http://h/users", { method: "POST", body }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
 }
 async function main(): Promise<void> {
   let app = new Router();
   app.post("/users", create);
+  await show(app, "{\"name\":\"root\"}");
+  await show(app, "{\"name\":\"ann\"}");
+}
+// case: router_errors_plain
+// expect: 404 text/plain;charset=UTF-8 [no user 7]
+// expect: 200 text/plain;charset=UTF-8 [user 1]
+// expect: 418 text/plain;charset=UTF-8 [teapot]
+// expect: 500 text/plain;charset=UTF-8 [bad input]
+// A plain handler may throw too: its own response, a thrown Response as it is, and a string as a
+// 500's text.
+class NotFound extends Error implements IntoResponse {
+  intoResponse(): Response {
+    return new Response(this.message, { status: 404 });
+  }
+}
+function find(id: string): string throws NotFound {
+  if (id !== "1") throw new NotFound("no user " + id);
+  return "user " + id;
+}
+async function show(app: Ref<Router>, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/users/:id", async (req) => new Response(find(req.param("id"))));
+  app.get("/tea", async (_req) => {
+    throw new Response("teapot", { status: 418 });
+  });
+  app.get("/bad", async (_req) => {
+    throw "bad input";
+  });
+  await show(app, "/users/7");
+  await show(app, "/users/1");
+  await show(app, "/tea");
+  await show(app, "/bad");
+}
+// case: router_errors_answer
+// expect: 201 text/plain;charset=UTF-8 [made ann]
+// A handler's written return type with 'intoResponse()' answers with the response it makes.
+class Created implements IntoResponse {
+  name: string;
+  constructor(name: string) { this.name = name; }
+  intoResponse(): Response {
+    return new Response("made " + this.name, { status: 201 });
+  }
+}
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (_req): Promise<Created> => new Created("ann"));
+  const res = await app.handle(new Request("http://h/users", { method: "POST" }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text + "]");
+}
+// case: router_state
+// expect: mw 1
+// expect: 200 text/plain;charset=UTF-8 [hits 1]
+// expect: mw 2
+// expect: 200 application/json [{"id":2,"name":"ann"}]
+// expect: mw 3
+// expect: 404 text/plain;charset=UTF-8 [Not Found]
+// A router's state is given to each handler and middleware, cloned for each request; a handler
+// taking a body takes it after the state.
+type NewUser = { name: string };
+type User = { id: i64; name: string };
+type App = shared<{ hits: Atomic<i64> }>;
+async function create(_req: Request, state: App, body: NewUser): Promise<User> {
+  return { id: state.hits.load(), name: body.name };
+}
+async function show(app: Ref<StateRouter<App>>, method: string, path: string, body: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method, body }));
+  const type = res.headers.get("content-type") ?? "none";
+  const text = await res.text();
+  console.log(res.status, type, "[" + text.trim() + "]");
+}
+async function main(): Promise<void> {
+  const initial: App = shared({ hits: new Atomic(0) });
+  let app = new Router().state(initial);
+  app.use(async (req, state, next) => {
+    console.log("mw", state.hits.add(1) + 1);
+    const res = await next(req);
+    return res;
+  });
+  app.get("/hits", async (_req, state) => new Response("hits " + state.hits.load()));
+  app.post("/users", create);
+  await show(app, "GET", "/hits", "");
+  await show(app, "POST", "/users", "{\"name\":\"ann\"}");
+  await show(app, "GET", "/nowhere", "");
+}
+// case: router_typed_untyped_body
+// error: a route's handler's parameter after the request is its body, read as JSON, so it needs the body's type written
+async function main(): Promise<void> {
+  let app = new Router();
+  app.post("/users", async (_req, body) => new Response("x"));
 }
 // case: router_typed_three_parameters
-// error: a route's handler takes the request and, to have its body read as JSON, a second parameter of the body's type, not 3 parameters
+// error: a route's handler takes the request and, to have its body read as JSON, a parameter of the body's type, not 3 parameters
 type NewUser = { name: string };
 async function main(): Promise<void> {
   let app = new Router();
   app.post("/users", async (_req: Request, body: NewUser, _extra: i64): Promise<NewUser> => body);
 }
 // case: router_typed_get_body
-// error: a GET request carries no body, so its handler can't take one as a second parameter
+// error: a GET request carries no body, so its handler can't take one after the request
 type Query = { q: string };
 async function main(): Promise<void> {
   let app = new Router();
   app.get("/search", async (_req, body: Query): Promise<Query> => body);
+}
+// case: router_method_not_allowed
+// expect: GET /users 200 [-] list
+// expect: DELETE /users 405 [GET, HEAD, POST, OPTIONS] Method Not Allowed
+// expect: OPTIONS /users 204 [GET, HEAD, POST, OPTIONS]
+// expect: PUT /items/3 405 [PATCH, OPTIONS] Method Not Allowed
+// expect: OPTIONS /custom 200 [-] own options
+// expect: PUT /any 200 [-] any
+// expect: GET /nowhere 404 [-] Not Found
+// expect: OPTIONS /nowhere 404 [-] Not Found
+// expect: POST /files/a.txt 404 [-] Not Found
+// A path routed only for other methods gets a 405 naming each once, OPTIONS there a 204 naming them,
+// and an OPTIONS or 'all' route of the program's own still answers first; static routes and
+// paths no route takes stay 404.
+async function show(app: Ref<Router>, method: string, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method: method }));
+  const body = await res.text();
+  console.log(`${method} ${path} ${res.status} [${res.headers.get("allow") ?? "-"}] ${body.trim()}`.trimEnd());
+}
+
+async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/users", async (_req) => new Response("list"));
+  app.post("/users", async (_req) => new Response("made", { status: 201 }));
+  app.patch("/items/:id", async (_req) => new Response("patched"));
+  app.patch("/items/:n", async (_req) => new Response("patched again"));
+  app.route("OPTIONS", "/custom", async (_req) => new Response("own options"));
+  app.get("/custom", async (_req) => new Response("custom"));
+  app.all("/any", async (_req) => new Response("any"));
+  app.static("/files", ".");
+  await show(app, "GET", "/users");
+  await show(app, "DELETE", "/users");
+  await show(app, "OPTIONS", "/users");
+  await show(app, "PUT", "/items/3");
+  await show(app, "OPTIONS", "/custom");
+  await show(app, "PUT", "/any");
+  await show(app, "GET", "/nowhere");
+  await show(app, "OPTIONS", "/nowhere");
+  await show(app, "POST", "/files/a.txt");
+}
+// case: router_wildcard
+// expect: /files 200 files []
+// expect: /files/ 200 files []
+// expect: /files/a.txt 200 files [a.txt]
+// expect: /files/docs/a%20b.txt 200 files [docs/a b.txt]
+// expect: /filesx 404 Not Found
+// expect: /users/7/x/y 200 user 7 [x/y]
+// expect: /api/v1/anything 200 api [v1/anything]
+// expect: /api 200 api []
+// A last '*' segment takes the rest of the path, none included, read percent-decoded as the
+// param '*'; it works after :params and in a mounted router.
+async function show(app: Ref<Router>, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path));
+  const body = await res.text();
+  console.log(path, res.status, body.trim());
+}
+
+async function main(): Promise<void> {
+  let api = new Router();
+  api.get("/*", async (req) => new Response("api [" + req.param("*") + "]"));
+  let app = new Router();
+  app.get("/files/*", async (req) => new Response("files [" + req.param("*") + "]"));
+  app.get("/users/:id/*", async (req) => new Response("user " + req.param("id") + " [" + req.param("*") + "]"));
+  app.route("/api", api);
+  for (const p of ["/files", "/files/", "/files/a.txt", "/files/docs/a%20b.txt", "/filesx", "/users/7/x/y", "/api/v1/anything", "/api"]) await show(app, p);
+}
+// case: router_not_found
+// expect: seen /nowhere
+// expect: 404 application/json {"error":"no route for /nowhere"}
+// expect: seen /old
+// expect: 404 application/json {"error":"no route for /gone"}
+// expect: seen /a
+// expect: 405 text/plain;charset=UTF-8 Method Not Allowed
+// expect: seen /a
+// expect: 200 text/plain;charset=UTF-8 a
+// notFound's handler answers what no route takes, inside the middleware, after a re-route too,
+// and the last set wins; a 405 is still the router's own.
+async function show(app: Ref<Router>, method: string, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method: method }));
+  const body = await res.text();
+  console.log(res.status, res.headers.get("content-type") ?? "-", body.trim());
+}
+
+async function main(): Promise<void> {
+  let app = new Router();
+  app.use(async (req, next) => {
+    console.log("seen", req.path);
+    let moved = req;
+    if (moved.path === "/old") moved.path = "/gone";
+    const res = await next(moved);
+    return res;
+  });
+  app.get("/a", async (_req) => new Response("a"));
+  app.notFound(async (_req) => new Response("first"));
+  app.notFound(async (req) => {
+    let res = new Response("{\"error\":\"no route for " + req.path + "\"}", { status: 404 });
+    res.headers.set("content-type", "application/json");
+    return res;
+  });
+  await show(app, "GET", "/nowhere");
+  await show(app, "GET", "/old");
+  await show(app, "POST", "/a");
+  await show(app, "GET", "/a");
+}
+// case: router_state_not_found
+// expect: 404 missing, 3 routes
+// A StateRouter's notFound handler is given the state.
+async function main(): Promise<void> {
+  let app = new Router().state({ routes: 3 });
+  app.get("/a", async (_req, _state) => new Response("a"));
+  app.notFound(async (_req, state) => new Response("missing, " + String(state.routes) + " routes", { status: 404 }));
+  const res = await app.handle(new Request("http://h/b"));
+  const body = await res.text();
+  console.log(res.status, body);
 }

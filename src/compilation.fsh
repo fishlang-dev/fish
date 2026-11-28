@@ -1,3 +1,4 @@
+import type { Reads } from "./reads.fsh";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.fsh";
@@ -9,7 +10,7 @@ import type { ClassMember, ClassNode, Declarator, Expr, Func as Declared, Interf
 import type { Categories, Free, Hygiene, Quote } from "./quote.fsh";
 import type { RegexTables } from "./regex.fsh";
 import type { RustClass, RustName, RustTables } from "./rust.fsh";
-import type { Locking } from "./program.fsh";
+import { FILE_SPAN, type Locking } from "./program.fsh";
 import type { TopKeys } from "./keys.fsh";
 import { TypeMap, Typing, type ClassType, type DynType, type LiteralType, type Type, type UnionType } from "./typing.fsh";
 import type { DynTable } from "./values.fsh";
@@ -35,9 +36,13 @@ import type { DynTable } from "./values.fsh";
 // `generated`: the nodes a macro made, which no warning points into: their author can't change them.
 // `rewrites`: the nodes lowering replaced, by id, until each body's rebuild puts them in place.
 // `looked`: every source file loading read or looked for, as an absolute path, missing ones included.
+// `published`: the program-wide names of the functions a Fish package's lib exports to other
+// packages, whose signatures stay as written.
+// `editionWarnings`: what lowering files in the reference-counted edition warned about.
+// `reads`: the files the entry's package lets comptime read.
 export type Compilation = {
   session: Session; ids: Ids; rewrites: Rewrites; names: Names; regex: RegexTables; typing: Typing; arenas: Arenas; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string; std: boolean }[]; rust: RustTables;
-  enumInits: [usize, usize, string][]; fileNames?: Map<usize, Map<string, string>>; generated: NodeSet<Id>; looked: string[];
+  enumInits: [usize, usize, string][]; fileNames?: Map<usize, Map<string, string>>; generated: NodeSet<Id>; looked: string[]; published?: Set<string>; editionWarnings?: CompileError[]; reads?: Reads;
 };
 
 // What a compilation numbers as it goes, from 0, so the same program is numbered the same way
@@ -47,9 +52,9 @@ export type Counts = { enums: usize; expansions: usize; constants: usize; checks
 
 // What lasts as long as whoever compiles: a CLI run, a language server, a test. Its options, and
 // the caches that spare later compilations the work earlier ones did. The caches only building
-// objects reads are on `mathlib.ts`'s `BuildSession`, out of the checker's reach.
+// objects reads are on `mathlib.fsh`'s `BuildSession`, out of the checker's reach.
 // `locking`: whether the lockfile may be rewritten, and which dependencies `fishc update` moves.
-// `engineHook`: whether programs may import `fish:engine`, which only the compiler's own tests do.
+// `engineHook`: whether programs may import `std:engine`, which only the compiler's own tests do.
 // `std`: std's statements when `cached`, each read a fresh copy, without which each compilation
 // parses std's source; and how many times std was parsed rather than loaded.
 // `timings`: each build stage's time, kept only when `--timings` asks.
@@ -70,7 +75,24 @@ export type Session = {
   // the tables of instances that are never compiled as each one's check ends.
   plain?: boolean;
   borrows?: BorrowEvent[];
+  // What `std:build` tells a program: the target, whether the build is a release one, and each
+  // `--flag`; undefined is a dev build for the host with no flags.
+  build?: BuildInfo;
 };
+
+// A `--flag name` or `--flag name=value` given to a build.
+export type BuildFlag = { name: string; value: string | null };
+// `triple` is the one `--target` gave, or empty for the host. `dev` is `fishc dev`'s build of a
+// program's handlers, whose serve answers through the host that loads them.
+export type BuildInfo = { triple: string; release: boolean; flags: BuildFlag[]; dev?: boolean };
+
+// The build `given` describes, made a release one or not, and for `triple` when one is given.
+export function buildFor(given: Ref<BuildInfo | undefined>, triple: string | undefined, release: boolean, dev?: boolean): BuildInfo {
+  let flags: BuildFlag[] = [];
+  if (given !== undefined) for (const f of given.flags) flags.push({ name: f.name, value: f.value });
+  const handlers = dev ?? (given !== undefined && given.dev === true);
+  return { triple: triple ?? (given !== undefined ? given.triple : ""), release, flags, dev: handlers };
+}
 
 export function newSession(): Session {
   return { locking: { locked: false }, engineHook: false, std: { tree: [], cached: false, parses: 0 } };
@@ -97,7 +119,7 @@ export function macroCompilation(c: Ref<Compilation>): Compilation {
     fileNames = copied;
   }
   return {
-    session: { locking: { locked: false }, engineHook: c.session.engineHook, std: { tree: [], cached: false, parses: 0 } },
+    session: { locking: { locked: false }, engineHook: c.session.engineHook, std: { tree: [], cached: false, parses: 0 }, build: c.session.build === undefined ? undefined : buildFor(c.session.build, undefined, c.session.build!.release) },
     ids: { last: c.ids.last },
     rewrites: new Rewrites(),
     names: copyNames(c.names),
@@ -112,6 +134,7 @@ export function macroCompilation(c: Ref<Compilation>): Compilation {
     fileNames,
     generated: c.generated.copy(),
     looked: [...c.looked],
+    reads: c.reads === undefined ? undefined : { dir: c.reads!.dir, globs: [...c.reads!.globs] },
   };
 }
 
@@ -134,7 +157,10 @@ export type Tables = {
   names: Names;
   enumInits: Compilation["enumInits"];
   fileNames?: Compilation["fileNames"];
+  published?: Compilation["published"];
+  editionWarnings?: Compilation["editionWarnings"];
   looked: string[];
+  reads?: Reads;
   typing: Typing;
   arenas: Arenas;
   upcasts: Set<string>;
@@ -171,6 +197,9 @@ export type Tables = {
   // type it takes; and the defaults it adds, which an Option's absence takes and anything else
   // never needs.
   destructuredParts: NodeMap<Stmt, Expr>;
+  // Each read of such a fresh variable, with the end of the whole assignment: every part is read
+  // before any target is written, so what a part borrows stays in use until the last write.
+  heldUntil: NodeMap<Expr, usize>;
   // What checking put into a statement list beside a statement, by the statement: the parts a
   // destructuring declaration became after it, and the block a `for` head's declarations moved
   // into around it. A generic class's instances check copies of one body, with its nodes' ids, so
@@ -178,6 +207,9 @@ export type Tables = {
   insertedAfter: NodeMap<Stmt, Stmt[]>;
   wrappedIn: NodeMap<Stmt, Stmt>;
   unusedDefaults: NodeSet<Expr>;
+  // The `as f64` a `Number` predicate writes around its argument, which converts whichever number
+  // a union of numbers holds rather than requiring an `f64`.
+  numericAs: NodeSet<Expr>;
   timerMains: NodeSet<Declared>;
   // A nested function's calls of itself, which run with the calling closure's own captures.
   selfCalls: NodeSet<Expr>;
@@ -202,6 +234,9 @@ export type Tables = {
   pairs: NodeSet<Expr>;
   // The `FixedArray.filled` calls, by the fixed array each makes.
   fixedFills: NodeSet<Expr>;
+  // SIMD constructors and methods, by the operation each lowers to: make, splat, a reduction,
+  // a lane comparison, select, any, all or toArray.
+  simdCalls: NodeMap<Expr, string>;
   // `String.fromCharCode(...)` and `String.fromCodePoint(...)`, by their call, their arguments
   // gathered into one array.
   stringBuilds: NodeMap<Expr, "units" | "points">;
@@ -225,7 +260,7 @@ export type Tables = {
   printCalls: NodeSet<Expr>;
   // `handle.join()` calls, which take the handle over and give it back awaitable as a TaskPanic.
   joinCalls: NodeSet<Expr>;
-  // node:util's `format` calls.
+  // std:util's `format` calls.
   formatCalls: NodeSet<Expr>;
   // The timer calls written in a program, rewritten into the std's own, and the async arrows
   // running their callbacks.
@@ -239,12 +274,15 @@ export type Tables = {
   groupCalls: NodeSet<Expr>;
   // The operands of an `await`, while they are checked.
   awaitedNow: NodeSet<Expr>;
-  // node:util's `inspect` calls.
+  // std:util's `inspect` calls.
   inspectCalls: NodeSet<Expr>;
   // The `isDeepStrictEqual` calls checked as the `===` they were turned into.
   deepEqualities: NodeSet<Expr>;
   // The calls `spawnBlocking` makes of a function it was given other than as an arrow.
   blockingRuns: NodeSet<Expr>;
+  // Where each function `spawnBlocking` runs starts, which the closures made of it share: they
+  // run on the blocking pool, where blocking is what they are for.
+  blockingTasks: Set<usize>;
   // The `parseArgs` calls whose config has been turned into the arguments std's port takes.
   parsedArgs: NodeSet<Expr>;
   // The calls that add a route to one of std's routers or mount one router in another, which
@@ -398,13 +436,16 @@ export type Tables = {
 /** @throws {CompileError} */
 export type Timed<T> = () => T;
 
-export function newTables({ session, names, enumInits, fileNames, looked, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
+export function newTables({ session, names, enumInits, fileNames, published, editionWarnings, looked, reads, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
   return {
     session,
     names,
     enumInits,
     fileNames,
+    published,
+    editionWarnings,
     looked,
+    reads,
     typing,
     arenas,
     upcasts,
@@ -423,9 +464,11 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     liftedFunctions: new NodeMap<Stmt | Expr, { name: string; symbol: string }>(),
     getterNames: new Set<string>(),
     destructuredParts: new NodeMap<Stmt, Expr>(),
+    heldUntil: new NodeMap<Expr, usize>(),
     insertedAfter: new NodeMap<Stmt, Stmt[]>(),
     wrappedIn: new NodeMap<Stmt, Stmt>(),
     unusedDefaults: new NodeSet<Expr>(),
+    numericAs: new NodeSet<Expr>(),
     timerMains: new NodeSet<Declared>(),
     selfCalls: new NodeSet<Expr>(),
     substituted: new NodeSet<Expr>(),
@@ -437,6 +480,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     packed: new NodeSet<Expr>(),
     pairs: new NodeSet<Expr>(),
     fixedFills: new NodeSet<Expr>(),
+    simdCalls: new NodeMap<Expr, string>(),
     stringBuilds: new NodeMap<Expr, "units" | "points">(),
     namedParams: new NodeMap<Param, { fn: string; names: string[]; clones: boolean[] }>(),
     presetParams: new NodeMap<Param, Type>(),
@@ -457,6 +501,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     inspectCalls: new NodeSet<Expr>(),
     deepEqualities: new NodeSet<Expr>(),
     blockingRuns: new NodeSet<Expr>(),
+    blockingTasks: new Set<usize>(),
     parsedArgs: new NodeSet<Expr>(),
     routes: new NodeMap<Expr, Route>(),
     printed: new NodeSet<Expr>(),
@@ -533,8 +578,22 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
 // `manual`, when set, is the clock: a test sets it and moves it by hand.
 // `report` prints the times; `memory`, kept when FISH_MEM=1 asks, is what the process held as each
 // stage ended, the most a stage ended at when it runs more than once. `stop`, from FISH_MEM_STOP, is
-// the stage the process ends after.
-export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading>; tables?: string; stop?: string };
+// the stage the process ends after. `usage`, kept when FISH_USAGE=1 asks, is each stage's CPU time
+// and peaks, read from getrusage alone, since FISH_MEM's `ps` at each body's end would skew the times.
+// `files` is each file's share, by the offset it starts at, named in `names`; `fileInner` is to it
+// what `inner` is to the stages. `json`, from `--timings-json`, is where the times are written.
+export type Timings = { ms: Map<string, f64>; notes: Map<string, string>; inner: f64; objects: { built: string[]; cached: usize }; manual?: f64; report: boolean; memory?: Map<string, Reading>; tables?: string; stop?: string; usage?: Usage; files: Map<usize, FileCost>; names: Map<usize, string>; fileInner: f64; json?: string };
+
+// A file's share of a build in ms: the parse of its text; the checks of its bodies, their move
+// checks and comptime included and the checks they needed of other bodies left out; the emission
+// of its instances; and how many instances it was compiled to.
+export type FileCost = { parse: f64; check: f64; codegen: f64; instances: usize };
+
+// Each stage's own CPU time in ms, fishc's and its children's, left out of the stage around it as
+// `ms` is; the most fishc and the largest of its children had been resident as it last ended, in
+// bytes; and `inner`, as Timings' own.
+export type Usage = { cpu: Map<string, f64>; peaks: Map<string, Peaks>; inner: f64 };
+export type Peaks = { own: i64; children: i64 };
 
 // The process's memory as a stage ended, in bytes: resident now and the most it has been resident.
 // -1 where the system can't say.
@@ -545,15 +604,47 @@ export type Reading = { rss: i64; peak: i64 };
 declare function getrusage(who: i32, usage: MutPtr<u8>): i32;
 declare function getpid(): i32;
 
-// The most the process has been resident: struct rusage's ru_maxrss, after its two timevals, in
-// bytes on macOS and KiB on Linux.
-function peakResident(): i64 {
+const SELF: i32 = 0;
+const CHILDREN: i32 = -1;
+
+// struct rusage for `who`, or undefined when the system can't say.
+function rusage(who: i32): u8[] | undefined {
   let usage: u8[] = new Array(144).fill(0 as u8);
-  const ok = unsafe { getrusage(0, mutPtrOf(usage[0])) };
-  if (ok !== 0) return -1;
+  const ok = unsafe { getrusage(who, mutPtrOf(usage[0])) };
+  return ok === 0 ? usage : undefined;
+}
+
+// The little-endian word at `at`, `bytes` long.
+function word(usage: Ref<u8[]>, at: usize, bytes: usize): i64 {
   let n: i64 = 0;
-  for (let i: usize = 0; i < 8; i++) n = n | ((usage[32 + i]! as i64) << ((8 * i) as i64));
+  for (let i: usize = 0; i < bytes; i++) n = n | ((usage[at + i]! as i64) << ((8 * i) as i64));
+  return n;
+}
+
+// The most `who` has been resident: ru_maxrss, after its two timevals, in bytes on macOS and KiB on
+// Linux.
+function peakOf(who: i32): i64 {
+  const usage = rusage(who);
+  if (usage === undefined) return -1;
+  const n = word(usage!, 32, 8);
   return process.platform === "darwin" ? n : n * 1024;
+}
+
+function peakResident(): i64 {
+  return peakOf(SELF);
+}
+
+// The user and system time fishc and the children it has waited for have taken, in ms: ru_utime
+// and ru_stime, each a 64-bit tv_sec and a tv_usec read as 32 bits, as both macOS and Linux lay
+// them out.
+function cpuNow(): f64 {
+  let total: f64 = 0;
+  for (const who of [SELF, CHILDREN]) {
+    const usage = rusage(who);
+    if (usage === undefined) continue;
+    for (const at of [0 as usize, 16 as usize]) total += (word(usage!, at, 8) as f64) * 1000 + (word(usage!, at + 8, 4) as f64) / 1000;
+  }
+  return total;
 }
 
 // What the process is resident at now: Linux's /proc/self/statm in pages, or what ps reports in KiB.
@@ -580,10 +671,11 @@ export const FRONT_END = ["parse", "macros", "check", "moves", "comptime"];
 // The stages FISH_MEM_STOP can name: those that end once in a build. `moves` and `comptime` end
 // once per body inside `check`, and flattening ends a stage named `check` before the check starts.
 export const STOP_STAGES = ["parse", "check", "codegen"];
-export const NATIVE_STAGES = ["compile", "runtime", "link"];
+// In the order a build runs them: the runtime and cached units, then the program, then the link.
+export const NATIVE_STAGES = ["runtime", "compile", "link"];
 
 export function newTimings(): Timings {
-  const made: Timings = { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 }, report: true };
+  const made: Timings = { ms: new Map(), notes: new Map(), inner: 0, objects: { built: [], cached: 0 }, report: true, files: new Map(), names: new Map(), fileInner: 0 };
   return made;
 }
 
@@ -601,7 +693,7 @@ export function newDeclarations(): Declarations {
 }
 
 // When a timed stage started, and the time stages inside the one around it had taken by then.
-export type Started = { timing: boolean; outer: f64; start: f64 };
+export type Started = { timing: boolean; outer: f64; start: f64; cpuOuter: f64; cpuStart: f64 };
 
 // Starts timing a stage of a compilation, when it is timed.
 export function timingStart(tables: Mut<Tables>): Started {
@@ -615,10 +707,17 @@ export function timingEnd(tables: Mut<Tables>, name: string, started: Ref<Starte
 
 // `timingStart` and `timingEnd` for a stage outside a check, timed on the session itself.
 export function stageStart(session: Mut<Session>): Started {
-  if (session.timings === undefined) return { timing: false, outer: 0, start: 0 };
+  if (session.timings === undefined) return { timing: false, outer: 0, start: 0, cpuOuter: 0, cpuStart: 0 };
   const outer = session.timings.inner;
   session.timings.inner = 0;
-  return { timing: true, outer, start: now(session.timings) };
+  let cpuOuter: f64 = 0;
+  let cpuStart: f64 = 0;
+  if (session.timings.usage !== undefined) {
+    cpuOuter = session.timings.usage.inner;
+    session.timings.usage.inner = 0;
+    cpuStart = cpuNow();
+  }
+  return { timing: true, outer, start: now(session.timings), cpuOuter, cpuStart };
 }
 
 export function stageEnd(session: Mut<Session>, name: string, started: Ref<Started>) {
@@ -632,17 +731,73 @@ export function stageEnd(session: Mut<Session>, name: string, started: Ref<Start
     const kept: Reading = was === undefined ? now : { rss: Math.max(was!.rss, now.rss), peak: now.peak };
     session.timings.memory.set(name, kept);
   }
+  if (session.timings.usage !== undefined) {
+    const spent = cpuNow() - started.cpuStart;
+    session.timings.usage.cpu.set(name, (session.timings.usage.cpu.get(name) ?? 0) + spent - session.timings.usage.inner);
+    session.timings.usage.inner = started.cpuOuter + spent;
+    const was = session.timings.usage.peaks.get(name);
+    const own = peakOf(SELF);
+    session.timings.usage.peaks.set(name, { own: was === undefined ? own : Math.max(was!.own, own), children: peakOf(CHILDREN) });
+  }
 }
 
 // A part of a stage, timed apart while the stage keeps all of its own time.
 export function partStart(session: Ref<Session>): Started {
-  if (session.timings === undefined) return { timing: false, outer: 0, start: 0 };
-  return { timing: true, outer: 0, start: now(session.timings) };
+  if (session.timings === undefined) return { timing: false, outer: 0, start: 0, cpuOuter: 0, cpuStart: 0 };
+  return { timing: true, outer: 0, start: now(session.timings), cpuOuter: 0, cpuStart: 0 };
 }
 
 export function partEnd(session: Mut<Session>, name: string, started: Ref<Started>) {
   if (!started.timing || session.timings === undefined) return;
   session.timings.ms.set(name, (session.timings.ms.get(name) ?? 0) + now(session.timings) - started.start);
+}
+
+// Starts timing a file's share of a stage, as `stageStart` does a stage.
+export function fileStart(session: Mut<Session>): Started {
+  if (session.timings === undefined) return { timing: false, outer: 0, start: 0, cpuOuter: 0, cpuStart: 0 };
+  const outer = session.timings.fileInner;
+  session.timings.fileInner = 0;
+  return { timing: true, outer, start: now(session.timings), cpuOuter: 0, cpuStart: 0 };
+}
+
+// Adds the time since `started`, less the file shares timed inside it, to the `part` of the file
+// holding source offset `at`, counting an instance when `instance`.
+export function fileEnd(session: Mut<Session>, at: usize, part: "parse" | "check" | "codegen", started: Ref<Started>, instance = false) {
+  if (!started.timing || session.timings === undefined) return;
+  const spent = now(session.timings) - started.start;
+  const own = spent - session.timings.fileInner;
+  session.timings.fileInner = started.outer + spent;
+  const base = at - (at % (FILE_SPAN as usize));
+  const was = session.timings.files.get(base);
+  let cost: FileCost = was === undefined ? { parse: 0, check: 0, codegen: 0, instances: 0 } : { parse: was!.parse, check: was!.check, codegen: was!.codegen, instances: was!.instances };
+  if (part === "parse") cost.parse += own;
+  else if (part === "check") cost.check += own;
+  else cost.codegen += own;
+  if (instance) cost.instances++;
+  session.timings.files.set(base, cost);
+}
+
+// Each file's costs, costliest first, named as the program writes them; std's prelude is in no
+// file of the program.
+export function fileCosts(timings: Ref<Timings>): ({ file: string } & FileCost)[] {
+  let out: ({ file: string } & FileCost)[] = [];
+  for (const [base, c] of timings.files) out.push({ file: timings.names.get(base) ?? "<fish std>", parse: c.parse, check: c.check, codegen: c.codegen, instances: c.instances });
+  out.sort((a, b) => b.parse + b.check + b.codegen - (a.parse + a.check + a.codegen));
+  return out;
+}
+
+// The `shown` costliest files, one line each, and how many more there are.
+export function formatFiles(timings: Ref<Timings>, shown: usize): string {
+  const costs = fileCosts(timings);
+  if (costs.length === 0) return "";
+  const ms = (n: f64) => `${n.toFixed(1)} ms`.padStart(13);
+  let out = `${"file".padEnd(32)}${"parse".padStart(13)}${"check".padStart(13)}${"codegen".padStart(13)}${"instances".padStart(11)}\n`;
+  for (let i: usize = 0; i < costs.length && i < shown; i++) {
+    const c: Ref<{ file: string } & FileCost> = costs[i]!;
+    out += `${c.file.padEnd(32)}${ms(c.parse)}${ms(c.check)}${ms(c.codegen)}${`${c.instances}`.padStart(11)}\n`;
+  }
+  if (costs.length > shown) out += `${costs.length - shown} more files; --timings-json <path> lists every one\n`;
+  return out;
 }
 
 // Runs `run`, adding its own time to stage `name` when timing.
@@ -679,6 +834,17 @@ export function formatMemory(memory: Ref<Map<string, Reading>>, stages: Ref<stri
   return out + `${"end".padEnd(12)}${mib(end.rss)}${mib(end.peak)}\n`;
 }
 
+// FISH_USAGE's table: for each stage that ran, in order, its own CPU time and the peaks as it ended.
+export function formatUsage(usage: Ref<Usage>, stages: Ref<string[]>): string {
+  const mib = (n: i64) => (n < 0 ? "?" : `${((n as f64) / 1048576).toFixed(1)} MiB`).padStart(14);
+  let out = `${"stage".padEnd(12)}${"cpu".padStart(14)}${"peak".padStart(14)}${"children".padStart(14)}\n`;
+  for (const s of stages) {
+    const p = usage.peaks.get(s);
+    if (p !== undefined) out += `${s.padEnd(12)}${`${(usage.cpu.get(s) ?? 0).toFixed(1)} ms`.padStart(14)}${mib(p!.own)}${mib(p!.children)}\n`;
+  }
+  return out;
+}
+
 // libc's `exit`, not `process.exit`: that marks the program abandoned, and a `--leaks` build's
 // runtime then reports nothing of what is live.
 declare function exit(status: i32): void;
@@ -693,9 +859,16 @@ export function stopAfter(session: Ref<Session>, stage: string): void {
   unsafe { exit(0) };
 }
 
-// Which cached objects a build made and how many it reused, as the runtime stage's note.
+// Which cached objects a build made and how many it reused, as the runtime stage's note. The
+// program's file units are counted rather than named, since a large program has hundreds.
 export function objectsNote(timings: Ref<Timings>): string {
-  const built: Ref<string[]> = timings.objects.built;
+  let named: string[] = [];
+  let files: usize = 0;
+  for (const b of timings.objects.built) {
+    if (b.startsWith("file-")) files++;
+    else named.push(b.clone());
+  }
+  if (files > 0) named.push(`${files} file unit${files === 1 ? "" : "s"}`);
   const cachedNote = `${timings.objects.cached} cached`;
-  return built.length > 0 ? `built ${built.join(", ")}; ${cachedNote}` : cachedNote;
+  return named.length > 0 ? `built ${named.join(", ")}; ${cachedNote}` : cachedNote;
 }

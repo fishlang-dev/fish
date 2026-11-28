@@ -8,6 +8,7 @@ import { classNode, decoratorList } from "./declarations.fsh";
 import { matchPattern, toPattern } from "./patterns.fsh";
 import { isPropertyName, parameters, propertyName, returnAnnotation, throwsClause, type, typeParameters } from "./types.fsh";
 import { nextId } from "./ids.fsh";
+import { jsx } from "./jsx.fsh";
 
 // The expression grammar: recursive descent, with Pratt parsing for binary operators.
 
@@ -273,6 +274,27 @@ function adjacent(c: Mut<Cursor>, i: usize, text: string): boolean {
   return isToken(c.peek(i), text) && c.peek(i).start === c.peek(i - 1).end;
 }
 
+// The words a type can begin with in lower case: the types every program has, and what TypeScript
+// writes before one.
+const LOWER_TYPES = ["string", "number", "boolean", "bigint", "any", "unknown", "never", "void", "object", "symbol", "undefined", "null", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64", "const", "this", "readonly", "keyof", "typeof", "unique", "infer", "new", "abstract", "asserts", "import"];
+
+// Whether a name after `<` reads as an HTML element's: lower case, and no type of the language's.
+function elementName(name: string): boolean {
+  const first = name.slice(0, 1);
+  return first >= "a" && first <= "z" && !LOWER_TYPES.includes(name);
+}
+
+// `<T>x`, as TypeScript writes an assertion outside a .tsx file.
+/** @throws {CompileError} */
+function assertion(c: Mut<Cursor>): Expr {
+  const open = c.expect("<");
+  const asserted = type(c);
+  c.expect(">");
+  const expr = unary(c);
+  const exprEnd: usize = expr.end;
+  return { id: nextId(c.ids), kind: "assertion", type: asserted, expr, start: open.start, end: exprEnd };
+}
+
 /** @throws {CompileError} */
 export function unary(c: Mut<Cursor>): Expr {
   const t = c.token();
@@ -297,12 +319,20 @@ export function unary(c: Mut<Cursor>): Expr {
     c.expect("}");
     return { id: nextId(c.ids), kind: "unsafe", expr, start: t.start, end: c.end() };
   }
-  if (c.eat("<")) {
-    const asserted = type(c);
-    c.expect(">");
-    const expr = unary(c);
-    const exprEnd: usize = expr.end;
-    return { id: nextId(c.ids), kind: "assertion", type: asserted, expr, start: t.start, end: exprEnd };
+  if (c.at("<")) {
+    // A JSX element first: `<T>x` read as one runs on to a closing tag it never finds.
+    const at = c.pos;
+    const element = c.attempt((c) => jsx(c));
+    if (element !== undefined) return chain(c, element, true);
+    c.rescan();
+    // An HTML element's name is no type, so what failed there was an element; so was what reads
+    // as an assertion with a tag right after it.
+    const tag = c.token(1);
+    const cast = tag.kind === "ident" && elementName(tag.text) ? undefined : c.attempt((c) => assertion(c));
+    if (cast !== undefined && !c.at("<")) return cast;
+    c.pos = at;
+    c.rescan();
+    return jsx(c);
   }
   if (c.at("++") || c.at("--")) {
     c.next();

@@ -4,7 +4,7 @@
 import { CompileError } from "./diag.fsh";
 import { dup, nextId, type Ids } from "./nodes.fsh";
 import { quoteTree, type QuoteField, type QuoteValue } from "./walk.fsh";
-import { cloneTypeMember } from "./rebuild.fsh";
+import { cloneFunc, cloneTypeMember } from "./rebuild.fsh";
 import {
   align, conditionalGroup, fill, group, ifBreak, indent, indentIfBreak, join, label, lineSuffix, newBreakParent, newHardline,
   newLine, newLineSuffixBoundary, newLiteralline, newSoftline, print, type Doc,
@@ -1211,7 +1211,7 @@ const testCallees = new Set([
   "it", "it.only", "it.skip", "describe", "describe.only", "describe.skip", "test", "test.only", "test.skip", "test.fixme",
   "test.step", "test.describe", "test.describe.only", "test.describe.skip", "test.describe.fixme", "test.describe.parallel",
   "test.describe.parallel.only", "test.describe.serial", "test.describe.serial.only", "skip", "xit", "xdescribe", "xtest",
-  "fit", "fdescribe", "ftest",
+  "fit", "fdescribe", "ftest", "fuzz",
 ]);
 function isFunction(e: Ref<Expr>): boolean {
   return e.kind === "function" || e.kind === "arrow";
@@ -1844,7 +1844,8 @@ class Printer {
         const doc = body !== undefined
           ? this.functionDoc(head, s.id, s.typeParams, s.params, s.returnType, s.throws, body, true, path, src, opts)
           : this.functionDoc(head, s.id, s.typeParams, s.params, s.returnType, s.throws, none, false, path, src, opts);
-        return this.macroDecorators(s.decorators, [s.macro ? "macro " : "", doc], path, src);
+        const marked: Doc = s.blocking === true ? ["@blocking", newHardline(), s.macro ? "macro " : "", doc] : [s.macro ? "macro " : "", doc];
+        return this.macroDecorators(s.decorators, marked, path, src);
       }
       case "typeAlias":
       {
@@ -1871,13 +1872,21 @@ class Printer {
       case "declare": {
         // A line break after `declare` would end the statement, so the body's leading comments
         // print before `declare`.
-        const declaredNode: Ref<Stmt> = s.body;
+        // `@blocking declare function` prints its mark before `declare`.
+        const blocking = s.body.kind === "function" && s.body.blocking === true;
+        let bare: Stmt | undefined = undefined;
+        if (s.body.kind === "function" && blocking) {
+          let f = cloneFunc(s.body);
+          f.blocking = undefined;
+          bare = f;
+        }
+        const declaredNode: Ref<Stmt> = bare !== undefined ? bare : s.body;
         const declared: At<"stmt"> = { sort: "stmt", node: declaredNode, key: "declaration", parent: upOf(path) };
         const list = this.commentsOf(s.body.id);
         let leading: Doc[] = [];
         for (const p of list) if (p.placement === "leading") leading.push(leadingComment(p, src, this.printComment(p)));
         const doc = this.statementDoc(declared, src);
-        return [leading, "declare ", this.commented(s.body.id, doc, src, false)];
+        return [leading, blocking ? ["@blocking", newHardline()] : "", "declare ", this.commented(s.body.id, doc, src, false)];
       }
       case "import":
         return this.importDoc(s, path, src);
@@ -2649,6 +2658,9 @@ class Printer {
   /** @throws {Error | CompileError} */
   expression(this: Mut<this>, path: Ref<At<"expr">>, src: string, opts: Ref<Opts>): Doc {
     const e = path.node;
+    // A JSX element is kept as written: the parser read it as the calls that build it, and no
+    // call written out begins with `<`.
+    if (e.kind === "call" && charAt(src, e.start) === "<") return join(newLiteralline(), textLines(src.slice(e.start as i64, e.end as i64)));
     switch (e.kind) {
       case "arrow":
         return this.arrow(e, path, src, opts);
@@ -4080,6 +4092,14 @@ class Printer {
           for (const d of declared.decorators) decorators.push(this.decorator(d, path, src));
           const doc = this.classDoc(declared, declaration, src, true);
           return [join(newHardline(), decorators), newHardline(), "export ", doc];
+        }
+        // `@blocking` on an exported function prints before `export`.
+        if (declared.kind === "function" && declared.blocking === true) {
+          let bare = cloneFunc(declared);
+          bare.blocking = undefined;
+          const unmarked: Stmt = bare;
+          const plain: At<"stmt"> = { sort: "stmt", node: unmarked, key: "declaration", parent: upOf(path) };
+          return ["@blocking", newHardline(), "export ", this.statement(plain, src)];
         }
         return ["export ", this.statement(declaration, src)];
       }

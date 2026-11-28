@@ -5,7 +5,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { indented } from "../../src/main.fsh";
-import { fishcPath, ran, read, removed, same, scratch, text, type Ran } from "./support.fsh";
+import { COMMANDS, helpOf, overview, usageOf, VERSION } from "../../src/commands.fsh";
+import { fishcPath, ran, ranFor, read, reference, removed, same, scratch, text, type Ran } from "./support.fsh";
 
 // Runs the native fishc with `args` in `cwd`, without the variables that decide whether output is
 // coloured, and with `vars`, each `NAME=value`, set.
@@ -58,7 +59,7 @@ test("a package's entry and its errors are found through the manifest", () => {
   const gone = dir(root, "gone", [["fish.toml", `[package]\nname = "gone"\nversion = "1.0.0"\nentry = "src/app.fsh"\n`]]);
   same(firstLine(fishcIn(gone, ["build"]).err), `fish.toml:4:9: error[E0905]: the entry 'src/app.fsh' doesn't exist; create it, or name another with entry = "..."`, "a missing entry");
   const typo = dir(root, "typo", [["fish.toml", `[package]\nname = "typo"\nverison = "1.0.0"\n`]]);
-  same(firstLine(fishcIn(typo, ["build"]).err), "fish.toml:3:1: error[E0905]: [package] has no key 'verison'; it has name, version, entry, lib, edition", "a misspelled key");
+  same(firstLine(fishcIn(typo, ["build"]).err), "fish.toml:3:1: error[E0905]: [package] has no key 'verison'; it has name, version, entry, lib, edition, capabilities", "a misspelled key");
   removed(root);
 }, { timeout: 30_000 });
 
@@ -149,7 +150,7 @@ test("a file's directive sets its edition, over its package's, after any shebang
   ]);
   ran(fishcIn(mixed, ["build", "main.fsh"]), 1, "", `two.fsh:1:1: error[E0006]: ${compat()}\n 1 | // @fish-edition ts-compat\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^\n`, "a TS-compat import");
   const unknown = dir(root, "unknown-edition", [["main.fsh", "#!/usr/bin/env fishc\n// @fish-edition typescript\nfunction main() {}\n"]]);
-  ran(fishcIn(unknown, ["build", "main.fsh"]), 1, "", "main.fsh:2:1: error[E0005]: an edition directive is written '// @fish-edition native' or '// @fish-edition ts-compat'\n 2 | // @fish-edition typescript\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n", "an unknown edition");
+  ran(fishcIn(unknown, ["build", "main.fsh"]), 1, "", "main.fsh:2:1: error[E0005]: an edition directive is written '// @fish-edition native', '// @fish-edition rc' or '// @fish-edition ts-compat'\n 2 | // @fish-edition typescript\n   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^\n", "an unknown edition");
   removed(root);
 }, { timeout: 30_000 });
 
@@ -235,10 +236,12 @@ test("fishc check reports every error, with a closing count, painted only when a
 
 type Stage = { stage: string; ms: f64; note: string | null };
 
-// Each `--timings` line as its stage, milliseconds and note; the numbers are only checked to parse.
+// Each `--timings` line as its stage, milliseconds and note, up to the table of files; the numbers
+// are only checked to parse.
 function stages(err: string): Stage[] {
   let found: Stage[] = [];
   for (const l of err.trimEnd().split("\n")) {
+    if (l.startsWith("file ")) break;
     const m = /^(\w+) +(\d+\.\d) ms(?: \((.+)\))?$/.exec(l);
     assert(m !== null, `not a timings line: ${l}`);
     const ms = parseFloat(m![2]);
@@ -264,6 +267,12 @@ test("fishc check --timings prints each front-end stage's time, then the total",
   assert(checked.code === 0, `exited with ${checked.code}`);
   same(checked.out, "", "stdout");
   same(names(checked.err), "parse,macros,check,moves,comptime,total", "check's stages");
+  assert(/\nmain\.fsh +\d+\.\d ms +\d+\.\d ms +\d+\.\d ms +\d+\n/.test(checked.err), `no line for main.fsh in the table of files: ${checked.err}`);
+  const json = join(p, "timings.json");
+  const quiet = fishcIn(p, ["check", "main.fsh", "--timings-json", json]);
+  ran(quiet, 0, "", "", "fishc check --timings-json alone");
+  const written = read(json);
+  assert(written.startsWith('{"files":[') && written.includes('"file":"main.fsh"') && written.includes('"stage":"check"') && written.includes('"version":1'), `--timings-json wrote: ${written}`);
   ran(fishcIn(p, ["check", "main.fsh"]), 0, "", "", "fishc check without --timings");
   const ir = fishcIn(p, ["build", "main.fsh", "--emit-llvm", "--timings"]);
   assert(ir.out.includes('@"fsh.main"'), "no fsh.main in the IR");
@@ -277,16 +286,16 @@ test("fishc check --timings prints each front-end stage's time, then the total",
 test("fishc build and run --timings print every stage, saying which objects were built or cached", () => {
   const root = scratch("fish-cli-");
   const p = dir(root, "timings-build", [["main.fsh", timedProgram()]]);
-  const all = "parse,macros,check,moves,comptime,codegen,compile,runtime,link,total";
+  const all = "parse,macros,check,moves,comptime,codegen,instrument,split,runtime,compile,link,total";
   // A cache of its own, so the first build compiles the runtime's objects and the second reuses them.
   const cache = [`FISH_CACHE_DIR=${join(p, "cache")}`];
   const first = fishcIn(p, ["build", "main.fsh", "--timings"], cache.clone());
   same(names(first.err), all, "the first build's stages");
-  const firstNote = stages(first.err)[7].note ?? "";
-  assert(/^built runtime, std, .+; 0 cached$/.test(firstNote), `the first build's runtime note: ${firstNote}`);
+  const firstNote = stages(first.err)[8].note ?? "";
+  assert(/^built program, runtime, std, .+; 0 cached$/.test(firstNote), `the first build's runtime note: ${firstNote}`);
   const again = fishcIn(p, ["build", "main.fsh", "--timings"], cache);
   assert(again.code === 0, `the second build exited with ${again.code}`);
-  const againNote = stages(again.err)[7].note ?? "";
+  const againNote = stages(again.err)[8].note ?? "";
   assert(/^\d+ cached$/.test(againNote), `the second build's runtime note: ${againNote}`);
   same(ranOut(join(p, "main")), "55\n", "the program");
   const run = fishcIn(p, ["run", "main.fsh", "--timings", "--release"]);
@@ -300,12 +309,13 @@ test("fishc build and run --timings print every stage, saying which objects were
 // Node's `JSON.stringify(JSON.parse(s), null, 2)` for each of `inputs`.
 function nodeIndented(inputs: Ref<string[]>): string[] {
   const script = `console.log(JSON.stringify(JSON.parse(process.argv[1]).map((s) => JSON.stringify(JSON.parse(s), null, 2))));`;
-  const run = spawnSync("node", ["-e", script, JSON.stringify(inputs)]);
-  assert(run.status === 0, `node failed: ${text(run.stderr)}`);
+  const given = JSON.stringify(inputs);
+  const run = reference("cli-json-indented", `${script}\n${given}`, () => ranFor("node", ["-e", script, given]));
+  assert(run.status === 0, `node failed: ${run.stderr}`);
   try {
-    return JSON.parse<string[]>(text(run.stdout));
+    return JSON.parse<string[]>(run.stdout);
   } catch (e) {
-    assert(false, `node gave: ${text(run.stdout)}`);
+    assert(false, `node gave: ${run.stdout}`);
     return [];
   }
 }
@@ -327,3 +337,30 @@ test("fishc parse parses a file without checking it, and reports a syntax error"
   assert(bad.err.includes("bad.fsh:2:1: error[E0001]"), `stderr: ${bad.err}`);
   removed(root);
 }, { timeout: 30_000 });
+
+test("fishc --version prints the version fish.toml gives", () => {
+  const root = scratch("fish-cli-");
+  const toml = read(join(import.meta.dir, "..", "..", "fish.toml"));
+  const line = toml.split("\n").find((l) => l.startsWith("version = "));
+  same(`version = "${VERSION}"`, line ?? "no version line", "VERSION against fish.toml");
+  ran(fishcIn(root, ["--version"]), 0, `fishc ${VERSION}\n`, "", "--version");
+  ran(fishcIn(root, ["-V"]), 0, `fishc ${VERSION}\n`, "", "-V");
+  removed(root);
+}, { timeout: 30_000 });
+
+test("fishc help lists the commands, and help, --help and -h show one's usage", () => {
+  const root = scratch("fish-cli-");
+  ran(fishcIn(root, ["help"]), 0, `${overview()}\n`, "", "fishc help");
+  ran(fishcIn(root, ["--help"]), 0, `${overview()}\n`, "", "fishc --help");
+  ran(fishcIn(root, []), 2, "", `${overview()}\n`, "fishc alone");
+  for (const c of COMMANDS) {
+    const help = `${helpOf(c.name)!}\n`;
+    ran(fishcIn(root, ["help", c.name]), 0, help, "", `fishc help ${c.name}`);
+    ran(fishcIn(root, [c.name, "--help"]), 0, help, "", `fishc ${c.name} --help`);
+  }
+  ran(fishcIn(root, ["build", "x.fsh", "-h"]), 0, `${helpOf("build")!}\n`, "", "-h after a file");
+  ran(fishcIn(root, ["help", "nope"]), 2, "", "fishc help: 'nope' isn't a command; run 'fishc help' for the list\n", "help for no command");
+  ran(fishcIn(root, ["nope"]), 2, "", "fishc: 'nope' isn't a command; run 'fishc help' for the list\n", "no such command");
+  ran(fishcIn(root, ["check", "--release", "x.fsh"]), 2, "", `${usageOf("check")}\n`, "check with a flag it doesn't take");
+  removed(root);
+}, { timeout: 120_000 });

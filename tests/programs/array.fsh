@@ -60,7 +60,7 @@ function main() { const xs = [1]; console.log(xs.map(double).length); }
 // case: array_callback_once
 // error: 'map' calls its callback once per element, but this closure moves 'owned' out, so it can run only once
 class P { n: i64; name: string; constructor(n: i64, name: string) { this.n = n; this.name = name; } }
-function take(p: P): string { return p.name; }
+export function take(p: P): string { return p.name; }
 function main() {
   const owned = new P(4, "own" + 1);
   const xs = [1, 2, 3];
@@ -397,8 +397,8 @@ function main() {
 // error: cannot change 'xs' while 'r' borrows 'xs[...]' and is used later
 // case: array_element_move
 type Q = { n: i64 };
-function take(q: Q) {}
-function grow(xs: Mut<Q[]>, q: Ref<Q>) {
+export function take(q: Q) {}
+export function grow(xs: Mut<Q[]>, q: Ref<Q>) {
   xs.push({ n: q.n });
 }
 
@@ -1006,6 +1006,61 @@ function main() {
   });
   console.log(qs.length);
 }
+// case: array_sort_long
+// expect: true true 1000
+// expect: true true
+// expect: 0 999 499500
+// expect: true
+// Sorting past the first runs of 16 and their merges keeps equal elements in order, whether the
+// input is shuffled, sorted or reversed, and orders strings held in blocks.
+class P { n: i64; tag: i64; constructor(n: i64, tag: i64) { this.n = n; this.tag = tag; } }
+function main() {
+  let ps: P[] = [];
+  for (let i = 0; i < 1000; i++) ps.push(new P((i * 7919) % 7, i));
+  ps.sort((a, b) => a.n - b.n);
+  let ordered = true;
+  let stable = true;
+  for (let i = 1; i < ps.length; i++) {
+    if (ps[i - 1].n > ps[i].n) ordered = false;
+    if (ps[i - 1].n === ps[i].n && ps[i - 1].tag > ps[i].tag) stable = false;
+  }
+  console.log(ordered, stable, ps.length);
+  let up: i64[] = [];
+  let down: i64[] = [];
+  for (let i = 0; i < 1000; i++) {
+    up.push(i);
+    down.push(999 - i);
+  }
+  up.sort((a, b) => a - b);
+  down.sort((a, b) => a - b);
+  let same = true;
+  for (let i = 0; i < 1000; i++) if (up[i] !== (i as i64) || down[i] !== (i as i64)) same = false;
+  console.log(same, up.length === down.length);
+  let sum = 0;
+  for (const x of down) sum += x;
+  console.log(down[0], down[999], sum);
+  let names: string[] = [];
+  for (let i = 0; i < 300; i++) names.push(`name-held-in-a-block-${(i * 31) % 300}`);
+  names.sort();
+  let sorted = true;
+  for (let i = 1; i < names.length; i++) if (names[i - 1] > names[i]) sorted = false;
+  console.log(sorted);
+}
+// case: array_sort_merge_panic
+// panic: attempt to divide by zero
+// A comparator panicking in a merge after the first runs leaves every element in the array, once,
+// for its drop.
+class P { n: i64; name: string; constructor(n: i64, name: string) { this.n = n; this.name = name; } }
+function main() {
+  let qs: P[] = [];
+  for (let i = 0; i < 100; i++) qs.push(new P(99 - i, `a name held in a block ${i}`));
+  qs.sort((a, b) => {
+    const bad = (a.n === 68 && b.n === 84) || (a.n === 84 && b.n === 68);
+    const z = 10 / (bad ? 0 : 1);
+    return a.n - b.n;
+  });
+  console.log(qs.length);
+}
 // case: array_sort_result
 // error: 'sort', which sorts its array in place, does not return a value
 function main() { let xs = [2, 1]; const r = xs.sort(); }
@@ -1300,4 +1355,220 @@ function main() {
   console.log(b.join("|"));
   const e: (string | i64)[] = [];
   console.log(`[${e.join(",")}]`);
+}
+// case: array_methods_mutated_args
+// expect: 1 true 1 true true true true true true true true true true true true true true true true true true true true true true false true true true true true true true true true true true true true true true true true true true true false false true true true false true true 4 a1,m1,b2
+// Array indexOf, includes, lastIndexOf, concat, and === retain earlier copyable arguments
+// (including sub-unions, wrappers, Mut, generics, recursive siblings, live recursive union members,
+// union-to-recursive boxing, recursive unfolding, nested recursive fields, and moveOnly projections) (F-2704).
+interface Counter { bump(this: Mut<this>): i64; }
+class Ticks {
+  n: Atomic<i64> = new Atomic(0);
+  bump(this: Mut<this>): i64 { return this.n.add(1); }
+}
+const disposedCount = new Atomic(0);
+@derive(Eq)
+class Guard {
+  n: i64;
+  s: string;
+  constructor(n: i64, s: string = "g") { this.n = n; this.s = s; }
+  [Symbol.dispose](this: Mut<this>): void { if (this.n === 99) disposedCount.add(1); }
+}
+type Node = { s: string; next: Node | null };
+type Other = { k: string; next: Other | null };
+type ExtraOther = { k: string; next: Other | null; extra: string };
+type Rec = string | { next: Rec };
+type NumRec = i64 | { next: NumRec };
+type RecSmall = { s: string; next?: RecSmall };
+type RecWithOpt = { s: string; opt?: string; next?: RecWithOpt };
+type Big = { s: string; extra: string };
+type Full = { s: string; opt: string };
+type FullMove = { s: string; opt: string; g: Guard };
+type FullMoveRec = { s: string; opt: string; g: Guard; next: { s: string } };
+type MoveNarrow = { s: string; g: Guard; next: RecSmall };
+type NarrowCopy = { s: string; next: RecSmall };
+type WithGuardSub = { s: string; sub: Guard };
+type TargetSub = { s: string; sub?: { s: string } };
+type RecNum = { x: i64; next?: RecNum };
+type S = { z: string };
+type SG = { a: Guard; z: string };
+function zero(): i64 { return 0; }
+function mkObj(_: string): Guard | { s: string } { return { s: "a" + "!" }; }
+function mkS(_: string): Guard | S { return { z: "a" + "!" }; }
+function mkRecObj(_: string): Guard | Node | { tag: string } { return { tag: "a" + "!" }; }
+function mkNode(_: string): Guard | Node { return { s: "n" + "!", next: null }; }
+function mkLitNode(_: "lit" | Node): Guard | Node | string { return { s: "n" + "!", next: null }; }
+function mkGuardRec(_: Rec | string): Guard | Rec { return "hello" + "!"; }
+function mkUnboxedRec(_: Rec): Guard | string | { next: Rec } { return "hello" + "!"; }
+function mkNodeOther(_: Node | ExtraOther): Guard | Node | Other { return { k: "a" + "!", next: null }; }
+function mkNodeOtherLive(_: Node | ExtraOther): Guard | Node | Other { return { s: "x" + "!", next: null }; }
+function mkRecOrOther(_: Rec | ExtraOther): Guard | string | { next: Rec } | Other { return { k: "a" + "!", next: null }; }
+function mkTagChoice(_: string): Guard | { s: string } | { s: string; extra: string } { return { s: "a" + "!" }; }
+function mkOpt(_: string | null): Guard | string | null { return "target" + "!"; }
+function mkStr(_: string): Guard | string { return "target" + "!"; }
+function mkArr(): string[] { return ["b" + 2]; }
+function mkGuardT<T, U>(_unused: U, expected: T): Guard | T { return expected; }
+function mkGuardNested<T, U>(_unused: U, expected: T): Guard | { next: T } { return { next: expected }; }
+function mkRecSmallOrBig(_: string): RecSmall | Big { return { s: "a" + "!" }; }
+function mkGuardRecWithOpt(_: string): Guard | RecWithOpt { return { s: "a" + "!" }; }
+function mkRecWithOpt(_: string): RecWithOpt { return { s: "a" + "!" }; }
+function mkGuardMS(): Guard | { s: string; g: Guard } | { s: string } { return { s: "a" + "!" }; }
+function mkGuardMoveNarrow(): Guard | MoveNarrow | NarrowCopy { return { s: "a" + "!", next: { s: "x" + "!" } }; }
+function mkGuardOptPresent(): Guard | RecWithOpt { return { s: "a" + "!", opt: "b" + "!" }; }
+function mkGuardTargetSub(): Guard | TargetSub { return { s: "a" + "!", sub: { s: "g" + "!" } }; }
+function mkGuardDropFree(): Guard | { x: i64 } { return { x: 7 }; }
+function mkRecLit(_: i64): Rec { return "lit"; }
+function mkGuardRecLit(_: i64): Guard | Rec { return "lit"; }
+function bumpCounter(): i64 { return disposedCount.load(); }
+function bumpStr(): string { return disposedCount.load() >= 0 ? "b" + "!" : "z"; }
+function eqMut(obj: Mut<{ s: string; extra: i64 }>): boolean {
+  return obj === mkObj((obj.s = "b" + "!"));
+}
+function eqGen<T extends string | null>(x: T, next: T): boolean {
+  let v = x;
+  return v === mkOpt((v = next));
+}
+function eqUnionMoveProj(x: S | SG): boolean {
+  const u: S | SG = x;
+  return u === mkS(bumpStr());
+}
+function runRealRecStr<T>(expected: T): boolean {
+  let u: T | string = "hello" + "!";
+  return u === mkGuardT((u = "bye" + "!"), expected);
+}
+function runRealRecLive<T>(init: T, expected: T): boolean {
+  let u: T | string = init;
+  return u === mkGuardT((u = "bye" + "!"), expected);
+}
+function runRealRecNum<T>(expected: T): boolean {
+  let u: T | i64 = 7;
+  return u === mkGuardT((u = 9), expected);
+}
+function runRealRecNested<T>(expected: T): boolean {
+  const nObj: { next: T | string; g: Guard } = { next: "hello" + "!", g: new Guard(99) };
+  return nObj === mkGuardNested(bumpStr(), expected);
+}
+function runRealRecAll(r: Rec, r2: Rec, nr: NumRec): [boolean, boolean, boolean, boolean, boolean] {
+  if (typeof r === "string" || typeof r2 === "string" || typeof nr === "number") return [false, false, false, false, false];
+  const a = runRealRecStr(r.next.clone());
+  const b = runRealRecLive(r.next.clone(), r2.next);
+  const c = runRealRecNum(nr.next);
+  const d = runRealRecNested(r.next);
+  let raw: Rec = { next: "hello" + "!" };
+  const e = ((raw as Rec) as (string | { next: Rec })) === mkUnboxedRec(raw = "bye" + "!") || true;
+  return [a, b, c, d, e];
+}
+function runReadingLoopDispose(): [boolean, boolean, boolean] {
+  const arr: (Guard | string)[] = [new Guard(1), "a" + "!"];
+  const sArr: string[] = ["a" + "!"];
+  let mgA: { s: string; g: Guard } | string = { s: "a" + "!", g: new Guard(99) };
+  const r1 = sArr.includes(mgA as ({ s: string } | string), typeof (mgA = "a" + "!") === "string" ? 0 : 0);
+  let optS: string | null = "a" + "!";
+  const r2 = arr.includes(optS!, (optS = null) === null ? 0 : 0);
+  let optS2: string | null = "a" + "!";
+  const r3 = arr.includes(optS2 as string, (optS2 = null) === null ? 0 : 0);
+  return [r1, r2, r3];
+}
+function runWideningDispose(): boolean {
+  let u: { s: string; g: Guard } | string = { s: "a" + "!", g: new Guard(99) };
+  const arr: string[] = ["a" + "!"];
+  return arr.includes(u as ({ s: string } | string));
+}
+function main() {
+  const items: string[] = ["first" + "!", "target" + "!"];
+  let n1 = "target" + "!";
+  const idx = items.indexOf(n1, ((n1 = "other" + "!").length as i64) - 6);
+  let n2 = "target" + "!";
+  const has = items.includes(n2, ((n2 = "other" + "!").length as i64) - 6);
+  let n3 = "target" + "!";
+  const last = items.lastIndexOf(n3, ((n3 = "other" + "!").length as i64) - 5);
+  const dyns: (Dyn<Counter> | null)[] = [new Ticks(), null];
+  const hasNull = dyns.includes(null, zero());
+  const mixed: (Guard | string)[] = [new Guard(2), "target" + "!"];
+  let n4 = "target" + "!";
+  const hasMixed = mixed.includes(n4, ((n4 = "other" + "!").length as i64) - 6);
+  let n5 = "target" + "!";
+  const hasUnsafe = mixed.includes(unsafe { n5 }, ((n5 = "other" + "!").length as i64) - 6);
+  let n5b = "target" + "!";
+  const eqAs = (n5b as (Guard | string)) === mkStr((n5b = "other" + "!"));
+  const optMixed: (Guard | string | null)[] = [new Guard(4), "target" + "!", null];
+  let opt: string | null = "target" + "!";
+  const hasSub = optMixed.includes(opt, (opt = null) === null ? 0 : 0);
+  const eqGeneric = eqGen<string | null>("target" + "!", null);
+  let obj: { s: string; extra: string | i64 } = { s: "a" + "!", extra: 1 };
+  const eqWide = obj === mkObj((obj = { s: "b" + "!", extra: 2 }).s);
+  let obj2: { tag: string; extra: i64 } = { tag: "a" + "!", extra: 1 };
+  const eqRecWide = obj2 === mkRecObj((obj2 = { tag: "b" + "!", extra: 2 }).tag);
+  let mobj: { s: string; extra: i64 } = { s: "a" + "!", extra: 1 };
+  const eqMutRes = eqMut(mobj);
+  const withRec: (Guard | Node | string)[] = [new Guard(5), "target" + "!"];
+  let n6 = "target" + "!";
+  const hasRecSib = withRec.includes(n6, ((n6 = "other" + "!").length as i64) - 6);
+  let node: Node = { s: "n" + "!", next: null };
+  const eqRec = node === mkNode((node = { s: "z" + "!", next: null }).s);
+  let rawNode: { s: string; next: Node | null } = { s: "n" + "!", next: null };
+  const eqRawNode = rawNode === mkNode((rawNode = { s: "z" + "!", next: null }).s);
+  let litNode: "lit" | Node = { s: "n" + "!", next: null };
+  const eqLitNode = litNode === mkLitNode((litNode = "lit"));
+  let recStr: Rec | string = "hello" + "!";
+  const eqRecStr = recStr === mkGuardRec((recStr = "bye" + "!"));
+  const liveRec: Rec = "hello" + "!";
+  let recLive: Rec | string = liveRec;
+  const eqRecLive = recLive === mkGuardRec((recLive = "bye" + "!"));
+  let mixRec: Node | ExtraOther = { k: "a" + "!", next: null, extra: "drop" + "!" };
+  const eqMixRec = mixRec === mkNodeOther((mixRec = { s: "x" + "!", next: null }));
+  let mixRecLive: Node | ExtraOther = { s: "x" + "!", next: null };
+  const eqMixRecLive = mixRecLive === mkNodeOtherLive((mixRecLive = { k: "z" + "!", next: null, extra: "e" + "!" }));
+  let rUnfold: Rec = "hello" + "!";
+  const eqRecUnfold = rUnfold === mkUnboxedRec((rUnfold = "bye" + "!"));
+  const mg1: { s: string; g: Guard } = { s: "a" + "!", g: new Guard(1) };
+  const eqMoveProjAs = (mg1 as { s: string }) === mkObj(bumpStr());
+  const mg2: { s: string; g: Guard } = { s: "a" + "!", g: new Guard(3) };
+  const eqMoveProj = mg2 === mkObj(bumpStr());
+  let unfoldBox: Rec | ExtraOther = { k: "a" + "!", next: null, extra: "drop" + "!" };
+  const eqUnfoldBox = unfoldBox === mkRecOrOther((unfoldBox = "bye" + "!"));
+  let tagObj: { s: string; extra: string } = { s: "a" + "!", extra: "e" + "!" };
+  const eqTagAs = (tagObj as { s: string }) === mkTagChoice((tagObj = { s: "b" + "!", extra: "f" + "!" }).s);
+  const wideDrop = runWideningDispose();
+  let recVal: Rec = "hello" + "!";
+  const hasRecUnbox = ["hello" + "!"].includes(recVal as (string | { next: Rec }));
+  const eqUnionSG = eqUnionMoveProj({ a: new Guard(99), z: "a" + "!" });
+  const eqUnionS = eqUnionMoveProj({ z: "a" + "!" });
+  const [realRecStr, realRecLive, realRecNum, realRecNested, realRecAs] = runRealRecAll({ next: "hello" + "!" }, { next: "hello" + "!" }, { next: 7 });
+  let bigX: Big = { s: "a" + "!", extra: "e" + "!" };
+  const eqTagRecSmall = (bigX as { s: string }) === mkRecSmallOrBig((bigX = { s: "z" + "!", extra: "w" + "!" }).s);
+  let tagMove: Big = { s: "a" + "!", extra: "e" + "!" };
+  const eqTagMoveAs = (tagMove as (Guard | { s: string })) === mkTagChoice((tagMove = { s: "b" + "!", extra: "f" + "!" }).s);
+  let fullX: Full = { s: "a" + "!", opt: "b" + "!" };
+  const eqStripOpt = (fullX as { s: string }) === mkGuardRecWithOpt((fullX = { s: "z" + "!", opt: "y" + "!" }).s);
+  let fullMoveU: Full = { s: "a" + "!", opt: "b" + "!" };
+  const eqStripOptMoveU = (fullMoveU as (Guard | { s: string })) === mkGuardRecWithOpt((fullMoveU = { s: "z" + "!", opt: "y" + "!" }).s);
+  const fm1: FullMove = { s: "a" + "!", opt: "b" + "!", g: new Guard(1) };
+  const eqStripOptMoveObj1 = (fm1 as { s: string; g: Guard }) === mkGuardRecWithOpt(bumpStr());
+  const fm2: FullMove = { s: "a" + "!", opt: "b" + "!", g: new Guard(3) };
+  const eqStripOptMoveObj2 = (fm2 as { s: string; g: Guard }) === mkRecWithOpt(bumpStr());
+  const bmMoveU: { s: string; extra: string; g: Guard } = { s: "a" + "!", extra: "e" + "!", g: new Guard(5) };
+  const eqMoveUMember1 = (bmMoveU as (Guard | { s: string; g: Guard })) === mkTagChoice(bumpStr());
+  const fmMoveU: FullMove = { s: "a" + "!", opt: "b" + "!", g: new Guard(7) };
+  const eqMoveUMember2 = (fmMoveU as (Guard | { s: string; g: Guard })) === mkGuardRecWithOpt(bumpStr());
+  const fmRec: FullMoveRec = { s: "a" + "!", opt: "b" + "!", g: new Guard(9), next: { s: "x" + "!" } };
+  const eqMoveNarrowRec = ((fmRec as MoveNarrow) as { s: string; opt?: string }) === mkGuardRecWithOpt(bumpStr());
+  const eqLitGuardRec = "lit" === mkGuardRecLit(bumpCounter());
+  const eqLitAsGuardRec = ("lit" as string) === mkGuardRecLit(bumpCounter());
+  const eqLitAsRec = ("lit" as string) === mkRecLit(bumpCounter());
+  const semX: { s: string; g: Guard; extra: string } = { s: "a" + "!", g: new Guard(11), extra: "e" + "!" };
+  const eqSemTagM = (semX as (Guard | { s: string; g: Guard })) === mkGuardMS();
+  const semFmRec: FullMoveRec = { s: "a" + "!", opt: "b" + "!", g: new Guard(12), next: { s: "x" + "!" } };
+  const eqSemTagNarrow = (semFmRec as MoveNarrow) === mkGuardMoveNarrow();
+  const semChainFm: FullMove = { s: "a" + "!", opt: "b" + "!", g: new Guard(13) };
+  const eqSemChainU = ((semChainFm as (Guard | FullMove)) as (Guard | FullMove | { s: string })) === mkGuardOptPresent();
+  const semSubX: { s: string; sub: Guard; extra: string } = { s: "a" + "!", sub: new Guard(14, "g" + "!"), extra: "e" + "!" };
+  const eqSemSubOpt = (semSubX as (Guard | WithGuardSub)) === mkGuardTargetSub();
+  let dropFreeSrc: { x: i64 } = { x: 7 };
+  const eqDropFreeAlloc = (dropFreeSrc as RecNum) === mkGuardDropFree();
+  const [rlAs, rlDirect, rlMut] = runReadingLoopDispose();
+  const base: string[] = ["a" + 1];
+  const mid: string[] = ["m" + 1];
+  const joined = base.concat(mid, mkArr()).join(",");
+  console.log(idx, has, last, hasNull, hasMixed, hasUnsafe, eqAs, hasSub, eqGeneric, eqWide, eqRecWide, eqMutRes, hasRecSib, eqRec, eqRawNode, eqLitNode, eqRecStr, eqRecLive, eqMixRec, eqMixRecLive, eqRecUnfold, eqMoveProjAs, eqMoveProj, eqUnfoldBox, eqTagAs, wideDrop, hasRecUnbox, eqUnionSG, eqUnionS, realRecStr, realRecLive, realRecNum, realRecNested, realRecAs, eqTagRecSmall, eqTagMoveAs, eqStripOpt, eqStripOptMoveU, eqStripOptMoveObj1, eqStripOptMoveObj2, eqMoveUMember1, eqMoveUMember2, eqMoveNarrowRec, eqLitGuardRec, eqLitAsGuardRec, eqLitAsRec, eqSemTagM, eqSemTagNarrow, eqSemChainU, eqSemSubOpt, eqDropFreeAlloc, rlAs, rlDirect, rlMut, disposedCount.load(), joined);
 }

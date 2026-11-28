@@ -611,3 +611,58 @@ function main() {
   const a: N = { of: t, node: e }
 }
 // error: can't choose which member of
+
+// case: union_refs_narrowed_through_reference
+// A reference to a union, narrowed by a check on what it points at, reads the member's fields from
+// the payload, however the value holding the reference was itself narrowed.
+type T =
+  | { kind: "ref"; name: string; args: T[] }
+  | { kind: "array"; element: T; ro: boolean }
+  | { kind: "infer"; name: string; constraint?: T }
+  | { kind: "lit"; value: i64 };
+type Any = { of: "t"; node: Ref<T> } | { of: "ts"; node: Ref<T[]> };
+function count(n: Any): i64 {
+  let i: i64 = 0;
+  switch (n.of) {
+    case "t":
+      switch (n.node.kind) {
+        case "ref":
+          i += n.node.args.length as i64;
+          for (const a of n.node.args) i += count({ of: "t", node: a });
+          break;
+        case "array":
+          i += count({ of: "t", node: n.node.element });
+          break;
+        case "infer":
+          if (n.node.constraint !== undefined) i += count({ of: "t", node: n.node.constraint! });
+          break;
+        case "lit":
+          i += n.node.value;
+          break;
+      }
+      break;
+    case "ts":
+      for (const a of n.node) i += count({ of: "t", node: a });
+      break;
+  }
+  return i;
+}
+function main() {
+  const t: T = { kind: "ref", name: "x", args: [{ kind: "lit", value: 5 }, { kind: "array", element: { kind: "lit", value: 7 }, ro: true }, { kind: "infer", name: "y", constraint: { kind: "lit", value: 11 } }, { kind: "infer", name: "z" }] };
+  console.log(count({ of: "t", node: t }));
+  const ts: T[] = [t, { kind: "lit", value: 1 }];
+  console.log(count({ of: "ts", node: ts }));
+  const a: T = { kind: "lit", value: 3 };
+  const b: T = { kind: "lit", value: 3 };
+  const c: T = { kind: "infer", name: "q" };
+  console.log(a.kind === "lit", c.kind === "lit", a.kind !== c.kind);
+  const m: string | null = "m";
+  const z: string | null = null;
+  console.log(m === null, z === null, m !== null);
+  console.log(a.kind === b.kind, a === b, a === c);
+}
+// expect: 27
+// expect: 28
+// expect: true false true
+// expect: false true true
+// expect: true true false

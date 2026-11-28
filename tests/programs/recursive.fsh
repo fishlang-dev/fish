@@ -830,3 +830,28 @@ function main() {
   console.log(narrowed(n), unwrapped(n), narrowed(bare));
   console.log(owned(n));
 }
+// case: recursive_tuple_member_holding_brands
+// expect: true
+// expect: false
+type Id = i64 & { __brand: "Id" };
+type Kin = i64 & { __brand: "Kin" };
+type V = [Id | Kin, string] | { kind: "n"; v: V[] };
+function main() {
+  const x: V = [2 as Id, "a"];
+  const y: V = [2 as Id, "a"];
+  const z: V = [3 as Kin, "a"];
+  console.log(x === y);
+  console.log(x === z);
+}
+// case: recursive_literal_beside_a_brand_of_its_base
+// expect: [lit,x,[lit]]
+type Name = string & { __brand: "Name" };
+type V = Name | "lit" | V[];
+function show(v: Ref<V>): string {
+  if (typeof v === "string") return v;
+  return "[" + v.map(show).join(",") + "]";
+}
+function main() {
+  const v: V = ["lit", "x" as Name, ["lit"]];
+  console.log(show(v));
+}

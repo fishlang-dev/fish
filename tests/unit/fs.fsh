@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { built, removed, same, scratch, text } from "./support.fsh";
+import { built, onSystem, ranFor, reference, removed, same, scratch, text } from "./support.fsh";
 
 function body(): string {
   return `
@@ -50,9 +50,9 @@ test("readFile and writeFile give what node's give", () => {
   const out = built(tmp, "main", `import { readFile, writeFile } from "node:fs/promises";\nimport * as fs from "fs/promises";\nasync function main(): Promise<void> throws IoError {${body().replace("BYTES", "[0x68, 0xff, 0x69]")}\n}\n`);
   const fish = spawnSync("env", ["FISH_LEAKS=1", out], { cwd: fishDir });
   const script = `const { readFile, writeFile } = require("node:fs/promises"); const fs = require("fs/promises"); (async () => {${body().replace("BYTES", "Buffer.from([0x68, 0xff, 0x69])")}\n})();`;
-  const node = spawnSync("node", ["-e", script], { cwd: nodeDir });
+  const node = reference(onSystem("fs-read-and-write"), script, () => ranFor("node", ["-e", script], nodeDir));
   same(text(fish.stderr), "", "the program's stderr");
-  same(text(fish.stdout), text(node.stdout), "the output");
+  same(text(fish.stdout), node.stdout, "the output");
   removed(tmp);
 }, { timeout: 30_000 });
 

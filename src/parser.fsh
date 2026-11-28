@@ -195,7 +195,7 @@ export type ClassNode = Span & Id & {
   name: string | undefined; abstract: boolean; decorators: Expr[]; typeParams: TypeParam[];
   // An instantiation expression when written with type arguments, as in `extends Base<T>`.
   extends: Expr | undefined; implements: TypeNode[]; members: ClassMember[];
-  // What `@derive` gave it, which `JSON` reads.
+  // What `@derive` gave it, which `JSON` reads, and `C` from `@c`, which lays it out as a C struct.
   derives?: string[];
 };
 
@@ -284,6 +284,8 @@ export type Func = Span & Id & {
   js?: JsName;
   overloadNames?: string[];
   signature?: true;
+  // `@blocking`: a call holds its thread until it returns, which an async function shouldn't do.
+  blocking?: true;
 };
 
 export type BinaryOp =
@@ -441,8 +443,7 @@ export class Cursor {
     return this.tokens[this.pos - 1]!.end;
   }
 
-  // Runs `parse`; if it throws a CompileError, puts the cursor back and returns undefined. Any
-  // other error goes on, which only the Bun build can meet: in Fish `parse` throws nothing else.
+  // Runs `parse`; if it throws a CompileError, puts the cursor back and returns undefined.
   /** @throws {CompileError} */
   attempt<T>(this: Mut<this>, parse: Parse<T>): T | undefined {
     const pos = this.pos;
@@ -470,6 +471,25 @@ export class Cursor {
     while (this.tokens.length > this.pos) this.tokens.pop();
     this.tokens.push(this.lex.regex(slash));
     return this.next();
+  }
+
+  // Takes what follows the last token, a tag's `>` or an expression's `}`, as a JSX element's
+  // text, in place of whatever was scanned past it as tokens.
+  /** @throws {CompileError} */
+  jsxText(this: Mut<this>): Token {
+    while (this.tokens.length > this.pos) this.tokens.pop();
+    const after: Token = { ...this.tokens[this.pos - 1]! };
+    this.tokens.push(this.lex.jsxText(after));
+    return this.next();
+  }
+
+  // Forgets what was scanned past the punctuator at the cursor, which a failed attempt at a JSX
+  // element may have read as text, so it is scanned again as tokens.
+  /** @throws {CompileError} */
+  rescan(this: Mut<this>): void {
+    const at = this.token();
+    while (this.tokens.length > this.pos + 1) this.tokens.pop();
+    this.lex.resume(at);
   }
 }
 
@@ -779,21 +799,36 @@ function typeAt(src: string, ids: Mut<Ids>, start: usize, end: usize): TypeNode 
   return t;
 }
 
+function isBlockingMark(d: Ref<Expr>): boolean {
+  return d.kind === "ident" && d.name === "blocking";
+}
+
 // A function, type alias, interface or enum after decorators, which Fish applies as macros
 // where TypeScript allows only classes.
 /** @throws {CompileError} */
-export function decorated(c: Mut<Cursor>, start: usize, decorators: Expr[]): Stmt {
+export function decorated(c: Mut<Cursor>, start: usize, given: Expr[]): Stmt {
   const next = c.token(1);
+  // `@blocking` is no macro: the checker reads it, so it costs no macro round.
+  const blocking = given.some((d) => isBlockingMark(d));
+  const decorators = given.filter((d) => !isBlockingMark(d));
+  const foreign = blocking && decorators.length === 0 && c.at("declare") && isToken(next, "function");
   const at = c.at("function") || (c.at("async") && isToken(next, "function") && !next.newlineBefore) || (c.at("type") && next.kind === "ident")
-    || c.at("interface") || c.at("enum") || (c.at("const") && isToken(next, "enum"));
+    || c.at("interface") || c.at("enum") || (c.at("const") && isToken(next, "enum")) || foreign;
   if (!at) throw c.error("expected a class, function, type, interface or enum after decorators");
   let s = statement(c);
+  if (s.kind === "declare" && s.body.kind === "function") {
+    s.start = start;
+    s.body.blocking = true;
+    return s;
+  }
+  if (blocking && s.kind !== "function") throw new CompileError("E1104", "'@blocking' marks a function", start, s.end);
   const id = nextId(c.ids);
   // Each kind is written to on its own, which Fish needs to write a field of a union.
   if (s.kind === "function") {
     s.id = id;
     s.start = start;
-    s.decorators = decorators;
+    if (blocking) s.blocking = true;
+    s.decorators = decorators.length > 0 ? decorators : undefined;
   } else if (s.kind === "typeAlias") {
     s.id = id;
     s.start = start;

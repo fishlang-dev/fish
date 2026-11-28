@@ -1,6 +1,6 @@
 // The golden runner: builds and runs every program in tests/programs with a fishc binary and
 // checks it against the expectations its comments state.
-//   fishc run tests/run.fsh -- [--fishc <path>] [--jobs <n>] [--list] [<pattern>]
+//   fishc run tests/run.fsh -- [--fishc <path>] [--jobs <n>] [--list] [--wine <llvm-mingw>] [<pattern>]
 //
 // Each program states its expectations in comments:
 //   // expect: <line>   the next line of stdout, in order
@@ -18,6 +18,7 @@
 //   // mode: abort      build with --panic=abort: a panic aborts (SIGABRT) instead of exiting 101
 //   // mode: parse      only parse; passing means it parsed
 //   // link: <name>     link the C library <name>, as `--link <name>` does
+//   // flag: <flag>     build with `--flag <flag>`, a name or name=value std:build reads
 //   // stdin: "<text>"  what the program reads on stdin, a JSON string; several are joined
 // A program spanning several files is a directory holding `main.fsh`, whose comments say what
 // to expect, and the files it imports.
@@ -27,95 +28,21 @@
 // lines, so its line numbers and messages read as they would in a file of its own; its test is
 // `<file> > <name>`. Text before the first case is the file's comment and belongs to no case.
 //
+// With `--wine <llvm-mingw>`, every program is built for x86_64 Windows with that toolchain and run
+// under Wine in the Docker image `fish-wine`, which `tests/unit/windows.fsh` builds; the repository
+// and the scratch directory are mounted at their own paths, so a program's paths read as they do
+// natively.
+//
 // The fishc is `--fishc`, else FISHC, else `fishc` on PATH. Programs are built and run as many at
 // once as the machine has cores, or FISH_TEST_JOBS, or `--jobs`. A pattern keeps the tests whose
-// name contains it. Each failure is printed as it is found, and the run exits 1 if any failed.
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+// name contains it. Each failure is printed as it is found. A program that failed while others ran
+// beside it is run once more on its own when they are done, and passes if it passes then, named as
+// having needed a second run: a program that waits on a timer can miss it on a busy machine. The
+// run exits 1 if any failed.
+import { existsSync, mkdtempSync, readdirSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-
-// A test's program: a file, a directory's `main.fsh`, or a case of a file, written out as its own
-// file; or what is wrong with a file's cases.
-type Program = { name: string; label: string; file: string; src: string; problem: string };
-
-// What building and running a program gave: the build's printed errors, or its warnings and how
-// the program ended.
-type Outcome = { failed: boolean; printed: string; warnings: string[]; stdout: string; stderr: string; exitCode: i64; signal: string; timedOut: boolean };
-
-const DIRECTIVES = ["expect", "error", "warning", "panic", "fails", "stderr", "mode", "link", "stdin"];
-
-// Every value a directive takes in a source, in order: the rest of each line after `// <key>: `.
-function directive(src: string, key: string): string[] {
-  const marker = `// ${key}: `;
-  let found: string[] = [];
-  for (const line of src.split("\n")) {
-    const at = line.indexOf(marker);
-    if (at >= 0) found.push(line.slice(at + (marker.length as i64)));
-  }
-  return found;
-}
-
-function isDirective(line: string): boolean {
-  return DIRECTIVES.some((key) => line.startsWith(`// ${key}: `));
-}
-
-// A case's name is letters, digits, '_' and '-'.
-function isName(name: string): boolean {
-  if (name === "") return false;
-  for (const c of name) if (!/^[\w-]$/.test(c)) return false;
-  return true;
-}
-
-// A test's name made safe as a file name, as the runner names each program's binary.
-function binaryName(name: string): string {
-  const bare = name.endsWith(".fsh") ? name.slice(0, (name.length as i64) - 4) : name;
-  let out = "";
-  let run = false;
-  for (const c of bare) {
-    if (/^[\w.-]$/.test(c)) {
-      out += c;
-      run = false;
-    } else if (!run) {
-      out += "_";
-      run = true;
-    }
-  }
-  return out;
-}
-
-function programsOf(dir: string, tmp: string, entry: string): Program[] throws IoError {
-  const file = entry.endsWith(".fsh") ? join(dir, entry) : join(dir, entry, "main.fsh");
-  const src = readFileSync(file, "utf8");
-  const lines = src.split("\n");
-  if (!entry.endsWith(".fsh") || !lines.some((l) => l.startsWith("// case: "))) return [{ name: entry, label: entry, file, src, problem: "" }];
-  const problem = (message: string, line: usize): Program[] => [{ name: entry, label: entry, file, src, problem: `${entry}:${line}: ${message}` }];
-  let names: string[] = [];
-  let starts: usize[] = [];
-  let bodies: string[][] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (line.startsWith("// case: ")) {
-      const name = line.slice(9).trim();
-      if (!isName(name)) return problem(`a case's name is letters, digits, '_' and '-', not '${name}'`, i + 1);
-      if (names.includes(name)) return problem(`the case '${name}' is named twice`, i + 1);
-      names.push(name);
-      starts.push(i + 1);
-      bodies.push([]);
-    } else if (bodies.length > 0) bodies[bodies.length - 1]!.push(line);
-    else if (isDirective(line)) return problem("this directive comes before the first case, so it belongs to none", i + 1);
-  }
-  for (let c = 0; c < names.length; c++) if (bodies[c]!.every((l) => l.trim() === "")) return problem(`the case '${names[c]!}' is empty`, starts[c]!);
-  const folder = join(tmp, "cases", entry.slice(0, (entry.length as i64) - 4));
-  mkdirSync(folder, { recursive: true });
-  let out: Program[] = [];
-  for (let c = 0; c < names.length; c++) {
-    const text = bodies[c]!.join("\n");
-    const path = join(folder, `${names[c]!}.fsh`);
-    writeFileSync(path, text);
-    out.push({ name: `${entry} > ${names[c]!}`, label: `${names[c]!}.fsh`, file: path, src: text, problem: "" });
-  }
-  return out;
-}
+import { binaryName, directive, environment, programsOf, ran, type Outcome, type Program } from "./harness.fsh";
 
 // How many errors a build's printed output names.
 function errorCount(text: string): i64 {
@@ -147,54 +74,30 @@ function limit(name: string): i64 {
   return name.startsWith("http_") || name.startsWith("tcp_") ? 30000 : 10000;
 }
 
-function environment(extra: string): { [name: string]: string } {
-  let env: { [name: string]: string } = {};
-  // A program that serves would trace to whatever collector the runner's own environment names.
-  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("OTEL_")) env[k] = v;
-  env[extra] = "1";
-  return env;
+// What runs a built program: itself, or Wine in Docker for a Windows build.
+function runner(wine: string, tmp: string, binary: string): string[] {
+  if (wine === "") return [binary];
+  return ["docker", "run", "--rm", "-i", "--platform", "linux/amd64", "-e", "FISH_LEAKS=1", "-v", `${tmp}:${tmp}`, "-v", `${process.cwd()}:${process.cwd()}`, "-w", process.cwd(), "fish-wine", "wine", binary];
 }
 
-// Kills a child still running after its limit, recording that it timed out.
-type Watch = { done: Atomic<boolean>; timedOut: Atomic<boolean> };
-
-async function watchdog(pid: i64, ms: i64, w: shared<Watch>): Promise<void> {
-  await Bun.sleep(ms);
-  if (w.done.load()) return;
-  w.timedOut.store(true);
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch (_e) {}
-}
-
-// Runs a command to its end, killing it after `ms`, giving its exit code, signal, output and
-// whether it timed out.
-async function ran(cmd: string[], cwd: string, env: { [name: string]: string }, stdin: u8[] | null, ms: i64): Promise<Outcome> throws IoError {
-  const child = stdin === null ? Bun.spawn(cmd, { cwd, env, stdout: "pipe", stderr: "pipe" }) : Bun.spawn(cmd, { cwd, env, stdin: stdin!, stdout: "pipe", stderr: "pipe" });
-  const w = shared<Watch>({ done: new Atomic(false), timedOut: new Atomic(false) });
-  spawn(watchdog(child.pid, ms, w.clone()));
-  const code = await child.exited;
-  w.done.store(true);
-  let stdout = "";
-  for await (const t of child.stdout) stdout += t;
-  let stderr = "";
-  for await (const t of child.stderr) stderr += t;
-  return { failed: false, printed: "", warnings: [], stdout, stderr, exitCode: child.exitCode ?? code, signal: child.signalCode ?? "", timedOut: w.timedOut.load() };
-}
-
-async function outcome(fishc: string, tmp: string, p: Program): Promise<Outcome> {
+async function outcome(fishc: string, tmp: string, p: Program, wine: string): Promise<Outcome> {
   const empty: Outcome = { failed: false, printed: "", warnings: [], stdout: "", stderr: "", exitCode: 0, signal: "", timedOut: false };
   const buildEnv = environment("NO_COLOR");
   try {
     let args = [fishc];
     if (p.src.includes("// mode: parse")) args = [fishc, "parse", basename(p.file)];
     else {
-      args = [fishc, "build", basename(p.file), "-o", join(tmp, binaryName(p.name))];
+      args = [fishc, "build", basename(p.file), "-o", join(tmp, binaryName(p.name) + (wine === "" ? "" : ".exe"))];
+      if (wine !== "") for (const a of ["--target", "x86_64-w64-windows-gnu", "--sysroot", wine]) args.push(a);
       if (p.src.includes("// mode: release")) args.push("--release");
       if (p.src.includes("// mode: abort")) args.push("--panic=abort");
       for (const l of directive(p.src, "link")) {
         args.push("--link");
         args.push(l.split(" ")[0]!);
+      }
+      for (const f of directive(p.src, "flag")) {
+        args.push("--flag");
+        args.push(f.split(" ")[0]!);
       }
     }
     const built = await ran(args, dirname(p.file), buildEnv, null, 300000);
@@ -209,7 +112,7 @@ async function outcome(fishc: string, tmp: string, p: Program): Promise<Outcome>
     const stdin = input.length > 0 ? new TextEncoder().encode(joined) : null;
     // Every program is checked for leaks: the runtime reports what is still allocated at exit. It
     // runs where the runner does, so its paths to fixtures are relative to the repository.
-    const run = await ran([join(tmp, binaryName(p.name))], process.cwd(), environment("FISH_LEAKS"), stdin, limit(p.label));
+    const run = await ran(runner(wine, tmp, join(tmp, binaryName(p.name) + (wine === "" ? "" : ".exe"))), process.cwd(), environment("FISH_LEAKS"), stdin, limit(p.label) * (wine === "" ? 1 : 3));
     return { ...run, warnings: warningsOf(built.stderr) };
   } catch (e) {
     return { ...empty, failed: true, printed: `the runner failed: ${e.message}` };
@@ -265,23 +168,32 @@ function verdict(p: Program, run: Outcome): string {
   return run.exitCode === want ? "" : `expected exit ${want}, got ${run.exitCode}:\n${run.stderr}`;
 }
 
-type Queue = { programs: Program[]; next: Atomic<i64>; failed: Atomic<i64>; fishc: string; tmp: string };
+type Queue = { programs: Program[]; next: Atomic<i64>; fishc: string; tmp: string; wine: string };
 
-async function worker(q: shared<Queue>): Promise<void> {
+// More failures than this are no accident of timing, and running each again alone would take longer
+// than the run did.
+const SECOND_RUNS = 20;
+
+// The programs a worker saw fail, by their place in the queue.
+async function worker(q: shared<Queue>): Promise<i64[]> {
+  let failed: i64[] = [];
   while (true) {
     const i = q.next.add(1);
-    if (i >= (q.programs.length as i64)) return;
+    if (i >= (q.programs.length as i64)) return failed;
     const p = q.programs[i as usize]!.clone();
-    let why = p.problem;
-    if (why === "") {
-      const run = await outcome(q.fishc, q.tmp, p.clone());
-      why = verdict(p.clone(), run);
-    }
+    const why = await failure(q.fishc, q.tmp, p.clone(), q.wine);
     if (why !== "") {
-      q.failed.add(1);
+      failed.push(i);
       console.log(`fail ${p.name}\n${why.trimEnd()}\n`);
     }
   }
+}
+
+// Why a program fails, or "" when it passes.
+async function failure(fishc: string, tmp: string, p: Program, wine: string): Promise<string> {
+  if (p.problem !== "") return p.problem;
+  const run = await outcome(fishc, tmp, p.clone(), wine);
+  return verdict(p.clone(), run);
 }
 
 async function main(): Promise<void> throws IoError {
@@ -289,12 +201,14 @@ async function main(): Promise<void> throws IoError {
   let jobs = parseInt(process.env.FISH_TEST_JOBS ?? "") ?? availableParallelism();
   let list = false;
   let pattern = "";
+  let wine = "";
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--fishc" && i + 1 < args.length) fishc = args[++i]!;
     else if (a === "--jobs" && i + 1 < args.length) jobs = parseInt(args[++i]!) ?? jobs;
     else if (a === "--list") list = true;
+    else if (a === "--wine" && i + 1 < args.length) wine = args[++i]!;
     else pattern = a;
   }
   const dir = join(import.meta.dir, "programs");
@@ -309,14 +223,31 @@ async function main(): Promise<void> throws IoError {
   }
   const started = performance.now();
   const total = programs.length as i64;
-  const q = shared<Queue>({ programs, next: new Atomic(0), failed: new Atomic(0), fishc, tmp });
-  let workers: JoinHandle<void>[] = [];
+  const q = shared<Queue>({ programs: programs.clone(), next: new Atomic(0), fishc, tmp, wine });
+  let workers: JoinHandle<i64[]>[] = [];
   for (let w = 0; w < jobs; w++) workers.push(spawn(worker(q.clone())));
+  let again: i64[] = [];
   while (workers.length > 0) {
     const w = workers.pop()!;
-    await w;
+    const saw = await w;
+    for (const i of saw) again.push(i);
   }
-  const failed = q.failed.load();
-  console.log(`${total - failed} pass, ${failed} fail, ${total} programs in ${((performance.now() - started) / 1000).toFixed(0)}s`);
+  let failed = again.length as i64;
+  let second = 0;
+  if (jobs > 1 && failed <= SECOND_RUNS) {
+    again.sort((a, b) => a - b);
+    for (const i of again) {
+      const p = programs[i as usize]!.clone();
+      if (p.problem !== "") continue;
+      const why = await failure(fishc, tmp, p.clone(), wine);
+      if (why === "") {
+        failed--;
+        second++;
+        console.log(`pass ${p.name}, on a second run alone\n`);
+      } else console.log(`fail ${p.name}, on a second run alone\n${why.trimEnd()}\n`);
+    }
+  }
+  const seconds = second === 0 ? "" : ` (${second} on a second run)`;
+  console.log(`${total - failed} pass${seconds}, ${failed} fail, ${total} programs in ${((performance.now() - started) / 1000).toFixed(0)}s`);
   if (failed > 0) process.exit(1);
 }

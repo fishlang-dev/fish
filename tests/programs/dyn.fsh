@@ -767,3 +767,20 @@ function main() {
   console.log(describe(new Sq(3)));
   console.log(describe(null));
 }
+// case: dyn_quoted_member_names
+// expect: 42
+// Interface member names with quotes, backslashes, and newlines are hex-escaped in LLVM IR (F-2439).
+interface Weird {
+  "a\"b\\c\n;injected": string;
+  "m\"()\n@evil"(): i64;
+  ok(): i64;
+}
+class Impl {
+  "a\"b\\c\n;injected": string = "ok";
+  "m\"()\n@evil"(): i64 { return 99; }
+  ok(): i64 { return 42; }
+}
+function main() {
+  const d: Dyn<Weird> = new Impl();
+  console.log(d.ok());
+}

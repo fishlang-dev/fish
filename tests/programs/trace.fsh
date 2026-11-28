@@ -12,7 +12,7 @@
 // expect: ending a span that isn't current leaves the current one: true
 // The current span follows its task through awaits and into the tasks it spawns. Ids are
 // random, so each line says how two of them relate. The endpoint is this program's own server.
-import { span, configureTracing } from "fish:trace";
+import { span, configureTracing } from "std:trace";
 
 async function collect(got: shared<{ port: Atomic<i64> }>): Promise<void> throws IoError {
   const seen = got.clone();
@@ -69,7 +69,7 @@ async function main(): Promise<void> {
 // case: trace_off
 // expect: ids are empty when tracing is off: true true true
 // An empty endpoint is off whatever OTEL_EXPORTER_OTLP_ENDPOINT says where this runs.
-import { span, configureTracing } from "fish:trace";
+import { span, configureTracing } from "std:trace";
 
 async function main(): Promise<void> {
   configureTracing({ endpoint: "" });
@@ -97,7 +97,7 @@ async function main(): Promise<void> {
 // expect: last <- nothing, same trace: true, kind 1, times in nanoseconds: true
 // A stand-in collector in the same program prints what it is sent: one batch at flushTraces,
 // and one the batch timer sends after main has returned, which the program waits for.
-import { span, configureTracing, flushTraces } from "fish:trace";
+import { span, configureTracing, flushTraces } from "std:trace";
 
 type Sent = { resourceSpans: { resource: { attributes: { key: string; value: { stringValue?: string } }[] }; scopeSpans: { spans: { traceId: string; spanId: string; parentSpanId?: string; name: string; kind: i64; startTimeUnixNano: string; endTimeUnixNano: string; attributes: { key: string; value: AnyValue }[] }[] }[] }[] };
 // An attribute's value, under the name of its type.
@@ -196,7 +196,7 @@ async function main(): Promise<void> {
 // in its caller's trace, a malformed one is ignored, and one whose caller didn't sample the
 // trace is followed but not exported. A handler that panics still ends its span, with the 500
 // its client gets. The spans go out as serve returns, and a server with trace: false has none.
-import { span, configureTracing, flushTraces } from "fish:trace";
+import { span, configureTracing, flushTraces } from "std:trace";
 
 type Sent = { resourceSpans: { resource: { attributes: { key: string; value: AnyValue }[] }; scopeSpans: { spans: { traceId: string; spanId: string; parentSpanId?: string; name: string; kind: i64; attributes: { key: string; value: AnyValue }[] }[] }[] }[] };
 // An attribute's value, under the name of its type.
@@ -317,7 +317,7 @@ async function main(): Promise<void> throws IoError | AbortError {
 // expect: outer <- nothing
 // A span bound with 'using' ends where its scope does, however the scope is left: at an early
 // return, at a throw, and at a block's end, the span around it current again.
-import { span, configureTracing, flushTraces } from "fish:trace";
+import { span, configureTracing, flushTraces } from "std:trace";
 
 type Sent = { resourceSpans: { scopeSpans: { spans: { spanId: string; parentSpanId?: string; name: string; attributes: { key: string; value: { boolValue?: boolean } }[] }[] }[] }[] };
 
@@ -390,7 +390,7 @@ async function main(): Promise<void> {
 // A program that traces runs on the async runtime, as one that sets timers does, so a main that
 // isn't async can still end a span: the batch goes out after main returns. Main can't await the
 // stand-in collector, so it polls for it.
-import { span, configureTracing } from "fish:trace";
+import { span, configureTracing } from "std:trace";
 
 type Sent = { resourceSpans: { scopeSpans: { spans: { parentSpanId?: string; name: string }[] }[] }[] };
 

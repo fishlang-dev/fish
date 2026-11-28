@@ -1,0 +1,21 @@
+script 0a3ec14610237e10ebb5bb160a3bbbc31b6027ccd61b4bacf472e90f7b66568d
+status 0
+stdout 754
+0 4 2 1 2
+ok ro
+EACCES: permission denied, access 'ro' EACCES access ro
+ENOENT: no such file or directory, access 'missing' ENOENT access missing
+ENOTDIR: not a directory, access 'f/x' ENOTDIR access f/x
+ENOENT: no such file or directory, access '' ENOENT access 
+mode is out of range: >= 0 && <= 7 ERR_OUT_OF_RANGE - none
+mode is out of range: >= 0 && <= 7 ERR_OUT_OF_RANGE - none
+ok ro
+EACCES: permission denied, access 'ro' EACCES access ro
+ENOENT: no such file or directory, access 'missing' ENOENT access missing
+ENOTDIR: not a directory, access 'f/x' ENOTDIR access f/x
+ENOENT: no such file or directory, access '' ENOENT access 
+mode is out of range: >= 0 && <= 7 ERR_OUT_OF_RANGE - none
+mode is out of range: >= 0 && <= 7 ERR_OUT_OF_RANGE - none
+
+stderr 0
+

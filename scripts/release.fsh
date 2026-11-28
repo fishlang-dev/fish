@@ -1,11 +1,14 @@
 // Cuts a release: fish.toml's version bumped, a CHANGELOG.md section from the conventional commits
-// since the last tag, a release commit and an annotated `v<version>` tag. Nothing is pushed; pushing
-// the tag runs the release workflow, which packs and publishes it, so every release tarball is built
-// on CI. `--nightly` builds and packs a tarball of HEAD named for today's date, with no commit or tag,
+// since the last tag, a release commit and an annotated `v<version>` tag. Nothing is pushed. The
+// release workflow runs this on a runner, on main, once a release branch's pull request into it is
+// merged, then pushes, packs, publishes and promotes, so every release tarball is built on CI.
+// `--nightly` builds and packs a tarball of HEAD named for today's date, with no commit or tag,
 // and `--pack <version>` packs the tarball of a release already tagged, under dist/ with its sha256.
 // The tarball's fishc is built from the commit's own tree at /tmp/fish-stage0/<commit>, the fixed
 // path stage 0 is built at, since a fishc holds the path it was built at: any machine building the
 // commit there gets the same binary, which is what lets a release be pinned as stage 0.
+// The fishc that runs scripts/build.fsh is FISHC when set, as the workflow sets it to stage 0, and
+// build/fishc otherwise.
 //   fishc run scripts/release.fsh -- <version> | --nightly | --pack <version>
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -48,17 +51,21 @@ function described(subject: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-// The changelog section for `version`: what the commits since `since` added, fixed and sped up.
-// Refactors, tests, chores and docs are left out, as they change nothing a user sees.
+// The changelog section for `version`: what the commits since `since` added, fixed and sped up,
+// and under Changed, those whose subject has no conventional prefix, as squashed pull requests'
+// don't. Refactors, tests, chores and docs are left out, as they change nothing a user sees.
 function section(version: string, since: string | undefined, date: string): string {
   let out = `## ${version} - ${date}\n\n`;
   if (since === undefined) return out + "The first release.\n";
   const log = run("git", ["log", "--no-merges", "--format=%s", `${since}..HEAD`]);
-  const groups: [string, string][] = [["feat", "Added"], ["fix", "Fixed"], ["perf", "Faster"]];
+  const groups: [string, string][] = [["feat", "Added"], ["fix", "Fixed"], ["perf", "Faster"], ["", "Changed"]];
   let any = false;
   for (const [kind, title] of groups) {
     let lines: string[] = [];
-    for (const subject of log.split("\n")) if (ofKind(subject, kind)) lines.push(`- ${described(subject)}`);
+    for (const subject of log.split("\n")) {
+      const taken = kind === "" ? subject.trim() !== "" && !/^[a-z]+(\([^)]*\))?!?:/.test(subject) : ofKind(subject, kind);
+      if (taken) lines.push(`- ${described(subject)}`);
+    }
     if (lines.length === 0) continue;
     any = true;
     out += `### ${title}\n\n${lines.join("\n")}\n\n`;
@@ -87,6 +94,20 @@ function bumped(version: string): string throws IoError {
   return text.replace(/^version = "[^"]*"$/m, `version = "${version}"`);
 }
 
+// src/commands.fsh with the VERSION `fishc --version` prints set to `version`.
+function versioned(version: string): string throws IoError {
+  const text = readFileSync(join(ROOT, "src", "commands.fsh"), "utf8");
+  if (!/^export const VERSION = "[^"]*";$/m.test(text)) fail("src/commands.fsh has no VERSION line to bump");
+  return text.replace(/^export const VERSION = "[^"]*";$/m, `export const VERSION = "${version}";`);
+}
+
+function fishc(): string {
+  const given = process.env.FISHC ?? "";
+  const path = given !== "" ? given : join(ROOT, "build", "fishc");
+  if (!existsSync(path)) fail(`no fishc at ${path} to build the release with; run scripts/build.fsh first, or set FISHC`);
+  return path;
+}
+
 // Builds fishc from this checkout and packs it with the sources it reads as it runs, as
 // `bin/fishc` and `share/fishc/`, into dist/<name>.tar.gz beside its sha256.
 async function pack(name: string, commit: string): Promise<string> throws IoError {
@@ -99,7 +120,7 @@ async function pack(name: string, commit: string): Promise<string> throws IoErro
   const stage = join(dist, name);
   rmSync(stage, { recursive: true, force: true });
   mkdirSync(join(stage, "bin"), { recursive: true });
-  await shown(["build/fishc", "run", "scripts/build.fsh", "--", "-o", join(stage, "bin", "fishc"), "--source", tree]);
+  await shown([fishc(), "run", "scripts/build.fsh", "--", "-o", join(stage, "bin", "fishc"), "--source", tree]);
   const share = join(stage, "share", "fishc");
   mkdirSync(join(share, "src"), { recursive: true });
   run("cp", ["-R", join(tree, "vendor"), join(share, "vendor")]);
@@ -116,7 +137,6 @@ async function pack(name: string, commit: string): Promise<string> throws IoErro
 
 async function main(): Promise<void> throws IoError {
   const args = process.argv.slice(2);
-  if (!existsSync(join(ROOT, "build", "fishc"))) fail("no build/fishc to build the release with; run scripts/build.fsh first");
   const date = new Date().toISOString().slice(0, 10);
   if (args.length === 1 && args[0]! === "--nightly") {
     await pack(`fishc-nightly-${date}-${hostKey()}`, run("git", ["rev-parse", "HEAD"]));
@@ -133,9 +153,10 @@ async function main(): Promise<void> throws IoError {
   if (run("git", ["status", "--porcelain"]) !== "") fail("the working tree has changes; commit or stash them first");
   if (spawnSync("git", ["rev-parse", "-q", "--verify", `refs/tags/${tag}`], { cwd: ROOT }).status === 0) fail(`${tag} is already tagged`);
   writeFileSync(join(ROOT, "fish.toml"), bumped(version));
+  writeFileSync(join(ROOT, "src", "commands.fsh"), versioned(version));
   writeFileSync(join(ROOT, "CHANGELOG.md"), changelog(section(version, lastTag(), date)));
-  run("git", ["add", "fish.toml", "CHANGELOG.md"]);
+  run("git", ["add", "fish.toml", "src/commands.fsh", "CHANGELOG.md"]);
   run("git", ["commit", "-q", "-m", `chore: release ${version}`]);
   run("git", ["tag", "-a", tag, "-m", `fishc ${version}`]);
-  console.log(`committed and tagged ${tag}; nothing was pushed\npush the commit and then the tag, and the release workflow publishes it:\n  git push origin HEAD && git push origin ${tag}`);
+  console.log(`committed and tagged ${tag}; nothing was pushed`);
 }

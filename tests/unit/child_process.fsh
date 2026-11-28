@@ -1,18 +1,22 @@
-// The std `child_process` module against node's: the same body
-// run by both, output compared.
+// The std `child_process` module against node's: the same body run by Fish, its output compared
+// with what node gave for it, as recorded.
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { built, fishc, removed, same, scratch, text } from "./support.fsh";
+import { built, fishc, ranFor, reference, removed, same, scratch, text } from "./support.fsh";
 
 function compare(name: string, imports: string, body: string, throws: string, nodeBody: string): string {
   const tmp = scratch("fish-child-process-");
   const out = built(tmp, name, `${imports}\nfunction main(): void ${throws}{${body}\n}\n`);
   const fish = spawnSync("env", ["FISH_LEAKS=1", out], { cwd: tmp });
   const script = `const cp = require("node:child_process"); const { spawnSync, execFileSync, execSync } = cp; (() => {${nodeBody}\n})();`;
-  const node = spawnSync("node", ["-e", script], { cwd: tmp });
-  same(text(fish.stderr), text(node.stderr), `${name}'s stderr`);
-  same(text(fish.stdout), text(node.stdout), `${name}'s output`);
+  // The directory is a new one each run, so the answer is recorded with a name in its place.
+  const node = reference(`child_process-${name}`, script, () => {
+    const got = ranFor("node", ["-e", script], tmp);
+    return { status: got.status, stdout: got.stdout.replaceAll(tmp, "<dir>"), stderr: got.stderr.replaceAll(tmp, "<dir>") };
+  });
+  same(text(fish.stderr).replaceAll(tmp, "<dir>"), node.stderr, `${name}'s stderr`);
+  same(text(fish.stdout).replaceAll(tmp, "<dir>"), node.stdout, `${name}'s output`);
   removed(tmp);
   return text(fish.stdout);
 }

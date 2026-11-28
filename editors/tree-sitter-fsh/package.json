@@ -7,7 +7,7 @@
   "scripts": {
     "generate": "tree-sitter generate",
     "test": "tree-sitter test",
-    "corpus": "node script/corpus.js"
+    "corpus": "fishc run script/corpus.fsh"
   },
   "devDependencies": {
     "tree-sitter-cli": "0.25.10",

@@ -1,8 +1,10 @@
 // Pins a release as stage 0. The release's tagged commit is built at its fixed path by the stage 0
 // pinned now, and that fishc must reach the bootstrap fixpoint and be the very binary the release's
 // tarball holds; then stage0.toml names the release, its tarball's sha256 and the binary's digest
-// for this machine, and adds the commit to the chain it can be rebuilt from. Commit the change once
-// the release is published, since a checkout with nothing cached downloads it.
+// for this machine. Commit the change once the release is published, since a checkout with nothing
+// cached downloads it. The release workflow
+// runs this on each target's runner and joins the stage0.toml each writes into the one it commits.
+// The fishc that runs scripts/build.fsh is FISHC when set, and build/fishc otherwise.
 // `--tarball <path>` checks a tarball on disk instead of downloading it, and `--no-fixpoint` leaves
 // the fixpoint out, which an hour and a half shorter run is only for trying the script.
 //   fishc run scripts/promote.fsh -- <version> [--tarball <path>] [--no-fixpoint]
@@ -44,8 +46,9 @@ async function main(): Promise<void> throws IoError | Error {
   const args = process.argv.slice(2);
   const version = args.length > 0 && !args[0]!.startsWith("--") ? args[0]! : fail("usage: fishc run scripts/promote.fsh -- <version> [--tarball <path>] [--no-fixpoint]");
   const tag = `v${version}`;
-  const fishc = join(ROOT, "build", "fishc");
-  if (!existsSync(fishc)) fail("no build/fishc to run the build with; run scripts/build.fsh first");
+  const runner = process.env.FISHC ?? "";
+  const fishc = runner !== "" ? runner : join(ROOT, "build", "fishc");
+  if (!existsSync(fishc)) fail(`no fishc at ${fishc} to run the build with; run scripts/build.fsh first, or set FISHC`);
   const commit = output("git", ["rev-parse", `${tag}^{commit}`]);
   let p: Pinned = pinned(ROOT);
   if (p.commit === commit) fail(`stage 0 is ${tag} already`);
@@ -82,11 +85,9 @@ async function main(): Promise<void> throws IoError | Error {
   rmSync(scratch, { recursive: true, force: true });
   if (shipped !== digest) fail(`the fishc in ${name} has digest ${shipped}, but ${tag} built at its fixed path gives ${digest}; the release can't be rebuilt from source, so it can't be stage 0`);
 
-  let chain = p.chain.length > 0 ? [...p.chain] : [p.commit];
-  chain.push(commit);
-  let next: Pinned = { commit, digests: new Map<string, string>([[hostKey(), digest]]), release: tag, releases: p.releases ?? RELEASES, tarballs: new Map<string, string>([[hostKey(), sum]]), chain };
+  let next: Pinned = { commit, digests: new Map<string, string>([[hostKey(), digest]]), release: tag, releases: p.releases ?? RELEASES, tarballs: new Map<string, string>([[hostKey(), sum]]) };
   writeFileSync(join(ROOT, "stage0.toml"), written(next));
   console.log(`stage0.toml pins ${tag} for ${hostKey()}: digest ${digest}, tarball ${sum}`);
-  if (p.digests.size > 1) console.log("other targets' digests were dropped; record each on its own machine with scripts/build.fsh -- --record");
+  if (p.digests.size > 1) console.log("it names this target alone; the release workflow joins each target's with scripts/pins.sh");
   console.log("commit stage0.toml once the release is published");
 }

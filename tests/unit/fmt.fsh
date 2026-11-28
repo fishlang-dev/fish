@@ -106,6 +106,16 @@ test("- formats standard input to standard output, and with --check exits 1 on u
   done(top);
 });
 
+test("a JSX element is kept as written while what surrounds it is formatted", () => {
+  const top = fresh();
+  const dir = files(top, "jsx", []);
+  const written = "function page(name:string):Html{\n  const title=<h1  class=\"t\">Hi   {name}</h1>;\n  return <main>\n      {title}\n    <p>one</p>\n  </main>;\n}\n";
+  const kept = "function page(name: string): Html {\n  const title = <h1  class=\"t\">Hi   {name}</h1>;\n  return <main>\n      {title}\n    <p>one</p>\n  </main>;\n}\n";
+  ran(fmt(dir, ["-"], written), 0, kept, "", "a file with JSX");
+  ran(fmt(dir, ["-"], kept), 0, kept, "", "formatted again");
+  done(top);
+});
+
 test("a file that doesn't parse is reported and left as it was, and the others are still formatted", () => {
   const top = fresh();
   const dir = files(top, "broken", [["a.fsh", messy()], ["bad.fsh", "function (\n"], ["z.fsh", messy()]]);
@@ -143,7 +153,7 @@ test("a flag fmt doesn't take, or - beside other paths, prints usage and exits 2
   const cases: string[][] = [["--release", "a.fsh"], ["-", "a.fsh"]];
   for (const args of cases) {
     const run = fmt(dir, args.clone());
-    assert(run.code === 2 && run.err.includes("usage: fishc fmt [<path>...] [--check]"), `${args.join(" ")}: exit code ${run.code}, stderr: ${run.err}`);
+    assert(run.code === 2 && run.err.includes("usage: fishc fmt [<path>...] [-p <member>] [--check]"), `${args.join(" ")}: exit code ${run.code}, stderr: ${run.err}`);
   }
   const unknown = fmt(dir, ["--fast", "a.fsh"]);
   assert(unknown.code === 2 && unknown.err.includes("Unknown option '--fast'"), `--fast: exit code ${unknown.code}, stderr: ${unknown.err}`);

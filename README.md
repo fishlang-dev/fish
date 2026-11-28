@@ -80,12 +80,12 @@ arrays (`arr.iter()`), and operator-overloading traits.
 curl -fsSL https://raw.githubusercontent.com/fishlang-dev/fish/main/install.sh | sh
 ```
 
-This downloads the latest release for your machine, checks its sha256, unpacks it under
-`~/.fishc`, links `fishc` into `~/.local/bin`, adds that to `PATH` in your shell's startup file,
-and builds a hello world to check it works. Releases are built for macOS on ARM64 so far. `fishc`
-needs clang 15 or newer (`xcode-select --install` on macOS). `FISHC_VERSION=0.1.0` picks a
-release, and `FISHC_NO_MODIFY_PATH=1` leaves your startup file alone. To uninstall,
-`rm -rf ~/.fishc ~/.local/bin/fishc`.
+This downloads the latest release for your machine, checks its sha256, unpacks it under `~/.fishc`,
+links `fishc` into `~/.local/bin`, adds that to `PATH` in your shell's startup file, and builds a
+hello world to check it works. Releases are built for macOS and Linux, on x86-64 and ARM64. `fishc`
+needs clang 15 or newer (`xcode-select --install` on macOS). `FISHC_VERSION=0.1.0` picks a release,
+and `FISHC_NO_MODIFY_PATH=1` leaves your startup file alone. To uninstall, `rm -rf ~/.fishc
+~/.local/bin/fishc`.
 
 ## Building fishc
 
@@ -98,8 +98,8 @@ With a `fishc` already:
 fishc run scripts/build.fsh
 ```
 
-With none, the first time: this unpacks the pinned commit and builds stage 0 from it, which needs
-git and [Bun](https://bun.sh) once, then builds `fishc` with it.
+With none: this downloads the release `stage0.toml` pins for your machine, checks its sha256, and
+builds `fishc` with it. It needs curl and git.
 
 ```sh
 sh scripts/bootstrap.sh
@@ -119,6 +119,11 @@ build/fishc build hello.fsh -o hello
 
 The first build compiles the `Math` runtime once into `~/.cache/fish` (or `$FISH_CACHE_DIR`).
 Its functions are correctly rounded, so a program prints the same numbers on every platform.
+
+`FISH_SHARED_CACHE` shares compiled objects between machines: a directory, or an `http://` or
+`https://` base URL answering GET and PUT. An object the local cache lacks is fetched from it and
+used only if it matches the SHA-256 stored beside it (`<name>.sha256`); an object built here is
+written back.
 
 ## Tests
 

@@ -1,10 +1,9 @@
-// Errors printed by Fish against node's, node's stacks cut to their
-// first line as Fish has none: the same program, its types stripped for node by Bun's transpiler,
-// asked of a Bun child process.
+// Errors printed by Fish against node's, node's stacks cut to their first line as Fish has none:
+// the same program, its types stripped for node by Bun's transpiler, as recorded.
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { built, removed, same, scratch, text } from "./support.fsh";
+import { built, ranFor, reference, removed, same, scratch, text } from "./support.fsh";
 
 function compare(name: string, source: string): void {
   const dir = scratch("fish-error-");
@@ -18,12 +17,14 @@ function compare(name: string, source: string): void {
     assert(false, e.message);
   }
   const strip = `const { readFileSync, writeFileSync } = require("node:fs"); const [from, to] = process.argv.slice(1); writeFileSync(to, "Error.stackTraceLimit = 0;\\n" + new Bun.Transpiler({ loader: "ts" }).transformSync(readFileSync(from, "utf8")) + "\\nmain();\\n");`;
-  const stripped = spawnSync("bun", ["-e", strip, typed, script]);
-  same(text(stripped.stderr), "", "stripping the types");
-  const node = spawnSync("node", [script]);
+  const node = reference(`error-${name}`, source, () => {
+    const stripped = ranFor("bun", ["-e", strip, typed, script]);
+    same(stripped.stderr, "", "stripping the types");
+    return ranFor("node", [script]);
+  });
   same(text(fish.stderr), "", "the program's stderr");
-  same(text(node.stderr), "", "node's stderr");
-  same(text(fish.stdout), text(node.stdout), "the output");
+  same(node.stderr, "", "node's stderr");
+  same(text(fish.stdout), node.stdout, "the output");
   removed(dir);
 }
 

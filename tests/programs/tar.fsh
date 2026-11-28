@@ -5,7 +5,7 @@
 // expect: stream: 3 entries
 // Archives the system's tar made, plain and gzipped, from a path, bytes and a stream, and a
 // path past ustar's 100 bytes.
-import { list, entries, TarError, type TarHeader } from "fish:tar";
+import { list, entries, TarError, type TarHeader } from "std:tar";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,7 +52,7 @@ async function main(): Promise<void> throws IoError | Error | TarError {
 // expect: ratio: true
 // expect: fifo: true
 // A corrupt header, each limit, and a FIFO are refused with TarError.
-import { list, TarError } from "fish:tar";
+import { list, TarError } from "std:tar";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -75,7 +75,8 @@ async function main(): Promise<void> throws IoError | TarError {
   spawnSync("env", ["COPYFILE_DISABLE=1", "tar", "-czf", join(dir, "z.tgz"), "-C", dir, "z.txt"]);
   let bytes = readFileSync(join(dir, "x.tar"));
   let corrupt = bytes.clone();
-  corrupt[3] = 120;
+  // Whatever the first header's name is, as tar writes a pax header first only for some files.
+  corrupt[3] = corrupt[3]! === 120 ? 121 : 120;
   const checksumSaid = await attempt("checksum", corrupt, {});
   console.log(checksumSaid);
   const entriesSaid = await attempt("entries", bytes.clone(), { maxEntries: 1 });
@@ -97,7 +98,7 @@ async function main(): Promise<void> throws IoError | TarError {
 // expect: mode 493
 // An archive the system's tar made, extracted and read back: files, a directory, a symlink and
 // a file's mode.
-import { extract, TarError } from "fish:tar";
+import { extract, TarError } from "std:tar";
 import { spawnSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -126,7 +127,7 @@ async function main(): Promise<void> throws IoError | Error | TarError {
 // expect: through a link: 'hop/x.txt' would be written through the symlink 'hop', which extract refuses
 // expect: nothing outside: true
 // Archives made with each escaping entry are refused, and nothing lands outside the target.
-import { extract, pack, TarError } from "fish:tar";
+import { extract, pack, TarError } from "std:tar";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { ZlibError } from "node:zlib";
@@ -177,7 +178,7 @@ async function main(): Promise<void> throws IoError | ZlibError | TarError {
 // expect: system gzip: a.txt|sub/|sub/b.txt
 // An archive pack writes reads back through entries() and through the system's tar, plain and
 // gzipped, with a long path kept through a PAX header.
-import { create, entries, list, TarError } from "fish:tar";
+import { create, entries, list, TarError } from "std:tar";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -205,5 +206,118 @@ async function main(): Promise<void> throws IoError | ZlibError | Error | TarErr
   console.log("system:", new TextDecoder().decode(t.stdout).trim().split("\n").join("|"));
   const z = spawnSync("tar", ["-tzf", join(dir, "x.tgz")]);
   console.log("system gzip:", new TextDecoder().decode(z.stdout).trim().split("\n").join("|"));
+  rmSync(dir, { recursive: true });
+}
+// case: tar_extract_refuses_symlink_chains
+// expect: forward: 'a/b/c/s2' follows symlinks out of the target, which extract refuses
+// expect: forward clean: true
+// expect: reverse: 'a/b/c/s2' follows symlinks out of the target, which extract refuses
+// expect: reverse clean: true
+// expect: three-hop: 'a/b/c/t3' follows symlinks out of the target, which extract refuses
+// expect: three-hop clean: true
+// expect: ro dir: 'ro/b/c/a2' follows symlinks out of the target, which extract refuses
+// expect: ro dir clean: true
+// expect: mixed-case: true
+// expect: self loop: 'a/loop' follows too many symlinks, which extract refuses
+// expect: self loop clean: true
+// expect: mutual loop: 'a/x' follows too many symlinks, which extract refuses
+// expect: mutual loop clean: true
+// expect: safe chain: ok
+// Multi-hop symlink chains (forward, reverse, 3-hop, read-only dir, mixed-case) and loops are refused (F-2394).
+import { extract, pack, TarError } from "std:tar";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { ZlibError } from "node:zlib";
+import { join } from "node:path";
+
+async function archive(paths: string[], cwd: string): Promise<u8[]> throws IoError | ZlibError {
+  let out: u8[] = [];
+  let chunks = pack(paths, { cwd });
+  for await (const chunk of chunks) for (const b of chunk) out.push(b);
+  return out;
+}
+
+async function attempt(what: string, bytes: u8[], to: string): Promise<void> {
+  try {
+    const _w = await extract(bytes, to);
+    console.log(what + ": extracted");
+  } catch (e) {
+    console.log(what + ": " + e.message);
+  }
+}
+
+async function main(): Promise<void> throws IoError | ZlibError | TarError {
+  const dir = mkdtempSync(join(tmpdir(), "fish-tar-chain-"));
+  const src = join(dir, "src");
+  mkdirSync(join(src, "a", "b", "c"), { recursive: true });
+  mkdirSync(join(src, "ro", "b", "c"), { recursive: true });
+  symlinkSync("../../..", join(src, "a", "b", "c", "s1"));
+  symlinkSync("s1/../../..", join(src, "a", "b", "c", "s2"));
+  symlinkSync("S1/../../..", join(src, "a", "b", "c", "s2_ci"));
+  symlinkSync("../../..", join(src, "ro", "b", "c", "z1"));
+  symlinkSync("z1/../../..", join(src, "ro", "b", "c", "a2"));
+  chmodSync(join(src, "ro", "b", "c"), 0o555);
+  symlinkSync("../../..", join(src, "a", "b", "c", "t1"));
+  symlinkSync("t1/a", join(src, "a", "b", "c", "t2"));
+  symlinkSync("t2/../..", join(src, "a", "b", "c", "t3"));
+  symlinkSync("loop", join(src, "a", "loop"));
+  symlinkSync("y", join(src, "a", "x"));
+  symlinkSync("x", join(src, "a", "y"));
+  writeFileSync(join(src, "a", "ok.txt"), "ok");
+  symlinkSync("..", join(src, "a", "b", "up1"));
+  symlinkSync("up1/ok.txt", join(src, "a", "b", "to_ok"));
+
+  const fwd = await archive(["a/b/c/s1", "a/b/c/s2"], src);
+  const outFwd = join(dir, "fwd");
+  await attempt("forward", fwd, outFwd);
+  console.log("forward clean:", lstatSync(join(outFwd, "a", "b", "c", "s1"), { throwIfNoEntry: false }) === undefined && lstatSync(join(outFwd, "a", "b", "c", "s2"), { throwIfNoEntry: false }) === undefined);
+
+  const rev = await archive(["a/b/c/s2", "a/b/c/s1"], src);
+  const outRev = join(dir, "rev");
+  await attempt("reverse", rev, outRev);
+  console.log("reverse clean:", lstatSync(join(outRev, "a", "b", "c", "s1"), { throwIfNoEntry: false }) === undefined && lstatSync(join(outRev, "a", "b", "c", "s2"), { throwIfNoEntry: false }) === undefined);
+
+  const three = await archive(["a/b/c/t3", "a/b/c/t2", "a/b/c/t1"], src);
+  const outThree = join(dir, "three");
+  await attempt("three-hop", three, outThree);
+  console.log("three-hop clean:", lstatSync(join(outThree, "a", "b", "c", "t1"), { throwIfNoEntry: false }) === undefined && lstatSync(join(outThree, "a", "b", "c", "t2"), { throwIfNoEntry: false }) === undefined && lstatSync(join(outThree, "a", "b", "c", "t3"), { throwIfNoEntry: false }) === undefined);
+
+  const roDir = await archive(["ro/b/c"], src);
+  const outRo = join(dir, "ro");
+  await attempt("ro dir", roDir, outRo);
+  console.log("ro dir clean:", lstatSync(join(outRo, "ro", "b", "c", "z1"), { throwIfNoEntry: false }) === undefined && lstatSync(join(outRo, "ro", "b", "c", "a2"), { throwIfNoEntry: false }) === undefined);
+
+  writeFileSync(join(dir, "case_probe"), "x");
+  const caseInsensitive = lstatSync(join(dir, "CASE_PROBE"), { throwIfNoEntry: false }) !== undefined;
+  if (caseInsensitive) {
+    const revCi = await archive(["a/b/c/s2_ci", "a/b/c/s1"], src);
+    const outCi = join(dir, "ci");
+    let refused = false;
+    try {
+      const _w = await extract(revCi, outCi);
+    } catch (e) {
+      refused = e.message.includes("follows symlinks out of the target");
+    }
+    const clean = lstatSync(join(outCi, "a", "b", "c", "s1"), { throwIfNoEntry: false }) === undefined && lstatSync(join(outCi, "a", "b", "c", "s2_ci"), { throwIfNoEntry: false }) === undefined;
+    console.log("mixed-case:", refused && clean);
+  } else {
+    console.log("mixed-case:", true);
+  }
+
+  const selfLoop = await archive(["a/loop"], src);
+  const outSelf = join(dir, "self");
+  await attempt("self loop", selfLoop, outSelf);
+  console.log("self loop clean:", lstatSync(join(outSelf, "a", "loop"), { throwIfNoEntry: false }) === undefined);
+
+  const mutLoop = await archive(["a/x", "a/y"], src);
+  const outMut = join(dir, "mut");
+  await attempt("mutual loop", mutLoop, outMut);
+  console.log("mutual loop clean:", lstatSync(join(outMut, "a", "x"), { throwIfNoEntry: false }) === undefined && lstatSync(join(outMut, "a", "y"), { throwIfNoEntry: false }) === undefined);
+
+  const safe = await archive(["a/ok.txt", "a/b/up1", "a/b/to_ok"], src);
+  const outSafe = join(dir, "safe");
+  const _w = await extract(safe, outSafe);
+  console.log("safe chain:", new TextDecoder().decode(readFileSync(join(outSafe, "a", "b", "to_ok"))));
+  chmodSync(join(src, "ro", "b", "c"), 0o755);
   rmSync(dir, { recursive: true });
 }

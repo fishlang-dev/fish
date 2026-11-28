@@ -1,11 +1,12 @@
-// The runtime's own behaviour, checked from C: the leak report, string
-// blocks and case mapping. JavaScript's case mapping, the reference, is asked of a Bun child process.
+// The runtime's own behaviour, checked from C: the leak report, string blocks and case mapping.
+// JavaScript's case mapping, the reference, is Bun's as recorded.
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CASEMAP, CASEMAP_UNICODE } from "../../src/casemap.fsh";
 import { NATIVE } from "../../src/native.fsh";
-import { removed, same, scratch, text } from "./support.fsh";
+import { caseScript, type Tables } from "../../scripts/casetables.fsh";
+import { ranFor, reference, removed, same, scratch, text } from "./support.fsh";
 
 type Ran = { stdout: string; stderr: string };
 
@@ -54,10 +55,9 @@ test("the halves of a surrogate pair join into one character", () => {
   const got = run(
     `
     fsh_str *high = fsh_str_of("\\xED\\xA0\\xBD", 3), *low = fsh_str_of("\\xED\\xB8\\x80", 3);
-    high->units = 1; low->units = 1;
     fsh_str *pair = fsh_rt_str_concat(high, low);
     fsh_str *emoji = fsh_str_of("\\xF0\\x9F\\x98\\x80", 4);
-    printf("%lld %lld %d\\n", (long long)pair->length, (long long)pair->units, fsh_rt_str_compare(pair, emoji));
+    printf("%lld %lld %d\\n", (long long)fsh_len(pair), (long long)fsh_rt_str_units(pair), fsh_rt_str_compare(pair, emoji));
     fsh_rt_str_print(1, high);
     printf("\\n");
     fsh_rt_str_release(high); fsh_rt_str_release(low); fsh_rt_str_release(pair); fsh_rt_str_release(emoji);`,
@@ -99,19 +99,6 @@ function fromTables(cp: i64, special: Ref<Map<i64, i64[]>>, simple: Ref<Map<i64,
   return s;
 }
 
-// Bun's script printing its Unicode version, then each code point's upper and lower case, a line
-// each, in the order the runtime's loop writes them.
-function engineScript(): string {
-  return `const out = [process.versions.unicode];
-for (let cp = 0; cp <= 0x10ffff; cp++) {
-  if ((cp >= 0xd800 && cp < 0xe000) || cp === 0x0a) continue;
-  const c = String.fromCodePoint(cp);
-  out.push(c.toUpperCase(), c.toLowerCase());
-}
-process.stdout.write(out.join("\\n") + "\\n");
-`;
-}
-
 function hex(cp: i64): string {
   const digits = "0123456789ABCDEF";
   let s = "";
@@ -123,14 +110,27 @@ function hex(cp: i64): string {
   return s.padStart(4, "0");
 }
 
+// What a row of the recorded tables maps its code point to.
+function recordedRows(rows: Ref<i64[][]>): Map<i64, i64[]> {
+  let out = new Map<i64, i64[]>();
+  for (const r of rows) out.set(r[0]!, r.slice(1));
+  return out;
+}
+
+// The first few code points two tables map differently, or nothing when they are the same.
+function tablesDiffer(name: string, ours: Ref<Map<i64, i64[]>>, theirs: Ref<Map<i64, i64[]>>): string {
+  let found: string[] = [];
+  for (const [cp, to] of theirs) {
+    const have = ours.get(cp);
+    if (have === undefined || have.join(",") !== to.join(",")) found.push(`U+${hex(cp)} is ${have === undefined ? "missing" : have.join(",")} for ${to.join(",")}`);
+  }
+  for (const cp of ours.keys()) if (!theirs.has(cp)) found.push(`U+${hex(cp)} is mapped and JavaScript leaves it`);
+  return found.length === 0 ? "" : `${name}: ${found.slice(0, 5).join("; ")}${found.length > 5 ? `, and ${found.length - 5} more` : ""}`;
+}
+
 // Every code point's upper and lower case, one at a time, against JavaScript's. Surrogates map
 // to themselves and are left out, as is the line feed, which separates the runtime's output.
-//
-// An engine on an older Unicode version than the tables were made from, as Bun is on macOS,
-// where its case mapping comes from the system's ICU, lacks the newer case pairs: it leaves
-// code points as they are that the tables map. Unicode never changes an existing pair, so when
-// every difference is of that kind the tables themselves are the reference. Any other
-// difference means the tables are stale.
+// The tables src/casemap.fsh holds must be the recorded ones, and the runtime must map as they do.
 test("case mapping matches JavaScript for every code point", () => {
   const got = run(
     `
@@ -139,8 +139,9 @@ test("case mapping matches JavaScript for every code point", () => {
       char bytes[4];
       fsh_str *s = fsh_str_of(bytes, fsh_put_cp(bytes, cp) - bytes);
       for (int upper = 1; upper >= 0; upper--) {
-        fsh_str *mapped = fsh_rt_str_case(s, upper);
-        fwrite(mapped->bytes, 1, mapped->length, stdout);
+        fsh_str *mapped = fsh_rt_str_case(s, upper), *shown = mapped;
+        FSH_OPEN(shown);
+        fwrite(shown->bytes, 1, shown->length, stdout);
         fputc('\\n', stdout);
         fsh_rt_str_release(mapped);
       }
@@ -152,11 +153,17 @@ test("case mapping matches JavaScript for every code point", () => {
   const lower = table("fsh_lower");
   const upperSpecial = table("fsh_upper_special");
   const lowerSpecial = table("fsh_lower_special");
-  const bun = spawnSync("bun", ["-e", engineScript()]);
-  assert(bun.status === 0, `bun failed: ${text(bun.stderr)}`);
-  let engine = text(bun.stdout).split("\n");
-  engine.pop();
-  const unicode = engine.shift()!;
+  const asked = reference("casemap-tables", caseScript(), () => ranFor("bun", ["-e", caseScript()]));
+  same(asked.stderr, "", "recording the tables");
+  let recorded: Tables = { upper: [], upperSpecial: [], lower: [], lowerSpecial: [], cased: [], ignorable: [], unicode: "" };
+  try {
+    recorded = JSON.parse<Tables>(asked.stdout);
+  } catch (e) {
+    assert(false, `the recorded tables don't parse: ${e.message}`);
+  }
+  same(recorded.unicode, CASEMAP_UNICODE, "the Unicode version the tables were recorded at");
+  const stale = [tablesDiffer("fsh_upper", upper, recordedRows(recorded.upper)), tablesDiffer("fsh_lower", lower, recordedRows(recorded.lower)), tablesDiffer("fsh_upper_special", upperSpecial, recordedRows(recorded.upperSpecial)), tablesDiffer("fsh_lower_special", lowerSpecial, recordedRows(recorded.lowerSpecial))].filter((d) => d !== "");
+  assert(stale.length === 0, `the case tables differ from the recorded ones; regenerate them with \`fishc run scripts/casemap.fsh\`. ${stale.join(". ")}`);
   let tables: string[] = [];
   let cps: i64[] = [];
   for (let cp: i64 = 0; cp <= 0x10ffff; cp++) {
@@ -166,15 +173,9 @@ test("case mapping matches JavaScript for every code point", () => {
     cps.push(cp);
     cps.push(cp);
   }
-  assert(engine.length === tables.length, `bun gave ${engine.length} mappings for ${tables.length}`);
   // Each code point's upper case is at an even index, and its lower case after it.
   const point = (i: usize) => `U+${hex(cps[i])} ${i % 2 === 0 ? "upper" : "lower"}`;
-  let differing: usize[] = [];
-  for (let i: usize = 0; i < tables.length; i++) if (engine[i] !== tables[i]) differing.push(i);
-  let older = differing.length > 0;
-  for (const i of differing) if (engine[i] !== String.fromCodePoint(cps[i] as u32)) older = false;
-  const shown = (indices: Ref<usize[]>, gotten: Ref<string[]>, want: Ref<string[]>) => indices.slice(0, 5).map((i) => `${point(i)}: ${JSON.stringify(gotten[i])} for ${JSON.stringify(want[i])}`).join("; ");
-  assert(differing.length === 0 || older, `the case tables differ from this Bun's case mapping (Unicode ${unicode}, tables ${CASEMAP_UNICODE}); regenerate them with \`fishc run scripts/casemap.fsh\`. Bun gives ${shown(differing, engine, tables)}`);
+  const shown = (indices: Ref<usize[]>, gotten: Ref<string[]>, want: Ref<string[]>) => indices.slice(0, 5).map((i) => `${point(i)}: ${JSON.stringify(gotten[i])} for ${JSON.stringify(want[i])}`).join(", ");
   let lines = got.stdout.split("\n");
   lines.pop();
   assert(lines.length === tables.length, `the runtime gave ${lines.length} mappings for ${tables.length}`);

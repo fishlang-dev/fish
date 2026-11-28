@@ -1,0 +1,18 @@
+script 57f9a62c0fd951ffc1494728f4280bcfa1883bc2aabec429b420ac79b952e76e
+status 0
+stdout 1414
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received 10 none ERR_OUT_OF_RANGE RangeError
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received 10 none ERR_OUT_OF_RANGE
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received -2 none ERR_OUT_OF_RANGE RangeError
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received -2 none ERR_OUT_OF_RANGE
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received 12 none ERR_OUT_OF_RANGE RangeError
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received 12 none ERR_OUT_OF_RANGE
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received 4294967296 none ERR_OUT_OF_RANGE RangeError
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received 4294967296 none ERR_OUT_OF_RANGE
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received 4_294_967_297 none ERR_OUT_OF_RANGE RangeError
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received 4_294_967_297 none ERR_OUT_OF_RANGE
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received -10_000_000_000 none ERR_OUT_OF_RANGE RangeError
+The value of "options.level" is out of range. It must be >= -1 and <= 9. Received -10_000_000_000 none ERR_OUT_OF_RANGE
+
+stderr 0
+

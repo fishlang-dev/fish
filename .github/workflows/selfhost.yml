@@ -1,43 +1,54 @@
-# Builds fishc from source with the pinned stage 0 and runs its tests, on each target fishc runs on.
-# Bun is needed only to build stage 0 from its pinned commit, when the cache has none.
+# Builds fishc from source with the pinned stage 0 and runs its tests, on each target stage0.toml
+# has a released stage 0 for. It runs on a pull request from a release branch into main, which is
+# the check a release is merged on, and by hand; no push starts it.
 name: self-hosting
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 concurrency:
   group: selfhost-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   selfhost:
+    # A fork's pull request never runs here: a fork can name a branch release/v* too.
+    if: github.event_name == 'workflow_dispatch' || (startsWith(github.head_ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository)
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, macos-15-intel, ubuntu-24.04, ubuntu-24.04-arm]
+        # Another target joins once stage0.toml has its digest and tarball, which its first stage 0
+        # gives it: scripts/build.fsh says how one is made.
+        os: [macos-latest, macos-15-intel, ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # The unit tests still run Bun for npm bundling and as the fake Postgres server. Pinned to the
+      # version scripts/references.fsh records Bun's answers from.
       - uses: oven-sh/setup-bun@v2
-      # Stage 0 takes over an hour to build from source and changes only with stage0.toml.
+        with:
+          bun-version: 1.4.3
+      - name: Libraries fishc links, and what the tests build and run
+        if: runner.os == 'Linux'
+        # The last is the sanitizer runtimes of the image's clang, named by its version, which the
+        # x86-64 image leaves out.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev zlib1g-dev libbrotli-dev libsqlite3-dev zip unzip "libclang-rt-$(clang -dumpversion | cut -d. -f1)-dev"
+      - name: Libraries the tests build programs with
+        if: runner.os == 'macOS'
+        run: brew install brotli
       - uses: actions/cache@v4
         with:
           path: ~/.cache/fish/stage0
           key: stage0-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('stage0.toml') }}
-      # A target stage0.toml has no digest for can't check a cached stage 0, so it builds stage 0
-      # from source and records the digest, kept as an artifact to be committed into stage0.toml.
-      - name: Bootstrap
-        id: bootstrap
-        run: |
-          arch=$(uname -m); case "$arch" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; esac
-          host="$arch-$(uname -s | tr '[:upper:]' '[:lower:]')"
-          echo "host=$host" >> "$GITHUB_OUTPUT"
-          if grep -q "^\"$host\" = " stage0.toml; then sh scripts/bootstrap.sh; else sh scripts/bootstrap.sh --record; fi
-      - uses: actions/upload-artifact@v4
-        with:
-          name: stage0-${{ steps.bootstrap.outputs.host }}
-          path: stage0.toml
-      - run: build/fishc run tests/run.fsh -- --fishc "$PWD/build/fishc"
-      - run: cd tests/unit && FISHC="$PWD/../../build/fishc" ../../build/fishc test --release
+      - name: Build
+        id: build
+        run: sh scripts/bootstrap.sh
+      - name: Golden programs
+        run: build/fishc run tests/run.fsh -- --fishc "$PWD/build/fishc"
+      # Run whatever the golden programs did, so one run shows every failure. A test with no limit
+      # of its own gets a minute, not ten seconds: the slowest runner takes several times as long
+      # as the machine the tests are written on.
+      - name: Unit tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cd tests/unit && FISHC="$PWD/../../build/fishc" ../../build/fishc test --release --timeout 60000

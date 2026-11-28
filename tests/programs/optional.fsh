@@ -126,3 +126,44 @@ function main() {
   print(t.list.length, t.list[0]!.start, t.list[0]!.subs!.length, t.last().start, t.last().raw ?? "none")
 }
 // expect: 2 1 2 2 none
+// case: optional_chain_temp_ref
+// expect: link 0: hello world!
+// expect: link 1: null
+// expect: cond 0: hello cond!
+// expect: cond 1: null
+// expect: narrow: hello narrow!
+// expect: or 0: hello fallback!
+// expect: or 1: kept!
+// Optional chains, ternaries (including narrowed single-branch), and nullish coalescing returning
+// Ref or Option<Ref> keep temporaries alive until the statement ends without double-freeing or leaking (F-2490, F-2703).
+class Echo {
+  id<A extends Lifetime>(s: Ref<string, A>): Ref<string, A> { return s; }
+}
+function show(tag: string, r: Ref<string> | null): void {
+  const junk = "zzzzzzzzzzzzzzzzzzzzzzzz" + "zzzz";
+  if (r === null) console.log(tag + ": null");
+  else console.log(tag + ": " + r + (junk.length > 0 ? "!" : ""));
+}
+function showRef(tag: string, r: Ref<string>): void {
+  const junk = "zzzzzzzzzzzzzzzzzzzzzzzz" + "zzzz";
+  console.log(tag + ": " + r + (junk.length > 0 ? "!" : ""));
+}
+function main(): void {
+  const echo = new Echo();
+  for (let i = 0; i < 2; i++) {
+    const target: Echo | null = i === 0 ? new Echo() : null;
+    show(`link ${i}`, target?.id("hello" + " world"));
+  }
+  for (let i = 0; i < 2; i++) {
+    show(`cond ${i}`, i === 0 ? echo.id("hello" + " cond") : null);
+  }
+  const maybe: i64 | null = 1;
+  if (maybe !== null) {
+    show("narrow", maybe !== null ? echo.id("hello" + " narrow") : null);
+  }
+  const kept = "kept" + "";
+  for (let i = 0; i < 2; i++) {
+    const base: Ref<string> | null = i === 0 ? null : kept;
+    showRef(`or ${i}`, base ?? echo.id("hello" + " fallback"));
+  }
+}

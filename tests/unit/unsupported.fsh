@@ -5,7 +5,7 @@ import { newCompilation } from "../../src/compilation.fsh";
 import { CompileError } from "../../src/diag.fsh";
 import { runtimeNames } from "../../src/main.fsh";
 import { parse } from "../../src/parser.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 
 // The error `src`, checked as a program of its own, is refused with; code "none" when it checks.
 function refusal(src: string, library: boolean): CompileError {
@@ -155,10 +155,10 @@ test("function signatures", () => {
 const EXPRESSIONS: [string, string, string][] = [
   ["super", "'super' expressions", ""],
   ["[1, , 2]", "holes in array literals", ""],
-  ["function () {}", "function expressions", ""],
+  ["function* () {}", "generator function expressions", ""],
   ["class {}", "class expressions", ""],
   ["true[0]", "indexed access expressions", ""],
-  ["f<i64>", "instantiation expressions", ""],
+  ["f<i64>", "instantiation expressions of anything but a generic function's name", ""],
   ["import.meta", "meta properties", "; 'import.meta' is read through its members path, file, dir, url, main, dirname, filename, or destructured into them"],
   ["import('m')", "dynamic imports", ""],
   ["f?.()", "optional calls", ""],
@@ -176,11 +176,8 @@ test("expression forms", () => {
   assert(failed.length === 0, failed.join("\n\n"));
 });
 
-// Object literal properties besides `key: value`, shorthand and spread: the rejected part is the
-// second column.
+// Object literal properties Fish has no meaning for yet: the rejected part is the second column.
 const PROPERTIES: [string, string, string][] = [
-  ["{ f() {} }", "methods in object literals", "f() {}"],
-  ["{ get x() { return 1 } }", "accessors in object literals", "get x() { return 1 }"],
   ["{ [Symbol.iterator]: 1 }", "'[Symbol.iterator]' members", "Symbol.iterator"],
 ];
 
@@ -235,14 +232,13 @@ test("rest over an interface's fields", () => {
 test("(1, 2)", () => {
   const src = "function main() {\n  let x = (1, 2)\n}";
   const start = src.indexOf("1, 2");
-  refuses("(1, 2)", src, "comma expressions are not supported yet", start, start + 4);
+  refuses("(1, 2)", src, "comma expressions used as values are not supported yet", start, start + 4);
 });
 
 // Statements that parse but have no meaning yet, inside main().
 const STATEMENTS: [string, string][] = [
   ["function* inner() {}", "nested generator functions"],
   ["debugger", "'debugger' statements"],
-  ["for (const k in o) {}", "'for...in' loops"],
   ["namespace N {}", "namespaces"],
   ["declare const x: i64", "ambient declarations"],
 ];

@@ -1,0 +1,76 @@
+script ce1e5acf229b0fbe77cb498813b73cc4c9a0fd0acd6078e31a2caf8485d4012e
+status 0
+stdout 1694
+{ a: 1, b: 'two', c: [ 1, 2, 3 ] }
+[
+   1,  2,  3,   4,    5,     6,
+   7,  8,  9,  10,   11,    12,
+  13, 14, 15,  16,   17,    18,
+  19, 20, 21,  22,   23,    24,
+  25, 26, 27, 100, 1000, 10000
+]
+[
+  'apple',      'banana',
+  'cherry',     'date',
+  'elderberry', 'fig',
+  'grape',      'honeydew',
+  'kiwi'
+]
+{ deep: { deeper: { deepest: [Object] } }, list: [ [ 1, [Array] ] ] }
+Map(2) { 'a' => 1, 'b' => { x: 1 } }
+Set(3) { 1, 2, 3 }
+Map(0) {}
+Set(0) {}
+[]
+{}
+Point { x: 1, y: 2 }
+{
+  'needs quotes': 1,
+  ok_name: 2,
+  "it's": "it's",
+  both: `say "it's"`,
+  tab: 'a\tb',
+  nl: 'x\ny',
+  ctl: '\x01\x7F'
+}
+{
+  long: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' +
+    'second line that is also fairly long so the whole string wraps over'
+}
+[
+   0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11,
+  12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+  24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
+  36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+  48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
+  60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71,
+  72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83,
+  84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+  96, 97, 98, 99,
+  ... 30 more items
+]
+{
+  a: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+  b: 'yyyyyyyyyyyyyyyyyyyyyyyyyyyyyy',
+  c: 'zzzzzzzzzzzzzzzzzzzzzzzzzzzzzz'
+}
+[
+  { name: 'one', value: 1 },
+  { name: 'two', value: 2 },
+  { name: 'three', value: 3 }
+]
+-0
+[ 1.5, -0, 1e+21, 0.1 ]
+{
+  nested: [ Point { x: 1, y: 2 }, Point { x: 3, y: 4 } ],
+  map: Map(1) { 1 => Set(1) { 'a' } }
+}
+[
+  'a', 'b', 'c',
+  'd', 'e', 'f',
+  'g'
+]
+[ 1, 22, 333, 4444, 55555, 666666, 7777777 ]
+
+stderr 0
+

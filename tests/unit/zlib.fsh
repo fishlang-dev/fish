@@ -1,14 +1,15 @@
-// The std `zlib` module against node's: the same body run by both in a
-// directory of its own, output compared. The body is TypeScript, its types stripped by node, which
-// runs it as a `.cts` file.
+// The std `zlib` module against node's: the same body run by Fish in a directory of its own, its
+// output compared with what node printed for it, as recorded. The body is TypeScript, its types
+// stripped by node, which ran it as a `.cts` file. Where a test needs a second implementation at
+// hand, to read what Fish wrote or write what Fish reads, perl's compressors are it.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { compile, runtimeLinks, runtimeUnits } from "../../src/main.fsh";
 import { ZLIB_NATIVE } from "../../src/native.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { HOST_TARGET, sanitizedTarget } from "../../src/target.fsh";
-import { built, fishc, read, removed, root, same, scratch, text } from "./support.fsh";
+import { built, fishc, ranFor, read, reference, removed, root, same, scratch, text } from "./support.fsh";
 
 function fishHelpers(): string {
   return `
@@ -98,14 +99,15 @@ function made(path: string): string {
   return path;
 }
 
-// Runs `body` as a Fish program and under node, each in a directory of its own made by `setup`, a
-// node script run there first; gives the two directories.
+// Runs `body` as a Fish program in a directory of its own made by `setup`, a shell command run
+// there first, and compares what it prints with what node printed for it in such a directory, as
+// recorded; gives the two directories.
 function compare(tmp: string, name: string, body: string, setup: string): [string, string] {
   const fishDir = made(join(tmp, `${name}-fish`));
   const nodeDir = made(join(tmp, `${name}-node`));
   if (setup !== "") {
     for (const dir of [fishDir, nodeDir]) {
-      const done = spawnSync("node", ["-e", setup], { cwd: dir });
+      const done = spawnSync("sh", ["-c", setup], { cwd: dir });
       same(text(done.stderr), "", `setting up ${dir}`);
     }
   }
@@ -116,10 +118,10 @@ function compare(tmp: string, name: string, body: string, setup: string): [strin
   const fish = spawnSync("env", ["FISH_LEAKS=1", out], { cwd: fishDir });
   const script = join(tmp, `${name}.cts`);
   write(script, `${nodeHelpers()}\n(${async ? "async " : ""}() => {${body}\n})();\n`);
-  const node = spawnSync("node", [script], { cwd: nodeDir });
+  const node = reference(`zlib-${name}`, `${nodeHelpers()}\n${body}\n${setup.replaceAll(tmp, "<tmp>")}`, () => ranFor("node", [script], nodeDir));
   same(text(fish.stderr), "", `${name}'s stderr`);
-  same(text(node.stderr), "", `node's stderr for ${name}`);
-  same(text(fish.stdout), text(node.stdout), `${name}'s output`);
+  same(node.stderr, "", `node's stderr for ${name}`);
+  same(text(fish.stdout), node.stdout, `${name}'s output`);
   assert(fish.stdout.length > 0, `${name} printed nothing`);
   return [fishDir, nodeDir];
 }
@@ -155,32 +157,36 @@ test("small inputs compress to node's bytes at every level, and decompress", () 
 function large(): string {
   let letters: string[] = [];
   for (let i: i64 = 0; i < 200000; i++) letters.push(String.fromCharCode((97 + ((i * i * 7 + i) % 26)) as u16) + (i % 13 === 0 ? " " : ""));
-  return letters.join("") + read(join(root(), "src", "check.fsh"));
+  // Then words in an order a fixed seed gives, so the text is the same wherever it is made and the
+  // answer recorded for it holds.
+  const words = ["const", "return", "function", "string", "import", "export", "while", "await", "(", ")", "{", "}", ";", "=>", "\n", "  "];
+  let seed: i64 = 7;
+  let drawn: string[] = [];
+  for (let i = 0; i < 120000; i++) {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    drawn.push(words[(seed % 16) as usize]!);
+  }
+  return letters.join("") + drawn.join(" ");
 }
 
-test("a large input round-trips with node both ways", () => {
+test("a large input round-trips with another implementation both ways", () => {
   const tmp = scratch("fish-zlib-");
   const big = join(tmp, "big.txt");
   write(big, large());
-  const setup = `const fs = require("node:fs"); const z = require("node:zlib");
-const big = fs.readFileSync(${JSON.stringify(big)});
-fs.writeFileSync("big.txt", big);
-fs.writeFileSync("node.gz", z.gzipSync(big));
-fs.writeFileSync("node.z", z.deflateSync(big, { level: 1 }));
-fs.writeFileSync("node.raw", z.deflateRawSync(big, { level: 9 }));`;
+  // Perl's own compressors make what Fish reads, and its decompressors read what Fish makes: an
+  // implementation that isn't Fish's, on every system the tests run on.
+  const setup = `cp "${big}" big.txt && perl -MIO::Compress::Gzip=gzip -MIO::Compress::Deflate=deflate -MIO::Compress::RawDeflate=rawdeflate -e 'gzip("big.txt" => "made.gz") or die; deflate("big.txt" => "made.z", Level => 1) or die; rawdeflate("big.txt" => "made.raw", Level => 9) or die;'`;
   const [fishDir, _nodeDir] = compare(tmp, "large", `
   const big = readFileSync("big.txt");
-  const back = [gunzipSync(readFileSync("node.gz")), inflateSync(readFileSync("node.z")), inflateRawSync(readFileSync("node.raw")), unzipSync(readFileSync("node.gz")), unzipSync(readFileSync("node.z"))];
+  const back = [gunzipSync(readFileSync("made.gz")), inflateSync(readFileSync("made.z")), inflateRawSync(readFileSync("made.raw")), unzipSync(readFileSync("made.gz")), unzipSync(readFileSync("made.z"))];
   for (const b of back) console.log(b.length, same(b, big));
   writeFileSync("out.gz", gzipSync(big.clone()));
   writeFileSync("out.z", deflateSync(big.clone(), { level: 1 }));
   writeFileSync("out.raw", deflateRawSync(big.clone(), { level: 9 }));
   writeFileSync("out0.gz", gzipSync(big, { level: 0 }));`, setup);
-  const check = spawnSync("node", ["-e", `const fs = require("node:fs"); const z = require("node:zlib");
-const big = fs.readFileSync("big.txt");
-console.log(z.gunzipSync(fs.readFileSync("out.gz")).equals(big), z.inflateSync(fs.readFileSync("out.z")).equals(big), z.inflateRawSync(fs.readFileSync("out.raw")).equals(big), z.gunzipSync(fs.readFileSync("out0.gz")).equals(big));`], { cwd: fishDir });
-  same(text(check.stderr), "", "node's stderr reading Fish's output");
-  same(text(check.stdout), "true true true true\n", "node decompressing Fish's output");
+  const check = spawnSync("perl", ["-MIO::Uncompress::Gunzip=gunzip", "-MIO::Uncompress::Inflate=inflate", "-MIO::Uncompress::RawInflate=rawinflate", "-e", `local $/; open F, "<", "big.txt" or die; binmode F; my $big = <F>; my @r; for (["out.gz", \\&gunzip], ["out.z", \\&inflate], ["out.raw", \\&rawinflate], ["out0.gz", \\&gunzip]) { my $o; $_->[1]->($_->[0] => \\$o) or die; push @r, ($o eq $big ? "true" : "false"); } print "@r\\n";`], { cwd: fishDir });
+  same(text(check.stderr), "", "perl's stderr reading Fish's output");
+  same(text(check.stdout), "true true true true\n", "perl decompressing Fish's output");
   removed(tmp);
 }, { timeout: 30_000 });
 
@@ -251,7 +257,7 @@ function irOf(tmp: string, name: string, src: string): string {
 
 function unitNames(ir: string): string[] {
   try {
-    return runtimeUnits(ir, false).map((u) => u.name);
+    return runtimeUnits([ir], false).map((u) => u.name);
   } catch (e) {
     assert(false, `runtimeUnits: ${e.message}`);
     return [];
@@ -262,9 +268,9 @@ test("zlib is compiled and linked into a program only when it calls the module",
   const tmp = scratch("fish-zlib-");
   const using = irOf(tmp, "using.fsh", `import { gzipSync, ZlibError } from "node:zlib";\nfunction main(): void throws ZlibError { console.log(gzipSync("x").length); }\n`);
   const plain = irOf(tmp, "plain.fsh", `function main() { console.log(new TextEncoder().encode("x").length); }\n`);
-  assert(runtimeLinks(using, HOST_TARGET).includes("-lz"), "the program calling zlib doesn't link -lz");
+  assert(runtimeLinks([using], HOST_TARGET).includes("-lz"), "the program calling zlib doesn't link -lz");
   assert(unitNames(using).includes("zlib"), "the program calling zlib has no zlib unit");
-  assert(!runtimeLinks(plain, HOST_TARGET).includes("-lz"), "the plain program links -lz");
+  assert(!runtimeLinks([plain], HOST_TARGET).includes("-lz"), "the plain program links -lz");
   assert(!unitNames(plain).includes("zlib"), "the plain program has a zlib unit");
   removed(tmp);
 }, { timeout: 30_000 });
@@ -347,11 +353,9 @@ test("input fed to zlib in several chunks is compressed and decompressed whole",
   same(text(clang.stderr), "", "clang's stderr");
   const ran = spawnSync(join(dir, "main"), [], { cwd: dir });
   same(text(ran.stdout), "0 100000 1\n".repeat(3), "the harness's output");
-  const check = spawnSync("node", ["-e", `const fs = require("node:fs"); const z = require("node:zlib");
-const input = Buffer.from(Array.from({ length: 100000 }, (_, i) => 97 + ((i * i * 7 + i) % 26)));
-console.log(z.inflateSync(fs.readFileSync("out0")).equals(input), z.gunzipSync(fs.readFileSync("out1")).equals(input), z.inflateRawSync(fs.readFileSync("out2")).equals(input));`], { cwd: dir });
-  same(text(check.stderr), "", "node's stderr");
-  same(text(check.stdout), "true true true\n", "node decompressing the harness's output");
+  const check = spawnSync("perl", ["-MIO::Uncompress::Gunzip=gunzip", "-MIO::Uncompress::Inflate=inflate", "-MIO::Uncompress::RawInflate=rawinflate", "-e", `my $input = join "", map { chr(97 + (($_ * $_ * 7 + $_) % 26)) } 0 .. 99999; my @r; for (["out0", \\&inflate], ["out1", \\&gunzip], ["out2", \\&rawinflate]) { my $o; $_->[1]->($_->[0] => \\$o) or die; push @r, ($o eq $input ? "true" : "false"); } print "@r\\n";`], { cwd: dir });
+  same(text(check.stderr), "", "perl's stderr");
+  same(text(check.stdout), "true true true\n", "perl decompressing the harness's output");
   removed(dir);
 }, { timeout: 30_000 });
 

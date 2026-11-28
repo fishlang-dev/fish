@@ -414,12 +414,25 @@ unsafe fn slice<T>(p: *const u8, n: i64) -> &'static [T] {
     if n == 0 { &[] } else { std::slice::from_raw_parts(p as *const T, n as usize) }
 }
 
+// A Fish string's bytes. A string of seven bytes or fewer is held in its pointer word, the low
+// bit set, its length in bits 1 to 3 and its bytes in the upper seven bytes, so they are copied
+// out; a longer one's are borrowed from the runtime.
+unsafe fn bytes_of(s: *const FishStr) -> std::borrow::Cow<'static, [u8]> {
+    let w = s as usize as u64;
+    if w & 1 == 1 {
+        let n = (w >> 1 & 7) as usize;
+        return std::borrow::Cow::Owned((0..n).map(|i| (w >> (8 * (i + 1))) as u8).collect());
+    }
+    let mut n = 0i64;
+    let p = fsh_rt_rust_str_bytes(s, &mut n);
+    std::borrow::Cow::Borrowed(if n == 0 { &[][..] } else { std::slice::from_raw_parts(p, n as usize) })
+}
+
 // A Fish string as Rust text. Fish strings are WTF-8, so a lone surrogate becomes U+FFFD, as
 // TextEncoder makes it.
 unsafe fn from_fish(s: *const FishStr) -> String {
-    let mut n = 0i64;
-    let p = fsh_rt_rust_str_bytes(s, &mut n);
-    let bytes = if n == 0 { &[][..] } else { std::slice::from_raw_parts(p, n as usize) };
+    let bytes = bytes_of(s);
+    let bytes = &bytes[..];
     if let Ok(text) = std::str::from_utf8(bytes) {
         return text.to_owned();
     }
@@ -445,12 +458,12 @@ struct Text {
     owned: std::cell::OnceCell<String>,
 }
 unsafe fn text_of(s: *const FishStr) -> Text {
-    let mut n = 0i64;
-    let p = fsh_rt_rust_str_bytes(s, &mut n);
-    let bytes: &'static [u8] = if n == 0 { &[] } else { std::slice::from_raw_parts(p, n as usize) };
-    let text = match std::str::from_utf8(bytes) {
-        Ok(text) => std::borrow::Cow::Borrowed(text),
-        Err(_) => std::borrow::Cow::Owned(from_fish(s)),
+    let text = match bytes_of(s) {
+        std::borrow::Cow::Borrowed(bytes) => match std::str::from_utf8(bytes) {
+            Ok(text) => std::borrow::Cow::Borrowed(text),
+            Err(_) => std::borrow::Cow::Owned(from_fish(s)),
+        },
+        std::borrow::Cow::Owned(bytes) => std::borrow::Cow::Owned(String::from_utf8(bytes).unwrap_or_else(|_| from_fish(s))),
     };
     Text { text, owned: std::cell::OnceCell::new() }
 }

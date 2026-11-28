@@ -1,0 +1,175 @@
+# Programs that are valid TypeScript and print something else under Bun, each under why.
+# scripts/differential.fsh reads this file; its head states the rules.
+#
+# A program was placed by the first line it prints differently, not by reading it through, so a
+# reason may be wrong for a program under it. The last group holds those no reason was clear for,
+# which is where a real difference in fishc would be hiding.
+
+## an empty Option prints as null, where JavaScript prints undefined
+array.fsh > array_at
+array.fsh > array_mutators
+array.fsh > array_reverse_callbacks
+index_signatures.fsh > index_signatures_entries
+iterator.fsh > iterator_eager
+optionalmethods.fsh > optionalmethods_call
+optionalmethods.fsh > optionalmethods_dyn_call
+optionalmethods.fsh > optionalmethods_moved_argument
+string.fsh > string_chain_temporary
+string.fsh > string_reading_methods
+tuple.fsh > tuple_optional
+tuple.fsh > tuple_spread_args
+
+## an object type's fields print and serialize sorted by name, where JavaScript keeps the order written
+bigint.fsh > bigint_values
+computed_keys.fsh > computed_keys_spread_and_const
+intersection.fsh > intersection_union_generic
+intersection.fsh > intersection_union_literals
+intersection.fsh > intersection_union_literals_plain
+intersection.fsh > intersection_union_recursive
+iterable.fsh > iterable_method_call
+ref_arrays.fsh > ref_arrays_gave_ok_object_result
+ref_arrays.fsh > ref_arrays_show_print_obj_elems
+typed_arrays.fsh > typed_array_constructors
+union_bounds.fsh > union_bounds_brands
+
+## a disposer runs whenever its value is dropped, where JavaScript runs it only for a using declaration
+dispose.fsh > await_using_both_disposers_declared_other_ways
+dispose.fsh > dispose_abstract_base
+dispose.fsh > dispose_array_elements
+dispose.fsh > dispose_borrowed
+dispose.fsh > dispose_borrowed_by_a_closure
+dispose.fsh > dispose_break
+dispose.fsh > dispose_declared
+dispose.fsh > dispose_early_return
+dispose.fsh > dispose_field_of_another
+dispose.fsh > dispose_generic_class
+dispose.fsh > dispose_map_values
+dispose.fsh > dispose_moved_into_function
+dispose.fsh > dispose_moved_out_and_back
+dispose.fsh > dispose_narrowed_to_an_object
+dispose.fsh > dispose_not_printed
+dispose.fsh > dispose_own_clone
+dispose.fsh > dispose_owned_receiver
+dispose.fsh > dispose_read_only_receiver
+dispose.fsh > dispose_reassigned
+dispose.fsh > dispose_scope_end
+dispose.fsh > dispose_subclass_and_base
+dispose.fsh > dispose_subclass_of_plain_base
+dispose.fsh > dispose_temporary
+
+## the program catches an error and prints it, and under Bun the error is that a name only Fish has is missing
+async.fsh > async_task_panic_all_joins
+async.fsh > async_task_panic_chained
+base64.fsh > base64_decode_errors
+base64.fsh > base64_last_chunk
+base64.fsh > base64_url_strict
+http.fsh > http_bad_options
+
+## the program prints its own file's name, which is main.ts under Bun
+import_meta.fsh > import_meta_keys
+import_meta.fsh > import_meta_main_entry
+import_meta.fsh > import_meta_names
+import_meta.fsh > import_meta_top_level
+
+## a value is copied or moved, never aliased, so a change made through one name doesn't show through another
+array.fsh > array_callbacks
+array.fsh > array_concat_flat
+array.fsh > array_constructors
+array.fsh > array_copying
+array.fsh > array_reading
+object.fsh > object_spread
+object_keys.fsh > object_keys_nested
+spread.fsh > spread_arrays
+tuple.fsh > tuple_optional_write
+tuple.fsh > tuple_readonly
+
+## a Mut reference writes through to what it borrows, where JavaScript rebinds a name or changes a copy
+narrowing.fsh > narrowing_lent_as_member
+narrowing.fsh > narrowing_lent_mutably_in_loop
+narrowing.fsh > narrowing_lent_mutably_runs
+parameter.fsh > parameter_mut_replace
+recursive.fsh > recursive_named_member_lend_field
+string.fsh > string_length_receivers
+string.fsh > string_mut
+string.fsh > string_operand_changed
+unknown_type.fsh > unknown_type_references
+
+## integers are exact and whole: i64, i128 and bigint don't round past 2^53, and dividing two integers gives an integer
+bigint.fsh > bigint_format
+i128.fsh > i128_arithmetic
+i128.fsh > i128_json_range
+i128.fsh > i128_wrap
+infer.fsh > infer_from_use
+math.fsh > parse_int_range
+math.fsh > parse_like_javascript
+math.fsh > to_fixed
+tuple.fsh > tuple_basics
+tuple.fsh > tuple_destructure
+unknown_type.fsh > unknown_type_exact_integer
+
+## === compares values, so two objects holding the same fields are equal
+eq.fsh > eq_object_params
+eq.fsh > eq_own_equals
+eq.fsh > eq_through_refs
+intersection.fsh > intersection_union_equal
+ref_arrays.fsh > ref_arrays_show_eq_string
+
+## JSON.parse<T> checks the text against T and throws where JavaScript gives back whatever was there
+json.fsh > json_parse
+json.fsh > json_parse_literal_union
+json.fsh > json_parse_union_messages
+
+## Bun's node:util prints errors, typed arrays and buffers differently from Node, which fishc follows
+dataview.fsh > dataview_widths
+error.fsh > error_depth
+error.fsh > error_multiline
+error.fsh > error_name_after_super
+error.fsh > error_null_cause
+typed_arrays.fsh > typed_array_long
+
+## not yet sorted: Bun and fishc disagree and nobody has read the program to say which is meant
+array.fsh > array_concat_literals
+array.fsh > array_sort
+async.fsh > async_reassign_promise
+async.fsh > async_task_panic_long_reason
+async_generator.fsh > for_await_borrowed_generator
+bun.fsh > bun_global_values
+bun.fsh > bun_imports
+callback_shared.fsh > callback_shared_async_closures_called_for_a_future
+destructure.fsh > destructure_declarations
+destructure.fsh > destructuring_assignment_generic_default
+enum.fsh > enum_computed_calls
+extend_map.fsh > extend_map
+extend_map.fsh > extend_map_chain
+generic_unions.fsh > generic_unions_option_argument
+http.fsh > http_response_clone
+http.fsh > http_sync_main
+index_signatures.fsh > index_signatures_order
+json.fsh > json_dynamic
+json.fsh > json_dynamic_map_annotations
+json.fsh > json_dynamic_narrowed_places
+json.fsh > json_dynamic_scalars_and_compare
+json.fsh > json_kind_narrowing
+json.fsh > json_parse_statement
+json.fsh > json_stringify_map
+math.fsh > math_correctly_rounded
+math.fsh > math_float
+math.fsh > math_pow_js
+math.fsh > math_release
+math.fsh > parse_lone_sign
+object.fsh > object_spread_private
+print.fsh > required_keeps_undefined
+process.fsh > process_env_entries
+process.fsh > process_named_values
+process.fsh > process_stream_is_tty
+readable_stream.fsh > readable_stream_pipe_aborts_on_error
+regex.fsh > regex_exec
+taskgroup.fsh > taskgroup_body_error
+tcp.fsh > tcp_error_fields
+tuple.fsh > tuple_generic
+typed_arrays.fsh > typed_array_members
+typed_arrays.fsh > typed_array_subarray_reads
+typed_arrays.fsh > typed_array_usize_positions
+unknown_type.fsh > unknown_type_compare_integers
+unknown_type.fsh > unknown_type_typeof
+url.fsh > url_international_domain

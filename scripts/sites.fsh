@@ -86,3 +86,76 @@ export function total(rows: Ref<Row[]>): usize {
   for (let i: usize = 0; i < rows.length; i++) sum += rows[i]!.bytes;
   return sum;
 }
+
+// A report as `memsites --json` writes it: every row, by function and by site, largest first.
+export type Snapshot = { stage: string; count: usize; bytes: usize; functions: Row[]; sites: Row[] };
+
+// One function's or site's change between two snapshots, `bytes` and `count` being after minus before.
+export type Change = { site: string; name: string; before: usize; after: usize; bytes: i64; count: i64 };
+
+export function snapshot(stage: string, report: Report): Snapshot {
+  const functions = largest(byFunction(report.rows));
+  return { stage, count: report.count, bytes: report.bytes, functions, sites: largest(report.rows) };
+}
+
+function rowsJson(rows: Ref<Row[]>): string {
+  return rows.map((r) => `    ${JSON.stringify(r)}`).join(",\n");
+}
+
+// One row to a line, so two snapshots compare with a plain diff too.
+export function snapshotJson(s: Ref<Snapshot>): string {
+  return `{\n  "stage": ${JSON.stringify(s.stage)},\n  "count": ${s.count},\n  "bytes": ${s.bytes},\n  "functions": [\n${rowsJson(s.functions)}\n  ],\n  "sites": [\n${rowsJson(s.sites)}\n  ]\n}\n`;
+}
+
+// A snapshot read back, refused when either list doesn't add up to its total, as a cut or edited
+// file would not.
+export function readSnapshot(text: string): Snapshot throws Error {
+  let parsed: Snapshot | undefined = undefined;
+  try {
+    parsed = JSON.parse<Snapshot>(text);
+  } catch (e) {
+    throw new Error(`it isn't a memsites snapshot: ${e.message}`);
+  }
+  const s = parsed!;
+  if (total(s.functions) !== s.bytes || total(s.sites) !== s.bytes) throw new Error(`its rows don't add up to its total of ${s.bytes} bytes`);
+  return s;
+}
+
+function key(r: Ref<Row>): string {
+  return `${r.site} in ${r.name}`;
+}
+
+function size(n: i64): i64 {
+  return n < 0 ? -n : n;
+}
+
+// What changed from `before` to `after`, a row in one only counting as 0 in the other, rows that
+// didn't change left out, the largest change in bytes first, then in count, then by where.
+export function changes(before: Ref<Row[]>, after: Ref<Row[]>): Change[] {
+  let at = new Map<string, usize>();
+  let out: Change[] = [];
+  for (let i: usize = 0; i < before.length; i++) {
+    const r: Ref<Row> = before[i]!;
+    at.set(key(r), out.length);
+    out.push({ site: r.site, name: r.name, before: r.bytes, after: 0, bytes: -(r.bytes as i64), count: -(r.count as i64) });
+  }
+  for (let i: usize = 0; i < after.length; i++) {
+    const r: Ref<Row> = after[i]!;
+    const known = at.get(key(r));
+    if (known === undefined) out.push({ site: r.site, name: r.name, before: 0, after: r.bytes, bytes: r.bytes as i64, count: r.count as i64 });
+    else {
+      out[known!]!.after = r.bytes;
+      out[known!]!.bytes += r.bytes as i64;
+      out[known!]!.count += r.count as i64;
+    }
+  }
+  let changed = out.filter((c) => c.bytes !== 0 || c.count !== 0);
+  changed.sort((a, b) => {
+    if (size(a.bytes) !== size(b.bytes)) return size(a.bytes) > size(b.bytes) ? -1 : 1;
+    if (size(a.count) !== size(b.count)) return size(a.count) > size(b.count) ? -1 : 1;
+    const x = `${a.name} ${a.site}`;
+    const y = `${b.name} ${b.site}`;
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
+  return changed;
+}

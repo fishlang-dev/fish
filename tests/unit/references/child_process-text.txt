@@ -1,0 +1,8 @@
+script 6f56b1a3c6fa07c80b3788f738a038baef5cfbed9bc61d819dcc92cb5412f9a1
+status 0
+stdout 20
+héllo wörld 5
+été 0
+
+stderr 0
+

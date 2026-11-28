@@ -295,6 +295,8 @@ function inPlace(): string[] {
   return [
     // the spans of nodes just made, before any tree holds them;
     "parseargs.fsh: Object.assign(node, { start", "tests.fsh: walk(\"func\", made, ({ node }) => void Object.assign(node, { start", "values.fsh: walk(\"expr\", e, ({ node }) => void Object.assign(node, { start",
+    // a call just parsed from text, given its own parts back before any tree holds it;
+    "parseargs.fsh: arrow.body.object = parse;",
     // a Body's overloads, given as ids, an enum's record, a Body's template mark and a Local's type, which are no nodes;
     "check.fsh: for (const f of this.funcs) if (f.overloadNames) f.overloads =", "check.fsh: for (const e of this.enums.values())", "classes.fsh: f.template = true", "check.fsh: local.type = type;",
     // lists of statements the checker walks, which it edits as a copy recorded by the list's owner
@@ -306,8 +308,9 @@ function inPlace(): string[] {
     "check.fsh: if (wrapped !== undefined && wrapped.kind === \"block\"", "check.fsh: if (inserted !== undefined && inserted.length > 0",
     "modules.fsh: let removed = l.body.splice(at, 1);", "modules.fsh: l.body.splice(at, 0, {", "macros.fsh: statements.splice(", "modules.fsh: if (startsMain(statements[i]!)) statements.splice(",
     // a kept check's class node given a member's body read again, so a generic class's later
-    // instances read it, which the node owns there;
-    "check.fsh: m.body = cloneStmts(statements);",
+    // instances read it, and its own function given its body read again, so inferring borrows
+    // reads the edit, which the node owns there;
+    "check.fsh: m.body = cloneStmts(statements);", "check.fsh: if (r.owner === undefined && s.kind === \"function\" && s.name === r.name) s.body = cloneStmts(statements);",
     // a file's statements lent to linking and put back where they were;
     "modules.fsh: let taken = m.statements.splice(0);",
     // a package's function just made, given the overloads it lists before any tree holds it;

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { Compilation } from "./compilation.fsh";
+import { buildFor, fileEnd, fileStart, type BuildInfo, type Compilation } from "./compilation.fsh";
 import { dependencyLib, dependencyOf, packageOf, resolvePackages, type Package as FishPackage } from "./dependencies.fsh";
 import { CompileError, type Source } from "./diag.fsh";
 import { NODE_MODULES } from "./survey.fsh";
@@ -9,15 +9,17 @@ import { jsDeclaration, jsOverloads, referenced } from "./js.fsh";
 import { DeclarationReader, findTypings, type Declared, type Exports } from "./typings.fsh";
 import { parse, type ClassMember, type ClassNode, type Declarator, type EnumMember, type Expr, type Func, type Interface, type MatchArm, type ObjectProp, type Param, type Pattern, type PatternProp, type Span, type Specifier, type Stmt, type SwitchCase, type TupleElement, type TypeAlias, type TypeMember, type TypeNode, type TypeParam } from "./parser.fsh";
 import { fishFiles } from "./fmt.fsh";
-import { MANIFEST, type RustDependency } from "./manifest.fsh";
+import { MANIFEST, type Edition, type RustDependency } from "./manifest.fsh";
 import { HANDLE, RUST_NAME, rustSymbol, type RustTables } from "./rust.fsh";
-import { ENGINE_HOOK, STD, STD_MODULES, STD_VALUES, stdModule } from "./std.fsh";
-import { refuseCompat } from "./migrate.fsh";
+import { ENGINE_HOOK, STD, STD_MODULES, STD_ONLY, STD_VALUES, stdModule, stdModuleNames } from "./std.fsh";
+import { editionOf, refuseCompat } from "./migrate.fsh";
+import { lowerRcEdition } from "./refcounted.fsh";
 import { unsupported } from "./unsupported.fsh";
-import { dup, forEachChild, nextId, nodeIdOf, NodeMap, Rewrites, shiftSpansStmt, shiftSpansStmts, walk, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
+import { dup, forEachChild, nextId, someNode, nodeIdOf, NodeMap, Rewrites, shiftSpansStmt, shiftSpansStmts, walk, walkWhile, type AnyNode, type Ids } from "./nodes.fsh";
 import { cloneClassMember, cloneExpr, cloneStmt, rebuiltStmts, type Replacements } from "./rebuild.fsh";
 import { forEachNamedChild, quoteTree, type QuoteValue } from "./walk.fsh";
 import { FILE_SPAN } from "./program.fsh";
+import { buildFacts, buildModule } from "./target.fsh";
 
 // A program spread over files: the entry and every file it imports, each parsed once with its own
 // offset range, so a position anywhere in the program says which file it is in.
@@ -28,16 +30,18 @@ import { FILE_SPAN } from "./program.fsh";
 // `whole`: a package's module an import names whole, as a namespace, reached through its name.
 // `owner`: on a Fish package's lib, the package, whose other files' exports are private to it.
 // `pkg`: the directory of the Fish package a file belongs to, when the program has a fish.toml.
+// `rc`: the file is in the reference-counted edition, and was lowered as it loaded.
 // The module each import and re-export names, by the statement; named apart so the type can hold
 // the module type it is part of.
 export type Targets = NodeMap<Stmt, Module>;
-export type Module = { path: string; file: string; base: usize; src: string; statements: Stmt[]; targets: Targets; globals: Map<string, Module>; whole?: boolean; owner?: { name: string; dir: string; lib: string }; pkg?: string };
+export type Module = { path: string; file: string; base: usize; src: string; statements: Stmt[]; targets: Targets; globals: Map<string, Module>; whole?: boolean; owner?: { name: string; dir: string; lib: string }; pkg?: string; rc?: true };
 // `packages`: each package specifier the program imports, by the directory its import resolves
 // from, its index naming it in the bundle.
 export type Package = { specifier: string; dir: string; at: Span };
 // `rust`: each Rust crate the program imports, with the directory of the Fish package listing it.
 // `links` is what linking made of each file, kept once the program is linked.
-export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[]; links?: Linked[] };
+// `fish` is the program's Fish packages, its own first, when it has a fish.toml.
+export type Loaded = { modules: Module[]; sources: Source[]; packages: Package[]; rust: RustCrate[]; links?: Linked[]; fish?: FishPackage[] };
 export type RustCrate = { dependency: RustDependency; dir: string };
 
 // What reads a file the program imports before the disk does: an editor's unsaved text, or
@@ -54,12 +58,16 @@ function readWith(read: Ref<Reader>, path: string): string {
   return given !== undefined ? given : readFileSync(path, "utf8");
 }
 
+// An entry named `memory:<name>` is only the text given for it, with no file or package around
+// it, as a program written in the playground is: it may import std's modules and nothing else.
+export const MEMORY = "memory:";
+
 // Loads `entry`, given as `src` when it is already read, and every file it imports, each read by
 // `read`, before the disk: an editor's unsaved text is newer than the disk's. The program's files are noted in the
 // compilation's `files`.
 /** @throws {CompileError | Error | IoError} */
 export function load(compilation: Mut<Compilation>, entry: string, src: string = readFileSync(entry, "utf8"), read?: (path: string) => string | undefined, fish?: FishPackage[]): Loaded {
-  let loader = new Loader(entry, fish !== undefined ? fish : resolvePackages(entry, compilation.session.locking));
+  let loader = new Loader(entry, fish !== undefined ? fish : entry.startsWith(MEMORY) ? undefined : resolvePackages(entry, compilation.session.locking));
   try {
     loader.visit(compilation, read, entry, src, entry);
   } catch (e) {
@@ -67,9 +75,10 @@ export function load(compilation: Mut<Compilation>, entry: string, src: string =
     throw e;
   }
   for (const m of loader.modules) compilation.files.push({ base: m.base, file: m.base === 0 ? basename(entry) : m.file, src: m.src, std: m.path.startsWith("std:") });
+  if (compilation.session.timings !== undefined) for (const f of compilation.files) compilation.session.timings!.names.set(f.base, f.file.clone());
   // std's text sits past every file's, so it goes last, where an offset past them finds it.
   const sources = withStd(loader.sources);
-  return { modules: loader.modules, sources, packages: loader.packages, rust: loader.rust };
+  return { modules: loader.modules, sources, packages: loader.packages, rust: loader.rust, fish: loader.fish };
 }
 
 function withStd(sources: Ref<Source[]>): Source[] {
@@ -100,15 +109,20 @@ class Loader {
 
   /** @throws {CompileError | Error | IoError} */
   std(this: Mut<this>, cx: Mut<Compilation>, read: Ref<Reader>, name: string): Module {
+    if (name === "build") {
+      const info: BuildInfo = cx.session.build !== undefined ? buildFor(cx.session.build, undefined, cx.session.build!.release) : { triple: "", release: false, flags: [] };
+      return this.visit(cx, read, "std:build", buildModule(info), "std:build");
+    }
     const text = STD_MODULES[name];
-    return this.visit(cx, read, `std:${name}`, text !== undefined ? text : "", name === "Bun" ? "bun" : `node:${name}`);
+    return this.visit(cx, read, `std:${name}`, text !== undefined ? text : "", name === "Bun" ? "bun" : `std:${name}`);
   }
 
   /** @throws {CompileError | Error | IoError} */
   visit(this: Mut<this>, cx: Mut<Compilation>, read: Ref<Reader>, path: string, text: string, file: string): Module {
     const std = path.startsWith("std:");
-    if (!std) cx.looked.push(resolve(path));
-    const key = std ? path : realpathSync(path);
+    const memory = path.startsWith(MEMORY);
+    if (!std && !memory) cx.looked.push(resolve(path));
+    const key = std || memory ? path : realpathSync(path);
     const known = this.byPath.get(key);
     if (known !== undefined) return known;
     const base = this.modules.length * (FILE_SPAN as usize);
@@ -118,7 +132,9 @@ class Loader {
     try {
       // A TS-compat file isn't compiled, whether or not it parses.
       if (!std) refuseCompat(text, this.fish !== undefined ? packageOf(this.fish, key)?.manifest.edition : undefined);
+      const parsing = fileStart(cx.session);
       parsed = parse(text, cx.ids);
+      fileEnd(cx.session, base, "parse", parsing);
     } catch (e) {
       // A parse or edition error's position is in its own file's text.
       if (e instanceof CompileError) shiftError(e, base);
@@ -126,6 +142,7 @@ class Loader {
     }
     if (base > 0) shiftSpansStmts(parsed, base);
     if (!std) lowerImportMeta(cx.ids, parsed, key, this.modules.length === 0);
+    if (!std) foldBuildConditions(cx.ids, parsed, cx.session.build);
     // A Rust crate's declarations are reached by importing `rust:<crate>`, not as this file's own.
     let statements: Stmt[] = [];
     let blocks: Namespace[] = [];
@@ -158,6 +175,16 @@ class Loader {
       const global = this.std(cx, read, name);
       globals.set(name, global);
     }
+    if (!std && this.editionAt(key, text) === "rc") {
+      const crossing = this.crossing(statements, targets);
+      let warned = lowerRcEdition(cx.ids, statements, crossing);
+      if (warned.length > 0) {
+        let all: CompileError[] = cx.editionWarnings !== undefined ? cx.editionWarnings!.map((w) => w.clone()) : [];
+        while (warned.length > 0) all.push(warned.shift()!);
+        cx.editionWarnings = all;
+      }
+      this.modules[index]!.rc = true;
+    }
     this.modules[index]!.statements = statements;
     this.modules[index]!.targets = targets;
     this.modules[index]!.globals = globals;
@@ -168,14 +195,14 @@ class Loader {
   /** @throws {CompileError | Error | IoError} */
   target(this: Mut<this>, cx: Mut<Compilation>, read: Ref<Reader>, path: string, key: string, s: Ref<Stmt>, specifier: string, importing: Ref<Stmt[]>): Module {
     const std = path.startsWith("std:");
-    if (specifier === "fish:engine") {
-      if (!cx.session.engineHook) throw new CompileError("E0903", "'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", s.start, s.end);
-      return this.visit(cx, read, "std:fish:engine", ENGINE_HOOK, "fish:engine");
+    if (specifier === "std:engine") {
+      if (!cx.session.engineHook) throw new CompileError("E0903", "'std:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", s.start, s.end);
+      return this.visit(cx, read, "std:engine", ENGINE_HOOK, "std:engine");
     }
     if (specifier.startsWith("rust:")) return this.rustModule(cx, read, key, specifier.slice("rust:".length as i64), s);
     // A bare name the importing file's own fish.toml depends on is that Fish package, even one
-    // Node also has; `node:` always means the built-in, and any other bare name is npm's.
-    const lib = this.fish !== undefined && !std && !/^(\.\.?(\/|$)|node:)/.test(specifier) ? dependencyLib(this.fish, path, specifier, { start: s.start, end: s.end }) : undefined;
+    // Node also has; `std:` and `node:` always mean the built-in, and any other bare name is npm's.
+    const lib = this.fish !== undefined && !std && !/^(\.\.?(\/|$)|node:|std:)/.test(specifier) ? dependencyLib(this.fish, path, specifier, { start: s.start, end: s.end }) : undefined;
     if (lib !== undefined) {
       const text = readWith(read, lib);
       let target = this.visit(cx, read, lib, text, relative(dirname(this.entry), lib));
@@ -192,6 +219,14 @@ class Loader {
     }
     const named = stdModule(specifier);
     if (named !== undefined) return this.std(cx, read, named);
+    // Std's own modules had `fish:` names once; saying where one went beats npm not having it.
+    if (specifier.startsWith("fish:")) {
+      const moved = specifier.slice("fish:".length as i64);
+      const now = stdModule(`std:${moved}`) !== undefined ? `; this one is 'std:${moved}'` : "";
+      throw new CompileError("E0902", `'${specifier}' names no module: std's modules are named 'std:'${now}`, s.start, s.end);
+    }
+    if (specifier.startsWith("std:")) throw new CompileError("E0902", `std has no module named '${specifier.slice("std:".length as i64)}'; it has ${stdModuleNames().map((n) => `'${n}'`).join(", ")}`, s.start, s.end);
+    if (path.startsWith(MEMORY)) throw new CompileError("E0901", `'${specifier}' can't be imported here: this program is one file, which may import std's modules, as 'std:fs'`, s.start, s.end);
     if (!/^\.\.?(\/|$)/.test(specifier)) return this.packageModule(cx, path, specifier, s, importing);
     // A dependency builds from its own files, which its checksum covers, and reaches others by name,
     // whether the path climbs out as written or through a link.
@@ -210,6 +245,26 @@ class Loader {
     const text = readWith(read, target);
     const shown = relative(dirname(this.entry), target);
     return this.visit(cx, read, target, text, shown !== "" ? shown : target);
+  }
+
+  // The edition a file is in, by its directive or its package's.
+  /** @throws {CompileError | IoError} */
+  editionAt(this: Ref<this>, key: string, text: string): Edition {
+    return editionOf(text, this.fish !== undefined ? packageOf(this.fish, key)?.manifest.edition : undefined);
+  }
+
+  // The names a file in the reference-counted edition imports from Fish files in the ownership
+  // edition, which take what it passes them by value.
+  /** @throws {CompileError | IoError} */
+  crossing(this: Ref<this>, statements: Ref<Stmt[]>, targets: Ref<Targets>): Set<string> {
+    let out = new Set<string>();
+    for (const s of statements) {
+      if (s.kind !== "import" || s.named === undefined) continue;
+      const t = targets.get(s);
+      if (t === undefined || t.path.startsWith("std:") || !t.path.endsWith(".fsh") || this.editionAt(t.path, t.src) === "rc") continue;
+      for (const n of s.named!) if (!n.typeOnly) out.add(n.alias ?? n.name);
+    }
+    return out;
   }
 
   // A declaration file a package's declarations come from: given its own place in the program's
@@ -580,7 +635,7 @@ function membersUsed(statements: Ref<Stmt[]>, name: string): { name: string; sta
 function packageExports(ids: Mut<Ids>, reader: Mut<DeclarationReader>, from: string, specifier: string, s: Ref<Stmt>, entry: string): Exports {
   // A name a Node module has is that module, unless an npm package of that name is installed, as
   // a bundler takes it.
-  const found = specifier.startsWith("node:") ? undefined : findTypings(from, specifier);
+  const found = specifier.startsWith("node:") || specifier.startsWith("std:") ? undefined : findTypings(from, specifier);
   if (found === undefined || ("missing" in found && NODE_MODULES.has(specifier.split("/")[0]!))) {
     throw new CompileError("E0908", `'${specifier}' is a Node module Fish's std doesn't have yet`, s.start, s.end);
   }
@@ -642,8 +697,14 @@ function globalsIn(statements: Ref<Stmt[]>): string[] {
   return found;
 }
 
-// The names of std's modules, as its table has them.
-const STD_NAMES = new Set<string>(Object.keys(STD_MODULES));
+// The names of std's modules a program may also write bare, as its table has them.
+function bareNames(): Set<string> {
+  let names = new Set<string>();
+  for (const name of Object.keys(STD_MODULES)) if (!STD_ONLY.has(name)) names.add(name);
+  return names;
+}
+
+const STD_NAMES = bareNames();
 
 // The file a statement imports from, or re-exports from.
 export function specifierOf(s: Ref<Stmt>): string | undefined {
@@ -751,10 +812,26 @@ export function flatten(compilation: Mut<Compilation>, loaded: Mut<Loaded>, libr
     }
   }
   if (!lenient) compilation.fileNames = names;
+  if (!lenient) compilation.published = publishedNames(all, loaded.modules);
   // Kept for a file read again into the same program, as `fishc watch` does; their bodies are
   // the program's now.
   if (!lenient) loaded.links = all;
   return program;
+}
+
+// The program-wide names of what each Fish package's lib exports, which other packages may call.
+function publishedNames(all: Ref<Linked[]>, modules: Ref<Module[]>): Set<string> {
+  let out = new Set<string>();
+  for (let i: usize = 0; i < all.length; i++) {
+    if (modules[i]!.owner === undefined) continue;
+    let names: string[] = [...all[i]!.exports.keys()];
+    for (const star of all[i]!.stars) for (const n of all[star]!.exports.keys()) names.push(n);
+    for (const n of names) {
+      const d = exported(all, i, n, new Set<string>());
+      if (d !== undefined) out.add(d.unique);
+    }
+  }
+  return out;
 }
 
 // The file at `index` parsed again from `text`, as loading parsed it: its spans in its own place
@@ -768,6 +845,7 @@ export function reparsedFile(ids: Mut<Ids>, loaded: Ref<Loaded>, index: usize, t
   if (m.base > 0) shiftSpansStmts(parsed, m.base);
   lowerImportMeta(ids, parsed, m.path, index === 0);
   if (parsed.some((s) => isRustBlock(s))) return { statements: [], fallback: "the file declares Rust" };
+  if (m.rc === true) return { statements: [], fallback: "the file is in the reference-counted edition" };
   // What a macro made of the file is in the program, which the file as written isn't.
   if (parsed.some((s) => decorated(s))) return { statements: [], fallback: "the file has decorators or macros" };
   const known = m.targets.ids();
@@ -1021,7 +1099,7 @@ function linkOf(ids: Mut<Ids>, modules: Mut<Module[]>, index: usize, indexOf: Re
       if (s.named !== undefined) {
         for (const sp of s.named) {
           if (modules[to]!.path === "std:buffer" && sp.name === "Buffer") {
-            if (sp.alias !== undefined && sp.alias !== "Buffer") throw new CompileError("E0907", "Buffer is a global, so import it under its own name, as in 'import { Buffer } from \"node:buffer\"'", sp.start, sp.end);
+            if (sp.alias !== undefined && sp.alias !== "Buffer") throw new CompileError("E0907", "Buffer is a global, so import it under its own name, as in 'import { Buffer } from \"std:buffer\"'", sp.start, sp.end);
             continue;
           }
           bindIn(l.imports, sp.alias !== undefined ? sp.alias : sp.name, to, sp.name, sp);
@@ -1072,7 +1150,7 @@ function linkOf(ids: Mut<Ids>, modules: Mut<Module[]>, index: usize, indexOf: Re
     const from = indexOf.get(global.path);
     if (from !== undefined && !l.own.has(name) && !l.imports.has(name) && !spaces.has(name)) spaces.set(name, { from, explicit: false });
   }
-  // A std module's value members imported by name, as `import { argv } from "node:process"`.
+  // A std module's value members imported by name, as `import { argv } from "std:process"`.
   let valued = new Map<string, "value" | "table">();
   for (const [alias, imp] of l.imports) {
     const kind = valuesOf(modules[imp.from]!).get(imp.name);
@@ -1605,6 +1683,93 @@ function stdValues(): Map<string, Map<string, "value" | "table">> {
 // keeps as Bun's compiled executables do, its name and directory, its file URL, and whether it is
 // the entry file. They are read as members, by a literal key, or by destructuring `import.meta`
 // in a declaration; any other use is left for the checker to refuse.
+// What a `comptime` condition over `std:build` comes to while loading: a string, a boolean or
+// null, or undefined when it reads anything else.
+type Decided = { value: string | boolean | null } | undefined;
+
+// An `if` whose condition reads what `std:build` gives under `comptime`, as in
+// `if (comptime target.os === "linux")`, decided as the file is loaded: the branch not taken is
+// dropped unchecked, as Zig does, so code for one platform may call what only that platform has.
+// A condition reading anything else is an ordinary one, both branches checked.
+function foldBuildConditions(ids: Mut<Ids>, statements: Mut<Stmt[]>, build: Ref<BuildInfo | undefined>): void {
+  // Each name this file imports from std:build, as `target`, `flags` or `*` for the namespace.
+  let names = new Map<string, string>();
+  for (const s of statements) {
+    if (s.kind !== "import" || s.module !== "std:build") continue;
+    if (s.namespace !== undefined) names.set(s.namespace!, "*");
+    if (s.named !== undefined) for (const sp of s.named!) if (sp.name === "target" || sp.name === "flags") names.set(sp.alias ?? sp.name, sp.name);
+  }
+  if (names.size === 0) return;
+  const info: BuildInfo = build !== undefined ? buildFor(build, undefined, build.release) : { triple: "", release: false, flags: [] };
+  let rewrites = new Rewrites();
+  walk({ of: "stmts", node: statements }, (x) => {
+    if (x.of !== "stmt" || x.node.kind !== "if" || !someNode({ of: "expr", node: x.node.cond }, (n) => n.of === "expr" && n.node.kind === "comptime")) return;
+    const decided = decide(x.node.cond, names, info);
+    if (decided === undefined || typeof decided.value !== "boolean") return;
+    const taken: Ref<Stmt[] | undefined> = decided.value ? x.node.then : x.node.else;
+    const at = { start: x.node.start, end: x.node.end };
+    if (taken === undefined) rewrites.replaceStmt(x.node, { id: nextId(ids), kind: "empty", ...at });
+    else rewrites.replaceStmt(x.node, { id: nextId(ids), kind: "block", body: taken.map((s) => cloneStmt(s)), ...at });
+  });
+  rebuiltStmts(statements, rewrites);
+}
+
+// Which of `target` and `flags` an expression names: by the name imported, or through the namespace.
+function buildName(e: Ref<Expr>, names: Ref<Map<string, string>>): string | undefined {
+  if (e.kind === "ident") {
+    const named = names.get(e.name);
+    return named === "*" ? undefined : named;
+  }
+  if (e.kind === "member" && e.object.kind === "ident" && names.get(e.object.name) === "*" && (e.name === "target" || e.name === "flags")) return e.name;
+  return undefined;
+}
+
+function decide(e: Ref<Expr>, names: Ref<Map<string, string>>, info: Ref<BuildInfo>): Decided {
+  switch (e.kind) {
+    case "comptime":
+      return decide(e.expr, names, info);
+    case "bool":
+      return { value: e.value };
+    case "string":
+      return { value: e.value };
+    case "null":
+      return { value: null };
+    case "unary": {
+      if (e.op !== "!") return undefined;
+      const inner = decide(e.operand, names, info);
+      return inner !== undefined && typeof inner.value === "boolean" ? { value: !inner.value } : undefined;
+    }
+    case "binary": {
+      const left = decide(e.left, names, info);
+      const right = decide(e.right, names, info);
+      if (left === undefined || right === undefined) return undefined;
+      if (e.op === "===" || e.op === "!==") return { value: (left.value === right.value) === (e.op === "===") };
+      if ((e.op === "&&" || e.op === "||") && typeof left.value === "boolean" && typeof right.value === "boolean") return { value: e.op === "&&" ? left.value && right.value : left.value || right.value };
+      return undefined;
+    }
+    case "member": {
+      if (buildName(e.object, names) !== "target") return undefined;
+      const facts = buildFacts(info);
+      if (e.name === "os") return { value: facts.os };
+      if (e.name === "arch") return { value: facts.arch };
+      if (e.name === "libc") return { value: facts.libc };
+      if (e.name === "release") return { value: info.release };
+      return undefined;
+    }
+    case "call": {
+      if (e.callee.kind !== "member" || buildName(e.callee.object, names) !== "flags" || e.args.length !== 1 || e.args[0]!.kind !== "string") return undefined;
+      const arg: Ref<Expr> = e.args[0]!;
+      const name = arg.kind === "string" ? arg.value : "";
+      const found = info.flags.find((f) => f.name === name);
+      if (e.callee.name === "has") return { value: found !== null };
+      if (e.callee.name === "get") return { value: found !== null ? found.value : null };
+      return undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
 function lowerImportMeta(ids: Mut<Ids>, statements: Mut<Stmt[]>, path: string, entry: boolean): void {
   // A script's `if (import.meta.main) main();`, as Bun runs one, says only what a native program
   // does anyway, so it goes.
@@ -2027,7 +2192,7 @@ function quotedShape(v: Ref<QuoteValue>): string {
 }
 
 // Moves an error raised while parsing a file to where the file sits in the program.
-function shiftError(e: Mut<CompileError>, by: usize): void {
+export function shiftError(e: Mut<CompileError>, by: usize): void {
   e.start += by;
   e.end += by;
   if (e.note !== undefined) {

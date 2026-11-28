@@ -2,7 +2,7 @@
 // expect: <Buffer 68 c3 a9 6c 6c 6f> <Buffer 01 02 ff> <Buffer > <Buffer ab> <Buffer 68 69> <Buffer 68 69 3e ff> <Buffer e9 13> <Buffer e9>
 // expect: <Buffer > [ <Buffer 68 69> ] { a: { b: { c: <Buffer 78> } } }
 // expect: <Buffer 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ... 1 more byte>
-// Text in each encoding and bytes, printed as Node prints a Buffer at any depth. Hex stops at the
+// Text in each encoding and bytes, printed as a Buffer prints at any depth. Hex stops at the
 // first pair that isn't hex, and base64 takes either alphabet.
 function main() {
   console.log(Buffer.from("héllo"), Buffer.from([1, 2, 255]), Buffer.from("zz12ab", "hex"), Buffer.from("abc", "hex"), Buffer.from("aGk=\n", "base64"), Buffer.from("aGk-_w", "base64url"), Buffer.from("é✓", "latin1"), Buffer.from("é", "ascii"));
@@ -130,10 +130,10 @@ function main() {
   console.log(Buffer.from([1]).readUInt8(0));
 }
 // case: buffer_import_renamed
-// error: Buffer is a global, so import it under its own name, as in 'import { Buffer } from "node:buffer"'
+// error: Buffer is a global, so import it under its own name, as in 'import { Buffer } from "std:buffer"'
 import { Buffer as B } from "node:buffer";
 function main() {}
 // case: buffer_import_other
-// error: 'node:buffer' has no export named 'Blob'
+// error: 'std:buffer' has no export named 'Blob'
 import { Blob } from "node:buffer";
 function main() {}

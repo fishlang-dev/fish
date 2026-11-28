@@ -13,11 +13,12 @@ export function fileAt(files: Ref<Compilation["files"]>, offset: usize): string 
   return files.findLast((f) => offset >= f.base)?.file ?? "";
 }
 
-// The name std's module holding a source offset is shown by, as "node:fs", or nothing when the
-// offset is in a file of the program's own, whatever that file is named.
+// The name std's module holding a source offset is shown by, as "std:fs", or nothing when the
+// offset is in a file of the program's own, whatever that file is named. std's prelude sits past
+// every file, so an offset beyond the last file's span is in none of them.
 export function stdModuleAt(files: Ref<Compilation["files"]>, offset: usize): string | undefined {
   const f = files.findLast((f) => offset >= f.base);
-  return f !== undefined && f.std ? f.file : undefined;
+  return f !== undefined && f.std && offset - f.base < (FILE_SPAN as usize) ? f.file : undefined;
 }
 
 // The source text a span covers in the program last loaded; std's prelude is in none of its files.

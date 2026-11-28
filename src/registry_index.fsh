@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, utimesSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { firstLine, git } from "./git.fsh";
 import { validName, type Manifest } from "./manifest.fsh";
 import { cacheDir } from "./mathlib.fsh";
@@ -26,12 +26,31 @@ export class Index {
 
   /** @throws {Error | IoError} */
   versions(name: string): IndexEntry[] {
+    if (sparseBase(this.url) !== undefined && validName(name)) fetchSparse(this.url, this.dir, join(name.slice(0, 2), name));
+    return versions(this.url, this.dir, name);
+  }
+
+  // The package's versions, none when the index doesn't have the package.
+  /** @throws {Error | IoError} */
+  listed(name: string): IndexEntry[] {
+    if (sparseBase(this.url) !== undefined && validName(name)) fetchSparse(this.url, this.dir, join(name.slice(0, 2), name));
+    if (validName(name) && !existsSync(join(this.dir, name.slice(0, 2), name))) return [];
     return versions(this.url, this.dir, name);
   }
 }
 
-// The index a program uses: FISH_REGISTRY, else its own package's [registry], else Fish's.
+// The registry `--registry` named, ahead of every other source, once main has read it.
+const CHOSEN = new Lock<string[]>([]);
+
+export function useRegistry(url: string): void {
+  CHOSEN.update((c) => { c.push(url); });
+}
+
+// The index a program uses: --registry, then FISH_REGISTRY, else its own package's [registry],
+// else Fish's.
 export function registryUrl(root: Ref<Manifest>): string {
+  const chosen = CHOSEN.update((c): string => c.length > 0 ? c[c.length - 1]! : "");
+  if (chosen !== "") return chosen;
   const env = process.env.FISH_REGISTRY;
   if (env !== undefined && env !== "") return env;
   const own = root.registry;
@@ -47,7 +66,12 @@ export function openIndex(url: string, refresh: boolean = false): Index {
   if (url.startsWith("-")) throw new Error(`the registry '${url}' can't start with '-'`);
   const base = join(cacheDir(), "index", `${url.replace(/^[a-z+]+:\/\//, "").replace(/[^A-Za-z0-9._-]+/g, "-").slice(-60)}-${createHash("sha256").update(url).digest("hex").slice(0, 12)}`);
   const current = join(base, "current");
-  if (refresh || !existsSync(join(current, "config.json"))) clone(url, base);
+  const sparse = sparseBase(url) !== undefined;
+  if (sparse) {
+    mkdirSync(current, { recursive: true });
+    if (refresh || !existsSync(join(current, "config.json"))) fetchSparse(url, current, "config.json");
+    if (!existsSync(join(current, "config.json"))) throw new Error(`the registry '${url}' has no config.json`);
+  } else if (refresh || !existsSync(join(current, "config.json"))) clone(url, base);
   const dir = realpathSync(current);
   // A clone in use is kept fresh, so another build's cleanup of hour-old clones leaves it alone.
   utimesSync(dir, new Date(), new Date());
@@ -59,6 +83,36 @@ export function openIndex(url: string, refresh: boolean = false): Index {
   }
   if (typeof dl !== "string" || !dl.includes("{name}") || !dl.includes("{version}")) throw new Error(`the registry '${url}' has a config.json without a "dl" naming {name} and {version}`);
   return new Index(url, dl, dir);
+}
+
+// The HTTP base of an index served over HTTP rather than git, written `sparse+<url>` as Cargo
+// writes one, when `url` is one.
+export function sparseBase(url: string): string | undefined {
+  if (!url.startsWith("sparse+http://") && !url.startsWith("sparse+https://")) return undefined;
+  return url.slice(7).replace(/\/+$/, "");
+}
+
+// Fetches one file of a sparse index into dir, at its path below the base; a file the index
+// doesn't have is removed, so a package unpublished there is no longer found.
+/** @throws {Error | IoError} */
+function fetchSparse(url: string, dir: string, path: string): void {
+  if (Bun.which("curl") === null) throw new Error(`reading the registry '${url}' needs the curl command, which isn't on PATH; install curl`);
+  const file = join(dir, path);
+  mkdirSync(dirname(file), { recursive: true });
+  const part = `${file}.${randomUUID()}`;
+  const got = Bun.spawnSync(["curl", "-q", "--silent", "--show-error", "--location", "--proto", "=https,http", "--proto-redir", "=https,http", "--max-filesize", "16777216", "--max-time", "60", "-o", part, "-w", "%{http_code}", "--", `${sparseBase(url)!}/${path}`], { stdout: "pipe", stderr: "pipe" });
+  const status = new TextDecoder().decode(got.stdout).trim();
+  if (got.exitCode !== 0 || (status !== "200" && status !== "404")) {
+    rmSync(part, { force: true });
+    const said = new TextDecoder().decode(got.stderr).trim().replace(/^curl: \(\d+\) /, "");
+    throw new Error(`can't read the registry '${url}': ${said !== "" ? said : `it answered ${status}`}`);
+  }
+  if (status === "404") {
+    rmSync(part, { force: true });
+    rmSync(file, { force: true });
+    return;
+  }
+  renameSync(part, file);
 }
 
 // A fresh clone beside the others, then `current` pointed at it; clones an hour old are removed.
@@ -180,7 +234,7 @@ function fitsAll(e: Ref<IndexEntry>, ranges: Ref<Range[]>): boolean {
 }
 
 function messageOf(e: unknown): string {
-  return e instanceof Error ? e.message : "it failed";
+  return e instanceof Error ? e.message : e instanceof IoError ? e.message : "it failed";
 }
 
 /** @throws {Error | IoError | Unresolved} */

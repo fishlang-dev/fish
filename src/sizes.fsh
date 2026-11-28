@@ -61,13 +61,42 @@ function measured(typing: Ref<Typing>, t: Type, memo: Mut<Sizes>): [usize, usize
   // The tag is padded to the 8-byte alignment of the payload words, even when there are none.
   if (r.kind === "union") return [8 + 8 * wordsOf(typing, t as UnionType, memo), 8];
   if (r.kind === "interior" && !isLock(r)) return size(typing, r.of, memo);
-  const lockSize: [usize, usize] = [4, 4];
-  const baseTypes: Type[] = r.kind === "class" && r.base !== undefined ? [r.base] : [];
-  const fields: Field[] = r.kind === "interior" ? [] : r.kind === "generator" || r.kind === "future" ? r.frame : r.kind === "param" ? (r.bound !== undefined ? typing.rec(r.bound).fields : []) : r.fields;
-  const parts: [usize, usize][] = r.kind === "interior" ? [lockSize, size(typing, r.of, memo)] : [...baseTypes, ...fields.map((f) => f.type)].map((p) => size(typing, p, memo));
+  const parts: [usize, usize][] = partsOf(typing, t).map(([, p]) => size(typing, p, memo));
   let align: usize = 1;
   for (const [, a] of parts) align = Math.max(align as f64, a as f64) as usize;
   let bytes: usize = 0;
   for (const [n, a] of parts) bytes = (Math.ceil((bytes as f64) / (a as f64)) as usize) * a + n;
   return [(Math.ceil((bytes as f64) / (align as f64)) as usize) * align, align];
+}
+
+// The parts a struct-like type is laid out from, in order, each by name: the base an instance
+// embeds, then its fields; a lock's state, then what it guards.
+function partsOf(typing: Ref<Typing>, t: Type): [string, Type][] {
+  const r = typing.rec(t as Exclude<Type, string>);
+  if (r.kind === "interior") return [["lock", "i32"], ["value", r.of]];
+  let out: [string, Type][] = [];
+  if (r.kind === "class" && r.base !== undefined) out.push(["(base)", r.base]);
+  const fields: Field[] = r.kind === "generator" || r.kind === "future" ? r.frame : r.kind === "param" ? (r.bound !== undefined ? typing.rec(r.bound).fields : []) : r.fields;
+  for (const f of fields) out.push([f.name, f.type]);
+  return out;
+}
+
+// A part of a struct-like type where it is laid out.
+export type Placed = { name: string; type: Type; offset: usize; size: usize; align: usize };
+
+// A type's size and alignment in bytes.
+export const sizeOf = (typing: Ref<Typing>, t: Type): [usize, usize] => size(typing, t, new TypeMap<Type, [usize, usize]>());
+
+// Where each part of a struct-like type sits, as `fishc layout` prints it.
+export function placedParts(typing: Ref<Typing>, t: Type): Placed[] {
+  let memo = new TypeMap<Type, [usize, usize]>();
+  let parts: Placed[] = [];
+  let at: usize = 0;
+  for (const [name, p] of partsOf(typing, t)) {
+    const [n, a] = size(typing, p, memo);
+    at = (Math.ceil((at as f64) / (a as f64)) as usize) * a;
+    parts.push({ name, type: p, offset: at, size: n, align: a });
+    at += n;
+  }
+  return parts;
 }

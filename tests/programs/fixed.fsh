@@ -164,7 +164,7 @@ function main() {
 // case: fixed_refs_referent_moved
 // error: cannot move 'o' while 'a' borrows 'o' and is used later
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B): i64 { return 1; }
+export function eat(_b: B): i64 { return 1; }
 function main() {
   let o = new B("o" + 1);
   const a: FixedArray<Ref<B>, 2> = [o, o];
@@ -174,7 +174,7 @@ function main() {
 // case: fixed_refs_element_read_then_moved
 // error: cannot move 'o'
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B): i64 { return 1; }
+export function eat(_b: B): i64 { return 1; }
 function main() {
   let o = new B("o" + 1);
   const a: FixedArray<Ref<B>, 1> = [o];

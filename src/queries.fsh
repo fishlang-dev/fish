@@ -3,7 +3,9 @@
 // rebuild whose files all read as they did is not checked again, and one after an edit checks only
 // the bodies that changed. `fishc build`, `fishc check` and `fishc watch` all drive it; the
 // language server holds one per program, and the cache on disk reads and writes one here.
-import { readFileSync } from "node:fs";
+import { listedFiles } from "./reads.fsh";
+import { readsOf } from "./manifest.fsh";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import type { InstanceId } from "./arenas.fsh";
 import { expanded, sourced } from "./analysis.fsh";
@@ -16,6 +18,7 @@ import { composedMoves, loadedContents, reloaded, spillFrom, takenBodies, textIn
 import { load, type Loaded } from "./modules.fsh";
 import { movedStmt } from "./nodes.fsh";
 import type { Stmt } from "./parser.fsh";
+import { liftFuzz } from "./fuzz.fsh";
 import { liftTests } from "./tests.fsh";
 import { FILE_SPAN } from "./program.fsh";
 
@@ -85,8 +88,15 @@ function checkedAfresh(session: Session, file: string, looked: Mut<string[]>, ma
   let loaded = loadedFrom(compilation, file, src !== undefined ? src! : readFileSync(file, "utf8"), looked, open);
   stopAfter(compilation.session, "parse");
   // Every file the load read, which is what the cached check is keyed by.
-  const contents = loadedContents(loaded, looked, manifest, manifestText, open);
-  const key = cached(compilation.session) ? checkKey(compilerDigest(), file, editing, false, contents) : "";
+  let contents = loadedContents(loaded, looked, manifest, manifestText, open);
+  // The files comptime may read key it too, whichever of them it reads.
+  if (compilation.reads !== undefined) {
+    for (const path of listedFiles(compilation.reads!)) contents.set(path, textIn(open, path));
+  }
+  // std:build's text is made from the build's target and flags rather than read, so it keys too.
+  let entry = file;
+  for (const m of loaded.modules) if (m.path === "std:build") entry = `${file}\0${m.src}`;
+  const key = cached(compilation.session) ? checkKey(compilerDigest(), entry, editing, false, contents) : "";
   // The check on disk is looked for before this one is made, since restoring it is what the cache
   // is for. Until it carries the state, a hit is only noted and the check still runs.
   const found = key !== "" ? readCheck(checkPath(key), key) : undefined;
@@ -245,6 +255,7 @@ export function checkedLoaded(compilation: Compilation, loaded: Loaded, taken: S
       let own: string[] = [];
       for (const m of modules.modules) if (m.pkg === first && !m.path.startsWith("std:")) own.push(m.path);
       liftTests(program, modules.modules, own);
+      liftFuzz(program, modules.modules, own);
     }
     statements = expanded(program, modules, library);
   } catch (e) {
@@ -264,8 +275,17 @@ function loadedFrom(compilation: Mut<Compilation>, file: string, src: string, lo
   // holder's: a copy of a handful of open documents against a program's whole parse.
   let held = new Map<string, string>();
   for (const [path, text] of open) held.set(path, text);
+  compilation.reads = readsOf(file);
   try {
-    return load(compilation, file, src, move (path) => held.get(resolve(path)));
+    return load(compilation, file, src, move (path): string | undefined => {
+      let out = held.get(resolve(path));
+      if (out === undefined) {
+        try {
+          out = held.get(realpathSync(path));
+        } catch (_e) {}
+      }
+      return out;
+    });
   } finally {
     stageEnd(compilation.session, "parse", started);
     for (const f of compilation.looked) looked.push(f);

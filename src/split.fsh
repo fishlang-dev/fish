@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { atNamesIn, firstNameIn, typeNamesIn } from "./layout.fsh";
 // A dev build's IR, or a large release build's, split into modules: std's part, whose text is
 // the same whatever the program's own code says, a part per group of the program's functions
-// (one per source file), and the program's part holding the rest. Each part's text changes only
+// (one per source file, or several for a very large one), and the program's part holding the rest. Each part's text changes only
 // when what it holds does, so its object can be cached by that text.
 //
 // Std's part is every definition its functions reach, stopping at the program's: its own functions,
@@ -22,24 +22,50 @@ type Item = { kind: "define" | "declare" | "global"; name: string; key: string; 
 const key = (name: string) => name.replace(/^"(.*)"$/, "$1");
 
 
-function items(lines: Ref<string[]>): Item[] {
+// The IR's items, its named structs' definitions by name, and its debug metadata, read from its
+// pieces, whose text joined by newlines is the module's. A piece holding one function whole, as
+// codegen gives most, is that function's text as it is; any other is read a line at a time, a
+// function running on to the line closing it.
+function items(pieces: Ref<string[]>): { found: Item[]; types: Map<string, string>; metadata: string } {
   let found: Item[] = [];
-  for (let i: usize = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (line === "") continue;
-    if (line.startsWith("!") || line.startsWith('%"<')) continue;
-    const name = firstNameIn(line) ?? "";
-    if (line.startsWith("define ")) {
-      let end = i;
-      while (lines[end]! !== "}") end++;
-      const text = lines.slice(i as i64, (end + 1) as i64).join("\n");
-      found.push({ kind: "define", name, key: key(name), text, refs: references(text), copied: false });
-      i = end;
-    } else if (line.startsWith("declare ")) found.push({ kind: "declare", name, key: key(name), text: line, refs: references(line), copied: false });
-    else if (line.startsWith("@")) found.push({ kind: "global", name, key: key(name), text: line, refs: references(line), copied: / = private unnamed_addr constant /.test(line) });
-    else assert(false, `can't split the IR at '${line}'`);
+  let types = new Map<string, string>();
+  let metadata = "";
+  let open: string[] = [];
+  for (const piece of pieces) {
+    if (open.length === 0 && whole(piece)) {
+      found.push(defined(piece));
+      continue;
+    }
+    for (const line of piece.split("\n")) {
+      if (open.length > 0) {
+        open.push(line);
+        if (line !== "}") continue;
+        found.push(defined(open.join("\n")));
+        open = [];
+        continue;
+      }
+      // A comment is the C a build compiles beside the module, which it reads before splitting.
+      if (line === "" || line.startsWith(";")) continue;
+      if (line.startsWith("!")) metadata += `${line}\n`;
+      else if (line.startsWith('%"<')) types.set(line.slice(0, line.indexOf(" = type ")), line);
+      else if (line.startsWith("define ")) open.push(line);
+      else if (line.startsWith("declare ")) found.push(item("declare", line, false));
+      else if (line.startsWith("@")) found.push(item("global", line, / = private unnamed_addr constant /.test(line)));
+      else assert(false, `can't split the IR at '${line}'`);
+    }
   }
-  return found;
+  assert(open.length === 0, "the IR ends inside a function");
+  return { found, types, metadata };
+}
+
+// Whether a piece is one function, from its `define` line to the line closing it and no further.
+const whole = (piece: string) => piece.startsWith("define ") && piece.endsWith("\n}") && piece.indexOf("\n}\n") < 0;
+
+const defined = (text: string) => item("define", text, false);
+
+function item(kind: "define" | "declare" | "global", text: string, copied: boolean): Item {
+  const name = firstNameIn(text) ?? "";
+  return { kind, name, key: key(name), text, refs: references(text), copied };
 }
 
 // The names an item refers to, its own included. String constants' bytes are left out, since an
@@ -83,20 +109,141 @@ const typeAt = (text: string) => ("{[<".includes(text[0]!) ? text.slice(0, (clos
 
 const exposed = (item: Ref<Item>) => (item.kind === "define" ? item.text.replace(/^define internal /, "define ") : item.text.replace(/ = (internal|private) /, " = "));
 
+// A function's symbol without what tells its instances apart: each instance's hash, and a generic
+// class's type arguments.
+function written(symbol: string): string {
+  let out = "";
+  let depth = 0;
+  for (let i: usize = 0; i < symbol.length; i++) {
+    const c = symbol[i]!;
+    if (c === "<") depth++;
+    else if (c === ">" && depth > 0) depth--;
+    else if (depth === 0) out += c;
+  }
+  return out.replace(/#[0-9a-z]+/g, "");
+}
+
+// The items without the program's functions that are another instance of their function with the
+// same text, its own name aside: type arguments that give a body the same layout and the same
+// calls lower to the same text. The instance with the smallest symbol is kept and every reference
+// to the others names it, so each is compiled once. A round that merges two callees can make
+// their callers the same, so rounds go on until one merges nothing. Std's functions stay as they
+// are: std's part reads the same whatever the program is.
+// ponytail: instances that call each other in a cycle never merge, since each round compares text
+// as it stands; start from the coarsest grouping and refine if a program shows many.
+function shared(found: Item[], own: Ref<Set<string>>): Item[] {
+  let all = found;
+  let groups = new Map<string, usize[]>();
+  for (let i: usize = 0; i < all.length; i++) {
+    const item: Ref<Item> = all[i]!;
+    if (item.kind !== "define" || !own.has(item.key) || !item.key.includes("#")) continue;
+    const name = written(item.key);
+    const had = groups.get(name);
+    if (had === undefined) groups.set(name, [i]);
+    else {
+      let list: usize[] = had;
+      list.push(i);
+      groups.set(name, list);
+    }
+  }
+  let several: usize[][] = [];
+  let candidates = new Set<string>();
+  for (const members of groups.values()) {
+    if (members.length < 2) continue;
+    let sorted: [string, usize][] = [];
+    for (const i of members) sorted.push([all[i]!.key, i]);
+    sorted.sort((a, b) => (a[0] < b[0] ? -1 : 1));
+    let ordered: usize[] = [];
+    for (const [k, i] of sorted) {
+      ordered.push(i);
+      candidates.add(k);
+    }
+    several.push(ordered);
+  }
+  if (several.length === 0) return all;
+  // Who refers to each function that may go, by place in `all`.
+  let referrers = new Map<string, usize[]>();
+  for (let i: usize = 0; i < all.length; i++) {
+    const item: Ref<Item> = all[i]!;
+    for (const r of item.refs) {
+      if (r === item.key || !candidates.has(r)) continue;
+      const had = referrers.get(r);
+      if (had === undefined) referrers.set(r, [i]);
+      else if (had[had.length - 1]! !== i) {
+        let list: usize[] = had;
+        list.push(i);
+        referrers.set(r, list);
+      }
+    }
+  }
+  // Each candidate's text with its own name left out, read again only once the text changed.
+  let masked = new Map<usize, string>();
+  let gone = new Set<usize>();
+  for (;;) {
+    let pairs: [usize, usize][] = [];
+    for (const members of several) {
+      let byText = new Map<string, usize>();
+      for (const i of members) {
+        if (gone.has(i)) continue;
+        let text = masked.get(i);
+        if (text === undefined) {
+          const item: Ref<Item> = all[i]!;
+          text = item.text.replaceAll(`@${item.name}`, "@");
+          masked.set(i, text);
+        }
+        const kept = byText.get(text);
+        if (kept === undefined) byText.set(text, i);
+        else pairs.push([i, kept]);
+      }
+    }
+    if (pairs.length === 0) break;
+    for (const [dropped, kept] of pairs) {
+      gone.add(dropped);
+      masked.delete(dropped);
+      const from = all[dropped]!.key;
+      const to = all[kept]!.key;
+      const [spelled, respelled] = [`@${all[dropped]!.name}`, `@${all[kept]!.name}`];
+      const refer = referrers.get(from);
+      if (refer === undefined) continue;
+      const already = referrers.get(to);
+      let moved: usize[] = [];
+      if (already !== undefined) for (const r of already) moved.push(r);
+      for (const r of refer) {
+        if (gone.has(r)) continue;
+        const item: Ref<Item> = all[r]!;
+        const text = item.text.replaceAll(spelled, respelled);
+        let refs: string[] = [];
+        for (const k of item.refs) refs.push(k === from ? to : k);
+        all[r] = { kind: item.kind, name: item.name, key: item.key, text, refs, copied: item.copied };
+        masked.delete(r);
+        if (r !== kept) moved.push(r);
+      }
+      referrers.set(to, moved);
+    }
+  }
+  let left: Item[] = [];
+  for (let i: usize = 0; i < all.length; i++) if (!gone.has(i)) left.push(all[i]!.clone());
+  return left;
+}
+
 // The IR split into std's part, a part for each of `groups`, and the program's. `stdSymbols` names
 // std's functions and `ownSymbols` the program's, as the IR spells them; `groups` names parts of
 // the program's functions, which leave the program's part for one of their own.
+// A group whose functions' text is longer than `limit`, when one is given, is divided in the IR's
+// order into parts of at most that much, the first under the group's name and the rest under
+// `<group>#2` and on, so no one file's part is the longest thing clang is given; std's part is
+// divided the same way, its parts in `std` in order, and so is the program's, whose first part,
+// holding its globals and debug metadata, is `program` and the rest `rest`. A `-g` build's
+// functions all refer to that metadata, so it is split with no limit.
 // `times` is how long its reading, reaching and writing took, for `--timings`.
-export function split(ir: string, stdSymbols: string[], ownSymbols: string[], groups: Ref<Map<string, string[]>>): { std: string; groups: Map<string, string>; program: string; times: [string, f64][] } {
+export function split(ir: Ref<string[]>, stdSymbols: string[], ownSymbols: string[], groups: Ref<Map<string, string[]>>, limit: usize = 0): { std: string[]; groups: Map<string, string>; program: string; rest: string[]; times: [string, f64][] } {
   const began = performance.now();
   const std = keysOf(stdSymbols);
   const own = keysOf(ownSymbols);
-  const lines = ir.split("\n");
-  const all = items(lines);
-  const read = performance.now();
   // Each named struct's definition, by its name, for the parts that use it.
-  let types = new Map<string, string>();
-  for (const l of lines) if (l.startsWith('%"<')) types.set(l.slice(0, l.indexOf(" = type ")), l);
+  let { found, types, metadata } = items(ir);
+  const all = shared(found, own);
+  const read = performance.now();
   // Where each key's item sits in `all`; of two items with one key, the later.
   let byName = new Map<string, usize>();
   for (let i: usize = 0; i < all.length; i++) byName.set(all[i]!.key, i);
@@ -150,15 +297,38 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
   let where = new Map<string, string>();
   for (const name of reached) where.set(name, STD);
   for (const [group, symbols] of groups) for (const k of keysOf(symbols)) if (!reached.has(k)) where.set(k, group);
+  let divided = new Map<string, i64>();
+  if (limit > 0) {
+    let filled = new Map<string, usize>();
+    for (const item of all) {
+      if (item.kind !== "define") continue;
+      const group = where.get(item.key) ?? "";
+      if (group !== "" && group !== STD && !groups.has(group)) continue;
+      let n = divided.get(group) ?? 1;
+      let size = filled.get(group) ?? 0;
+      if (size > 0 && size + item.text.length > limit) {
+        n++;
+        size = 0;
+        divided.set(group, n);
+      }
+      filled.set(group, size + item.text.length);
+      if (n > 1) where.set(item.key, `${group}#${n}`);
+    }
+  }
   const reachedAt = performance.now();
-  let metadata = "";
-  for (const line of lines) if (line.startsWith("!")) metadata += `${line}\n`;
   let out = new Map<string, string>();
-  for (const group of groups.keys()) out.set(group, typed(types, part(all, byName, where, group)));
-  const stdPart = typed(types, part(all, byName, where, STD));
+  for (const group of groups.keys()) {
+    out.set(group, typed(types, part(all, byName, where, group)));
+    const n = divided.get(group) ?? 1;
+    for (let more: i64 = 2; more <= n; more++) out.set(`${group}#${more}`, typed(types, part(all, byName, where, `${group}#${more}`)));
+  }
+  let stdParts = [typed(types, part(all, byName, where, STD))];
+  for (let more: i64 = 2; more <= (divided.get(STD) ?? 1); more++) stdParts.push(typed(types, part(all, byName, where, `${STD}#${more}`)));
   const programPart = typed(types, part(all, byName, where, "")) + metadata;
+  let rest: string[] = [];
+  for (let more: i64 = 2; more <= (divided.get("") ?? 1); more++) rest.push(typed(types, part(all, byName, where, `#${more}`)));
   const done = performance.now();
-  return { std: stdPart, groups: out, program: programPart, times: [["split items", read - began], ["split reach", reachedAt - read], ["split parts", done - reachedAt]] };
+  return { std: stdParts, groups: out, program: programPart, rest, times: [["split items", read - began], ["split reach", reachedAt - read], ["split parts", done - reachedAt]] };
 }
 
 // Std's part's name in `where`, which no group of the program's can have, since groups are named

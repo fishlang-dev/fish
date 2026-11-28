@@ -1,5 +1,5 @@
 // The vendored JS engine, and programs that call it through the
-// compiler's own test hook `fish:engine`, which only a session that allows it compiles, so these
+// compiler's own test hook `std:engine`, which only a session that allows it compiles, so these
 // programs are compiled in process. The build under AddressSanitizer is `sanitized`.
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
@@ -9,7 +9,7 @@ import { JS_NATIVE } from "../../src/js_native.fsh";
 import { buildAsync, callsEngine, compile, engineDir, engineSources } from "../../src/main.fsh";
 import { mathObjects, type BuildSession } from "../../src/mathlib.fsh";
 import { NATIVE } from "../../src/native.fsh";
-import { cachedSession } from "../../src/stdcache.fsh";
+import { cachedSession } from "../../src/mathlib.fsh";
 import { removed, same, scratch, text } from "./support.fsh";
 
 // A session whose programs may import the compiler's own test hook.
@@ -95,7 +95,7 @@ function sanitized(file: string, src: string): Ran {
 }
 
 function handles(): string {
-  return `import { evaluate } from "fish:engine";
+  return `import { evaluate } from "std:engine";
 
 function keep(v: JsValue): JsValue {
   const copy = v;
@@ -136,7 +136,7 @@ test("JS handles are counted, sent and freed", () => {
 }, { timeout: 30_000 });
 
 function narrowing(): string {
-  return `import { evaluate } from "fish:engine";
+  return `import { evaluate } from "std:engine";
 
 function describe(v: JsValue): string {
   if (typeof v === "string") return \`a string, \${v}, of length \${v.length}\`;
@@ -231,7 +231,7 @@ async function hookBuilt(file: string, src: string): Promise<void> {
 test("reading a property of undefined panics", async () => {
   const dir = scratch("fish-engine-");
   const file = join(dir, "undefined.fsh");
-  await hookBuilt(file, `import { evaluate } from "fish:engine";\nfunction main() {\n  const v = evaluate("export default undefined;");\n  const w = v.get("x");\n}\n`);
+  await hookBuilt(file, `import { evaluate } from "std:engine";\nfunction main() {\n  const v = evaluate("export default undefined;");\n  const w = v.get("x");\n}\n`);
   const run = spawnSync(`${file}.out`, []);
   same(text(run.stderr), `panicked at ${file}:4:13:\nuncaught exception in JS: TypeError: cannot read property 'x' of undefined\nstack backtrace:\n   0: main at ${file}:4:13\n`, "stderr");
   assert(run.status === 101, `exited with ${run.status ?? -1}`);
@@ -270,7 +270,7 @@ test("refused", () => {
   let failed: string[] = [];
   for (let i: usize = 0; i < cases.length; i++) {
     const [body, message] = cases[i].clone();
-    const got = refusal(hooked(), join(dir, `refused-${i}.fsh`), `import { evaluate } from "fish:engine";\nfunction main() { ${body} }\n`);
+    const got = refusal(hooked(), join(dir, `refused-${i}.fsh`), `import { evaluate } from "std:engine";\nfunction main() { ${body} }\n`);
     if (!got.includes(message)) failed.push(`refused: ${body}\n  expected: ${message}\n  got: ${got === "" ? "no error" : got}`);
   }
   removed(dir);
@@ -290,9 +290,9 @@ test("a module that fails panics", async () => {
   for (let i: usize = 0; i < cases.length; i++) {
     const [source, reason] = cases[i].clone();
     const file = join(dir, `fails-${i}.fsh`);
-    await hookBuilt(file, `import { evaluate } from "fish:engine";\nfunction main() {\n  console.log("before");\n  const v = evaluate(${JSON.stringify(source)});\n}\n`);
+    await hookBuilt(file, `import { evaluate } from "std:engine";\nfunction main() {\n  console.log("before");\n  const v = evaluate(${JSON.stringify(source)});\n}\n`);
     const run = spawnSync("env", ["FISH_LEAKS=1", `${file}.out`]);
-    const want = `panicked at fish:engine:3:10:\nuncaught exception in JS: ${reason}\nstack backtrace:\n   0: main at ${file}:4:13\n`;
+    const want = `panicked at std:engine:3:10:\nuncaught exception in JS: ${reason}\nstack backtrace:\n   0: main at ${file}:4:13\n`;
     if (text(run.stdout) !== "before\n" || text(run.stderr) !== want || run.status !== 101) {
       failed.push(`a module that fails panics: ${source}\n  expected stdout "before\\n", exit 101 and stderr:\n${want}  got exit ${run.status ?? -1}, stdout ${JSON.stringify(text(run.stdout))} and stderr:\n${text(run.stderr)}`);
     }
@@ -303,8 +303,8 @@ test("a module that fails panics", async () => {
 
 test("a program can't import the test hook", () => {
   const dir = scratch("fish-engine-");
-  const got = refusal(cachedSession(), join(dir, "hook.fsh"), `import { evaluate } from "fish:engine";\nfunction main() {}\n`);
-  same(got, "'fish:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", "the error");
+  const got = refusal(cachedSession(), join(dir, "hook.fsh"), `import { evaluate } from "std:engine";\nfunction main() {}\n`);
+  same(got, "'std:engine' is the compiler's own test hook, which a program can't import; JS runs only as a package's code", "the error");
   removed(dir);
 }, { timeout: 30_000 });
 
@@ -315,7 +315,7 @@ test("a program with no JS doesn't build the engine in", () => {
   write(file, src);
   try {
     const ir = compile(hooked(), src, file);
-    assert(!callsEngine(ir), "the IR calls the engine");
+    assert(!callsEngine([ir]), "the IR calls the engine");
   } catch (e) {
     assert(false, failure(e, file, src));
   }
