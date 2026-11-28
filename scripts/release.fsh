@@ -51,17 +51,21 @@ function described(subject: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-// The changelog section for `version`: what the commits since `since` added, fixed and sped up.
-// Refactors, tests, chores and docs are left out, as they change nothing a user sees.
+// The changelog section for `version`: what the commits since `since` added, fixed and sped up,
+// and under Changed, those whose subject has no conventional prefix, as squashed pull requests'
+// don't. Refactors, tests, chores and docs are left out, as they change nothing a user sees.
 function section(version: string, since: string | undefined, date: string): string {
   let out = `## ${version} - ${date}\n\n`;
   if (since === undefined) return out + "The first release.\n";
   const log = run("git", ["log", "--no-merges", "--format=%s", `${since}..HEAD`]);
-  const groups: [string, string][] = [["feat", "Added"], ["fix", "Fixed"], ["perf", "Faster"]];
+  const groups: [string, string][] = [["feat", "Added"], ["fix", "Fixed"], ["perf", "Faster"], ["", "Changed"]];
   let any = false;
   for (const [kind, title] of groups) {
     let lines: string[] = [];
-    for (const subject of log.split("\n")) if (ofKind(subject, kind)) lines.push(`- ${described(subject)}`);
+    for (const subject of log.split("\n")) {
+      const taken = kind === "" ? subject.trim() !== "" && !/^[a-z]+(\([^)]*\))?!?:/.test(subject) : ofKind(subject, kind);
+      if (taken) lines.push(`- ${described(subject)}`);
+    }
     if (lines.length === 0) continue;
     any = true;
     out += `### ${title}\n\n${lines.join("\n")}\n\n`;
