@@ -363,7 +363,8 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
   let building = together(tables.session, caches);
   // The next build gives the kept tables its own session.
   tables.session = newSession();
-  let known: Map<string, string[]> = units !== undefined ? units! : new Map<string, string[]>();
+  let known = new Map<string, string[]>();
+  if (units !== undefined) known = units;
   linked(building, nativesOf(ir, release, target, leaks), split, out, release, links, shim, target, leaks, debug, known);
   writeFileSync(`${out}.fshnames`, names);
   return { ir, warnings: made.warnings, session: building, kept: { checked: { instances, tables, warnings }, parts: checkerParts, loaded, contents, carried, emitted, units: known } };
