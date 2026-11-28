@@ -1,10 +1,10 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import type { Subprocess } from "bun";
 import { relative } from "node:path";
 import type { Compilation } from "./compilation.fsh";
 import { CompileError } from "./diag.fsh";
-import { renameIn, type Loaded, type Module } from "./modules.fsh";
+import { renameIn, resolveSpecifier, specifierOf, type Loaded, type Module } from "./modules.fsh";
 import { nextId, respanFunc, type Ids } from "./nodes.fsh";
 import { parse, type Expr, type Func, type ObjectProp, type Span, type Stmt } from "./parser.fsh";
 
@@ -75,6 +75,52 @@ export function testNamesIn(path: string): string[] | undefined {
     return undefined;
   }
   return names;
+}
+
+// The files `path` imports or re-exports from by a relative path, as real paths: none when it can't
+// be read or doesn't parse, and none for an import that names no file.
+export function importsIn(path: string): string[] {
+  let ids: Ids = { last: 0 };
+  let statements: Stmt[] = [];
+  try {
+    statements = parse(readFileSync(path, "utf8"), ids);
+  } catch (_e) {
+    return [];
+  }
+  let found: string[] = [];
+  for (const s of statements) {
+    const specifier = specifierOf(s);
+    if (specifier === undefined || !/^\.\.?(\/|$)/.test(specifier)) continue;
+    let looked: string[] = [];
+    let file: string | undefined = undefined;
+    try {
+      file = realpathSync(resolveSpecifier(path, specifier, { start: s.start, end: s.end }, looked));
+    } catch (_e) {}
+    if (file !== undefined) found.push(file);
+  }
+  return found;
+}
+
+// Each of `roots` with the files it depends on: itself and every file it imports, directly or
+// through others, as real paths.
+/** @throws {IoError} */
+export function dependencies(roots: Ref<string[]>): Map<string, Set<string>> {
+  let imports = new Map<string, string[]>();
+  let closures = new Map<string, Set<string>>();
+  for (const root of roots) {
+    let seen = new Set<string>();
+    let pending = [realpathSync(root)];
+    while (pending.length > 0) {
+      const f = pending.pop()!;
+      if (seen.has(f)) continue;
+      seen.add(f);
+      if (!imports.has(f)) imports.set(f, importsIn(f));
+      const next = imports.get(f)!;
+      for (const g of next) if (!seen.has(g)) pending.push(g);
+    }
+    closures.set(root, seen);
+  }
+  return closures;
 }
 
 // Leaves every file's tests out, as a build does before checking.

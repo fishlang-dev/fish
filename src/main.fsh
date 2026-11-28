@@ -29,7 +29,7 @@ import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTr
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
 import { serveLsp } from "./lsp.fsh";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.fsh";
-import { hideMains, harnessImports, harnessMain, liftTests, runDefaults, runTests, stopTests, testNamesIn, type RunOptions, type Test } from "./tests.fsh";
+import { dependencies, hideMains, harnessImports, harnessMain, liftTests, runDefaults, runTests, stopTests, testNamesIn, type RunOptions, type Test } from "./tests.fsh";
 import { formatRanking, rank, readPlan, type Plan } from "./rank.fsh";
 import { compare, formatComparison, formatReport, readReport, sources, survey, type Report as SurveyReport } from "./survey.fsh";
 import { explain } from "./codes.fsh";
@@ -46,7 +46,7 @@ import { allocators, allocs, allocsJson, formatAllocs } from "./allocs.fsh";
 import { formatLayouts, layoutsJson, layoutsOf, probing } from "./typelayout.fsh";
 import { binaryFunctions, bloat, bloatJson, formatBloat, irFunctions, type Sized } from "./bloat.fsh";
 import { withDebugInfo } from "./debuginfo.fsh";
-import { watchProgram, type Rebuilt } from "./watch.fsh";
+import { listened, nextChanges, received, snapshot, watchedFiles, watchProgram, type Rebuilt } from "./watch.fsh";
 import { type Kept } from "./incremental.fsh";
 import { checkedProgram, checkedSource, Queries } from "./queries.fsh";
 import { fileAt } from "./program.fsh";
@@ -858,7 +858,6 @@ function wholeNumber(text: string): usize | undefined {
 // `testPackage`'s build and run, the build at `out`.
 /** @throws {Error | IoError | JsonError} */
 async function testsIn(session: BuildSession, dir: string, out: string, filter: string | undefined, release: boolean, options: Ref<RunOptions>): Promise<i64> {
-  let running = new Set<i32>();
   let problems: string[] = [];
   const all = fishFiles(dir, problems);
   for (const message of problems) console.error(message.replace(/^fishc fmt/, "fishc test"));
@@ -867,8 +866,13 @@ async function testsIn(session: BuildSession, dir: string, out: string, filter: 
     console.error(picked);
     return 1;
   }
-  const files = picked.files;
-  const wanted = picked.filter;
+  return await testFiles(session, dir, out, picked.files, picked.filter, release, options);
+}
+
+// Builds the tests of `files` at `out` and runs those whose name holds `wanted`, or all of them.
+/** @throws {Error | IoError | JsonError} */
+async function testFiles(session: BuildSession, dir: string, out: string, files: Ref<string[]>, wanted: string | undefined, release: boolean, options: Ref<RunOptions>): Promise<i64> {
+  let running = new Set<i32>();
   try {
     const tests = buildTests(session, dir, files, out, release);
     if (tests.length === 0) {
@@ -882,7 +886,7 @@ async function testsIn(session: BuildSession, dir: string, out: string, filter: 
       stopTests(running);
       return code;
     }
-    console.error(`fishc test: no test's name contains '${filter ?? ""}'`);
+    console.error(`fishc test: no test's name contains '${wanted ?? ""}'`);
     return 1;
   } catch (e) {
     if (!(e instanceof CompileError)) throw e;
@@ -890,6 +894,59 @@ async function testsIn(session: BuildSession, dir: string, out: string, filter: 
     console.error(painted(e, relative(process.cwd(), join(dir, MANIFEST)), ""));
     return 1;
   }
+}
+
+// `fishc test --watch`: runs the tests `arg` picks, then, each time files they depend on change,
+// builds and runs again only the test files that import a changed file, directly or through others,
+// or are one, until SIGINT or SIGTERM, giving the exit code. Each run's build takes a session of its own from `fresh`.
+/** @throws {Error | IoError | JsonError} */
+async function watchTests(fresh: () => BuildSession, dir: string, arg: string | undefined, release: boolean, options: Ref<RunOptions>): Promise<i64> {
+  const s = listened();
+  const note = (text: string) => console.error(`[fishc] ${text}`);
+  const scratch = mkdtempSync(join(tmpdir(), "fishc-test-"));
+  const out = join(scratch, "tests");
+  const manifest = join(dir, MANIFEST);
+  let problems: string[] = [];
+  const picked = testFilesFor(fishFiles(dir, problems), arg);
+  for (const message of problems) console.error(message.replace(/^fishc fmt/, "fishc test"));
+  // With no argument the package's files are found again each round, so a new one joins.
+  let roots: string[] = [];
+  let wanted: string | undefined = undefined;
+  if (typeof picked === "string") {
+    console.error(picked);
+    rmSync(scratch, { recursive: true, force: true });
+    return 1;
+  } else {
+    roots = picked.files;
+    wanted = picked.filter;
+  }
+  let run = [...roots];
+  while (received(s) === 0) {
+    if (run.length > 0) await testFiles(fresh(), dir, out, run, wanted, release, options);
+    if (arg === undefined) {
+      let again: string[] = [];
+      roots = fishFiles(dir, again);
+    }
+    const closures = dependencies(roots);
+    let watched: string[] = [manifest];
+    for (const [_root, files] of closures) for (const f of files) watched.push(f);
+    note("waiting for changes");
+    const before = snapshot(watchedFiles(watched));
+    const found = await nextChanges(before, s);
+    if (found === undefined) break;
+    const edited = new Set([...found]);
+    const everything = edited.has(existsSync(manifest) ? realpathSync(manifest) : resolve(manifest));
+    run = [];
+    for (const root of roots) {
+      const names = testNamesIn(root);
+      if (names !== undefined && names.length === 0) continue;
+      if (everything || [...closures.get(root)!].some((f) => edited.has(f))) run.push(root);
+    }
+    const shownFiles = found.map((f) => relative(process.cwd(), f)).join(", ");
+    note(run.length === 0 ? `${shownFiles} changed; no test file depends on it` : `${shownFiles} changed; running ${run.map((f) => relative(process.cwd(), f)).join(", ")}`);
+  }
+  rmSync(scratch, { recursive: true, force: true });
+  return s.interrupt.aborted ? 130 : 143;
 }
 
 // Which of the package's files `all` a run builds, and the name filter left for its tests: the one
@@ -1827,6 +1884,7 @@ async function main(): Promise<void> {
           pgo: { type: "string", multiple: true },
           timeout: { type: "string" },
           jobs: { type: "string" },
+          watch: { type: "boolean" },
           fn: { type: "string" },
           top: { type: "string" },
           names: { type: "string" },
@@ -1983,12 +2041,16 @@ async function main(): Promise<void> {
   }
   if (command === "test") {
     // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
-    const usage = "usage: fishc test [<file> | <filter>] [--release] [--timeout <ms>] [--jobs <n>]";
-    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "timeout" && k !== "jobs") || values.panic !== "unwind") fail(usage);
+    const usage = "usage: fishc test [<file> | <filter>] [--release] [--timeout <ms>] [--jobs <n>] [--watch]";
+    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "timeout" && k !== "jobs" && k !== "watch") || values.panic !== "unwind") fail(usage);
     let options = runDefaults();
     if (values.timeout !== undefined) options.timeout = wholeNumber(values.timeout) ?? fail(`fishc test: --timeout takes a whole number of milliseconds above 0, not '${values.timeout}'`);
     if (values.jobs !== undefined) options.jobs = wholeNumber(values.jobs) ?? fail(`fishc test: --jobs takes a whole number of tests above 0, not '${values.jobs}'`);
     const found = findManifest(process.cwd()) ?? fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
+    if (values.watch === true) {
+      const watched = await watchTests(sessionFor, dirname(found!), file, values.release === true, options);
+      process.exit(watched);
+    }
     const code = await testPackage(sessionFor(), dirname(found!), file, values.release === true, options);
     process.exit(code);
   }
@@ -2185,7 +2247,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release[=size]] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--linker system|lld|mold] [--backend native|llvm] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--backend native|llvm] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<file> | <filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp\n       fishc daemon");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release[=size]] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--linker system|lld|mold] [--backend native|llvm] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--backend native|llvm] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<file> | <filter>] [--release] [--watch]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp\n       fishc daemon");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
