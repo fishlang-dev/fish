@@ -2638,6 +2638,7 @@ export class Expressions<C extends Context> implements Union<C> {
   // function given by name isn't converted yet.
   /** @throws {CompileError} */
   private namedFunction(this: Mut<this>, callback: Ref<Expr>): Expr | undefined {
+    if (callback.kind === "instantiation") return this.instantiationArrow(callback);
     if (callback.kind !== "ident") return undefined;
     const local = this.ctx.lookup(callback.name, undefined);
     if (local !== undefined) {

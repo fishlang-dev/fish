@@ -1897,9 +1897,10 @@ class Response {
 
   // A redirect to url, as given, with no body. Fetch throws a RangeError for a status that isn't a
   // redirect; here it panics.
-  static redirect(url: string, status: i64 = 302): Response {
-    assert(status === 301 || status === 302 || status === 303 || status === 307 || status === 308, "Response.redirect's status must be 301, 302, 303, 307 or 308");
-    let res = new Response(null, { status: status });
+  static redirect(url: string, status?: i64): Response {
+    const code = status ?? 302;
+    assert(code === 301 || code === 302 || code === 303 || code === 307 || code === 308, "Response.redirect's status must be 301, 302, 303, 307 or 308");
+    let res = new Response(null, { status: code });
     res.headers.set("location", url);
     return res;
   }

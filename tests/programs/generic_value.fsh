@@ -342,7 +342,7 @@ function id<T>(x: T): T {
   return x;
 }
 function twice<T>(x: T): T[] {
-  return [x, x];
+  return [x.clone(), x];
 }
 function apply(f: (x: i64) => i64, x: i64): i64 {
   return f(x);
@@ -356,7 +356,7 @@ function main() {
   console.log(apply(id<i64>, 7));
 }
 // case: instantiation_expression_typed_by_arguments
-// error: argument of type 'string' is not assignable to parameter of type 'i64'
+// error: argument of type '"no"' is not assignable to parameter of type 'i64'
 function id<T>(x: T): T {
   return x;
 }

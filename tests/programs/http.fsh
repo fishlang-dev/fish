@@ -1347,7 +1347,9 @@ async function main(): Promise<void> {
   let req = new Request("http://h/a", { method: "POST", headers: headers, body: "hi" });
   req.path = "/moved";
   const copy = req.clone();
-  console.log(copy.method, copy.url, copy.path, copy.headers.get("x-n") ?? "-", "[" + (await copy.text()) + "]", "[" + (await req.text()) + "]");
+  const copied = await copy.text();
+  const kept = await req.text();
+  console.log(copy.method, copy.url, copy.path, copy.headers.get("x-n") ?? "-", "[" + copied + "]", "[" + kept + "]");
   let changed = req.clone();
   changed.method = "GET";
   changed.path = "/a";
