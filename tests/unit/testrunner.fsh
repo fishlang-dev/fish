@@ -133,6 +133,21 @@ test("a filter runs only the tests whose name holds it, and one matching none ex
   removed(root);
 }, { timeout: 30_000 });
 
+test("a file runs only its own tests, a filter builds only the files it can match, and either matching nothing says so", () => {
+  const root = scratch("fish-test-");
+  const dir = pkg(root, "picked", [
+    ["src/main.fsh", passing()],
+    ["src/other.fsh", 'export const n: i64 = 1;\ntest("other adds", () => {\n  assert(n + n === 2);\n});\n'],
+    ["src/broken.fsh", 'test("never built", () => {\n  const n: i64 = "two";\n});\n'],
+    ["src/none.fsh", "export const m: i64 = 2;\n"],
+  ]);
+  equal(fishcTest(dir, ["src/other.fsh"]), { code: 0, out: "ok src/other.fsh > other adds\n1 passed, 0 failed\n", err: "" }, "fishc test src/other.fsh");
+  equal(fishcTest(dir, ["subtracts"]), { code: 0, out: "ok src/main.fsh > subtracts\n1 passed, 0 failed\n", err: "" }, "fishc test subtracts");
+  equal(fishcTest(dir, ["src/none.fsh"]), { code: 1, out: "", err: "fishc test: 'src/none.fsh' has no tests\n" }, "fishc test src/none.fsh");
+  equal(fishcTest(dir, ["divides"]), { code: 1, out: "", err: "fishc test: no test's name contains 'divides'\n" }, "fishc test divides");
+  removed(root);
+}, { timeout: 60_000 });
+
 // A directory holding a clang that runs the real one, then does `then` with the path it linked,
 // `$out`, when that is a test program.
 function clangShim(root: string, then: string): string {
@@ -295,7 +310,7 @@ test("a diagnostic names a test as the test, and --panic=abort is refused", () =
   assert(named.err.includes("which isn't the 'Error' that the test 'throws its own' throws"), `stderr:\n${named.err}`);
   const aborting = fishcTest(dir, ["--panic=abort"]);
   assert(aborting.code === 2, `--panic=abort exited with ${aborting.code}`);
-  same(aborting.err, "usage: fishc test [<filter>] [--release] [--timeout <ms>] [--jobs <n>]\n", "--panic=abort's stderr");
+  same(aborting.err, "usage: fishc test [<file> | <filter>] [--release] [--timeout <ms>] [--jobs <n>]\n", "--panic=abort's stderr");
   removed(root);
 }, { timeout: 30_000 });
 
