@@ -26,7 +26,7 @@ interface B {
   get(): boolean
 }
 
-function f(x: A & B): i64 {
+export function f(x: A & B): i64 {
   return 1
 }
 
@@ -141,8 +141,10 @@ function f<T>(t: T & { a: i64 }): i64 {
   return t.a
 }
 
-function main() {}
-// error: intersections with type parameters are not supported yet
+function main() {
+  console.log(f<{ b: boolean }>({ a: 3, b: true }))
+}
+// expect: 3
 // case: intersection_union
 // `A & (B | C)` distributes, as in TypeScript: a tagged union whose every member has the shared
 // fields, narrowed by its tag.

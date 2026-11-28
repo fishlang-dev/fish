@@ -14,7 +14,7 @@ function openParamIn(typing: Ref<Typing>, t: Type, deep: boolean, seen: Mut<Type
   if (typeof t === "string" || seen.has(t)) return undefined;
   seen.add(t);
   const r = typing.rec(t);
-  if (r.kind === "param") return r.concrete !== undefined ? openParamIn(typing, r.concrete, deep, seen) : (t as ParamType);
+  if (r.kind === "param") return r.concrete !== undefined && !(r.within === true && typing.openWithin) ? openParamIn(typing, r.concrete, deep, seen) : (t as ParamType);
   if (!deep) return undefined;
   for (const part of partsOf(typing, t)) {
     const open = openParamIn(typing, part, deep, seen);
@@ -54,6 +54,22 @@ export function standIn(typing: Ref<Typing>, types: Ref<Type[]>, what: string, a
     throw new CompileError("E0114", `${what} of the type parameter '${typing.rec(open).name}' isn't supported yet: it is computed while compiling, from a type known then`, at.start, at.end);
   }
   return undefined;
+}
+
+// Whether `e` is a type function `standIn` refused over a type parameter, as `keyof T` or `T[K]`,
+// which a generic definition can't compute but each instance, its type arguments known, can.
+export function perInstance(e: Ref<CompileError>): boolean {
+  return e.code === "E0114" && e.message.includes(" of the type parameter '") && e.message.endsWith("isn't supported yet: it is computed while compiling, from a type known then");
+}
+
+// The type the checker stands in for a `keyof` or `T[K]` known only per instance, where a caller
+// inferring its callee's type arguments reads one.
+export const PER_INSTANCE = "per instance";
+
+export function perInstanceStandIn(typing: Ref<Typing>, t: Type): boolean {
+  if (typeof t === "string") return false;
+  const r = typing.rec(t);
+  return r.kind === "param" && r.name === PER_INSTANCE;
 }
 
 // What the type-level functions ask of the code using them: whether a class's fields are known,

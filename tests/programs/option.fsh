@@ -154,7 +154,7 @@ function main() {
 // case: option_default_moves
 // 'a ?? b' hands over what a holds.
 class P { x: i64; constructor(x: i64) { this.x = x } }
-function take(p: P) { print(p.x) }
+export function take(p: P) { print(p.x) }
 function main() {
   const o: P | null = new P(1)
   take(o ?? new P(2))
@@ -290,7 +290,7 @@ function main() {
 // case: option_unwrap_moves
 // 'x!' hands over what x holds.
 class P { x: i64; constructor(x: i64) { this.x = x } }
-function take(p: P) { print(p.x) }
+export function take(p: P) { print(p.x) }
 function main() {
   const o: P | null = new P(1)
   take(o!)
@@ -330,7 +330,7 @@ function main() {
 // case: option_unwrap_out_of_borrow
 // '!' can't move a value out of an Option a reference borrows.
 class P { x: i64; constructor(x: i64) { this.x = x } }
-function take(p: P): i64 { return p.x }
+export function take(p: P): i64 { return p.x }
 function steal(o: Ref<P | null>): i64 {
   return take(o!) + take(o!)
 }

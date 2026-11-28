@@ -49,7 +49,7 @@ const RULES: Rule[] = [
   { id: "G8", action: "guided", title: "isNaN after parsing: Fish's parsing gives an Option to check" },
   { id: "G9", action: "guided", title: ".call, .apply and .bind: pass the receiver explicitly or use a closure" },
   { id: "G10", action: "guided", title: "an async callback passed to forEach: use for...of with await, or spawned tasks" },
-  { id: "G11", action: "guided", title: "a value aliased and changed from two names: Rc<T> in one thread, shared<T> across tasks, a .clone(), or restructuring" },
+  { id: "G11", action: "guided", title: "a value aliased and changed from two names: the reference-counted edition for the file, Rc<T> in one thread, shared<T> across tasks, a .clone(), or restructuring" },
   { id: "G12", action: "guided", title: "DisposableStack, and Symbol.dispose and Symbol.asyncDispose beyond a class's methods: give a class a [Symbol.dispose]() method, which runs when an instance is dropped, or an async [Symbol.asyncDispose]() one for 'await using'" },
   { id: "A1", action: "auto", title: "var: const or let" },
   { id: "A2", action: "auto", title: "null, undefined and ?: Option" },
@@ -78,7 +78,7 @@ const RULES: Rule[] = [
   { id: "dynamicRegex", action: "reject", title: "regexes built while the program runs: Fish compiles every regex while compiling" },
   { id: "regexStrings", action: "guided", title: "match, matchAll and search given a string, and next() on matchAll: Fish takes a regex literal there, and matchAll gives an array" },
   { id: "regexState", action: "guided", title: "exec or test on a g or y regex, and lastIndex: a Fish regex keeps no state; use matchAll, or drop the flag" },
-  { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
+  { id: "forIn", action: "unsupported", title: "for...in loops assigning a variable declared outside them; declare it in the loop's head", feature: "for...in" },
   { id: "decorators", action: "unsupported", title: "decorators, which Fish runs as macros, so a framework's decorators need a Fish macro of the same name" },
   { id: "namespaces", action: "unsupported", title: "namespaces and module declarations", feature: "Namespaces" },
   { id: "genericFunctionsHeld", action: "unsupported", title: "generic function types held in class fields, arrays or unions, which would box a family of functions" },
@@ -91,6 +91,7 @@ const RULES: Rule[] = [
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
   { id: "json", action: "unsupported", title: "JSON.parse revivers, and JSON.stringify's replacer and indent arguments" },
   { id: "nestedFunctions", action: "unsupported", title: "generic or generator function declarations inside a function" },
+  { id: "generatorExpressions", action: "unsupported", title: "generator function expressions, as in 'function* () {}': declare the generator at the top level" },
 ];
 
 // A rejected construct has no Fish equivalent and needs a redesign; a guided one, a rewrite.
@@ -247,9 +248,9 @@ const BUILTINS = new Map<string, Equivalent>([
   ["http", PLANNED("node:http server shim")], ["console", PLANNED("The rest of console")],
   ["test", PLANNED("Jest-style test API")], ["sqlite", STD("std:sqlite's Database, each call awaited")],
   ["fs/promises", STD("std:fs/promises, for readFile, writeFile, open, access, utimes, lutimes, chmod, symlink, link, readlink, realpath and watch")], ["fs", STD("std:fs, for readFileSync, writeFileSync, existsSync, statSync and lstatSync with throwIfNoEntry, readdirSync with withFileTypes, realpathSync, mkdtempSync, rmSync, mkdirSync, renameSync, copyFileSync, unlinkSync, accessSync, utimesSync, lutimesSync, chmodSync, symlinkSync, linkSync, readlinkSync, openSync, readSync, writeSync, closeSync, fstatSync, ftruncateSync, fchmodSync, fsyncSync and constants with the open flags")], ["util", STD("util, for format, inspect, isDeepStrictEqual and parseArgs")], ["path", STD("path, for join, dirname, basename, extname, resolve, relative, normalize, isAbsolute, parse and format")], ["crypto", STD("crypto, for createHash, createHmac, randomBytes, randomUUID, getRandomValues and hash")],
-  // fetch and serve speak HTTPS, but importing `https` needs the same shim as `http`, and `tls`
-  // Node's own connect and its sockets with events.
-  ["https", PLANNED("node:http server shim")], ["tls", PLANNED("node:tls")], ["http2", PLANNED("HTTP/2")], ["child_process", STD("std:child_process, for spawnSync, execFileSync and execSync")],
+  // fetch and serve speak HTTPS and HTTP/2, but importing `https` or `http2` needs the same shim
+  // as `http`, and `tls` Node's own connect and its sockets with events.
+  ["https", PLANNED("node:http server shim")], ["tls", PLANNED("node:tls")], ["http2", PLANNED("node:http server shim")], ["child_process", STD("std:child_process, for spawnSync, execFileSync and execSync")],
   ["events", PLANNED("EventTarget and EventEmitter")], ["url", STD("std:url, for fileURLToPath and pathToFileURL")], ["querystring", PLANNED("node:querystring")],
   ["os", STD("std:os, for hostname, tmpdir, homedir, platform and availableParallelism")], ["zlib", STD("std:zlib, for gzipSync, gunzipSync, deflateSync, inflateSync, deflateRawSync, inflateRawSync and unzipSync, and those seven as promises")], ["stream", STD("ReadableStream and WritableStream, as globals")],
   ["buffer", STD("Buffer, for from, alloc, allocUnsafe, concat, byteLength, compare, equals, toString, indexOf and includes of text, and the read methods")], ["assert", STD("std:assert, for the default export and ok")], ["timers", STD("the setTimeout and setInterval globals")],
@@ -568,7 +569,7 @@ function exprRules(e: Ref<Expr>, s: Mut<Scan>) {
     const index: Ref<Expr> = e.index;
     if (object.kind === "meta" && index.kind === "string" && IMPORT_META_MEMBERS.includes(index.value)) s.metaRead.add(object.id);
   } else if (e.kind === "function") {
-    note(s, "A9", e.start);
+    note(s, e.generator ? "generatorExpressions" : "A9", e.start);
     params(s, e.params, false);
   } else if (e.kind === "arrow") params(s, e.params, true);
   // A destructuring assignment ports as a statement of its own.
@@ -651,7 +652,7 @@ function stmtRules(st: Ref<Stmt>, s: Mut<Scan>, depth: usize, ambient: boolean) 
       break;
     case "forIn":
       s.heads.add(st.left.id);
-      note(s, "forIn", st.start);
+      if (st.left.kind !== "let" || st.left.keyword === "var") note(s, "forIn", st.start);
       break;
     case "namespace":
       note(s, "namespaces", st.start);

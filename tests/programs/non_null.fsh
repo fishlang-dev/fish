@@ -82,7 +82,7 @@ function main() {
 // Moving out through a '!' moves the value itself.
 class P { x: i64; constructor(x: i64) { this.x = x } }
 type Holder = { p: P }
-function take(p: P) { print(p.x) }
+export function take(p: P) { print(p.x) }
 function main() {
   const h: Holder = { p: new P(1) }
   take(h.p!)

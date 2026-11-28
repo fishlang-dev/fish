@@ -1,10 +1,12 @@
 // A program loaded, its macros expanded and its files linked, as every compile and check starts.
+import { checkCapabilities } from "./capabilities.fsh";
 import { check, type Checked } from "./check.fsh";
 import { newCompilation, stageEnd, stageStart, type Compilation, type Session } from "./compilation.fsh";
 import { CompileError, copyNames, named, type Names, type Source } from "./diag.fsh";
 import { expandMacros } from "./macros.fsh";
 import { flatten, load, type Loaded } from "./modules.fsh";
 import type { Stmt } from "./parser.fsh";
+import { liftFuzz, stripFuzz } from "./fuzz.fsh";
 import { liftTests, stripTests } from "./tests.fsh";
 
 // Checks the program whose entry is `file`, with text `src`, without building it, its package's
@@ -20,6 +22,7 @@ export function analyze(session: Session, src: string, file: string, read?: (pat
     let own: string[] = [];
     for (const m of loaded.modules) if (m.pkg === first && !m.path.startsWith("std:")) own.push(m.path);
     liftTests(compilation, loaded.modules, own);
+    liftFuzz(compilation, loaded.modules, own);
     program = expanded(compilation, loaded, false);
   } catch (e) {
     if (e instanceof CompileError) throw sourced(e, copyNames(compilation.names), loaded.sources);
@@ -39,7 +42,10 @@ export function analyze(session: Session, src: string, file: string, read?: (pat
 export function expanded(compilation: Mut<Compilation>, loaded: Mut<Loaded>, library: boolean): Stmt[] {
   let started = stageStart(compilation.session);
   stripTests(loaded);
+  stripFuzz(loaded);
   expandMacros(compilation, loaded, library, (round, macros) => check(round, macros, false, true));
+  // After macros, so what a dependency's own macros write is held to its capabilities too.
+  checkCapabilities(loaded);
   stageEnd(compilation.session, "macros", started);
   started = stageStart(compilation.session);
   const program = flatten(compilation, loaded, library);

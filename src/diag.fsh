@@ -45,6 +45,12 @@ export function written(text: string, names: Ref<Names>): string {
 // A second location an error refers to, like where a value was moved.
 export type Note = { message: string; start: usize; end: usize };
 
+// One source-range replacement in program offset space, resolved to a file via `sourceOf`.
+export type TextEdit = { start: usize; end: usize; text: string };
+// Fixes are ordered by preference: shared borrows first, mutable borrows/let next, clones last.
+export type FixKind = "borrow" | "mut" | "clone";
+export type Fix = { message: string; edits: TextEdit[]; kind: FixKind };
+
 // A move or a loan the move checker made, for a run that asked its session to log them: the
 // span of what moved or was lent, what happened as a message says it, and for a loan a variable
 // holds, where its holder is last used. Offsets are the program's, as an error's are.
@@ -80,6 +86,8 @@ export class CompileError extends Error {
   // The moves and loans logged before the check failed, when its session logs them: the session
   // is dropped with the check, so its log leaves with the error.
   borrows: BorrowEvent[] = [];
+  // Machine-applicable candidate fixes, ordered from most preferred (borrows) to fallback (clones).
+  fixes: Fix[] = [];
 
   constructor(code: string, message: string, start: usize, end: usize = start + 1, note?: Note) {
     super(message);
@@ -103,8 +111,25 @@ export class CompileError extends Error {
     out.names = { local: new Set([...this.names.local]), madeUp: new Map([...this.names.madeUp]) };
     out.errors = this.errors.map((e) => e.clone());
     out.borrows = this.borrows.map((b) => ({ ...b }));
+    out.fixes = copyFixes(this.fixes);
     return out;
   }
+}
+
+export function copyFixes(fixes: Ref<Fix[]>): Fix[] {
+  let out: Fix[] = [];
+  for (const f of fixes) {
+    let edits: TextEdit[] = [];
+    for (const e of f.edits) edits.push({ start: e.start, end: e.end, text: e.text });
+    out.push({ message: f.message, edits, kind: f.kind });
+  }
+  return out;
+}
+
+export function withFixes(e: CompileError, fixes: Fix[]): CompileError {
+  let out = e;
+  out.fixes = fixes;
+  return out;
 }
 
 // Several errors from one build, in source order. It reads as its first wherever only one error
@@ -112,12 +137,14 @@ export class CompileError extends Error {
 export class CompileErrors extends CompileError {
   constructor(errors: CompileError[]) {
     super(errors[0]!.code, errors[0]!.message, errors[0]!.start, errors[0]!.end, errors[0]!.note === undefined ? undefined : { ...errors[0]!.note! });
+    this.fixes = copyFixes(errors[0]!.fixes);
     this.errors = errors;
   }
 }
 
 export function compileErrors(errors: CompileError[]): CompileError {
   let out = new CompileError(errors[0]!.code, errors[0]!.message, errors[0]!.start, errors[0]!.end, errors[0]!.note === undefined ? undefined : { ...errors[0]!.note! });
+  out.fixes = copyFixes(errors[0]!.fixes);
   out.errors = errors;
   return out;
 }

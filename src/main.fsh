@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { constants, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
@@ -7,26 +7,37 @@ import { bodyOf, type Arenas } from "./arenas.fsh";
 import { C_KEYWORDS } from "./check.fsh";
 import { codegenChecked, compiledOf, pointerSymbol, shortened, symbolIn, symbolNames, type Emitted, type Options } from "./codegen.fsh";
 import { demangled, helperName, namesFrom, namesText, plainName } from "./demangle.fsh";
-import { fileCosts, formatFiles, formatMemory, formatTimings, formatUsage, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type Compilation, type Peaks, type Reading, type Session, type Tables, type Timings } from "./compilation.fsh";
+import { buildFor, fileCosts, formatFiles, formatMemory, formatTimings, formatUsage, FRONT_END, NATIVE_STAGES, newCompilation, newSession, newTimings, objectsNote, partEnd, partStart, stageEnd, stageStart, STOP_STAGES, stopAfter, type BuildFlag, type Compilation, type Peaks, type Reading, type Session, type Tables, type Timings } from "./compilation.fsh";
 import { expanded, sourced } from "./analysis.fsh";
 import { cachedSession } from "./mathlib.fsh";
 import { CompileError, copyNames, formatError, movedOffset, type BorrowEvent, type Names, type Source } from "./diag.fsh";
 import { load, type Loaded, type RustCrate } from "./modules.fsh";
 import { resolvePackages } from "./dependencies.fsh";
-import { pack, prepare, submit, unsafeDependencies } from "./publish.fsh";
-import { openIndex, registryUrl } from "./registry_index.fsh";
+import { workspaceAbove, workspaceOf, type Member, type Workspace } from "./workspace.fsh";
+import { pack, prepare, submit, unsafeDependencies, upload } from "./publish.fsh";
+import { openIndex, registryUrl, sparseBase, useRegistry } from "./registry_index.fsh";
 import { formatVersion, parseRange, maxSatisfying, type Version } from "./semver.fsh";
 import { createPackage, type Edition, fieldError, findManifest, loadManifest, MANIFEST, NAME_RULE, readManifest, vacant, validName, withDependency } from "./manifest.fsh";
 import { parse, parseWithComments, type Span, type Stmt } from "./parser.fsh";
 import type { Ids } from "./nodes.fsh";
+import { addonOf } from "./addon.fsh";
+import { mobileOf, typeName, type Mobile } from "./mobile.fsh";
+import { bareMetalRefusal, boardSource, linkerScript } from "./mcu.fsh";
 import { bundle } from "./bundle.fsh";
 import { JS_NATIVE } from "./js_native.fsh";
-import { NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
+import { BROTLI_NATIVE, NATIVE, SQLITE_NATIVE, TLS_NATIVE, tlsStub, ZLIB_NATIVE } from "./native.fsh";
 import { objectOf } from "./macho.fsh";
 import { cachedObjects, files, MATH_RUNTIME, NATIVE_UNIT, mathObjects, mathObjectsAsync, mathUnits, objectAsync, objectPath, sourceRoot, type BuildSession, type Unit } from "./mathlib.fsh";
 import { RUNTIME } from "./runtime.fsh";
-import { copyTarget, dockerfile, dockerfilePath, findOpenSsl, hostTarget, hostTriple, instrumented, linkerFlags, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, sizeTarget, staticTarget, withFlags, type Target } from "./target.fsh";
+import { copyTarget, dockerfile, isBareMetal, dockerfilePath, findBrotli, findFuzzerClang, findOpenSsl, fuzzerTarget, hostTarget, hostTriple, forTarget, instrumented, isLambda, isWasm, isWindows, linkerFlags, PGO_INSTRUMENT, pgoUse, resolveTarget, sanitizedTarget, sizeTarget, staticTarget, threading, withFlags, type Target } from "./target.fsh";
+import { browserFiles, loader } from "./wasi.fsh";
+import { zipped } from "./serverless.fsh";
 import { fishFiles, formatPaths, formatStdin, rewrite } from "./fmt.fsh";
+import { EXERCISES, exerciseText, FOLDER } from "./learn.fsh";
+import { commandNamed, helpOf, overview, usageOf, VERSION } from "./commands.fsh";
+import { documented, indexPage, modulePage, pageName, type Documented } from "./docs.fsh";
+import { displayFixPath, fixProgram } from "./fix.fsh";
+import { formatReproducer, fuzzHarnessImports, fuzzHarnessMain, liftFuzz, shellQuote, type FuzzTarget } from "./fuzz.fsh";
 import { serveLsp } from "./lsp.fsh";
 import { directive, fix, migrations, REJECTS, type Imported } from "./migrate.fsh";
 import { dependencies, hideMains, harnessImports, harnessMain, liftTests, runDefaults, runTests, stopTests, testFunctions, testNamesIn, type Outcome, type RunOptions, type Test } from "./tests.fsh";
@@ -34,7 +45,10 @@ import { formatRanking, rank, readPlan, type Plan } from "./rank.fsh";
 import { compare, formatComparison, formatReport, readReport, sources, survey, type Report as SurveyReport } from "./survey.fsh";
 import { explain } from "./codes.fsh";
 import { explainBorrows, functionsIn } from "./explain.fsh";
-import { openapiOf } from "./openapi.fsh";
+import { openapiOf, type LeftOut } from "./openapi.fsh";
+import { clientOf, typesOf } from "./client.fsh";
+import { bindHeader } from "./bindc.fsh";
+import { heapDiffFiles } from "./heap.fsh";
 import { complete, entries, program, REPL_VALUE, shown, thrownBy, type Entry, type ReplState } from "./repl.fsh";
 import { comptimeBody, comptimeTest } from "./comptime.fsh";
 import type { InstanceId } from "./arenas.fsh";
@@ -46,7 +60,10 @@ import { allocators, allocs, allocsJson, formatAllocs } from "./allocs.fsh";
 import { formatLayouts, layoutsJson, layoutsOf, probing } from "./typelayout.fsh";
 import { binaryFunctions, bloat, bloatJson, formatBloat, irFunctions, type Sized } from "./bloat.fsh";
 import { withDebugInfo } from "./debuginfo.fsh";
-import { listened, nextChanges, received, snapshot, watchedFiles, watchProgram, type Rebuilt } from "./watch.fsh";
+import { jsModule, type JsModule } from "./jsgen.fsh";
+import { listening, nextChanges, received, snapshot, watchedFiles, watchProgram, type Rebuilt } from "./watch.fsh";
+import { develop, HANDLERS_C, HOST_C, hostSource, stateShapes, type Handlers } from "./dev.fsh";
+import { cachedScript, keepScript, scriptBuildPath } from "./scripts.fsh";
 import { type Kept } from "./incremental.fsh";
 import { checkedProgram, checkedSource, Queries } from "./queries.fsh";
 import { fileAt } from "./program.fsh";
@@ -97,6 +114,9 @@ function daemonBuild(r: Ref<DaemonRequest>, kept: Kept | undefined): Served {
 }
 // A library C can call: an archive to link, or a shared library to load.
 export type Library = "static" | "shared";
+// What a build is profiled for: stack samples (true), live memory by allocation site ("heap"), or
+// nothing.
+export type Profiling = boolean | "heap";
 
 export { analyze } from "./analysis.fsh";
 
@@ -106,14 +126,14 @@ export { analyze } from "./analysis.fsh";
 type Compiled = { ir: string[]; checked: Checked; loaded: Loaded; emitted: Emitted | undefined; helpers: Map<string, string> };
 
 // A build session apart: what a compilation takes, and the caches only building objects reads.
-type Caches = { clang?: string; digests: Map<string, string>; mathUnits?: Unit[]; backend?: string };
+type Caches = { clang?: string; clangCc?: string; cc?: string; digests: Map<string, string>; mathUnits?: Unit[]; backend?: string };
 
 function apart(session: BuildSession): { core: Session; caches: Caches } {
-  return { core: { locking: session.locking, engineHook: session.engineHook, std: session.std, timings: session.timings, failed: session.failed, checkCache: session.checkCache }, caches: { clang: session.clang, digests: session.digests, mathUnits: session.mathUnits, backend: session.backend } };
+  return { core: { locking: session.locking, engineHook: session.engineHook, std: session.std, timings: session.timings, failed: session.failed, checkCache: session.checkCache, build: session.build }, caches: { clang: session.clang, clangCc: session.clangCc, cc: session.cc, digests: session.digests, mathUnits: session.mathUnits, backend: session.backend } };
 }
 
 function together(core: Session, caches: Caches): BuildSession {
-  return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, checkCache: core.checkCache, clang: caches.clang, digests: caches.digests, mathUnits: caches.mathUnits, backend: caches.backend };
+  return { locking: core.locking, engineHook: core.engineHook, std: core.std, timings: core.timings, failed: core.failed, checkCache: core.checkCache, build: core.build, clang: caches.clang, clangCc: caches.clangCc, cc: caches.cc, digests: caches.digests, mathUnits: caches.mathUnits, backend: caches.backend };
 }
 
 // `session` for a build that keeps nothing of its check once its program is emitted.
@@ -125,9 +145,9 @@ function plain(session: Session): Session {
 
 // Compiles the program whose entry is `file`, with text `src`, and every file it imports.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false, debug = false): string {
+export function compile(session: Session, src: string, file: string, release = false, panic: Panic = "unwind", library = false, leaks = false, debug = false, profile: Profiling = false): string {
   let looked: string[] = [];
-  return compiledIn(newCompilation(session), src, file, release, panic, library, leaks, debug, looked).ir.join("\n");
+  return compiledIn(newCompilation(session), src, file, release, panic, library, leaks, debug, looked, profile).ir.join("\n");
 }
 
 // Checks the program whose entry is `file` as `compile` would, generating nothing; throws its
@@ -150,14 +170,15 @@ function checkedFile(session: Session, file: string): { warnings: CompileError[]
 // The program checked and turned into IR, timed as the codegen stage, its packages bundled in and,
 // in a debug build, its debug info added.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function compiledIn(compilation: Compilation, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks: boolean, debug: boolean, looked: Mut<string[]>): Compiled {
+function compiledIn(compilation: Compilation, src: string, file: string, release: boolean, panic: Panic, library: boolean, leaks: boolean, debug: boolean, looked: Mut<string[]>, profile: Profiling = false): Compiled {
   let program = compilation;
+  program.session.build = buildFor(program.session.build, undefined, release);
   // What a build's codegen fails on is collected in the session's list, when it has one.
   const failed = program.session.failed;
   program.session.failed = undefined;
   let made = checkedSource(program, file, src, library ? runtimeNames() : false, looked);
   const sources = [...made.loaded.sources];
-  return generated(made.checked, made.loaded, { src, file, release, panic, library, sources, leaks, debug, failed });
+  return generated(made.checked, made.loaded, { src, file, release, panic, library, sources, leaks, profile, debug, failed });
 }
 
 // `codegenChecked`, its errors given the program's files. A function of its own so that what
@@ -189,6 +210,32 @@ function generated(checked: Checked, loaded: Loaded, options: Options): Compiled
   stageEnd(done.checked.tables.session, "codegen", started);
   stopAfter(done.checked.tables.session, "codegen");
   return { ir, checked: done.checked, loaded, emitted: done.emitted, helpers: done.helpers };
+}
+
+// Builds `file` as a JavaScript module at `out`, `<name>.js` when it isn't given, with the `.d.ts`
+// typing its exports beside it. A library has no `main` and exports its classes too. Gives the
+// warnings.
+/** @throws {CompileError | Error | IoError} */
+function buildJs(session: Session, file: string, out: string | undefined, release: boolean, library: boolean): CompileError[] {
+  let compilation = newCompilation(plain(session));
+  compilation.session.build = buildFor(compilation.session.build, "js", release);
+  let looked: string[] = [];
+  const src = readFileSync(file, "utf8");
+  const none = new Set<string>();
+  let made = checkedSource(compilation, file, src, library ? none : false, looked);
+  const sources = [...made.loaded.sources];
+  const names = copyNames(made.checked.tables.names);
+  const warnings = [...made.checked.warnings];
+  let module: JsModule = { js: "", dts: "" };
+  try {
+    module = jsModule(made.checked, { src, file, sources: [...sources], release, library });
+  } catch (e) {
+    throw sourced(e, names, sources);
+  }
+  const named = out ?? `${basename(file, ".fsh")}.js`;
+  writeFileSync(named, module.js);
+  writeFileSync(`${named.replace(/\.m?js$/, "")}.d.ts`, module.dts);
+  return warnings;
 }
 
 // The IR with the program's packages bundled into it, those its code reaches, when it reaches any.
@@ -233,9 +280,13 @@ export function runtimeNames(): Set<string> {
 // Builds `file` into a library at `out`'s directory, `lib<name>.a` or a shared one, with
 // `<name>.h` declaring its exports beside it. Gives the warnings.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), debug = false): CompileError[] {
+// `glue` is C compiled into the library, a Node addon's or a mobile module's, whose caller writes
+// any header itself. A shared library with glue is built at `out` itself, finding what the glue
+// leaves undefined, such as N-API's functions, in the process that loads it.
+export function buildLibrary(session: BuildSession, file: string, out: string, kind: Library, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), debug = false, glue?: string): CompileError[] {
   const src = readFileSync(file, "utf8");
   let { core, caches } = apart(session);
+  core.build = buildFor(core.build, target.triple, release);
   let looked: string[] = [];
   const made = compiledIn(newCompilation(core), src, file, release, panic, true, false, debug, looked);
   const pieces: Ref<string[]> = made.ir;
@@ -259,9 +310,16 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
     if (kind === "shared") {
       const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
       const extension = darwin ? "dylib" : "so";
-      run(["clang", ...target.compile, ...target.link, ...linkerFlags(target), "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, "-funwind-tables", "-o", join(dirname(out), `lib${name}.${extension}`), optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(pieces, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)], ir);
+      const glued = glue === undefined ? [...none] : ["-x", "c", glue!, "-x", "none", ...(darwin ? ["-undefined", "dynamic_lookup"] : none)];
+      const written = glue === undefined ? join(dirname(out), `lib${name}.${extension}`) : out;
+      run([target.cc ?? "clang", ...target.compile, ...target.link, ...linkerFlags(target), "-shared", "-fPIC", "-pthread", "-x", "ir", "-", "-x", "none", ...objects, ...glued, "-funwind-tables", "-o", written, optimize, ...g, "-lm", ...links.map((l) => `-l${l}`), ...runtimeLinks(pieces, target), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)], ir);
     } else {
-      run(["clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize, ...g], ir);
+      run([target.cc ?? "clang", ...target.compile, "-c", "-fPIC", "-x", "ir", "-", "-o", fish, optimize, ...g], ir);
+      if (glue !== undefined) {
+        const glueObject = join(dir, "glue.o");
+        run([target.cc ?? "clang", ...target.compile, "-c", "-fPIC", "-x", "c", glue!, "-o", glueObject, optimize, ...g]);
+        objects.push(glueObject);
+      }
       const archive = shim !== undefined ? join(dir, "fish.a") : join(dirname(out), `lib${name}.a`);
       if (target.ar !== "ar" && Bun.which(target.ar) === null) throw new Error(`fishc build: a static library for ${target.triple} is archived with llvm-ar, which isn't on PATH; install LLVM and put its bin directory on PATH, or build with --lib=shared`);
       run([target.ar, "rcs", archive, fish, ...objects]);
@@ -271,7 +329,105 @@ export function buildLibrary(session: BuildSession, file: string, out: string, k
     }
     let exported: Ref<Instance>[] = [];
     for (const i of compiledOf(checked)) if (bodyOf(checked.tables.arenas, i).exported === true) exported.push(i);
-    writeFileSync(join(dirname(out), `${name}.h`), header(name, checked.tables, exported));
+    if (glue === undefined) writeFileSync(join(dirname(out), `${name}.h`), header(name, checked.tables, exported));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return made.checked.warnings;
+}
+
+// `fishc dev`'s builds: with `handlers`, the program as a shared library its host loads, its serve
+// answering through the host; else the host, an executable. `glue` is the C half it links. Gives
+// the warnings and the shapes of the state the handlers keep; `looked` is given the files read.
+/** @throws {CompileError | Error | IoError | JsonError} */
+export function buildDev(session: BuildSession, file: string, out: string, glue: string, handlers: boolean, looked: Mut<string[]>): { warnings: CompileError[]; shapes: string } {
+  const src = readFileSync(file, "utf8");
+  let { core, caches } = apart(session);
+  core.build = buildFor(core.build, undefined, false, handlers);
+  // The handlers are checked with std's dev section, which no other build of the program shares.
+  core.checkCache = false;
+  const made = compiledIn(newCompilation(core), src, file, false, "unwind", false, false, false, looked);
+  const pieces: Ref<string[]> = made.ir;
+  const ir = pieces.join("\n");
+  const checked: Ref<Checked> = made.checked;
+  if (rustShim(made.loaded.rust, checked) !== undefined) throw new Error("fishc dev: a program calling Rust isn't reloaded in place yet; run it with 'fishc watch'");
+  const target = hostTarget();
+  const darwin = process.platform === "darwin";
+  let building = together(newSession(), caches);
+  let objects: string[] = [];
+  for (const o of cachedObjects(building, runtimeUnits(pieces, false, handlers, copyTarget(target)))) objects.push(o);
+  for (const o of mathObjects(building, [...target.compile])) objects.push(o);
+  // Each load's own calls stay its own, never bound to a later load's or the host's.
+  const shared: string[] = !handlers ? [] : darwin ? ["-shared", "-fPIC"] : ["-shared", "-fPIC", "-Wl,-Bsymbolic"];
+  const dl: string[] = darwin ? [] : ["-ldl"];
+  const dir = mkdtempSync(join(tmpdir(), "fishc-dev-"));
+  try {
+    const c = join(dir, "glue.c");
+    writeFileSync(c, glue);
+    run(["clang", ...target.compile, ...target.link, ...shared, "-x", "ir", "-", "-x", "c", c, "-x", "none", ...objects, "-funwind-tables", ...threading(target), "-o", out, "-O0", "-lm", ...runtimeLinks(pieces, target), ...dl], ir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return { warnings: made.checked.warnings, shapes: handlers ? stateShapes(ir) : "" };
+}
+
+// What one of `fishc dev`'s builds takes: the source, where the build goes, and --locked.
+type DevBuild = { file: string; out: string; locked: boolean };
+
+// The host `fishc dev` serves through, built once from its generated source.
+function devHost(b: Ref<DevBuild>): boolean {
+  try {
+    let looked: string[] = [];
+    buildDev(sessionWith(b.locked, false), b.file, b.out, HOST_C, false, looked);
+    return true;
+  } catch (e) {
+    console.error(`fishc: ${(e as { message: string }).message}`);
+    return false;
+  }
+}
+
+// One build of the handlers at `out`, its warnings or error shown as `fishc watch` shows them.
+function devHandlers(b: Ref<DevBuild>, out: string): Handlers {
+  let loaded: string[] = [];
+  try {
+    const made = buildDev(sessionWith(b.locked, false), b.file, out, HANDLERS_C, true, loaded);
+    for (const w of made.warnings) console.error(painted(w, b.file, textOf(b.file), "warning"));
+    return { built: true, loaded, shapes: made.shapes };
+  } catch (e) {
+    if (e instanceof CompileError) console.error(painted(e, b.file, textOf(b.file)));
+    else console.error(`fishc: ${(e as { message: string }).message}`);
+    return { built: false, loaded, shapes: "" };
+  }
+}
+
+// A microcontroller build: the program's IR and the board file linked by lld at `out` as one
+// ELF image, with no runtime. A panic halts, so the build's panics abort. A symbol the link
+// doesn't find is something the program needs from a runtime there isn't, said by name.
+/** @throws {CompileError | Error | IoError | JsonError} */
+function buildBareMetal(session: BuildSession, file: string, out: string, release: boolean, target: Target, arena: usize | undefined, debug: boolean): CompileError[] {
+  const src = readFileSync(file, "utf8");
+  let { core } = apart(session);
+  core.build = buildFor(core.build, target.triple, release);
+  let looked: string[] = [];
+  const made = compiledIn(newCompilation(core), src, file, release, "abort", false, false, debug, looked);
+  // A debug build's frame chain is thread-local, and a board runs one thread with no TLS.
+  const ir = made.ir.join("\n").replace("@fsh_rt_frames = external thread_local global ptr", "@fsh_rt_frames = global ptr null");
+  const dir = mkdtempSync(join(tmpdir(), "fishc-mcu-"));
+  try {
+    const board = join(dir, "board.c");
+    const script = join(dir, "link.ld");
+    writeFileSync(board, boardSource(arena));
+    writeFileSync(script, linkerScript(target.triple));
+    const none: string[] = [];
+    const args = [target.cc ?? "clang", ...target.compile, "-x", "ir", "-", "-x", "c", board, "-x", "none", `-Wl,-T,${script}`, ...target.link, "-o", out, release ? "-O2" : "-O0", ...(debug ? ["-g"] : none)];
+    const done = Bun.spawnSync(args, { stdin: new TextEncoder().encode(ir) });
+    if (done.exitCode !== 0) {
+      const err = new TextDecoder().decode(done.stderr);
+      let missing: string[] = [];
+      for (const m of err.matchAll(/undefined symbol: ([\w.$]+)/g)) missing.push(m[1]!);
+      if (missing.length > 0) throw new Error(bareMetalRefusal(target.triple, missing, arena !== undefined));
+      throw new Error(`clang failed:\n${err}`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -328,17 +484,18 @@ function cType(typing: Ref<Typing>, t: Type): string {
 // `links` names the C libraries the program's declared functions come from. With `leaks`, the
 // program reports at exit what it never freed, by where it was allocated. Gives the warnings.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), leaks = false, debug = false): CompileError[] {
+export function build(session: BuildSession, file: string, out: string, release = false, panic: Panic = "unwind", links: string[] = [], target: Target = hostTarget(), leaks = false, debug = false, profile: Profiling = false): CompileError[] {
   let looked: string[] = [];
-  return built(session, file, out, release, panic, [...links], target, leaks, debug, looked).warnings;
+  return built(session, file, out, release, panic, [...links], target, leaks, debug, looked, profile).warnings;
 }
 
 // `build`, giving the session back, with its caches and the build's timings. `looked` is given the
 // files the program was read from, or looked for, even when it doesn't build.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>): { warnings: CompileError[]; session: BuildSession } {
+function built(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, profile: Profiling = false): { warnings: CompileError[]; session: BuildSession } {
   let { core, caches } = apart(session);
-  let ready = readied(core, caches, file, release, panic, leaks, debug, looked, target);
+  core.build = buildFor(core.build, target.triple, release);
+  let ready = readied(core, caches, file, release, panic, leaks, debug, looked, target, profile);
   let known = new Map<string, string[]>();
   linked(ready.building, ready.natives, ready.split, out, release, links, ready.shim, target, leaks, debug, known);
   writeFileSync(`${out}.fshnames`, ready.names);
@@ -349,8 +506,8 @@ function built(session: BuildSession, file: string, out: string, release: boolea
 // so the checked program, the loaded files and the IR, which only `fishc watch` keeps for its next
 // build, are dropped as it returns: clang then compiles with nothing of them held beside it.
 /** @throws {CompileError | Error | IoError | JsonError} */
-function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>): { natives: Natives; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession; names: string } {
-  let made = compiledKept(core, file, release, panic, leaks, debug, looked, undefined, undefined, false);
+function readied(core: Session, caches: Caches, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, target: Ref<Target>, profile: Profiling = false): { natives: Natives; split: { cached: Unit[]; program: string; times: [string, f64][] }; shim: Shim | undefined; warnings: CompileError[]; building: BuildSession; names: string } {
+  let made = compiledKept(core, file, release, panic, leaks, debug, looked, undefined, undefined, false, profile);
   const instrumenting = stageStart(made.kept.checked.tables.session);
   const ir = instrumentedPieces(made.ir, target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
@@ -366,7 +523,7 @@ function readied(core: Session, caches: Caches, file: string, release: boolean, 
   stageEnd(session, "split", splitting);
   if (session.timings !== undefined) for (const [name, ms] of split.times) session.timings!.ms.set(name, ms);
   const building = together(session, caches);
-  return { natives: nativesOf(ir, release, target, leaks), split, shim, warnings: made.warnings, building, names };
+  return { natives: nativesOf(ir, release, target, leaks, profile), split, shim, warnings: made.warnings, building, names };
 }
 
 // The session a check's tables hold, the rest of what was kept dropped as this returns.
@@ -380,9 +537,10 @@ function sessionOf(kept: Kept): Session {
 // did is not loaded or checked again. Gives what to keep for the next build. `manifest` is the
 // package's, which a build may read.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string[]; warnings: CompileError[]; session: BuildSession; kept: Kept } {
+export function builtKept(session: BuildSession, file: string, out: string, release: boolean, panic: Panic, links: string[], target: Target, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true, profile: Profiling = false): { ir: string[]; warnings: CompileError[]; session: BuildSession; kept: Kept } {
   let { core, caches } = apart(session);
-  let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest, keep);
+  core.build = buildFor(core.build, target.triple, release);
+  let made = compiledKept(core, file, release, panic, leaks, debug, looked, kept, manifest, keep, profile);
   const instrumenting = stageStart(made.kept.checked.tables.session);
   const ir = instrumentedPieces(made.ir, target);
   const shim = rustShim(made.kept.loaded.rust, made.kept.checked);
@@ -400,7 +558,7 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
   tables.session = newSession();
   let known = new Map<string, string[]>();
   if (units !== undefined) known = units;
-  linked(building, nativesOf(ir, release, target, leaks), split, out, release, links, shim, target, leaks, debug, known);
+  linked(building, nativesOf(ir, release, target, leaks, profile), split, out, release, links, shim, target, leaks, debug, known);
   writeFileSync(`${out}.fshnames`, names);
   return { ir, warnings: made.warnings, session: building, kept: { checked: { instances, tables, warnings }, parts: checkerParts, loaded, contents, carried, emitted, units: known } };
 }
@@ -408,7 +566,7 @@ export function builtKept(session: BuildSession, file: string, out: string, rele
 // `compile` for `fishc watch`, from what its last build kept, giving the IR, the warnings and what
 // to keep.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true): { ir: string[]; warnings: CompileError[]; kept: Kept; helpers: Map<string, string> } {
+export function compiledKept(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, looked: Mut<string[]>, kept: Kept | undefined, manifest: string | undefined, keep = true, profile: Profiling = false): { ir: string[]; warnings: CompileError[]; kept: Kept; helpers: Map<string, string> } {
   const reusing = kept !== undefined;
   // Reading the files again and putting the changed ones back, apart from the check it times itself.
   // Counted by hand from the front end's stages, since the session it starts on moves into the
@@ -418,6 +576,7 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   if (session.timings !== undefined) for (const name of FRONT_END) before += session.timings!.ms.get(name) ?? 0;
   let queries = new Queries(file, manifest, new Map<string, string>());
   let given = session;
+  given.build = buildFor(given.build, undefined, release);
   if (!keep) given.plain = true;
   let start = queries.checked(given, looked, kept);
   if (start.checked.tables.session.timings !== undefined) {
@@ -429,7 +588,7 @@ export function compiledKept(session: Session, file: string, release: boolean, p
   start.checked.tables.session.failed = undefined;
   const sources = [...start.loaded.sources];
   // Debug info marks every function's lines, so a `-g` build emits every function again.
-  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, debug, failed, prior: debug ? undefined : start.emitted, rechecked: start.rechecked, keep });
+  let made = generated(start.checked, start.loaded, { src: readFileSync(file, "utf8"), file, release, panic, library: false, sources, leaks, profile, debug, failed, prior: debug ? undefined : start.emitted, rechecked: start.rechecked, keep });
   let warnings = [...made.checked.warnings];
   // A clean check gives its warnings in the order they are written in, which a kept one's
   // positions only give through their files' maps.
@@ -443,11 +602,11 @@ export function compiledKept(session: Session, file: string, release: boolean, p
 // How a build from what `fishc watch` kept differs from a clean build of `file`: its IR, its
 // warnings, or the error it stopped at, or undefined when they match.
 /** @throws {IoError} */
-export function cleanDifference(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, got: Ref<{ ir: string; warnings: CompileError[] } | CompileError>): string | undefined {
+export function cleanDifference(session: Session, file: string, release: boolean, panic: Panic, leaks: boolean, debug: boolean, got: Ref<{ ir: string; warnings: CompileError[] } | CompileError>, profile: Profiling = false): string | undefined {
   let clean: { ir: string; warnings: CompileError[] } | CompileError | undefined = undefined;
   try {
     let looked: string[] = [];
-    const made = compiledIn(newCompilation(session), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, looked);
+    const made = compiledIn(newCompilation(session), readFileSync(file, "utf8"), file, release, panic, false, leaks, debug, looked, profile);
     clean = { ir: made.ir.join("\n"), warnings: [...made.checked.warnings] };
   } catch (e) {
     if (!(e instanceof CompileError)) return `the clean build failed: ${(e as { message: string }).message}`;
@@ -640,8 +799,8 @@ function partSymbols(pieces: Ref<string[]>, checked: Ref<Checked>, release: bool
 type Natives = { units: Unit[]; links: string[] };
 
 /** @throws {IoError} */
-function nativesOf(ir: Ref<string[]>, release: boolean, target: Ref<Target>, leaks: boolean): Natives {
-  return { units: runtimeUnits(ir, release, false, copyTarget(target), leaks), links: runtimeLinks(ir, target) };
+function nativesOf(ir: Ref<string[]>, release: boolean, target: Ref<Target>, leaks: boolean, profile: Profiling = false): Natives {
+  return { units: runtimeUnits(ir, release, false, copyTarget(target), leaks, profile), links: runtimeLinks(ir, target) };
 }
 
 // Builds the program, split into `halves`, into the executable `out`.
@@ -663,14 +822,15 @@ function linked(session: Mut<BuildSession>, natives: Ref<Natives>, halves: Ref<{
   if (session.timings !== undefined) session.timings.notes.set("runtime", objectsNote(session.timings));
   const g = debug ? ["-g"] : none;
   const tls = [...natives.links];
+  const cc = session.cc ?? "clang";
   if (alongside) {
     const linking = stageStart(session);
-    clang([...clangArgs(out, release, links, objects, shim, copyTarget(target), []), ...tls]);
+    clang([...clangArgs(out, release, links, objects, shim, copyTarget(target), [], cc), ...tls]);
     stageEnd(session, "link", linking);
     return;
   }
   if (session.timings === undefined) {
-    clang([...clangArgs(out, release, links, objects, shim, copyTarget(target)), ...tls, ...g], halves.program);
+    clang([...clangArgs(out, release, links, objects, shim, copyTarget(target), ["-x", "ir", "-"], cc), ...tls, ...g], halves.program);
     return;
   }
   // Timed, the program is compiled and linked by two clang calls, so each is measured on its own.
@@ -678,10 +838,10 @@ function linked(session: Mut<BuildSession>, natives: Ref<Natives>, halves: Ref<{
   try {
     const object = join(dir, "program.o");
     const compiling = stageStart(session);
-    clang(["clang", ...target.compile, "-c", "-x", "ir", "-", "-o", object, "-funwind-tables", ...optimization(release, target), ...g], halves.program);
+    clang([cc, ...target.compile, "-c", "-x", "ir", "-", "-o", object, "-funwind-tables", ...optimization(release, target), ...g], halves.program);
     stageEnd(session, "compile", compiling);
     const linking = stageStart(session);
-    clang([...clangArgs(out, release, links, objects, shim, copyTarget(target), [object]), ...tls, ...g]);
+    clang([...clangArgs(out, release, links, objects, shim, copyTarget(target), [object], cc), ...tls, ...g]);
     // On macOS the debug info stays in the object, deleted below; clang gathers it into a .dSYM
     // only when it compiles and links in one call, so it is gathered here.
     const darwin = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
@@ -777,17 +937,18 @@ export async function buildAsync(session: BuildSession, file: string, out: strin
   let building = together(made.checked.tables.session, caches);
   // ponytail: each object in turn, as Fish can't map to promises yet; Promise.all over them once it can.
   let objects: string[] = [];
+  const cc = building.cc ?? "clang";
   for (const u of runtimeUnits(made.ir, release)) {
-    const object = await objectAsync(u, objectPath(building, u));
+    const object = await objectAsync(u, objectPath(building, u), cc);
     objects.push(object);
   }
   for (const u of halves.cached) {
-    const object = await objectAsync(u, objectPath(building, u));
+    const object = await objectAsync(u, objectPath(building, u), cc);
     objects.push(object);
   }
   const math = await mathObjectsAsync(building);
   for (const o of math) objects.push(o);
-  const compiler = Bun.spawn([...clangArgs(out, release, links, objects, shim, copyTarget(host)), ...runtimeLinks(made.ir, host)], { stdin: new TextEncoder().encode(halves.program), stderr: "pipe" });
+  const compiler = Bun.spawn([...clangArgs(out, release, links, objects, shim, copyTarget(host), ["-x", "ir", "-"], cc), ...runtimeLinks(made.ir, host)], { stdin: new TextEncoder().encode(halves.program), stderr: "pipe" });
   const errors = new Response(compiler.stderr);
   const [code, stderr] = await Promise.all([compiler.exited, errors.text()]);
   if (code !== 0) throw new Error(`clang failed:\n${stderr}`);
@@ -804,7 +965,7 @@ export type BuiltTests = { tests: Test[]; ran: Map<usize, Outcome> };
 // `wanted`, or all of them, first run in the comptime interpreter, and the program is linked only
 // when one of them does what comptime code can't.
 /** @throws {CompileError | Error | IoError | JsonError} */
-export function buildTests(session: BuildSession, dir: string, files: Ref<string[]>, out: string, release = false, interpret = false, wanted: string | undefined = undefined): BuiltTests {
+export function buildTests(session: BuildSession, dir: string, files: Ref<string[]>, out: string, release = false, interpret = false, wanted: string | undefined = undefined, docs = false): BuiltTests {
   // The harness is read as the manifest's path, which every package has and no `.fsh` file is, so
   // the files' names are written from the package's directory.
   const entry = join(dir, MANIFEST);
@@ -819,7 +980,7 @@ export function buildTests(session: BuildSession, dir: string, files: Ref<string
   try {
     let paths: string[] = [];
     for (const f of files) paths.push(realpathSync(f));
-    tests = liftTests(compilation, loaded.modules, paths);
+    tests = liftTests(compilation, loaded.modules, paths, docs);
     if (tests.length === 0) return { tests, ran };
     hideMains(compilation, loaded.modules);
     functions = testFunctions(tests, loaded.modules);
@@ -899,6 +1060,18 @@ function wholeNumber(text: string): usize | undefined {
   return (Number(text) ?? 0) as usize;
 }
 
+function parseSimSeed(text: string): u64 | undefined {
+  if (!/^[0-9]{1,20}$/.test(text)) return undefined;
+  let value: u64 = 0 as u64;
+  const maxDiv10: u64 = 1844674407370955161 as u64;
+  for (let i: usize = 0; i < text.length; i++) {
+    const d = (text.charCodeAt(i) - 48) as u64;
+    if (value > maxDiv10 || (value === maxDiv10 && d > (5 as u64))) return undefined;
+    value = value * (10 as u64) + d;
+  }
+  return value;
+}
+
 // `testPackage`'s build and run, the build at `out`.
 /** @throws {Error | IoError | JsonError} */
 async function testsIn(session: BuildSession, dir: string, out: string, filter: string | undefined, release: boolean, options: Ref<RunOptions>): Promise<i64> {
@@ -918,7 +1091,7 @@ async function testsIn(session: BuildSession, dir: string, out: string, filter: 
 async function testFiles(session: BuildSession, dir: string, out: string, files: Ref<string[]>, wanted: string | undefined, release: boolean, options: Ref<RunOptions>): Promise<i64> {
   let running = new Set<i32>();
   try {
-    const built = buildTests(session, dir, files, out, release, options.interpret, wanted);
+    const built = buildTests(session, dir, files, out, release, options.interpret, wanted, options.docs);
     const tests = built.tests;
     if (tests.length === 0) {
       console.log("no tests found");
@@ -946,7 +1119,7 @@ async function testFiles(session: BuildSession, dir: string, out: string, files:
 // or are one, until SIGINT or SIGTERM, giving the exit code. Each run's build takes a session of its own from `fresh`.
 /** @throws {Error | IoError | JsonError} */
 async function watchTests(fresh: () => BuildSession, dir: string, arg: string | undefined, release: boolean, options: Ref<RunOptions>): Promise<i64> {
-  const s = listened();
+  const s = listening();
   const note = (text: string) => console.error(`[fishc] ${text}`);
   const scratch = mkdtempSync(join(tmpdir(), "fishc-test-"));
   const out = join(scratch, "tests");
@@ -1001,7 +1174,7 @@ async function watchTests(fresh: () => BuildSession, dir: string, arg: string | 
 // of its own from `fresh`, since a check uses up the one it is given.
 /** @throws {IoError} */
 async function watchCheck(fresh: () => BuildSession, entry: string, manifest: string | undefined): Promise<i64> {
-  const s = listened();
+  const s = listening();
   const note = (text: string) => console.error(`[fishc] ${text}`);
   let files = watchedFiles([entry], manifest);
   let kept: Kept | undefined = undefined;
@@ -1080,6 +1253,288 @@ function signalled(signal: "SIGINT" | "SIGTERM", code: i64): Promise<i64> {
   });
 }
 
+type FuzzOptions = {
+  runs?: usize;
+  maxTime?: usize;
+  corpus?: string;
+  artifacts?: string;
+  replay?: string;
+  asan: boolean;
+  list: boolean;
+};
+
+// Discovers all `fuzz()` blocks in `files` (relative to `dir`).
+/** @throws {CompileError | Error | IoError} */
+function discoverFuzz(session: BuildSession, dir: string, files: Ref<string[]>): FuzzTarget[] {
+  if (files.length === 0) return [];
+  const realDir = realpathSync(dir);
+  let paths: string[] = [];
+  for (const f of files) paths.push(realpathSync(f));
+  const manifest = findManifest(realDir);
+  const scratchDir = manifest === undefined ? realpathSync(mkdtempSync(join(tmpdir(), "fishc-fuzz-h-"))) : undefined;
+  const harnessDir = manifest !== undefined ? realpathSync(dirname(manifest!)) : scratchDir!;
+  const entry = manifest !== undefined ? realpathSync(manifest!) : join(scratchDir!, "harness.fsh");
+  const src = fuzzHarnessImports(harnessDir, [...paths]);
+  try {
+    if (scratchDir !== undefined) writeFileSync(entry, src);
+    let { core } = apart(session);
+    let compilation = newCompilation(core);
+    let loaded = load(compilation, entry, src);
+    try {
+      const targets = liftFuzz(compilation, loaded.modules, paths);
+      let shown: FuzzTarget[] = [];
+      for (const t of targets) shown.push({ name: t.name, module: { file: relative(realDir, t.module.path), path: t.module.path }, index: t.index });
+      return shown;
+    } catch (e) {
+      if (e instanceof CompileError) throw sourced(e, copyNames(compilation.names), loaded.sources);
+      throw e;
+    }
+  } finally {
+    if (scratchDir !== undefined) rmSync(scratchDir!, { recursive: true, force: true });
+  }
+}
+
+// Builds one `fuzz()` target (by name) into a libFuzzer executable at `out`.
+/** @throws {CompileError | Error | IoError | JsonError} */
+function buildFuzzTarget(session: BuildSession, dir: string, files: Ref<string[]>, targetName: string, out: string, asan: boolean, cc: string): void {
+  const realDir = realpathSync(dir);
+  let paths: string[] = [];
+  for (const f of files) paths.push(realpathSync(f));
+  const manifest = findManifest(realDir);
+  const scratchDir = manifest === undefined ? realpathSync(mkdtempSync(join(tmpdir(), "fishc-fuzz-h-"))) : undefined;
+  const harnessDir = manifest !== undefined ? realpathSync(dirname(manifest!)) : scratchDir!;
+  const entry = manifest !== undefined ? realpathSync(manifest!) : join(scratchDir!, "harness.fsh");
+  const src = fuzzHarnessImports(harnessDir, [...paths]);
+  try {
+    if (scratchDir !== undefined) writeFileSync(entry, src);
+    let { core, caches } = apart(session);
+    let compilation = newCompilation(core);
+    let loaded = load(compilation, entry, src);
+    let program: Stmt[] = [];
+    try {
+      const targets = liftFuzz(compilation, loaded.modules, paths);
+      const chosen = targets.find((t) => t.name === targetName);
+      if (chosen === undefined) throw new Error(`fishc fuzz: internal error: target '${targetName}' disappeared`);
+      hideMains(compilation, loaded.modules);
+      let harness = fuzzHarnessMain(compilation.ids, chosen!, loaded.modules);
+      while (harness.length > 0) loaded.modules[0]!.statements.push(harness.shift()!);
+      program = expanded(compilation, loaded, true);
+    } catch (e) {
+      if (e instanceof CompileError) throw sourced(e, copyNames(compilation.names), loaded.sources);
+      throw e;
+    }
+    const checked = checkedProgram(compilation, program, runtimeNames(), loaded.sources).checked;
+    const sources = [...loaded.sources];
+    const release = !asan;
+    const made = generated(checked, loaded, { src, file: entry, release, panic: "abort", library: true, fuzz: true, sources, harness: true, debug: false });
+    const shim = rustShim(made.loaded.rust, made.checked);
+    const platform = fuzzerTarget(asan);
+    const ir = instrumentedPieces(made.ir, platform);
+    const halves = parts(ir, partSymbols(ir, made.checked, release), release, platform, false);
+    let building = together(made.checked.tables.session, caches);
+    building.cc = cc;
+    building.clang = undefined;
+    let none = new Map<string, string[]>();
+    linked(building, nativesOf(ir, release, platform, false), halves, out, release, [], shim, platform, false, false, none);
+  } finally {
+    if (scratchDir !== undefined) rmSync(scratchDir!, { recursive: true, force: true });
+  }
+}
+
+function isArtifactName(name: string): boolean {
+  return name.startsWith("crash-") || name.startsWith("oom-") || name.startsWith("timeout-") || name.startsWith("leak-");
+}
+
+// Records existing libFuzzer artifact files and their mtimes so a new crash artifact can be
+// identified after an inherited-stdio run without buffering libFuzzer's output in memory.
+function snapshotArtifacts(dir: string): Map<string, f64> {
+  let snap = new Map<string, f64>();
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!isArtifactName(name)) continue;
+      const st = statSync(join(dir, name));
+      if (st.isFile()) snap.set(name, st.mtimeMs);
+    }
+  } catch (_e) {
+    // Directory may not exist yet or be unreadable.
+  }
+  return snap;
+}
+
+function newestArtifact(dir: string, before: Ref<Map<string, f64>>): string | undefined {
+  let bestPath: string | undefined = undefined;
+  let bestMtime: f64 = -1;
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!isArtifactName(name)) continue;
+      const full = join(dir, name);
+      const st = statSync(full);
+      if (!st.isFile()) continue;
+      const prev = before.get(name);
+      if (prev !== undefined && st.mtimeMs <= prev!) continue;
+      if (st.mtimeMs >= bestMtime) {
+        bestMtime = st.mtimeMs;
+        bestPath = full;
+      }
+    }
+  } catch (_e) {
+    return undefined;
+  }
+  return bestPath;
+}
+
+// Reads at most `limit` bytes plus total file size from `path` without loading huge artifacts.
+/** @throws {IoError} */
+function readArtifactHead(path: string, limit: usize): { sample: u8[]; total: usize } {
+  const total = statSync(path).size as usize;
+  const take = total < limit ? total : limit;
+  if (take === 0) return { sample: [], total };
+  let buf = new Uint8Array(take);
+  const fd = openSync(path, "r");
+  let got: usize = 0;
+  try {
+    const n = readSync(fd, buf, 0, take as i64, 0);
+    if (n > 0) got = n as usize;
+  } finally {
+    closeSync(fd);
+  }
+  return { sample: buf.slice(0, got as i64), total };
+}
+
+function buildReplayHint(isFile: boolean, fileArg: string | undefined, totalTargets: usize, targetName: string, artifactPath: string): string {
+  let parts: string[] = ["fishc", "fuzz"];
+  if (isFile && fileArg !== undefined) parts.push(shellQuote(fileArg));
+  if (totalTargets > 1) parts.push(shellQuote(targetName));
+  parts.push("--replay");
+  parts.push(shellQuote(artifactPath));
+  return parts.join(" ");
+}
+
+type FuzzRace = { kind: "exit"; code: i64 } | { kind: "signal"; code: i64 };
+
+function fuzzSignalled(signal: "SIGINT" | "SIGTERM", code: i64): Promise<FuzzRace> {
+  return new Promise<FuzzRace>((resolve) => {
+    process.once(signal, () => resolve({ kind: "signal", code }));
+  });
+}
+
+// Runs one built libFuzzer binary with inherited stdio so progress streams live in O(1) memory,
+// detecting any saved crash artifact and printing the formatted reproducer.
+/** @throws {IoError} */
+async function runFuzzBinary(binary: string, scratch: string, target: Ref<FuzzTarget>, isFile: boolean, fileArg: string | undefined, totalTargets: usize, options: Ref<FuzzOptions>, running: Mut<Set<i32>>): Promise<i64> {
+  let args: string[] = [];
+  let artDir = process.cwd();
+  let before = new Map<string, f64>();
+  if (options.replay !== undefined) {
+    args.push(`-artifact_prefix=${scratch}${sep}`);
+    args.push(resolve(options.replay!));
+  } else {
+    if (options.runs !== undefined) args.push(`-runs=${options.runs!}`);
+    if (options.maxTime !== undefined) args.push(`-max_total_time=${options.maxTime!}`);
+    if (options.artifacts !== undefined) {
+      artDir = resolve(options.artifacts!);
+      mkdirSync(artDir, { recursive: true });
+      args.push(`-artifact_prefix=${artDir}${sep}`);
+    }
+    if (options.corpus !== undefined) {
+      const dir = resolve(options.corpus!);
+      mkdirSync(dir, { recursive: true });
+      args.push(dir);
+    }
+    before = snapshotArtifacts(artDir);
+  }
+  const child = Bun.spawn([binary, ...args], { cwd: process.cwd(), stdin: "ignore", stdout: "inherit", stderr: "inherit", detached: true });
+  const group = child.pid as i32;
+  running.add(group);
+  const code = await child.exited;
+  running.delete(group);
+  if (code === 0) {
+    console.log(`ok ${target.module.file} > ${target.name}`);
+    return 0;
+  }
+  const artifact = options.replay !== undefined ? resolve(options.replay!) : newestArtifact(artDir, before);
+  if (artifact !== undefined && existsSync(artifact!) && statSync(artifact!).isFile()) {
+    const shown = options.artifacts !== undefined || options.replay !== undefined ? artifact! : relative(process.cwd(), artifact!);
+    const head = readArtifactHead(artifact!, 256);
+    const replayHint = buildReplayHint(isFile, fileArg, totalTargets, target.name, shown);
+    console.error(`\n${formatReproducer(target, shown, head.sample, head.total, replayHint)}`);
+  } else {
+    console.error(`FAIL ${target.module.file} > ${target.name} (exited with ${code})`);
+  }
+  return 1;
+}
+
+/** @throws {Error | IoError | JsonError} */
+async function runFuzzLoop(dir: string, files: Ref<string[]>, chosen: Ref<FuzzTarget[]>, totalTargets: usize, scratch: string, cc: string, isFile: boolean, fileArg: string | undefined, options: Ref<FuzzOptions>, running: Mut<Set<i32>>): Promise<FuzzRace> {
+  for (let i: usize = 0; i < chosen.length; i++) {
+    const target: Ref<FuzzTarget> = chosen[i]!;
+    const binary = join(scratch, `fuzz-${i}`);
+    try {
+      buildFuzzTarget(sessionWith(false, false, true), dir, files, target.name, binary, options.asan, cc);
+    } catch (e) {
+      if (e instanceof CompileError) {
+        console.error(painted(e, relative(process.cwd(), join(dir, "__fish_fuzz__.fsh")), ""));
+        return { kind: "exit", code: 1 };
+      }
+      throw e;
+    }
+    const ran = await runFuzzBinary(binary, scratch, target, isFile, fileArg, totalTargets, options, running);
+    if (ran !== 0) return { kind: "exit", code: ran };
+  }
+  return { kind: "exit", code: 0 };
+}
+
+/** @throws {Error | IoError | JsonError} */
+async function runFuzz(session: BuildSession, dir: string, files: Ref<string[]>, filter: string | undefined, isFile: boolean, fileArg: string | undefined, options: Ref<FuzzOptions>): Promise<i64> {
+  let targets: FuzzTarget[] = [];
+  try {
+    targets = discoverFuzz(session, dir, files);
+  } catch (e) {
+    if (e instanceof CompileError) {
+      console.error(painted(e, relative(process.cwd(), join(dir, "__fish_fuzz__.fsh")), ""));
+      return 1;
+    }
+    throw e;
+  }
+  if (targets.length === 0) {
+    console.log("no fuzz targets found");
+    return 0;
+  }
+  const totalTargets = targets.length;
+  const chosen = filter === undefined ? targets : targets.filter((t) => t.name.includes(filter!));
+  if (chosen.length === 0) {
+    console.error(`fishc fuzz: no fuzz target's name contains '${filter ?? ""}'`);
+    return 1;
+  }
+  if (options.list) {
+    for (const t of chosen) console.log(`${t.module.file} > ${t.name}`);
+    return 0;
+  }
+  if (chosen.length > 1 && options.runs === undefined && options.maxTime === undefined && options.replay === undefined) {
+    console.error(`fishc fuzz: found ${chosen.length} fuzz targets (${chosen.map((t) => t.name).join(", ")}); name one to fuzz, or pass --runs <n> or --max-time <sec>`);
+    return 2;
+  }
+  const cc = findFuzzerClang(options.asan);
+  const scratch = mkdtempSync(join(tmpdir(), "fishc-fuzz-"));
+  let running = new Set<i32>();
+  let code: i64 = 0;
+  try {
+    const outcome = await Promise.race([
+      runFuzzLoop(dir, files, chosen, totalTargets, scratch, cc, isFile, fileArg, options, running),
+      fuzzSignalled("SIGINT", 130),
+      fuzzSignalled("SIGTERM", 143),
+    ]);
+    code = outcome.code;
+  } catch (e) {
+    stopTests(running);
+    rmSync(scratch, { recursive: true, force: true });
+    throw e;
+  }
+  stopTests(running);
+  rmSync(scratch, { recursive: true, force: true });
+  return code;
+}
+
 // Lints the TS-compat files among `paths`, a directory standing for its `.fsh` files as for
 // `fishc fmt`, and a `.ts` file named itself being TS-compat: each rule's hit is printed as an
 // error is, then the count. A file named itself that is native is said to have nothing to lint.
@@ -1151,8 +1606,8 @@ function lintPaths(paths: string[], fixing: boolean): i64 {
         if (inPackage !== undefined) edition = inPackage;
       }
       if (edition === "broken") continue;
-      if (edition === "native") {
-        if (named) console.log(`fishc lint: '${shown}' is in the native edition, so there's nothing to lint`);
+      if (edition === "native" || edition === "rc") {
+        if (named) console.log(`fishc lint: '${shown}' is in the ${edition} edition, so there's nothing to lint`);
         continue;
       }
       let parsing: Ids = { last: 0 };
@@ -1274,10 +1729,31 @@ export function indented(json: string): string {
   return out;
 }
 
+// A copy of `flags`, for a session of its own.
+function flagsCopy(flags: Ref<BuildFlag[]>): BuildFlag[] {
+  return flags.map((f) => ({ name: f.name, value: f.value }));
+}
+
+// Each `--flag name` or `--flag name=value`, the last one given for a name winning.
+function buildFlagsOf(given: string[]): BuildFlag[] {
+  let flags: BuildFlag[] = [];
+  for (const g of given) {
+    const at = g.indexOf("=");
+    const name = at < 0 ? g : g.slice(0, at);
+    if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(name)) fail(`fishc: '--flag ${g}' names no flag; a flag is a name such as 'fast' or 'level=3', starting with a letter`);
+    const value = at < 0 ? null : g.slice(at + 1);
+    const known = flags.findIndex((f) => f.name === name);
+    if (known >= 0) flags.splice(known, 1);
+    flags.push({ name, value });
+  }
+  return flags;
+}
+
 // A session for one build, with the lockfile kept as it is when `locked`, timed when `timed` or
 // when `json` names where to write the times, and reading no cached check when `checking`.
-function sessionWith(locked: boolean, timed: boolean, checking = false, json?: string, backend?: string): BuildSession {
+function sessionWith(locked: boolean, timed: boolean, checking = false, json?: string, backend?: string, flags: BuildFlag[] = []): BuildSession {
   let made = cachedSession();
+  if (flags.length > 0) made.build = { triple: "", release: false, flags };
   const chosen = backend ?? process.env.FISH_BACKEND;
   if (chosen !== undefined && chosen !== "native" && chosen !== "llvm") fail(`fishc: the backend '${chosen!}' isn't one; give native or llvm`);
   made.backend = chosen;
@@ -1306,14 +1782,14 @@ const CODEGEN_PARTS = ["codegen names", "codegen setup", "codegen comptime", "co
 const OTHER_PARTS = ["reload compare", "reload read", "reload classify", "split names", "split items", "split reach", "split parts"];
 
 // What one of `fishc watch`'s builds takes.
-type Rebuild = { entry: string; binary: string; links: string[]; release: boolean; panic: Panic; leaks: boolean; debug: boolean; locked: boolean; timed: boolean; manifest: string | undefined };
+type Rebuild = { entry: string; binary: string; links: string[]; release: boolean; panic: Panic; leaks: boolean; profile: Profiling; debug: boolean; locked: boolean; timed: boolean; manifest: string | undefined; flags: BuildFlag[] };
 
 // One of `fishc watch`'s builds: whether it built, and the files it read or looked for.
 function rebuilt(r: Ref<Rebuild>, kept: Kept | undefined): Rebuilt {
   let loaded: string[] = [];
   try {
     const start = performance.now();
-    let made = builtKept(sessionWith(r.locked, r.timed), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded, kept, r.manifest);
+    let made = builtKept(sessionWith(r.locked, r.timed, false, undefined, undefined, flagsCopy(r.flags)), r.entry, r.binary, r.release, r.panic, [...r.links], hostTarget(), r.leaks, r.debug, loaded, kept, r.manifest, true, r.profile);
     const stages = ["reload", ...FRONT_END, "codegen", "instrument", "split", ...NATIVE_STAGES];
     reportTimings(made.session, ["reload", ...FRONT_END, "codegen", ...CODEGEN_PARTS, "instrument", "split", ...OTHER_PARTS, ...NATIVE_STAGES], start);
     // What no stage holds, so a rebuild's time is all accounted for.
@@ -1359,7 +1835,7 @@ function saved(carried: usize, ir: Ref<string[]>, warnings: Ref<CompileError[]>)
 function verified(r: Ref<Rebuild>, got: Ref<{ ir: string; warnings: CompileError[] } | CompileError>): void {
   if (process.env.FISH_WATCH_VERIFY === undefined) return;
   try {
-    const wrong = cleanDifference(sessionWith(r.locked, false, true), r.entry, r.release, r.panic, r.leaks, r.debug, got);
+    const wrong = cleanDifference(sessionWith(r.locked, false, true, undefined, undefined, flagsCopy(r.flags)), r.entry, r.release, r.panic, r.leaks, r.debug, got, r.profile);
     console.error(wrong === undefined ? "[fishc] verified: the build matches a clean one" : `[fishc] verify failed: ${wrong}`);
   } catch (e) {
     console.error(`[fishc] verify failed: ${(e as { message: string }).message}`);
@@ -1443,8 +1919,8 @@ function lengthOf(pieces: Ref<string[]>): usize {
 
 // The IR in pieces as a sanitizer build gives clang it, each function marked for its sanitizer.
 function instrumentedPieces(pieces: string[], target: Ref<Target>): string[] {
-  if (target.sanitize === undefined) return pieces;
-  return pieces.map((p) => instrumented(p, target));
+  if (target.sanitize === undefined && !isWindows(target.triple)) return pieces;
+  return pieces.map((p) => forTarget(instrumented(p, target), target));
 }
 
 export const callsEngine = (ir: Ref<string[]>) => linesWith(ir, "@fsh_rt_js_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@fsh_rt_js_/.test(l));
@@ -1457,15 +1933,21 @@ export const callsTls = (ir: Ref<string[]>) => [...linesWith(ir, "fsh_rt_tls_"),
 // Whether the IR calls into the zlib half of the runtime, as the zlib module does.
 export const callsZlib = (ir: Ref<string[]>) => linesWith(ir, "fsh_rt_zlib_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_zlib_/.test(l));
 
+// Whether the IR calls into the brotli half of the runtime, as the compress module does.
+export const callsBrotli = (ir: Ref<string[]>) => linesWith(ir, "fsh_rt_brotli_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_brotli_/.test(l));
+
 // Whether the IR calls into the SQLite half of the runtime, as the sqlite module does.
 export const callsSqlite = (ir: Ref<string[]>) => linesWith(ir, "fsh_rt_sqlite_").some((l) => /^\s+(?:%\S+ = )?(?:call|invoke) [^"\n]*@"?fsh_rt_sqlite_/.test(l));
 
 // What links OpenSSL into a program calling the TLS runtime, when it was found, without which the
-// runtime's TLS calls say how to install it, zlib into one calling the zlib runtime, and the
-// system's SQLite into one calling the SQLite runtime.
+// runtime's TLS calls say how to install it, zlib into one calling the zlib runtime, libbrotlienc
+// into one calling the brotli runtime, and the system's SQLite into one calling the SQLite runtime.
 export function runtimeLinks(ir: Ref<string[]>, target: Ref<Target>): string[] {
   let libraries: string[] = [];
   if (callsZlib(ir)) libraries.push("-lz");
+  // runtimeUnits has already refused a build when libbrotlienc is missing.
+  const brotli = callsBrotli(ir) ? findBrotli(target) : undefined;
+  if (brotli !== undefined && "link" in brotli) for (const flag of brotli.link) libraries.push(flag);
   if (callsSqlite(ir)) libraries.push("-lsqlite3");
   if (!callsTls(ir)) return libraries;
   const openssl = findOpenSsl(target);
@@ -1474,24 +1956,39 @@ export function runtimeLinks(ir: Ref<string[]>, target: Ref<Target>): string[] {
 }
 
 // The C half of the runtime as cached objects, with the engine's glue and sources when the
-// program's IR calls the engine, and the TLS, zlib and SQLite halves when it calls those. They are built with unwind tables so a panic can unwind through
+// program's IR calls the engine, and the TLS, zlib, brotli and SQLite halves when it calls those. They are built with unwind tables so a panic can unwind through
 // them, and position-independent when `pic`, for a library. A `--leaks` build's runtime records
 // each block's site, so it is an object of its own.
 /** @throws {IoError} */
-export function runtimeUnits(ir: Ref<string[]>, release: boolean, pic = false, target: Target = hostTarget(), leaks = false): Unit[] {
+export function runtimeUnits(ir: Ref<string[]>, release: boolean, pic = false, target: Target = hostTarget(), leaks = false, profile: Profiling = false): Unit[] {
   const js = callsEngine(ir);
   const openssl = callsTls(ir) ? findOpenSsl(target) : undefined;
   const none: string[] = [];
-  const flags = [...target.compile, "-funwind-tables", "-pthread", ...optimization(release, target), ...(pic ? ["-fPIC"] : none), ...(js ? ["-I", engineDir()] : none)];
+  if (js && isWasm(target.triple)) throw new IoError(`fishc build: npm packages run in the JS engine, which isn't built for ${target.triple}; build without --target, or without the package`);
+  const flags = [...target.compile, "-funwind-tables", ...threading(target), ...optimization(release, target), ...(pic ? ["-fPIC"] : none), ...(js ? ["-I", engineDir()] : none)];
   const tls = openssl === undefined ? "" : "missing" in openssl ? "-tls-missing" : "-tls";
-  const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}`;
-  const source = [NATIVE, ...(js ? [JS_NATIVE] : none), ...(openssl === undefined ? none : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
+  const name = `${js ? "runtime-js" : "runtime"}${tls}${leaks ? "-leaks" : ""}${profile === true ? "-profile" : profile === "heap" ? "-heap-profile" : ""}`;
+  // A debug build's runtime checks the order Locks are taken in.
+  const source = [...(release ? none : ["#define FSH_LOCK_ORDER"]), NATIVE, ...(js ? [JS_NATIVE] : none), ...(openssl === undefined ? none : ["missing" in openssl ? tlsStub(openssl.missing) : TLS_NATIVE])].join("\n");
   const tlsFlags = openssl !== undefined && "compile" in openssl ? openssl.compile : [...none];
-  const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none)], stdin: source, inputs: js ? files(engineDir()) : none };
+  const runtime: Unit = { name, args: ["-x", "c", "-", ...flags, ...tlsFlags, ...(leaks ? ["-DFSH_LEAK_SITES"] : none), ...(profile === true ? ["-DFSH_PROFILE"] : profile === "heap" ? ["-DFSH_HEAP_PROFILE"] : none)], stdin: source, inputs: js ? files(engineDir()) : none };
   const engine: Unit[] = js ? engineSources().map((source): Unit => ({ name: basename(source, ".c"), args: ["-x", "c", source, ...flags], inputs: files(engineDir()) })) : [];
   const zlib: Unit[] = callsZlib(ir) ? [{ name: "zlib", args: ["-x", "c", "-", ...flags], stdin: ZLIB_NATIVE, inputs: [] }] : [];
+  const brotlienc = callsBrotli(ir) ? findBrotli(target) : undefined;
+  if (brotlienc !== undefined && "missing" in brotlienc) throw new IoError(brotlienc.missing);
+  const brotli: Unit[] = brotlienc !== undefined && "compile" in brotlienc ? [{ name: "brotli", args: ["-x", "c", "-", ...flags, ...brotlienc.compile], stdin: BROTLI_NATIVE, inputs: [] }] : [];
   const sqlite: Unit[] = callsSqlite(ir) ? [{ name: "sqlite", args: ["-x", "c", "-", ...flags], stdin: SQLITE_NATIVE, inputs: [] }] : [];
-  return [runtime, ...engine, ...zlib, ...sqlite];
+  const shim = cShimLines(ir);
+  const c: Unit[] = shim.length > 0 ? [{ name: "cshim", args: ["-x", "c", "-", ...flags, "-w", "-fno-builtin"], stdin: ["#include <stddef.h>", "#include <stdint.h>", ...shim, ""].join("\n"), inputs: [] }] : [];
+  return [runtime, ...engine, ...zlib, ...brotli, ...sqlite, ...c];
+}
+
+// The C the module carries for its C functions taking or giving `@c` structs, which clang
+// compiles so that each struct is passed as the target's C ABI passes it.
+function cShimLines(ir: Ref<string[]>): string[] {
+  let out: string[] = [];
+  for (const line of linesWith(ir, "; fsh.c ")) if (line.startsWith("; fsh.c ")) out.push(line.slice(8));
+  return out;
 }
 
 // A build's optimization level. A sanitized dev build is optimized a little, as clang advises for
@@ -1514,9 +2011,9 @@ function withoutGlobalIsel(release: boolean, target: Ref<Target>): boolean {
 // Clang's command line for a program, its IR read from stdin unless `program` names it compiled
 // already, linked with `objects`.
 /** @throws {Error} */
-function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = hostTarget(), program: string[] = ["-x", "ir", "-"]): string[] {
+function clangArgs(out: string, release: boolean, links: string[], objects: string[], shim?: Shim, target: Target = hostTarget(), program: string[] = ["-x", "ir", "-"], cc = "clang"): string[] {
   const none: string[] = [];
-  return ["clang", ...target.compile, ...target.link, ...linkerFlags(target), ...program, "-x", "none", ...objects, "-funwind-tables", "-pthread", "-o", out, ...optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)];
+  return [cc, ...target.compile, ...target.link, ...linkerFlags(target), ...program, "-x", "none", ...objects, "-funwind-tables", ...threading(target), "-o", out, ...optimization(release, target), "-lm", ...links.map((l) => `-l${l}`), ...(shim !== undefined ? [shim.lib, ...shim.links] : none)];
 }
 
 // What runs comptime code over a checked program, every function of which is checked: the repl's
@@ -1695,6 +2192,94 @@ function fail(message: string): never {
   return process.exit(2);
 }
 
+// The commands that run in every member at a workspace's root, and those `-p` can aim.
+const ACROSS = new Set(["build", "check", "test", "fmt"]);
+const AIMED = new Set(["build", "check", "test", "fmt", "add", "publish"]);
+
+// fishc's own arguments without the `-p <name>` they were given in any of its spellings, and with
+// `-p <member>` first, for fishc run again in that member's directory.
+function aimedAt(member: string): string[] {
+  let out = ["-p", member];
+  let ended = false;
+  const given = Bun.argv.slice(2);
+  for (let i: usize = 0; i < given.length; i++) {
+    const a = given[i]!;
+    if (!ended && (a === "-p" || a === "--package")) i++;
+    else if (!ended && ((a.startsWith("-p") && a !== "-p") || a.startsWith("--package="))) continue;
+    else {
+      if (a === "--") ended = true;
+      out.push(a);
+    }
+  }
+  return out;
+}
+
+// Runs fishc again in a member's directory, aimed at it, and gives its exit code.
+/** @throws {IoError} */
+function inMember(member: Ref<Member>): i64 {
+  const run = Bun.spawnSync([process.execPath, ...aimedAt(member.name)], { cwd: member.dir, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+  return run.exitCode ?? 1;
+}
+
+// Whether a member is only a library, with a lib and no entry: build and check across a workspace
+// pass over it, as the members importing it check it. A manifest that doesn't read isn't passed
+// over, so its own run reports it.
+function libraryOnly(member: Ref<Member>): boolean {
+  try {
+    const m = loadManifest(join(member.dir, MANIFEST));
+    return !existsSync(join(member.dir, m.entry)) && existsSync(join(member.dir, m.lib));
+  } catch (_e) {
+    return false;
+  }
+}
+
+// `-p <name>` runs the command in that member of the workspace around the working directory, and
+// build, check, test and fmt at a workspace's root, with no file or path, run in every member, each
+// after a line naming it. Returns when the command runs here, as it would with no workspace.
+/** @throws {IoError} */
+function throughWorkspace(command: string | undefined, chosen: string | undefined, given: boolean, out: boolean): void {
+  const across = command !== undefined && ACROSS.has(command!);
+  if (chosen === undefined && !across) return;
+  const shown = command ?? "";
+  if (chosen !== undefined && !(command !== undefined && AIMED.has(command!))) fail(`fishc ${shown}: '-p' chooses a workspace member for build, check, test, fmt, add and publish`);
+  if (chosen !== undefined && given) fail(`fishc ${shown}: '-p' chooses the member to run in; give a file or path, or '-p', not both`);
+  const here = realpathSync(process.cwd());
+  let ws: Workspace | undefined = undefined;
+  try {
+    ws = workspaceAbove(here);
+  } catch (e) {
+    if (!(e instanceof CompileError)) throw e;
+    console.error(painted(e, e.sources.length > 0 ? e.sources[0]!.file : MANIFEST, e.sources.length > 0 ? e.sources[0]!.src : ""));
+    process.exit(1);
+  }
+  if (chosen !== undefined) {
+    if (ws === undefined) fail(`fishc ${shown}: '-p' chooses a member of a workspace, and there is no [workspace] here or above`);
+    const member = ws!.members.find((m) => m.name === chosen) ?? fail(`fishc ${shown}: the workspace has no member '${chosen!}'; it has ${ws!.members.map((m) => m.name).join(", ")}`);
+    if (member.dir === here) return;
+    process.exit(inMember(member));
+  }
+  // Only at the root itself: inside a member, or a package on its own, the command is that one's.
+  const found = findManifest(here);
+  if (ws === undefined || given || found === undefined || realpathSync(found!) !== ws!.file) return;
+  if (out) fail(`fishc ${shown}: '-o' names one output, and a workspace's root runs every member; choose one with -p <name>`);
+  let failed: string[] = [];
+  let code = 0;
+  for (const m of ws!.members) {
+    if ((command === "build" || command === "check") && libraryOnly(m)) {
+      console.error(`==> ${m.name}: a library with no entry, checked by the members that import it`);
+      continue;
+    }
+    console.error(`==> ${m.name}`);
+    const ran = inMember(m);
+    if (ran !== 0) {
+      failed.push(m.name);
+      if (code === 0) code = ran;
+    }
+  }
+  if (failed.length > 0) console.error(`fishc ${shown}: ${failed.length} of ${ws!.members.length} members failed: ${failed.join(", ")}`);
+  process.exit(code);
+}
+
 // The errors that are what `fishc explain-borrows` shows rather than what stops it.
 const OWNERSHIP = new Set(["E0201", "E0202", "E0203", "E0204", "E0205"]);
 
@@ -1745,16 +2330,31 @@ function explainFile(file: string, only: string | undefined): never {
   return process.exit(0);
 }
 
+// `fishc bind c`: a header's bindings written to `out`, or printed, and what was left out listed
+// on stderr.
+function bindFile(header: string, out: string | undefined, flags: string[]): never {
+  try {
+    const bound = bindHeader(header, process.env.CC ?? "clang", flags);
+    if (out === undefined) process.stdout.write(bound.source);
+    else writeFileSync(out!, bound.source);
+    for (const line of bound.skipped) console.error(`skipped ${line}`);
+  } catch (e) {
+    fail(`fishc bind: ${e instanceof Error ? e.message : (e as { message: string }).message}`);
+  }
+  return process.exit(0);
+}
+
 // `fishc openapi`: prints the OpenAPI document of the routes `file`'s program adds to std's
 // routers, or writes it to `out`, and names on stderr each route the document leaves out. Its
 // title and version are the package's, or the file's name and 0.0.0 for a file in no package.
+// With `client`, `fishc client`: the TypeScript client of the same routes in its place.
 /** @throws {Error | IoError} */
-function openapiFile(file: string, out: string | undefined): never {
+function openapiFile(file: string, out: string | undefined, client = false): never {
   let src = "";
   try {
     src = readFileSync(file, "utf8");
   } catch (e) {
-    fail(`fishc openapi: can't read '${file}': ${(e as { message: string }).message}`);
+    fail(`fishc ${client ? "client" : "openapi"}: can't read '${file}': ${(e as { message: string }).message}`);
   }
   let title = basename(file);
   let version = "0.0.0";
@@ -1775,12 +2375,21 @@ function openapiFile(file: string, out: string | undefined): never {
     let queries = new Queries(file, undefined, new Map<string, string>());
     // A check read back from the cache would hold no routes.
     const kept = queries.checked(sessionWith(false, false, true), looked, undefined);
-    const made = openapiOf(kept.checked.tables, title, version);
-    for (const l of made.left) {
-      const skipped = sourced(new CompileError("W0003", `this route is left out of the document: ${l.why}`, l.start, l.end), undefined, kept.loaded.sources);
+    let text = "";
+    let left: LeftOut[] = [];
+    if (client) {
+      const made = clientOf(kept.checked.tables, basename(file));
+      text = made.code.trimEnd();
+      left = made.left;
+    } else {
+      const made = openapiOf(kept.checked.tables, title, version);
+      text = indented(made.document);
+      left = made.left;
+    }
+    for (const l of left) {
+      const skipped = sourced(new CompileError("W0003", `this route is left out of the ${client ? "client" : "document"}: ${l.why}`, l.start, l.end), undefined, kept.loaded.sources);
       console.error(painted(skipped, file, src, "warning"));
     }
-    const text = indented(made.document);
     if (out === undefined) console.log(text);
     else writeFileSync(out!, `${text}\n`);
   } catch (e) {
@@ -1932,17 +2541,331 @@ function checkProject(dir: string, fish: boolean = false) {
   if (sources(dir, fish).length === 0) fail(`fishc survey: '${dir}' holds no TypeScript ${fish ? "or Fish " : ""}files (.ts, .tsx or .mts${fish ? ", or .fsh" : ""}, outside node_modules)`);
 }
 
+// The first exercise in `dir`, from `from` on, that doesn't compile, and its error as fishc check
+// prints it; undefined when they all do.
+/** @throws {IoError} */
+function unsolved(dir: string, from: usize): { at: usize; error: string } | undefined {
+  for (let i = from; i < EXERCISES.length; i++) {
+    const path = join(dir, EXERCISES[i]!.file);
+    const shown = join(FOLDER, EXERCISES[i]!.file);
+    try {
+      checkedFile(sessionWith(false, false, true), path);
+    } catch (e) {
+      if (e instanceof CompileError) return { at: i, error: painted(e, shown, readFileSync(path, "utf8")) };
+      return { at: i, error: (e as { message: string }).message };
+    }
+  }
+  return undefined;
+}
+
+// `fishc learn`: writes the exercises missing from `fish-learn/`, then shows the first that doesn't
+// compile and waits for it to be saved, going on to the next once it compiles, until all do. With
+// `hint`, the hint of the first that doesn't; with `once`, the first that doesn't, without waiting.
+// Gives the exit code: 0 once every exercise compiles.
+/** @throws {IoError} */
+async function learn(hint: boolean, once: boolean): Promise<i64> {
+  const dir = join(process.cwd(), FOLDER);
+  mkdirSync(dir, { recursive: true });
+  for (let i: usize = 0; i < EXERCISES.length; i++) {
+    const path = join(dir, EXERCISES[i]!.file);
+    if (!existsSync(path)) writeFileSync(path, exerciseText(i, EXERCISES[i]!));
+  }
+  const done = `every one of the ${EXERCISES.length} exercises compiles; you've finished the tutorial`;
+  let found = unsolved(dir, 0);
+  if (hint) {
+    console.log(found === undefined ? done : `${join(FOLDER, EXERCISES[found!.at]!.file)}: ${EXERCISES[found!.at]!.hint}`);
+    return 0;
+  }
+  while (found !== undefined) {
+    const at = found!.at;
+    const path = join(dir, EXERCISES[at]!.file);
+    console.log(`exercise ${at + 1} of ${EXERCISES.length}: ${join(FOLDER, EXERCISES[at]!.file)}\n`);
+    console.error(found!.error);
+    if (once) return 1;
+    console.log("fix it and save the file; 'fishc learn hint' gives a hint\n");
+    const seen = statSync(path).mtimeMs;
+    while (statSync(path).mtimeMs === seen) await Bun.sleep(300);
+    found = unsolved(dir, at);
+    if (found === undefined || found!.at !== at) console.log(`exercise ${at + 1} compiles\n`);
+  }
+  console.log(done);
+  return 0;
+}
+
+// `fishc client --types`: the `.d.ts` declarations of a file's exported types, printed or written
+// to `out`.
+/** @throws {IoError} */
+function typesFile(file: string, out: string | undefined): never {
+  let src = "";
+  try {
+    src = readFileSync(file, "utf8");
+  } catch (e) {
+    fail(`fishc client: can't read '${file}': ${(e as { message: string }).message}`);
+  }
+  try {
+    const parsed = parseWithComments(src, { last: 0 });
+    const text = typesOf(src, parsed.program, basename(file));
+    if (out === undefined) process.stdout.write(text);
+    else writeFileSync(out!, text);
+  } catch (e) {
+    if (!(e instanceof CompileError)) throw e;
+    console.error(painted(e, file, src));
+    process.exit(1);
+  }
+  return process.exit(0);
+}
+
+// `fishc doc`: the package's files, or the one named, as HTML pages and an index in `out`,
+// `build/doc` by default. Gives the exit code.
+/** @throws {IoError} */
+function docSite(file: string | undefined, out: string | undefined): i64 {
+  const manifest = findManifest(process.cwd());
+  const root = manifest !== undefined ? dirname(manifest!) : process.cwd();
+  let problems: string[] = [];
+  const files = file !== undefined ? [resolve(file!)] : fishFiles(root, problems);
+  for (const message of problems) console.error(message.replace(/^fishc fmt/, "fishc doc"));
+  const dir = out ?? join(root, "build", "doc");
+  mkdirSync(dir, { recursive: true });
+  let modules: { file: string; items: Documented[] }[] = [];
+  for (const f of files) {
+    const src = readFileSync(f, "utf8");
+    const shown = relative(root, f);
+    try {
+      const parsed = parseWithComments(src, { last: 0 });
+      const items = documented(src, parsed.program, parsed.comments);
+      writeFileSync(join(dir, pageName(shown)), modulePage(shown, items));
+      modules.push({ file: shown, items });
+    } catch (e) {
+      if (!(e instanceof CompileError)) throw e;
+      console.error(painted(e, f, src));
+      return 1;
+    }
+  }
+  writeFileSync(join(dir, "index.html"), indexPage(basename(root), modules));
+  const where = relative(process.cwd(), dir);
+  console.log(`wrote ${modules.length} module page${modules.length === 1 ? "" : "s"} and an index to ${where === "" ? "." : where}`);
+  return 0;
+}
+
+// `fishc build --addon`: the file's exports as a Node and Bun addon, `<name>.node` beside it unless
+// `out` says where, with the `.d.ts` declaring them beside that. Gives the exit code.
+/** @throws {IoError} */
+function buildAddon(session: BuildSession, file: string, out: string | undefined, release: boolean, debug: boolean): i64 {
+  const src = readFileSync(file, "utf8");
+  const output = out ?? join(dirname(file), `${basename(file, ".fsh")}.node`);
+  const dir = mkdtempSync(join(tmpdir(), "fishc-addon-"));
+  const entry = join(dir, "addon.fsh");
+  try {
+    const from = relative(dir, resolve(file));
+    const made = addonOf(src, from.startsWith(".") ? from : `./${from}`);
+    writeFileSync(entry, made.fish);
+    writeFileSync(join(dir, "glue.c"), made.glue);
+    const warnings = buildLibrary(session, entry, resolve(output), "shared", release, "unwind", [], hostTarget(), debug, join(dir, "glue.c"));
+    for (const w of warnings) console.error(painted(w, file, src, "warning"));
+    writeFileSync(`${output.replace(/\.node$/, "")}.d.ts`, made.dts);
+    return 0;
+  } catch (e) {
+    // An error in the generated entry is shown against it; every other names its own file.
+    if (e instanceof CompileError) console.error(existsSync(entry) ? painted(e, entry, readFileSync(entry, "utf8")) : painted(e, file, src));
+    else console.error((e as { message: string }).message);
+    return 1;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// `fishc build --mobile ios|android|react-native`: the file's exports as a module an app calls, in
+// `<name>-<platform>` beside it unless `out` says where. A panic aborts, since unwinding into Swift
+// or JNI frames is undefined. Gives the exit code.
+/** @throws {IoError} */
+function buildMobile(fresh: () => BuildSession, file: string, platform: string, out: string | undefined, release: boolean, debug: boolean, sysroot: string | undefined): i64 {
+  const src = readFileSync(file, "utf8");
+  const name = basename(file, ".fsh");
+  const output = resolve(out ?? join(dirname(file), `${name}-${platform}`));
+  const dir = mkdtempSync(join(tmpdir(), "fishc-mobile-"));
+  const entry = join(dir, "mobile.fsh");
+  try {
+    const from = relative(dir, resolve(file));
+    const made = mobileOf(src, from.startsWith(".") ? from : `./${from}`, name);
+    writeFileSync(entry, made.fish);
+    mkdirSync(output, { recursive: true });
+    const type = typeName(name);
+    writeFileSync(join(output, `${type}.h`), made.header);
+    let warnings: CompileError[] = [];
+    if (platform === "ios") warnings = buildIos(fresh, entry, dir, output, made, release, debug);
+    else if (platform === "android") warnings = buildAndroid(fresh, entry, dir, output, made, release, debug, sysroot);
+    else {
+      writeFileSync(join(output, `Native${type}.ts`), made.spec);
+      writeFileSync(join(output, `Native${type}Module.h`), made.module);
+    }
+    for (const w of warnings) console.error(painted(w, file, src, "warning"));
+    return 0;
+  } catch (e) {
+    if (e instanceof CompileError) console.error(existsSync(entry) ? painted(e, entry, readFileSync(entry, "utf8")) : painted(e, file, src));
+    else console.error((e as { message: string }).message);
+    return 1;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// The iOS SDK `sdk` names, iphoneos or iphonesimulator, as Xcode has it.
+/** @throws {Error | IoError} */
+function iosSdk(sdk: string): string {
+  const missing = "fishc build: building for iOS needs Xcode with its iOS SDKs; install Xcode, then run 'sudo xcode-select -s /Applications/Xcode.app'";
+  if (process.platform !== "darwin" || Bun.which("xcrun") === null) throw new Error(missing);
+  const found = Bun.spawnSync(["xcrun", "--sdk", sdk, "--show-sdk-path"]);
+  const path = new TextDecoder().decode(found.stdout).trim();
+  if (found.exitCode !== 0 || path === "") throw new Error(missing);
+  return path;
+}
+
+// A static library for the device and one for the simulator on both CPUs, joined as
+// `<Name>.xcframework` with the header and a module map, and the Swift wrapper beside it.
+/** @throws {CompileError | Error | IoError | JsonError} */
+function buildIos(fresh: () => BuildSession, entry: string, dir: string, output: string, made: Ref<Mobile>, release: boolean, debug: boolean): CompileError[] {
+  const type = typeName(made.name);
+  const lib = `lib${made.name}.a`;
+  const glue = join(dir, "glue.c");
+  writeFileSync(glue, made.glue);
+  const slices: [string, string, string][] = [["arm64-apple-ios13.0", "iphoneos", "device"], ["arm64-apple-ios13.0-simulator", "iphonesimulator", "sim-arm64"], ["x86_64-apple-ios13.0-simulator", "iphonesimulator", "sim-x86_64"]];
+  let warnings: CompileError[] = [];
+  for (const [triple, sdk, slice] of slices) {
+    const root = iosSdk(sdk);
+    mkdirSync(join(dir, slice));
+    const target: Target = { triple, compile: ["-target", triple, "-isysroot", root, "-Wno-override-module"], link: [], ar: "ar" };
+    warnings = buildLibrary(fresh(), entry, join(dir, slice, lib), "static", release, "abort", [], target, debug, glue);
+  }
+  mkdirSync(join(dir, "sim"));
+  run(["lipo", "-create", join(dir, "sim-arm64", lib), join(dir, "sim-x86_64", lib), "-output", join(dir, "sim", lib)]);
+  const headers = join(dir, "headers");
+  mkdirSync(headers);
+  writeFileSync(join(headers, `${type}.h`), made.header);
+  writeFileSync(join(headers, "module.modulemap"), made.modulemap);
+  const framework = join(output, `${type}.xcframework`);
+  rmSync(framework, { recursive: true, force: true });
+  run(["xcodebuild", "-create-xcframework", "-library", join(dir, "device", lib), "-headers", headers, "-library", join(dir, "sim", lib), "-headers", headers, "-output", framework]);
+  writeFileSync(join(output, `${type}.swift`), made.swift);
+  return warnings;
+}
+
+// Orders NDK versions like 27.1.12297006 by their numbers.
+function newerNdk(a: string, b: string): i64 {
+  const x = a.split(".").map((p) => Number(p));
+  const y = b.split(".").map((p) => Number(p));
+  for (let i = 0; i < x.length && i < y.length; i++) if (x[i]! !== y[i]!) return y[i]! > x[i]! ? 1 : -1;
+  return (y.length as i64) - (x.length as i64);
+}
+
+// The NDK's clang: from `--sysroot`, ANDROID_NDK_HOME, or the newest NDK in the Android SDK.
+/** @throws {Error | IoError} */
+function ndkClang(given: string | undefined): string {
+  const install = "install one with Android Studio's SDK Manager or 'sdkmanager \"ndk;<version>\"', or give its directory with --sysroot <dir> or ANDROID_NDK_HOME";
+  let ndk = given ?? process.env.ANDROID_NDK_HOME ?? "";
+  if (ndk === "") {
+    const home = process.env.HOME ?? "";
+    const sdk = process.env.ANDROID_HOME ?? (process.platform === "darwin" ? join(home, "Library", "Android", "sdk") : join(home, "Android", "Sdk"));
+    let versions: string[] = existsSync(join(sdk, "ndk")) ? readdirSync(join(sdk, "ndk")).filter((v) => /^\d+(\.\d+)*$/.test(v)) : [];
+    versions.sort(newerNdk);
+    if (versions.length === 0) throw new Error(`fishc build: building for Android needs the Android NDK, and ${join(sdk, "ndk")} has none; ${install}`);
+    ndk = join(sdk, "ndk", versions[0]!);
+  }
+  const host = process.platform === "darwin" ? "darwin-x86_64" : "linux-x86_64";
+  const clang = join(resolve(ndk), "toolchains", "llvm", "prebuilt", host, "bin", "clang");
+  if (!existsSync(clang)) throw new Error(`fishc build: ${resolve(ndk)} isn't an Android NDK for this machine: it has no ${clang}; ${install}`);
+  return clang;
+}
+
+// A shared library per ABI under `jniLibs`, built by the NDK's clang for API 28 with the JNI glue,
+// and the Kotlin wrapper beside them. Bionic has getentropy and posix_spawn, which the runtime
+// calls, from API 28.
+/** @throws {CompileError | Error | IoError | JsonError} */
+function buildAndroid(fresh: () => BuildSession, entry: string, dir: string, output: string, made: Ref<Mobile>, release: boolean, debug: boolean, sysroot: string | undefined): CompileError[] {
+  const clang = ndkClang(sysroot);
+  const glue = join(dir, "jni.c");
+  writeFileSync(glue, made.jni);
+  const abis: [string, string, string[]][] = [["aarch64-linux-android28", "arm64-v8a", ["-fno-global-isel"]], ["x86_64-linux-android28", "x86_64", []]];
+  let warnings: CompileError[] = [];
+  for (const [triple, abi, extra] of abis) {
+    const at = join(output, "jniLibs", abi);
+    mkdirSync(at, { recursive: true });
+    let session = fresh();
+    session.cc = clang;
+    const target: Target = { triple, compile: ["-target", triple, "-Wno-override-module", ...extra], link: [], ar: "ar", cc: clang };
+    warnings = buildLibrary(session, entry, join(at, `lib${made.name}.so`), "shared", release, "abort", [], target, debug, glue);
+  }
+  writeFileSync(join(output, `${typeName(made.name)}.kt`), made.kotlin);
+  return warnings;
+}
+
+// Runs `binary` with `args` on this process's standard streams, giving its exit code, or 128 plus
+// the signal's number when a signal ended it, as a shell reports it.
+/** @throws {IoError} */
+function ranProgram(binary: string, args: Ref<string[]>): i64 {
+  const ran = Bun.spawnSync([binary, ...args], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+  const signal = ran.signalCode;
+  const found = signal === null ? undefined : Object.entries(constants.signals).find(([name]) => name === signal);
+  return ran.exitCode ?? 128 + (found === undefined ? 0 : found[1]);
+}
+
+// `fishc script.fsh args...`: the cached binary when the script, what it imports and fishc are all
+// as they were when it was built, else a fresh build kept for the next run.
+/** @throws {IoError} */
+function runScript(script: string, args: Ref<string[]>): i64 {
+  let binary = cachedScript(script);
+  if (binary === undefined) {
+    let temp = "";
+    try {
+      temp = scriptBuildPath(script);
+      let looked: string[] = [];
+      const made = built(sessionWith(false, false, false), script, temp, false, "unwind", [], hostTarget(), false, false, looked);
+      for (const w of made.warnings) console.error(painted(w, script, readFileSync(script, "utf8"), "warning"));
+      binary = keepScript(script, temp, looked);
+    } catch (e) {
+      if (e instanceof CompileError) console.error(painted(e, script, readFileSync(script, "utf8")));
+      else console.error((e as { message: string }).message);
+      if (temp !== "") rmSync(temp, { force: true });
+      return 1;
+    }
+  }
+  return ranProgram(binary!, args);
+}
+
 /** @throws {Error | IoError | JsonError} */
 async function main(): Promise<void> {
   if (Bun.argv.length === 3 && Bun.argv[2] === "lsp") {
     await serveLsp();
     return;
   }
+  // `fishc script.fsh args...`, as a `#!/usr/bin/env fishc` line runs it: every argument after the
+  // file is the script's, so none of them is read as fishc's own flag.
+  if (Bun.argv.length > 2 && Bun.argv[2]!.endsWith(".fsh") && existsSync(Bun.argv[2]!)) process.exit(runScript(Bun.argv[2]!, Bun.argv.slice(3)));
+  if (Bun.argv.length === 2) fail(overview());
+  // Help and the version are looked for only before `--`, since what follows is the program's.
+  let own: string[] = [];
+  for (const a of Bun.argv.slice(2)) {
+    if (a === "--") break;
+    own.push(a);
+  }
+  if (own.length === 1 && (own[0]! === "--version" || own[0]! === "-V")) {
+    console.log(`fishc ${VERSION}`);
+    process.exit(0);
+  }
+  if (own.length > 0 && (own[0]! === "help" || own.some((a) => a === "--help" || a === "-h"))) {
+    // `fishc help --help` asks about help itself; `fishc --help` and `fishc help` for the list.
+    let name: string | undefined = undefined;
+    if (own[0]! !== "help") {
+      if (!own[0]!.startsWith("-")) name = own[0];
+    } else if (own.length > 1) name = own[1]!.startsWith("-") ? "help" : own[1];
+    if (name === undefined) console.log(overview());
+    else console.log(helpOf(name!) ?? fail(`fishc help: '${name!}' isn't a command; run 'fishc help' for the list`));
+    process.exit(0);
+  }
   // A bare `--lib` builds the default kind, a static library; `--release=size` is a release build
   // tuned for size.
   const given = Bun.argv.slice(2);
-  const profile = given.find((a) => a.startsWith("--release=") && a !== "--release=size");
-  if (profile !== undefined) fail(`fishc: '${profile}' isn't a release profile; give '--release' or '--release=size'`);
+  const releaseProfile = given.find((a) => a.startsWith("--release=") && a !== "--release=size");
+  if (releaseProfile !== undefined) fail(`fishc: '${releaseProfile}' isn't a release profile; give '--release' or '--release=size'`);
   const { values, positionals } = (() => {
     try {
       return parseArgs({
@@ -1960,6 +2883,10 @@ async function main(): Promise<void> {
           sysroot: { type: "string" },
           static: { type: "boolean" },
           dockerfile: { type: "boolean" },
+          addon: { type: "boolean" },
+          mobile: { type: "string" },
+          arena: { type: "string" },
+          types: { type: "boolean" },
           json: { type: "boolean" },
           rank: { type: "boolean" },
           self: { type: "string" },
@@ -1970,10 +2897,13 @@ async function main(): Promise<void> {
           "allow-dirty": { type: "boolean" },
           submit: { type: "boolean" },
           fork: { type: "string" },
+          registry: { type: "string" },
           yes: { type: "boolean" },
           check: { type: "boolean" },
           fix: { type: "boolean" },
           leaks: { type: "boolean" },
+          profile: { type: "boolean" },
+          "heap-profile": { type: "boolean" },
           debug: { type: "boolean", short: "g" },
           timings: { type: "boolean" },
           "timings-json": { type: "string" },
@@ -1990,6 +2920,19 @@ async function main(): Promise<void> {
           names: { type: "string" },
           linker: { type: "string" },
           backend: { type: "string" },
+          runs: { type: "string" },
+          "max-time": { type: "string" },
+          corpus: { type: "string" },
+          artifacts: { type: "string" },
+          replay: { type: "string" },
+          "no-asan": { type: "boolean" },
+          list: { type: "boolean" },
+          sim: { type: "boolean" },
+          seed: { type: "string" },
+          seeds: { type: "string" },
+          "no-doc": { type: "boolean" },
+          flag: { type: "string", multiple: true },
+          package: { type: "string", short: "p" },
         },
       });
     } catch (e) {
@@ -1997,8 +2940,11 @@ async function main(): Promise<void> {
     }
   })();
   // The options given, as Node's parseArgs keys them: those on the command line and `panic`'s default.
+  // --registry applies to whatever reads the registry, and -p is taken by throughWorkspace before
+  // any command reads its flags, so no command's own flags list them.
   let flags: string[] = [];
-  for (const [k, v] of Object.entries(values)) if (v !== undefined) flags.push(k);
+  for (const [k, v] of Object.entries(values)) if (v !== undefined && k !== "registry" && k !== "package") flags.push(k);
+  if (values.registry !== undefined) useRegistry(values.registry);
   const links: string[] = values.link === undefined ? [] : [...values.link];
   // The target with `--linker`'s choice, checked before anything is built.
   const linking = (t: Target): Target => {
@@ -2015,7 +2961,8 @@ async function main(): Promise<void> {
   const timed = values.timings === true;
   const checking = values["no-check-cache"] === true;
   const json = values["timings-json"];
-  const sessionFor = (): BuildSession => sessionWith(locked, timed, checking, json, values.backend);
+  const buildFlags = buildFlagsOf(values.flag === undefined ? [] : [...values.flag]);
+  const sessionFor = (): BuildSession => sessionWith(locked, timed, checking, json, values.backend, flagsCopy(buildFlags));
   // `fishc run` and `fishc watch` take the program's arguments after the file, or all of them with no file.
   const command = positionals.length > 0 ? positionals[0] : undefined;
   if (command === "daemon" && positionals.length === 1) await serveDaemon(daemonBuild);
@@ -2028,13 +2975,14 @@ async function main(): Promise<void> {
     writeFileSync(values.out!, objectOf(readFileSync(0)));
     return;
   }
+  throughWorkspace(command, values.package, command === "fmt" ? positionals.length > 1 : (command === "build" || command === "check") && file !== undefined, values.out !== undefined);
   if (command === "repl") {
-    if (positionals.length !== 1 || flags.some((k) => k !== "panic")) fail("usage: fishc repl");
+    if (positionals.length !== 1 || flags.some((k) => k !== "panic")) fail(usageOf("repl"));
     runRepl(locked, timed, checking);
   }
   // Parses a file without checking it, for test programs that only have to parse.
   if (command === "parse") {
-    if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail("usage: fishc parse <file.fsh>");
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail(usageOf("parse"));
     let src = "";
     try {
       src = readFileSync(named!, "utf8");
@@ -2047,18 +2995,33 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (command === "explain") {
-    if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail("usage: fishc explain <code>");
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic")) fail(usageOf("explain"));
     const text = explain(named!);
     if (text === undefined) fail(`fishc explain: '${named ?? ""}' isn't an error code; a code looks like E0201 or W0001, as an error shows it`);
     console.log(text);
     process.exit(0);
   }
   if (command === "explain-borrows") {
-    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "fn")) fail("usage: fishc explain-borrows <file.fsh> [--fn <name>]");
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "fn")) fail(usageOf("explain-borrows"));
     explainFile(named!, values.fn);
   }
+  if (command === "learn") {
+    const sub = positionals.length > 1 ? positionals[1] : undefined;
+    if (positionals.length > 2 || (sub !== undefined && sub !== "hint") || flags.some((k) => k !== "panic" && k !== "check")) fail(usageOf("learn"));
+    const code = await learn(sub === "hint", values.check === true);
+    process.exit(code);
+  }
+  if (command === "client") {
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "out" && k !== "types")) fail(usageOf("client"));
+    if (values.types === true) typesFile(named!, values.out);
+    openapiFile(named!, values.out, true);
+  }
+  if (command === "doc") {
+    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "out")) fail(usageOf("doc"));
+    process.exit(docSite(file, values.out));
+  }
   if (command === "openapi") {
-    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "out")) fail("usage: fishc openapi <file.fsh> [-o <out>]");
+    if (positionals.length !== 2 || flags.some((k) => k !== "panic" && k !== "out")) fail(usageOf("openapi"));
     openapiFile(named!, values.out);
   }
   if (command === "bloat") {
@@ -2077,9 +3040,22 @@ async function main(): Promise<void> {
     if (positionals.length !== 3 || flags.some((k) => k !== "panic" && k !== "json")) fail("usage: fishc layout <file.fsh> <type> [--json]");
     layoutTypes(named!, positionals[2]!, values.json === true);
   }
+  if (command === "heap") {
+    if (positionals.length !== 4 || positionals[1] !== "diff" || flags.some((k) => k !== "panic")) fail(usageOf("heap"));
+    try {
+      for (const line of heapDiffFiles(positionals[2]!, positionals[3]!)) console.log(line);
+    } catch (e) {
+      fail(`fishc heap diff: ${e.message}`);
+    }
+    process.exit(0);
+  }
+  if (command === "bind") {
+    if (positionals.length < 3 || positionals[1] !== "c" || flags.some((k) => k !== "panic" && k !== "out")) fail(usageOf("bind"));
+    bindFile(positionals[2]!, values.out, positionals.slice(3));
+  }
   if (command === "survey") {
     const dirs = positionals.slice(1);
-    const usage = "usage: fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]";
+    const usage = usageOf("survey");
     const extra = values.self !== undefined || values.plan !== undefined;
     if (dirs.length === 0 || (values.rank !== true && (dirs.length > 1 || extra))) fail(usage);
     if (values.rank === true && values.compare !== undefined) fail("fishc survey: --compare compares one project's survey; rankings can't be compared yet");
@@ -2119,7 +3095,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (command === "fmt") {
-    const usage = "usage: fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]";
+    const usage = usageOf("fmt");
     let paths = positionals.slice(1);
     if (flags.some((k) => k !== "check" && k !== "panic") || (paths.includes("-") && paths.length > 1)) fail(usage);
     const check = values.check === true;
@@ -2132,21 +3108,106 @@ async function main(): Promise<void> {
   }
   if (command === "lint") {
     let paths = positionals.slice(1);
-    if (flags.some((k) => k !== "panic" && k !== "fix") || values.panic !== "unwind") fail("usage: fishc lint [<path>...] [--fix]");
+    if (flags.some((k) => k !== "panic" && k !== "fix") || values.panic !== "unwind") fail(usageOf("lint"));
     if (paths.length === 0) {
       const found = findManifest(process.cwd()) ?? fail(`fishc lint: no ${MANIFEST} here or in any directory above; name the files to lint, or run it inside a package`);
       paths.push(dirname(found!));
     }
     process.exit(lintPaths(paths, values.fix === true));
   }
+  if (command === "fix") {
+    const usage = usageOf("fix");
+    const allowed = new Set(["panic", "dry-run", "check"]);
+    if (positionals.length > 2 || flags.some((k) => !allowed.has(k)) || values.panic !== "unwind") fail(usage);
+    const dryRun = values["dry-run"] === true;
+    const checkOnly = values.check === true;
+    let entry = file;
+    let manifest: string | undefined = undefined;
+    let projectRoot = "";
+    if (entry !== undefined) {
+      if (!existsSync(entry!) || !statSync(entry!).isFile()) fail(`fishc fix: can't find file '${entry!}'`);
+      const found = findManifest(dirname(resolve(entry!)));
+      manifest = found;
+      projectRoot = found !== undefined ? dirname(found!) : dirname(resolve(entry!));
+    } else {
+      const found = findManifest(process.cwd()) ?? fail(`fishc fix: no ${MANIFEST} here or in any directory above; give a .fsh file or run inside a package`);
+      try {
+        const pkg = loadManifest(found!, "entry");
+        manifest = found;
+        projectRoot = pkg.dir;
+        entry = join(pkg.dir, pkg.entry);
+      } catch (e) {
+        if (e instanceof CompileError) {
+          console.error(painted(e, relative(process.cwd(), found!), readFileSync(found!, "utf8")));
+          process.exit(1);
+        }
+        fail(`fishc fix: ${(e as { message: string }).message}`);
+      }
+    }
+    try {
+      const report = fixProgram(entry!, manifest, projectRoot);
+      const cwd = process.cwd();
+      let writeFailed = false;
+      let failedPaths = new Set<string>();
+      if (!dryRun && !checkOnly) {
+        for (const [path, text] of report.edited) {
+          const orig = report.originals.get(path) ?? "";
+          const failed = rewrite(path, text, Buffer.from(orig));
+          if (failed !== undefined) {
+            console.error(`fishc fix: can't write '${displayFixPath(path, cwd)}': ${failed}`);
+            writeFailed = true;
+            failedPaths.add(path);
+          }
+        }
+      }
+      let reportedCount: usize = 0;
+      for (const a of report.applied) {
+        if (failedPaths.has(a.file)) continue;
+        const verb = dryRun || checkOnly ? "would fix" : "fixed";
+        console.log(`${verb} [${a.kind}] ${displayFixPath(a.file, cwd)}:${a.line}: ${a.message}`);
+        reportedCount++;
+      }
+      const entryText = report.edited.get(realpathSync(resolve(entry!))) ?? report.originals.get(realpathSync(resolve(entry!))) ?? "";
+      for (const rem of report.remaining) {
+        console.error(painted(rem, displayFixPath(realpathSync(resolve(entry!)), cwd), entryText));
+      }
+      const count = dryRun || checkOnly ? report.applied.length : reportedCount;
+      const fileCount = dryRun || checkOnly ? report.edited.size : report.edited.size - failedPaths.size;
+      if (count === 0 && report.remaining.length === 0 && !writeFailed) {
+        console.log("nothing to fix");
+      } else {
+        const prefix = dryRun || checkOnly ? "would apply" : "applied";
+        const suffix = report.remaining.length > 0 ? `, ${report.remaining.length} error${report.remaining.length === 1 ? "" : "s"} remaining` : "";
+        console.log(`${prefix} ${count} fix${count === 1 ? "" : "es"} in ${fileCount} file${fileCount === 1 ? "" : "s"}${suffix}`);
+      }
+      if (writeFailed || report.remaining.length > 0 || (checkOnly && count > 0)) process.exit(1);
+      process.exit(0);
+    } catch (e) {
+      console.error(`fishc fix: ${(e as { message: string }).message}`);
+      process.exit(1);
+    }
+  }
   if (command === "test") {
     // Tests are built to unwind, so `--panic=abort` is refused rather than ignored.
-    const usage = "usage: fishc test [<file> | <filter>] [--release] [--timeout <ms>] [--jobs <n>] [--watch | --interpret]";
-    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "timeout" && k !== "jobs" && k !== "watch" && k !== "interpret") || values.panic !== "unwind" || (values.watch === true && values.interpret === true)) fail(usage);
+    const usage = usageOf("test");
+    if (positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "release" && k !== "timeout" && k !== "jobs" && k !== "sim" && k !== "seed" && k !== "seeds" && k !== "no-doc" && k !== "flag" && k !== "watch" && k !== "interpret") || values.panic !== "unwind" || (values.watch === true && values.interpret === true)) fail(usage);
     let options = runDefaults();
+    if (values["no-doc"] === true) options.docs = false;
     if (values.timeout !== undefined) options.timeout = wholeNumber(values.timeout) ?? fail(`fishc test: --timeout takes a whole number of milliseconds above 0, not '${values.timeout}'`);
     if (values.jobs !== undefined) options.jobs = wholeNumber(values.jobs) ?? fail(`fishc test: --jobs takes a whole number of tests above 0, not '${values.jobs}'`);
     options.interpret = values.interpret === true;
+    if (values.sim === true) {
+      options.sim = true;
+      if (values.seed !== undefined) options.seed = parseSimSeed(values.seed) ?? fail(`fishc test: --seed takes an unsigned 64-bit integer, not '${values.seed}'`);
+      if (values.seeds !== undefined) options.seeds = wholeNumber(values.seeds) ?? fail(`fishc test: --seeds takes a whole number above 0, not '${values.seeds}'`);
+      const u64Max: u64 = (1844674407370955161 as u64) * (10 as u64) + (5 as u64);
+      if (u64Max - options.seed < ((options.seeds - 1) as u64)) fail("fishc test: --seed + --seeds overflows unsigned 64-bit range");
+    } else if (values.seeds !== undefined) {
+      fail("fishc test: --seeds requires --sim");
+    } else if (values.seed !== undefined) {
+      // Without --sim, the seed is the one every property draws its inputs from.
+      options.propSeed = parseSimSeed(values.seed) ?? fail(`fishc test: --seed takes an unsigned 64-bit integer, not '${values.seed}'`);
+    }
     const found = findManifest(process.cwd()) ?? fail(`fishc test: no ${MANIFEST} here or in any directory above; tests run inside a package`);
     if (values.watch === true) {
       const watched = await watchTests(sessionFor, dirname(found!), file, values.release === true, options);
@@ -2155,8 +3216,51 @@ async function main(): Promise<void> {
     const code = await testPackage(sessionFor(), dirname(found!), file, values.release === true, options);
     process.exit(code);
   }
+  if (command === "fuzz") {
+    const usage = usageOf("fuzz");
+    const allowed = new Set(["panic", "runs", "max-time", "corpus", "artifacts", "replay", "no-asan", "list"]);
+    if (positionals.length > 3 || flags.some((k) => !allowed.has(k)) || values.panic !== "unwind") fail(usage);
+    let options: FuzzOptions = { asan: values["no-asan"] !== true, list: values.list === true };
+    if (values.runs !== undefined) options.runs = wholeNumber(values.runs) ?? fail(`fishc fuzz: --runs takes a whole number above 0, not '${values.runs}'`);
+    const maxTime = values["max-time"];
+    if (maxTime !== undefined) options.maxTime = wholeNumber(maxTime) ?? fail(`fishc fuzz: --max-time takes a whole number of seconds above 0, not '${maxTime}'`);
+    if (values.corpus !== undefined) options.corpus = values.corpus;
+    if (values.artifacts !== undefined) options.artifacts = values.artifacts;
+    if (values.replay !== undefined) {
+      if (!existsSync(values.replay) || !statSync(values.replay).isFile()) fail(`fishc fuzz: replay file '${values.replay}' doesn't exist or isn't a regular file`);
+      options.replay = values.replay;
+    }
+    const first = positionals.length > 1 ? positionals[1] : undefined;
+    const second = positionals.length > 2 ? positionals[2] : undefined;
+    const isFile = first !== undefined && first.endsWith(".fsh");
+    if (!isFile && second !== undefined) fail(usage);
+    let dir = "";
+    let files: string[] = [];
+    let filter: string | undefined = undefined;
+    if (isFile) {
+      if (!existsSync(first!) || !statSync(first!).isFile()) fail(`fishc fuzz: can't find file '${first!}'`);
+      const full = resolve(first!);
+      dir = dirname(full);
+      files = [full];
+      filter = second;
+    } else {
+      const found = findManifest(process.cwd()) ?? fail(`fishc fuzz: no ${MANIFEST} here or in any directory above; give a .fsh file or run inside a package`);
+      dir = dirname(found!);
+      let problems: string[] = [];
+      files = fishFiles(dir, problems);
+      for (const message of problems) console.error(message.replace(/^fishc fmt/, "fishc fuzz"));
+      filter = first;
+    }
+    try {
+      const code = await runFuzz(sessionFor(), dir, files, filter, isFile, isFile ? first : undefined, options);
+      process.exit(code);
+    } catch (e) {
+      console.error((e as { message: string }).message);
+      process.exit(1);
+    }
+  }
   if (command === "publish") {
-    const usage = "usage: fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]";
+    const usage = usageOf("publish");
     const allowed = new Set(["panic", "dry-run", "allow-dirty", "submit", "fork", "yes"]);
     const submitting = values.submit === true;
     if (positionals.length > 1 || flags.some((k) => !allowed.has(k)) || ((values.fork !== undefined || values.yes === true) && !submitting) || (submitting && values["dry-run"] === true)) fail(usage);
@@ -2170,7 +3274,10 @@ async function main(): Promise<void> {
       if (packed.unsafe.length === 0 && deps.length === 0) console.log(`no unsafe in ${packed.manifest.name} or its dependencies`);
       for (const u of packed.unsafe) console.log(`unsafe: ${u.file}:${u.line}:${u.col} ${u.what}`);
       for (const d of deps) console.log(`unsafe: the dependency '${d.name}' ${d.text} uses unsafe`);
-      if (values["dry-run"] !== true) {
+      if (values["dry-run"] !== true && sparseBase(registryUrl(packed.manifest)) !== undefined) {
+        if (submitting) fail("fishc publish: --submit opens a pull request against a git index; a registry server takes the release itself");
+        console.log(`published ${packed.manifest.name} ${packed.manifest.version} to ${upload(packed)}`);
+      } else if (values["dry-run"] !== true) {
         const prepared = prepare(packed);
         console.log(`prepared ${prepared.branch} in ${prepared.clone}: ${prepared.archive} and its index line`);
         if (!submitting) console.log(`run 'fishc publish --submit' to push it to your fork and open a pull request`);
@@ -2190,11 +3297,17 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (command === "add" || command === "update") {
-    const usage = "usage: fishc add <name>[@<range>]\n       fishc update [<name>]";
+    const usage = usageOf(command!);
     if (positionals.length > 2 || (command === "add" && file === undefined) || flags.some((k) => k !== "panic")) fail(usage);
     const found = findManifest(process.cwd()) ?? fail(`fishc ${command ?? ""}: no ${MANIFEST} here or in any directory above; make a package with 'fishc new <name>' or 'fishc init'`);
     try {
-      const manifest = loadManifest(found);
+      // A workspace's root with no package of its own adds to a member, and updates the lock all of
+      // its members share through the first.
+      const around = workspaceAbove(dirname(found!));
+      const bare = around !== undefined && around!.file === realpathSync(found!) && !around!.members.some((m) => m.dir === around!.dir);
+      if (bare && command === "add") fail(`fishc add: the workspace's root holds no package; add to a member with -p <name>`);
+      if (bare && around!.members.length === 0) fail(`fishc update: the workspace has no members`);
+      const manifest = loadManifest(bare ? join(around!.members[0]!.dir, MANIFEST) : found);
       if (command === "add") {
         const at = file!.indexOf("@");
         const name = at >= 0 ? file!.slice(0, at) : file!;
@@ -2216,11 +3329,12 @@ async function main(): Promise<void> {
         const chosen = released.find((e) => formatVersion(e.version) === formatVersion(latest!));
         if (chosen !== undefined && chosen.unsafe === true) console.error(`note: '${name}' ${chosen.text} uses unsafe`);
       } else {
-        if (file !== undefined && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
+        if (file !== undefined && !bare && !manifest.dependencies.some((d) => d.name === file && "version" in d)) fail(`fishc update: '${file}' isn't a dependency from the registry in ${MANIFEST}`);
         let updating = cachedSession();
         updating.locking.update = file !== undefined ? new Set([file]) : "all";
         resolvePackages(join(manifest.dir, manifest.entry), updating.locking);
-        console.log(`updated ${fromHere(join(manifest.dir, "fish.lock"))}`);
+        const shared = workspaceOf(manifest.dir);
+        console.log(`updated ${fromHere(join(shared !== undefined ? shared!.dir : manifest.dir, "fish.lock"))}`);
       }
     } catch (e) {
       if (e instanceof CompileError) {
@@ -2232,7 +3346,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (command === "new" || command === "init") {
-    const usage = "usage: fishc new <name>\n       fishc init [<name>]";
+    const usage = usageOf(command!);
     const extra = flags.some((k) => k !== "panic");
     if (positionals.length > 2 || extra || (command === "new" && file === undefined)) fail(usage);
     const dir = command === "new" ? join(process.cwd(), file!) : process.cwd();
@@ -2254,12 +3368,15 @@ async function main(): Promise<void> {
   const size = values["release-size"] === true;
   const leaks = values.leaks === true;
   if (size && command !== "build") fail(`fishc ${command ?? ""}: '--release=size' tunes a build's binary for size; build with 'fishc build --release=size'`);
+  if (values.profile === true && values["heap-profile"] === true) fail(`fishc ${command ?? ""}: '--profile' and '--heap-profile' each instrument the program on their own; build with one of them`);
+  if (values.leaks === true && values["heap-profile"] === true) fail(`fishc ${command ?? ""}: '--leaks' and '--heap-profile' each keep a header on every block; build with one of them`);
+  const profile: Profiling = values.profile === true ? true : values["heap-profile"] === true ? "heap" : false;
   if ((values["pgo-instrument"] === true || values.pgo !== undefined) && command !== "build") fail(`fishc ${command ?? ""}: profile-guided optimization is a build's; build with 'fishc build --pgo-instrument', run the binary it writes, then 'fishc build --release --pgo default.profraw'`);
   if (values.sanitize !== undefined && command !== "build") fail(`fishc ${command ?? ""}: '--sanitize' instruments a build; build with 'fishc build --sanitize address|thread', then run the binary it writes`);
   let target = file;
   let out = values.out;
   // With no file, the package around the working directory is built, as cargo builds one.
-  if ((command === "build" || command === "check" || command === "run" || command === "watch") && file === undefined && lib === undefined) {
+  if ((command === "build" || command === "check" || command === "run" || command === "watch" || command === "dev") && file === undefined && lib === undefined) {
     const found = findManifest(process.cwd()) ?? fail(`fishc ${command ?? ""}: no ${MANIFEST} here or in any directory above; give a file to build, or make a package with 'fishc new <name>' or 'fishc init'`);
     try {
       const manifest = loadManifest(found, "entry");
@@ -2276,6 +3393,7 @@ async function main(): Promise<void> {
     }
   }
   const llvm = values["emit-llvm"] === true;
+  const fuzzFlag = values.runs !== undefined || values["max-time"] !== undefined || values.corpus !== undefined || values.artifacts !== undefined || values.replay !== undefined || values["no-asan"] === true || values.list === true || values.sim === true || values.seed !== undefined || values.seeds !== undefined;
   // A plain build or check goes to a running `fishc daemon`, which builds from what it kept.
   const plainFlags = ["out", "release", "panic", "link", "debug", "leaks", "locked"];
   const delegable = (command === "build" || (command === "check" && values.out === undefined && !release)) && target !== undefined && (panicName === "unwind" || panicName === "abort") && flags.every((k) => plainFlags.includes(k)) && process.env.FISH_BACKEND === undefined;
@@ -2287,7 +3405,7 @@ async function main(): Promise<void> {
       process.exit(reply.code);
     }
   }
-  if (command === "check" && target !== undefined && values.out === undefined && !release && !llvm && lib === undefined) {
+  if (command === "check" && target !== undefined && values.out === undefined && !release && !llvm && profile === false && !fuzzFlag && lib === undefined) {
     try {
       const start = performance.now();
       // Nothing but the warnings is read once the check ends, so it keeps what a plain build keeps.
@@ -2301,7 +3419,7 @@ async function main(): Promise<void> {
     }
     process.exit(0);
   }
-  if (command === "run" && target !== undefined && values.out === undefined && !llvm && lib === undefined) {
+  if (command === "run" && target !== undefined && values.out === undefined && !llvm && !fuzzFlag && lib === undefined) {
     // A lone file's program is built where nothing else looks, and removed once it has run.
     const scratch = out === undefined ? mkdtempSync(join(tmpdir(), "fishc-run-")) : undefined;
     const binary = out ?? join(scratch!, basename(target, ".fsh"));
@@ -2309,14 +3427,10 @@ async function main(): Promise<void> {
     try {
       const start = performance.now();
       let looked: string[] = [];
-      const made = built(sessionFor(), target, binary, release, panic, [...links], linking(hostTarget()), leaks, values.debug === true, looked);
+      const made = built(sessionFor(), target, binary, release, panic, [...links], linking(hostTarget()), leaks, values.debug === true, looked, profile);
       reportTimings(made.session, [...FRONT_END, "codegen", "instrument", "split", ...NATIVE_STAGES], start);
       for (const w of made.warnings) console.error(painted(w, target, readFileSync(target, "utf8"), "warning"));
-      const ran = Bun.spawnSync([binary, ...programArgs], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
-      // A signal ends it with 128 plus the signal's number, as a shell reports it.
-      const signal = ran.signalCode;
-      const found = signal === null ? undefined : Object.entries(constants.signals).find(([name]) => name === signal);
-      code = ran.exitCode ?? 128 + (found === undefined ? 0 : found[1]);
+      code = ranProgram(binary, programArgs);
     } catch (e) {
       if (e instanceof CompileError) console.error(painted(e, target, readFileSync(target, "utf8")));
       else console.error((e as { message: string }).message);
@@ -2330,13 +3444,13 @@ async function main(): Promise<void> {
     const watched = await watchCheck(sessionFor, target, findManifest(dirname(resolve(target))));
     process.exit(watched);
   }
-  if (command === "watch" && target !== undefined && values.out === undefined && !llvm && lib === undefined) {
+  if (command === "watch" && target !== undefined && values.out === undefined && !llvm && !fuzzFlag && lib === undefined) {
     const entry = target;
     const scratch = out === undefined ? mkdtempSync(join(tmpdir(), "fishc-watch-")) : undefined;
     const binary = out ?? join(scratch!, basename(entry, ".fsh"));
     // What each build takes, the callback's own, since it may run on another thread.
     const manifest = findManifest(dirname(resolve(entry)));
-    const rebuild: Rebuild = { entry: `${entry}`, binary: `${binary}`, links: [...links], release, panic, leaks, debug: values.debug === true, locked, timed, manifest };
+    const rebuild: Rebuild = { entry: `${entry}`, binary: `${binary}`, links: [...links], release, panic, leaks, profile, debug: values.debug === true, locked, timed, manifest, flags: flagsCopy(buildFlags) };
     await watchProgram({
       entry,
       binary,
@@ -2352,14 +3466,53 @@ async function main(): Promise<void> {
       },
     });
   }
-  if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release[=size]] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--linker system|lld|mold] [--backend native|llvm] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--backend native|llvm] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] --check [--timings]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<file> | <filter>] [--release] [--watch]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp\n       fishc daemon");
-    process.exit(2);
+  if (command === "dev") {
+    if (target === undefined || positionals.length > 2 || flags.some((k) => k !== "panic" && k !== "locked") || values.panic !== "unwind") fail(usageOf("dev"));
+    const entry = target!;
+    const scratch = mkdtempSync(join(tmpdir(), "fishc-dev-"));
+    const hostFile = join(scratch, "host.fsh");
+    writeFileSync(hostFile, hostSource(join(scratch, "current")));
+    // What each callback takes, its own copy, since a closure owns what it captures.
+    const forHost: DevBuild = { file: hostFile, out: join(scratch, "host"), locked };
+    const forHandlers: DevBuild = { file: `${entry}`, out: "", locked };
+    const removing = `${scratch}`;
+    await develop({
+      entry,
+      dir: scratch,
+      manifest: findManifest(dirname(resolve(entry))),
+      host: () => devHost(forHost),
+      handlers: (out) => devHandlers(forHandlers, out),
+      done: () => {
+        try {
+          rmSync(removing, { recursive: true, force: true });
+        } catch (_e) {
+          // The scratch directory is the system's temporary one, which it clears in time.
+        }
+      },
+    });
+  }
+  if (command === "build" && values.mobile !== undefined) {
+    const platform = values.mobile!;
+    if (file === undefined || (platform !== "ios" && platform !== "android" && platform !== "react-native") || values.addon === true || lib !== undefined || llvm || values.static === true || values.target !== undefined || values.sanitize !== undefined || values["pgo-instrument"] === true || values.pgo !== undefined || leaks || profile !== false || links.length > 0 || (values.sysroot !== undefined && platform !== "android")) fail(usageOf("build"));
+    process.exit(buildMobile(sessionFor, file!, platform, values.out, release, values.debug === true, values.sysroot));
+  }
+  if (command === "build" && values.addon === true) {
+    if (file === undefined || lib !== undefined || llvm || values.static === true || values.target !== undefined || values.sanitize !== undefined || values["pgo-instrument"] === true || values.pgo !== undefined || leaks || profile !== false || links.length > 0) fail(usageOf("build"));
+    process.exit(buildAddon(sessionFor(), file!, values.out, release, values.debug === true));
+  }
+  if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || fuzzFlag || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
+    if (command !== undefined && command!.endsWith(".fsh")) fail(`fishc: can't find '${command!}'`);
+    if (command !== undefined && commandNamed(command!) === undefined) fail(`fishc: '${command!}' isn't a command; run 'fishc help' for the list`);
+    fail(command === undefined ? overview() : usageOf(command!));
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
   if (values.timings === true && lib !== undefined) fail("fishc build: '--timings' times an executable's build; leave out '--lib' to time the program it would be built from");
   if (json !== undefined && lib !== undefined) fail("fishc build: '--timings-json' times an executable's build; leave out '--lib' to time the program it would be built from");
   if (leaks && lib !== undefined) fail("fishc build: '--leaks' can't build a library; build the program that uses it with '--leaks' instead");
+  if (profile !== false && lib !== undefined) {
+    const flag = profile === "heap" ? "--heap-profile" : "--profile";
+    fail(`fishc build: '${flag}' can't build a library; build the program that uses it with '${flag}' instead`);
+  }
   if (values.static === true && lib !== undefined) fail("fishc build: '--static' builds an executable, not a library; leave out '--lib', or '--static'");
   if ((values.static === true || values.dockerfile === true) && llvm) fail("fishc build: '--emit-llvm' prints the IR without linking it, so '--static' and '--dockerfile' don't apply; leave them out");
   const sanitize = values.sanitize === undefined ? undefined : values.sanitize.flatMap((s) => s.split(","));
@@ -2375,11 +3528,56 @@ async function main(): Promise<void> {
   if ((instrumenting || profiles.length > 0) && (llvm || lib !== undefined || sanitize !== undefined)) fail(`fishc build: '${pgo}' applies to an executable clang builds, so it doesn't go with '--emit-llvm', '--lib' or '--sanitize'`);
   if (size && (llvm || lib !== undefined || sanitize !== undefined)) fail("fishc build: '--release=size' tunes an executable clang links, so it doesn't go with '--emit-llvm', '--lib' or '--sanitize'");
   if (values.dockerfile === true && values.static !== true) fail("fishc build: '--dockerfile' writes an image holding only the binary, which needs it built with '--static'");
+  if (values.target === "js") {
+    if (llvm || values.static === true || values.dockerfile === true || sanitize !== undefined || instrumenting || profiles.length > 0 || leaks || profile !== false || links.length > 0 || values.sysroot !== undefined || values.debug === true || values.timings === true) {
+      fail("fishc build: a js build is a JavaScript module and its .d.ts, so '--emit-llvm', '--static', '--dockerfile', '--sanitize', '--pgo-instrument', '--pgo', '--leaks', '--profile', '--heap-profile', '--link', '--sysroot', '-g' and '--timings' don't apply; leave them out");
+    }
+    try {
+      const warnings = buildJs(sessionFor(), target!, out, release, lib !== undefined);
+      for (const w of warnings) console.error(painted(w, target!, readFileSync(target!, "utf8"), "warning"));
+    } catch (e) {
+      if (e instanceof CompileError) console.error(painted(e, target!, readFileSync(target!, "utf8")));
+      else console.error((e as { message: string }).message);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+  const wasm = values.target !== undefined && isWasm(values.target);
+  if (wasm) {
+    const what = `fishc build: a ${values.target ?? ""} build is a WebAssembly module`;
+    if (lib !== undefined) fail(`${what} a WASI runtime starts, not a library; leave out '--lib'`);
+    if (values.static === true) fail(`${what}, which holds everything it links already; leave out '--static'`);
+    if (sanitize !== undefined) fail(`${what}, and clang has no sanitizer runtimes for wasm32; leave out '--sanitize'`);
+    if (instrumenting || profiles.length > 0) fail(`${what}, and clang has no profile runtime for wasm32; leave out '${pgo}'`);
+    if (profile !== false) fail(`${what}, and WASI has no signals to sample or report a profile with; leave out '${profile === "heap" ? "--heap-profile" : "--profile"}'`);
+    // --panic defaults to unwind, so only one written out is refused.
+    if (panicName === "unwind" && Bun.argv.some((a) => a === "--panic" || a.startsWith("--panic="))) fail(`${what}, which can't unwind, so a panic in it prints its message and exits with 101; leave out '--panic=unwind'`);
+  }
+  const bare = values.target !== undefined && isBareMetal(values.target);
+  if (values.arena !== undefined && !bare) fail("fishc build: '--arena' declares a microcontroller build's heap; build with '--target thumbv7em-none-eabihf' or '--target riscv32imc-unknown-none-elf'");
+  const arenaBytes = values.arena === undefined ? undefined : wholeNumber(values.arena) ?? fail(`fishc build: '--arena' takes the arena's size in bytes, a whole number above 0, not '${values.arena}'`);
+  if (bare) {
+    const what = `fishc build: a ${values.target ?? ""} build has no runtime`;
+    if (lib !== undefined) fail(`${what}; it is an image for the board, not a library, so leave out '--lib'`);
+    if (values.static === true || values.dockerfile === true) fail(`${what} and links everything it holds already; leave out '--static'`);
+    if (sanitize !== undefined || instrumenting || profiles.length > 0 || profile !== false || leaks) fail(`${what} to report from; leave out '--sanitize', '--pgo', '--profile', '--heap-profile' and '--leaks'`);
+    if (links.length > 0) fail(`${what} and links no C libraries; leave out '--link'`);
+    if (Bun.argv.some((a) => a === "--panic" || a.startsWith("--panic="))) fail(`${what}, and a panic there halts; leave out '--panic'`);
+  }
+  if (values.target !== undefined && isWindows(values.target)) {
+    const what = `fishc build: a ${values.target} build`;
+    if (lib !== undefined) fail(`${what} is an executable; libraries for Windows aren't built yet, so leave out '--lib'`);
+    if (values.static === true) fail(`${what} links its C runtime and threads into the executable already; leave out '--static'`);
+    if (sanitize !== undefined) fail(`${what} has no sanitizer runtime in llvm-mingw; leave out '--sanitize'`);
+    if (profile !== false) fail(`${what} has no signals to sample or report a profile with; leave out '${profile === "heap" ? "--heap-profile" : "--profile"}'`);
+  }
+  // A module never unwinds: WASI preview 1 has no exceptions to unwind with.
+  const panicking: Panic = wasm ? "abort" : panic;
   try {
     if (llvm) {
       const start = performance.now();
       let looked: string[] = [];
-      const made = compiledIn(newCompilation(plain(sessionFor())), readFileSync(target!, "utf8"), target!, release, panic, lib !== undefined, leaks, values.debug === true, looked);
+      const made = compiledIn(newCompilation(plain(sessionFor())), readFileSync(target!, "utf8"), target!, release, panicking, lib !== undefined, leaks, values.debug === true, looked, profile);
       reportTimings(made.checked.tables.session, [...FRONT_END, "codegen"], start);
       writePieces(made.ir);
     } else {
@@ -2393,17 +3591,30 @@ async function main(): Promise<void> {
       const platform = linking(instrumenting ? withFlags(sanitizing, [...PGO_INSTRUMENT]) : profiles.length > 0 ? withFlags(sanitizing, pgoUse(profiles)) : sanitizing);
       // A sanitizer's report names .fsh lines only when the program carries line tables.
       const debug = values.debug === true || sanitized;
-      const binary = out ?? basename(target!, ".fsh");
+      const lambda = isLambda(platform.triple);
+      const named = out ?? `${basename(target!, ".fsh")}${wasm ? (values.target === "browser" || values.target === "edge" ? ".js" : ".wasm") : isWindows(platform.triple) ? ".exe" : lambda ? ".zip" : ""}`;
+      const page = values.target === "browser" || values.target === "edge" ? browserFiles(named) : undefined;
+      // A Lambda function's executable is built as bootstrap, then zipped where the build was asked to write.
+      const scratch = lambda ? mkdtempSync(join(tmpdir(), "fishc-lambda-")) : undefined;
+      const binary = page !== undefined ? page.module : scratch !== undefined ? join(scratch, "bootstrap") : named;
       const image = values.dockerfile === true ? dockerfilePath(binary) : undefined;
       try {
         let warnings: CompileError[] = [];
         if (lib !== undefined) warnings = buildLibrary(sessionFor(), target!, binary, lib, release, panic, [...links], copyTarget(platform), debug);
+        else if (bare) warnings = buildBareMetal(sessionFor(), target!, binary, release, copyTarget(platform), arenaBytes, debug);
         else {
           const start = performance.now();
           let looked: string[] = [];
-          const made = built(sessionFor(), target!, binary, release || instrumenting, panic, [...links], copyTarget(platform), leaks, debug, looked);
+          let session = sessionFor();
+          if (platform.cc !== undefined) session.cc = platform.cc;
+          const made = built(session, target!, binary, release || instrumenting, panicking, [...links], copyTarget(platform), leaks, debug, looked, profile);
           reportTimings(made.session, [...FRONT_END, "codegen", "instrument", "split", ...NATIVE_STAGES], start);
           warnings = made.warnings;
+        }
+        if (page !== undefined) writeFileSync(page.loader, loader(basename(page.module), values.target === "edge"));
+        if (scratch !== undefined) {
+          writeFileSync(named, zipped("bootstrap", readFileSync(binary)));
+          rmSync(scratch, { recursive: true, force: true });
         }
         if (image !== undefined) writeFileSync(image, dockerfile(binary));
         for (const w of warnings) console.error(painted(w, target!, readFileSync(target!, "utf8"), "warning"));

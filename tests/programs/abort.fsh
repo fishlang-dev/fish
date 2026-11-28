@@ -512,3 +512,29 @@ async function main() {
     console.log(x + y === 2);
   }
 }
+// case: abort_shutdown_waiter_at_exit
+// expect: done
+// A task waiting on process.shutdown at async runtime exit must tear down cleanly (F-2493).
+async function waiter(ch: Channel<i64>): Promise<i64> {
+  const sig = AbortSignal.any([process.shutdown, new AbortController().signal]);
+  try {
+    const _v = await ch.receive(sig);
+    return 1;
+  } catch (_e) {
+    return 0;
+  }
+}
+
+async function main() {
+  const ch = new Channel<i64>(1);
+  const _h = spawn(waiter(ch.clone()));
+  const _h2 = spawn(async () => {
+    try {
+      await sleep(10000, process.shutdown);
+    } catch (_e) {
+    }
+    return 0;
+  });
+  await yieldNow();
+  console.log("done");
+}

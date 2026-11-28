@@ -35,7 +35,7 @@ function main() {
 // expect: n
 // case: ref_arrays_move_referent
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -55,7 +55,7 @@ function main() {
 // case: ref_arrays_element_keeps_borrow
 // A reference read out of the array borrows what the array does, after the array's last use.
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -67,7 +67,7 @@ function main() {
 // case: ref_arrays_holder_element_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type N = { of: "b"; node: Ref<B> } | { of: "n" };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let ns: N[] = [{ of: "b", node: b1 }];
@@ -249,7 +249,7 @@ function main() {
 // expect: 0
 // case: ref_arrays_push_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let st: Ref<B>[] = [];
@@ -271,7 +271,7 @@ function main() {
 // error: 'b1' doesn't live long enough: 'st' still borrows it after its block ends
 // case: ref_arrays_index_write_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b0 = new B("0");
   let b1 = new B("a");
@@ -283,7 +283,7 @@ function main() {
 // error: cannot move 'b1' while 'st' borrows 'b1' and is used later
 // case: ref_arrays_pop_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let st: Ref<B>[] = [];
@@ -384,7 +384,7 @@ function main() {
 // References collected out of a loop borrow what the looped array did.
 class B { s: string; constructor(s: string) { this.s = s; } }
 type N = { of: "b"; node: Ref<B> } | { of: "n" };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let ns: N[] = [{ of: "b", node: b1 }];
@@ -469,7 +469,7 @@ class Stack {
   items: Ref<B>[] = [];
   add(this: Mut<this>, b: Ref<B>) { this.items.push(b); }
 }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let st = new Stack();
@@ -500,7 +500,7 @@ class Stack {
   add(this: Mut<this>, b: Ref<B>) { this.items.push(b); }
   take(this: Mut<this>): Ref<B> | null { return this.items.pop(); }
 }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let st = new Stack();
@@ -513,7 +513,7 @@ function main() {
 // case: ref_arrays_object_field_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type Bag = { items: Ref<B>[]; n: i64 };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let b2 = new B("b");
@@ -525,8 +525,8 @@ function main() {
 // error: cannot move 'b2' while 'bag' borrows 'b2' and is used later
 // case: ref_arrays_returned_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function both(a: Ref<B>): Ref<B>[] { return [a, a]; }
-function eat(_b: B) {}
+export function both(a: Ref<B>): Ref<B>[] { return [a, a]; }
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let ys = both(b1);
@@ -536,8 +536,8 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used later
 // case: ref_arrays_passed_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function pass(rs: Ref<B>[]): Ref<B>[] { return rs; }
-function eat(_b: B) {}
+export function pass(rs: Ref<B>[]): Ref<B>[] { return rs; }
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let ys = pass([b1]);
@@ -547,7 +547,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used later
 // case: ref_arrays_capture_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -567,8 +567,8 @@ function main() {
 // error: keeping references in 'rs', which this closure captures, is not supported yet
 // case: ref_arrays_generic_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function wrap<T>(x: T): T[] { return [x]; }
-function eat(_b: B) {}
+export function wrap<T>(x: T): T[] { return [x]; }
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   const r: Ref<B> = b1;
@@ -579,7 +579,7 @@ function main() {
 // error: cannot move 'b1' while 'ws' borrows 'b1' and is used later
 // case: ref_arrays_nested_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let b2 = new B("b");
@@ -591,7 +591,7 @@ function main() {
 // error: cannot move 'b2' while 'rr' borrows 'b2' and is used later
 // case: ref_arrays_copy_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let b2 = new B("b");
@@ -640,7 +640,7 @@ function main() {
 // case: ref_arrays_pop_object_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B>; k: string };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a" + 1);
   let ms: M[] = [{ node: b1, k: "k" }];
@@ -652,7 +652,7 @@ function main() {
 // case: ref_arrays_pop_field_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B>; k: string };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a" + 1);
   let ms: M[] = [{ node: b1, k: "k" }];
@@ -664,7 +664,7 @@ function main() {
 // case: ref_arrays_pop_tuple_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B>; k: string };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a" + 1);
   let ms: [Ref<B>, string][] = [[b1, "k"]];
@@ -676,8 +676,8 @@ function main() {
 // case: ref_arrays_pop_argument_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B>; k: string };
-function eat(_b: B) {}
-function pass(m: M): M { return m; }
+export function eat(_b: B) {}
+export function pass(m: M): M { return m; }
 function main() {
   let b1 = new B("a" + 1);
   let ms: M[] = [{ node: b1, k: "k" }];
@@ -738,7 +738,7 @@ function main() {
 // case: ref_arrays_temporary_literal_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B> };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a" + 1);
   let t: M = { node: b1 };
@@ -750,7 +750,7 @@ function main() {
 // case: ref_arrays_temporary_object_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B> };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a" + 1);
   let t: M = { node: b1 };
@@ -762,8 +762,8 @@ function main() {
 // case: ref_arrays_temporary_call_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B> };
-function eat(_b: B) {}
-function mk(m: M): [M, i64] { return [m, 1]; }
+export function eat(_b: B) {}
+export function mk(m: M): [M, i64] { return [m, 1]; }
 function main() {
   let b1 = new B("a" + 1);
   let t: M = { node: b1 };
@@ -795,7 +795,7 @@ function main() {
 // case: ref_arrays_loop_literal_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B> };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a" + 1);
   let r: Ref<B> = b1;
@@ -808,7 +808,7 @@ function main() {
 // case: ref_arrays_temporary_conditional_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B> };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a" + 1);
   let r: Ref<B> = b1;
@@ -820,7 +820,7 @@ function main() {
 // case: ref_arrays_temporary_coalesce_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B> };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a" + 1);
   let b2 = new B("b" + 1);
@@ -834,7 +834,7 @@ function main() {
 // case: ref_arrays_temporary_new_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B> };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 class G { m: M; constructor(m: M) { this.m = m; } }
 function main() {
   let b1 = new B("a" + 1);
@@ -847,9 +847,9 @@ function main() {
 // case: ref_arrays_temporary_getter_move
 class B { s: string; constructor(s: string) { this.s = s; } }
 type M = { node: Ref<B> };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 class G { m: M; constructor(m: M) { this.m = m; } get mm(): M { return { node: this.m.node }; } }
-function idg(g: G): G { return g; }
+export function idg(g: G): G { return g; }
 function main() {
   let b1 = new B("a" + 1);
   let t: M = { node: b1 };
@@ -862,7 +862,7 @@ function main() {
 // case: ref_arrays_assign_value_move
 // An assignment used as a value borrows what it stored.
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a" + 1);
   let b2 = new B("b" + 1);
@@ -875,7 +875,7 @@ function main() {
 // error: cannot move 'b1' while
 // case: ref_arrays_assign_value_push
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a" + 1);
   let b2 = new B("b" + 1);
@@ -889,7 +889,7 @@ function main() {
 // error: cannot move 'b1' while 'rs' borrows 'b1' and is used later
 // case: ref_arrays_assign_value_chain
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a" + 1);
   let b2 = new B("b" + 1);
@@ -930,7 +930,7 @@ function main() {
 // A loop over a method's array of references leaves the receiver borrowed by what the body kept.
 class B { s: string; constructor(s: string) { this.s = s; } }
 class W { b: B; constructor() { this.b = new B("x" + 1); } all(): Ref<B>[] { return [this.b]; } }
-function eatw(_w: W) {}
+export function eatw(_w: W) {}
 function main() {
   let w = new W();
   let keep: Ref<B>[] = [];
@@ -1120,7 +1120,7 @@ function main() {
 // expect: b a a
 // case: ref_arrays_at_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1131,7 +1131,7 @@ function main() {
 // error: cannot move 'b1' while 'v' borrows 'b1' and is used later
 // case: ref_arrays_at_option_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1142,7 +1142,7 @@ function main() {
 // error: cannot move 'b1' while 'v' borrows 'b1' and is used later
 // case: ref_arrays_find_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1153,7 +1153,7 @@ function main() {
 // error: cannot move 'b1' while 'v' borrows 'b1' and is used later
 // case: ref_arrays_find_last_option_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: (Ref<B> | null)[] = [b1];
@@ -1164,7 +1164,7 @@ function main() {
 // error: cannot move 'b1' while 'v' borrows 'b1' and is used later
 // case: ref_arrays_find_object_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 type H = { node: Ref<B> };
 function main() {
   let b1 = new B("a");
@@ -1176,7 +1176,7 @@ function main() {
 // error: cannot move 'b1' while 'v' borrows 'b1' and is used later
 // case: ref_arrays_shift_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1228,8 +1228,8 @@ function main() {
 // expect: a
 // case: ref_arrays_at_return_parameter_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
-function first(xs: Ref<Ref<B>[]>): Ref<B> { return xs.at(0)!; }
+export function eat(_b: B) {}
+export function first(xs: Ref<Ref<B>[]>): Ref<B> { return xs.at(0)!; }
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1262,7 +1262,7 @@ function main() {
 // error: 'cur' can only be pointed at a variable
 // case: ref_arrays_at_field_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 class K { r: Ref<B>; constructor(r: Ref<B>) { this.r = r; } }
 function main() {
   let b1 = new B("a");
@@ -1274,7 +1274,7 @@ function main() {
 // error: cannot move 'b1' while 'k' borrows 'b1' and is used later
 // case: ref_arrays_find_push_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1429,7 +1429,7 @@ function main() {
 // expect: 2 true
 // case: ref_arrays_copy_bad_filter
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -1440,7 +1440,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_slice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -1451,7 +1451,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_concat
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -1462,7 +1462,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_concat_other
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1];
@@ -1485,7 +1485,7 @@ function main() {
 // error: 'ys' would keep borrowing this temporary, which is gone once its statement ends; give it
 // case: ref_arrays_copy_bad_toReversed
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -1496,7 +1496,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_toSorted
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -1507,7 +1507,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_flat
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[][] = [[b1], [b2]];
@@ -1518,7 +1518,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_from
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -1548,7 +1548,7 @@ function main() {
 // error: cannot change 'b1.s' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_obj
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 type H = { node: Ref<B> };
 function main() {
   let b1 = new B("a");
@@ -1560,7 +1560,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_opt_chain
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: (Ref<B> | null)[] = [b1, null];
@@ -1571,7 +1571,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_field_slice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 class K { items: Ref<B>[] = []; all(): Ref<B>[] { return this.items.slice(0); } }
 function main() {
   let b1 = new B("a");
@@ -1593,7 +1593,7 @@ function main() {
 // error: cannot move 'b1' while 'rs' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_loop_slice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1602,7 +1602,7 @@ function main() {
 // error: cannot move 'b1' while a 'for...of' loop and 'x' borrow 'b1' and are used
 // case: ref_arrays_copy_bad_index_slice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1706,8 +1706,8 @@ function main() { console.log(f()[0].s); }
 // error: can't return a reference to 'b1', which belongs to this function and is gone once it
 // case: ref_arrays_copy_param_filter
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
-function f(rs: Ref<Ref<B>[]>): Ref<B>[] { return rs.filter((x) => x.s !== "z"); }
+export function eat(_b: B) {}
+export function f(rs: Ref<Ref<B>[]>): Ref<B>[] { return rs.filter((x) => x.s !== "z"); }
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -1718,7 +1718,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copies_bad_assign
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1];
@@ -1730,7 +1730,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copies_bad_chain
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1741,7 +1741,7 @@ function main() {
 // error: cannot move 'b1' while 'v' borrows 'b1' and is used
 // case: ref_arrays_copies_bad_closure_capture
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1766,7 +1766,7 @@ function main() {
 // error: 'b3' doesn't live long enough: 'ys' still borrows it after its block
 // case: ref_arrays_copies_bad_field
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 class K { items: Ref<B>[]; constructor(items: Ref<B>[]) { this.items = items; } }
 function main() {
   let b1 = new B("a");
@@ -1802,7 +1802,7 @@ function main() {
 // error: 'b3' doesn't live long enough: 'ys' still borrows it after its block
 // case: ref_arrays_copies_bad_loop_acc
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1814,7 +1814,7 @@ function main() {
 // error: cannot move 'b1' while 'acc' borrows 'b1' and is used
 // case: ref_arrays_copies_bad_method_ret
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 class K { items: Ref<B>[] = []; add(this: Mut<this>, b: Ref<B>) { this.items.push(b); } copy(): Ref<B>[] { return this.items.slice(0); } }
 function main() {
   let b1 = new B("a");
@@ -1827,7 +1827,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copies_bad_option_elem
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: (Ref<B> | null)[] = [b1, null];
@@ -1838,7 +1838,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copies_bad_push_elem
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1850,7 +1850,7 @@ function main() {
 // error: cannot move 'b1' while 'out' borrows 'b1' and is used
 // case: ref_arrays_copies_bad_push_slice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1862,7 +1862,7 @@ function main() {
 // error: cannot move 'b1' while 'rr' borrows 'b1' and is used
 // case: ref_arrays_copies_bad_reassign_self
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -1873,8 +1873,8 @@ function main() {
 // error: cannot move 'b2' while 'rs' borrows 'b2' and is used
 // case: ref_arrays_copies_bad_ret_param
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
-function f(xs: Ref<B>[]): Ref<B>[] { return xs.filter((x) => x.s === "a"); }
+export function eat(_b: B) {}
+export function f(xs: Ref<B>[]): Ref<B>[] { return xs.filter((x) => x.s === "a"); }
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -1944,7 +1944,7 @@ function main() {
 // expect: a
 // case: ref_arrays_store_bad_fill
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -1955,7 +1955,7 @@ function main() {
 // error: cannot move 'b3' while 'rs' borrows 'b3' and is used
 // case: ref_arrays_store_bad_fill_range
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -1976,7 +1976,7 @@ function main() {
 // error: 'rs' would keep borrowing this temporary, which is gone once its statement ends; give it
 // case: ref_arrays_store_bad_old_fill
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -1987,7 +1987,7 @@ function main() {
 // error: cannot move 'b2' while 'rs' borrows 'b2' and is used
 // case: ref_arrays_store_bad_old_splice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -1998,7 +1998,7 @@ function main() {
 // error: cannot move 'b2' while 'rs' borrows 'b2' and is used
 // case: ref_arrays_store_bad_old_toSpliced
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2009,7 +2009,7 @@ function main() {
 // error: cannot move 'b2' while 'ys' borrows 'b2' and is used
 // case: ref_arrays_store_bad_old_unshift
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2020,7 +2020,7 @@ function main() {
 // error: cannot move 'b2' while 'rs' borrows 'b2' and is used
 // case: ref_arrays_store_bad_old_with
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2031,7 +2031,7 @@ function main() {
 // error: cannot move 'b2' while 'ys' borrows 'b2' and is used
 // case: ref_arrays_store_bad_splice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2042,7 +2042,7 @@ function main() {
 // error: cannot move 'b3' while 'rs' borrows 'b3' and is used
 // case: ref_arrays_store_bad_splice_both
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2053,7 +2053,7 @@ function main() {
 // error: cannot move 'b3' while 'rs' and 'gone' borrow 'b3' and are used
 // case: ref_arrays_store_bad_splice_result
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -2064,7 +2064,7 @@ function main() {
 // error: cannot move 'b1' while 'gone' borrows 'b1' and is used
 // case: ref_arrays_store_bad_toSpliced
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2075,7 +2075,7 @@ function main() {
 // error: cannot move 'b3' while 'ys' borrows 'b3' and is used
 // case: ref_arrays_store_bad_unshift
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2086,7 +2086,7 @@ function main() {
 // error: cannot move 'b3' while 'rs' borrows 'b3' and is used
 // case: ref_arrays_store_bad_unshift_elem
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1];
@@ -2099,7 +2099,7 @@ function main() {
 // case: ref_arrays_store_bad_unshift_obj
 class B { s: string; constructor(s: string) { this.s = s; } }
 type N = { of: "b"; node: Ref<B> } | { of: "n" };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: N[] = [{ of: "b", node: b1 }];
@@ -2110,7 +2110,7 @@ function main() {
 // error: cannot move 'b3' while 'rs' borrows 'b3' and is used
 // case: ref_arrays_store_bad_unshift_two
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c"); let b4 = new B("d");
   let rs: Ref<B>[] = [b1];
@@ -2121,7 +2121,7 @@ function main() {
 // error: cannot move 'b4' while 'rs' borrows 'b4' and is used
 // case: ref_arrays_store_bad_with
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2141,7 +2141,7 @@ function main() {
 // error: cannot move 'b3' while 'b3' is lent to 'show' for this
 // case: ref_arrays_store_field_fill
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2153,7 +2153,7 @@ function main() {
 // error: cannot move 'b3' while 'rs' borrows 'b3' and is used
 // case: ref_arrays_store_field_splice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2165,7 +2165,7 @@ function main() {
 // error: cannot move 'b3' while 'rs' borrows 'b3' and is used
 // case: ref_arrays_store_field_toSpliced
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2177,7 +2177,7 @@ function main() {
 // error: cannot move 'b3' while 'ys' borrows 'b3' and is used
 // case: ref_arrays_store_field_unshift
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2189,7 +2189,7 @@ function main() {
 // error: cannot move 'b3' while 'rs' borrows 'b3' and is used
 // case: ref_arrays_store_field_with
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1, b2];
@@ -2491,7 +2491,7 @@ function main() {
 // expect: 2 a
 // case: ref_arrays_copy_bad_splice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -2502,7 +2502,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_toSpliced
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -2513,7 +2513,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_copy_bad_with
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -2560,7 +2560,7 @@ function main() {
 // expect: a
 // case: ref_arrays_spread_bad_assign_field
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 class K { items: Ref<B>[] = []; }
 function main() {
   let b1 = new B("a");
@@ -2573,7 +2573,7 @@ function main() {
 // error: cannot move 'b1' while 'k' borrows 'b1' and is used
 // case: ref_arrays_spread_bad_copy
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -2584,7 +2584,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_spread_bad_field
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 class K { items: Ref<B>[]; constructor(items: Ref<B>[]) { this.items = [...items]; } }
 function main() {
   let b1 = new B("a");
@@ -2596,7 +2596,7 @@ function main() {
 // error: cannot move 'b1' while 'k' borrows 'b1' and is used
 // case: ref_arrays_spread_bad_mixed_new
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1];
@@ -2607,7 +2607,7 @@ function main() {
 // error: cannot move 'b3' while 'ys' borrows 'b3' and is used
 // case: ref_arrays_spread_bad_mixed_old
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1];
@@ -2618,7 +2618,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_spread_bad_nested
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -2630,7 +2630,7 @@ function main() {
 // case: ref_arrays_spread_bad_obj
 class B { s: string; constructor(s: string) { this.s = s; } }
 type N = { of: "b"; node: Ref<B> } | { of: "n" };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: N[] = [{ of: "b", node: b1 }];
@@ -2662,7 +2662,7 @@ function main() {
 // error: '...' spreads into an array literal, or as an argument into a rest parameter, as in
 // case: ref_arrays_spread_bad_push_spread
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -2687,8 +2687,8 @@ function main() {
 // error: can't store in 'this' a reference to 'xs[...]', which belongs to this function and is
 // case: ref_arrays_spread_bad_rest_ret
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
-function first(...xs: Ref<B>[]): Ref<B> { return xs[0]; }
+export function eat(_b: B) {}
+export function first(...xs: Ref<B>[]): Ref<B> { return xs[0]; }
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -2717,8 +2717,8 @@ function main() { console.log(f().length); }
 // error: can't return a reference to 'b1', which belongs to this function and is gone once it
 // case: ref_arrays_spread_bad_ret_param
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
-function f(xs: Ref<B>[]): Ref<B>[] { return [...xs]; }
+export function eat(_b: B) {}
+export function f(xs: Ref<B>[]): Ref<B>[] { return [...xs]; }
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -2759,7 +2759,7 @@ function main() {
 // error: 'b3' doesn't live long enough: 'ys' still borrows it after its block
 // case: ref_arrays_spread_bad_temp
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1];
@@ -2770,7 +2770,7 @@ function main() {
 // error: cannot move 'b3' while 'ys' borrows 'b3' and is used
 // case: ref_arrays_spread_bad_temp_slice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -2781,7 +2781,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_spread_bad_two
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1];
@@ -2857,8 +2857,8 @@ function main() {
 // expect: 2
 // case: ref_arrays_temp_call_at
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
-function mk(b: Ref<B>): Ref<B>[] { return [b]; }
+export function eat(_b: B) {}
+export function mk(b: Ref<B>): Ref<B>[] { return [b]; }
 function main() {
   let b1 = new B("a");
   const v = mk(b1).at(0)!;
@@ -2868,8 +2868,8 @@ function main() {
 // error: cannot move 'b1' while 'v' borrows 'b1' and is used
 // case: ref_arrays_temp_call_slice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
-function mk(b: Ref<B>): Ref<B>[] { return [b]; }
+export function eat(_b: B) {}
+export function mk(b: Ref<B>): Ref<B>[] { return [b]; }
 function main() {
   let b1 = new B("a");
   const ys = mk(b1).slice(0);
@@ -2879,7 +2879,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_temp_chain_with_slice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1];
@@ -2890,7 +2890,7 @@ function main() {
 // error: cannot move 'b3' while 'ys' borrows 'b3' and is used
 // case: ref_arrays_temp_concat_with
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1];
@@ -2913,7 +2913,7 @@ function main() {
 // expect: a
 // case: ref_arrays_temp_lit_slice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   const r: Ref<B> = b1;
@@ -2924,7 +2924,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_temp_nested_slice
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rr: Ref<B>[][] = [[b1]];
@@ -2962,7 +2962,7 @@ function main() {
 // error: spreads of owned values into arrays of references are not supported
 // case: ref_arrays_clone_bad_clone_index
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -2973,7 +2973,7 @@ function main() {
 // error: cannot move 'b1' while 'v' borrows 'b1' and is used
 // case: ref_arrays_clone_bad_elem_clone
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rr: Ref<B>[][] = [[b1]];
@@ -2984,7 +2984,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_clone_bad_field_clone
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 class K { items: Ref<B>[] = []; add(this: Mut<this>, b: Ref<B>) { this.items.push(b); } copy(): Ref<B>[] { return this.items.clone(); } }
 function main() {
   let b1 = new B("a");
@@ -2997,7 +2997,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_clone_bad_holder_obj
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 type H = { items: Ref<B>[] };
 function main() {
   let b1 = new B("a");
@@ -3009,7 +3009,7 @@ function main() {
 // error: cannot move 'b1' while 'c' borrows 'b1' and is used
 // case: ref_arrays_clone_bad_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -3020,7 +3020,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_clone_bad_nested
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rr: Ref<B>[][] = [[b1]];
@@ -3032,7 +3032,7 @@ function main() {
 // case: ref_arrays_clone_bad_obj_elem
 class B { s: string; constructor(s: string) { this.s = s; } }
 type N = { of: "b"; node: Ref<B> } | { of: "n" };
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: N[] = [{ of: "b", node: b1 }];
@@ -3043,7 +3043,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_clone_bad_option
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: (Ref<B> | null)[] = [b1, null];
@@ -3063,8 +3063,8 @@ function main() { console.log(f().length); }
 // error: can't return a reference to 'b1', which belongs to this function and is gone once it
 // case: ref_arrays_clone_bad_ret_param
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
-function f(xs: Ref<Ref<B>[]>): Ref<B>[] { return xs.clone(); }
+export function eat(_b: B) {}
+export function f(xs: Ref<Ref<B>[]>): Ref<B>[] { return xs.clone(); }
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -3096,7 +3096,7 @@ function main() {
 // error: 'b3' doesn't live long enough: 'ys' still borrows it after its block
 // case: ref_arrays_clone_bad_temp_clone
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1];
@@ -3107,7 +3107,7 @@ function main() {
 // error: cannot move 'b3' while 'ys' borrows 'b3' and is used
 // case: ref_arrays_clone_fixed_clone
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -3326,7 +3326,7 @@ function main() {
 // expect: 1 a [ B { s: 'a' } ] 1
 // case: ref_arrays_gives_bad_capture
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1];
@@ -3349,7 +3349,7 @@ function main() {
 // error: can't return a reference to 'b3', which belongs to this function and is gone once it
 // case: ref_arrays_gives_bad_identity
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -3369,7 +3369,7 @@ function main() {
 // error: can't return a reference to 't', which belongs to this function and is gone once it
 // case: ref_arrays_gives_bad_owned_move
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eatBs(_xs: B[]) {}
+export function eatBs(_xs: B[]) {}
 function main() {
   let xs = [new B("a")];
   const ys = xs.map((x) => x);
@@ -3396,7 +3396,7 @@ function main() { console.log(f().length); }
 // error: can't return a reference to 'xs', which belongs to this function and is gone once it
 // case: ref_arrays_gives_bad_reduce
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -3407,7 +3407,7 @@ function main() {
 // error: cannot move 'b2' while 'best' borrows 'b2' and is used
 // case: ref_arrays_gives_bad_reduce_init
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b3 = new B("c");
   let rs: Ref<B>[] = [b1];
@@ -3544,7 +3544,7 @@ function main() {
 // error: cannot change 'xs' while 'v' borrows 'xs' and is used
 // case: ref_arrays_gave_bad_child
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 class P { child: Ref<B>; constructor(child: Ref<B>) { this.child = child; } }
 function main() {
   let b1 = new B("a");
@@ -3556,7 +3556,7 @@ function main() {
 // error: cannot move 'b1' while 'ys' borrows 'b1' and is used
 // case: ref_arrays_gave_bad_child_ref
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 class P { child: Ref<B>; constructor(child: Ref<B>) { this.child = child; } }
 function main() {
   let b1 = new B("a");
@@ -3642,7 +3642,7 @@ function main() {
 // error: 'ys' would keep borrowing this temporary, which is gone once its statement ends; give it
 // case: ref_arrays_gave_bad_option_result
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a");
   let rs: Ref<B>[] = [b1];
@@ -3701,7 +3701,7 @@ function main() {
 // error: cannot change 'xs' while 'best' borrows 'xs' and is used
 // case: ref_arrays_gave_bad_reduce_right
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
+export function eat(_b: B) {}
 function main() {
   let b1 = new B("a"); let b2 = new B("b");
   let rs: Ref<B>[] = [b1, b2];
@@ -3769,8 +3769,8 @@ function main() {
 // error: 'ys' would keep borrowing this temporary, which is gone once its statement ends; give it
 // case: ref_arrays_gave_bad_temp_refs
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B) {}
-function mk(b: Ref<B>): Ref<B>[] { return [b]; }
+export function eat(_b: B) {}
+export function mk(b: Ref<B>): Ref<B>[] { return [b]; }
 function main() {
   let b1 = new B("a");
   const ys = mk(b1).map((x) => x);
@@ -3905,7 +3905,7 @@ function main() {
 // case: ref_arrays_copy_index_through_cast_moved
 // error: cannot move 'b3'
 class B { s: string; constructor(s: string) { this.s = s; } }
-function eat(_b: B): i64 { return 1; }
+export function eat(_b: B): i64 { return 1; }
 function main() {
   let b1 = new B("a" + 1);
   let b3 = new B("c" + 3);
@@ -3930,8 +3930,8 @@ function main() {
 // case: ref_arrays_lifetime_returned_moved
 // error: cannot move 'b1' while 'rs' borrows 'b1' and is used later
 class B { s: string; constructor(s: string) { this.s = s; } }
-function both<A extends Lifetime>(x: Ref<B, A>, _other: Ref<B>): Ref<B, A>[] { return [x]; }
-function eat(_b: B): i64 { return 1; }
+export function both<A extends Lifetime>(x: Ref<B, A>, _other: Ref<B>): Ref<B, A>[] { return [x]; }
+export function eat(_b: B): i64 { return 1; }
 function main() {
   let b1 = new B("a" + 1);
   let b2 = new B("b" + 2);
@@ -3956,8 +3956,8 @@ function main() {
 // error: cannot move 'b1' while 'st' borrows 'b1' and is used later
 class B { s: string; constructor(s: string) { this.s = s; } }
 type Stack<A extends Lifetime> = { items: Ref<B, A>[]; n: i64 };
-function start<A extends Lifetime>(x: Ref<B, A>, _other: Ref<B>): Stack<A> { return { items: [x], n: 1 }; }
-function eat(_b: B): i64 { return 1; }
+export function start<A extends Lifetime>(x: Ref<B, A>, _other: Ref<B>): Stack<A> { return { items: [x], n: 1 }; }
+export function eat(_b: B): i64 { return 1; }
 function main() {
   let b1 = new B("a" + 1);
   let b2 = new B("b" + 2);
@@ -3991,7 +3991,7 @@ class Stack<A extends Lifetime> {
   add(this: Mut<this>, x: Ref<B, A>): void { this.items.push(x); }
   top(): Ref<B, A> { return this.items[this.items.length - 1]; }
 }
-function eat(_b: B): i64 { return 1; }
+export function eat(_b: B): i64 { return 1; }
 function main() {
   let b1 = new B("a" + 1);
   let st = new Stack();

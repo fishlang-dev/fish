@@ -1325,3 +1325,20 @@ function main(): void throws JsonError {
 // expect: 4 dddddddd 3
 // expect: true true ---x1 ababab ab|
 // expect: "ab42" 7 123 1234567
+// case: string_multi_arg_mutated
+// expect: hello replaced!
+// expect: Z!-b-Z!
+// expect: first!second!third!fourth!
+// Multi-argument String methods retain earlier arguments across later argument mutations (F-2492).
+function main(): void {
+  let x = "wor" + "ld";
+  const r1 = "hello world".replace(x, (x = "replaced" + "!"));
+  let y = "a" + "";
+  const r2 = "a-b-a".replaceAll(y, (y = "Z" + "!"));
+  let a = "first" + "!";
+  let b = "third" + "!";
+  const r3 = "".concat(a, (a = "second" + "!"), b, (b = "fourth" + "!"));
+  console.log(r1);
+  console.log(r2);
+  console.log(r3);
+}

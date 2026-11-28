@@ -1,3 +1,4 @@
+import type { Reads } from "./reads.fsh";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { Arenas, type BodyId, type InstanceId, type LocalId } from "./arenas.fsh";
@@ -35,9 +36,13 @@ import type { DynTable } from "./values.fsh";
 // `generated`: the nodes a macro made, which no warning points into: their author can't change them.
 // `rewrites`: the nodes lowering replaced, by id, until each body's rebuild puts them in place.
 // `looked`: every source file loading read or looked for, as an absolute path, missing ones included.
+// `published`: the program-wide names of the functions a Fish package's lib exports to other
+// packages, whose signatures stay as written.
+// `editionWarnings`: what lowering files in the reference-counted edition warned about.
+// `reads`: the files the entry's package lets comptime read.
 export type Compilation = {
   session: Session; ids: Ids; rewrites: Rewrites; names: Names; regex: RegexTables; typing: Typing; arenas: Arenas; counts: Counts; upcasts: Set<string>; files: { base: usize; file: string; src: string; std: boolean }[]; rust: RustTables;
-  enumInits: [usize, usize, string][]; fileNames?: Map<usize, Map<string, string>>; generated: NodeSet<Id>; looked: string[];
+  enumInits: [usize, usize, string][]; fileNames?: Map<usize, Map<string, string>>; generated: NodeSet<Id>; looked: string[]; published?: Set<string>; editionWarnings?: CompileError[]; reads?: Reads;
 };
 
 // What a compilation numbers as it goes, from 0, so the same program is numbered the same way
@@ -70,7 +75,24 @@ export type Session = {
   // the tables of instances that are never compiled as each one's check ends.
   plain?: boolean;
   borrows?: BorrowEvent[];
+  // What `std:build` tells a program: the target, whether the build is a release one, and each
+  // `--flag`; undefined is a dev build for the host with no flags.
+  build?: BuildInfo;
 };
+
+// A `--flag name` or `--flag name=value` given to a build.
+export type BuildFlag = { name: string; value: string | null };
+// `triple` is the one `--target` gave, or empty for the host. `dev` is `fishc dev`'s build of a
+// program's handlers, whose serve answers through the host that loads them.
+export type BuildInfo = { triple: string; release: boolean; flags: BuildFlag[]; dev?: boolean };
+
+// The build `given` describes, made a release one or not, and for `triple` when one is given.
+export function buildFor(given: Ref<BuildInfo | undefined>, triple: string | undefined, release: boolean, dev?: boolean): BuildInfo {
+  let flags: BuildFlag[] = [];
+  if (given !== undefined) for (const f of given.flags) flags.push({ name: f.name, value: f.value });
+  const handlers = dev ?? (given !== undefined && given.dev === true);
+  return { triple: triple ?? (given !== undefined ? given.triple : ""), release, flags, dev: handlers };
+}
 
 export function newSession(): Session {
   return { locking: { locked: false }, engineHook: false, std: { tree: [], cached: false, parses: 0 } };
@@ -97,7 +119,7 @@ export function macroCompilation(c: Ref<Compilation>): Compilation {
     fileNames = copied;
   }
   return {
-    session: { locking: { locked: false }, engineHook: c.session.engineHook, std: { tree: [], cached: false, parses: 0 } },
+    session: { locking: { locked: false }, engineHook: c.session.engineHook, std: { tree: [], cached: false, parses: 0 }, build: c.session.build === undefined ? undefined : buildFor(c.session.build, undefined, c.session.build!.release) },
     ids: { last: c.ids.last },
     rewrites: new Rewrites(),
     names: copyNames(c.names),
@@ -112,6 +134,7 @@ export function macroCompilation(c: Ref<Compilation>): Compilation {
     fileNames,
     generated: c.generated.copy(),
     looked: [...c.looked],
+    reads: c.reads === undefined ? undefined : { dir: c.reads!.dir, globs: [...c.reads!.globs] },
   };
 }
 
@@ -134,7 +157,10 @@ export type Tables = {
   names: Names;
   enumInits: Compilation["enumInits"];
   fileNames?: Compilation["fileNames"];
+  published?: Compilation["published"];
+  editionWarnings?: Compilation["editionWarnings"];
   looked: string[];
+  reads?: Reads;
   typing: Typing;
   arenas: Arenas;
   upcasts: Set<string>;
@@ -181,6 +207,9 @@ export type Tables = {
   insertedAfter: NodeMap<Stmt, Stmt[]>;
   wrappedIn: NodeMap<Stmt, Stmt>;
   unusedDefaults: NodeSet<Expr>;
+  // The `as f64` a `Number` predicate writes around its argument, which converts whichever number
+  // a union of numbers holds rather than requiring an `f64`.
+  numericAs: NodeSet<Expr>;
   timerMains: NodeSet<Declared>;
   // A nested function's calls of itself, which run with the calling closure's own captures.
   selfCalls: NodeSet<Expr>;
@@ -205,6 +234,9 @@ export type Tables = {
   pairs: NodeSet<Expr>;
   // The `FixedArray.filled` calls, by the fixed array each makes.
   fixedFills: NodeSet<Expr>;
+  // SIMD constructors and methods, by the operation each lowers to: make, splat, a reduction,
+  // a lane comparison, select, any, all or toArray.
+  simdCalls: NodeMap<Expr, string>;
   // `String.fromCharCode(...)` and `String.fromCodePoint(...)`, by their call, their arguments
   // gathered into one array.
   stringBuilds: NodeMap<Expr, "units" | "points">;
@@ -248,6 +280,9 @@ export type Tables = {
   deepEqualities: NodeSet<Expr>;
   // The calls `spawnBlocking` makes of a function it was given other than as an arrow.
   blockingRuns: NodeSet<Expr>;
+  // Where each function `spawnBlocking` runs starts, which the closures made of it share: they
+  // run on the blocking pool, where blocking is what they are for.
+  blockingTasks: Set<usize>;
   // The `parseArgs` calls whose config has been turned into the arguments std's port takes.
   parsedArgs: NodeSet<Expr>;
   // The calls that add a route to one of std's routers or mount one router in another, which
@@ -401,13 +436,16 @@ export type Tables = {
 /** @throws {CompileError} */
 export type Timed<T> = () => T;
 
-export function newTables({ session, names, enumInits, fileNames, looked, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
+export function newTables({ session, names, enumInits, fileNames, published, editionWarnings, looked, reads, typing, arenas, upcasts, ids, rewrites, counts, regex, files, rust, generated }: Compilation): Tables {
   return {
     session,
     names,
     enumInits,
     fileNames,
+    published,
+    editionWarnings,
     looked,
+    reads,
     typing,
     arenas,
     upcasts,
@@ -430,6 +468,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     insertedAfter: new NodeMap<Stmt, Stmt[]>(),
     wrappedIn: new NodeMap<Stmt, Stmt>(),
     unusedDefaults: new NodeSet<Expr>(),
+    numericAs: new NodeSet<Expr>(),
     timerMains: new NodeSet<Declared>(),
     selfCalls: new NodeSet<Expr>(),
     substituted: new NodeSet<Expr>(),
@@ -441,6 +480,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     packed: new NodeSet<Expr>(),
     pairs: new NodeSet<Expr>(),
     fixedFills: new NodeSet<Expr>(),
+    simdCalls: new NodeMap<Expr, string>(),
     stringBuilds: new NodeMap<Expr, "units" | "points">(),
     namedParams: new NodeMap<Param, { fn: string; names: string[]; clones: boolean[] }>(),
     presetParams: new NodeMap<Param, Type>(),
@@ -461,6 +501,7 @@ export function newTables({ session, names, enumInits, fileNames, looked, typing
     inspectCalls: new NodeSet<Expr>(),
     deepEqualities: new NodeSet<Expr>(),
     blockingRuns: new NodeSet<Expr>(),
+    blockingTasks: new Set<usize>(),
     parsedArgs: new NodeSet<Expr>(),
     routes: new NodeMap<Expr, Route>(),
     printed: new NodeSet<Expr>(),

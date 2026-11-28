@@ -195,7 +195,7 @@ export type ClassNode = Span & Id & {
   name: string | undefined; abstract: boolean; decorators: Expr[]; typeParams: TypeParam[];
   // An instantiation expression when written with type arguments, as in `extends Base<T>`.
   extends: Expr | undefined; implements: TypeNode[]; members: ClassMember[];
-  // What `@derive` gave it, which `JSON` reads.
+  // What `@derive` gave it, which `JSON` reads, and `C` from `@c`, which lays it out as a C struct.
   derives?: string[];
 };
 
@@ -284,6 +284,8 @@ export type Func = Span & Id & {
   js?: JsName;
   overloadNames?: string[];
   signature?: true;
+  // `@blocking`: a call holds its thread until it returns, which an async function shouldn't do.
+  blocking?: true;
 };
 
 export type BinaryOp =
@@ -797,21 +799,36 @@ function typeAt(src: string, ids: Mut<Ids>, start: usize, end: usize): TypeNode 
   return t;
 }
 
+function isBlockingMark(d: Ref<Expr>): boolean {
+  return d.kind === "ident" && d.name === "blocking";
+}
+
 // A function, type alias, interface or enum after decorators, which Fish applies as macros
 // where TypeScript allows only classes.
 /** @throws {CompileError} */
-export function decorated(c: Mut<Cursor>, start: usize, decorators: Expr[]): Stmt {
+export function decorated(c: Mut<Cursor>, start: usize, given: Expr[]): Stmt {
   const next = c.token(1);
+  // `@blocking` is no macro: the checker reads it, so it costs no macro round.
+  const blocking = given.some((d) => isBlockingMark(d));
+  const decorators = given.filter((d) => !isBlockingMark(d));
+  const foreign = blocking && decorators.length === 0 && c.at("declare") && isToken(next, "function");
   const at = c.at("function") || (c.at("async") && isToken(next, "function") && !next.newlineBefore) || (c.at("type") && next.kind === "ident")
-    || c.at("interface") || c.at("enum") || (c.at("const") && isToken(next, "enum"));
+    || c.at("interface") || c.at("enum") || (c.at("const") && isToken(next, "enum")) || foreign;
   if (!at) throw c.error("expected a class, function, type, interface or enum after decorators");
   let s = statement(c);
+  if (s.kind === "declare" && s.body.kind === "function") {
+    s.start = start;
+    s.body.blocking = true;
+    return s;
+  }
+  if (blocking && s.kind !== "function") throw new CompileError("E1104", "'@blocking' marks a function", start, s.end);
   const id = nextId(c.ids);
   // Each kind is written to on its own, which Fish needs to write a field of a union.
   if (s.kind === "function") {
     s.id = id;
     s.start = start;
-    s.decorators = decorators;
+    if (blocking) s.blocking = true;
+    s.decorators = decorators.length > 0 ? decorators : undefined;
   } else if (s.kind === "typeAlias") {
     s.id = id;
     s.start = start;

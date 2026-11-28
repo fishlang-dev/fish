@@ -6,7 +6,8 @@ import type { Subprocess } from "bun";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fishcPath, removed, same, scratch, text } from "./support.fsh";
+import { usageOf } from "../../src/commands.fsh";
+import { fishcPath, read, removed, same, scratch, text } from "./support.fsh";
 
 type Ran = { code: i64; out: string; err: string };
 
@@ -310,7 +311,7 @@ test("a diagnostic names a test as the test, and --panic=abort is refused", () =
   assert(named.err.includes("which isn't the 'Error' that the test 'throws its own' throws"), `stderr:\n${named.err}`);
   const aborting = fishcTest(dir, ["--panic=abort"]);
   assert(aborting.code === 2, `--panic=abort exited with ${aborting.code}`);
-  same(aborting.err, "usage: fishc test [<file> | <filter>] [--release] [--timeout <ms>] [--jobs <n>] [--watch | --interpret]\n", "--panic=abort's stderr");
+  same(aborting.err, `${usageOf("test")}\n`, "--panic=abort's stderr");
   removed(root);
 }, { timeout: 30_000 });
 
@@ -339,3 +340,115 @@ test("fishc test --release builds the tests optimized and runs them", () => {
   assert(plain.code === 0, `fishc test exited with ${plain.code}`);
   removed(root);
 }, { timeout: 30_000 });
+
+// Properties: each run over generated inputs, a failing one shrunk to its smallest and printed with
+// the seed that replays it.
+function properties(): string {
+  return `function main() {}
+type Point = { x: i64; y: i64 };
+property("reversing twice gives the array back", (xs: i64[]) => {
+  let ys = xs.toReversed().toReversed();
+  assert(ys.length === xs.length);
+  for (let i = 0; i < xs.length; i++) assert(ys[i] === xs[i]);
+});
+property("points add either way round", (a: Point, b: Point, flip: boolean) => {
+  const one = flip ? a.x.wrappingAdd(b.x) : b.x.wrappingAdd(a.x);
+  assert(one === a.x.wrappingAdd(b.x));
+});
+property("strings and unions", (s: string, k: "a" | "b" | null, t: [u8, f64]) => {
+  assert(s.length >= 0);
+  assert(k === null || k === "a" || k === "b");
+  assert(t[0] <= 255);
+});
+property("no number is over 50", (n: i64) => {
+  assert(n <= 50, "too big");
+});
+`;
+}
+
+test("a property runs over generated inputs and a failure is shrunk to the smallest", () => {
+  const root = scratch("fish-props-");
+  try {
+    const dir = pkg(root, "props", [["src/main.fsh", properties()]]);
+    const got = fishcTest(dir, ["--seed", "7"]);
+    assert(got.code === 1, `the run's exit code: ${shown(got)}`);
+    for (const name of ["reversing twice gives the array back", "points add either way round", "strings and unions"]) assert(got.out.includes(`ok src/main.fsh > ${name}\n`), `'${name}' passes:\n${shown(got)}`);
+    assert(got.out.includes("FAIL src/main.fsh > no number is over 50\n"), `the failing property:\n${shown(got)}`);
+    assert(got.out.includes("'fishc test --seed 7' runs it again"), `the seed is printed:\n${shown(got)}`);
+    assert(got.out.includes("  n = 51\n"), `the failure shrinks to 51:\n${shown(got)}`);
+    // The same seed draws the same inputs.
+    const again = fishcTest(dir, ["--seed", "7", "over 50"]);
+    const line = (out: string) => out.split("\n").find((l) => l.startsWith("property ")) ?? "";
+    same(line(again.out), line(got.out), "the replay's failure");
+  } finally {
+    removed(root);
+  }
+});
+
+test("a property's parameters need their types written, as types it can generate", () => {
+  const root = scratch("fish-props-");
+  try {
+    const untyped = pkg(root, "untyped", [["src/main.fsh", `function main() {}\nproperty("p", (n) => {});\n`]]);
+    assert(fishcTest(untyped, []).err.includes("a property is written as 'property(\"name\", (x: T, ...) => { ... })'"), "an untyped parameter");
+    const map = pkg(root, "map", [["src/main.fsh", `function main() {}\nproperty("p", (m: Map<string, i64>) => {});\n`]]);
+    assert(fishcTest(map, []).err.includes("a property's parameter can't be a 'Map<string, i64>' yet"), "a type with no generator");
+  } finally {
+    removed(root);
+  }
+});
+
+function documentedLib(): string {
+  return `/** Adds two numbers.
+ *
+ * \`\`\`fsh
+ * console.log(add(1, 2));
+ * // expect: 3
+ * \`\`\`
+ */
+export function add(a: i64, b: i64): i64 {
+  return a + b;
+}
+
+/** Wrong on purpose.
+ *
+ * \`\`\`fsh
+ * console.log(add(2, 2));
+ * // expect: 5
+ * \`\`\`
+ */
+export function twice(a: i64): i64 {
+  return add(a, a);
+}
+`;
+}
+
+test("the examples in doc comments run as tests, their expect lines checked, unless --no-doc", () => {
+  const root = scratch("fish-doctests-");
+  try {
+    const dir = pkg(root, "doctests", [["src/main.fsh", "function main() {}\n"], ["src/lib.fsh", documentedLib()]]);
+    const got = fishcTest(dir, []);
+    assert(got.code === 1, `the run's exit code: ${shown(got)}`);
+    assert(got.out.includes("ok src/lib.fsh > doc example at src/lib.fsh:3\n"), `the right example passes:\n${shown(got)}`);
+    assert(got.out.includes("FAIL src/lib.fsh > doc example at src/lib.fsh:14\n--- expected\n5\n--- printed\n4\n"), `the wrong one fails naming both:\n${shown(got)}`);
+    const skipped = fishcTest(dir, ["--no-doc"]);
+    same(skipped.out, "no tests found\n", "--no-doc runs none");
+  } finally {
+    removed(root);
+  }
+});
+
+test("fishc doc writes an index and a page per module, with signatures, comments and examples", () => {
+  const root = scratch("fish-doc-");
+  try {
+    const dir = pkg(root, "site", [["src/main.fsh", "function main() {}\n"], ["src/lib.fsh", documentedLib()]]);
+    const run = spawnSync(fishcPath(), ["doc"], { cwd: dir });
+    assert(run.status === 0, `fishc doc: ${text(run.stderr)}`);
+    same(text(run.stdout), "wrote 2 module pages and an index to build/doc\n", "its report");
+    const page = read(join(dir, "build", "doc", "src_lib.html"));
+    assert(page.includes('id="add"') && page.includes("export function add(a: i64, b: i64): i64") && page.includes("<p>Adds two numbers.</p>") && page.includes("console.log(add(1, 2));"), page);
+    const index = read(join(dir, "build", "doc", "index.html"));
+    assert(index.includes('<a href="src_lib.html">src/lib.fsh</a>') && index.includes('["twice","function","src_lib.html#twice"]'), index);
+  } finally {
+    removed(root);
+  }
+});

@@ -5,7 +5,9 @@ import { bodyOf, type Arenas, type InstanceId, type LocalId } from "./arenas.fsh
 import { CompileError } from "./diag.fsh";
 import { nextId } from "./ids.fsh";
 import { clonePattern, cloneStmts } from "./rebuild.fsh";
+import { readFileSync } from "node:fs";
 import { fileAt, stdModuleAt } from "./program.fsh";
+import { readable, type Reads } from "./reads.fsh";
 import { built, quoted, type Builder, type Free } from "./quote.fsh";
 import { integerMethod } from "./values.fsh";
 import type { Expr, Param, Pattern, Span, Stmt } from "./parser.fsh";
@@ -392,6 +394,24 @@ export function comptimeBody<H extends ComptimeHost>(host: Mut<H>, instance: Ins
   }
 }
 
+// Runs the function `instance`, which takes no arguments, as a program's `main()` would run: what
+// it printed, in order, and the failure that stopped it, if one did.
+export function runMain<H extends ComptimeHost>(host: Mut<H>, instance: InstanceId): { printed: [Value, Type][][]; failure?: CompileError } {
+  const body = bodyOf(host.tables.arenas, host.tables.arenas.instanceOf(instance));
+  const site: Span = { start: body.start, end: body.end };
+  let run = new Interpreter(host);
+  run.printing = true;
+  let failure: CompileError | undefined = undefined;
+  try {
+    const _v = run.call(instance, [], undefined, site);
+  } catch (e) {
+    failure = run.failure(e as Failure, site);
+  } finally {
+    run.finish();
+  }
+  return { printed: run.printed, failure };
+}
+
 const constName = (arenas: Ref<Arenas>, c: InstanceId) => bodyOf(arenas, arenas.instanceOf(c)).name.slice("const ".length as i64);
 
 // What comptime code may throw out of a run.
@@ -399,6 +419,10 @@ type Failure = CompileError | Stop | Return | Jump | Thrown;
 
 class Interpreter<H extends ComptimeHost> {
   host: Mut<H>;
+  // When set, `console.*` calls are kept here, each its arguments' values and types, rather than
+  // refused: how the playground runs `main()`.
+  printing = false;
+  printed: [Value, Type][][] = [];
   // When the run started, for the compilation's timings.
   private started: Started;
 
@@ -518,6 +542,27 @@ class Interpreter<H extends ComptimeHost> {
   /** @throws {Stop} */
   private step<S extends Span>(this: Mut<this>, at: Ref<S>) {
     if (++this.steps > STEPS) throw new Stop(`this comptime code took more than ${grouped(STEPS)} steps; is there a loop that never ends?`, span(at), false);
+  }
+
+  // `readText` and `readBytes` from std:comptime: a file of the package, which its fish.toml lists
+  // under `[comptime] reads`, as text or as its bytes.
+  /** @throws {Stop} */
+  private readFile<S extends Span>(this: Mut<this>, name: string, args: Value[], at: Ref<S>): Value {
+    let given = args;
+    const written = given.length > 0 ? given.shift()! : undefined;
+    if (typeof written !== "string") throw new Stop(`'${name}' takes the file's path as a string`, span(at), false);
+    const reads: Ref<Reads | undefined> = this.host.tables.reads;
+    if (reads === undefined) throw new Stop(`'${name}' reads only files fish.toml lists, and this package lists none; add them under [comptime], as in reads = ["${written}"]`, span(at), false);
+    const found = readable(reads!, written);
+    if ("why" in found) throw new Stop(found.why, span(at), false);
+    try {
+      if (name === "readText") return readFileSync(found.path, "utf8");
+      let items: Value[] = [];
+      for (const b of readFileSync(found.path)) items.push(BigInt(b));
+      return { kind: "array", items };
+    } catch (_e) {
+      throw new Stop(`'${written}' can't be read`, span(at), false);
+    }
   }
 
   // Code that reaches outside the program, or waits, which comptime never runs.
@@ -694,6 +739,9 @@ class Interpreter<H extends ComptimeHost> {
   call<S extends Span>(this: Mut<this>, callee: InstanceId, args: Value[], self: Place | undefined, at: Ref<S>): Value {
     if (++this.depth > DEPTH) throw new Stop(`this comptime code nests calls more than ${DEPTH} deep; is there a recursion that never ends?`, span(at), false);
     try {
+      const reading = stdModuleAt(this.host.tables.files, this.body(callee).start) === "std:comptime";
+      const named = this.body(callee).name;
+      if (reading) return this.readFile(named, args, at);
       const body = this.body(callee);
       const name = body.name;
       const crypto = RANDOM.has(name) && stdModuleAt(this.host.tables.files, body.start) === "std:crypto";
@@ -782,7 +830,8 @@ class Interpreter<H extends ComptimeHost> {
         while (s.test === undefined || this.valueOf(f, s.test) === true) {
           this.step(s);
           if (!this.loopBody(f, s, s.body)) break;
-          if (s.update !== undefined) this.expr(f, s.update);
+          if (s.update !== undefined && s.update.kind === "sequence") for (const part of s.update.exprs) this.expr(f, part);
+          else if (s.update !== undefined) this.expr(f, s.update);
         }
         return;
       case "forOf": {
@@ -1197,7 +1246,16 @@ class Interpreter<H extends ComptimeHost> {
   /** @throws {CompileError | Jump | Stop | Thrown} */
   private callExpr(this: Mut<this>, f: usize, e: Ref<Extract<Expr, { kind: "call" }>>, type: Type): Value | Short {
     const callee: Ref<Expr> = e.callee;
-    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") this.refuse("printing", e);
+    if (callee.kind === "member" && callee.object.kind === "ident" && callee.object.name === "console") {
+      if (!this.printing) this.refuse("printing", e);
+      let line: [Value, Type][] = [];
+      for (const a of e.args) {
+        const t = this.typeOf(f, a);
+        line.push([copyValue(this.valueOf(f, a)), t]);
+      }
+      this.printed.push(line);
+      return undefined;
+    }
     if (this.host.tables.clocks.get(e) === "Math.random") this.random("'Math.random'", e);
     // A data-carrying enum's member, as `Shape.Circle(2)`.
     const r = typeof type === "string" ? undefined : this.host.tables.typing.rec(type);
@@ -2497,7 +2555,7 @@ function toF32(v: bigint): f64 {
 }
 
 // A value as `String(x)` and templates write it; an f32 as the shortest decimal naming it.
-function display(value: Ref<Value>, type: Type | undefined): string {
+export function display(value: Ref<Value>, type: Type | undefined): string {
   if (isMember(value)) return display(payload(value), type);
   const v = value;
   if (typeof v === "number" && type === "f32") return shortestF32(v);

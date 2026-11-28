@@ -35,7 +35,7 @@ function main() {}
 import { x } from "fish:nope";
 function main() {}
 // case: std_names_unknown
-// error: std has no module named 'nope'; it has 'assert', 'buffer', 'child_process', 'crypto', 'fs', 'fs/promises', 'os', 'path', 'postgres', 'process', 'sqlite', 'stdin', 'tar', 'tls', 'trace', 'url', 'util', 'zip', 'zlib'
+// error: std has no module named 'nope'; it has 'assert', 'auth', 'buffer', 'build', 'child_process', 'compress', 'comptime', 'cors', 'crypto', 'durable', 'fs', 'fs/promises', 'grpc', 'inspect', 'log', 'mcu', 'os', 'path', 'postgres', 'process', 'query', 'redis', 's3', 'sim', 'sqlite', 'stdin', 'tar', 'tls', 'trace', 'url', 'util', 'zip', 'zlib'
 import { x } from "std:nope";
 function main() {}
 // case: std_names_bun_has_no_std_name

@@ -1,9 +1,10 @@
+import type { InstanceId } from "./arenas.fsh";
 import type { CompileError } from "./diag.fsh";
-import { nextId, type Ids, type NodeMap } from "./nodes.fsh";
-import type { Expr, Pattern } from "./parser.fsh";
-import { clonePattern } from "./rebuild.fsh";
+import { nextId, type Ids, type NodeMap, type NodeSet, type Rewrites, type SiteTable } from "./nodes.fsh";
+import type { Expr, JsName, Pattern } from "./parser.fsh";
+import { cloneExpr, clonePattern } from "./rebuild.fsh";
 import { unsupported } from "./unsupported.fsh";
-import type { ClassType, Field, LiteralType, ObjectType, ParamType, RecursiveType, Type, VariantType, Typing } from "./typing.fsh";
+import { isNumeric, redundantBang, type ClassType, type Field, type LiteralType, type ObjectType, type ParamType, type RecursiveType, type RefType, type Type, type VariantType, type Typing } from "./typing.fsh";
 
 // What `match` knows about patterns apart from checking expressions: what each pattern tests,
 // the names they bind, and which values of the matched type no arm covers.
@@ -75,10 +76,103 @@ export function literalOf(e: Ref<Expr>): LiteralValue {
   return zero / zero;
 }
 
+function valueTypeOf(
+  types: Ref<SiteTable<Type>>,
+  coercions: Ref<SiteTable<Type>>,
+  rewrites: Ref<Rewrites>,
+  e: Ref<Expr>,
+): Type | undefined {
+  const now = rewrites.rewritten(e);
+  if (now !== undefined) return coercions.get(now) ?? types.get(now);
+  return coercions.get(e) ?? types.get(e);
+}
+
+function widensAs(
+  typing: Mut<Typing>,
+  types: Ref<SiteTable<Type>>,
+  coercions: Ref<SiteTable<Type>>,
+  rewrites: Ref<Rewrites>,
+  e: Ref<Extract<Expr, { kind: "as" | "satisfies" }>>,
+): boolean {
+  const fromRaw = valueTypeOf(types, coercions, rewrites, e.expr);
+  const toRaw = types.get(e);
+  if (fromRaw === undefined || toRaw === undefined) return false;
+  const from = typing.lower(fromRaw);
+  const to = typing.lower(toRaw);
+  if (typing.kindOf(from) === "union" && from !== to && !typing.fits(from, to)) return false;
+  return !isNumeric(to) && to !== "bigint" && typing.kindOf(to) !== "pointer";
+}
+
+function indexesType(typing: Mut<Typing>, t: Type): boolean {
+  const lowered = typing.lower(t);
+  const held = typeof lowered !== "string" && typing.rec(lowered).kind === "ref" ? typing.lower(typing.rec(lowered as RefType).to) : lowered;
+  const kind = typing.kindOf(held);
+  return kind === "array" || kind === "fixed";
+}
+
 // Whether an expression makes a value of its own, which a match then owns, rather than reading
-// one that lives somewhere, which a match borrows.
-export function made(e: Ref<Expr>): boolean {
-  return ["call", "new", "object", "array", "template", "conditional", "match"].includes(e.kind) || (e.kind === "binary" && (e.op === "+" || e.op === "??"));
+// one that lives somewhere, which a match borrows. Mirrors `Codegen.fresh` without `needsDrop`.
+export function made(
+  typing: Mut<Typing>,
+  types: Ref<SiteTable<Type>>,
+  coercions: Ref<SiteTable<Type>>,
+  calls: Ref<SiteTable<InstanceId>>,
+  copiesOut: Ref<NodeSet<Expr>>,
+  computed: Ref<NodeSet<Expr>>,
+  jsMembers: Ref<NodeSet<Expr>>,
+  jsStatics: Ref<NodeMap<Expr, JsName>>,
+  jsExports: Ref<NodeMap<Expr, JsName>>,
+  rewrites: Ref<Rewrites>,
+  eGiven: Expr,
+): boolean {
+  let e: Expr = eGiven;
+  while (true) {
+    const now = rewrites.rewritten(e);
+    if (now !== undefined) e = now;
+    const outerRaw = types.get(e);
+    if (outerRaw === undefined) return false;
+    const outerType = typing.lower(outerRaw);
+    if (typing.kindOf(outerType) === "ref") return false;
+    if (e.kind === "satisfies" || e.kind === "unsafe" || (e.kind === "as" && widensAs(typing, types, coercions, rewrites, e))) {
+      e = cloneExpr(e.expr);
+      continue;
+    }
+    switch (e.kind) {
+      case "call":
+      case "new":
+      case "object":
+      case "arrow":
+      case "comptime":
+      case "template":
+      case "conditional":
+      case "array":
+      case "match":
+      case "pipe":
+      case "yield":
+        return true;
+      case "unary":
+        return e.op === "await" || outerType === "bigint";
+      case "binary":
+        return e.op === "+" || e.op === "??" || outerType === "bigint";
+      case "member":
+        return calls.has(e) || copiesOut.has(e) || computed.has(e) || jsMembers.has(e) || jsStatics.has(e);
+      case "ident":
+        return copiesOut.has(e) || jsExports.has(e);
+      case "index": {
+        const obj = valueTypeOf(types, coercions, rewrites, e.object);
+        return obj !== undefined && !indexesType(typing, obj);
+      }
+      case "nonNull": {
+        if (e.narrows !== undefined || redundantBang(e)) return false;
+        const innerRaw = valueTypeOf(types, coercions, rewrites, e.expr);
+        if (innerRaw === undefined || typing.lower(innerRaw) === "null") return false;
+        e = cloneExpr(e.expr);
+        continue;
+      }
+      default:
+        return false;
+    }
+  }
 }
 
 // The names a pattern binds, in order.

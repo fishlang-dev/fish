@@ -3,8 +3,8 @@ import type { CompileError, Source } from "./diag.fsh";
 import { AST } from "./ast.fsh";
 import { nextId, renumberStmts, Rewrites, someNode, walk, type AnyNode } from "./nodes.fsh";
 import { rebuiltStmts } from "./rebuild.fsh";
-import { parse, type Pattern, type Stmt } from "./parser.fsh";
-import { TYPED_ARRAY_NAMES } from "./typing.fsh";
+import { parse, type Pattern, type Stmt, type TypeNode } from "./parser.fsh";
+import { SIMD_MASKS, SIMD_TYPES, TYPED_ARRAY_NAMES } from "./typing.fsh";
 
 // Fish's std library, as Fish source checked with each program. The prelude goes into every
 // program; the HTTP library only into one that names it.
@@ -174,6 +174,97 @@ function __arrayFilled<T>(n: i64, x: T): T[] {
 class AbortError { message: string = "This operation was aborted"; }
 // What awaiting 'handle.join()' throws when the task panicked: its panic's reason.
 class TaskPanic { message: string; constructor(message: string) { this.message = message; } }
+// What a property test draws its inputs from: SplitMix64, seeded by FISH_PROP_SEED when a run
+// replays one, else by the clock, so each run tries inputs the last didn't.
+class PropRandom {
+  state: u64;
+  constructor(seed: u64) { this.state = seed; }
+  next(this: Mut<this>): u64 {
+    this.state = this.state.wrappingAdd(0x9e3779b97f4a7c15);
+    let z = this.state;
+    z = (z ^ (z >> 30)).wrappingMul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrappingMul(0x94d049bb133111eb);
+    return z ^ (z >> 31);
+  }
+  below(this: Mut<this>, n: i64): i64 {
+    return n <= 0 ? 0 : (this.next() % (n as u64)) as i64;
+  }
+}
+declare function fsh_rt_getenv(name: Ptr<u8>): Ptr<u8>;
+function __propSeed(): u64 {
+  let given = "";
+  unsafe {
+    const p = fsh_rt_getenv(cString("FISH_PROP_SEED"));
+    if (!p.isNull()) given = fromCString(p);
+  }
+  const parsed = given === "" ? null : parseInt(given);
+  return parsed !== null ? parsed as u64 : Date.now() as u64;
+}
+// The values a property's integers start from, which a wide or narrow type reads as its own.
+const __PROP_EDGES: i64[] = [0, 1, -1, 2, 127, -128, 255, 256, 32767, -32768, 65535, 2147483647, -2147483648, 4294967295, 9223372036854775807, -9223372036854775807 - 1];
+function __propInteger(r: Mut<PropRandom>, size: i64): i64 {
+  if (r.below(8) === 0) return __PROP_EDGES[r.below(__PROP_EDGES.length as i64) as usize];
+  const bound = size + 1;
+  return r.below(2 * bound + 1) - bound;
+}
+function __propShrinkInteger(v: i64): i64[] {
+  let out: i64[] = [];
+  if (v === 0) return out;
+  out.push(0);
+  if (v < 0 && v > -9223372036854775807) out.push(-v);
+  let step = v / 2;
+  while (step !== 0 && out.length < 24) {
+    out.push(v - step);
+    step = step / 2;
+  }
+  return out;
+}
+const __PROP_FLOATS: f64[] = [0.0, -0.0, 1.0, -1.0, 0.5, 1e300, -1e-300, 1.0 / 0.0, -1.0 / 0.0, 0.0 / 0.0];
+function __propFloat(r: Mut<PropRandom>, size: i64): f64 {
+  if (r.below(8) === 0) return __PROP_FLOATS[r.below(__PROP_FLOATS.length as i64) as usize];
+  return ((r.below(2000001) - 1000000) as f64) / 1000000.0 * ((size + 1) as f64);
+}
+function __propShrinkFloat(v: f64): f64[] {
+  let out: f64[] = [];
+  if (v === 0.0 || v !== v) return out;
+  out.push(0.0);
+  // Truncated by hand, since a program may declare its own Math; a value this large is already whole.
+  const whole = v > -9.0e18 && v < 9.0e18 ? ((v as i64) as f64) : v;
+  if (whole !== v && whole - whole === 0.0) out.push(whole);
+  if (v - v === 0.0 && v / 2.0 !== v) out.push(v / 2.0);
+  return out;
+}
+function __propBoolean(r: Mut<PropRandom>): boolean {
+  return r.below(2) === 1;
+}
+function __propPick(r: Mut<PropRandom>, n: i64): i64 {
+  return r.below(n);
+}
+function __propLength(r: Mut<PropRandom>, size: i64): i64 {
+  return r.below(size / 4 + 2);
+}
+const __PROP_PIECES: string[] = ["a", "b", "z", "A", "Z", "0", "9", " ", "-", "_", ".", "/", "%", "é", "ß", "中", "😀", "\\u0000", "\\n"];
+function __propString(r: Mut<PropRandom>, size: i64): string {
+  const n = __propLength(r, size);
+  let s = "";
+  for (let i = 0; i < n; i++) {
+    if (r.below(3) === 0) s += __PROP_PIECES[r.below(__PROP_PIECES.length as i64) as usize];
+    else s += String.fromCharCode((32 + r.below(95)) as u16);
+  }
+  return s;
+}
+function __propShrinkString(v: Ref<string>): string[] {
+  let out: string[] = [];
+  const n = v.length as i64;
+  if (n === 0) return out;
+  out.push("");
+  if (n > 1) {
+    out.push(v.slice(0, n / 2));
+    out.push(v.slice(n / 2));
+  }
+  for (let i: i64 = 0; i < n && i < 16; i++) out.push(v.slice(0, i) + v.slice(i + 1));
+  return out;
+}
 class IoError {
   message: string;
   code: string = "";
@@ -360,7 +451,989 @@ class __FatalTextDecoder {
 `;
 
 // The Fetch API's Headers, Request and Response.
-const HTTP = `
+const HTTP2 = String.raw`
+// HTTP/2, in the server and fetch alike: frames, HPACK and flow control, per RFC 9113 and 7541.
+// A HPACK integer, or text, and the index just past it.
+type __h2Int = { value: i64; next: usize };
+type __h2Text = { value: string; next: usize };
+// What a connection's responders share with its reader: the peer's send windows by stream, the
+// connection's under 0, the largest frame and the initial window the peer's settings give, and
+// how many streams are being answered.
+type __h2State = { windows: Lock<Map<i64, i64>>; frame: Atomic<i64>; initial: Atomic<i64>; active: Atomic<i64> };
+// A response read from one stream: its status, headers, body and any trailers.
+type __h2Reply = { status: i64; headers: Headers; body: u8[]; trailers: Headers };
+
+// One connection's HPACK decoder: the dynamic table, oldest first, and the Huffman code, keyed
+// by its length times 2^32 plus its bits.
+class Http2Hpack {
+  names: string[] = [];
+  values: string[] = [];
+  sizes: i64[] = [];
+  size: i64 = 0;
+  max: i64 = 4096;
+  statics: string[];
+  codes: Map<i64, i64> = new Map();
+
+  constructor() {
+    this.statics = Http2.statics();
+    const codes = Http2.huffmanCodes();
+    const lengths = Http2.huffmanLengths();
+    for (let i: usize = 0; i < 256; i++) this.codes.set((lengths[i] << 32) | codes[i], i as i64);
+    this.codes.set((30 << 32) | 1073741823, 256);
+  }
+
+  // A header block's fields as name then value, or null when it isn't valid HPACK. A table size
+  // update may not go past limit, the size this side's settings allow.
+  decode(this: Mut<this>, block: Ref<u8[]>, limit: i64): string[] | null {
+    let out: string[] = [];
+    let at: usize = 0;
+    while (at < block.length) {
+      const b = block[at] as i64;
+      if ((b & 128) !== 0) {
+        const n = Http2.integer(block, at, 7);
+        if (n === null) return null;
+        const f = this.field(n.value);
+        if (f === null) return null;
+        out.push(f[0]);
+        out.push(f[1]);
+        at = n.next;
+      } else if ((b & 224) === 32) {
+        const n = Http2.integer(block, at, 5);
+        if (n === null || n.value > limit) return null;
+        this.max = n.value;
+        this.evict();
+        at = n.next;
+      } else {
+        const indexing = (b & 192) === 64;
+        const n = Http2.integer(block, at, indexing ? 6 : 4);
+        if (n === null) return null;
+        let name = "";
+        let next = n.next;
+        if (n.value === 0) {
+          const s = this.text(block, next);
+          if (s === null) return null;
+          name = s.value;
+          next = s.next;
+        } else {
+          const f = this.field(n.value);
+          if (f === null) return null;
+          name = f[0];
+        }
+        const v = this.text(block, next);
+        if (v === null) return null;
+        out.push(name);
+        out.push(v.value);
+        if (indexing) this.add(name, v.value);
+        at = v.next;
+      }
+    }
+    return out;
+  }
+
+  // The name and value at a table index: the static table's 61, then the dynamic table newest first.
+  field(this: Ref<this>, index: i64): string[] | null {
+    if (index <= 0) return null;
+    if (index <= 61) return [this.statics[((index - 1) * 2) as usize], this.statics[((index - 1) * 2 + 1) as usize]];
+    const back = index - 62;
+    if (back >= (this.names.length as i64)) return null;
+    const at = (this.names.length as i64 - 1 - back) as usize;
+    return [this.names[at], this.values[at]];
+  }
+
+  add(this: Mut<this>, name: string, value: string) {
+    const size = (new TextEncoder().encode(name).length + new TextEncoder().encode(value).length) as i64 + 32;
+    this.names.push(name);
+    this.values.push(value);
+    this.sizes.push(size);
+    this.size += size;
+    this.evict();
+  }
+
+  // Drops the oldest entries until the table fits its size, which empties it for an entry larger
+  // than the whole table.
+  evict(this: Mut<this>) {
+    while (this.size > this.max && this.sizes.length > 0) {
+      const gone = this.sizes.shift();
+      if (gone !== null) this.size -= gone;
+      this.names.shift();
+      this.values.shift();
+    }
+  }
+
+  // A string literal at an index: its length, then its bytes, Huffman-coded when the top bit is set.
+  text(this: Ref<this>, block: Ref<u8[]>, at: usize): __h2Text | null {
+    if (at >= block.length) return null;
+    const huffman = ((block[at] as i64) & 128) !== 0;
+    const n = Http2.integer(block, at, 7);
+    if (n === null) return null;
+    const end = n.next + (n.value as usize);
+    if (end > block.length) return null;
+    let raw: u8[] = [];
+    for (let i = n.next; i < end; i++) raw.push(block[i]);
+    if (!huffman) return { value: new TextDecoder().decode(raw), next: end };
+    const decoded = this.unhuffman(raw);
+    if (decoded === null) return null;
+    return { value: new TextDecoder().decode(decoded), next: end };
+  }
+
+  // Huffman-coded bytes decoded a bit at a time, or null when they hold the EOS code or end in
+  // anything but at most seven bits of its leading ones.
+  // ponytail: a map lookup per bit; a table walked a byte at a time would be faster for long values.
+  unhuffman(this: Ref<this>, raw: Ref<u8[]>): u8[] | null {
+    let out: u8[] = [];
+    let code: i64 = 0;
+    let length: i64 = 0;
+    for (const byte of raw) {
+      for (let bit: i64 = 7; bit >= 0; bit--) {
+        code = (code << 1) | (((byte as i64) >> bit) & 1);
+        length += 1;
+        const symbol = this.codes.get((length << 32) | code);
+        if (symbol !== null) {
+          if (symbol === 256) return null;
+          out.push(symbol as u8);
+          code = 0;
+          length = 0;
+        } else if (length >= 30) return null;
+      }
+    }
+    if (length > 7 || code !== (1 << length) - 1) return null;
+    return out;
+  }
+}
+
+// A stream a client opened on a connection the server reads: its header block until it ends,
+// then its fields, its body so far, and the signal its request carries.
+class Http2Stream {
+  id: i64;
+  block: u8[] = [];
+  fields: string[] = [];
+  body: u8[] = [];
+  headed: boolean = false;
+  ended: boolean = false;
+  client: AbortController = new AbortController();
+
+  constructor(id: i64) {
+    this.id = id;
+  }
+}
+
+class Http2 {
+  // RFC 7541's static table, name then value.
+  static statics(): string[] {
+    return [
+      ":authority", "", ":method", "GET", ":method", "POST", ":path", "/", ":path", "/index.html",
+      ":scheme", "http", ":scheme", "https", ":status", "200", ":status", "204", ":status", "206",
+      ":status", "304", ":status", "400", ":status", "404", ":status", "500", "accept-charset", "",
+      "accept-encoding", "gzip, deflate", "accept-language", "", "accept-ranges", "", "accept", "",
+      "access-control-allow-origin", "", "age", "", "allow", "", "authorization", "",
+      "cache-control", "", "content-disposition", "", "content-encoding", "", "content-language", "",
+      "content-length", "", "content-location", "", "content-range", "", "content-type", "",
+      "cookie", "", "date", "", "etag", "", "expect", "", "expires", "", "from", "", "host", "",
+      "if-match", "", "if-modified-since", "", "if-none-match", "", "if-range", "",
+      "if-unmodified-since", "", "last-modified", "", "link", "", "location", "", "max-forwards", "",
+      "proxy-authenticate", "", "proxy-authorization", "", "range", "", "referer", "", "refresh", "",
+      "retry-after", "", "server", "", "set-cookie", "", "strict-transport-security", "",
+      "transfer-encoding", "", "user-agent", "", "vary", "", "via", "", "www-authenticate", "",
+    ];
+  }
+
+  // RFC 7541's Huffman code for each byte, and its length in bits.
+  static huffmanCodes(): i64[] {
+    return [
+      8184, 8388568, 268435426, 268435427, 268435428, 268435429, 268435430, 268435431, 268435432,
+      16777194, 1073741820, 268435433, 268435434, 1073741821, 268435435, 268435436, 268435437,
+      268435438, 268435439, 268435440, 268435441, 268435442, 1073741822, 268435443, 268435444,
+      268435445, 268435446, 268435447, 268435448, 268435449, 268435450, 268435451, 20, 1016, 1017,
+      4090, 8185, 21, 248, 2042, 1018, 1019, 249, 2043, 250, 22, 23, 24, 0, 1, 2, 25, 26, 27, 28, 29,
+      30, 31, 92, 251, 32764, 32, 4091, 1020, 8186, 33, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102,
+      103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 252, 115, 253, 8187, 524272, 8188,
+      16380, 34, 32765, 3, 35, 4, 36, 5, 37, 38, 39, 6, 116, 117, 40, 41, 42, 7, 43, 118, 44, 8, 9,
+      45, 119, 120, 121, 122, 123, 32766, 2044, 16381, 8189, 268435452, 1048550, 4194258, 1048551,
+      1048552, 4194259, 4194260, 4194261, 8388569, 4194262, 8388570, 8388571, 8388572, 8388573,
+      8388574, 16777195, 8388575, 16777196, 16777197, 4194263, 8388576, 16777198, 8388577, 8388578,
+      8388579, 8388580, 2097116, 4194264, 8388581, 4194265, 8388582, 8388583, 16777199, 4194266,
+      2097117, 1048553, 4194267, 4194268, 8388584, 8388585, 2097118, 8388586, 4194269, 4194270,
+      16777200, 2097119, 4194271, 8388587, 8388588, 2097120, 2097121, 4194272, 2097122, 8388589,
+      4194273, 8388590, 8388591, 1048554, 4194274, 4194275, 4194276, 8388592, 4194277, 4194278,
+      8388593, 67108832, 67108833, 1048555, 524273, 4194279, 8388594, 4194280, 33554412, 67108834,
+      67108835, 67108836, 134217694, 134217695, 67108837, 16777201, 33554413, 524274, 2097123,
+      67108838, 134217696, 134217697, 67108839, 134217698, 16777202, 2097124, 2097125, 67108840,
+      67108841, 268435453, 134217699, 134217700, 134217701, 1048556, 16777203, 1048557, 2097126,
+      4194281, 2097127, 2097128, 8388595, 4194282, 4194283, 33554414, 33554415, 16777204, 16777205,
+      67108842, 8388596, 67108843, 134217702, 67108844, 67108845, 134217703, 134217704, 134217705,
+      134217706, 134217707, 268435454, 134217708, 134217709, 134217710, 134217711, 134217712, 67108846
+    ];
+  }
+
+  static huffmanLengths(): i64[] {
+    return [
+      13, 23, 28, 28, 28, 28, 28, 28, 28, 24, 30, 28, 28, 30, 28, 28, 28, 28, 28, 28, 28, 28, 30, 28,
+      28, 28, 28, 28, 28, 28, 28, 28, 6, 10, 10, 12, 13, 6, 8, 11, 10, 10, 8, 11, 8, 6, 6, 6, 5, 5, 5,
+      6, 6, 6, 6, 6, 6, 6, 7, 8, 15, 6, 12, 10, 13, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+      7, 7, 7, 7, 7, 7, 8, 7, 8, 13, 19, 13, 14, 6, 15, 5, 6, 5, 6, 5, 6, 6, 6, 5, 7, 7, 6, 6, 6, 5,
+      6, 7, 6, 5, 5, 6, 7, 7, 7, 7, 7, 15, 11, 14, 13, 28, 20, 22, 20, 20, 22, 22, 22, 23, 22, 23, 23,
+      23, 23, 23, 24, 23, 24, 24, 22, 23, 24, 23, 23, 23, 23, 21, 22, 23, 22, 23, 23, 24, 22, 21, 20,
+      22, 22, 23, 23, 21, 23, 22, 22, 24, 21, 22, 23, 23, 21, 21, 22, 21, 23, 22, 23, 23, 20, 22, 22,
+      22, 23, 22, 22, 23, 26, 26, 20, 19, 22, 23, 22, 25, 26, 26, 26, 27, 27, 26, 24, 25, 19, 21, 26,
+      27, 27, 26, 27, 24, 21, 21, 26, 26, 28, 27, 27, 27, 20, 24, 20, 21, 22, 21, 21, 23, 22, 22, 25,
+      25, 24, 24, 26, 23, 26, 27, 26, 26, 27, 27, 27, 27, 27, 28, 27, 27, 27, 27, 27, 26
+    ];
+  }
+
+  // A HPACK integer whose first byte keeps prefix bits for it.
+  static integer(block: Ref<u8[]>, at: usize, prefix: i64): __h2Int | null {
+    if (at >= block.length) return null;
+    const mask = (1 << prefix) - 1;
+    let value = (block[at] as i64) & mask;
+    let i = at + 1;
+    if (value < mask) return { value: value, next: i };
+    let shift: i64 = 0;
+    while (true) {
+      if (i >= block.length || shift > 28) return null;
+      const c = block[i] as i64;
+      value += (c & 127) << shift;
+      shift += 7;
+      i += 1;
+      if ((c & 128) === 0) return { value: value, next: i };
+    }
+  }
+
+  static putInteger(out: Mut<u8[]>, value: i64, prefix: i64, first: i64) {
+    const max = (1 << prefix) - 1;
+    if (value < max) {
+      out.push((first | value) as u8);
+      return;
+    }
+    out.push((first | max) as u8);
+    let left = value - max;
+    while (left >= 128) {
+      out.push(((left & 127) | 128) as u8);
+      left = left >> 7;
+    }
+    out.push(left as u8);
+  }
+
+  // A string literal as sent: never Huffman-coded, which costs a few bytes and no table.
+  static putText(out: Mut<u8[]>, text: string) {
+    const bytes = new TextEncoder().encode(text);
+    Http2.putInteger(out, bytes.length as i64, 7, 0);
+    for (const b of bytes) out.push(b);
+  }
+
+  // A field as a literal the peer doesn't add to its table, so this side keeps no encoder table.
+  static putField(out: Mut<u8[]>, name: string, value: string) {
+    out.push(0 as u8);
+    Http2.putText(out, name);
+    Http2.putText(out, value);
+  }
+
+  // :status, from the static table when it is there.
+  static putStatus(out: Mut<u8[]>, status: i64) {
+    const known = [200, 204, 206, 304, 400, 404, 500];
+    for (let i: usize = 0; i < known.length; i++) {
+      if (known[i] === status) {
+        Http2.putInteger(out, 8 + (i as i64), 7, 128);
+        return;
+      }
+    }
+    Http2.putInteger(out, 8, 4, 0);
+    Http2.putText(out, String(status));
+  }
+
+  // A frame: its 24-bit length, type, flags and stream, then the payload.
+  static frame(kind: i64, flags: i64, id: i64, payload: Ref<u8[]>): u8[] {
+    const n = payload.length as i64;
+    let out: u8[] = [];
+    out.reserve(n + 9);
+    out.push(((n >> 16) & 255) as u8);
+    out.push(((n >> 8) & 255) as u8);
+    out.push((n & 255) as u8);
+    out.push(kind as u8);
+    out.push(flags as u8);
+    Http2.putU32(out, id & 2147483647);
+    for (const b of payload) out.push(b);
+    return out;
+  }
+
+  static putU32(out: Mut<u8[]>, n: i64) {
+    out.push(((n >> 24) & 255) as u8);
+    out.push(((n >> 16) & 255) as u8);
+    out.push(((n >> 8) & 255) as u8);
+    out.push((n & 255) as u8);
+  }
+
+  static u32(b: Ref<u8[]>, at: usize): i64 {
+    return ((b[at] as i64) << 24) | ((b[at + 1] as i64) << 16) | ((b[at + 2] as i64) << 8) | (b[at + 3] as i64);
+  }
+
+  // A SETTINGS frame of identifier, value pairs.
+  static settings(pairs: Ref<i64[]>): u8[] {
+    let payload: u8[] = [];
+    for (let i: usize = 0; i + 1 < pairs.length; i += 2) {
+      payload.push(((pairs[i] >> 8) & 255) as u8);
+      payload.push((pairs[i] & 255) as u8);
+      Http2.putU32(payload, pairs[i + 1]);
+    }
+    return Http2.frame(4, 0, 0, payload);
+  }
+
+  static windowUpdate(id: i64, n: i64): u8[] {
+    let payload: u8[] = [];
+    Http2.putU32(payload, n);
+    return Http2.frame(8, 0, id, payload);
+  }
+
+  static reset(id: i64, code: i64): u8[] {
+    let payload: u8[] = [];
+    Http2.putU32(payload, code);
+    return Http2.frame(3, 0, id, payload);
+  }
+
+  static goaway(last: i64, code: i64): u8[] {
+    let payload: u8[] = [];
+    Http2.putU32(payload, last);
+    Http2.putU32(payload, code);
+    return Http2.frame(7, 0, 0, payload);
+  }
+
+  // A header block as a HEADERS frame and as many CONTINUATIONs as the peer's frame size needs.
+  static headers(id: i64, block: Ref<u8[]>, end: boolean, max: i64): u8[] {
+    let out: u8[] = [];
+    const n = block.length as i64;
+    let at: i64 = 0;
+    let first = true;
+    while (first || at < n) {
+      const take = n - at < max ? n - at : max;
+      let piece: u8[] = [];
+      for (let i = at; i < at + take; i++) piece.push(block[i as usize]);
+      at += take;
+      const flags = (at >= n ? 4 : 0) | (first && end ? 1 : 0);
+      for (const b of Http2.frame(first ? 1 : 9, flags, id, piece)) out.push(b);
+      first = false;
+    }
+    return out;
+  }
+
+  static preface(): u8[] {
+    return new TextEncoder().encode("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n");
+  }
+
+  // Whether what a connection has sent so far is the start of the preface, up to all of it.
+  static prefaceSoFar(buffer: Ref<u8[]>): boolean {
+    const want = Http2.preface();
+    if (buffer.length === 0) return false;
+    for (let i: usize = 0; i < buffer.length && i < want.length; i++) if (buffer[i] !== want[i]) return false;
+    return true;
+  }
+
+  // A DATA or HEADERS payload without its padding, and a HEADERS one without its priority, or
+  // null when the padding is longer than the frame.
+  static unpadded(payload: u8[], flags: i64, priority: boolean): u8[] | null {
+    let from: i64 = 0;
+    let pad: i64 = 0;
+    if ((flags & 8) !== 0) {
+      if (payload.length === 0) return null;
+      pad = payload[0] as i64;
+      from = 1;
+    }
+    if (priority && (flags & 32) !== 0) from += 5;
+    const end = payload.length as i64 - pad;
+    if (end < from) return null;
+    if (from === 0 && pad === 0) return payload;
+    return payload.slice(from, end);
+  }
+
+  // The frame at the front of a buffer holding it whole: its type, flags, stream and payload.
+  static take(buffer: Mut<u8[]>): { kind: i64; flags: i64; id: i64; payload: u8[] } {
+    const length = Http2.frameLength(buffer);
+    const kind = buffer[3] as i64;
+    const flags = buffer[4] as i64;
+    const id = Http2.u32(buffer, 5) & 2147483647;
+    const rest = buffer.splice(9 + length);
+    const payload = buffer.splice(9);
+    buffer.splice(0);
+    for (const b of rest) buffer.push(b);
+    return { kind: kind, flags: flags, id: id, payload: payload };
+  }
+
+  static frameLength(buffer: Ref<u8[]>): i64 {
+    return ((buffer[0] as i64) << 16) | ((buffer[1] as i64) << 8) | (buffer[2] as i64);
+  }
+
+  // Writes what a connection's streams queue, in order, so frames never interleave. A write that
+  // fails ends the writing, though what is queued is still taken so no sender waits.
+  static async writer(conn: TcpStream, out: Channel<u8[]>): Promise<void> {
+    let failed = false;
+    while (true) {
+      const frame = await out.receive();
+      if (frame === null) return;
+      if (failed) continue;
+      try {
+        await conn.write(frame, AbortSignal.timeout(30000));
+      } catch (e) {
+        failed = true;
+      }
+    }
+  }
+
+  // Whether a frame was queued before the connection went.
+  static async queue(out: Ref<Channel<u8[]>>, frame: u8[], gone: Ref<AbortSignal>): Promise<boolean> {
+    try {
+      await out.send(frame, gone.clone());
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Sends bytes as DATA frames within the peer's windows for the connection and the stream,
+  // waiting while either is shut. False once the stream was reset or the connection went.
+  // ponytail: a shut window is polled every millisecond; a waker per stream would wake at once.
+  static async data(out: Ref<Channel<u8[]>>, state: Ref<shared<__h2State>>, id: i64, payload: Ref<u8[]>, end: boolean, gone: Ref<AbortSignal>): Promise<boolean> {
+    const n = payload.length as i64;
+    if (n === 0) {
+      if (!end) return true;
+      const sent = await Http2.queue(out, Http2.frame(0, 1, id, payload), gone);
+      return sent;
+    }
+    let at: i64 = 0;
+    while (at < n) {
+      if (gone.aborted) return false;
+      const most = state.frame.load();
+      const want = n - at < most ? n - at : most;
+      const take = state.windows.update((w): i64 => {
+        const c = w.get(0);
+        const s = w.get(id);
+        if (c === null || s === null) return -1;
+        let t = want;
+        if (c < t) t = c;
+        if (s < t) t = s;
+        if (t > 0) {
+          w.set(0, c - t);
+          w.set(id, s - t);
+        }
+        return t;
+      });
+      if (take < 0) return false;
+      if (take === 0) {
+        await sleep(1);
+        continue;
+      }
+      let chunk: u8[] = [];
+      chunk.reserve(take);
+      for (let i = at; i < at + take; i++) chunk.push(payload[i as usize]);
+      at += take;
+      const sent = await Http2.queue(out, Http2.frame(0, at === n && end ? 1 : 0, id, chunk), gone);
+      if (!sent) return false;
+    }
+    return true;
+  }
+
+  // Ends a stream's response: with its trailers as a last HEADERS when it has them, else an empty DATA.
+  static async finish(out: Ref<Channel<u8[]>>, state: Ref<shared<__h2State>>, id: i64, res: Ref<Response>, gone: Ref<AbortSignal>): Promise<void> {
+    const trailers = res.__trailers();
+    if (trailers === null) {
+      const none: u8[] = [];
+      await Http2.data(out, state, id, none, true, gone);
+      return;
+    }
+    let block: u8[] = [];
+    for (let i: usize = 0; i < trailers.names.length; i++) if (!Http2.connectionField(trailers.names[i])) Http2.putField(block, trailers.names[i], trailers.values[i]);
+    await Http2.queue(out, Http2.headers(id, block, true, state.frame.load()), gone);
+  }
+
+  // A request from a stream's fields, or null when its pseudo-headers aren't a request's.
+  static request(fields: Ref<string[]>, host: string, secure: boolean, signal: AbortSignal): Request | null {
+    let method = "";
+    let path = "";
+    let authority = "";
+    let headers = new Headers();
+    for (let i: usize = 0; i + 1 < fields.length; i += 2) {
+      const name = fields[i];
+      const value = fields[i + 1];
+      if (Http1.hasBreak(value) || name.length === 0) return null;
+      if (name === ":method") method = value;
+      else if (name === ":path") path = value;
+      else if (name === ":authority") authority = value;
+      else if (name === ":scheme") {}
+      else if (name.startsWith(":") || name !== name.toLowerCase() || !Http1.isToken(name)) return null;
+      else headers.append(name, value);
+    }
+    if (!Http1.isToken(method) || !path.startsWith("/")) return null;
+    if (authority.length === 0) {
+      const named = headers.get("host");
+      authority = named !== null ? named : host;
+    }
+    if (!Http1.isHost(authority)) return null;
+    return new Request((secure ? "https://" : "http://") + authority + path, { method: method, headers: headers, signal: signal });
+  }
+
+  // A response's header block, framing a body of bytes with its length.
+  static responseBlock(res: Ref<Response>, streamed: boolean): u8[] {
+    let block: u8[] = [];
+    Http2.putStatus(block, res.status);
+    for (let i: usize = 0; i < res.headers.names.length; i++) {
+      const name = res.headers.names[i];
+      if (!Http2.connectionField(name) && name !== "content-length" && name !== "date") Http2.putField(block, name, res.headers.values[i]);
+    }
+    for (const line of res.cookies.toSetCookieHeaders()) Http2.putField(block, "set-cookie", line);
+    if (!streamed && res.status !== 204 && res.status !== 304) Http2.putField(block, "content-length", String(res.__bytes().length as i64));
+    Http2.putField(block, "date", httpDate());
+    return block;
+  }
+
+  // The fields HTTP/2 forbids, since they belong to one HTTP/1.1 connection.
+  static connectionField(name: string): boolean {
+    return name === "connection" || name === "keep-alive" || name === "proxy-connection" || name === "transfer-encoding" || name === "upgrade" || name === "host";
+  }
+
+  // Serves one HTTP/2 connection whose client has sent the preface's first bytes: streams are
+  // read here and each request answered by a task of its own, through one writer. With no stream
+  // open the connection closes after idleTimeout; when the server stops it says GOAWAY, lets the
+  // streams being answered finish for a second, and closes.
+  static async serve(conn: TcpStream, start: u8[], handler: ServeHandler, host: string, stop: AbortSignal, limits: __serveLimits): Promise<void> throws IoError {
+    let buffer = start;
+    while ((buffer.length as i64) < 24) {
+      const got = await Http1.readBy(conn, stop, Http1.after(limits.headerTimeout));
+      if (got === null || got.length === 0) return;
+      for (const b of got) buffer.push(b);
+    }
+    if (!Http2.prefaceSoFar(buffer)) return;
+    buffer = buffer.splice(24);
+    const out = new Channel<u8[]>(64);
+    const writing = spawn(Http2.writer(conn.clone(), out.clone()));
+    let windows = new Map<i64, i64>();
+    windows.set(0, 65535);
+    const state = shared<__h2State>({ windows: new Lock(windows), frame: new Atomic(16384), initial: new Atomic(65535), active: new Atomic(0) });
+    const gone = new AbortController();
+    const going = gone.signal.clone();
+    const settings: i64[] = [3, 100];
+    await Http2.queue(out, Http2.settings(settings), going);
+    await Http2.read(conn, buffer, handler, host, stop, limits, out.clone(), state.clone(), gone.signal.clone());
+    const ended = nowMs();
+    while (state.active.load() > 0) {
+      if (nowMs() - ended > 1000) gone.abort();
+      await sleep(5);
+    }
+    gone.abort();
+    out.close();
+    await writing;
+  }
+
+  // The frames' loop, until the client goes, breaks the protocol, sits idle, or the server stops.
+  static async read(conn: Ref<TcpStream>, start: u8[], handler: ServeHandler, host: string, stop: AbortSignal, limits: __serveLimits, out: Channel<u8[]>, state: shared<__h2State>, gone: AbortSignal): Promise<void> throws IoError {
+    let buffer = start;
+    let hpack = new Http2Hpack();
+    let streams: Http2Stream[] = [];
+    let last: i64 = 0;
+    // The stream whose header block CONTINUATION frames go on, and whether its HEADERS ended it.
+    let continuing: i64 = 0;
+    let continuingEnds = false;
+    let code: i64 = 0;
+    while (true) {
+      // Streams answered and gone from the windows are dropped.
+      let kept: Http2Stream[] = [];
+      while (streams.length > 0) {
+        const s = streams.pop()!;
+        const id = s.id;
+        if (!s.ended || state.windows.update((w) => w.has(id))) kept.push(s);
+      }
+      streams = kept;
+      const idle = streams.length === 0 && state.active.load() === 0;
+      const deadline = idle ? Http1.after(limits.idleTimeout) : 0;
+      const head = await Http2.fill(conn, buffer, 9, stop, deadline);
+      if (head !== 1) break;
+      const length = Http2.frameLength(buffer);
+      if (length > 16384) {
+        code = 6;
+        break;
+      }
+      const whole = await Http2.fill(conn, buffer, 9 + length, stop, Http1.after(limits.idleTimeout));
+      if (whole !== 1) break;
+      const f = Http2.take(buffer);
+      if (continuing !== 0 && (f.kind !== 9 || f.id !== continuing)) {
+        code = 1;
+        break;
+      }
+      if (f.kind === 0) {
+        // DATA: counted against the windows whether or not its stream still wants it.
+        if (length > 0) await Http2.queue(out, Http2.windowUpdate(0, length), gone);
+        const at = Http2.find(streams, f.id);
+        const data = Http2.unpadded(f.payload, f.flags, false);
+        if (data === null) {
+          code = 1;
+          break;
+        }
+        if (at < 0 || !streams[at as usize].headed || streams[at as usize].ended) {
+          if (f.id > last || f.id === 0) {
+            code = 1;
+            break;
+          }
+          continue;
+        }
+        const end = (f.flags & 1) !== 0;
+        if ((streams[at as usize].body.length + data.length) as i64 > limits.maxBodySize) {
+          await Http2.refuse(streams, at, out, state, gone, 413);
+          continue;
+        }
+        for (const b of data) streams[at as usize].body.push(b);
+        if (end) await Http2.dispatch(streams, at, handler.clone(), host, limits, out, state, gone);
+        else if (length > 0) await Http2.queue(out, Http2.windowUpdate(f.id, length), gone);
+      } else if (f.kind === 1 || f.kind === 9) {
+        const opening = f.kind === 1;
+        if (f.id === 0 || (f.id % 2) === 0 || (!opening && continuing === 0)) {
+          code = 1;
+          break;
+        }
+        const fragment = opening ? Http2.unpadded(f.payload, f.flags, true) : f.payload;
+        if (fragment === null) {
+          code = 1;
+          break;
+        }
+        let at = Http2.find(streams, f.id);
+        if (opening) {
+          if (at < 0) {
+            if (f.id <= last) {
+              code = 1;
+              break;
+            }
+            last = f.id;
+            streams.push(new Http2Stream(f.id));
+            at = streams.length as i64 - 1;
+            const initial = state.initial.load();
+            const id = f.id;
+            state.windows.update((w) => { w.set(id, initial); });
+          }
+          continuingEnds = (f.flags & 1) !== 0;
+        }
+        for (const b of fragment) streams[at as usize].block.push(b);
+        if ((streams[at as usize].block.length as i64) > 65536) {
+          code = 11;
+          break;
+        }
+        if ((f.flags & 4) === 0) {
+          continuing = f.id;
+          continue;
+        }
+        continuing = 0;
+        const block = streams[at as usize].block.splice(0);
+        const fields = hpack.decode(block, 4096);
+        if (fields === null) {
+          code = 9;
+          break;
+        }
+        // A second header block is the request's trailers, which end it.
+        if (!streams[at as usize].headed) {
+          streams[at as usize].fields = fields;
+          streams[at as usize].headed = true;
+          if (stop.aborted || state.active.load() >= 100) {
+            streams[at as usize].ended = true;
+            const id = f.id;
+            state.windows.update((w) => { w.delete(id); });
+            await Http2.queue(out, Http2.reset(f.id, 7), gone);
+            continue;
+          }
+        } else if (!continuingEnds) {
+          code = 1;
+          break;
+        }
+        if (continuingEnds && !streams[at as usize].ended) await Http2.dispatch(streams, at, handler.clone(), host, limits, out, state, gone);
+      } else if (f.kind === 3) {
+        const at = Http2.find(streams, f.id);
+        if (at >= 0) {
+          streams[at as usize].client.abort();
+          streams[at as usize].ended = true;
+        }
+        const id = f.id;
+        state.windows.update((w) => { w.delete(id); });
+      } else if (f.kind === 4) {
+        if ((f.flags & 1) !== 0) continue;
+        if (f.id !== 0 || (length % 6) !== 0) {
+          code = 6;
+          break;
+        }
+        for (let i: usize = 0; i + 5 < f.payload.length; i += 6) {
+          const key = ((f.payload[i] as i64) << 8) | (f.payload[i + 1] as i64);
+          const value = Http2.u32(f.payload, i + 2);
+          if (key === 4) {
+            if (value > 2147483647) {
+              code = 3;
+              break;
+            }
+            const delta = value - state.initial.exchange(value);
+            state.windows.update((w) => {
+              for (const k of w.keys()) if (k !== 0) w.set(k, w.get(k)! + delta);
+            });
+          } else if (key === 5) {
+            if (value < 16384 || value > 16777215) {
+              code = 1;
+              break;
+            }
+            state.frame.store(value);
+          }
+        }
+        if (code !== 0) break;
+        await Http2.queue(out, Http2.frame(4, 1, 0, []), gone);
+      } else if (f.kind === 6) {
+        if (length !== 8) {
+          code = 6;
+          break;
+        }
+        if ((f.flags & 1) === 0) await Http2.queue(out, Http2.frame(6, 1, 0, f.payload), gone);
+      } else if (f.kind === 7) {
+        break;
+      } else if (f.kind === 8) {
+        if (length !== 4) {
+          code = 6;
+          break;
+        }
+        const n = Http2.u32(f.payload, 0) & 2147483647;
+        const id = f.id;
+        state.windows.update((w) => {
+          const now = w.get(id);
+          if (now !== null) w.set(id, now + n);
+        });
+      } else if (f.kind === 5) {
+        code = 1;
+        break;
+      }
+    }
+    // A client gone, or a protocol error, ends every stream's request; a server stopping lets
+    // those being answered finish.
+    if (code !== 0 || !stop.aborted) for (const s of streams) s.client.abort();
+    await Http2.queue(out, Http2.goaway(last, code), gone);
+  }
+
+  static find(streams: Ref<Http2Stream[]>, id: i64): i64 {
+    for (let i: usize = 0; i < streams.length; i++) if (streams[i].id === id) return i as i64;
+    return -1;
+  }
+
+  // 1 once the buffer holds need bytes, 0 when the connection ends or the server stops, and -1
+  // once the deadline passes, where 0 is none.
+  static async fill(conn: Ref<TcpStream>, buffer: Mut<u8[]>, need: i64, stop: Ref<AbortSignal>, deadline: i64): Promise<i64> throws IoError {
+    while ((buffer.length as i64) < need) {
+      const got = await Http1.readBy(conn, stop, deadline);
+      if (got === null) return -1;
+      if (got.length === 0) return 0;
+      for (const b of got) buffer.push(b);
+    }
+    return 1;
+  }
+
+  // Answers a stream at once with a bare status and ends it, as for a body over the limit.
+  static async refuse(streams: Mut<Http2Stream[]>, at: i64, out: Ref<Channel<u8[]>>, state: Ref<shared<__h2State>>, gone: Ref<AbortSignal>, status: i64): Promise<void> {
+    streams[at as usize].ended = true;
+    const id = streams[at as usize].id;
+    state.windows.update((w) => { w.delete(id); });
+    let block: u8[] = [];
+    Http2.putStatus(block, status);
+    await Http2.queue(out, Http2.headers(id, block, true, state.frame.load()), gone);
+    await Http2.queue(out, Http2.reset(id, 0), gone);
+  }
+
+  // Hands a stream whose request has ended to a task that answers it.
+  static async dispatch(streams: Mut<Http2Stream[]>, at: i64, handler: ServeHandler, host: string, limits: Ref<__serveLimits>, out: Ref<Channel<u8[]>>, state: Ref<shared<__h2State>>, gone: Ref<AbortSignal>): Promise<void> {
+    streams[at as usize].ended = true;
+    const id = streams[at as usize].id;
+    let req = Http2.request(streams[at as usize].fields, host, limits.secure, streams[at as usize].client.signal.clone());
+    if (req === null) {
+      state.windows.update((w) => { w.delete(id); });
+      await Http2.queue(out, Http2.reset(id, 1), gone);
+      return;
+    }
+    req.__setBody(streams[at as usize].body.splice(0));
+    state.active.add(1);
+    spawn(Http2.respond(handler, req, id, out.clone(), state.clone(), gone.clone(), limits.trace));
+  }
+
+  // Runs a stream's handler on a task of its own, so a panic answers only its stream with a 500,
+  // then sends the response within the windows. A streamed body stops when the client resets the
+  // stream or the connection goes.
+  static async respond(handler: ServeHandler, req: Request, id: i64, out: Channel<u8[]>, state: shared<__h2State>, gone: AbortSignal, trace: boolean): Promise<void> {
+    const head = req.method === "HEAD";
+    const client = req.signal.clone();
+    let traced: __traceRecord[] = [];
+    let outer: i64[] = [];
+    if (trace && __traceOn()) {
+      outer = __traceWords();
+      traced.push(__traceRequest(req));
+    }
+    let res: Response;
+    try {
+      const running = spawn(Http1.handle(handler, req));
+      if (traced.length > 0) __traceEnter(outer);
+      res = await running.join();
+    } catch (e) {
+      res = new Response("", { status: 500 });
+    }
+    // A response HTTP/2 can't carry, a 101 among them, goes out as a 500.
+    if (!Http1.sendable(res)) res = new Response("Internal Server Error\n", { status: 500 });
+    if (traced.length > 0) __traceServed(traced, res.status);
+    const bodiless = head || res.status === 204 || res.status === 304;
+    const byteStream = res.__byteStream();
+    const stream = res.__stream();
+    const streamed = byteStream !== null || stream !== null;
+    const block = Http2.responseBlock(res, streamed);
+    const empty = bodiless || (!streamed && res.__bytes().length === 0);
+    const started = await Http2.queue(out, Http2.headers(id, block, empty, state.frame.load()), gone);
+    if (started && !empty) {
+      const either = AbortSignal.any([client, gone.clone()]);
+      if (byteStream !== null) {
+        let chunks = byteStream.__values();
+        let open = true;
+        while (open && !either.aborted) {
+          const chunk = await Promise.race([Http1.nextBytes(chunks), Http1.abortOfBytes(either)]);
+          if (chunk === null) break;
+          open = await Http2.data(out, state, id, chunk, false, gone);
+        }
+        if (open && !either.aborted) await Http2.finish(out, state, id, res, gone);
+      } else if (stream !== null) {
+        let pieces = stream;
+        let open = true;
+        while (open && !either.aborted) {
+          const piece = await Promise.race([Http1.next(pieces), Http1.abortOf(either)]);
+          if (piece === null) break;
+          const bytes = new TextEncoder().encode(piece);
+          open = await Http2.data(out, state, id, bytes, false, gone);
+        }
+        if (open && !either.aborted) await Http2.finish(out, state, id, res, gone);
+      } else {
+        const sent = await Http2.data(out, state, id, res.__bytes(), false, gone);
+        if (sent) await Http2.finish(out, state, id, res, gone);
+      }
+    }
+    state.windows.update((w) => { w.delete(id); });
+    state.active.sub(1);
+  }
+
+  // Sends one request as stream 1 of a connection whose peer chose HTTP/2 and reads the reply
+  // whole, its trailers included: within the server's windows going out, and replenishing the
+  // windows this side gives as the body comes in.
+  static async exchange(conn: Ref<TcpStream>, scheme: string, method: string, authority: string, path: string, headers: Ref<Headers>, body: Ref<u8[]>, signal: AbortSignal): Promise<__h2Reply> throws IoError | AbortError {
+    let block: u8[] = [];
+    Http2.putField(block, ":method", method);
+    Http2.putField(block, ":scheme", scheme);
+    Http2.putField(block, ":authority", authority);
+    Http2.putField(block, ":path", path);
+    for (let i: usize = 0; i < headers.names.length; i++) {
+      const name = headers.names[i];
+      if (!Http1.isToken(name) || Http1.hasBreak(headers.values[i])) throw new IoError("can't send the request: header '" + name + "' holds a line break or isn't a header name");
+      const te = name === "te" && headers.values[i] !== "trailers";
+      if (!Http2.connectionField(name) && name !== "content-length" && !te) Http2.putField(block, name, headers.values[i]);
+    }
+    if (!headers.has("accept")) Http2.putField(block, "accept", "*/*");
+    if (!headers.has("user-agent")) Http2.putField(block, "user-agent", "fish");
+    const size = body.length as i64;
+    if (size > 0 || method === "POST" || method === "PUT" || method === "PATCH") Http2.putField(block, "content-length", String(size));
+    let opening = Http2.preface();
+    const settings: i64[] = [2, 0];
+    for (const b of Http2.settings(settings)) opening.push(b);
+    for (const b of Http2.headers(1, block, size === 0, 16384)) opening.push(b);
+    await conn.write(opening, signal.clone());
+    let sendConnection: i64 = 65535;
+    let sendStream: i64 = 65535;
+    let frameMost: i64 = 16384;
+    let initial: i64 = 65535;
+    let sent: i64 = 0;
+    let hpack = new Http2Hpack();
+    let buffer: u8[] = [];
+    let fragments: u8[] = [];
+    let status: i64 = 0;
+    let fields = new Headers();
+    let trailers = new Headers();
+    let data: u8[] = [];
+    while (true) {
+      // As much of the body as the windows allow goes out before the next frame is read.
+      while (sent < size && sendConnection > 0 && sendStream > 0) {
+        let take = size - sent;
+        if (take > frameMost) take = frameMost;
+        if (take > sendConnection) take = sendConnection;
+        if (take > sendStream) take = sendStream;
+        let chunk: u8[] = [];
+        for (let i = sent; i < sent + take; i++) chunk.push(body[i as usize]);
+        sent += take;
+        sendConnection -= take;
+        sendStream -= take;
+        await conn.write(Http2.frame(0, sent === size ? 1 : 0, 1, chunk), signal.clone());
+      }
+      await Http2.more(conn, buffer, 9, signal);
+      const length = Http2.frameLength(buffer);
+      if (length > 16384) throw new IoError("the server sent a frame over 16 KiB, which this side didn't allow");
+      await Http2.more(conn, buffer, 9 + length, signal);
+      const f = Http2.take(buffer);
+      if (f.kind === 4) {
+        if ((f.flags & 1) !== 0) continue;
+        for (let i: usize = 0; i + 5 < f.payload.length; i += 6) {
+          const key = ((f.payload[i] as i64) << 8) | (f.payload[i + 1] as i64);
+          const value = Http2.u32(f.payload, i + 2);
+          if (key === 4) {
+            sendStream += value - initial;
+            initial = value;
+          }
+          else if (key === 5 && value >= 16384 && value <= 16777215) frameMost = value;
+        }
+        await conn.write(Http2.frame(4, 1, 0, []), signal.clone());
+      } else if (f.kind === 6) {
+        if ((f.flags & 1) === 0) await conn.write(Http2.frame(6, 1, 0, f.payload), signal.clone());
+      } else if (f.kind === 8) {
+        const n = Http2.u32(f.payload, 0) & 2147483647;
+        if (f.id === 0) sendConnection += n;
+        else if (f.id === 1) sendStream += n;
+      } else if (f.kind === 7) {
+        if ((Http2.u32(f.payload, 0) & 2147483647) < 1) throw new IoError("the server went away before answering, with HTTP/2 error " + String(Http2.u32(f.payload, 4)));
+      } else if (f.kind === 3 && f.id === 1) {
+        throw new IoError("the server reset the stream with HTTP/2 error " + String(Http2.u32(f.payload, 0)));
+      } else if ((f.kind === 1 || f.kind === 9) && f.id === 1) {
+        const fragment = f.kind === 1 ? Http2.unpadded(f.payload, f.flags, true) : f.payload;
+        if (fragment === null) throw new IoError("the server's HEADERS frame is malformed");
+        for (const b of fragment) fragments.push(b);
+        if ((f.flags & 4) === 0) continue;
+        const decoded = hpack.decode(fragments.splice(0), 4096);
+        if (decoded === null) throw new IoError("the server's header block isn't valid HPACK");
+        if (status >= 200) {
+          for (let i: usize = 0; i + 1 < decoded.length; i += 2) trailers.append(decoded[i], decoded[i + 1]);
+        } else {
+          let given = new Headers();
+          let code: i64 = -1;
+          for (let i: usize = 0; i + 1 < decoded.length; i += 2) {
+            if (decoded[i] === ":status") code = Http1.digits(decoded[i + 1]);
+            else if (!decoded[i].startsWith(":")) given.append(decoded[i], decoded[i + 1]);
+          }
+          if (code < 100 || code > 999) throw new IoError("the server's response has no :status");
+          // An interim 1xx response is skipped, as HTTP/1.1's are.
+          if (code >= 200) {
+            status = code;
+            fields = given;
+          }
+        }
+        if ((f.flags & 1) !== 0) break;
+      } else if (f.kind === 0 && f.id === 1) {
+        const piece = Http2.unpadded(f.payload, f.flags, false);
+        if (piece === null) throw new IoError("the server's DATA frame is malformed");
+        for (const b of piece) data.push(b);
+        if ((f.flags & 1) !== 0) break;
+        if (length > 0) {
+          let update = Http2.windowUpdate(0, length);
+          for (const b of Http2.windowUpdate(1, length)) update.push(b);
+          await conn.write(update, signal.clone());
+        }
+      }
+    }
+    if (status < 200) throw new IoError("the server ended the stream before its response's headers");
+    return { status: status, headers: fields, body: data, trailers: trailers };
+  }
+
+  // Reads until the buffer holds need bytes, which must come before the connection ends.
+  static async more(conn: Ref<TcpStream>, buffer: Mut<u8[]>, need: i64, signal: Ref<AbortSignal>): Promise<void> throws IoError | AbortError {
+    while ((buffer.length as i64) < need) {
+      const got = await Http1.more(conn, signal, "the HTTP/2 response ended");
+      for (const b of got) buffer.push(b);
+    }
+  }
+}
+`;
+const HTTP = HTTP2 + `
 class Headers {
   names: string[] = [];
   values: string[] = [];
@@ -576,8 +1649,9 @@ class Request {
   // A body given as a stream, at most one, read into #body when the request is sent or read.
   // Shared, so a request still clones, its copies sharing the one stream. The stream's
   // generator is held rather than the stream, since a class field naming a ReadableStream
-  // instance makes it before its type parameter is bound.
-  #bytes: shared<{ s: Lock<Dyn<AsyncGenerator<u8[]>>[]> }>;
+  // instance makes it before its type parameter is bound. Once the request is cloned, the copy
+  // that reads the stream to its end keeps the bytes in read for the others.
+  #bytes: shared<{ s: Lock<Dyn<AsyncGenerator<u8[]>>[]>; read: Lock<u8[][]>; cloned: Atomic<i64> }>;
   signal: AbortSignal;
   // The :params a Router's route took from the path, as name then value.
   params: string[] = [];
@@ -604,8 +1678,35 @@ class Request {
     this.method = method;
     this.headers = headers;
     this.#body = bytes;
-    this.#bytes = shared({ s: new Lock(streams) });
+    const read: u8[][] = [];
+    this.#bytes = shared({ s: new Lock(streams), read: new Lock(read), cloned: new Atomic(0) });
     this.signal = signal;
+  }
+
+  // A copy of the request, as it is now: its path as a middleware may have rewritten it, its
+  // :params, and a body each copy can read in full.
+  // ponytail: a streamed body read through body, or by two copies at once, reaches only one of
+  // them; tee the stream if a program needs that.
+  clone(): Request {
+    this.#bytes.cloned.store(1);
+    let copy = new Request(this.url, { method: this.method, headers: this.headers.clone(), signal: this.signal.clone() });
+    copy.path = this.path;
+    copy.params = this.params.clone();
+    copy.#body = this.#body.clone();
+    copy.#bytes = this.#bytes.clone();
+    return copy;
+  }
+
+  // The bytes a copy of this request read from the stream they share, or null.
+  private kept(this: Ref<this>): u8[] | null {
+    return this.#bytes.read.update((r) => r.length > 0 ? r[0].clone() : null);
+  }
+
+  // Keeps a streamed body's bytes for the other copies, when there are any.
+  private keep(this: Ref<this>, bytes: Ref<u8[]>) {
+    if (this.#bytes.cloned.load() === 0) return;
+    const held = bytes.clone();
+    this.#bytes.read.update((r) => { r.push(held); });
   }
 
   __setBody(this: Mut<this>, body: string | u8[] | ReadableStream<u8[]>) {
@@ -626,8 +1727,13 @@ class Request {
   // A body given as a stream, read to its end into the bytes, as fetch sends it with a length.
   async __drain(this: Mut<this>) {
     const given = this.#bytes.s.update((s) => s.pop());
-    if (given === null) return;
+    if (given === null) {
+      const kept = this.kept();
+      if (kept !== null) this.#body = kept;
+      return;
+    }
     const bytes = await __streamBytes(ReadableStream.from(__streamDyn(given)));
+    this.keep(bytes);
     this.#body = bytes;
   }
 
@@ -648,7 +1754,13 @@ class Request {
   // The body's bytes as they were sent; a streamed one's read to its end, once.
   async bytes(): Promise<u8[]> {
     const given = this.#bytes.s.update((s) => s.pop());
-    if (given !== null) return await __streamBytes(ReadableStream.from(__streamDyn(given)));
+    if (given !== null) {
+      const bytes = await __streamBytes(ReadableStream.from(__streamDyn(given)));
+      this.keep(bytes);
+      return bytes;
+    }
+    const kept = this.kept();
+    if (kept !== null) return kept;
     return this.#body.clone();
   }
 
@@ -679,6 +1791,8 @@ class Request {
 }
 
 type ResponseInit = { status?: i64; statusText?: string; headers?: Headers };
+// A response's trailers, at most one set, filled by whatever makes its body.
+type __trailerBox = { fields: Lock<Headers[]> };
 // One server-sent event: its data, and the event type, ID and reconnection delay it may name.
 type ServerSentEvent = { data: string; event?: string; id?: string; retry?: i64 };
 
@@ -703,6 +1817,9 @@ class Response {
   url: string = "";
   // The cookies it sets and deletes, each sent as a Set-Cookie header of its own.
   cookies: CookieMap = new CookieMap();
+  // Trailers sent after the body over HTTP/2, which a streamed body may fill as it ends, as gRPC's
+  // status is; HTTP/1.1 sends none.
+  #trailers: shared<__trailerBox>;
 
   // A text or streamed body is typed 'text/plain;charset=UTF-8' unless the headers say
   // otherwise; bytes are given no type.
@@ -738,6 +1855,17 @@ class Response {
     this.#stream = new Lock(stream);
     const upgrade: __wsUpgrade[] = [];
     this.#upgrade = new Lock(upgrade);
+    const trailers: Headers[] = [];
+    this.#trailers = shared<__trailerBox>({ fields: new Lock(trailers) });
+  }
+
+  __trailersFrom(this: Mut<this>, from: shared<__trailerBox>) {
+    this.#trailers = from;
+  }
+
+  // The trailers, once the body has given them, or null.
+  __trailers(): Headers | null {
+    return this.#trailers.fields.update((f) => f.length > 0 ? f[0].clone() : null);
   }
 
   // A response whose body is the value as JSON, typed 'application/json' unless the headers
@@ -765,6 +1893,21 @@ class Response {
     if (!res.headers.has("content-type")) res.headers.set("content-type", "text/event-stream");
     if (!res.headers.has("cache-control")) res.headers.set("cache-control", "no-cache");
     return new Response(__sseFrames(events), { status: res.status, statusText: res.statusText, headers: res.headers });
+  }
+
+  // A redirect to url, as given, with no body. Fetch throws a RangeError for a status that isn't a
+  // redirect; here it panics.
+  static redirect(url: string, status?: i64): Response {
+    const code = status ?? 302;
+    assert(code === 301 || code === 302 || code === 303 || code === 307 || code === 308, "Response.redirect's status must be 301, 302, 303, 307 or 308");
+    let res = new Response(null, { status: code });
+    res.headers.set("location", url);
+    return res;
+  }
+
+  // A network error, as Fetch's: status 0 and no body. serve answers it with a 500.
+  static error(): Response {
+    return new Response(null, { status: 0 });
   }
 
   get ok(): boolean {
@@ -798,6 +1941,22 @@ class Response {
   // The bytes of a body that isn't streamed.
   __bytes(this: Ref<this>): Ref<u8[]> {
     return this.#body;
+  }
+
+  // Whether the body is streamed, in text pieces or bytes.
+  __streamed(): boolean {
+    return this.#stream.update((s) => s.length > 0) || this.#bytes.update((s) => s.length > 0);
+  }
+
+  // Replaces the body, as std:compress does with the body coded.
+  __setBody(this: Mut<this>, body: u8[] | ReadableStream<u8[]>) {
+    this.#stream.update((s) => { while (s.length > 0) s.pop(); });
+    this.#bytes.update((s) => { while (s.length > 0) s.pop(); });
+    if (body instanceof ReadableStream) {
+      this.#body = [];
+      const chunks = body.__values();
+      this.#bytes.update((s) => { s.push(chunks); });
+    } else this.#body = body;
   }
 
   // The body as a stream of bytes, or null when there is none. A streamed body is handed over
@@ -917,8 +2076,10 @@ type ServeInfo = { hostname: string; port: i64 };
 // Body sizes are in bytes and timeouts in milliseconds; a timeout of 0 is none.
 // unix is a socket path to serve on in place of a port, removed when serve stops. tls has the
 // server speak HTTPS with a PEM certificate chain and its private key. trace: false
-// keeps the server's requests out of the program's traces, when tracing is on.
-type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64; trace?: boolean };
+// keeps the server's requests out of the program's traces, when tracing is on. restart: true has
+// SIGUSR2 start the program again, handing it the listener: once it listens, this one stops
+// accepting and drains, and if it fails to, this one keeps serving.
+type ServeOptions = { port?: i64; hostname?: string; unix?: string; tls?: { cert: string; key: string }; signal?: AbortSignal; onListen?: (info: ServeInfo) => void; maxBodySize?: i64; headerTimeout?: i64; idleTimeout?: i64; trace?: boolean; restart?: boolean };
 type ServeHandler = (req: Request) => Promise<Response>;
 // What serve's options settle for each connection, under a name no program can write.
 type __serveLimits = { maxBodySize: i64; headerTimeout: i64; idleTimeout: i64; secure: boolean; trace: boolean };
@@ -929,11 +2090,23 @@ type __routerMiddleware = (req: Request, next: __routerNext) => Promise<Response
 // Each route's method, split path, handler, whether it takes every path below its own, and the
 // middleware of the routers mounted around it, outermost first, added together under one lock.
 type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHandler[]; prefixes: boolean[]; groups: __routerMiddleware[][] };
-// A router's routes and middleware, shared so each middleware's next can hold them.
-type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
+// A router's routes and middleware, shared so each middleware's next can hold them, and the
+// handler notFound set, when one was.
+type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]>; notFound: Lock<ServeHandler[]> };
+
+// A value a route's handler gives or throws that makes its own response, as axum's trait does.
+// A Response is given as it is, a thrown string as a 500's text, and any other error a handler
+// throws as a 500 that says nothing of it.
+interface IntoResponse {
+  intoResponse(): Response;
+}
 
 // Serves HTTP/1.1 on hostname and port, or a socket path, each connection on a task of its own.
 async function serve(options: ServeOptions, handler: (req: Request) => Promise<Response>): Promise<void> throws IoError {
+  if (__platformServes()) {
+    await __platformServe(options, handler);
+    return;
+  }
   const unix = options.unix;
   if (unix !== null && (options.port !== null || options.hostname !== null)) throw new IoError("serve takes either a 'unix' socket path or a 'port' and 'hostname', not both");
   let hostname = "0.0.0.0";
@@ -950,9 +2123,13 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     secure: options.tls !== null,
     trace: options.trace !== false,
   };
-  // With no signal of its own, the server stops at the first SIGINT or SIGTERM.
+  const restart = options.restart === true;
+  if (restart && unix !== null) throw new IoError("serve's restart option hands over a TCP listener; a unix socket can't be restarted yet");
+  // With no signal of its own, the server stops at the first SIGINT or SIGTERM, or once a restart
+  // has a new process listening.
   const given = options.signal;
-  const stop = given ?? shutdownSignal();
+  const restarted = new AbortController();
+  const stop = AbortSignal.any([given ?? shutdownSignal(), restarted.signal]);
   const live = shared({ count: new Atomic(0) });
   {
     // The listener closes as this block ends, so no one new waits while connections drain.
@@ -968,6 +2145,8 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
     const bound = listener.port;
     const listen = options.onListen;
     if (listen !== null) listen({ hostname: unix ?? hostname, port: bound });
+    unsafe { fsh_rt_restart_ready() };
+    if (restart) spawn(__serveRestarts(bound, restarted, stop.clone()));
     const boxed: ServeHandler = handler;
     // A request with no Host header gets the server's address, an IPv6 one bracketed as in a URL,
     // or localhost, as curl sends over a socket.
@@ -991,6 +2170,43 @@ async function serve(options: ServeOptions, handler: (req: Request) => Promise<R
   if (limits.trace && __traceOn()) await __traceSend();
 }
 
+declare function fsh_rt_restart_ready(): void;
+declare function fsh_rt_restart_spawn(port: i64): i64;
+declare function fsh_rt_restart_wait(fd: i64, ms: i64): i64;
+declare function fsh_rt_signal_listen(n: i64): i64;
+declare function fsh_rt_signal_count(n: i64): i64;
+declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
+
+// Each SIGUSR2 while the server runs starts the program again on its listener, and once the new
+// process listens, stops this one's accepting through done.
+// ponytail: looks for the signal every 100 ms; a wake from the signal's thread would be sooner.
+async function __serveRestarts(port: i64, done: AbortController, stop: AbortSignal): Promise<void> {
+  let usr2: i64 = 0;
+  for (let n: i64 = 1; n < 65; n++) if (unsafe { !fsh_rt_signal_name(n).isNull() && fromCString(fsh_rt_signal_name(n)) === "SIGUSR2" }) usr2 = n;
+  let seen = unsafe { fsh_rt_signal_listen(usr2) };
+  while (true) {
+    try {
+      await sleep(100, stop);
+    } catch (e) {
+      return;
+    }
+    const now = unsafe { fsh_rt_signal_count(usr2) };
+    if (now <= seen) continue;
+    seen = now;
+    const ready = unsafe { fsh_rt_restart_spawn(port) };
+    if (ready < 0) {
+      console.error("serve: the program couldn't be started again for a restart, so this one keeps serving");
+      continue;
+    }
+    const said = await spawnBlocking(() => unsafe { fsh_rt_restart_wait(ready, 60000) });
+    if (said === 1) {
+      done.abort();
+      return;
+    }
+    console.error(said === 0 ? "serve: the new process ended before it listened, so this one keeps serving" : "serve: the new process didn't listen within a minute and was stopped, so this one keeps serving");
+  }
+}
+
 // What a request's head says: its request line and headers.
 class HttpHead {
   method: string;
@@ -1012,6 +2228,14 @@ class HttpHead {
 async function serveConnection(conn: TcpStream, handler: ServeHandler, host: string, stop: AbortSignal, limits: __serveLimits): Promise<void> {
   let buffer: u8[] = [];
   try {
+    // A client speaking HTTP/2, by prior knowledge or once ALPN chose it, opens with its preface.
+    const opening = await Http1.readBy(conn, stop, Http1.sooner(Http1.after(limits.headerTimeout), Http1.after(limits.idleTimeout)));
+    if (opening === null || opening.length === 0) return;
+    buffer = opening;
+    if (Http2.prefaceSoFar(buffer)) {
+      await Http2.serve(conn, buffer, handler, host, stop, limits);
+      return;
+    }
     while (true) {
       buffer = Http1.skipBlank(buffer);
       const headBy = Http1.after(limits.headerTimeout);
@@ -1153,7 +2377,9 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
 }
 
 // Routes requests by method and path, as Hono and Express do: the first route matching both
-// runs, ':name' segments match any one segment, and a request no route matches gets a 404.
+// runs, ':name' segments match any one segment, a last '*' segment matches the rest, a path
+// routed only for other methods gets a 405 with Allow, or a 204 for OPTIONS, and a request no
+// route matches gets a 404 or what notFound's handler gives.
 // ponytail: each request walks every route in order; a tree of segments would scale further.
 class Router {
   private table: shared<__routerTable>;
@@ -1167,7 +2393,8 @@ class Router {
     const groups: __routerMiddleware[][] = [];
     const routes: __routerRoutes = { methods: [], paths: [], handlers: handlers, prefixes: [], groups: groups };
     const middleware: __routerMiddleware[] = [];
-    const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware) });
+    const missing: ServeHandler[] = [];
+    const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware), notFound: new Lock<ServeHandler[]>(missing) });
     const held = table.clone();
     this.table = table;
     this.inner = Router.routing(held, 1);
@@ -1184,6 +2411,14 @@ class Router {
 
   // Wraps every route and the 404, whenever it is added; the first added runs outermost.
   use(this: Mut<this>, middleware: __routerMiddleware) { this.table.middleware.update((m) => { m.push(middleware); }); }
+
+  // The handler answering what no route takes, in place of the plain 404, as Hono's app.notFound.
+  notFound(this: Mut<this>, handler: ServeHandler) {
+    this.table.notFound.update((n) => {
+      n.splice(0);
+      n.push(handler);
+    });
+  }
 
   get(this: Mut<this>, path: string, handler: ServeHandler) { this.add("GET", path, handler); }
   post(this: Mut<this>, path: string, handler: ServeHandler) { this.add("POST", path, handler); }
@@ -1304,7 +2539,11 @@ class Router {
     const method = req.method.clone();
     const have = path.split("/");
     const found = this.table.routes.update((t) => Router.find(t, method, have, 0));
-    let handler: ServeHandler = async (r: Request) => new Response("Not Found\\n", { status: 404 });
+    const missed = this.table.clone();
+    let handler: ServeHandler = async (r: Request) => {
+      const res = await Router.missed(missed.clone(), r);
+      return res;
+    };
     let params: string[] = [];
     let prefix = false;
     let after: usize = 0;
@@ -1361,7 +2600,10 @@ class Router {
     while (true) {
       const at = from;
       const found = table.routes.update((t) => Router.find(t, method, have, at));
-      if (found === null) return new Response("Not Found\\n", { status: 404 });
+      if (found === null) {
+        const res = await Router.missed(table.clone(), req);
+        return res;
+      }
       const params = Router.decoded(found.params);
       if (params === null) return new Response("Bad Request\\n", { status: 400 });
       const again = Router.routing(table.clone(), depth + 1);
@@ -1403,6 +2645,37 @@ class Router {
     return res;
   }
 
+  // The answer for a request no route takes: a 405 naming the methods its path is routed for, a
+  // 204 for OPTIONS there, else notFound's handler or a 404.
+  private static async missed(table: shared<__routerTable>, req: Request): Promise<Response> {
+    const have = req.path.split("/");
+    let allowed = table.routes.update((t) => Router.allowed(t, have));
+    if (allowed.length > 0) {
+      allowed.push("OPTIONS");
+      let res = req.method === "OPTIONS" ? new Response(null, { status: 204 }) : new Response("Method Not Allowed\\n", { status: 405 });
+      res.headers.set("allow", allowed.join(", "));
+      return res;
+    }
+    let own = table.notFound.update((n) => n.map((h) => h.clone()));
+    if (own.length === 0) return new Response("Not Found\\n", { status: 404 });
+    const handler = own.pop()!;
+    const res = await handler(req);
+    return res;
+  }
+
+  // The methods of the routes taking a path, in the order they were added, HEAD after GET. A
+  // static route's path is a prefix it may pass on, so it names none.
+  private static allowed(t: Ref<__routerRoutes>, have: Ref<string[]>): string[] {
+    let out: string[] = [];
+    for (let i = 0; i < t.paths.length; i++) {
+      if (t.prefixes[i] || Router.match(t.paths[i], have, false) === null) continue;
+      const m = t.methods[i].clone();
+      if (!out.includes(m)) out.push(m.clone());
+      if (m === "GET" && !out.includes("HEAD")) out.push("HEAD");
+    }
+    return out;
+  }
+
   // The first route from index start taking a method and path, its handler cloned, with the
   // :params it reads, whether it is a prefix route, and the index after it.
   private static find(t: Ref<__routerRoutes>, method: string, have: Ref<string[]>, start: usize): { handler: ServeHandler; params: string[]; prefix: boolean; next: usize; group: __routerMiddleware[] } | null {
@@ -1414,6 +2687,12 @@ class Router {
       if (found !== null) return { handler: t.handlers[i].clone(), params: found, prefix: t.prefixes[i], next: i + 1, group: t.groups[i].map((m) => m.clone()) };
     }
     return null;
+  }
+
+  // The router with state its handlers and middleware are given, as axum's with_state: each
+  // request gets a clone, so the state is a handle such as a pool or a shared<T>.
+  state<S>(this: Own<this>, state: S): StateRouter<S> {
+    return new StateRouter<S>(this, __devKeep(state));
   }
 
   // The router as the handler serve takes; the handler owns it.
@@ -1438,24 +2717,92 @@ class Router {
   }
 
   // The :params a route's segments take from a path's, or null when they don't match. A prefix
-  // route matches a path with more segments than its own.
+  // route matches a path with more segments than its own, and a last '*' segment takes the rest
+  // of the path, none included, as the param '*'.
   static match(want: Ref<string[]>, have: Ref<string[]>, prefix: boolean): string[] | null {
-    if (prefix ? have.length < want.length : want.length !== have.length) return null;
+    const rest = want.length > 1 && want[want.length - 1] === "*";
+    const fixed = rest ? want.length - 1 : want.length;
+    if (prefix || rest ? have.length < fixed : want.length !== have.length) return null;
     let params: string[] = [];
-    for (let i = 0; i < want.length; i++) {
+    for (let i = 0; i < fixed; i++) {
       if (want[i].startsWith(":")) {
         if (have[i].length === 0) return null;
         params.push(want[i].slice(1));
         params.push(have[i]);
       } else if (want[i] !== have[i]) return null;
     }
+    if (rest) {
+      params.push("*");
+      params.push(have.slice(fixed as i64).join("/"));
+    }
     return params;
   }
 }
 
+// The state a StateRouter is given. Under fishc dev, codegen makes this the state the host kept from
+// the first load of the handlers, so it outlives a reload; anywhere else it is the state given.
+function __devKeep<S>(state: S): S {
+  return state;
+}
+
+// A Router whose handlers take (req, state) and whose middleware take (req, state, next).
+class StateRouter<S> {
+  private router: Router;
+  private held: S;
+
+  constructor(router: Router, held: S) {
+    this.router = router;
+    this.held = held;
+  }
+
+  use(this: Mut<this>, middleware: (req: Request, state: S, next: __routerNext) => Promise<Response>) {
+    const state = this.held.clone();
+    this.router.use(async (req: Request, next: __routerNext) => {
+      const res = await middleware(req, state.clone(), next);
+      return res;
+    });
+  }
+
+  get(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.get(path, this.bound(handler)); }
+  post(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.post(path, this.bound(handler)); }
+  put(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.put(path, this.bound(handler)); }
+  patch(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.patch(path, this.bound(handler)); }
+  delete(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.delete(path, this.bound(handler)); }
+  all(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.all(path, this.bound(handler)); }
+  route(this: Mut<this>, method: string, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.route(method, path, this.bound(handler)); }
+
+  notFound(this: Mut<this>, handler: (req: Request, state: S) => Promise<Response>) { this.router.notFound(this.bound(handler)); }
+
+  // A plain router's routes under a prefix, as Router.route mounts one.
+  mount(this: Mut<this>, prefix: string, child: Router) { this.router.route(prefix, child); }
+
+  static(this: Mut<this>, prefix: string, root: string) { this.router.static(prefix, root); }
+
+  async handle(req: Request): Promise<Response> {
+    const res = await this.router.handle(req);
+    return res;
+  }
+
+  handler(this: Own<this>): ServeHandler {
+    const router = this;
+    return async (req: Request) => {
+      const res = await router.handle(req);
+      return res;
+    };
+  }
+
+  private bound(this: Ref<this>, handler: (req: Request, state: S) => Promise<Response>): ServeHandler {
+    const state = this.held.clone();
+    return async (req: Request) => {
+      const res = await handler(req, state.clone());
+      return res;
+    };
+  }
+}
+
 // What the checker writes around a route's handler that says its types: a 400 saying why the
-// body isn't the JSON its type reads, a 204 for a handler giving nothing, and what a handler
-// gives as JSON.
+// body isn't the JSON its type reads, a 204 for a handler giving nothing, what a handler gives as
+// JSON or as its own response, and the response for what it throws, chosen by the error's type.
 function __routerRefused(message: string): Response {
   return new Response(message, { status: 400 });
 }
@@ -1468,6 +2815,25 @@ function __routerEmpty(): Response {
 // write it as the type's layout, an empty optional field as null where the type leaves it out.
 function __routerJson<T>(data: Ref<T>): Response {
   let res = new Response(JSON.stringify(data));
+  res.headers.set("content-type", "application/json");
+  return res;
+}
+
+function __routerInto(value: IntoResponse): Response {
+  return value.intoResponse();
+}
+
+function __routerGiven(res: Response): Response {
+  return res;
+}
+
+function __routerText(message: string): Response {
+  return new Response(message, { status: 500 });
+}
+
+// The error is dropped unread: its message may say what a client shouldn't see.
+function __routerFailed<E>(_error: E): Response {
+  let res = new Response("{\\"error\\":\\"Internal Server Error\\"}", { status: 500 });
   res.headers.set("content-type", "application/json");
   return res;
 }
@@ -2115,8 +3481,16 @@ class Http1 {
     return b;
   }
 
+  // The handler's task is the request's, so the request ID it sets here is what std:log's entries
+  // carry in it and every task it spawns, across awaits; the response echoes it.
   static async handle(handler: ServeHandler, req: Request): Promise<Response> {
-    return await handler(req);
+    const given = req.headers.get("x-request-id");
+    const id = given !== null && __logUsable(given) ? given : __traceHex([__traceFresh()[0]]);
+    const slot = __logBegin(id.clone());
+    let res = await handler(req);
+    __logEnd(slot);
+    res.headers.set("x-request-id", id);
+    return res;
   }
 
   // The client's next bytes, nothing once the stream ends or the server stops, or null once the
@@ -2657,6 +4031,49 @@ const __traceMode = new Atomic(0);
 // The delay is the OpenTelemetry batch processor's default, five seconds.
 const __traceHeld = new Lock<__traceSettings>({ endpoint: "", service: "", delay: 5000, armed: false, timer: 0, spans: [] });
 
+declare function fsh_rt_log_get(): i64;
+declare function fsh_rt_log_set(request: i64): void;
+
+// The request IDs of the requests being served, keyed by the number the task holding one carries,
+// which only a number fits in.
+// ponytail: a handler that panics leaves its entry behind; remove it where serve catches the
+// panic if a server that panics often grows.
+const __logIds = new Lock<Map<i64, string>>(new Map<i64, string>());
+const __logNext = new Atomic(0);
+
+// Whether a client's x-request-id is one to keep: visible ASCII, at most 128 characters.
+function __logUsable(id: string): boolean {
+  if (id.length === 0 || id.length > 128) return false;
+  for (let i: usize = 0; i < id.length; i++) {
+    const c = id.charCodeAt(i) as i64;
+    if (c < 33 || c > 126) return false;
+  }
+  return true;
+}
+
+// Makes id the current task's request ID, giving the number it is kept under.
+function __logBegin(id: string): i64 {
+  const n = __logNext.add(1) + 1;
+  __logIds.update((m) => { m.set(n, id); });
+  unsafe { fsh_rt_log_set(n) };
+  return n;
+}
+
+function __logEnd(n: i64): void {
+  __logIds.update((m) => { m.delete(n); });
+  unsafe { fsh_rt_log_set(0) };
+}
+
+// The request ID of the request the current task serves, or "" outside one.
+function __logRequest(): string {
+  const n = unsafe { fsh_rt_log_get() };
+  if (n === 0) return "";
+  return __logIds.update((m): string => {
+    const id = m.get(n);
+    return id === null ? "" : id.clone();
+  });
+}
+
 // The current context: a trace id's halves, the current span's id and its flags, all 0 outside
 // any span. It belongs to the task, so it follows one through its awaits.
 function __traceWords(): i64[] {
@@ -2880,7 +4297,8 @@ async function __traceSend(): Promise<void> {
 
 // fetch, whose URLs the URL library's parser reads.
 const FETCH = `
-// Fetches a URL over HTTP/1.1, or HTTPS, one connection per request, as the Fetch API does: a
+// Fetches a URL over HTTP/1.1, or HTTPS, one connection per request, as the Fetch API does,
+// speaking HTTP/2 when an https: server's ALPN picks it: a
 // 4xx or 5xx is a response, not an error, and a redirect is returned rather than followed.
 async function fetch(input: string | Request | URL, init?: RequestInit): Promise<Response> throws IoError | AbortError {
   const unix = init !== null ? init.unix : null;
@@ -2893,7 +4311,17 @@ async function fetch(input: string | Request | URL, init?: RequestInit): Promise
   let conn: TcpStream;
   if (unix !== null) conn = await TcpStream.unix(unix, signal.clone());
   else conn = await TcpStream.connect(to.host, to.port, signal.clone());
-  if (to.secure) await __tlsClient(conn, to.host, ca, signal.clone());
+  if (to.secure) {
+    const chosen = await __tlsClientOffering(conn, to.host, ca, "h2,http/1.1", signal.clone());
+    if (chosen === "h2") {
+      const reply = await Http2.exchange(conn, "https", req.method, to.authority, to.path, req.headers, req.__bytes(), signal.clone());
+      let body = reply.body;
+      if (req.method === "HEAD") body = [];
+      let res = new Response(body, { status: reply.status, headers: reply.headers });
+      res.url = to.url;
+      return res;
+    }
+  }
   await conn.write(sent, signal.clone());
   let res = await Http1.receive(conn, req.method === "HEAD", signal);
   res.url = to.url;
@@ -4134,8 +5562,8 @@ const STREAM_NAMES = ["ReadableStream", "WritableStream", "ReadableStreamDefault
 const HIDDEN_NAMES = [...URL_NAMES, "TypeError", "Date", "RangeError", "Html"];
 // std's top-level names for its own code: a program can't use them as std means them, so no
 // suggestion offers them.
-export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection"]);
-const HTTP_NAMES = ["fetch", "serve", "Router", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
+export const STD_INTERNAL = new Set(["Http1", "HttpHead", "serveConnection", "Http2", "Http2Hpack", "Http2Stream"]);
+const HTTP_NAMES = ["fetch", "serve", "Router", "StateRouter", "IntoResponse", "ServerWebSocket", "WebSocketSender", "WebSocketOptions", "Request", "Response", "Headers", "CookieMap", "CookieInit", "RequestCookies", "ServeOptions", "ServeInfo", "ServeHandler", "RequestInit", "ResponseInit"];
 
 // The std source sits past every program's files in offsets, so a position says which it is in.
 export const STD_BASE: usize = 2 ** 40;
@@ -4786,9 +6214,16 @@ const TLS = String.raw`
 // Starts TLS as the client on a connected stream and finishes the handshake, so a server whose
 // certificate doesn't verify fails here: an empty write sends nothing past the handshake.
 async function __tlsClient(conn: Ref<TcpStream>, serverName: string, ca: string, signal: AbortSignal): Promise<void> throws IoError | AbortError {
-  const why = conn.startTls(serverName, ca);
+  await __tlsClientOffering(conn, serverName, ca, "", signal);
+}
+
+// __tlsClient offering ALPN the protocols named, as "h2,http/1.1", and giving the one the server
+// chose, or an empty string.
+async function __tlsClientOffering(conn: Ref<TcpStream>, serverName: string, ca: string, alpn: string, signal: AbortSignal): Promise<string> throws IoError | AbortError {
+  const why = conn.startTls(serverName, ca, alpn);
   if (why.length > 0) throw new IoError(why);
   await conn.write([], signal);
+  return conn.protocol();
 }
 `;
 
@@ -4915,6 +6350,7 @@ function checkPath(path: string): void throws IoError {
   if (path.includes("\0")) throw invalid("The argument 'path' must be a string, Uint8Array, or URL without null bytes. Received '" + path.replaceAll("\0", "\\x00") + "'");
 }
 
+@blocking
 export function openSync(path: string, flags: string | i64 = "r", mode: i64 = 0o666): i64 throws IoError {
   checkPath(path);
   let bits = 0;
@@ -4930,6 +6366,7 @@ export function openSync(path: string, flags: string | i64 = "r", mode: i64 = 0o
   return fd;
 }
 
+@blocking
 export function closeSync(fd: i64): void throws IoError {
   checkFd(fd);
   const r = unsafe { fsh_rt_fd_call(3, fd, 0) };
@@ -4939,6 +6376,7 @@ export function closeSync(fd: i64): void throws IoError {
 // What's read lands at offset; a null or -1 position reads from the file's own, which moves.
 export function readSync(fd: i64, buffer: Mut<u8[]>): i64 throws IoError;
 export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64, length: i64, position?: i64 | null): i64 throws IoError;
+@blocking
 export function readSync(fd: i64, buffer: Mut<u8[]>, offset: i64 = 0, length?: i64, position?: i64 | null): i64 throws IoError {
   checkFd(fd, false);
   // length |= 0, which FileHandle's read doesn't do.
@@ -4953,7 +6391,8 @@ function readInto(fd: i64, buffer: Mut<u8[]>, offset: i64, n: i64, position: i64
   if (n === 0) return 0;
   if (size === 0) throw invalid("The argument 'buffer' is empty and cannot be written. Received Uint8Array(0) []");
   if (n < 0) throw outOfRange("length", ">= 0", n);
-  if (offset + n > size) throw outOfRange("length", "<= " + String(size - offset), n);
+  if (offset > size) throw outOfRange("offset", "<= " + String(size), offset);
+  if (n > size - offset) throw outOfRange("length", "<= " + String(size - offset), n);
   if (position < -1 || position > SAFE) throw outOfRange("position", ">= -1 && <= 9007199254740991", position);
   const got = unsafe { fsh_rt_fd_read(fd, mutPtrOf(buffer[offset as usize]), n, position) };
   if (got < 0) throw failed(got, "read", null);
@@ -4964,6 +6403,7 @@ function readInto(fd: i64, buffer: Mut<u8[]>, offset: i64, n: i64, position: i64
 // writes at the file's own.
 export function writeSync(fd: i64, buffer: Ref<u8[]>, offset?: i64 | null, length?: i64 | null, position?: i64 | null): i64 throws IoError;
 export function writeSync(fd: i64, text: string, position?: i64 | null, encoding?: "utf8" | "utf-8"): i64 throws IoError;
+@blocking
 export function writeSync(fd: i64, data: Ref<string | u8[]>, second?: i64 | null, third?: i64 | "utf8" | "utf-8" | null, position?: i64 | null): i64 throws IoError {
   checkFd(fd, false);
   if (typeof data === "string") {
@@ -4988,6 +6428,7 @@ function written(fd: i64, bytes: Ref<u8[]>, offset: i64, n: i64, position: i64):
   return r;
 }
 
+@blocking
 export function fstatSync(fd: i64): Stats throws IoError {
   checkFd(fd);
   let out: i64[] = new Array(8).fill(0);
@@ -5033,6 +6474,7 @@ class FsConstants {
 }
 
 // A negative length truncates to nothing.
+@blocking
 export function ftruncateSync(fd: i64, len: i64 = 0): void throws IoError {
   if (len < -SAFE || len > SAFE) throw outOfRange("len", ">= -9007199254740991 && <= 9007199254740991", len);
   checkFd(fd);
@@ -5040,6 +6482,7 @@ export function ftruncateSync(fd: i64, len: i64 = 0): void throws IoError {
   if (r < 0) throw failed(r, "ftruncate", null);
 }
 
+@blocking
 export function fchmodSync(fd: i64, mode: i64): void throws IoError {
   checkMode(mode);
   checkFd(fd);
@@ -5047,6 +6490,7 @@ export function fchmodSync(fd: i64, mode: i64): void throws IoError {
   if (r < 0) throw failed(r, "fchmod", null);
 }
 
+@blocking
 export function fsyncSync(fd: i64): void throws IoError {
   checkFd(fd);
   const r = unsafe { fsh_rt_fd_call(2, fd, 0) };
@@ -5054,7 +6498,1376 @@ export function fsyncSync(fd: i64): void throws IoError {
 }
 `;
 
+// std:query, as a template rather than String.raw, since its column types are template literal types.
+const QUERY = `// A value a compiled query passes as a parameter, as std:postgres and std:sqlite bind them.
+export type QueryValue = null | boolean | i64 | f64 | string | u8[];
+
+// Whose SQL a query compiles to: \`$1\` parameters for Postgres, \`?\` for SQLite.
+export type Dialect = "postgres" | "sqlite";
+
+export type ComparisonOperator = "=" | "<>" | "!=" | "<" | "<=" | ">" | ">=" | "like" | "not like" | "is" | "is not";
+export type OrderDirection = "asc" | "desc";
+
+// A column of the tables a query reads, by name or as \`table.column\`.
+export type ColumnRef<S> = { [T in keyof S]: \`\${T}.\${keyof S[T]}\` }[keyof S] | { [T in keyof S]: keyof S[T] }[keyof S];
+// The type of the column a reference names.
+export type ColumnValue<S, R> = R extends \`\${infer T}.\${infer C}\` ? S[T][C] : { [T in keyof S]: R extends keyof S[T] ? S[T][R] : never }[keyof S];
+type ColumnName<R> = R extends \`\${infer T}.\${infer C}\` ? C : R;
+// The row selecting \`C\` gives: each column under its own name.
+export type Selection<S, C> = { [P in C as ColumnName<P>]: ColumnValue<S, P> };
+// A table a left join reads, each column null where no row matched.
+export type Nullable<T> = { [P in keyof T]: T[P] | null };
+
+// A query's SQL and the values its placeholders stand for, giving rows of type O.
+export class CompiledQuery<O> {
+  sql: string;
+  parameters: QueryValue[];
+  constructor(sql: string, parameters: QueryValue[]) {
+    this.sql = sql;
+    this.parameters = parameters;
+  }
+}
+
+type Condition = { column: string; op: string; value: QueryValue };
+type Join = { kind: string; table: string; left: string; right: string };
+type Order = { column: string; direction: string };
+
+// What a query has been given so far, rendered once it is compiled. An insert's column names and
+// each row's values are \`names\` and \`rows\`; an update's are \`names\` and \`assigned\`.
+type Parts = { dialect: Dialect; table: string; columns: string[]; joins: Join[]; conditions: Condition[]; orders: Order[]; limit: i64 | null; offset: i64 | null; names: string[]; rows: QueryValue[][]; assigned: QueryValue[] };
+
+function parts(dialect: Dialect, table: string): Parts {
+  return { dialect: dialect, table: table, columns: [], joins: [], conditions: [], orders: [], limit: null, offset: null, names: [], rows: [], assigned: [] };
+}
+
+// SQL text with its parameters, numbered as the dialect numbers them.
+class Writer {
+  dialect: Dialect;
+  sql: string = "";
+  parameters: QueryValue[] = [];
+  constructor(dialect: Dialect) {
+    this.dialect = dialect;
+  }
+  text(this: Mut<this>, s: string): void {
+    this.sql += s;
+  }
+  value(this: Mut<this>, v: QueryValue): void {
+    this.parameters.push(v);
+    this.sql += this.dialect === "postgres" ? "$" + String(this.parameters.length) : "?";
+  }
+}
+
+// An identifier double-quoted, a \`table.column\` reference part by part.
+function quoted(name: string): string {
+  return name.split(".").map((p) => "\\"" + p.replaceAll("\\"", "\\"\\"") + "\\"").join(".");
+}
+
+function conditions(w: Mut<Writer>, parts: Ref<Parts>): void {
+  let first = true;
+  for (const c of parts.conditions) {
+    w.text(first ? " where " : " and ");
+    first = false;
+    w.text(quoted(c.column) + " " + c.op + " ");
+    w.value(c.value.clone());
+  }
+}
+
+function selectSql(parts: Ref<Parts>): Writer {
+  let w = new Writer(parts.dialect);
+  w.text("select " + (parts.columns.length === 0 ? "*" : parts.columns.map((c) => c === "*" ? c : c.endsWith(".*") ? quoted(c.slice(0, (c.length as i64) - 2)) + ".*" : quoted(c)).join(", ")));
+  w.text(" from " + quoted(parts.table));
+  for (const j of parts.joins) w.text(" " + j.kind + " join " + quoted(j.table) + " on " + quoted(j.left) + " = " + quoted(j.right));
+  conditions(w, parts);
+  for (let i: usize = 0; i < parts.orders.length; i++) w.text((i === 0 ? " order by " : ", ") + quoted(parts.orders[i]!.column) + " " + parts.orders[i]!.direction);
+  if (parts.limit !== null) {
+    w.text(" limit ");
+    w.value(parts.limit);
+  }
+  if (parts.offset !== null) {
+    w.text(" offset ");
+    w.value(parts.offset);
+  }
+  return w;
+}
+
+export class SelectQueryBuilder<DB, S, TB, O> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  // Adds columns to the rows the query gives, each under its own name.
+  select<C extends ColumnRef<S>>(this: Ref<this>, columns: C[]): SelectQueryBuilder<DB, S, TB, O & Selection<S, C>> {
+    let parts = this.parts.clone();
+    for (const c of columns) parts.columns.push(c);
+    return new SelectQueryBuilder<DB, S, TB, O & Selection<S, C>>(parts);
+  }
+
+  // Adds every column of the table the query selects from.
+  selectAll(this: Ref<this>): SelectQueryBuilder<DB, S, TB, O & S[TB]> {
+    let parts = this.parts.clone();
+    parts.columns.push(parts.table + ".*");
+    return new SelectQueryBuilder<DB, S, TB, O & S[TB]>(parts);
+  }
+
+  innerJoin<J extends keyof DB>(this: Ref<this>, table: J, left: ColumnRef<S & Record<J, DB[J]>>, right: ColumnRef<S & Record<J, DB[J]>>): SelectQueryBuilder<DB, S & Record<J, DB[J]>, TB, O> {
+    let parts = this.parts.clone();
+    parts.joins.push({ kind: "inner", table: table, left: left, right: right });
+    return new SelectQueryBuilder<DB, S & Record<J, DB[J]>, TB, O>(parts);
+  }
+
+  // A left join's columns are null where no row of \`table\` matched.
+  leftJoin<J extends keyof DB>(this: Ref<this>, table: J, left: ColumnRef<S & Record<J, DB[J]>>, right: ColumnRef<S & Record<J, DB[J]>>): SelectQueryBuilder<DB, S & Record<J, Nullable<DB[J]>>, TB, O> {
+    let parts = this.parts.clone();
+    parts.joins.push({ kind: "left", table: table, left: left, right: right });
+    return new SelectQueryBuilder<DB, S & Record<J, Nullable<DB[J]>>, TB, O>(parts);
+  }
+
+  // Keeps the rows where the column compares so with the value; several are all required.
+  where<R extends ColumnRef<S>>(this: Ref<this>, column: R, op: ComparisonOperator, value: ColumnValue<S, R>): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    const v: QueryValue = value;
+    parts.conditions.push({ column: column, op: op, value: v });
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  orderBy(this: Ref<this>, column: ColumnRef<S>, direction: OrderDirection = "asc"): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    parts.orders.push({ column: column, direction: direction });
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  limit(this: Ref<this>, n: i64): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    parts.limit = n;
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  offset(this: Ref<this>, n: i64): SelectQueryBuilder<DB, S, TB, O> {
+    let parts = this.parts.clone();
+    parts.offset = n;
+    return new SelectQueryBuilder<DB, S, TB, O>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<O> {
+    const w = selectSql(this.parts);
+    return new CompiledQuery<O>(w.sql, w.parameters);
+  }
+}
+
+export class InsertQueryBuilder<DB, T extends keyof DB> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  // Adds a row to insert; a field the row leaves out is the column's default. Every row names the
+  // same columns as the first.
+  values(this: Ref<this>, row: Partial<DB[T]>): InsertQueryBuilder<DB, T> throws TypeError {
+    let parts = this.parts.clone();
+    let names: string[] = [];
+    let values: QueryValue[] = [];
+    for (const [k, v] of Object.entries(row)) {
+      if (v === undefined) continue;
+      const value: QueryValue = v;
+      names.push(k);
+      values.push(value);
+    }
+    if (parts.rows.length === 0) parts.names = names;
+    else if (names.join(",") !== parts.names.join(",")) throw new TypeError("each row inserted names the same columns as the first: " + parts.names.join(", "));
+    parts.rows.push(values);
+    return new InsertQueryBuilder<DB, T>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<{}> throws TypeError {
+    if (this.parts.rows.length === 0) throw new TypeError("an insert needs a row; add one with values()");
+    let w = new Writer(this.parts.dialect);
+    w.text("insert into " + quoted(this.parts.table));
+    if (this.parts.names.length === 0) w.text(" default values");
+    else {
+      w.text(" (" + this.parts.names.map((n) => quoted(n)).join(", ") + ") values ");
+      let first = true;
+      for (const row of this.parts.rows) {
+        w.text(first ? "(" : ", (");
+        first = false;
+        let next = false;
+        for (const v of row) {
+          if (next) w.text(", ");
+          next = true;
+          w.value(v.clone());
+        }
+        w.text(")");
+      }
+    }
+    return new CompiledQuery<{}>(w.sql, w.parameters);
+  }
+}
+
+export class UpdateQueryBuilder<DB, T extends keyof DB> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  // The columns to change, from the fields \`values\` has.
+  set(this: Ref<this>, values: Partial<DB[T]>): UpdateQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    for (const [k, v] of Object.entries(values)) {
+      if (v === undefined) continue;
+      const value: QueryValue = v;
+      parts.names.push(k);
+      parts.assigned.push(value);
+    }
+    return new UpdateQueryBuilder<DB, T>(parts);
+  }
+
+  // One column to change, which may be set to null.
+  setColumn<C extends keyof DB[T]>(this: Ref<this>, column: C, value: DB[T][C]): UpdateQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    parts.names.push(column);
+    const v: QueryValue = value;
+    parts.assigned.push(v);
+    return new UpdateQueryBuilder<DB, T>(parts);
+  }
+
+  where<C extends keyof DB[T]>(this: Ref<this>, column: C, op: ComparisonOperator, value: DB[T][C]): UpdateQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    const v: QueryValue = value;
+    parts.conditions.push({ column: column, op: op, value: v });
+    return new UpdateQueryBuilder<DB, T>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<{}> throws TypeError {
+    if (this.parts.names.length === 0) throw new TypeError("an update needs a column to set; add one with set()");
+    let w = new Writer(this.parts.dialect);
+    w.text("update " + quoted(this.parts.table) + " set ");
+    // A null value is an element like any other, so the values are read by looping, not by index.
+    let i: usize = 0;
+    for (const v of this.parts.assigned) {
+      if (i > 0) w.text(", ");
+      w.text(quoted(this.parts.names[i]!) + " = ");
+      w.value(v.clone());
+      i++;
+    }
+    conditions(w, this.parts);
+    return new CompiledQuery<{}>(w.sql, w.parameters);
+  }
+}
+
+export class DeleteQueryBuilder<DB, T extends keyof DB> {
+  parts: Parts;
+  constructor(parts: Parts) {
+    this.parts = parts;
+  }
+
+  where<C extends keyof DB[T]>(this: Ref<this>, column: C, op: ComparisonOperator, value: DB[T][C]): DeleteQueryBuilder<DB, T> {
+    let parts = this.parts.clone();
+    const v: QueryValue = value;
+    parts.conditions.push({ column: column, op: op, value: v });
+    return new DeleteQueryBuilder<DB, T>(parts);
+  }
+
+  compile(this: Ref<this>): CompiledQuery<{}> {
+    let w = new Writer(this.parts.dialect);
+    w.text("delete from " + quoted(this.parts.table));
+    conditions(w, this.parts);
+    return new CompiledQuery<{}>(w.sql, w.parameters);
+  }
+}
+
+// Queries over the tables \`DB\` maps names to row types, checked against them while compiling.
+export class Kysely<DB> {
+  dialect: Dialect;
+  constructor(options: { dialect: Dialect }) {
+    this.dialect = options.dialect;
+  }
+
+  selectFrom<T extends keyof DB>(this: Ref<this>, table: T): SelectQueryBuilder<DB, Record<T, DB[T]>, T, {}> {
+    return new SelectQueryBuilder<DB, Record<T, DB[T]>, T, {}>(parts(this.dialect, table));
+  }
+
+  insertInto<T extends keyof DB>(this: Ref<this>, table: T): InsertQueryBuilder<DB, T> {
+    return new InsertQueryBuilder<DB, T>(parts(this.dialect, table));
+  }
+
+  updateTable<T extends keyof DB>(this: Ref<this>, table: T): UpdateQueryBuilder<DB, T> {
+    return new UpdateQueryBuilder<DB, T>(parts(this.dialect, table));
+  }
+
+  deleteFrom<T extends keyof DB>(this: Ref<this>, table: T): DeleteQueryBuilder<DB, T> {
+    return new DeleteQueryBuilder<DB, T>(parts(this.dialect, table));
+  }
+}
+`;
+
+// std:grpc, as a template rather than String.raw, since its macros quote with backquotes.
+const GRPC = `// gRPC over HTTP/2: messages as classes the @message macro gives protobuf encoders while
+// compiling, services as interfaces @service gives a client and a server side.
+declare function fsh_rt_bytes_copy(to: MutPtr<u8>, from: Ptr<u8>, n: i64): void;
+
+// What a call's status says went wrong: its gRPC code, as GrpcStatus names them, and its message.
+export class GrpcError extends Error {
+  code: i64;
+  constructor(code: i64, message: string) {
+    super(message);
+    this.name = "GrpcError";
+    this.code = code;
+  }
+}
+
+function pbVarint(out: Mut<u8[]>, v: u64) {
+  let left = v;
+  while (left >= 128) {
+    out.push(((left & 127) | 128) as u8);
+    left = left >> 7;
+  }
+  out.push(left as u8);
+}
+
+function pbKey(out: Mut<u8[]>, field: i64, wire: i64) {
+  pbVarint(out, ((field << 3) | wire) as u64);
+}
+
+// Each field's encoder writes nothing for proto3's default, unless always: an optional field
+// holding one, or an element of a repeated field.
+function pbInt(out: Mut<u8[]>, field: i64, v: i64, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 0);
+  pbVarint(out, v as u64);
+}
+
+function pbUint(out: Mut<u8[]>, field: i64, v: u64, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 0);
+  pbVarint(out, v);
+}
+
+function pbBool(out: Mut<u8[]>, field: i64, v: boolean, always: boolean) {
+  if (!v && !always) return;
+  pbKey(out, field, 0);
+  out.push(v ? 1 : 0);
+}
+
+function pbDouble(out: Mut<u8[]>, field: i64, v: f64, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 1);
+  let bits: u64 = 0;
+  unsafe { fsh_rt_bytes_copy(mutPtrOf(bits) as MutPtr<u8>, ptrOf(v) as Ptr<u8>, 8) };
+  for (let i: u64 = 0; i < 8; i++) out.push(((bits >> (i * 8)) & 255) as u8);
+}
+
+function pbFloat(out: Mut<u8[]>, field: i64, v: f32, always: boolean) {
+  if (v === 0 && !always) return;
+  pbKey(out, field, 5);
+  let bits: u32 = 0;
+  unsafe { fsh_rt_bytes_copy(mutPtrOf(bits) as MutPtr<u8>, ptrOf(v) as Ptr<u8>, 4) };
+  for (let i: u32 = 0; i < 4; i++) out.push(((bits >> (i * 8)) & 255) as u8);
+}
+
+function pbBytes(out: Mut<u8[]>, field: i64, v: Ref<u8[]>, always: boolean) {
+  if (v.length === 0 && !always) return;
+  pbKey(out, field, 2);
+  pbVarint(out, v.length as u64);
+  for (const b of v) out.push(b);
+}
+
+function pbString(out: Mut<u8[]>, field: i64, v: string, always: boolean) {
+  if (v.length === 0 && !always) return;
+  const bytes = new TextEncoder().encode(v);
+  pbBytes(out, field, bytes, true);
+}
+
+// Reads a message's fields in order, each a key, then its value as its wire type gives it.
+class PbReader {
+  bytes: u8[];
+  at: usize = 0;
+
+  constructor(bytes: u8[]) {
+    this.bytes = bytes;
+  }
+
+  more(this: Ref<this>): boolean {
+    return this.at < this.bytes.length;
+  }
+
+  varint(this: Mut<this>): u64 throws GrpcError {
+    let v: u64 = 0;
+    let shift: u64 = 0;
+    while (true) {
+      if (this.at >= this.bytes.length || shift > 63) throw new GrpcError(13, "a protobuf varint runs past the message");
+      const b = this.bytes[this.at] as u64;
+      this.at += 1;
+      v = v | ((b & 127) << shift);
+      shift += 7;
+      if ((b & 128) === 0) return v;
+    }
+  }
+
+  int64(this: Mut<this>): i64 throws GrpcError {
+    return this.varint() as i64;
+  }
+
+  bool(this: Mut<this>): boolean throws GrpcError {
+    return this.varint() !== 0;
+  }
+
+  fixed(this: Mut<this>, n: usize): u64 throws GrpcError {
+    if (this.at + n > this.bytes.length) throw new GrpcError(13, "a protobuf fixed-width value runs past the message");
+    let v: u64 = 0;
+    for (let i: usize = 0; i < n; i++) v = v | ((this.bytes[this.at + i] as u64) << ((i * 8) as u64));
+    this.at += n;
+    return v;
+  }
+
+  double(this: Mut<this>): f64 throws GrpcError {
+    const bits = this.fixed(8);
+    let x: f64 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 8) };
+    return x;
+  }
+
+  float(this: Mut<this>): f32 throws GrpcError {
+    const bits = this.fixed(4) as u32;
+    let x: f32 = 0;
+    unsafe { fsh_rt_bytes_copy(mutPtrOf(x) as MutPtr<u8>, ptrOf(bits) as Ptr<u8>, 4) };
+    return x;
+  }
+
+  bytesField(this: Mut<this>): u8[] throws GrpcError {
+    const n = this.varint() as usize;
+    if (this.at + n > this.bytes.length) throw new GrpcError(13, "a protobuf length-delimited value runs past the message");
+    const out = this.bytes.slice(this.at as i64, (this.at + n) as i64);
+    this.at += n;
+    return out;
+  }
+
+  string(this: Mut<this>): string throws GrpcError {
+    return new TextDecoder().decode(this.bytesField());
+  }
+
+  pb_u64(this: Mut<this>): u64 throws GrpcError { return this.varint(); }
+  pb_u32(this: Mut<this>): u32 throws GrpcError { return this.varint() as u32; }
+  pb_u16(this: Mut<this>): u16 throws GrpcError { return this.varint() as u16; }
+  pb_u8(this: Mut<this>): u8 throws GrpcError { return this.varint() as u8; }
+  pb_i64(this: Mut<this>): i64 throws GrpcError { return this.varint() as i64; }
+  pb_i32(this: Mut<this>): i32 throws GrpcError { return (this.varint() as i64) as i32; }
+  pb_i16(this: Mut<this>): i16 throws GrpcError { return (this.varint() as i64) as i16; }
+  pb_i8(this: Mut<this>): i8 throws GrpcError { return (this.varint() as i64) as i8; }
+  pb_bool(this: Mut<this>): boolean throws GrpcError { return this.varint() !== 0; }
+  pb_f64(this: Mut<this>): f64 throws GrpcError { return this.double(); }
+  pb_f32(this: Mut<this>): f32 throws GrpcError { return this.float(); }
+  pb_string(this: Mut<this>): string throws GrpcError { return this.string(); }
+  pb_bytesField(this: Mut<this>): u8[] throws GrpcError { return this.bytesField(); }
+
+  // A length-delimited value read as a message of its own.
+  sub(this: Mut<this>): PbReader throws GrpcError {
+    return new PbReader(this.bytesField());
+  }
+
+  // Passes over a field this side doesn't know, as protobuf's readers do.
+  skip(this: Mut<this>, wire: i64) throws GrpcError {
+    if (wire === 0) this.varint();
+    else if (wire === 1) this.fixed(8);
+    else if (wire === 2) this.bytesField();
+    else if (wire === 5) this.fixed(4);
+    else throw new GrpcError(13, "a protobuf field has wire type " + String(wire) + ", which proto3 doesn't use");
+  }
+}
+
+// How a field's type is sent: its scalar's reader method, or "message" with the class's name, and
+// whether it repeats or is optional.
+type PbShape = { kind: string; name: string; repeated: boolean; optional: boolean };
+
+function pbScalar(name: string): boolean {
+  return name === "i64" || name === "i32" || name === "i16" || name === "i8" || name === "u64" || name === "u32" || name === "u16" || name === "u8" || name === "boolean" || name === "f64" || name === "number" || name === "f32" || name === "string";
+}
+
+function pbShapeOf(t: Ref<AstType>, field: string): PbShape {
+  if (t.kind === "union" && t.types.length === 2) {
+    let inner: PbShape | null = null;
+    let nulls = 0;
+    for (const u of t.types) {
+      if (pbIsNull(u)) nulls++;
+      else inner = pbShapeOf(u, field);
+    }
+    if (nulls === 1 && inner !== null && !inner.repeated && !inner.optional) return { kind: inner.kind, name: inner.name, repeated: false, optional: true };
+  }
+  if (t.kind === "array") {
+    const e = t.element.clone();
+    if (e.kind === "ref" && e.name === "u8") return { kind: "bytes", name: "", repeated: false, optional: false };
+    const inner = pbShapeOf(e, field);
+    if (!inner.repeated && !inner.optional) return { kind: inner.kind, name: inner.name, repeated: true, optional: false };
+  }
+  if (t.kind === "ref" && t.args.length === 0) {
+    if (pbScalar(t.name)) return { kind: t.name, name: "", repeated: false, optional: false };
+    return { kind: "message", name: t.name, repeated: false, optional: false };
+  }
+  assert(false, "'" + field + "' has a type protobuf can't carry: a message's fields are sized numbers, booleans, strings, u8[], other messages, arrays of these, or one of these or null");
+  return { kind: "", name: "", repeated: false, optional: false };
+}
+
+function pbIsNull(t: Ref<AstType>): boolean {
+  if (t.kind === "ref") return t.name === "null" || t.name === "undefined";
+  if (t.kind === "literal") return t.value.kind === "null";
+  return false;
+}
+
+function pbNumber(n: i64): AstExpr {
+  return { kind: "int", value: n, start: 0, end: 0 };
+}
+
+function pbFlag(b: boolean): AstExpr {
+  return { kind: "bool", value: b, start: 0, end: 0 };
+}
+
+// The statement writing one value of a field.
+function pbWriteOne(shape: Ref<PbShape>, n: i64, value: AstExpr, always: boolean): AstStmt {
+  const num = pbNumber(n);
+  const all = pbFlag(always);
+  const k = shape.kind;
+  if (k === "i64" || k === "i32" || k === "i16" || k === "i8") return quote\`pbInt(\${ident("pbOut")}, \${num}, \${value} as i64, \${all});\`;
+  if (k === "u64" || k === "u32" || k === "u16" || k === "u8") return quote\`pbUint(\${ident("pbOut")}, \${num}, \${value} as u64, \${all});\`;
+  if (k === "boolean") return quote\`pbBool(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  if (k === "f64" || k === "number") return quote\`pbDouble(\${ident("pbOut")}, \${num}, \${value} as f64, \${all});\`;
+  if (k === "f32") return quote\`pbFloat(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  if (k === "string") return quote\`pbString(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  if (k === "bytes") return quote\`pbBytes(\${ident("pbOut")}, \${num}, \${value}, \${all});\`;
+  return quote\`{ let inner: u8[] = []; \${value}.__pbWrite(inner); pbBytes(\${ident("pbOut")}, \${num}, inner, \${all}); }\`;
+}
+
+// The expression reading one value of a field from reader r.
+function pbReadOne(shape: Ref<PbShape>, r: string): AstExpr {
+  const k = shape.kind;
+  const reader = ident(r);
+  if (k === "message") return quote\`\${ident(shape.name)}.__pbRead(\${reader}.sub())\`;
+  const method = k === "boolean" ? "bool" : k === "number" ? "f64" : k === "bytes" ? "bytesField" : k === "string" ? "string" : k;
+  return quote\`\${reader}.\${ident("pb_" + method)}()\`;
+}
+
+// @message: the class becomes a protobuf message, its fields numbered 1, 2, 3 in the order they
+// are declared, or as an @field(n) on one says, with toBinary() and fromBinary(bytes).
+export macro function message(input: AstStmt): AstStmt {
+  let c = input;
+  assert(c.kind === "class", "'@message' applies to a class, whose fields are the message's");
+  if (c.kind !== "class") return c;
+  const className = c.name;
+  assert(className !== null, "'@message' needs a named class");
+  if (className === null) return c;
+  // The numbers @field pinned, by field name.
+  let pinnedNames: string[] = [];
+  let pinnedNumbers: i64[] = [];
+  let kept: AstClassMember[] = [];
+  for (const m of c.members) {
+    if (m.kind === "field" && typeof m.name === "string" && m.name.startsWith("__pbField_")) {
+      const v = m.init.clone();
+      if (v !== null && v.kind === "int") {
+        pinnedNames.push(m.name.slice(10));
+        pinnedNumbers.push(v.value);
+      }
+      continue;
+    }
+    kept.push(m.clone());
+  }
+  let writes: AstStmt[] = [];
+  let reads: AstStmt[] = [];
+  let next: i64 = 1;
+  let used: i64[] = [];
+  for (const m of kept) {
+    if (m.kind !== "field" || m.modifiers.length > 0) continue;
+    if (typeof m.name !== "string") continue;
+    const name = pbText(m.name);
+    const t = m.type.clone();
+    assert(t !== null, "'" + name + "' needs a written type for '@message' to encode it");
+    if (t === null) continue;
+    assert(m.init !== null || m.optional, "'" + name + "' needs a default value, as 'fromBinary' starts each field at its default");
+    let n = next;
+    for (let i: usize = 0; i < pinnedNames.length; i++) if (pinnedNames[i] === name) n = pinnedNumbers[i];
+    assert(!pbHas(used, n), "two fields of '" + className + "' have the number " + String(n));
+    used.push(n);
+    next = n + 1;
+    const shape = pbShapeOf(t, name);
+    const f = ident(name);
+    const num = pbNumber(n);
+    if (shape.repeated) {
+      writes.push(quote\`for (const \${ident("pbX")} of this.\${f.clone()}) \${pbWriteOne(shape, n, ident("pbX"), true)}\`);
+      const packable = shape.kind !== "string" && shape.kind !== "bytes" && shape.kind !== "message";
+      if (packable) reads.push(quote\`if (\${ident("pbField")} === \${num.clone()} && \${ident("pbWire")} === 2) { let \${ident("pbPacked")} = \${ident("pbR")}.sub(); while (\${ident("pbPacked")}.more()) \${ident("pbM")}.\${f.clone()}.push(\${pbReadOne(shape, "pbPacked")}); continue; }\`);
+      reads.push(quote\`if (\${ident("pbField")} === \${num.clone()}) { \${ident("pbM")}.\${f.clone()}.push(\${pbReadOne(shape, "pbR")}); continue; }\`);
+    } else if (shape.optional) {
+      const one = pbWriteOne(shape, n, quote\`this.\${f.clone()}\`, true);
+      writes.push(quote\`if (this.\${f.clone()} !== null) \${one}\`);
+      reads.push(quote\`if (\${ident("pbField")} === \${num.clone()}) { \${ident("pbM")}.\${f.clone()} = \${pbReadOne(shape, "pbR")}; continue; }\`);
+    } else {
+      writes.push(pbWriteOne(shape, n, quote\`this.\${f.clone()}\`, false));
+      reads.push(quote\`if (\${ident("pbField")} === \${num.clone()}) { \${ident("pbM")}.\${f.clone()} = \${pbReadOne(shape, "pbR")}; continue; }\`);
+    }
+  }
+  const self = ident(className);
+  const selfType: AstType = { kind: "ref", name: className, args: [], start: 0, end: 0 };
+  const k = quote\`class X {
+    __pbWrite(this: Ref<this>, \${ident("pbOut")}: Mut<u8[]>) {}
+    static __pbRead(reader: PbReader): \${selfType.clone()} throws GrpcError {
+      let \${ident("pbR")} = reader;
+      let \${ident("pbM")} = new \${self.clone()}();
+      while (\${ident("pbR")}.more()) {
+        const key = \${ident("pbR")}.pb_u64() as i64;
+        const \${ident("pbField")} = key >> 3;
+        const \${ident("pbWire")} = key & 7;
+        \${ident("pbR")}.skip(\${ident("pbWire")});
+      }
+      return \${ident("pbM")};
+    }
+    toBinary(this: Ref<this>): u8[] {
+      let out: u8[] = [];
+      this.__pbWrite(out);
+      return out;
+    }
+    static fromBinary(bytes: u8[]): \${selfType.clone()} throws GrpcError {
+      return \${self.clone()}.__pbRead(new PbReader(bytes));
+    }
+    static __pbTry(bytes: u8[]): \${selfType.clone()} | GrpcError {
+      try {
+        return \${self.clone()}.fromBinary(bytes);
+      } catch (e) {
+        return e;
+      }
+    }
+  }\`;
+  if (k.kind === "class") {
+    for (const member of k.members) {
+      let made = member.clone();
+      if (made.kind === "method" && typeof made.name === "string" && made.name === "__pbWrite") made.body = writes.clone();
+      if (made.kind === "method" && typeof made.name === "string" && made.name === "__pbRead" && made.body !== null) {
+        let body = made.body.clone();
+        let loop = body[2].clone();
+        if (loop.kind === "while") {
+          let inner: AstStmt[] = [loop.body[0].clone(), loop.body[1].clone(), loop.body[2].clone()];
+          for (const s of reads) inner.push(s.clone());
+          inner.push(loop.body[3].clone());
+          loop.body = inner;
+        }
+        body[2] = loop;
+        made.body = body;
+      }
+      kept.push(made);
+    }
+  }
+  c.members = kept;
+  return c;
+}
+
+// @field(n) on a message's field: its number on the wire, which stays as fields are added around it.
+export macro function field(input: AstStmt, member: usize, n: i64): AstStmt {
+  let c = input;
+  if (c.kind === "class") {
+    const f = c.members[member].clone();
+    if (f.kind === "field" && typeof f.name === "string") {
+      assert(n >= 1 && n <= 536870911 && (n < 19000 || n > 19999), "a protobuf field number is 1 to 536870911, outside 19000 to 19999, not " + String(n));
+      const num = pbNumber(n);
+      const k = quote\`class X { static \${ident("__pbField_" + f.name)} = \${num}; }\`;
+      if (k.kind === "class") c.members.push(k.members[0].clone());
+    }
+  }
+  return c;
+}
+
+function pbText(s: string): string {
+  return s;
+}
+
+function pbHas(xs: Ref<i64[]>, n: i64): boolean {
+  for (const x of xs) if (x === n) return true;
+  return false;
+}
+
+// A service's methods as a server runs them: its full name, as "helloworld.Greeter", and a call
+// giving each reply of a method, by its name, to a request's bytes, or the error that ended it.
+export type GrpcCall = (method: string, body: u8[]) => Dyn<AsyncGenerator<u8[] | GrpcError>>;
+export type GrpcService = { name: string; call: GrpcCall };
+
+function grpcPascal(name: string): string {
+  return name.slice(0, 1).toUpperCase() + name.slice(1);
+}
+
+function grpcTypeOf(t: Ref<AstType>, what: string): AstType {
+  assert(t.kind === "ref" && t.args.length === 0, what + " is a '@message' class, named");
+  return t.clone();
+}
+
+// The class a method returns from, unwrapped from its Promise or AsyncGenerator, and whether it streams.
+// failing says the reply may instead be a GrpcError, the status the call ends with.
+type GrpcMethod = { name: string; request: AstType; reply: AstType; streams: boolean; failing: boolean };
+
+function grpcMethodOf(m: Ref<AstTypeMember>, service: string): GrpcMethod {
+  assert(m.kind === "method", "a '@service' interface holds methods only, and '" + service + "' holds something else");
+  let out: GrpcMethod = { name: "", request: { kind: "ref", name: "", args: [], start: 0, end: 0 }, reply: { kind: "ref", name: "", args: [], start: 0, end: 0 }, streams: false, failing: false };
+  if (m.kind !== "method") return out;
+  if (typeof m.name !== "string") return out;
+  const name = pbText(m.name);
+  assert(m.params.length === 1, "'" + name + "' takes one request message, as a gRPC method does");
+  const p = m.params[0].type.clone();
+  assert(p !== null, "'" + name + "' needs its request's type written");
+  if (p === null) return out;
+  const r = m.returns.clone();
+  assert(r !== null && r.kind === "ref" && (r.name === "Promise" || r.name === "AsyncGenerator") && r.args.length === 1, "'" + name + "' returns a Promise of its reply message, or an AsyncGenerator of them to stream");
+  const given = r.args[0].clone();
+  let reply = given.clone();
+  let failing = false;
+  if (given.kind === "union" && given.types.length === 2) {
+    for (const u of given.types) {
+      if (u.kind === "ref" && u.name === "GrpcError") failing = true;
+      else reply = u.clone();
+    }
+  }
+  return { name: name, request: grpcTypeOf(p, "'" + name + "''s request"), reply: grpcTypeOf(reply, "'" + name + "''s reply"), streams: r.name === "AsyncGenerator", failing: failing };
+}
+
+// A reply as the bytes sent, or the GrpcError it is when the method may give one.
+function grpcEncoded(failing: boolean, value: AstExpr): AstExpr {
+  if (failing) return quote\`\${value.clone()} instanceof GrpcError ? \${value.clone()} : \${value}.toBinary()\`;
+  return quote\`\${value}.toBinary()\`;
+}
+
+function grpcTypeName(t: Ref<AstType>): string {
+  if (t.kind === "ref") return pbText(t.name);
+  return "";
+}
+
+// @service("helloworld.Greeter") on an interface of gRPC methods, each taking a request message
+// and giving a Promise of a reply, or an AsyncGenerator of replies for a server stream. It adds
+// <Name>Client, whose methods call a server at a URL, and <name>Service(impl), the service for a
+// GrpcServer to run on impl.
+export macro function service(input: AstStmt, fullName: string): Ast[] {
+  assert(input.kind === "interface", "'@service' applies to an interface of the service's methods");
+  if (input.kind !== "interface") return [input];
+  const name = pbText(input.name);
+  let methods: GrpcMethod[] = [];
+  for (const m of input.members) methods.push(grpcMethodOf(m, name));
+  const client = ident(name + "Client");
+  const serviceFn = ident(name.slice(0, 1).toLowerCase() + name.slice(1) + "Service");
+  const callFn = ident("__grpcCall" + name);
+  const iface: AstType = { kind: "ref", name: name, args: [], start: 0, end: 0 };
+  const full: AstExpr = { kind: "string", value: fullName, start: 0, end: 0 };
+  let members: AstClassMember[] = [];
+  let calls: AstStmt[] = [];
+  for (const m of methods) {
+    const path: AstExpr = { kind: "string", value: "/" + fullName + "/" + grpcPascal(m.name), start: 0, end: 0 };
+    const wire: AstExpr = { kind: "string", value: grpcPascal(m.name), start: 0, end: 0 };
+    const method = ident(m.name);
+    const replyClass = ident(grpcTypeName(m.reply));
+    const requestClass = ident(grpcTypeName(m.request));
+    let made: AstStmt = quote\`class X {}\`;
+    let call: AstStmt = quote\`{}\`;
+    if (m.streams) {
+      made = quote\`class X {
+        async *\${method.clone()}(this: Ref<this>, request: Ref<\${m.request.clone()}>): AsyncGenerator<\${m.reply.clone()}> throws GrpcError | IoError | AbortError {
+          const replies = await grpcServerStream(this.url, \${path.clone()}, request.toBinary());
+          for (const bytes of replies.messages) yield \${replyClass.clone()}.fromBinary(bytes.clone());
+          const status = replies.status;
+          if (status !== null) throw status;
+        }
+      }\`;
+      call = quote\`if (\${ident("grpcMethod")} === \${wire.clone()}) {
+        const request = \${requestClass.clone()}.__pbTry(\${ident("grpcBody")});
+        if (request instanceof GrpcError) {
+          yield request;
+          return;
+        }
+        let replies = \${ident("grpcImpl")}.\${method.clone()}(request);
+        while (true) {
+          const r = await replies.next();
+          if (r.done !== false) return;
+          const item: u8[] | GrpcError = \${grpcEncoded(m.failing, quote\`r.value\`)};
+          const stop = item instanceof GrpcError;
+          yield item;
+          if (stop) return;
+        }
+      }\`;
+    } else {
+      made = quote\`class X {
+        async \${method.clone()}(this: Ref<this>, request: Ref<\${m.request.clone()}>): Promise<\${m.reply.clone()}> throws GrpcError | IoError | AbortError {
+          const bytes = await grpcUnary(this.url, \${path.clone()}, request.toBinary());
+          return \${replyClass.clone()}.fromBinary(bytes);
+        }
+      }\`;
+      call = quote\`if (\${ident("grpcMethod")} === \${wire.clone()}) {
+        const request = \${requestClass.clone()}.__pbTry(\${ident("grpcBody")});
+        if (request instanceof GrpcError) {
+          yield request;
+          return;
+        }
+        const answered = await \${ident("grpcImpl")}.\${method.clone()}(request);
+        const reply: u8[] | GrpcError = \${grpcEncoded(m.failing, quote\`answered\`)};
+        yield reply;
+        return;
+      }\`;
+    }
+    if (made.kind === "class") members.push(made.members[0].clone());
+    calls.push(call);
+  }
+  let clientClass = quote\`export class \${client.clone()} {
+    url: string;
+    constructor(url: string) {
+      this.url = url;
+    }
+  }\`;
+  if (clientClass.kind === "export") {
+    let d = clientClass.body.clone();
+    if (d.kind === "class") {
+      for (const m of members) d.members.push(m.clone());
+      clientClass.body = d;
+    }
+  }
+  const serviceDecl = quote\`export function \${serviceFn}(impl: \${iface.clone()}): GrpcService {
+    return { name: \${full}, call: (method: string, body: u8[]): Dyn<AsyncGenerator<u8[] | GrpcError>> => \${callFn.clone()}(impl.clone(), method, body) };
+  }\`;
+  let callDecl = quote\`async function* \${callFn.clone()}(\${ident("grpcImpl")}: \${iface.clone()}, \${ident("grpcMethod")}: string, \${ident("grpcBody")}: u8[]): AsyncGenerator<u8[] | GrpcError> {
+    yield new GrpcError(12, "the service has no method " + \${ident("grpcMethod")});
+  }\`;
+  if (callDecl.kind === "function" && callDecl.body !== null) {
+    let body: AstStmt[] = [];
+    for (const s of calls) body.push(s.clone());
+    for (const s of callDecl.body) body.push(s.clone());
+    callDecl.body = body;
+  }
+  return [input, clientClass, serviceDecl, callDecl];
+}
+
+// GrpcError's codes, as gRPC numbers them.
+export const GrpcStatus = { OK: 0, CANCELLED: 1, UNKNOWN: 2, INVALID_ARGUMENT: 3, DEADLINE_EXCEEDED: 4, NOT_FOUND: 5, ALREADY_EXISTS: 6, PERMISSION_DENIED: 7, RESOURCE_EXHAUSTED: 8, FAILED_PRECONDITION: 9, ABORTED: 10, OUT_OF_RANGE: 11, UNIMPLEMENTED: 12, INTERNAL: 13, UNAVAILABLE: 14, DATA_LOSS: 15, UNAUTHENTICATED: 16 };
+
+// A message as gRPC frames it: uncompressed, its length, then its bytes.
+function grpcFrame(message: Ref<u8[]>): u8[] {
+  let out: u8[] = [0 as u8];
+  const n = message.length as i64;
+  out.push(((n >> 24) & 255) as u8);
+  out.push(((n >> 16) & 255) as u8);
+  out.push(((n >> 8) & 255) as u8);
+  out.push((n & 255) as u8);
+  for (const b of message) out.push(b);
+  return out;
+}
+
+// The messages a body holds, or why it can't be read: compression isn't offered, so a
+// compressed message is refused.
+function grpcFrames(body: Ref<u8[]>): u8[][] | GrpcError {
+  let out: u8[][] = [];
+  let at: usize = 0;
+  while (at < body.length) {
+    if (at + 5 > body.length) return new GrpcError(13, "a gRPC message's frame is cut short");
+    if (body[at] !== 0) return new GrpcError(12, "compressed gRPC messages aren't supported");
+    const n = (((body[at + 1] as i64) << 24) | ((body[at + 2] as i64) << 16) | ((body[at + 3] as i64) << 8) | (body[at + 4] as i64)) as usize;
+    if (at + 5 + n > body.length) return new GrpcError(13, "a gRPC message is cut short");
+    out.push(body.slice((at + 5) as i64, (at + 5 + n) as i64));
+    at += 5 + n;
+  }
+  return out;
+}
+
+// grpc-message's text, percent-decoded as gRPC sends it.
+function grpcUnescape(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let out: u8[] = [];
+  let i: usize = 0;
+  while (i < bytes.length) {
+    if (bytes[i] === 37 && i + 2 < bytes.length) {
+      const n = parseInt(new TextDecoder().decode(bytes.slice((i + 1) as i64, (i + 3) as i64)), 16);
+      if (n !== null) {
+        out.push(n as u8);
+        i += 3;
+        continue;
+      }
+    }
+    out.push(bytes[i]);
+    i += 1;
+  }
+  return new TextDecoder().decode(out);
+}
+
+// grpc-message's text percent-encoded, past printable ASCII and '%'.
+function grpcEscape(text: string): string {
+  const digits = "0123456789ABCDEF";
+  let out = "";
+  for (const b of new TextEncoder().encode(text)) {
+    if (b >= 32 && b <= 126 && b !== 37) out += String.fromCharCode(b as u16);
+    else out += "%" + digits[(b >> 4) as usize] + digits[(b & 15) as usize];
+  }
+  return out;
+}
+
+// One call to a server: the request message out, the reply messages back, and the status the
+// trailers end it with, any but OK thrown. The URL is http:// for HTTP/2 by prior knowledge or
+// https:// for TLS agreeing to h2. A connection per call.
+// ponytail: a connection per call and a stream read whole before its first message is given; a
+// pooled connection and replies handed over as their frames arrive would scale further.
+async function grpcCall(url: string, path: string, message: u8[]): Promise<GrpcReplies> throws GrpcError | IoError | AbortError {
+  const u = grpcURL(url);
+  if (u instanceof GrpcError) throw u;
+  const secure = u.protocol === "https:";
+  if (!secure && u.protocol !== "http:") throw new GrpcError(3, "a gRPC URL starts with http:// or https://, not " + u.protocol);
+  const host = u.hostname.startsWith("[") ? u.hostname.slice(1, (u.hostname.length as i64) - 1) : u.hostname;
+  const port = u.port.length === 0 ? (secure ? 443 : 80) : parseInt(u.port) ?? 80;
+  const signal = new AbortController().signal;
+  const conn = await TcpStream.connect(host, port, signal.clone());
+  if (secure) {
+    const chosen = await __tlsClientOffering(conn, host, "", "h2", signal.clone());
+    if (chosen !== "h2") throw new GrpcError(14, "the server at " + u.host + " didn't agree to HTTP/2, which gRPC needs");
+  }
+  let headers = new Headers();
+  headers.set("content-type", "application/grpc");
+  headers.set("te", "trailers");
+  const body = grpcFrame(message);
+  const reply = await Http2.exchange(conn, secure ? "https" : "http", "POST", u.host, path, headers, body, signal);
+  if (reply.status !== 200) throw new GrpcError(reply.status === 404 ? 12 : 14, "the server answered " + path + " with HTTP status " + String(reply.status));
+  const said = reply.trailers.get("grpc-status") ?? reply.headers.get("grpc-status");
+  if (said === null) throw new GrpcError(13, "the server's reply to " + path + " has no grpc-status");
+  const code = parseInt(said) ?? 2;
+  const status = code === 0 ? null : new GrpcError(code, grpcUnescape(reply.trailers.get("grpc-message") ?? reply.headers.get("grpc-message") ?? ""));
+  const frames = grpcFrames(reply.body);
+  if (frames instanceof GrpcError) throw frames;
+  return { messages: frames, status: status };
+}
+
+// A call's replies, and the status it ended with when that isn't OK.
+type GrpcReplies = { messages: u8[][]; status: GrpcError | null };
+
+function grpcURL(url: string): URL | GrpcError {
+  try {
+    return new URL(url);
+  } catch (e) {
+    return new GrpcError(3, "the gRPC URL can't be read as a URL: " + e.message);
+  }
+}
+
+async function grpcUnary(url: string, path: string, message: u8[]): Promise<u8[]> throws GrpcError | IoError | AbortError {
+  const got = await grpcCall(url, path, message);
+  const status = got.status;
+  if (status !== null) throw status;
+  let replies = got.messages;
+  if (replies.length !== 1) throw new GrpcError(13, path + " gave " + String(replies.length as i64) + " replies to a call taking one");
+  const first = replies.pop();
+  if (first === null) throw new GrpcError(13, path + " gave no reply");
+  return first;
+}
+
+async function grpcServerStream(url: string, path: string, message: u8[]): Promise<GrpcReplies> throws GrpcError | IoError | AbortError {
+  const replies = await grpcCall(url, path, message);
+  return replies;
+}
+
+type GrpcTable = { services: Lock<GrpcService[]> };
+
+// Services by their full names, served through a handler serve runs over HTTP/2. A call to a
+// method a service doesn't have, or to a service not added, ends with UNIMPLEMENTED.
+export class GrpcServer {
+  #table: shared<GrpcTable>;
+
+  constructor() {
+    const none: GrpcService[] = [];
+    this.#table = shared<GrpcTable>({ services: new Lock(none) });
+  }
+
+  add(this: Ref<this>, service: GrpcService) {
+    this.#table.services.update((s) => { s.push(service); });
+  }
+
+  // The handler for serve, sharing this server's services.
+  handler(this: Ref<this>): ServeHandler {
+    const table = this.#table.clone();
+    return async (req: Request) => {
+      const res = await grpcHandle(table.clone(), req);
+      return res;
+    };
+  }
+}
+
+function grpcFind(services: Ref<GrpcService[]>, name: string): GrpcCall | null {
+  for (const s of services) if (s.name === name) return s.call.clone();
+  return null;
+}
+
+async function grpcHandle(table: shared<GrpcTable>, req: Request): Promise<Response> {
+  const parts = req.path.split("/");
+  if (req.method !== "POST" || parts.length !== 3) return new Response("Not Found\\n", { status: 404 });
+  const kind = req.headers.get("content-type") ?? "";
+  if (!kind.startsWith("application/grpc")) return new Response("Unsupported Media Type\\n", { status: 415 });
+  const name = parts[1];
+  const call = table.services.update((s) => grpcFind(s, name));
+  const body = await req.bytes();
+  const none: Headers[] = [];
+  const box = shared<__trailerBox>({ fields: new Lock(none) });
+  let headers = new Headers();
+  headers.set("content-type", "application/grpc");
+  let res = new Response(ReadableStream.from(grpcReplies(call, parts[2], name, body, box.clone())), { status: 200, headers: headers });
+  res.__trailersFrom(box);
+  return res;
+}
+
+// A call's replies as frames, then its status in the trailers.
+async function* grpcReplies(call: GrpcCall | null, method: string, service: string, body: u8[], box: shared<__trailerBox>): AsyncGenerator<u8[]> {
+  let code: i64 = 0;
+  let message = "";
+  const frames = grpcFrames(body);
+  if (call === null) {
+    code = 12;
+    message = "the server has no service " + service;
+  } else if (frames instanceof GrpcError) {
+    code = frames.code;
+    message = frames.message;
+  } else if (frames.length !== 1) {
+    code = 12;
+    message = "a call takes one request message, as client streaming isn't supported";
+  } else {
+    let replies = call(method, frames[0].clone());
+    for await (const r of replies) {
+      if (r instanceof GrpcError) {
+        code = r.code;
+        message = r.message;
+        break;
+      }
+      yield grpcFrame(r);
+    }
+  }
+  let trailers = new Headers();
+  trailers.set("grpc-status", String(code));
+  if (message.length > 0) trailers.set("grpc-message", grpcEscape(message));
+  box.fields.update((f) => { f.push(trailers); });
+}
+`;
+
 export const STD_MODULES: Record<string, string> = {
+  // A microcontroller's peripherals, imported as std:mcu.
+  mcu: `
+// @registers(base) on a class: its fields are one peripheral's registers, in order, each at the
+// next offset its size aligns to from base, and the class becomes one static method per register
+// giving a MutPtr at that address, read and written with readVolatile and writeVolatile inside
+// unsafe. Every address is worked out while compiling, so an access is one load or store.
+export macro function registers(input: AstStmt, base: i64): AstStmt {
+  let c = input;
+  assert(c.kind === "class", "'@registers' applies to a class whose fields are a peripheral's registers, in order");
+  if (c.kind !== "class") return c;
+  let offset: i64 = 0;
+  let made: AstClassMember[] = [];
+  for (const m of c.members) {
+    assert(m.kind === "field" && typeof m.name === "string", "a register block holds only fields, like 'data: u32'");
+    if (m.kind !== "field" || typeof m.name !== "string") continue;
+    const name = m.name;
+    const t = m.type.clone();
+    assert(t !== null && t.kind === "ref", "register '" + name + "' needs its type written, like 'data: u32'");
+    if (t.kind !== "ref") continue;
+    const size: i64 = t.name === "u8" || t.name === "i8" ? 1 : t.name === "u16" || t.name === "i16" ? 2 : t.name === "u32" || t.name === "i32" ? 4 : t.name === "u64" || t.name === "i64" ? 8 : 0;
+    assert(size > 0, "register '" + name + "' is an integer of 8, 16, 32 or 64 bits, not '" + t.name + "'");
+    if (size === 0) continue;
+    offset = (offset + size - 1) / size * size;
+    const at: AstExpr = { kind: "int", value: base + offset, start: 0, end: 0 };
+    const pointer: AstType = { kind: "ref", name: "MutPtr", args: [t.clone()], start: 0, end: 0 };
+    const k = quote\`class X {
+      static register(): \${pointer.clone()} {
+        return unsafe { (\${at} as usize) as \${pointer.clone()} };
+      }
+    }\`;
+    if (k.kind === "class") for (const member of k.members) {
+      let method = member.clone();
+      if (method.kind === "method") method.name = name;
+      made.push(method);
+    }
+    offset += size;
+  }
+  c.members = made;
+  return c;
+}
+`,
+  grpc: GRPC,
+  query: QUERY,
+  s3: String.raw`import { hash, hmac } from "crypto";
+
+// Where a client finds its bucket and how it signs: any left out is read from S3_* and then AWS_*
+// environment variables (S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY_ID,
+// S3_SECRET_ACCESS_KEY, S3_SESSION_TOKEN). Objects are addressed as endpoint/bucket/key unless
+// virtualHostedStyle asks for bucket.host/key.
+export type S3Options = { endpoint?: string; region?: string; bucket?: string; accessKeyId?: string; secretAccessKey?: string; sessionToken?: string; virtualHostedStyle?: boolean };
+export type S3Method = "GET" | "PUT" | "DELETE" | "HEAD";
+// date is when the URL is signed, now when left out.
+export type PresignOptions = { expiresIn?: i64; method?: S3Method; date?: Date };
+export type WriteOptions = { type?: string };
+export type ListOptions = { prefix?: string; delimiter?: string; maxKeys?: i64; startAfter?: string; continuationToken?: string };
+export type S3ListObject = { key: string; size: i64; lastModified: string; eTag: string };
+export type S3ListResult = { contents: S3ListObject[]; commonPrefixes: string[]; isTruncated: boolean; keyCount: i64; nextContinuationToken: string | null };
+
+// What S3 answered a request it refused with: its error code, as NoSuchKey or AccessDenied, and
+// the HTTP status.
+export class S3Error {
+  name: string = "S3Error";
+  code: string;
+  message: string;
+  status: i64;
+  constructor(code: string, message: string, status: i64) {
+    this.code = code;
+    this.message = message;
+    this.status = status;
+  }
+}
+
+// One request's SigV4 inputs: every header is signed, and host as the URL gives it.
+export type SignInput = { method: string; url: string; headers: Record<string, string>; payloadHash: string; accessKeyId: string; secretAccessKey: string; region: string; date: Date; service?: string };
+export type Signed = { authorization: string; amzDate: string; signature: string };
+
+type Config = { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; sessionToken: string; virtualHostedStyle: boolean };
+
+const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+function setting(given: string | undefined, name: string, fallback: string): string {
+  if (given !== undefined) return given;
+  const own = process.env["S3_" + name];
+  if (own !== undefined) return own;
+  const aws = process.env["AWS_" + name];
+  return aws !== undefined ? aws : fallback;
+}
+
+function configOf(o: Ref<S3Options>): Config {
+  const region = setting(o.region, "REGION", process.env["AWS_DEFAULT_REGION"] ?? "us-east-1");
+  let endpoint = setting(o.endpoint, "ENDPOINT", "https://s3." + region + ".amazonaws.com");
+  while (endpoint.endsWith("/")) endpoint = endpoint.slice(0, (endpoint.length as i64) - 1);
+  return {
+    endpoint: endpoint, region: region, bucket: setting(o.bucket, "BUCKET", ""),
+    accessKeyId: setting(o.accessKeyId, "ACCESS_KEY_ID", ""), secretAccessKey: setting(o.secretAccessKey, "SECRET_ACCESS_KEY", ""),
+    sessionToken: setting(o.sessionToken, "SESSION_TOKEN", ""), virtualHostedStyle: o.virtualHostedStyle ?? false,
+  };
+}
+
+const HEX = "0123456789abcdef";
+
+function hex(bytes: Ref<u8[]>): string {
+  let out = "";
+  for (const b of bytes) out += HEX[(b >> 4) as usize]! + HEX[(b & 15) as usize]!;
+  return out;
+}
+
+// RFC 3986 percent-encoding as SigV4 wants it: every byte but letters, digits and -._~, and '/'
+// too unless it separates a path's segments.
+export function uriEncode(text: string, keepSlash: boolean): string {
+  let out = "";
+  for (const b of new TextEncoder().encode(text)) {
+    const kept = (b >= 65 && b <= 90) || (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b === 45 || b === 46 || b === 95 || b === 126 || (keepSlash && b === 47);
+    if (kept) out += String.fromCharCode(b as u16);
+    else out += "%" + HEX[(b >> 4) as usize]!.toUpperCase() + HEX[(b & 15) as usize]!.toUpperCase();
+  }
+  return out;
+}
+
+// "20130524T000000Z", the form SigV4 dates take.
+function amzDateOf(date: Ref<Date>): string {
+  const iso = date.toISOString();
+  return iso.slice(0, 4) + iso.slice(5, 7) + iso.slice(8, 13) + iso.slice(14, 16) + iso.slice(17, 19) + "Z";
+}
+
+// A query string's pairs, already encoded as sent, sorted by name as a canonical request holds them.
+function canonicalQuery(search: string): string {
+  if (search.length === 0) return "";
+  let pairs: [string, string][] = [];
+  for (const part of search.split("&")) {
+    if (part.length === 0) continue;
+    const eq = part.indexOf("=");
+    const name = eq < 0 ? part : part.slice(0, eq);
+    const value = eq < 0 ? "" : part.slice(eq + 1);
+    pairs.push([name, value]);
+  }
+  pairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  return pairs.map((p) => p[0] + "=" + p[1]).join("&");
+}
+
+function signingKey(secret: string, day: string, region: string, service: string): u8[] {
+  const k1 = hmac("sha256", "AWS4" + secret, day);
+  const k2 = hmac("sha256", k1, region);
+  const k3 = hmac("sha256", k2, service);
+  return hmac("sha256", k3, "aws4_request");
+}
+
+// The SigV4 signature of a request, its URL already encoded as sent.
+function signature(input: Ref<SignInput>): [string, string, string] throws TypeError {
+  const service = input.service ?? "s3";
+  const url = new URL(input.url);
+  const amzDate = amzDateOf(input.date);
+  const day = amzDate.slice(0, 8);
+  let all: [string, string][] = [["host", url.host]];
+  for (const [n, v] of Object.entries(input.headers)) all.push([n.toLowerCase(), v.trim()]);
+  all.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const signed = all.map((h) => h[0]).join(";");
+  const canonical = [input.method, url.pathname, canonicalQuery(url.search.length > 0 ? url.search.slice(1) : ""), all.map((h) => h[0] + ":" + h[1] + "\n").join(""), signed, input.payloadHash].join("\n");
+  const scope = day + "/" + input.region + "/" + service + "/aws4_request";
+  const toSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + hash("sha256", canonical, "hex");
+  return [hex(hmac("sha256", signingKey(input.secretAccessKey, day, input.region, service), toSign)), signed, scope];
+}
+
+// Signs a request with SigV4 in an Authorization header, as every S3Client request is.
+export function signRequest(input: SignInput): Signed throws TypeError {
+  const amzDate = amzDateOf(input.date);
+  const [sig, signed, scope] = signature(input);
+  return { authorization: "AWS4-HMAC-SHA256 Credential=" + input.accessKeyId + "/" + scope + ", SignedHeaders=" + signed + ", Signature=" + sig, amzDate: amzDate, signature: sig };
+}
+
+function objectUrl(c: Ref<Config>, key: string): string {
+  const path = key.length > 0 ? "/" + uriEncode(key, true) : "";
+  if (!c.virtualHostedStyle) return c.endpoint + "/" + uriEncode(c.bucket, false) + path;
+  const scheme = c.endpoint.indexOf("://");
+  return c.endpoint.slice(0, scheme + 3) + c.bucket + "." + c.endpoint.slice(scheme + 3) + (path.length > 0 ? path : "/");
+}
+
+function presigned(c: Ref<Config>, key: string, options: Ref<PresignOptions>): string throws TypeError {
+  if (c.bucket.length === 0) throw new TypeError("S3Client needs a bucket: pass { bucket } or set S3_BUCKET");
+  const expires = options.expiresIn ?? 86400;
+  if (expires < 1 || expires > 604800) throw new TypeError("a presigned URL expires in 1 to 604800 seconds, not " + String(expires));
+  const date = options.date !== undefined ? options.date.clone() : new Date();
+  const amzDate = amzDateOf(date);
+  const scope = amzDate.slice(0, 8) + "/" + c.region + "/s3/aws4_request";
+  let query = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=" + uriEncode(c.accessKeyId + "/" + scope, false) + "&X-Amz-Date=" + amzDate + "&X-Amz-Expires=" + String(expires);
+  if (c.sessionToken.length > 0) query += "&X-Amz-Security-Token=" + uriEncode(c.sessionToken, false);
+  query += "&X-Amz-SignedHeaders=host";
+  const url = objectUrl(c, key) + "?" + query;
+  const input: SignInput = { method: options.method ?? "GET", url: url, headers: {}, payloadHash: "UNSIGNED-PAYLOAD", accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, region: c.region, date: date };
+  const [sig, _signed, _scope] = signature(input);
+  return url + "&X-Amz-Signature=" + sig;
+}
+
+// The text between the first <tag> and its </tag> from at, entities decoded, and where it ends.
+function tagged(xml: string, tag: string, at: i64): [string, i64] | null {
+  const open = xml.indexOf("<" + tag + ">", at);
+  if (open < 0) return null;
+  const start = open + (tag.length as i64) + 2;
+  const close = xml.indexOf("</" + tag + ">", start);
+  if (close < 0) return null;
+  const text = xml.slice(start, close).replaceAll("&quot;", "\"").replaceAll("&apos;", "'").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+  return [text, close + (tag.length as i64) + 3];
+}
+
+function textOf(xml: string, tag: string): string {
+  const found = tagged(xml, tag, 0);
+  return found !== null ? found[0] : "";
+}
+
+async function send(c: Ref<Config>, method: S3Method, key: string, query: string, body: u8[], type: string): Promise<Response> throws S3Error | IoError | AbortError | TypeError {
+  if (c.bucket.length === 0) throw new TypeError("S3Client needs a bucket: pass { bucket } or set S3_BUCKET");
+  const url = objectUrl(c, key) + (query.length > 0 ? "?" + query : "");
+  const payload = body.length > 0 ? hash("sha256", body.clone(), "hex") : EMPTY_SHA256;
+  const date = new Date();
+  let headers: Record<string, string> = { "x-amz-content-sha256": payload, "x-amz-date": amzDateOf(date) };
+  if (c.sessionToken.length > 0) headers["x-amz-security-token"] = c.sessionToken;
+  if (type.length > 0) headers["content-type"] = type;
+  const signed = signRequest({ method: method, url: url, headers: headers.clone(), payloadHash: payload, accessKeyId: c.accessKeyId, secretAccessKey: c.secretAccessKey, region: c.region, date: date });
+  let sent = new Headers();
+  for (const [n, v] of Object.entries(headers)) sent.set(n, v);
+  sent.set("authorization", signed.authorization);
+  const res = await fetch(url, method === "PUT" ? { method: method, headers: sent, body: body } : { method: method, headers: sent });
+  if (res.status >= 200 && res.status < 300) return res;
+  const status = res.status;
+  let xml = "";
+  if (method !== "HEAD") xml = await res.text();
+  const code = textOf(xml, "Code");
+  const message = textOf(xml, "Message");
+  throw new S3Error(code.length > 0 ? code : status === 404 ? "NoSuchKey" : "HTTP" + String(status), message.length > 0 ? message : "S3 answered " + method + " " + key + " with status " + String(status), status);
+}
+
+function bytesOf(data: string | u8[]): u8[] {
+  return typeof data === "string" ? new TextEncoder().encode(data) : data;
+}
+
+// An object in a bucket, by its key; nothing is fetched until it is read.
+export class S3File {
+  config: Config;
+  key: string;
+  constructor(config: Config, key: string) {
+    this.config = config;
+    this.key = key;
+  }
+  async bytes(this: Ref<this>): Promise<u8[]> throws S3Error | IoError | AbortError | TypeError {
+    const res = await send(this.config, "GET", this.key, "", [], "");
+    return await res.bytes();
+  }
+  async text(this: Ref<this>): Promise<string> throws S3Error | IoError | AbortError | TypeError {
+    const res = await send(this.config, "GET", this.key, "", [], "");
+    return await res.text();
+  }
+  async exists(this: Ref<this>): Promise<boolean> throws S3Error | IoError | AbortError | TypeError {
+    try {
+      await send(this.config, "HEAD", this.key, "", [], "");
+      return true;
+    } catch (e) {
+      if (e instanceof S3Error && e.status === 404) return false;
+      throw e;
+    }
+  }
+  async write(this: Ref<this>, data: string | u8[], options: WriteOptions = {}): Promise<i64> throws S3Error | IoError | AbortError | TypeError {
+    const body = bytesOf(data);
+    const n = body.length as i64;
+    await send(this.config, "PUT", this.key, "", body, options.type ?? "");
+    return n;
+  }
+  async delete(this: Ref<this>): Promise<void> throws S3Error | IoError | AbortError | TypeError {
+    await send(this.config, "DELETE", this.key, "", [], "");
+  }
+  presign(this: Ref<this>, options: PresignOptions = {}): string throws TypeError {
+    return presigned(this.config, this.key, options);
+  }
+}
+
+// An S3-compatible bucket, as Bun's S3Client reaches one: AWS, R2, MinIO and others.
+export class S3Client {
+  config: Config;
+  constructor(options: S3Options = {}) {
+    this.config = configOf(options);
+  }
+  file(this: Ref<this>, key: string): S3File {
+    return new S3File(this.config.clone(), key);
+  }
+  async write(this: Ref<this>, key: string, data: string | u8[], options: WriteOptions = {}): Promise<i64> throws S3Error | IoError | AbortError | TypeError {
+    const f = this.file(key);
+    return await f.write(data, options);
+  }
+  async delete(this: Ref<this>, key: string): Promise<void> throws S3Error | IoError | AbortError | TypeError {
+    await send(this.config, "DELETE", key, "", [], "");
+  }
+  async exists(this: Ref<this>, key: string): Promise<boolean> throws S3Error | IoError | AbortError | TypeError {
+    const f = this.file(key);
+    return await f.exists();
+  }
+  presign(this: Ref<this>, key: string, options: PresignOptions = {}): string throws TypeError {
+    return presigned(this.config, key, options);
+  }
+  // One page of the bucket's keys, in key order, as ListObjectsV2 gives them.
+  async list(this: Ref<this>, options: ListOptions = {}): Promise<S3ListResult> throws S3Error | IoError | AbortError | TypeError {
+    let query = "list-type=2";
+    if (options.continuationToken !== undefined) query += "&continuation-token=" + uriEncode(options.continuationToken, false);
+    if (options.delimiter !== undefined) query += "&delimiter=" + uriEncode(options.delimiter, false);
+    if (options.maxKeys !== undefined) query += "&max-keys=" + String(options.maxKeys);
+    if (options.prefix !== undefined) query += "&prefix=" + uriEncode(options.prefix, false);
+    if (options.startAfter !== undefined) query += "&start-after=" + uriEncode(options.startAfter, false);
+    const res = await send(this.config, "GET", "", query, [], "");
+    const xml = await res.text();
+    let contents: S3ListObject[] = [];
+    let at: i64 = 0;
+    for (;;) {
+      const item = tagged(xml, "Contents", at);
+      if (item === null) break;
+      at = item[1];
+      const size = Number.parseInt(textOf(item[0], "Size"));
+      contents.push({ key: textOf(item[0], "Key"), size: size ?? 0, lastModified: textOf(item[0], "LastModified"), eTag: textOf(item[0], "ETag") });
+    }
+    let prefixes: string[] = [];
+    at = 0;
+    for (;;) {
+      const item = tagged(xml, "CommonPrefixes", at);
+      if (item === null) break;
+      at = item[1];
+      prefixes.push(textOf(item[0], "Prefix"));
+    }
+    const token = tagged(xml, "NextContinuationToken", 0);
+    const count = Number.parseInt(textOf(xml, "KeyCount")) ?? (contents.length as i64);
+    return { contents: contents, commonPrefixes: prefixes, isTruncated: textOf(xml, "IsTruncated") === "true", keyCount: count, nextContinuationToken: token !== null ? token[0] : null };
+  }
+}
+`,
+  // What a build is for, made per build from its target, release mode and flags by the loader.
+  build: "",
   // Node's assert and assert.ok, whose calls the checker gives the global assert's meaning, so
   // they panic where they are made.
   assert: String.raw`
@@ -5298,6 +8111,56 @@ class ParsedArgs {
   flagListOr(i: i64, fallback: boolean[]): boolean[] {
     return this.flagList(i) ?? fallback;
   }
+
+  // parseArgs<T>()'s reads, which end the program with the usage on a missing or bad value.
+  textGiven(i: i64, flag: string, usage: string): string {
+    const given = this.text(i);
+    if (given === null) __argsFailed("missing " + flag, usage);
+    return given!;
+  }
+
+  // An integer option's value, in the field's type's range, written in decimal.
+  integer(i: i64, flag: string, usage: string, required: boolean, min: i64, max: i64): i64 | null {
+    return __argInteger(this.text(i), flag, usage, required, min, max);
+  }
+
+  integers(i: i64, flag: string, usage: string, min: i64, max: i64): i64[] {
+    let out: i64[] = [];
+    for (const g of this.strings[i as usize]) out.push(__argInteger(g, flag, usage, true, min, max)!);
+    return out;
+  }
+
+  float(i: i64, flag: string, usage: string, required: boolean): f64 | null {
+    return __argFloat(this.text(i), flag, usage, required);
+  }
+
+  floats(i: i64, flag: string, usage: string): f64[] {
+    let out: f64[] = [];
+    for (const g of this.strings[i as usize]) out.push(__argFloat(g, flag, usage, true)!);
+    return out;
+  }
+}
+
+function __argInteger(given: string | null, flag: string, usage: string, required: boolean, min: i64, max: i64): i64 | null {
+  if (given === null) {
+    if (required) __argsFailed("missing " + flag, usage);
+    return null;
+  }
+  const text = given!;
+  const n = /^[+-]?[0-9]+$/.test(text) ? parseInt(text) : null;
+  if (n === null || n! < min || n! > max) __argsFailed(flag + " takes an integer from " + String(min) + " to " + String(max) + ", not '" + text + "'", usage);
+  return n;
+}
+
+function __argFloat(given: string | null, flag: string, usage: string, required: boolean): f64 | null {
+  if (given === null) {
+    if (required) __argsFailed("missing " + flag, usage);
+    return null;
+  }
+  const text = given!;
+  const n = text.trim() === "" ? null : Number(text);
+  if (n === null || Number.isNaN(n!)) __argsFailed(flag + " takes a number, not '" + text + "'", usage);
+  return n;
 }
 
 function size(s: string): i64 {
@@ -5445,6 +8308,51 @@ export function parseArgs<V>(given: string[] | null, specs: ParseArgsSpec[], all
   const values = build(p);
   return { values, positionals: p.positionals };
 }
+
+declare function fsh_rt_exit(code: i64): void;
+
+function __argsExit(code: i64): never {
+  unsafe { fsh_rt_exit(code) };
+  // The C call never returns.
+  while (true) {}
+}
+
+// parseArgs<T>(): the usage line and its options, as the checker wrote them, after the program's name.
+function __argsUsage(usage: string): string {
+  const n = unsafe { fsh_rt_argc() };
+  const path = n > 1 ? unsafe { fromCString(fsh_rt_arg(1)) } : "program";
+  return "Usage: " + path.slice(path.lastIndexOf("/") + 1) + usage;
+}
+
+function __argsFailed(message: string, usage: string): never {
+  console.error("error: " + message + "\n\n" + __argsUsage(usage));
+  unsafe { fsh_rt_exit(2) };
+  // The C call never returns.
+  while (true) {}
+}
+
+// What parseArgs<T>() is rewritten to: -h or --help before any "--" prints the usage and ends the
+// program with 0, and an argument the options don't take, its message and the usage, with 2.
+function __typedArgs<V>(usage: string, run: () => V throws ParseArgsError): V {
+  for (const a of programArgs()) {
+    if (a === "--") break;
+    if (a === "-h" || a === "--help") {
+      console.log(__argsUsage(usage));
+      __argsExit(0);
+    }
+  }
+  let message = "";
+  try {
+    return run();
+  } catch (e) {
+    message = e.message;
+  }
+  console.error("error: " + message + "\n\n" + __argsUsage(usage));
+  unsafe { fsh_rt_exit(2) };
+  // The C call never returns.
+  while (true) {}
+}
+
 `,
   // A port of Node's path.posix for the functions Fish has.
   path: String.raw`
@@ -5842,6 +8750,7 @@ export class FileHandle {
     const held = this.#held.clone();
     const size = buffer.length as i64;
     const from = offset ?? 0;
+    if (from < 0 || from > SAFE) throw outOfRange("offset", ">= 0 && <= 9007199254740991", from);
     const n = length ?? size - from;
     const at = position ?? -1;
     // The read fills a copy of its own, since the buffer stays here, then lands in the buffer.
@@ -6051,6 +8960,7 @@ async function watchAborted(signal: AbortSignal): Promise<string | null> {
   fs: String.raw`
 // A descriptor is read to its end from where it is. Standard input goes through readLine's
 // buffer, so what a line read took is still read here.
+@blocking
 export function readFileSync(path: string | i64): u8[] throws IoError {
   if (typeof path === "string") return fileReadSync(path);
   if (path === 0) {
@@ -6067,28 +8977,33 @@ export function readFileSync(path: string | i64): u8[] throws IoError {
   }
 }
 
+@blocking
 export function readFileSyncText(path: string | i64): string throws IoError {
   const bytes = readFileSync(path);
   return new TextDecoder().decode(bytes);
 }
 
+@blocking
 export function writeFileSync(path: string, data: string | u8[]): void throws IoError {
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
   fileWriteSync(path, bytes);
 }
 
+@blocking
 export function existsSync(path: string): boolean {
   return pathExists(path);
 }
 
 export function statSync(path: string, options?: { throwIfNoEntry?: true }): Stats throws IoError;
 export function statSync(path: string, options: { throwIfNoEntry: false }): Stats | undefined throws IoError;
+@blocking
 export function statSync(path: string, options?: { throwIfNoEntry?: boolean }): Stats | undefined throws IoError {
   return pathStats(path, true, options?.throwIfNoEntry ?? true);
 }
 
 export function lstatSync(path: string, options?: { throwIfNoEntry?: true }): Stats throws IoError;
 export function lstatSync(path: string, options: { throwIfNoEntry: false }): Stats | undefined throws IoError;
+@blocking
 export function lstatSync(path: string, options?: { throwIfNoEntry?: boolean }): Stats | undefined throws IoError {
   return pathStats(path, false, options?.throwIfNoEntry ?? true);
 }
@@ -6096,6 +9011,7 @@ export function lstatSync(path: string, options?: { throwIfNoEntry?: boolean }):
 export function readdirSync(path: string): string[] throws IoError;
 export function readdirSync(path: string, options: { withFileTypes?: false }): string[] throws IoError;
 export function readdirSync(path: string, options: { withFileTypes: true }): Dirent[] throws IoError;
+@blocking
 export function readdirSync(path: string, options?: { withFileTypes?: boolean }): string[] | Dirent[] throws IoError {
   const names = dirRead(path);
   if (!(options?.withFileTypes ?? false)) return names;
@@ -6111,16 +9027,19 @@ export function readdirSync(path: string, options?: { withFileTypes?: boolean })
   return entries;
 }
 
+@blocking
 export function realpathSync(path: string): string throws IoError {
   return pathReal(path);
 }
 
+@blocking
 export function mkdtempSync(prefix: string): string throws IoError {
   return dirTemp(prefix);
 }
 
 export type RmOptions = { recursive?: boolean; force?: boolean };
 
+@blocking
 export function rmSync(path: string, options: RmOptions = {}): void throws IoError {
   pathRemove(path, options.recursive ?? false, options.force ?? false);
 }
@@ -6128,27 +9047,32 @@ export function rmSync(path: string, options: RmOptions = {}): void throws IoErr
 export type MakeDirectoryOptions = { recursive?: boolean; mode?: i64 };
 
 // The first directory made with recursive, as the prefix of path spells it; otherwise undefined.
+@blocking
 export function mkdirSync(path: string, options: MakeDirectoryOptions | i64 = {}): string | undefined throws IoError {
   if (typeof options === "number") return dirMake(path, false, options);
   return dirMake(path, options.recursive ?? false, options.mode ?? 0o777);
 }
 
+@blocking
 export function renameSync(oldPath: string, newPath: string): void throws IoError {
   pathRename(oldPath, newPath);
 }
 
 export const constants = new FsConstants();
 
+@blocking
 export function copyFileSync(src: string, dest: string, mode: i64 = 0): void throws IoError {
   fileCopy(src, dest, mode);
 }
 
+@blocking
 export function unlinkSync(path: string): void throws IoError {
   pathUnlink(path);
 }
 
 ${FILES}
 
+@blocking
 export function accessSync(path: string, mode: i64 = 0): void throws IoError {
   pathAccess(path, mode);
 }
@@ -6160,11 +9084,13 @@ function seconds(time: f64 | Date): f64 {
   return time < 0 && time - time === 0 ? (Date.now() as f64) / 1000 : time;
 }
 
+@blocking
 export function utimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
   pathUtimes(path, seconds(atime), seconds(mtime), true);
 }
 
 // A link's own times, not its target's.
+@blocking
 export function lutimesSync(path: string, atime: f64 | Date, mtime: f64 | Date): void throws IoError {
   pathUtimes(path, seconds(atime), seconds(mtime), false);
 }
@@ -6213,19 +9139,23 @@ function fileMode(mode: i64 | string): i64 throws IoError {
   return n as i64;
 }
 
+@blocking
 export function chmodSync(path: string, mode: i64 | string): void throws IoError {
   pathChmod(path, fileMode(mode));
 }
 
 // The link type matters only on Windows, so it is checked and then unused.
+@blocking
 export function symlinkSync(target: string, path: string, _type: "dir" | "file" | "junction" | null = null): void throws IoError {
   pathLink(target, path, true);
 }
 
+@blocking
 export function linkSync(existingPath: string, newPath: string): void throws IoError {
   pathLink(existingPath, newPath, false);
 }
 
+@blocking
 export function readlinkSync(path: string): string throws IoError {
   return pathReadLink(path);
 }
@@ -6306,31 +9236,38 @@ function checked(inflating: boolean, bits: i64, level: i64, input: Ref<u8[]>, li
   return out;
 }
 
+@blocking
 export function gzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(false, 31, data, options);
 }
 
+@blocking
 export function gunzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, 31, data, options);
 }
 
+@blocking
 export function deflateSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(false, 15, data, options);
 }
 
+@blocking
 export function inflateSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, 15, data, options);
 }
 
+@blocking
 export function deflateRawSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(false, -15, data, options);
 }
 
+@blocking
 export function inflateRawSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, -15, data, options);
 }
 
 // Gzip or zlib, whichever the input's header says.
+@blocking
 export function unzipSync(data: string | u8[], options: ZlibOptions = {}): u8[] throws ZlibError {
   return run(true, 47, data, options);
 }
@@ -6373,6 +9310,235 @@ export async function unzip(data: string | u8[], options: ZlibOptions = {}): Pro
   return await runAsync(true, 47, data, options);
 }
 `,
+  // Response compression for a Router, imported as std:compress: br, gzip or deflate as a
+  // request's Accept-Encoding prefers, over the system zlib and libbrotlienc.
+  compress: String.raw`
+declare function fsh_rt_zlib_open(bits: i64, level: i64): Ptr<u8>;
+declare function fsh_rt_zlib_push(stream: Ptr<u8>, data: Ptr<u8>, length: i64, finish: i64, result: MutPtr<i64>): Ptr<u8>;
+declare function fsh_rt_zlib_take(run: Ptr<u8>, out: MutPtr<u8>): void;
+declare function fsh_rt_zlib_close(stream: Ptr<u8>): void;
+declare function fsh_rt_brotli_open(quality: i64): Ptr<u8>;
+declare function fsh_rt_brotli_push(stream: Ptr<u8>, data: Ptr<u8>, length: i64, finish: i64, result: MutPtr<i64>): Ptr<u8>;
+declare function fsh_rt_brotli_take(run: Ptr<u8>, out: MutPtr<u8>): void;
+declare function fsh_rt_brotli_close(stream: Ptr<u8>): void;
+
+// threshold is the fewest bytes a body that isn't streamed needs to be compressed; a streamed
+// body's size isn't known, so it always is.
+export type CompressOptions = { threshold?: i64 };
+
+// The coding an Accept-Encoding value prefers of br, gzip and deflate, or "" for none of them:
+// the highest q above 0, a tie going to the first of those, and * giving its q to any not named.
+export function negotiate(accept: string): string {
+  const offered = ["br", "gzip", "deflate"];
+  let named: f64[] = [-1.0, -1.0, -1.0];
+  let any: f64 = -1.0;
+  for (const part of accept.split(",")) {
+    const fields = part.split(";");
+    const name = fields[0].trim().toLowerCase();
+    let q: f64 = 1.0;
+    for (let i: usize = 1; i < fields.length; i++) {
+      const field = fields[i].trim().toLowerCase();
+      if (field.startsWith("q=")) q = parseFloat(field.slice(2)) ?? 0.0;
+    }
+    if (name === "*") any = q;
+    for (let i: usize = 0; i < offered.length; i++) if (offered[i] === name) named[i] = q;
+  }
+  let best = "";
+  let top: f64 = 0.0;
+  for (let i: usize = 0; i < offered.length; i++) {
+    const q = named[i] < 0.0 ? any : named[i];
+    if (q > top) {
+      top = q;
+      best = offered[i];
+    }
+  }
+  return best;
+}
+
+// A type whose bodies come compressed already: images but SVG, audio, video, archives, web fonts
+// and PDF.
+function packedType(type: string): boolean {
+  const t = type.split(";")[0].trim().toLowerCase();
+  if (t.startsWith("image/")) return t !== "image/svg+xml";
+  if (t.startsWith("audio/") || t.startsWith("video/")) return true;
+  switch (t) {
+    case "application/zip":
+    case "application/gzip":
+    case "application/x-gzip":
+    case "application/x-bzip2":
+    case "application/x-xz":
+    case "application/x-7z-compressed":
+    case "application/vnd.rar":
+    case "application/zstd":
+    case "application/pdf":
+    case "font/woff":
+    case "font/woff2":
+      return true;
+  }
+  return false;
+}
+
+// Whether a response may be coded at all, whatever the request accepts.
+function codable(res: Ref<Response>): boolean {
+  if (res.status < 200 || res.status === 204 || res.status === 304) return false;
+  if (res.headers.has("content-encoding")) return false;
+  const cache = res.headers.get("cache-control");
+  if (cache !== null && cache.toLowerCase().includes("no-transform")) return false;
+  const type = res.headers.get("content-type");
+  return type === null || !packedType(type);
+}
+
+// Whether a Vary value already names Accept-Encoding, or every header.
+function varies(value: string): boolean {
+  for (const name of value.split(",")) {
+    const n = name.trim().toLowerCase();
+    if (n === "accept-encoding" || n === "*") return true;
+  }
+  return false;
+}
+
+// An open deflate stream or brotli encoder.
+class Coder {
+  #brotli: boolean;
+  #state: Ptr<u8>;
+
+  // gzip and deflate as HTTP names them, deflate being zlib's format; zlib's default level, and
+  // brotli's quality 4, which compresses about as well as gzip's default but faster, as dynamic
+  // responses want.
+  constructor(coding: string) {
+    this.#brotli = coding === "br";
+    this.#state = coding === "br" ? unsafe { fsh_rt_brotli_open(4) } : unsafe { fsh_rt_zlib_open(coding === "gzip" ? 31 : 15, -1) };
+  }
+
+  // The coded bytes of the next chunk, flushed so they can be sent at once, or with finish of
+  // the last, ending the stream.
+  push(this: Ref<this>, data: Ref<u8[]>, finish: boolean): u8[] {
+    if (data.length > 0) return this.feed(data, data.length as i64, finish);
+    // A pointer is taken to an element, so no input is passed as one byte of length 0.
+    const none: u8[] = [0 as u8];
+    return this.feed(none, 0, finish);
+  }
+
+  feed(this: Ref<this>, input: Ref<u8[]>, length: i64, finish: boolean): u8[] {
+    let result: i64[] = [0, 0, 0];
+    const last = finish ? 1 : 0;
+    const done = this.#brotli
+      ? unsafe { fsh_rt_brotli_push(this.#state, ptrOf(input[0]), length, last, mutPtrOf(result[0])) }
+      : unsafe { fsh_rt_zlib_push(this.#state, ptrOf(input[0]), length, last, mutPtrOf(result[0])) };
+    let out: u8[] = new Array(result[2] === 0 ? 1 : result[2]).fill(0 as u8);
+    if (this.#brotli) {
+      unsafe { fsh_rt_brotli_take(done, mutPtrOf(out[0])) };
+    } else {
+      unsafe { fsh_rt_zlib_take(done, mutPtrOf(out[0])) };
+    }
+    if (result[2] === 0) out = [];
+    assert(result[0] === 0, "compressing a response body failed");
+    return out;
+  }
+
+  // Frees the stream or encoder; nothing may be pushed after.
+  close(this: Ref<this>): void {
+    if (this.#brotli) {
+      unsafe { fsh_rt_brotli_close(this.#state) };
+    } else {
+      unsafe { fsh_rt_zlib_close(this.#state) };
+    }
+  }
+}
+
+// A streamed body's chunks coded as they come, each flushed so a stream of events still
+// reaches the client an event at a time.
+// ponytail: the coder is closed when the body ends; a body dropped part way, as when the client
+// goes, leaks it, since a generator held in a Dyn can't own a value with a drop yet.
+async function* coded(coding: string, source: ReadableStream<u8[]>): AsyncGenerator<u8[]> {
+  const coder = new Coder(coding);
+  let chunks = source;
+  for await (const chunk of chunks) {
+    const out = coder.push(chunk, false);
+    if (out.length > 0) yield out;
+  }
+  const none: u8[] = [];
+  const last = coder.push(none, true);
+  coder.close();
+  yield last;
+}
+
+// A Router middleware compressing responses with the coding the request's Accept-Encoding
+// prefers. A response already coded, marked no-transform, of a type that comes compressed, with
+// no body, or with a whole body under the threshold is sent as it is. Every response it could
+// code says Vary: Accept-Encoding, so a cache keeps each coding apart.
+export function compress(options: CompressOptions = {}): (req: Request, next: (req: Request) => Promise<Response>) => Promise<Response> {
+  const threshold = options.threshold ?? 1024;
+  return async (req, next) => {
+    const coding = req.method === "HEAD" ? "" : negotiate(req.headers.get("accept-encoding") ?? "");
+    let res = await next(req);
+    if (!codable(res)) return res;
+    const vary = res.headers.get("vary");
+    if (vary === null) res.headers.set("vary", "Accept-Encoding");
+    else if (!varies(vary)) res.headers.set("vary", vary + ", Accept-Encoding");
+    if (coding === "") return res;
+    if (res.__streamed()) {
+      const source = res.body;
+      if (source === null) return res;
+      res.__setBody(ReadableStream.from(coded(coding, source)));
+    } else {
+      if ((res.__bytes().length as i64) < threshold) return res;
+      const coder = new Coder(coding);
+      const packed = coder.push(res.__bytes(), true);
+      coder.close();
+      res.__setBody(packed);
+    }
+    res.headers.set("content-encoding", coding);
+    res.headers.delete("content-length");
+    return res;
+  };
+}
+`,
+  // CORS for a Router, imported as std:cors, as Hono's cors middleware.
+  cors: String.raw`
+// origins are the origins allowed, "*" for any; methods are those a preflight allows; credentials
+// lets a browser send cookies and read the response.
+export type CorsOptions = { origins?: string[]; methods?: string[]; credentials?: boolean };
+
+// The Access-Control-Allow-Origin a request from origin gets, or "" for none. With credentials a
+// "*" can't be sent, so the origin itself is.
+export function allowedOrigin(origins: Ref<string[]>, origin: string, credentials: boolean): string {
+  if (origins.includes("*")) return credentials ? origin : "*";
+  return origins.includes(origin) ? origin : "";
+}
+
+// A Router middleware answering preflight requests itself and adding the Access-Control headers
+// to every other response, the router's 404 and 405 included.
+export function cors(options: CorsOptions = {}): (req: Request, next: (req: Request) => Promise<Response>) => Promise<Response> {
+  const origins = options.origins ?? ["*"];
+  const methods = (options.methods ?? ["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH"]).join(", ");
+  const credentials = options.credentials ?? false;
+  const varies = credentials || !origins.includes("*");
+  return async (req, next) => {
+    const allow = allowedOrigin(origins, req.headers.get("origin") ?? "", credentials);
+    let res: Response;
+    if (req.method === "OPTIONS" && req.headers.has("access-control-request-method")) {
+      res = new Response(null, { status: 204 });
+      if (allow !== "") {
+        res.headers.set("access-control-allow-methods", methods.clone());
+        const asked = req.headers.get("access-control-request-headers");
+        if (asked !== null) res.headers.set("access-control-allow-headers", asked);
+      }
+    } else {
+      res = await next(req);
+    }
+    if (allow !== "") {
+      res.headers.set("access-control-allow-origin", allow);
+      if (credentials) res.headers.set("access-control-allow-credentials", "true");
+    }
+    if (varies) {
+      const had = res.headers.get("vary");
+      res.headers.set("vary", had === null ? "Origin" : had + ", Origin");
+    }
+    return res;
+  };
+}
+`,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
 declare function write(fd: i32, data: Ptr<u8>, length: usize): isize;
@@ -6398,6 +9564,7 @@ export class SpawnSyncReturns<T> {
   }
 }
 
+@blocking
 export function spawnSync(command: string, args: string[] = [], options: SpawnSyncOptions = {}): SpawnSyncReturns<u8[]> {
   const input = options.input ?? "";
   const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
@@ -6437,23 +9604,28 @@ function executed(r: SpawnSyncReturns<u8[]>, command: string): u8[] throws IoErr
   throw new ExecError(message, r.status, r.signal, r.stdout, r.stderr);
 }
 
+@blocking
 export function execFileSync(file: string, args: string[] = [], options: SpawnSyncOptions = {}): u8[] throws IoError | ExecError {
   const named = [file, ...args].join(" ");
   return executed(spawnSync(file, args, options), named);
 }
 
+@blocking
 export function execFileSyncText(file: string, args: string[] = [], options: SpawnSyncOptions = {}): string throws IoError | ExecError {
   return new TextDecoder().decode(execFileSync(file, args, options));
 }
 
+@blocking
 export function execSync(command: string, options: SpawnSyncOptions = {}): u8[] throws IoError | ExecError {
   return executed(spawnSync("/bin/sh", ["-c", command], options), command);
 }
 
+@blocking
 export function execSyncText(command: string, options: SpawnSyncOptions = {}): string throws IoError | ExecError {
   return new TextDecoder().decode(execSync(command, options));
 }
 
+@blocking
 export function spawnSyncText(command: string, args: string[] = [], options: SpawnSyncOptions = {}): SpawnSyncReturns<string> {
   const r = spawnSync(command, args, options);
   const text = new TextDecoder();
@@ -6477,7 +9649,7 @@ export async function connect(host: string, port: i64, options: ConnectOptions =
 `,
   // Postgres over its wire protocol: a pool of connections, statements with parameters sent apart from
   // their text, and rows read by column name into a type.
-  postgres: String.raw`
+  postgres: String.raw`import type { CompiledQuery } from "std:query";
 declare function fsh_rt_crypto_digest(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, rounds: i64, out: MutPtr<u8>): i64;
 declare function fsh_rt_crypto_missing(): Ptr<u8>;
 declare function fsh_rt_random_fill(at: MutPtr<u8>, count: usize): void;
@@ -7026,6 +10198,13 @@ export class Pool {
     return rowsAs<T>(outcome);
   }
 
+  // The rows a query std:query compiled gives, typed by what it selected.
+  async executeQuery<T>(this: Ref<this>, q: Ref<CompiledQuery<T>>): Promise<T[]> throws PostgresError | RowError | IoError | AbortError {
+    let params: SqlValue[] = [];
+    for (const p of q.parameters) params.push(p.clone());
+    return await this.query<T>(q.sql, params);
+  }
+
   // The first row sql gives as a T, or null when it gives none.
   async queryOne<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T | null> throws PostgresError | RowError | IoError | AbortError {
     let rows = await this.query<T>(sql, params);
@@ -7057,10 +10236,609 @@ export class Pool {
   }
 }
 `,
+  // Redis over RESP2, as node-redis's createClient shapes it: commands on a pool of connections,
+  // and publish and subscribe.
+  // JSON Web Tokens and password hashes over OpenSSL, whose calls live in the TLS half of the
+  // runtime: signJwt, verifyJwt, hashPassword and verifyPassword, with sync forms of the last two.
+  auth: String.raw`import { randomBytes } from "crypto";
+
+declare function fsh_rt_crypto_sign(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, out: MutPtr<u8>): i64;
+declare function fsh_rt_crypto_verify(which: i64, key: Ptr<u8>, keyLength: i64, data: Ptr<u8>, length: i64, sig: Ptr<u8>, sigLength: i64): i64;
+declare function fsh_rt_crypto_kdf(kind: i64, password: Ptr<u8>, passwordLength: i64, salt: Ptr<u8>, saltLength: i64, a: i64, b: i64, c: i64, out: MutPtr<u8>, outLength: i64): i64;
+declare function fsh_rt_crypto_missing(): Ptr<u8>;
+
+export type JwtAlgorithm = "HS256" | "HS384" | "HS512" | "RS256" | "ES256" | "EdDSA";
+
+// Why a token was refused, with a code to branch on: "malformed", "algorithm", "key",
+// "signature", "expired", "notBefore", "audience", "issuer" or "claims".
+export class JwtError {
+  name: string = "JwtError";
+  message: string;
+  code: string;
+  constructor(code: string, message: string) {
+    this.code = code;
+    this.message = message;
+  }
+}
+
+// A stored password hash that can't be read, or a hash this OpenSSL can't make.
+export class PasswordError {
+  name: string = "PasswordError";
+  message: string;
+  constructor(message: string) {
+    this.message = message;
+  }
+}
+
+export type SignJwtOptions = { alg?: JwtAlgorithm; expiresIn?: i64; notBefore?: i64; audience?: string; issuer?: string; subject?: string };
+export type VerifyJwtOptions = { algorithms: JwtAlgorithm[]; audience?: string; issuer?: string; clockTolerance?: i64 };
+
+const __JWT_ALGORITHMS: JwtAlgorithm[] = ["HS256", "HS384", "HS512", "RS256", "ES256", "EdDSA"];
+
+function __jwtNumber(alg: JwtAlgorithm): i64 {
+  return __JWT_ALGORITHMS.indexOf(alg);
+}
+
+function __b64url(bytes: Ref<u8[]>): string {
+  return bytes.toBase64({ alphabet: "base64url", omitPadding: true });
+}
+
+function __unb64url(text: string, what: string): u8[] throws JwtError {
+  if (!/^[A-Za-z0-9_-]*$/.test(text)) throw new JwtError("malformed", "the token's " + what + " isn't base64url");
+  try {
+    return u8.fromBase64(text, { alphabet: "base64url" });
+  } catch (e) {
+    throw new JwtError("malformed", "the token's " + what + " isn't base64url");
+  }
+}
+
+// A pointer is taken to an element, so an empty input is passed as one byte of length 0.
+function __bytesOrOne(b: Ref<u8[]>): u8[] {
+  return b.length === 0 ? [0 as u8] : b.clone();
+}
+
+function __cryptoMissing(): string {
+  return unsafe { fromCString(fsh_rt_crypto_missing()) };
+}
+
+function __objectOf(text: string, what: string): Map<string, Json> throws JwtError {
+  let v: Json = null;
+  try {
+    v = JSON.parse(text);
+  } catch (e) {
+    throw new JwtError(what === "claims" ? "claims" : "malformed", "the token's " + what + " isn't JSON: " + e.message);
+  }
+  if (v instanceof Map) return v;
+  throw new JwtError(what === "claims" ? "claims" : "malformed", "the token's " + what + " must be a JSON object");
+}
+
+// Each claim the options give, set where the claims don't already have it.
+function __withClaim(m: Mut<Map<string, Json>>, name: string, value: Json): void throws JwtError {
+  if (m.has(name)) throw new JwtError("claims", "the claims already hold '" + name + "', which the options set too; give it in one place");
+  m.set(name, value);
+}
+
+// A signed token for the claims, which serialize as a JSON object. HS algorithms take the shared
+// secret; RS256, ES256 and EdDSA take a PEM private key.
+export function signJwt<T>(claims: Ref<T>, key: string | u8[], options?: SignJwtOptions): string throws JwtError {
+  const alg: JwtAlgorithm = options?.alg ?? "HS256";
+  let m = __objectOf(JSON.stringify(claims), "claims");
+  const now = Date.now() / 1000;
+  if (!m.has("iat")) m.set("iat", now as f64);
+  const expiresIn = options?.expiresIn;
+  if (expiresIn !== undefined) __withClaim(m, "exp", (now + expiresIn) as f64);
+  const notBefore = options?.notBefore;
+  if (notBefore !== undefined) __withClaim(m, "nbf", (now + notBefore) as f64);
+  const audience = options?.audience;
+  if (audience !== undefined) __withClaim(m, "aud", audience);
+  const issuer = options?.issuer;
+  if (issuer !== undefined) __withClaim(m, "iss", issuer);
+  const subject = options?.subject;
+  if (subject !== undefined) __withClaim(m, "sub", subject);
+  const enc = new TextEncoder();
+  const input = __b64url(enc.encode('{"alg":"' + alg + '","typ":"JWT"}')) + "." + __b64url(enc.encode(JSON.stringify(m)));
+  const k: u8[] = typeof key === "string" ? enc.encode(key) : key;
+  if (k.length === 0) throw new JwtError("key", "signJwt needs a non-empty key");
+  const data = enc.encode(input);
+  let out: u8[] = new Array(1024).fill(0 as u8);
+  const n = unsafe { fsh_rt_crypto_sign(__jwtNumber(alg), ptrOf(k[0]), k.length as i64, ptrOf(data[0]), data.length as i64, mutPtrOf(out[0])) };
+  if (n === -2) throw new JwtError("key", "JWT signing needs OpenSSL: " + __cryptoMissing());
+  if (n < 0) throw new JwtError("key", alg.startsWith("HS") ? "OpenSSL couldn't sign with the secret" : "the key isn't a PEM private key " + alg + " signs with (" + (alg === "RS256" ? "RSA of 2048 bits or more" : alg === "ES256" ? "EC on P-256" : "Ed25519") + ")");
+  return input + "." + __b64url(out.slice(0, n));
+}
+
+function __numberClaim(m: Ref<Map<string, Json>>, name: string): f64 | null throws JwtError {
+  const v = m.get(name);
+  if (v === null) return null;
+  if (typeof v === "number") return v;
+  throw new JwtError("claims", "the token's '" + name + "' claim isn't a number of seconds");
+}
+
+// The token's claims as T, once its signature checks under the key with one of the algorithms
+// given, it hasn't expired, and its audience and issuer are the ones asked for. HS algorithms
+// take the shared secret; RS256, ES256 and EdDSA a PEM public key.
+export function verifyJwt<T>(token: string, key: string | u8[], options: VerifyJwtOptions): T throws JwtError {
+  const parts = token.split(".");
+  if (parts.length !== 3) throw new JwtError("malformed", "a JWT has three parts separated by '.', this has " + String(parts.length));
+  const dec = new TextDecoder();
+  const header = __objectOf(dec.decode(__unb64url(parts[0], "header")), "header");
+  const named = header.get("alg");
+  if (typeof named !== "string") throw new JwtError("malformed", "the token's header names no 'alg'");
+  let alg: JwtAlgorithm | null = null;
+  for (const a of options.algorithms) if (a === named) alg = a;
+  if (alg === null) throw new JwtError("algorithm", "the token is signed with '" + named + "', which isn't one of the algorithms allowed: " + options.algorithms.join(", "));
+  if (header.has("crit")) throw new JwtError("malformed", "the token's header has critical extensions, which verifyJwt doesn't know");
+  const enc = new TextEncoder();
+  const k: u8[] = typeof key === "string" ? enc.encode(key) : key;
+  if (k.length === 0) throw new JwtError("key", "verifyJwt needs a non-empty key");
+  const data = enc.encode(parts[0] + "." + parts[1]);
+  const raw = __unb64url(parts[2], "signature");
+  const sig = __bytesOrOne(raw);
+  const ok = unsafe { fsh_rt_crypto_verify(__jwtNumber(alg!), ptrOf(k[0]), k.length as i64, ptrOf(data[0]), data.length as i64, ptrOf(sig[0]), raw.length as i64) };
+  if (ok === -2) throw new JwtError("key", "JWT verification needs OpenSSL: " + __cryptoMissing());
+  if (ok === -1) throw new JwtError("key", "the key isn't a PEM public key " + alg! + " verifies with");
+  if (ok !== 1) throw new JwtError("signature", "the token's signature doesn't match");
+  const payload = dec.decode(__unb64url(parts[1], "payload"));
+  const claims = __objectOf(payload, "claims");
+  const now = (Date.now() as f64) / 1000.0;
+  const tolerance = (options.clockTolerance ?? 0) as f64;
+  const exp = __numberClaim(claims, "exp");
+  if (exp !== null && now >= exp + tolerance) throw new JwtError("expired", "the token expired at " + String(exp));
+  const nbf = __numberClaim(claims, "nbf");
+  if (nbf !== null && now + tolerance < nbf) throw new JwtError("notBefore", "the token isn't valid before " + String(nbf));
+  const audience = options.audience;
+  if (audience !== undefined) {
+    const aud = claims.get("aud");
+    let found = false;
+    if (typeof aud === "string") found = aud === audience;
+    else if (Array.isArray(aud)) for (const a of aud) if (typeof a === "string" && a === audience) found = true;
+    if (!found) throw new JwtError("audience", "the token isn't for the audience '" + audience + "'");
+  }
+  const issuer = options.issuer;
+  if (issuer !== undefined) {
+    const iss = claims.get("iss");
+    if (typeof iss !== "string" || iss !== issuer) throw new JwtError("issuer", "the token wasn't issued by '" + issuer + "'");
+  }
+  try {
+    return JSON.parse<T>(payload);
+  } catch (e) {
+    throw new JwtError("claims", "the token's claims don't fit the type asked for: " + e.message);
+  }
+}
+
+function __kdf(kind: i64, password: string, salt: Ref<u8[]>, a: i64, b: i64, c: i64, length: i64): u8[] throws PasswordError {
+  const pw = new TextEncoder().encode(password);
+  const p = __bytesOrOne(pw);
+  let out: u8[] = new Array(length).fill(0 as u8);
+  const ok = unsafe { fsh_rt_crypto_kdf(kind, ptrOf(p[0]), pw.length as i64, ptrOf(salt[0]), salt.length as i64, a, b, c, mutPtrOf(out[0]), length) };
+  if (ok === -2) throw new PasswordError("password hashing needs OpenSSL: " + __cryptoMissing());
+  if (ok === -1) throw new PasswordError("argon2id needs OpenSSL 3.2 or newer; upgrade it and build the program again");
+  if (ok !== 1) throw new PasswordError("OpenSSL refused the hash's parameters");
+  return out;
+}
+
+// An argon2id hash of the password as a PHC string, with OWASP's minimum parameters (19 MiB, two
+// passes, one lane) and a random 16-byte salt. It runs on the blocking pool.
+export async function hashPassword(password: string): Promise<string> throws PasswordError {
+  const made = await spawnBlocking(() => __hashPassword(password));
+  return made;
+}
+
+// The same hash made on the calling thread, for code with no runtime running, such as a CLI tool;
+// in an async function it holds its worker for the whole hash, so use hashPassword there.
+@blocking
+export function hashPasswordSync(password: string): string throws PasswordError {
+  return __hashPassword(password);
+}
+
+function __hashPassword(password: string): string throws PasswordError {
+  const salt = randomBytes(16);
+  const hash = __kdf(0, password, salt, 19456, 2, 1, 32);
+  return "$argon2id$v=19$m=19456,t=2,p=1$" + salt.toBase64({ omitPadding: true }) + "$" + hash.toBase64({ omitPadding: true });
+}
+
+// Whether the password is the one hashed, for argon2id and scrypt PHC strings. Run on the
+// blocking pool, the comparison taking the same time wherever the bytes differ.
+export async function verifyPassword(password: string, hash: string): Promise<boolean> throws PasswordError {
+  const same = await spawnBlocking(() => __verifyPassword(password, hash));
+  return same;
+}
+
+// The same check made on the calling thread, for code with no runtime running; in an async
+// function use verifyPassword.
+@blocking
+export function verifyPasswordSync(password: string, hash: string): boolean throws PasswordError {
+  return __verifyPassword(password, hash);
+}
+
+function __phcParams(text: string, names: string[]): i64[] throws PasswordError {
+  let out: i64[] = [];
+  const parts = text.split(",");
+  if (parts.length !== names.length) throw new PasswordError("the hash's parameters aren't " + names.join(", "));
+  for (let i: usize = 0; i < names.length; i++) {
+    const kv = parts[i].split("=");
+    const n = kv.length === 2 && kv[0] === names[i] && /^[0-9]{1,10}$/.test(kv[1]) ? parseInt(kv[1]) : null;
+    if (n === null) throw new PasswordError("the hash's parameters aren't " + names.join(", "));
+    out.push(n);
+  }
+  return out;
+}
+
+function __phcBytes(text: string): u8[] throws PasswordError {
+  if (!/^[A-Za-z0-9+/]+$/.test(text)) throw new PasswordError("the hash's salt or digest isn't base64");
+  try {
+    return u8.fromBase64(text);
+  } catch (e) {
+    throw new PasswordError("the hash's salt or digest isn't base64");
+  }
+}
+
+function __verifyPassword(password: string, hash: string): boolean throws PasswordError {
+  const f = hash.split("$");
+  let kind: i64 = 0;
+  let a: i64 = 0;
+  let b: i64 = 0;
+  let c: i64 = 0;
+  let salt: u8[] = [];
+  let want: u8[] = [];
+  if (f.length === 6 && f[0] === "" && f[1] === "argon2id" && f[2] === "v=19") {
+    const p = __phcParams(f[3], ["m", "t", "p"]);
+    if (p[0] < 8 || p[0] > 4194304 || p[1] < 1 || p[1] > 1000 || p[2] < 1 || p[2] > 255) throw new PasswordError("the argon2id hash's parameters are out of range");
+    a = p[0];
+    b = p[1];
+    c = p[2];
+    salt = __phcBytes(f[4]);
+    want = __phcBytes(f[5]);
+  } else if (f.length === 5 && f[0] === "" && f[1] === "scrypt") {
+    kind = 1;
+    const p = __phcParams(f[2], ["ln", "r", "p"]);
+    if (p[0] < 1 || p[0] > 24 || p[1] < 1 || p[1] > 64 || p[2] < 1 || p[2] > 64) throw new PasswordError("the scrypt hash's parameters are out of range");
+    a = 1 << p[0];
+    b = p[1];
+    c = p[2];
+    salt = __phcBytes(f[3]);
+    want = __phcBytes(f[4]);
+  } else throw new PasswordError("the hash isn't an argon2id or scrypt PHC string");
+  if (salt.length < 8 || want.length < 16 || want.length > 128) throw new PasswordError("the hash's salt or digest is too short");
+  const got = __kdf(kind, password, salt, a, b, c, want.length as i64);
+  let diff: u8 = 0;
+  for (let i: usize = 0; i < want.length; i++) diff = diff | (got[i] ^ want[i]);
+  return diff === 0;
+}
+`,
+  redis: String.raw`// A reply as the server gives it: a status or bulk string, an integer, an array, or nil.
+export type RedisReply = null | string | i64 | RedisReply[];
+
+// An error reply from the server, as "WRONGTYPE Operation against a key ...": its message, and its
+// first word as the code.
+export class RedisError extends Error {
+  code: string;
+  constructor(message: string) {
+    super(message);
+    this.name = "RedisError";
+    const space = message.indexOf(" ");
+    this.code = space < 0 ? message : message.slice(0, space);
+  }
+}
+
+// url is redis://[user:password@]host[:port][/database], or rediss:// over TLS; poolSize is how
+// many connections the client keeps at most.
+export type RedisClientOptions = { url?: string; poolSize?: i64 };
+// SET's options: a lifetime in seconds or milliseconds, and setting only when the key is missing
+// or only when it is there.
+export type SetOptions = { EX?: i64; PX?: i64; NX?: boolean; XX?: boolean };
+// A message published to a channel the subscriber listens on.
+export type RedisMessage = { channel: string; message: string };
+
+type Config = { host: string; port: i64; user: string; password: string; database: i64; tls: boolean; max: i64 };
+
+// One connection, holding what it read past the last reply.
+class Conn {
+  stream: TcpStream;
+  buffer: u8[] = [];
+
+  constructor(stream: TcpStream) {
+    this.stream = stream;
+  }
+
+  // A connection to the server, signed in and on its database.
+  static async open(c: Ref<Config>): Promise<Conn> throws RedisError | IoError | AbortError {
+    const stream = await TcpStream.connect(c.host, c.port);
+    if (c.tls) await __tlsClient(stream, c.host, "", new AbortController().signal);
+    let conn = new Conn(stream);
+    if (c.password.length > 0) {
+      const auth: string[] = c.user.length > 0 ? ["AUTH", c.user, c.password] : ["AUTH", c.password];
+      await conn.call(auth);
+    }
+    if (c.database !== 0) {
+      const select: string[] = ["SELECT", String(c.database)];
+      await conn.call(select);
+    }
+    return conn;
+  }
+
+  // Sends a command and reads its reply, an error reply thrown.
+  async call(this: Mut<this>, args: Ref<string[]>): Promise<RedisReply> throws RedisError | IoError | AbortError {
+    await this.stream.write(encode(args));
+    const reply = await this.reply();
+    if (reply instanceof RedisError) throw reply;
+    return reply;
+  }
+
+  // The next reply, an error reply given rather than thrown.
+  async reply(this: Mut<this>): Promise<RedisReply | RedisError> throws IoError | AbortError {
+    while (true) {
+      const parsed = parse(this.buffer, 0);
+      if (parsed !== null) {
+        const rest = this.buffer.splice(parsed.next);
+        this.buffer = rest;
+        return parsed.value;
+      }
+      const got = await this.stream.read(65536);
+      if (got.length === 0) throw new IoError("the Redis server closed the connection");
+      for (const b of got) this.buffer.push(b);
+    }
+  }
+}
+
+// A command as RESP sends it: an array of bulk strings.
+function encode(args: Ref<string[]>): u8[] {
+  let out = new TextEncoder().encode("*" + String(args.length as i64) + "\r\n");
+  for (const arg of args) {
+    const bytes = new TextEncoder().encode(arg);
+    for (const b of new TextEncoder().encode("$" + String(bytes.length as i64) + "\r\n")) out.push(b);
+    for (const b of bytes) out.push(b);
+    out.push(13);
+    out.push(10);
+  }
+  return out;
+}
+
+type Parsed = { value: RedisReply | RedisError; next: i64 };
+
+// Where the line starting at an index ends, at its CR, or -1 when its CR LF hasn't come yet.
+function lineEnd(b: Ref<u8[]>, at: i64): i64 {
+  for (let i = at; i + 1 < (b.length as i64); i++) if (b[i as usize] === 13 && b[(i + 1) as usize] === 10) return i;
+  return -1;
+}
+
+// The reply starting at an index and where the next one starts, or null when it hasn't all come.
+// An error inside an array stands for the whole reply, as the client only gives it to throw.
+// ponytail: a reply is parsed again from its start after each read; a parser keeping its place
+// would read a large reply in one pass.
+function parse(b: Ref<u8[]>, at: i64): Parsed | null {
+  const end = lineEnd(b, at);
+  if (end < 0) return null;
+  const kind = b[at as usize];
+  const line = new TextDecoder().decode(b.slice(at + 1, end));
+  const next = end + 2;
+  if (kind === 43) return { value: line, next: next };
+  if (kind === 45) return { value: new RedisError(line), next: next };
+  if (kind === 58) return { value: parseInt(line) ?? 0, next: next };
+  if (kind === 36) {
+    const n = parseInt(line) ?? -1;
+    if (n < 0) return { value: null, next: next };
+    if ((b.length as i64) < next + n + 2) return null;
+    return { value: new TextDecoder().decode(b.slice(next, next + n)), next: next + n + 2 };
+  }
+  if (kind === 42) {
+    const n = parseInt(line) ?? -1;
+    if (n < 0) return { value: null, next: next };
+    let items: RedisReply[] = [];
+    let failed: RedisError | null = null;
+    let at2 = next;
+    for (let i = 0; i < n; i++) {
+      const item = parse(b, at2);
+      if (item === null) return null;
+      at2 = item.next;
+      const v = item.value;
+      if (v instanceof RedisError) failed = v;
+      else items.push(v);
+    }
+    if (failed !== null) return { value: failed, next: at2 };
+    return { value: items, next: at2 };
+  }
+  return { value: new RedisError("ERR the server sent a reply this client can't read, starting with byte " + String(kind as i64)), next: next };
+}
+
+// A redis:// or rediss:// URL as what to connect to.
+function config(url: string, max: i64): Config throws TypeError {
+  let u = new URL("redis://localhost");
+  try {
+    u = new URL(url);
+  } catch (e) {
+    // The URL itself isn't repeated, as it may hold a password.
+    throw new TypeError("the Redis URL can't be read as a URL: " + e.message);
+  }
+  if (u.protocol !== "redis:" && u.protocol !== "rediss:") throw new TypeError("a Redis URL starts with redis:// or rediss://, not " + u.protocol);
+  const port = u.port.length === 0 ? 6379 : parseInt(u.port) ?? 6379;
+  const path = u.pathname.startsWith("/") ? u.pathname.slice(1) : u.pathname;
+  const database = path.length === 0 ? 0 : parseInt(path) ?? -1;
+  if (database < 0) throw new TypeError("a Redis URL's path is the database's number, not '" + path + "'");
+  if (max < 1) throw new TypeError("poolSize is a whole number of at least 1, not " + String(max));
+  const host = u.hostname.startsWith("[") ? u.hostname.slice(1, (u.hostname.length as i64) - 1) : u.hostname;
+  return { host: host.length === 0 ? "localhost" : host, port: port, user: unescaped(u.username), password: unescaped(u.password), database: database, tls: u.protocol === "rediss:", max: max };
+}
+
+type Shared = { gate: Semaphore; idle: Lock<Conn[]> };
+
+// A client of one server, as node-redis's createClient gives: commands run on a pool of
+// connections, at most poolSize, each running one command at a time; a connection that breaks is
+// dropped and the next command opens another. Clones share the pool.
+export class RedisClient {
+  private config: Config;
+  private state: shared<Shared>;
+
+  constructor(config: Config) {
+    const idle: Conn[] = [];
+    this.state = shared<Shared>({ gate: new Semaphore(config.max), idle: new Lock<Conn[]>(idle) });
+    this.config = config;
+  }
+
+  // Opens a connection now, so a wrong address or password fails here rather than at the first command.
+  async connect(this: Ref<this>): Promise<void> throws RedisError | IoError | AbortError {
+    const conn = await Conn.open(this.config);
+    this.state.idle.update((cs) => cs.push(conn));
+  }
+
+  // Any command, as its words, and the reply the server gives.
+  async sendCommand(this: Ref<this>, args: string[]): Promise<RedisReply> throws RedisError | IoError | AbortError {
+    const state = this.state.clone();
+    const _permit = await state.gate.acquire();
+    const idle = state.idle.update((cs) => cs.pop());
+    let conn: Conn;
+    if (idle === null) conn = await Conn.open(this.config);
+    else conn = idle;
+    await conn.stream.write(encode(args));
+    const reply = await conn.reply();
+    // The server answered, so the connection is whole and goes back to the pool.
+    state.idle.update((cs) => cs.push(conn));
+    if (reply instanceof RedisError) throw reply;
+    return reply;
+  }
+
+  async ping(this: Ref<this>): Promise<string> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["PING"]);
+    return asText(reply);
+  }
+
+  // The string at a key, or null when there is none.
+  async get(this: Ref<this>, key: string): Promise<string | null> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["GET", key]);
+    if (reply === null) return null;
+    return asText(reply);
+  }
+
+  // "OK", or null when NX or XX kept it from setting.
+  async set(this: Ref<this>, key: string, value: string, options: SetOptions = {}): Promise<string | null> throws RedisError | IoError | AbortError {
+    let args: string[] = ["SET", key, value];
+    const ex = options.EX;
+    if (ex !== null) {
+      args.push("EX");
+      args.push(String(ex));
+    }
+    const px = options.PX;
+    if (px !== null) {
+      args.push("PX");
+      args.push(String(px));
+    }
+    if (options.NX === true) args.push("NX");
+    if (options.XX === true) args.push("XX");
+    const reply = await this.sendCommand(args);
+    if (reply === null) return null;
+    return asText(reply);
+  }
+
+  async incr(this: Ref<this>, key: string): Promise<i64> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["INCR", key]);
+    return asInteger(reply);
+  }
+
+  async incrBy(this: Ref<this>, key: string, by: i64): Promise<i64> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["INCRBY", key, String(by)]);
+    return asInteger(reply);
+  }
+
+  async decr(this: Ref<this>, key: string): Promise<i64> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["DECR", key]);
+    return asInteger(reply);
+  }
+
+  // How many of the keys there were to delete.
+  async del(this: Ref<this>, keys: string | string[]): Promise<i64> throws RedisError | IoError | AbortError {
+    let args: string[] = ["DEL"];
+    if (typeof keys === "string") args.push(keys);
+    else for (const k of keys) args.push(k);
+    const reply = await this.sendCommand(args);
+    return asInteger(reply);
+  }
+
+  async exists(this: Ref<this>, key: string): Promise<boolean> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["EXISTS", key]);
+    return asInteger(reply) === 1;
+  }
+
+  // Whether the key was there to be given a lifetime of seconds.
+  async expire(this: Ref<this>, key: string, seconds: i64): Promise<boolean> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["EXPIRE", key, String(seconds)]);
+    return asInteger(reply) === 1;
+  }
+
+  // Seconds the key has left, -1 when it has no lifetime and -2 when it isn't there.
+  async ttl(this: Ref<this>, key: string): Promise<i64> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["TTL", key]);
+    return asInteger(reply);
+  }
+
+  // How many subscribers got the message.
+  async publish(this: Ref<this>, channel: string, message: string): Promise<i64> throws RedisError | IoError | AbortError {
+    const reply = await this.sendCommand(["PUBLISH", channel, message]);
+    return asInteger(reply);
+  }
+
+  // The messages published to the channels, on a connection of their own that stays subscribed
+  // until the loop over them ends.
+  async *subscribe(this: Ref<this>, channels: string | string[]): AsyncGenerator<RedisMessage> throws RedisError | IoError | AbortError {
+    let conn = await Conn.open(this.config);
+    let args: string[] = ["SUBSCRIBE"];
+    if (typeof channels === "string") args.push(channels);
+    else for (const c of channels) args.push(c);
+    await conn.stream.write(encode(args));
+    while (true) {
+      const reply = await conn.reply();
+      if (reply instanceof RedisError) throw reply;
+      if (!Array.isArray(reply) || reply.length !== 3) continue;
+      const kind = reply[0].clone();
+      const channel = reply[1].clone();
+      const message = reply[2].clone();
+      if (kind === "message" && typeof channel === "string" && typeof message === "string") yield { channel: channel, message: message };
+    }
+  }
+
+  // Closes the idle connections; a command after this opens new ones.
+  close(this: Ref<this>) {
+    this.state.idle.update((cs) => { while (cs.length > 0) cs.pop(); });
+  }
+}
+
+export function createClient(options: RedisClientOptions = {}): RedisClient throws TypeError {
+  return new RedisClient(config(options.url ?? "redis://localhost:6379", options.poolSize ?? 10));
+}
+
+// A URL's user or password with its percent escapes decoded.
+function unescaped(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let out: u8[] = [];
+  let i: usize = 0;
+  while (i < bytes.length) {
+    if (bytes[i] === 37 && i + 2 < bytes.length) {
+      const n = parseInt(new TextDecoder().decode(bytes.slice((i + 1) as i64, (i + 3) as i64)), 16);
+      if (n !== null) {
+        out.push(n as u8);
+        i += 3;
+        continue;
+      }
+    }
+    out.push(bytes[i]);
+    i += 1;
+  }
+  return new TextDecoder().decode(out);
+}
+
+function asText(reply: RedisReply): string throws RedisError {
+  if (typeof reply === "string") return reply;
+  throw new RedisError("ERR the server's reply isn't a string");
+}
+
+function asInteger(reply: RedisReply): i64 throws RedisError {
+  if (typeof reply === "number") return reply;
+  throw new RedisError("ERR the server's reply isn't an integer");
+}
+`,
   // SQLite through the system's library, which links into a program only when it imports this:
   // statements with parameters bound apart from their text, and rows read by column name into a
   // type, as the postgres module reads them.
-  sqlite: String.raw`
+  sqlite: String.raw`import type { CompiledQuery } from "std:query";
 declare function fsh_rt_sqlite_database(): i64;
 declare function fsh_rt_sqlite_open(db: i64, path: Ptr<u8>): i64;
 declare function fsh_rt_sqlite_error(db: i64): Ptr<u8>;
@@ -7305,6 +11083,13 @@ export class Database {
   }
 
   // The first row sql gives as a T, or null when it gives none.
+  // The rows a query std:query compiled gives, typed by what it selected.
+  async executeQuery<T>(this: Ref<this>, q: Ref<CompiledQuery<T>>): Promise<T[]> throws SqliteError | RowError {
+    let params: SqlValue[] = [];
+    for (const p of q.parameters) params.push(p.clone());
+    return await this.query<T>(q.sql, params);
+  }
+
   async queryOne<T>(this: Ref<this>, sql: string, params: SqlValue[] = []): Promise<T | null> throws SqliteError | RowError {
     const out = await once(this.handle, sql, params, 1);
     let rows = rowsAs<T>(out.rows);
@@ -7387,7 +11172,7 @@ export class Statement {
 `,
   // Tar archives, read an entry at a time and written from files, imported as std:tar.
   tar: String.raw`
-import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
+import { closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, rmSync, symlinkSync, linkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
 import { dirname, isAbsolute, join, normalize, relative, resolve } from "std:path";
 import { gunzipSync, gzipSync, ZlibError } from "zlib";
 import { open } from "fs/promises";
@@ -7635,6 +11420,51 @@ function throughLinks(root: string, to: string, path: string): void throws IoErr
   }
 }
 
+// Validates a symlink target's lexical constraints before creating it on disk.
+function checkLinkEntry(root: string, to: string, path: string, target: string): void throws TarError {
+  if (to === root) throw new TarError("'" + path + "' cannot replace the target directory with a symlink", path);
+  if (isAbsolute(target)) throw new TarError("'" + path + "' is a symlink to the absolute path '" + target + "', which extract refuses", path);
+  if (target.length > 4096) throw new TarError("'" + path + "' has a symlink target that is too long, which extract refuses", path);
+  landing(root, join(dirname(relative(root, to)), target));
+}
+
+// Walks a symlink's target component by component from its parent directory under root,
+// expanding any existing symlinks along the way so symlink chains and loops cannot escape root.
+// Returns the remaining path-step budget for this extract().
+function checkLinkTarget(root: string, to: string, path: string, target: string, budget: i64): i64 throws IoError | TarError {
+  checkLinkEntry(root, to, path, target);
+  let cur = dirname(to);
+  let stack: string[] = [];
+  const initial = target.split("/");
+  for (let i = (initial.length as i64) - 1; i >= 0; i--) stack.push(initial[i as usize]!);
+  let hops: i64 = 0;
+  let left = budget;
+  while (stack.length > 0) {
+    left--;
+    if (left < 0) throw new TarError("'" + path + "' follows too many symlinks, which extract refuses", path);
+    const seg = stack.pop()!;
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (cur === root) throw new TarError("'" + path + "' follows symlinks out of the target, which extract refuses", path);
+      cur = dirname(cur);
+      continue;
+    }
+    const next = join(cur, seg);
+    const st = lstatSync(next, { throwIfNoEntry: false });
+    if (st !== undefined && st.isSymbolicLink()) {
+      hops++;
+      if (hops > 40) throw new TarError("'" + path + "' follows too many symlinks, which extract refuses", path);
+      const linkTarget = readlinkSync(next);
+      if (isAbsolute(linkTarget)) throw new TarError("'" + path + "' follows a symlink to the absolute path '" + linkTarget + "', which extract refuses", path);
+      const parts = linkTarget.split("/");
+      for (let i = (parts.length as i64) - 1; i >= 0; i--) stack.push(parts[i as usize]!);
+    } else {
+      cur = next;
+    }
+  }
+  return left;
+}
+
 // Writes the archive's entries under dir, made if it isn't there, and gives the paths written.
 // Nothing lands outside dir: absolute paths, climbing paths, links pointing out and paths
 // through symlinks are refused with TarError, as are devices and FIFOs.
@@ -7642,32 +11472,51 @@ export async function extract(source: TarSource, dir: string, limits: TarLimits 
   const root = resolve(dir);
   mkdirSync(root, { recursive: true });
   let written: string[] = [];
+  let links: { to: string; path: string; target: string }[] = [];
+  let dirModes: { to: string; mode: i64 }[] = [];
   let all = entries(source, limits);
-  for await (const e of all) {
-    const to = landing(root, e.path);
-    throughLinks(root, to, e.path);
-    if (e.type === "directory") {
-      mkdirSync(to, { recursive: true });
-      if (e.mode !== 0) chmodSync(to, e.mode & 0o777);
+  try {
+    for await (const e of all) {
+      const to = landing(root, e.path);
+      throughLinks(root, to, e.path);
+      if (e.type === "directory") {
+        mkdirSync(to, { recursive: true });
+        if (e.mode !== 0) dirModes.push({ to, mode: e.mode & 0o777 });
+        written.push(to);
+        continue;
+      }
+      mkdirSync(dirname(to), { recursive: true });
+      if (e.type === "symlink") {
+        checkLinkEntry(root, to, e.path, e.target);
+        symlinkSync(e.target, to);
+        links.push({ to, path: e.path, target: e.target });
+      } else if (e.type === "link") {
+        const from = landing(root, e.target);
+        throughLinks(root, from, e.path);
+        linkSync(from, to);
+      } else {
+        writeFileSync(to, e.data);
+        chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
+        utimesSync(to, e.mtime as f64, e.mtime as f64);
+      }
       written.push(to);
-      continue;
     }
-    mkdirSync(dirname(to), { recursive: true });
-    if (e.type === "symlink") {
-      if (isAbsolute(e.target)) throw new TarError("'" + e.path + "' is a symlink to the absolute path '" + e.target + "', which extract refuses", e.path);
-      landing(root, join(dirname(relative(root, to)), e.target));
-      symlinkSync(e.target, to);
-    } else if (e.type === "link") {
-      const from = landing(root, e.target);
-      throughLinks(root, from, e.path);
-      linkSync(from, to);
-    } else {
-      writeFileSync(to, e.data);
-      chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
-      utimesSync(to, e.mtime as f64, e.mtime as f64);
+    // Validate every created symlink once all entries exist so forward and reverse chains
+    // (including under case- or normalization-insensitive filesystems) cannot escape root.
+    let budget: i64 = 200000;
+    for (const l of links) budget = checkLinkTarget(root, l.to, l.path, l.target, budget);
+  } catch (err) {
+    for (const l of links) {
+      try {
+        rmSync(l.to, { force: true });
+      } catch (_e) {}
     }
-    written.push(to);
+    throw err;
   }
+  // Apply directory modes deepest-first after validation succeeds so read-only directories
+  // cannot block child writes or symlink cleanup on failure.
+  dirModes.sort((a, b) => (b.to.length as i64) - (a.to.length as i64));
+  for (const d of dirModes) chmodSync(d.to, d.mode);
   return written;
 }
 
@@ -7824,7 +11673,7 @@ export async function create(file: string, paths: string[], options: TarPackOpti
 `,
   // Zip archives, read through their central directory and written deflated, as std:zip.
   zip: String.raw`
-import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, symlinkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, utimesSync, chmodSync, writeFileSync } from "std:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "std:path";
 import { deflateRawSync, inflateRawSync, ZlibError } from "zlib";
 import { open } from "fs/promises";
@@ -8050,33 +11899,93 @@ function throughLinks(root: string, to: string, path: string): void throws IoErr
   }
 }
 
+function checkLinkEntry(root: string, to: string, path: string, target: string): void throws ZipError {
+  if (to === root) throw new ZipError("'" + path + "' cannot replace the target directory with a symlink", path);
+  if (isAbsolute(target)) throw new ZipError("'" + path + "' is a symlink to the absolute path '" + target + "', which extract refuses", path);
+  if (target.length > 4096) throw new ZipError("'" + path + "' has a symlink target that is too long, which extract refuses", path);
+  landing(root, join(dirname(relative(root, to)), target));
+}
+
+function checkLinkTarget(root: string, to: string, path: string, target: string, budget: i64): i64 throws IoError | ZipError {
+  checkLinkEntry(root, to, path, target);
+  let cur = dirname(to);
+  let stack: string[] = [];
+  const initial = target.split("/");
+  for (let i = (initial.length as i64) - 1; i >= 0; i--) stack.push(initial[i as usize]!);
+  let hops: i64 = 0;
+  let left = budget;
+  while (stack.length > 0) {
+    left--;
+    if (left < 0) throw new ZipError("'" + path + "' follows too many symlinks, which extract refuses", path);
+    const seg = stack.pop()!;
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (cur === root) throw new ZipError("'" + path + "' follows symlinks out of the target, which extract refuses", path);
+      cur = dirname(cur);
+      continue;
+    }
+    const next = join(cur, seg);
+    const st = lstatSync(next, { throwIfNoEntry: false });
+    if (st !== undefined && st.isSymbolicLink()) {
+      hops++;
+      if (hops > 40) throw new ZipError("'" + path + "' follows too many symlinks, which extract refuses", path);
+      const linkTarget = readlinkSync(next);
+      if (isAbsolute(linkTarget)) throw new ZipError("'" + path + "' follows a symlink to the absolute path '" + linkTarget + "', which extract refuses", path);
+      const parts = linkTarget.split("/");
+      for (let i = (parts.length as i64) - 1; i >= 0; i--) stack.push(parts[i as usize]!);
+    } else {
+      cur = next;
+    }
+  }
+  return left;
+}
+
 // Writes the archive's entries under dir and gives the paths written, refusing as std:tar's
 // extract does anything that would land outside dir.
 export async function extract(source: ZipSource, dir: string, limits: ZipLimits = {}): Promise<string[]> throws IoError | ZipError {
   const root = resolve(dir);
   mkdirSync(root, { recursive: true });
   let written: string[] = [];
+  let links: { to: string; path: string; target: string }[] = [];
+  let dirModes: { to: string; mode: i64 }[] = [];
   let all = entries(source, limits);
-  for await (const e of all) {
-    const to = landing(root, e.path);
-    throughLinks(root, to, e.path);
-    if (e.type === "directory") {
-      mkdirSync(to, { recursive: true });
-      if (e.mode !== 0) chmodSync(to, e.mode & 0o777);
-    } else {
-      mkdirSync(dirname(to), { recursive: true });
-      if (e.type === "symlink") {
-        if (isAbsolute(e.target)) throw new ZipError("'" + e.path + "' is a symlink to the absolute path '" + e.target + "', which extract refuses", e.path);
-        landing(root, join(dirname(relative(root, to)), e.target));
-        symlinkSync(e.target, to);
+  try {
+    for await (const e of all) {
+      const to = landing(root, e.path);
+      throughLinks(root, to, e.path);
+      if (e.type === "directory") {
+        mkdirSync(to, { recursive: true });
+        if (e.mode !== 0) dirModes.push({ to, mode: e.mode & 0o777 });
       } else {
-        writeFileSync(to, e.data);
-        chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
-        utimesSync(to, e.mtime as f64, e.mtime as f64);
+        mkdirSync(dirname(to), { recursive: true });
+        if (e.type === "symlink") {
+          checkLinkEntry(root, to, e.path, e.target);
+          symlinkSync(e.target, to);
+          links.push({ to, path: e.path, target: e.target });
+        } else {
+          writeFileSync(to, e.data);
+          chmodSync(to, e.mode !== 0 ? e.mode & 0o777 : 0o644);
+          utimesSync(to, e.mtime as f64, e.mtime as f64);
+        }
       }
+      written.push(to);
     }
-    written.push(to);
+    // Validate every created symlink once all entries exist so forward and reverse chains
+    // (including under case- or normalization-insensitive filesystems) cannot escape root.
+    let budget: i64 = 200000;
+    for (const l of links) budget = checkLinkTarget(root, l.to, l.path, l.target, budget);
+  } catch (err) {
+    for (const l of links) {
+      try {
+        rmSync(l.to, { force: true });
+      } catch (_e) {}
+    }
+    throw err;
   }
+  // Apply directory modes deepest-first after validation succeeds so read-only directories
+  // cannot block child writes or symlink cleanup on failure.
+  dirModes.sort((a, b) => (b.to.length as i64) - (a.to.length as i64));
+  for (const d of dirModes) chmodSync(d.to, d.mode);
   return written;
 }
 
@@ -8242,6 +12151,249 @@ export async function create(file: string, paths: string[], options: ZipPackOpti
 `,
   // Spans in a program's own code, imported as std:trace. Their state is std's own, which serve
   // shares, so what is here only wraps it.
+  // Files of the package read while compiling, imported as std:comptime. fish.toml lists which,
+  // as globs under [comptime] reads; comptime runs these, and a program running one panics.
+  comptime: String.raw`
+// The file at the path, relative to the directory holding fish.toml, as UTF-8 text.
+export function readText(path: string): string {
+  assert(false, "readText runs only while compiling: call it in a comptime block or expression, or a top-level const");
+  return path;
+}
+
+// The file at the path, relative to the directory holding fish.toml, as its bytes.
+export function readBytes(path: string): u8[] {
+  assert(false, "readBytes runs only while compiling: call it in a comptime block or expression, or a top-level const");
+  return [];
+}
+`,
+  // Structured logging, imported as std:log: each entry one JSON line on stderr.
+  // @durable functions' runs: what an await gave, recorded as JSON as each one ends, so a run
+  // given its id again after a crash or a deploy replays what it recorded and carries on from
+  // the first await it hadn't finished. The fishc lowering of a @durable function calls the
+  // __ methods of Durable.
+  durable: String.raw`import { Database, type SqliteError } from "std:sqlite";
+
+// Where runs keep what they recorded. A store that can't read or write panics, since a run
+// that can't record can't be resumed.
+export interface DurableStore {
+  // What the run recorded, step by step, as JSON; none for a run not started or finished.
+  steps(run: string): Promise<string[]>;
+  record(run: string, step: i64, value: string): Promise<void>;
+  // Forgets the run, which ended; its id may start a new run.
+  finish(run: string): Promise<void>;
+  // The runs that recorded a step and haven't ended, to resume.
+  unfinished(): Promise<string[]>;
+}
+
+// A DurableStore in a SQLite database, its steps in the table durable_steps.
+// The database is held shared, so the store has no disposer of its own and can be a
+// Dyn<DurableStore>; each use takes a handle on it.
+export class SqliteStore {
+  #db: shared<{ db: Database }>;
+
+  constructor(db: Database) {
+    this.#db = shared({ db });
+  }
+
+  #handle(): Database {
+    return this.#db.update((v) => v.db.clone());
+  }
+
+  // The store in the database file at path, made when it isn't there; ":memory:" keeps it in memory.
+  static async open(path: string): Promise<SqliteStore> throws SqliteError {
+    const db = await Database.open(path);
+    await db.run("CREATE TABLE IF NOT EXISTS durable_steps (run TEXT NOT NULL, step INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY (run, step))");
+    return new SqliteStore(db);
+  }
+
+  // Another handle on the same database, for a store given to more than one run.
+  clone(): SqliteStore {
+    return new SqliteStore(this.#handle());
+  }
+
+  async steps(run: string): Promise<string[]> {
+    let out: string[] = [];
+    try {
+      const db = this.#handle();
+      const rows = await db.query<{ value: string }>("SELECT value FROM durable_steps WHERE run = ? ORDER BY step", [run.clone()]);
+      for (const r of rows) out.push(r.value.clone());
+    } catch (e) {
+      assert(false, "the durable store can't read run '" + run + "': " + e.message);
+    }
+    return out;
+  }
+
+  async record(run: string, step: i64, value: string): Promise<void> {
+    try {
+      const db = this.#handle();
+      await db.run("INSERT OR REPLACE INTO durable_steps (run, step, value) VALUES (?, ?, ?)", [run.clone(), step, value]);
+    } catch (e) {
+      assert(false, "the durable store can't record a step of run '" + run + "': " + e.message);
+    }
+  }
+
+  async finish(run: string): Promise<void> {
+    try {
+      const db = this.#handle();
+      await db.run("DELETE FROM durable_steps WHERE run = ?", [run.clone()]);
+    } catch (e) {
+      assert(false, "the durable store can't finish run '" + run + "': " + e.message);
+    }
+  }
+
+  async unfinished(): Promise<string[]> {
+    let out: string[] = [];
+    try {
+      const db = this.#handle();
+      const rows = await db.query<{ run: string }>("SELECT DISTINCT run FROM durable_steps ORDER BY run");
+      for (const r of rows) out.push(r.run.clone());
+    } catch (e) {
+      assert(false, "the durable store can't list its runs: " + e.message);
+    }
+    return out;
+  }
+}
+
+// One run of a @durable function, by its id in its store: given as the function's first
+// argument, it replays the steps the run recorded before, then records each await after them.
+export class Durable {
+  readonly id: string;
+  #store: Dyn<DurableStore>;
+  #saved: Lock<string[]>;
+  #loaded: Atomic<boolean>;
+  #next: Atomic<i64>;
+
+  constructor(store: Dyn<DurableStore>, id: string) {
+    this.id = id;
+    this.#store = store;
+    this.#saved = new Lock<string[]>([]);
+    this.#loaded = new Atomic(false);
+    this.#next = new Atomic(0);
+  }
+
+  // Whether the run recorded its next await before, reading what it recorded the first time.
+  async __replaying(): Promise<boolean> {
+    if (!this.#loaded.exchange(true)) {
+      const steps = await this.#store.steps(this.id);
+      this.#saved.update((s) => {
+        for (const step of steps) s.push(step.clone());
+      });
+    }
+    const at = this.#next.load();
+    return this.#saved.update((s) => at < (s.length as i64));
+  }
+
+  // What the next await gave when it was recorded, read back as its type.
+  // ponytail: a recorded null of a type holding null reads back as no value, which panics.
+  __replayed<T>(): T {
+    const at = this.#next.add(1);
+    const text = this.#saved.update((s) => s[at as usize]!.clone());
+    let found: T[] = [];
+    try {
+      const value = JSON.parse<T>(text);
+      found.push(value);
+    } catch (e) {
+      assert(false, "durable run '" + this.id + "' recorded a step its code no longer awaits there: " + e.message);
+    }
+    return found.pop()!;
+  }
+
+  // Records what the next await gave, then gives it on.
+  async __recorded<T>(value: T): Promise<T> {
+    const at = this.#next.add(1);
+    await this.#store.record(this.id, at, JSON.stringify(value));
+    return value;
+  }
+
+  // What the next await gives: what the run recorded there before, or else what work gives,
+  // recorded. Fish's promises are lazy, so work a run replays never runs.
+  async __step<T>(work: Promise<T>): Promise<T> {
+    const replaying = await this.__replaying();
+    if (replaying) return this.__replayed<T>();
+    const value = await work;
+    return await this.__recorded<T>(value);
+  }
+
+  // The same for an await whose value nothing keeps, recorded as having ended.
+  async __pass<T>(work: Promise<T>): Promise<void> {
+    const replaying = await this.__replaying();
+    if (replaying) {
+      this.#next.add(1);
+      return;
+    }
+    await work;
+    const at = this.#next.add(1);
+    await this.#store.record(this.id, at, "null");
+  }
+
+  // The run's arguments: those it recorded first, or else these, recorded.
+  async __args<T>(given: T): Promise<T> {
+    const replaying = await this.__replaying();
+    if (replaying) return this.__replayed<T>();
+    return await this.__recorded<T>(given);
+  }
+
+  async __finished(): Promise<void> {
+    await this.#store.finish(this.id);
+  }
+
+  // False, as the condition of the checks the lowering makes that never run: they only type
+  // what a run keeps across an await, which has to be Json.
+  __never(): boolean {
+    return false;
+  }
+}
+`,
+  log: String.raw`
+// An entry's extra fields: any value with a JSON form, an object's fields joining the entry's own.
+export interface LogFields {}
+
+// Writes one line, {"ts", "level", "msg", "requestId"?, ...fields}, when the level is at least
+// FISH_LOG's (debug, info, warn or error; info when unset or anything else). requestId is that of
+// the request the calling task serves, inside serve.
+export function debug(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(0, message, JSON.stringify(fields));
+  else entry(0, message, "");
+}
+
+export function info(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(1, message, JSON.stringify(fields));
+  else entry(1, message, "");
+}
+
+export function warn(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(2, message, JSON.stringify(fields));
+  else entry(2, message, "");
+}
+
+export function error(message: string, fields?: LogFields): void {
+  if (fields !== null) entry(3, message, JSON.stringify(fields));
+  else entry(3, message, "");
+}
+
+const LEVELS = ["debug", "info", "warn", "error"];
+
+// ponytail: FISH_LOG is read for every entry; keep it once read if a hot path logs at a level
+// that's off.
+function least(): i64 {
+  const named = process.env["FISH_LOG"];
+  if (named === null) return 1;
+  const at = LEVELS.indexOf(named.toLowerCase());
+  return at < 0 ? 1 : at;
+}
+
+// An object's fields go into the entry; any other JSON value goes in as "fields".
+function entry(level: i64, message: string, fields: string): void {
+  if (level < least()) return;
+  let line = '{"ts":' + JSON.stringify(new Date().toISOString()) + ',"level":"' + LEVELS[level as usize] + '","msg":' + JSON.stringify(message);
+  const id = __logRequest();
+  if (id.length > 0) line += ',"requestId":' + JSON.stringify(id);
+  if (fields.startsWith("{")) {
+    if (fields.length > 2) line += "," + fields.slice(1, (fields.length as i64) - 1);
+  } else if (fields.length > 0) line += ',"fields":' + fields;
+  console.error(line + "}");
+}
+`,
   trace: String.raw`
 // endpoint is the collector's base URL, as OTEL_EXPORTER_OTLP_ENDPOINT is, and "" turns tracing
 // off whatever the environment says; serviceName is the service the spans are from; batchDelay
@@ -8311,6 +12463,118 @@ export function configureTracing(options: TracingOptions): void {
 // about to return awaits this, or it runs on until the timer has sent them.
 export async function flushTraces(): Promise<void> {
   await __traceSend();
+}
+`,
+  // Live snapshot of active async tasks, imported as std:inspect.
+  inspect: String.raw`
+declare function fsh_rt_tasks_json(): Ptr<u8>;
+declare function fsh_rt_tasks_table(): Ptr<u8>;
+declare function fsh_rt_tasks_free(p: Ptr<u8>): void;
+
+// One active task in the async runtime at the moment of the snapshot.
+export type TaskInfo = {
+  id: i64;
+  name: string;
+  state: string;
+  awaiting: string;
+  awaitSite: string;
+  ageMs: i64;
+  spawnSite: string;
+  blocking: boolean;
+  polls: i64;
+};
+
+// A JSON array of every live task, matching TaskInfo[].
+export function tasksJson(): string {
+  let text = "[]";
+  unsafe {
+    const p = fsh_rt_tasks_json();
+    if (!p.isNull()) {
+      text = fromCString(p);
+      fsh_rt_tasks_free(p);
+    }
+  }
+  return text;
+}
+
+// A human-readable table of every live task for logging or terminal output.
+export function formatTasks(): string {
+  let text = "";
+  unsafe {
+    const p = fsh_rt_tasks_table();
+    if (!p.isNull()) {
+      text = fromCString(p);
+      fsh_rt_tasks_free(p);
+    }
+  }
+  return text;
+}
+
+// Live snapshot of every active task, sorted by task id.
+export function tasks(): TaskInfo[] {
+  const raw = tasksJson();
+  try {
+    return JSON.parse<TaskInfo[]>(raw);
+  } catch (_e) {
+    return [];
+  }
+}
+`,
+  // Deterministic simulation controls, imported as std:sim. Active when FISH_SIM_SEED is set.
+  sim: String.raw`
+declare function fsh_rt_sim_enabled(): i32;
+declare function fsh_rt_sim_seed(): u64;
+declare function fsh_rt_sim_now(): i64;
+declare function fsh_rt_sim_advance(ms: i64): void;
+declare function fsh_rt_sim_partition(a: Ptr<u8>, b: Ptr<u8>): void;
+declare function fsh_rt_sim_heal(a: Ptr<u8>, b: Ptr<u8>): void;
+declare function fsh_rt_sim_set_delay(minMs: i64, maxMs: i64): void;
+declare function fsh_rt_sim_set_drop_rate(rate: f64): void;
+declare function fsh_rt_sim_reset_faults(): void;
+
+// Whether the runtime is executing in deterministic simulation mode (FISH_SIM_SEED set).
+export function enabled(): boolean {
+  return unsafe { fsh_rt_sim_enabled() !== 0 };
+}
+
+// The active simulation seed (0 when simulation mode is not enabled).
+export function seed(): u64 {
+  return unsafe { fsh_rt_sim_seed() };
+}
+
+// Current virtual monotonic clock in milliseconds (or real monotonic ms outside sim mode).
+export function now(): i64 {
+  return unsafe { fsh_rt_sim_now() };
+}
+
+// Advances the virtual clock by ms milliseconds and fires any newly due timers and network events.
+export function advance(ms: i64): void {
+  unsafe { fsh_rt_sim_advance(ms) };
+}
+
+// Injects a symmetric network partition between endpoints a and b (host, host:port, or "*").
+export function partition(a: string, b: string): void {
+  unsafe { fsh_rt_sim_partition(cString(a), cString(b)) };
+}
+
+// Removes a symmetric network partition between endpoints a and b.
+export function heal(a: string, b: string): void {
+  unsafe { fsh_rt_sim_heal(cString(a), cString(b)) };
+}
+
+// Sets simulated network latency range in milliseconds for virtual TCP delivery.
+export function setDelay(minMs: i64, maxMs: i64 = minMs): void {
+  unsafe { fsh_rt_sim_set_delay(minMs, maxMs) };
+}
+
+// Sets simulated network drop/reset probability in [0.0, 1.0] for virtual TCP operations.
+export function setDropRate(rate: f64): void {
+  unsafe { fsh_rt_sim_set_drop_rate(rate) };
+}
+
+// Clears all partitions, delays, and drop-rate faults.
+export function resetFaults(): void {
+  unsafe { fsh_rt_sim_reset_faults() };
 }
 `,
   // Standard input as a global module, stdin.lines() and the rest, reading through readLine's
@@ -8719,6 +12983,7 @@ async function sleeping(ms: i64): Promise<void> {
   await sleep(ms);
 }
 
+@blocking
 export function sleepSync(ms: i64): void {
   let left = ms;
   while (left > 0) {
@@ -8852,6 +13117,7 @@ function signalName(n: i64): string {
 // Runs a command to its end. stdin is /dev/null unless given, and stdout and stderr are piped
 // unless asked otherwise; env, when given, is the child's whole environment, and its PATH, when
 // it has one, is where the command is looked for.
+@blocking
 export function spawnSync(cmd: string[], options: SpawnOptions = {}): SyncSubprocess throws IoError {
   const [file, input, flags, pairs] = spawnPlan(cmd, options, null, options.stdout ?? "pipe", options.stderr ?? "pipe");
   const [pid, status, signo, stdout, stderr] = processSpawn(file, cmd, options.cwd ?? "", input, flags, pairs);
@@ -9003,7 +13269,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "cors", "query", "s3", "log", "durable", "mcu", "comptime"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.
@@ -9509,7 +13775,317 @@ class Arena<T> {
   }
 }
 `;
-export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML;
+const SIMD = `
+// SIMD vectors' load and store, which the checker turns f32x4.load(a, i) and v.store(a, i)
+// into, so the array is borrowed as by any function. The rest are LLVM vector instructions.
+// LLVM's optimizer turns these lane reads and writes into vector loads and stores.
+function __simd_f32x4_load(a: Ref<f32[]>, i: usize): f32x4 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3]]; }
+function __simd_f32x4_store(v: f32x4, a: Mut<f32[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; }
+function __simd_f32x8_load(a: Ref<f32[]>, i: usize): f32x8 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7]]; }
+function __simd_f32x8_store(v: f32x8, a: Mut<f32[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; a[i + 4] = v[4]; a[i + 5] = v[5]; a[i + 6] = v[6]; a[i + 7] = v[7]; }
+function __simd_f64x2_load(a: Ref<f64[]>, i: usize): f64x2 { return [a[i + 0], a[i + 1]]; }
+function __simd_f64x2_store(v: f64x2, a: Mut<f64[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; }
+function __simd_f64x4_load(a: Ref<f64[]>, i: usize): f64x4 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3]]; }
+function __simd_f64x4_store(v: f64x4, a: Mut<f64[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; }
+function __simd_i8x16_load(a: Ref<i8[]>, i: usize): i8x16 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7], a[i + 8], a[i + 9], a[i + 10], a[i + 11], a[i + 12], a[i + 13], a[i + 14], a[i + 15]]; }
+function __simd_i8x16_store(v: i8x16, a: Mut<i8[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; a[i + 4] = v[4]; a[i + 5] = v[5]; a[i + 6] = v[6]; a[i + 7] = v[7]; a[i + 8] = v[8]; a[i + 9] = v[9]; a[i + 10] = v[10]; a[i + 11] = v[11]; a[i + 12] = v[12]; a[i + 13] = v[13]; a[i + 14] = v[14]; a[i + 15] = v[15]; }
+function __simd_u8x16_load(a: Ref<u8[]>, i: usize): u8x16 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7], a[i + 8], a[i + 9], a[i + 10], a[i + 11], a[i + 12], a[i + 13], a[i + 14], a[i + 15]]; }
+function __simd_u8x16_store(v: u8x16, a: Mut<u8[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; a[i + 4] = v[4]; a[i + 5] = v[5]; a[i + 6] = v[6]; a[i + 7] = v[7]; a[i + 8] = v[8]; a[i + 9] = v[9]; a[i + 10] = v[10]; a[i + 11] = v[11]; a[i + 12] = v[12]; a[i + 13] = v[13]; a[i + 14] = v[14]; a[i + 15] = v[15]; }
+function __simd_i16x8_load(a: Ref<i16[]>, i: usize): i16x8 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7]]; }
+function __simd_i16x8_store(v: i16x8, a: Mut<i16[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; a[i + 4] = v[4]; a[i + 5] = v[5]; a[i + 6] = v[6]; a[i + 7] = v[7]; }
+function __simd_i32x4_load(a: Ref<i32[]>, i: usize): i32x4 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3]]; }
+function __simd_i32x4_store(v: i32x4, a: Mut<i32[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; }
+function __simd_i32x8_load(a: Ref<i32[]>, i: usize): i32x8 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7]]; }
+function __simd_i32x8_store(v: i32x8, a: Mut<i32[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; a[i + 4] = v[4]; a[i + 5] = v[5]; a[i + 6] = v[6]; a[i + 7] = v[7]; }
+function __simd_i64x2_load(a: Ref<i64[]>, i: usize): i64x2 { return [a[i + 0], a[i + 1]]; }
+function __simd_i64x2_store(v: i64x2, a: Mut<i64[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; }
+function __simd_u32x4_load(a: Ref<u32[]>, i: usize): u32x4 { return [a[i + 0], a[i + 1], a[i + 2], a[i + 3]]; }
+function __simd_u32x4_store(v: u32x4, a: Mut<u32[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; a[i + 2] = v[2]; a[i + 3] = v[3]; }
+function __simd_u64x2_load(a: Ref<u64[]>, i: usize): u64x2 { return [a[i + 0], a[i + 1]]; }
+function __simd_u64x2_store(v: u64x2, a: Mut<u64[]>, i: usize): void { a[i + 0] = v[0]; a[i + 1] = v[1]; }
+`;
+const CONCURRENT = String.raw`
+// A Map many tasks read and write at once: its entries are spread over shards by their key's
+// hash, each under a lock of its own, so tasks working in different shards never wait for one
+// another. Nothing is lent out past a shard's lock: 'get' gives a clone, and 'with' and 'update'
+// run a callback on the value while the lock is held, which can't 'await'.
+class ConcurrentMap<K, V> {
+  private shards: RwLock<Map<K, V>>[] = [];
+  constructor(options?: { shards?: i64 }) {
+    const n = options === undefined || options.shards === undefined ? 16 : options.shards;
+    // Fewer than one shard is one.
+    for (let i = 0; i < n || i === 0; i++) this.shards.push(new RwLock(new Map<K, V>()));
+  }
+  private shardOf(k: Ref<K>): usize {
+    return (__keyHash(k.clone()) % (this.shards.length as u64)) as usize;
+  }
+  get(k: K): V | undefined {
+    return this.shards[this.shardOf(k)].read((m): V | undefined => {
+      const found = m.get(k);
+      if (found === undefined) return undefined;
+      return found.clone();
+    });
+  }
+  has(k: K): boolean {
+    return this.shards[this.shardOf(k)].read((m) => m.has(k));
+  }
+  set(k: K, v: V): void {
+    this.shards[this.shardOf(k)].update((m) => { m.set(k, v); });
+  }
+  delete(k: K): boolean {
+    return this.shards[this.shardOf(k)].update((m) => m.delete(k));
+  }
+  // Every shard's count, each read under its own lock, so not one moment's.
+  get size(): usize {
+    let n: usize = 0;
+    for (const s of this.shards) n += s.read((m) => m.size);
+    return n;
+  }
+  // What 'fn' gives from the key's value, read in place, or undefined when the key is absent.
+  with<R>(k: K, fn: (v: Ref<V>) => R): R | undefined {
+    return this.shards[this.shardOf(k)].read((m): R | undefined => {
+      const found = m.get(k);
+      if (found === undefined) return undefined;
+      return fn(found);
+    });
+  }
+  // Changes the key's value in place; false when the key is absent.
+  update(k: K, fn: (v: Mut<V>) => void): boolean {
+    return this.shards[this.shardOf(k)].update((m) => m.update(k, (v) => fn(v)));
+  }
+  // Changes the key's value in place, or adds 'value' when the key is absent, in one hold of the lock.
+  upsert(k: K, value: V, fn: (v: Mut<V>) => void): void {
+    this.shards[this.shardOf(k)].update((m) => {
+      if (!m.update(k.clone(), (v) => fn(v))) m.set(k, value);
+    });
+  }
+}
+`;
+// How serve runs for a build target with a server of its own, one of three: a socket's, as here,
+// AWS Lambda's runtime API, or an edge module's one request.
+const PLATFORM_SOCKET = String.raw`
+function __platformServes(): boolean {
+  return false;
+}
+async function __platformServe(_options: Ref<ServeOptions>, _handler: ServeHandler): Promise<void> {}
+`;
+
+// serve in a Lambda function's bootstrap: with Lambda's runtime API named in the environment, each
+// invocation, an HTTP API or function URL event in payload format 2.0, is a request for the
+// handler, and its response the invocation's result. Run anywhere else, it serves as itself.
+const PLATFORM_LAMBDA = String.raw`
+type __LambdaHttp = { method: string };
+type __LambdaContext = { http: __LambdaHttp; domainName?: string };
+type __LambdaEvent = { rawPath: string; rawQueryString?: string; headers?: Map<string, string>; cookies?: string[]; body?: string; isBase64Encoded?: boolean; requestContext: __LambdaContext };
+// Read through the runtime, since std's own source has no 'process' to name.
+function __lambdaApi(): string | null {
+  const value = unsafe { fsh_rt_getenv(cString("AWS_LAMBDA_RUNTIME_API")) };
+  if (unsafe { value.isNull() }) return null;
+  return unsafe { fromCString(value) };
+}
+function __platformServes(): boolean {
+  return __lambdaApi() !== null;
+}
+function __lambdaRequest(event: string): Request throws JsonError | TypeError {
+  const e = JSON.parse<__LambdaEvent>(event);
+  const query = e.rawQueryString ?? "";
+  const host = e.requestContext.domainName ?? "localhost";
+  let headers = new Headers();
+  const given: Ref<Map<string, string> | null> = e.headers;
+  if (given !== null) for (const [name, value] of given) headers.append(name.clone(), value.clone());
+  const cookies: Ref<string[] | null> = e.cookies;
+  if (cookies !== null && cookies.length > 0) headers.set("cookie", cookies.join("; "));
+  const text = e.body ?? "";
+  const body: u8[] = e.isBase64Encoded === true ? u8.fromBase64(text) : new TextEncoder().encode(text);
+  return new Request("https://" + host + e.rawPath + (query.length > 0 ? "?" + query : ""), { method: e.requestContext.http.method, headers, body });
+}
+// The response in payload format 2.0, its body always base64 so bytes pass as they are.
+// ponytail: a header named twice keeps its last value, as a JSON object can hold one.
+async function __lambdaReply(res: Response): Promise<string> {
+  const bytes = await res.bytes();
+  let headers = "";
+  let cookies = "";
+  for (let i: usize = 0; i < res.headers.names.length; i++) {
+    const name = res.headers.names[i]!;
+    const value = res.headers.values[i]!;
+    if (name === "set-cookie") cookies += (cookies.length > 0 ? "," : "") + JSON.stringify(value);
+    else headers += (headers.length > 0 ? "," : "") + JSON.stringify(name) + ":" + JSON.stringify(value);
+  }
+  return '{"statusCode":' + String(res.status) + ',"headers":{' + headers + '},"cookies":[' + cookies + '],"body":' + JSON.stringify(bytes.toBase64()) + ',"isBase64Encoded":true}';
+}
+// An event the handler can't be given is the invocation's error; a runtime API that stops
+// answering is the sandbox going away, so serve returns.
+async function __platformServe(_options: Ref<ServeOptions>, handler: ServeHandler): Promise<void> {
+  const base = "http://" + (__lambdaApi() ?? "") + "/2018-06-01/runtime/invocation/";
+  while (true) {
+    try {
+      const next = await fetch(base + "next");
+      const id = next.headers.get("lambda-runtime-aws-request-id") ?? "";
+      const event = await next.text();
+      let reply = "";
+      let failure = "";
+      try {
+        const req = __lambdaRequest(event);
+        const res = await handler(req);
+        reply = await __lambdaReply(res);
+      } catch (e) {
+        failure = e.message;
+      }
+      if (failure.length > 0) await fetch(base + id + "/error", { method: "POST", body: '{"errorMessage":' + JSON.stringify(failure) + ',"errorType":"InvalidEvent"}' });
+      else await fetch(base + id + "/response", { method: "POST", body: reply });
+    } catch (e) {
+      console.error("serve: Lambda's runtime API stopped answering: " + e.message);
+      return;
+    }
+  }
+}
+`;
+
+// serve in an edge module: one request read as JSON from standard input, { method, url, headers
+// as [name, value] pairs, body in base64 }, answered as { status, headers, body } on standard
+// output. The loader fishc writes beside the module turns a Workers fetch into that exchange.
+const PLATFORM_EDGE = String.raw`
+type __EdgeRequest = { method: string; url: string; headers: string[][]; body: string };
+function __platformServes(): boolean {
+  return true;
+}
+async function __edgeReply(res: Response): Promise<string> {
+  const bytes = await res.bytes();
+  let out = '{"status":' + String(res.status) + ',"headers":[';
+  for (let i: usize = 0; i < res.headers.names.length; i++) {
+    if (i > 0) out += ",";
+    out += "[" + JSON.stringify(res.headers.names[i]!) + "," + JSON.stringify(res.headers.values[i]!) + "]";
+  }
+  return out + '],"body":' + JSON.stringify(bytes.toBase64()) + "}";
+}
+function __edgeRequest(text: string): Request throws JsonError | TypeError {
+  const asked = JSON.parse<__EdgeRequest>(text);
+  let headers = new Headers();
+  for (const pair of asked.headers) if (pair.length === 2) headers.append(pair[0]!.clone(), pair[1]!.clone());
+  const body = u8.fromBase64(asked.body);
+  return new Request(asked.url, { method: asked.method, headers, body });
+}
+async function __platformServe(_options: Ref<ServeOptions>, handler: ServeHandler): Promise<void> {
+  let input: u8[] = [];
+  const given = __stdinTake(1);
+  if (given !== null) input = given;
+  let reply = '{"status":400,"headers":[],"body":""}';
+  try {
+    const req = __edgeRequest(new TextDecoder().decode(input));
+    const res = await handler(req);
+    reply = await __edgeReply(res);
+  } catch (_e) {}
+  console.log(reply);
+}
+`;
+
+// serve in fishc dev's handlers, a shared library the host loads again on each change: the host
+// listens and holds every connection, and hands this load each request to answer, one task each,
+// as JSON in the edge module's shape, until a newer load takes over. The fishdev_* functions are
+// the library's C glue, which calls the host.
+const PLATFORM_DEV = String.raw`
+declare function fishdev_listen(hostname: Ptr<u8>, port: i64): void;
+declare function fishdev_next(): i64;
+declare function fishdev_request(job: i64): Ptr<u8>;
+declare function fishdev_reply(job: i64, bytes: Ptr<u8>, length: i64): void;
+type __DevRequest = { method: string; url: string; headers: string[][]; body: string };
+function __platformServes(): boolean {
+  return true;
+}
+function __devRequest(text: string): Request throws JsonError | TypeError {
+  const asked = JSON.parse<__DevRequest>(text);
+  let headers = new Headers();
+  for (const pair of asked.headers) if (pair.length === 2) headers.append(pair[0]!.clone(), pair[1]!.clone());
+  const body = u8.fromBase64(asked.body);
+  return new Request(asked.url, { method: asked.method, headers, body });
+}
+async function __devReply(res: Response): Promise<string> {
+  const bytes = await res.bytes();
+  let out = '{"status":' + String(res.status) + ',"headers":[';
+  for (let i: usize = 0; i < res.headers.names.length; i++) {
+    if (i > 0) out += ",";
+    out += "[" + JSON.stringify(res.headers.names[i]!) + "," + JSON.stringify(res.headers.values[i]!) + "]";
+  }
+  return out + '],"body":' + JSON.stringify(bytes.toBase64()) + "}";
+}
+async function __devAnswer(job: i64, handler: ServeHandler): Promise<void> {
+  let reply = '{"status":500,"headers":[],"body":""}';
+  try {
+    const req = __devRequest(unsafe { fromCString(fishdev_request(job)) });
+    const res = await handler(req);
+    reply = await __devReply(res);
+  } catch (e) {
+    console.error("fishc dev: a request couldn't be answered: " + e.message);
+  }
+  const bytes = new TextEncoder().encode(reply);
+  unsafe { fishdev_reply(job, ptrOf(bytes[0]), bytes.length as i64) };
+}
+async function __platformServe(options: Ref<ServeOptions>, handler: ServeHandler): Promise<void> {
+  let hostname = "0.0.0.0";
+  const h = options.hostname;
+  if (h !== null) hostname = h.clone();
+  let port: i64 = 8000;
+  const p = options.port;
+  if (p !== null) port = p;
+  unsafe { fishdev_listen(cString(hostname), port) };
+  const boxed: ServeHandler = handler;
+  while (true) {
+    const job = await spawnBlocking(() => unsafe { fishdev_next() });
+    spawn(__devAnswer(job, boxed.clone()));
+  }
+}
+`;
+
+// fishc dev's host, a program of one call: it loads the handlers the control file names, again each
+// time the file names others, and serves on the address their serve gives, sending each request to
+// the handlers loaded last. The fishdev_host_* functions are the host's C glue.
+const DEV_HOST = String.raw`
+declare function fishdev_host_start(control: Ptr<u8>): i64;
+declare function fishdev_host_port(): i64;
+declare function fishdev_host_hostname(): Ptr<u8>;
+declare function fishdev_host_call(request: Ptr<u8>): Ptr<u8>;
+declare function fishdev_host_free(text: Ptr<u8>): void;
+type __DevReply = { status: i64; headers: string[][]; body: string };
+async function __devAsked(req: Request): Promise<string> {
+  const bytes = await req.bytes();
+  let out = '{"method":' + JSON.stringify(req.method) + ',"url":' + JSON.stringify(req.url) + ',"headers":[';
+  for (let i: usize = 0; i < req.headers.names.length; i++) {
+    if (i > 0) out += ",";
+    out += "[" + JSON.stringify(req.headers.names[i]!) + "," + JSON.stringify(req.headers.values[i]!) + "]";
+  }
+  return out + '],"body":' + JSON.stringify(bytes.toBase64()) + "}";
+}
+@blocking
+function __devCall(asked: string): string {
+  const given = unsafe { fishdev_host_call(cString(asked)) };
+  const text = unsafe { fromCString(given) };
+  unsafe { fishdev_host_free(given) };
+  return text;
+}
+function __devAnswered(text: string): Response throws JsonError | TypeError {
+  const r = JSON.parse<__DevReply>(text);
+  let headers = new Headers();
+  for (const pair of r.headers) if (pair.length === 2) headers.append(pair[0]!.clone(), pair[1]!.clone());
+  return new Response(u8.fromBase64(r.body), { status: r.status, headers });
+}
+async function __devHost(control: string): Promise<void> throws IoError {
+  if (unsafe { fishdev_host_start(cString(control)) } !== 0) throw new IoError("fishc dev: the host has no handlers to load");
+  const port = await spawnBlocking(() => unsafe { fishdev_host_port() });
+  const hostname = unsafe { fromCString(fishdev_host_hostname()) };
+  const shown = hostname === "0.0.0.0" ? "localhost" : hostname.clone();
+  await serve({ hostname, port, onListen: (info: ServeInfo) => console.error("[fishc] serving on http://" + shown + ":" + String(info.port)) }, async (req: Request) => {
+    const asked = await __devAsked(req);
+    const given = await spawnBlocking(() => __devCall(asked));
+    try {
+      return __devAnswered(given);
+    } catch (_e) {
+      return new Response("fishc dev: the handlers gave a reply the host couldn't read\n", { status: 502 });
+    }
+  });
+}
+`;
+
+export const STD_SOURCE = PRELUDE + HTTP + TRACE + FETCH + SERVED + URL_CORE + URL_LIB + JSON_VALUE + JSON_NAME + AST + AST_HELPERS + JS_ERROR + BYTES + TYPED + DATA_VIEW + BUFFER + BTOA + ATOB + DATE + STDIN + TLS + STREAMS + ARENA + HTML + SIMD + CONCURRENT + PLATFORM_SOCKET + PLATFORM_LAMBDA + PLATFORM_EDGE + PLATFORM_DEV + DEV_HOST;
 export const STD_FILE = "<fish std>";
 // std's text as a program's last source, for rendering an error or a panic inside it.
 export const STD: Source = { base: STD_BASE, src: STD_SOURCE, file: STD_FILE };
@@ -9527,7 +14103,7 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // The statements of each of std's sections, in the order STD_SOURCE joins them.
   let sections: Stmt[][] = [];
   let from: usize = 0;
-  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML]) {
+  for (const text of [PRELUDE, HTTP, TRACE, FETCH, SERVED, URL_CORE, URL_LIB, JSON_VALUE, JSON_NAME, AST + AST_HELPERS, JS_ERROR, BYTES, TYPED, DATA_VIEW, BUFFER, BTOA, ATOB, DATE, STDIN, TLS, STREAMS, ARENA, HTML, SIMD, CONCURRENT, PLATFORM_SOCKET, PLATFORM_LAMBDA, PLATFORM_EDGE, PLATFORM_DEV, DEV_HOST]) {
     const start = from;
     from += text.length;
     sections.push(all.filter((s) => s.start >= start && s.start < from));
@@ -9555,6 +14131,19 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   let streaming = sections.shift()!;
   let arenas = sections.shift()!;
   let htmls = sections.shift()!;
+  let simds = sections.shift()!;
+  let concurrent = sections.shift()!;
+  let sockets = sections.shift()!;
+  let lambda = sections.shift()!;
+  let edge = sections.shift()!;
+  let dev = sections.shift()!;
+  let devHost = sections.shift()!;
+  // A serverless or edge target's serve answers through its platform, which reads its requests
+  // with fetch or from standard input.
+  const target = compilation.session.build?.triple ?? "";
+  const lambdaBuild = target === "lambda" || target === "lambda-arm64";
+  const edgeBuild = target === "edge";
+  const devBuild = compilation.session.build?.dev === true;
   renamed(json, { kind: "json" });
   renamed(jsonName, { kind: "json" });
   let astNames: string[] = [];
@@ -9568,8 +14157,9 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   // fetch, URL and a Request the program builds read any URL, so they need the whole parser. The
   // server's requests, from a Host it checked and a target, need only its host and path rules.
   // The std:trace module's code names __traceOn, and what it wraps is sent through Http1.
-  const httpUsed = uses(written, http, [...HTTP_NAMES, "__traceOn"]);
-  const fetchUsed = httpUsed && uses(written, fetching, ["fetch"]);
+  const devHostUsed = uses(written, devHost, ["__devHost"]);
+  const httpUsed = devHostUsed || uses(written, http, [...HTTP_NAMES, "__traceOn", "__logRequest"]);
+  const fetchUsed = httpUsed && (lambdaBuild || uses(written, fetching, ["fetch"]));
   const urlWanted = fetchUsed || uses(written, [], URL_NAMES) || (httpUsed && mentionsName(written, "Request"));
   // The libraries a program gets by naming them; JsError also comes with any package.
   const jsonUsed = uses(written, json, ["Json", "JSON"]);
@@ -9580,18 +14170,19 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   const bufferUsed = mentionsName(written, "Buffer") || mentionsName(written, "BufferEncoding");
   const btoaUsed = uses(written, btoa, ["btoa"]);
   const atobUsed = uses(written, atob, ["atob"]);
-  const readingUsed = uses(written, reading, ["readLine", "__stdinTake", "prompt"]);
+  const readingUsed = (httpUsed && edgeBuild) || uses(written, reading, ["readLine", "__stdinTake", "prompt"]);
   // The checker turns 'bytes.toBase64()' and 'u8.fromHex(s)' into calls of these helpers, and
   // btoa, atob and Buffer call them too.
   const encoding = httpUsed || bufferUsed || (btoaUsed && btoa.length > 0) || (atobUsed && atob.length > 0) || mentionsEncoder(written);
   const dated = httpUsed || uses(written, dates, ["Date"]);
-  const secure = fetchUsed || uses(written, tls, ["__tlsClient"]);
+  const secure = fetchUsed || uses(written, tls, ["__tlsClient", "__tlsClientOffering"]);
   const streamed = httpUsed || uses(written, streaming, STREAM_NAMES);
   // The checker turns typed arrays' constructors and methods into calls of these helpers.
   const typing = (dataViewUsed && dataView.length > 0) || mentionsTypedArray(written);
   let chosen: Stmt[] = prelude;
   if (dated) chosen = chosen.concat(dates);
-  if (httpUsed) chosen = chosen.concat(http).concat(tracing);
+  if (httpUsed) chosen = chosen.concat(http).concat(tracing).concat(lambdaBuild ? lambda : edgeBuild ? edge : devBuild ? dev : sockets);
+  if (devHostUsed) chosen = chosen.concat(devHost);
   if (fetchUsed) chosen = chosen.concat(fetching);
   if (httpUsed && !urlWanted) chosen = chosen.concat(served);
   if (httpUsed || urlWanted) chosen = chosen.concat(core);
@@ -9612,6 +14203,12 @@ export function stdFor(compilation: Mut<Compilation>, written: Ref<Stmt[]>): Stm
   if (uses(written, arenas, ["Arena"])) chosen = chosen.concat(arenas);
   // Response.html takes an Html, so every program that serves HTTP has it.
   if (httpUsed || uses(written, htmls, HTML_NAMES)) chosen = chosen.concat(htmls);
+  // The checker turns SIMD vectors' constructors and methods into calls of these helpers.
+  if (uses(written, simds, [...SIMD_TYPES.keys(), ...SIMD_MASKS.keys()])) chosen = chosen.concat(simds);
+  if (uses(written, concurrent, ["ConcurrentMap"])) chosen = chosen.concat(concurrent);
+  // A C function the program declares already, as a std module it imports may, is declared once.
+  const foreign = foreignShapes(written);
+  if (foreign.size > 0) chosen = chosen.filter((s) => !declaredNames(s).some((n) => sameForeign(foreign, s, n)));
   if (own.size > 0) renamed(chosen, { kind: "own", names: own });
   // The array iterators' generators and the promise cells take names no program can write, so
   // none hides them.
@@ -9726,12 +14323,53 @@ function fromPackage(s: Ref<Stmt>): boolean {
 function uses(written: Ref<Stmt[]>, library: Ref<Stmt[]>, wanted: Ref<string[]>): boolean {
   let declared = new Set<string>();
   for (const s of written) for (const n of declaredNames(s)) declared.add(n);
-  for (const s of library) for (const n of declaredNames(s)) if (declared.has(n)) return false;
+  // A C function both declare alike is one function, as a std module and a section may each need it.
+  const foreign = foreignShapes(written);
+  for (const s of library) for (const n of declaredNames(s)) if (declared.has(n) && !sameForeign(foreign, s, n)) return false;
   // A name the program declares is its own, not the library's.
   return someNode({ of: "stmts", node: written }, (n) => {
     const name = nameOf(n);
     return name !== undefined && wanted.includes(name) && !declared.has(name);
   });
+}
+
+// Whether a statement declares a C function, `declare function f(...): T;`.
+function cDeclaration(s: Ref<Stmt>): boolean {
+  return s.kind === "declare" && s.body.kind === "function" && s.body.body === undefined;
+}
+
+// The C functions these statements declare, each with its parameters' and result's types.
+function foreignShapes(statements: Ref<Stmt[]>): Map<string, string> {
+  let out = new Map<string, string>();
+  for (const s of statements) {
+    const shape = foreignSignature(s);
+    if (shape === undefined) continue;
+    for (const n of declaredNames(s)) out.set(n, shape);
+  }
+  return out;
+}
+
+// Whether `s` declares the C function `n` with the types the program's declaration has.
+function sameForeign(foreign: Ref<Map<string, string>>, s: Ref<Stmt>, n: string): boolean {
+  const theirs = foreign.get(n);
+  return theirs !== undefined && foreignSignature(s) === theirs;
+}
+
+// A C declaration's parameter types and result type, its parameters' names left out.
+function foreignSignature(s: Ref<Stmt>): string | undefined {
+  if (s.kind !== "declare" || s.body.kind !== "function" || s.body.body !== undefined) return undefined;
+  let parts: string[] = [];
+  for (const p of s.body.params) parts.push(p.type === undefined ? "?" : typeText(p.type));
+  return `(${parts.join(",")})${s.body.returnType === undefined ? "?" : typeText(s.body.returnType)}`;
+}
+
+// A type a C declaration writes, as a named type and its arguments; any other form is told apart
+// only by its kind and place, which never matches another declaration's.
+function typeText(t: Ref<TypeNode>): string {
+  if (t.kind !== "ref") return `${t.kind}@${t.start}`;
+  let args: string[] = [];
+  for (const a of t.args) args.push(typeText(a));
+  return args.length === 0 ? t.name : `${t.name}<${args.join(",")}>`;
 }
 
 // The top-level names a statement binds: a declaration's, each name its `let` or `const`

@@ -1,7 +1,8 @@
+import type { Compilation, Declarations } from "./compilation.fsh";
 import { nextId, respanExpr, type Ids } from "./nodes.fsh";
 import { CompileError } from "./diag.fsh";
-import { parseExpression, type Expr, type ObjectProp, type Pattern, type Span } from "./parser.fsh";
-import { cloneExpr } from "./rebuild.fsh";
+import { parseExpression, type Expr, type ObjectProp, type Pattern, type Span, type TypeMember, type TypeNode } from "./parser.fsh";
+import { cloneExpr, cloneTypeMember, cloneTypeNode } from "./rebuild.fsh";
 
 type Call = Extract<Expr, { kind: "call" }>;
 
@@ -151,4 +152,138 @@ function finishBuilder(builder: Expr, defaults: Mut<Expr[]>): Expr {
     b.body.props.push(prop);
   }
   return b;
+}
+
+const INTEGER_LIMITS: [string, string, string][] = [
+  ["i8", "-128", "127"], ["i16", "-32768", "32767"], ["i32", "-2147483648", "2147483647"], ["i64", "-9223372036854775808", "9223372036854775807"], ["isize", "-9223372036854775808", "9223372036854775807"],
+  ["u8", "0", "255"], ["u16", "0", "65535"], ["u32", "0", "4294967295"], ["u64", "0", "9223372036854775807"], ["usize", "0", "9223372036854775807"],
+];
+
+// A field of `parseArgs<T>()`'s type as the command line takes it: what it reads, whether it may be
+// left out, and whether it may be given more than once.
+type ArgKind = { base: string; optional: boolean; many: boolean };
+
+function argRefused(what: string, start: usize, end: usize): CompileError {
+  return new CompileError("E0504", `'parseArgs<T>()' reads ${what}`, start, end);
+}
+
+/** @throws {CompileError} */
+function argKind(t: Ref<TypeNode>, optional: boolean): ArgKind {
+  if (t.kind === "union") {
+    let rest: TypeNode[] = [];
+    let empty = false;
+    for (const m of t.types) {
+      if ((m.kind === "ref" && (m.name === "null" || m.name === "undefined") && m.args.length === 0) || (m.kind === "literal" && m.value.kind === "null")) empty = true;
+      else rest.push(cloneTypeNode(m));
+    }
+    if (empty && rest.length === 1) return argKind(rest[0]!, true);
+  }
+  if (t.kind === "ref" && t.name === "Option" && t.args.length === 1) return argKind(t.args[0]!, true);
+  if (t.kind === "array" && !optional) {
+    const element = argKind(t.element, false);
+    if (!element.optional && !element.many) return { base: element.base, optional: false, many: true };
+  }
+  if (t.kind === "ref" && t.args.length === 0 && (t.name === "boolean" || t.name === "string" || t.name === "f32" || t.name === "f64" || INTEGER_LIMITS.some((l) => l[0] === t.name))) return { base: t.name, optional, many: false };
+  throw argRefused("fields that are booleans, strings or numbers, their Options, and arrays of them", t.start, t.end);
+}
+
+// The doc comment written just before `at` in its file, as one line of help.
+function docBefore(files: Ref<Compilation["files"]>, at: usize): string {
+  const f = files.findLast((f) => at >= f.base);
+  if (f === undefined) return "";
+  const before = f.src.slice(0, (at - f.base) as i64).trimEnd();
+  if (!before.endsWith("*/")) return "";
+  const open = before.lastIndexOf("/**");
+  if (open < 0) return "";
+  return before.slice(open + 3, (before.length - 2) as i64).split("\n").map((l) => l.trim().replace(/^\*\s?/, "")).filter((l) => l !== "").join(" ");
+}
+
+// The fields of `parseArgs<T>()`'s type as written: an object type, or an alias or interface
+// naming one.
+/** @throws {CompileError} */
+export function writtenFields(t: Ref<TypeNode>, decls: Ref<Declarations>): TypeMember[] {
+  if (t.kind === "object") return t.members.map((m) => cloneTypeMember(m));
+  if (t.kind === "ref" && t.args.length === 0) {
+    const alias = decls.aliases.get(t.name);
+    if (alias !== undefined && alias.type.kind === "object") return alias.type.members.map((m) => cloneTypeMember(m));
+    const named = decls.interfaces.get(t.name);
+    if (named !== undefined && named.extends.length === 0) return named.members.map((m) => cloneTypeMember(m));
+  }
+  throw argRefused("an object type, an alias of one or an interface, written as its type argument", t.start, t.end);
+}
+
+// `parseArgs<T>()`: the call of std's port with specs from T's fields, its builder reading each
+// field as T types it, inside std's helper answering --help and turning a bad argument into exit
+// code 2. `parsed` is the name std's port goes by in the program, which names its helper too.
+/** @throws {CompileError} */
+export function typedParseArgs(ids: Mut<Ids>, e: Ref<Call>, members: Ref<TypeMember[]>, files: Ref<Compilation["files"]>, parsed: string): { call: Expr; inner: Expr } {
+  const typed = parsed.replace("parseArgs", "__typedArgs");
+  if (e.args.length > 0) throw new CompileError("E0504", "'parseArgs<T>()' takes no arguments; it reads the program's own", e.args[0]!.start, e.args[e.args.length - 1]!.end);
+  const written: Ref<TypeNode> = e.typeArgs[0]!;
+  let specs: string[] = [];
+  let reads: string[] = [];
+  let lines: [string, string][] = [];
+  let positionals = false;
+  for (const m of members) {
+    if (m.kind !== "property" || typeof m.name !== "string" || m.type === undefined) throw argRefused("fields with their types written, like 'port: u16'", m.start, m.end);
+    const name = m.name;
+    if (name === "positionals") {
+      const t: Ref<TypeNode> = m.type!;
+      if (t.kind !== "array" || t.element.kind !== "ref" || t.element.name !== "string" || m.optional) throw argRefused("'positionals' as a 'string[]', the arguments that aren't options", t.start, t.end);
+      positionals = true;
+      reads.push("positionals: p.positionals.clone()");
+      continue;
+    }
+    if (!/^[a-z][A-Za-z0-9]*$/.test(name)) throw argRefused(`fields named in camelCase, which it gives as --kebab-case options; '${name}' isn't`, m.start, m.end);
+    const kind = argKind(m.type!, m.optional);
+    const i = specs.length;
+    const flag = `--${name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
+    const text = kind.base !== "boolean";
+    specs.push(`{ name: ${JSON.stringify(flag.slice(2))}, short: "", text: ${text}, multiple: ${kind.many} }`);
+    const f = JSON.stringify(flag);
+    const limits = INTEGER_LIMITS.find((l) => l[0] === kind.base);
+    let read = "";
+    if (kind.base === "boolean") read = kind.many ? `p.flagListOr(${i}, [])` : kind.optional ? `p.flag(${i})` : `p.flagOr(${i}, false)`;
+    else if (kind.base === "string") read = kind.many ? `p.textsOr(${i}, [])` : kind.optional ? `p.text(${i})` : `p.textGiven(${i}, ${f}, @usage@)`;
+    else if (limits !== undefined) {
+      const bounds = `${limits[1]} as i64, ${limits[2]} as i64`;
+      const cast = kind.base === "i64" ? "" : ` as ${kind.base}`;
+      if (kind.many) read = `p.integers(${i}, ${f}, @usage@, ${bounds}).map((x) => x${cast})`;
+      else if (!kind.optional) read = `(p.integer(${i}, ${f}, @usage@, true, ${bounds})!${cast})`;
+      else if (kind.base === "i64") read = `p.integer(${i}, ${f}, @usage@, false, ${bounds})`;
+      else read = `((n: i64 | null): ${kind.base} | null => (n === null ? null : n!${cast}))(p.integer(${i}, ${f}, @usage@, false, ${bounds}))`;
+    } else {
+      const cast = kind.base === "f64" ? "" : ` as ${kind.base}`;
+      if (kind.many) read = `p.floats(${i}, ${f}, @usage@).map((x) => x${cast})`;
+      else if (!kind.optional) read = `(p.float(${i}, ${f}, @usage@, true)!${cast})`;
+      else if (kind.base === "f64") read = `p.float(${i}, ${f}, @usage@, false)`;
+      else read = `((n: f64 | null): ${kind.base} | null => (n === null ? null : n!${cast}))(p.float(${i}, ${f}, @usage@, false))`;
+    }
+    reads.push(`${name}: ${read}`);
+    lines.push([`${flag}${text ? ` <${kind.base === "string" ? "text" : kind.base}>` : ""}${kind.many ? "..." : ""}`, docBefore(files, m.start)]);
+  }
+  lines.push(["-h, --help", "Show this help"]);
+  const width = lines.reduce((w, l) => Math.max(w, l[0].length as i64), 0 as i64);
+  const usage = ` [options]${positionals ? " [<args>...]" : ""}\n\nOptions:\n${lines.map((l) => `  ${l[0].padEnd(width as usize)}  ${l[1]}`.trimEnd()).join("\n")}`;
+  // The builder's type is T as written, put in place of the placeholder once parsed.
+  const source = `typed(@usage@, () => parse(null, [${specs.join(", ")}], ${positionals}, false, (p): Placeholder => ({ ${reads.join(", ")} })).values)`;
+  let call: Expr = respanExpr(parseExpression(source.replaceAll("@usage@", JSON.stringify(usage)), ids), e);
+  if (call.kind === "call" && call.callee.kind === "ident") call.callee.name = typed;
+  let inner: Expr | undefined = undefined;
+  if (call.kind === "call" && call.args.length === 2 && call.args[1]!.kind === "arrow") {
+    let arrow = call.args.pop()!;
+    if (arrow.kind === "arrow" && !Array.isArray(arrow.body) && arrow.body.kind === "member" && arrow.body.object.kind === "call") {
+      let parse = arrow.body.object;
+      if (parse.callee.kind === "ident") parse.callee.name = parsed;
+      if (parse.args.length === 5 && parse.args[4]!.kind === "arrow") {
+        let builder = parse.args.pop()!;
+        if (builder.kind === "arrow") builder.returnType = cloneTypeNode(written);
+        parse.args.push(builder);
+      }
+      inner = cloneExpr(parse);
+      arrow.body.object = parse;
+    }
+    call.args.push(arrow);
+  }
+  return { call, inner: inner! };
 }

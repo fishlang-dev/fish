@@ -79,10 +79,11 @@ export type ObjectType = Brand<usize, "object">;
 // A class is nominal: one per declaration, so `===` is identity. Its own fields are in
 // declaration order, filled in once resolved, and follow the base it embeds in memory.
 // An instance of a generic class also records the class it came from and its type arguments.
-// `disposes`: the class declares a disposer, a `[Symbol.dispose]` method.
+// `disposes`: the class declares a disposer, a `[Symbol.dispose]` method. `c`: `@c` lays it out
+// as a C struct, its fields in declaration order with C's alignment, and lets it cross to C by value.
 // `rust`: the Rust type a class a Rust module declares stands for. An abstract class only ever
 // exists embedded in a concrete one, so it is never a value's type.
-export type ClassRecord = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true; disposes?: true };
+export type ClassRecord = { kind: "class"; name: string; fields: Field[]; base?: ClassType; generic?: { name: string; args: Type[] }; rust?: RustClass; abstract?: true; disposes?: true; c?: true };
 export type ClassType = Brand<usize, "class">;
 
 // An interface is a trait: fields and method signatures that any value with those members
@@ -157,7 +158,9 @@ export type ArrayType = Brand<usize, "array">;
 
 // `FixedArray<T, N>`: exactly `size` elements stored inline, laid out as `[size x T]`; interned,
 // so `===` is identity.
-export type FixedRecord = { kind: "fixed"; element: Type; size: usize; fields: Field[] };
+// `simd` marks a SIMD vector, `f32x4` and the like, or a mask of its lanes when they are boolean:
+// held as the fixed array is, with lane-wise operators lowered to LLVM vectors.
+export type FixedRecord = { kind: "fixed"; element: Type; size: usize; fields: Field[]; simd?: boolean };
 export type FixedType = Brand<usize, "fixed">;
 // `Map<K, V>` and `Set<T>` (a Set's value is `void`): a pointer to an owned hash table in the
 // runtime, its entries kept in insertion order. A dictionary, `{ [k: string]: V }`, is a Map with
@@ -301,6 +304,27 @@ export function splitTemplate(s: string, quasis: Ref<string[]>): string[] | unde
   }
   parts.push(s.slice(pos, end));
   return parts;
+}
+
+// The SIMD vector types, by name, and their lanes: Rust's std::simd shapes that fit 128 or 256 bits.
+export const SIMD_TYPES = new Map<string, [Numeric, usize]>([
+  ["f32x4", ["f32", 4]], ["f32x8", ["f32", 8]], ["f64x2", ["f64", 2]], ["f64x4", ["f64", 4]],
+  ["i8x16", ["i8", 16]], ["u8x16", ["u8", 16]], ["i16x8", ["i16", 8]], ["i32x4", ["i32", 4]],
+  ["i32x8", ["i32", 8]], ["i64x2", ["i64", 2]], ["u32x4", ["u32", 4]], ["u64x2", ["u64", 2]],
+]);
+// The masks lane comparisons give, by their lane count.
+export const SIMD_MASKS = new Map<string, usize>([["mask2", 2], ["mask4", 4], ["mask8", 8], ["mask16", 16]]);
+
+// The SIMD vector or mask type `name` names, or undefined for any other name.
+export function simdTypeNamed(typing: Mut<Typing>, name: string): FixedType | undefined {
+  const lanes = SIMD_TYPES.get(name);
+  if (lanes !== undefined) return typing.fixedType(lanes[0], lanes[1], true);
+  const mask = SIMD_MASKS.get(name);
+  return mask !== undefined ? typing.fixedType("boolean", mask, true) : undefined;
+}
+
+export function simdName(element: Type, size: usize): string {
+  return typeof element !== "string" ? "" : element === "boolean" ? `mask${size}` : `${element}x${size}`;
 }
 
 export const isFloat = (t: Type): t is "f32" | "f64" => t === "f32" || t === "f64";
@@ -676,6 +700,10 @@ export function familyHeld(where: string): string {
 const FIRST_ID: usize = 21;
 
 export class Typing {
+  // Whether a generic definition that each instance can check instead is being checked, where a
+  // type parameter bounded by values, as `K extends "a" | "b"`, is left open for type functions
+  // rather than read as its bound's union.
+  openWithin: boolean = false;
   // Every record of this program, the one for type id N at N - FIRST_ID: the module constants'
   // first, then those this program makes. An array rather than a map, so a record can be lent.
   private arena: TypeRecord[] = [
@@ -1010,7 +1038,7 @@ export class Typing {
     return this.holdsPart(t, (u) => {
       const r = this.recOf(u);
       return r !== undefined && r.kind === "class" && (r.rust !== undefined || this.disposable(u));
-    });
+    }, false, true);
   }
 
   isCopy(t: Type): boolean {
@@ -1084,14 +1112,14 @@ export class Typing {
     return out;
   }
 
-  holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false): boolean {
+  holdsPart(t: Type, found: (t: Type) => boolean, throughRefs = false, skipEmptyFixed = false): boolean {
     let seen = new TypeSet<Type>();
-    return this.holdsPartIn(t, found, throughRefs, seen);
+    return this.holdsPartIn(t, found, throughRefs, skipEmptyFixed, seen);
   }
 
   // Walked with a stack, in the order a recursive walk would take, so `found` is called rather than
   // handed on, which would make another instance of this method for each closure handed on.
-  private holdsPartIn(start: Type, found: (t: Type) => boolean, throughRefs: boolean, seen: Mut<TypeSet<Type>>): boolean {
+  private holdsPartIn(start: Type, found: (t: Type) => boolean, throughRefs: boolean, skipEmptyFixed: boolean, seen: Mut<TypeSet<Type>>): boolean {
     let stack: Type[] = [start];
     while (stack.length > 0) {
       const t = stack.pop()!;
@@ -1105,7 +1133,8 @@ export class Typing {
       if (r.kind === "ref") parts = throughRefs ? [r.to] : [];
       else if (r.kind === "param") parts = r.concrete !== undefined ? [r.concrete] : [];
       else if (r.kind === "union") parts = r.members.slice();
-      else if (r.kind === "array" || r.kind === "fixed") parts = [r.element];
+      else if (r.kind === "array") parts = [r.element];
+      else if (r.kind === "fixed") parts = !skipEmptyFixed || r.size > 0 ? [r.element] : [];
       else if (r.kind === "map") parts = [r.key, r.value];
       else if (r.kind === "interior" || r.kind === "recursive") parts = [r.of];
       else if (r.kind === "class") {
@@ -1611,7 +1640,7 @@ export class Typing {
     }
     if (r.kind === "fixed") {
       const element = this.stored(r.element);
-      return this.fixedType(element, r.size);
+      return this.fixedType(element, r.size, r.simd === true);
     }
     if (r.kind === "map") {
       const value = this.stored(r.value);
@@ -2559,16 +2588,23 @@ export class Typing {
 
   private refs = new Map<string, RefType>();
 
-  fixedType(this: Mut<this>, element: Type, size: usize): FixedType {
-    const key = `fixed ${size} ${this.keyOf(element)}`;
+  fixedType(this: Mut<this>, element: Type, size: usize, simd = false): FixedType {
+    const key = `${simd ? "simd" : "fixed"} ${size} ${this.keyOf(element)}`;
     let t = this.fixeds.get(key);
     if (t === undefined) {
-      t = this.made<FixedType>({ kind: "fixed", element, size, fields: [] }, key);
+      t = this.made<FixedType>(simd ? { kind: "fixed", element, size, fields: [], simd: true } : { kind: "fixed", element, size, fields: [] }, key);
       this.fixeds.set(key, t);
     }
     return t;
   }
   private fixeds = new Map<string, FixedType>();
+
+  // A SIMD vector's or mask's lane type and count, or undefined for any other type.
+  simd(t: Type | undefined): { element: Type; size: usize } | undefined {
+    if (t === undefined || typeof t === "string") return undefined;
+    const r = this.rec(t);
+    return r.kind === "fixed" && r.simd === true ? { element: r.element, size: r.size } : undefined;
+  }
 
   arrayType(this: Mut<this>, element: Type, typed?: TypedName): ArrayType {
     // An element's key nests the keys of everything inside it, so building and hashing it on every
@@ -2856,7 +2892,7 @@ export class Typing {
         found = this.arrayType(element);
       } else if (r.kind === "fixed") {
         const element = this.lower(r.element);
-        found = this.fixedType(element, r.size);
+        found = this.fixedType(element, r.size, r.simd === true);
       } else if (r.kind === "variant") {
         const loweredArgs = r.args.map((t) => this.lower(t));
         found = r.args.some((a, i) => loweredArgs[i as usize] !== a) ? this.instanceVariant(t as VariantType, loweredArgs) : t;
@@ -2932,18 +2968,29 @@ export class Typing {
     }
     for (const t of group) {
       let r = this.rec(t);
-      if (r.kind === "object" && r.tuple !== true && r.match !== true) {
+      if (r.kind === "object" && r.match !== true) {
         r.fields = r.fields.map((f): Field => ({ ...f, type: this.lower(f.type) }));
+        // A tuple's elements are its fields; its rest, and the object of its fields, are lowered
+        // with them, so a tuple held in the group stays the record its values are written as.
+        const rest = r.rest;
+        if (rest !== undefined) r.rest = this.lower(rest);
+        const shape = r.shape;
         this.setRec(t, r);
+        if (shape !== undefined) {
+          let s = this.rec(shape);
+          s.fields = s.fields.map((f): Field => ({ ...f, type: this.lower(f.type) }));
+          this.setRec(shape, s);
+        }
       } else if (r.kind === "union" && r.unknown !== true) {
-        // Objects stay the records they are. Two brands of one base become one member.
+        // Objects and tuples stay the records they are. Two brands of one base become one
+        // member, and a literal whose base is a member is that member, as `unionType` has it.
         let members: Type[] = [];
         for (const m of r.members) {
           const b = this.recOf(m);
-          const low = b?.kind === "object" && b.tuple !== true ? m : this.lower(m);
+          const low = b?.kind === "object" ? m : this.lower(m);
           if (!members.includes(low)) members.push(low);
         }
-        r.members = members;
+        r.members = members.filter((m) => typeof m === "string" || this.rec(m).kind !== "literal" || !members.includes(this.baseOf(m as LiteralType)!));
         this.setRec(t, r);
       }
     }
@@ -2979,7 +3026,7 @@ export class Typing {
     }
     if (r.kind === "fixed") {
       const element = this.lowerKeepingBrands(r.element);
-      return this.fixedType(element, r.size);
+      return this.fixedType(element, r.size, r.simd === true);
     }
     if (r.kind === "ref") {
       const to = this.lowerKeepingBrands(r.to);
@@ -3059,6 +3106,20 @@ export class Typing {
     const found = swap.get(t);
     if (found !== undefined) return found;
     if (typeof t === "string") return t;
+    // A future made of others, as `Promise.all` makes, is made again of theirs replaced, and an
+    // async generator's `next()` of its generator replaced.
+    const combined = this.combinedOf.get(t as FutureType);
+    if (combined !== undefined) {
+      const futures = combined.futures.map((f) => this.replaced(f, swap) as FutureType | HandleType | DynType);
+      const array = combined.array === undefined ? undefined : (this.replaced(combined.array, swap) as ArrayType);
+      if (!futures.some((f, i) => f !== combined.futures[i as usize]) && array === combined.array) return t;
+      return this.combinedFuture({ ...combined, futures, array });
+    }
+    const leaf = this.leafOf.get(t as FutureType);
+    if (leaf !== undefined && leaf.method === "next") {
+      const of = this.replaced(leaf.of, swap);
+      return of === leaf.of ? t : this.leafFuture("next", of, undefined, leaf.signal);
+    }
     if (this.unswappable(t) && [...swap.keys()].every((k) => this.kindOf(k) === "param")) return t;
     const r = this.rec(t);
     if (r.kind === "class") {
@@ -3110,7 +3171,7 @@ export class Typing {
     }
     if (r.kind === "fixed") {
       const element = this.replaced(r.element, swap);
-      return this.fixedType(element, r.size);
+      return this.fixedType(element, r.size, r.simd === true);
     }
     if (r.kind === "map") {
       const key = this.replaced(r.key, swap);
@@ -3319,7 +3380,7 @@ export class Typing {
       if (r.kind === "object" && r.tuple === true) found = `${this.readonlyTuple(t as ObjectType) ? "readonly " : ""}[${this.elementsOf(t as ObjectType).map((t) => this.shapeKey(t)).join(",")}${r.required === undefined ? "" : `?${r.required}`}${r.rest === undefined ? "" : `...${this.shapeKey(r.rest)}`}]`;
       else if (r.kind === "object") found = `{${r.fields.map((f) => `${f.readonly === true ? "readonly " : ""}${JSON.stringify(f.name)}:${this.shapeKey(f.type)}`).join(",")}}`;
       else if (r.kind === "array") found = `${this.shapeKey(r.element)}[]`;
-      else if (r.kind === "fixed") found = `FixedArray<${this.shapeKey(r.element)},${r.size}>`;
+      else if (r.kind === "fixed") found = r.simd === true ? simdName(r.element, r.size) : `FixedArray<${this.shapeKey(r.element)},${r.size}>`;
       else if (r.kind === "map") found = r.set ? `Set<${this.shapeKey(r.key)}>` : `${r.dict === true ? "Dict" : "Map"}<${this.shapeKey(r.key)},${this.shapeKey(r.value)}>`;
       else if (r.kind === "union") found = `(${r.members.map((t) => this.shapeKey(t)).join("|")})`;
       else if (r.kind === "ref") found = `${r.mutable ? "mut" : "ref"} ${this.shapeKey(r.to)}${r.life !== undefined ? ` ${r.life}` : ""}`;
@@ -3506,7 +3567,7 @@ export class Typing {
     if (r.kind === "regex") return "RegExp";
     if (r.kind === "array" && r.typed !== undefined) return r.typed;
     if (r.kind === "array") return this.showArray(r.element);
-    if (r.kind === "fixed") return `FixedArray<${this.show(r.element)}, ${r.size}>`;
+    if (r.kind === "fixed") return r.simd === true ? simdName(r.element, r.size) : `FixedArray<${this.show(r.element)}, ${r.size}>`;
     if (r.kind === "map") return r.set ? `Set<${this.show(r.key)}>` : r.dict === true ? `{ [key: string]: ${this.show(r.value)} }` : `Map<${this.show(r.key)}, ${this.show(r.value)}>`;
     if (r.kind === "generator") return `${r.async === true ? "Async" : ""}Generator<${this.show(r.yields)}>${r.throws !== undefined ? ` throws ${this.show(r.throws)}` : ""}`;
     if (r.kind === "future") return `Promise<${this.show(r.gives)}>${r.throws !== undefined ? ` throws ${this.show(r.throws)}` : ""}${this.describing ? ` ${r.name}(${r.frame.map((f) => this.show(f.type)).join(", ")})` : ""}`;

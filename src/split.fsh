@@ -44,7 +44,8 @@ function items(pieces: Ref<string[]>): { found: Item[]; types: Map<string, strin
         open = [];
         continue;
       }
-      if (line === "") continue;
+      // A comment is the C a build compiles beside the module, which it reads before splitting.
+      if (line === "" || line.startsWith(";")) continue;
       if (line.startsWith("!")) metadata += `${line}\n`;
       else if (line.startsWith('%"<')) types.set(line.slice(0, line.indexOf(" = type ")), line);
       else if (line.startsWith("define ")) open.push(line);

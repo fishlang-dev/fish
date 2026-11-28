@@ -933,8 +933,86 @@ function id<T = i64>(x: T): T {
   return x
 }
 
+function empty<T = string>(): T[] {
+  return []
+}
+
+function pair<A, B = A[]>(a: A, b: B): B {
+  return b
+}
+
+function main() {
+  print(id(3), id<boolean>(true))
+  let e = empty()
+  e.push("x")
+  print(e.length, e[0])
+  print(pair<i64>(1, [2, 3]).length)
+}
+// expect: 3 true
+// expect: 1 x
+// expect: 2
+// case: generic_default_class
+class Stack<T = i64> {
+  items: T[] = []
+  push(this: Mut<this>, x: T) {
+    this.items.push(x)
+  }
+}
+
+class Keyed<K, V = K> {
+  key: K
+  value: V
+  constructor(key: K, value: V) {
+    this.key = key
+    this.value = value
+  }
+}
+
+function size(s: Stack): i64 {
+  return s.items.length as i64
+}
+
+function main() {
+  let s = new Stack()
+  s.push(4)
+  s.push(5)
+  let t: Stack<string> = new Stack<string>()
+  t.push("a")
+  const k: Keyed<string> = new Keyed<string>("a", "b")
+  print(size(s), s.items[1], t.items[0], k.value)
+}
+// expect: 2 5 a b
+// case: generic_default_interface_alias
+interface Named<T = string> {
+  name: T
+}
+
+type Pair<A, B = A> = { first: A; second: B }
+
+function main() {
+  const n: Named = { name: "fish" }
+  const m: Named<i64> = { name: 7 }
+  const p: Pair<i64> = { first: 1, second: 2 }
+  const q: Pair<i64, boolean> = { first: 1, second: true }
+  print(n.name, m.name, p.second, q.second)
+}
+// expect: fish 7 2 true
+// case: generic_default_order
+function f<T = i64, U>(x: U): U {
+  return x
+}
+
 function main() {}
-// error: default type arguments are not supported yet
+// error: required type parameter 'U' can't follow one with a default
+// case: generic_default_too_few
+function f<A, B = A>(a: A, b: B): A {
+  return a
+}
+
+function main() {
+  f<i64, i64, i64>(1, 2)
+}
+// error: expected 1-2 type arguments, but got 3
 // case: generic_explicit_mismatch
 function id<T>(x: T): T {
   return x
