@@ -657,7 +657,8 @@ function linked(session: Mut<BuildSession>, natives: Ref<Natives>, halves: Ref<{
 }
 
 // The backend a dev build's IR goes to when nothing chooses: `--backend` and FISH_BACKEND choose.
-const DEFAULT_BACKEND = "llvm";
+// Native, which turns the compiler's own units into objects about 7 times faster than clang `-O0`.
+const DEFAULT_BACKEND = "native";
 
 // Whether a build's IR goes to the native backend: a plain dev build for this machine, an arm64
 // Mac, when the native backend is chosen. Release builds, `-g`, sanitizers, `--leaks` and other
