@@ -12,8 +12,9 @@ export const TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-
 // own target has both empty, so its builds and cache keys are what they were before targets.
 // `ar` archives a static library: the host's own can't index another OS's objects. `sanitize`
 // names the sanitizer a build is instrumented with, if any. `linker` is the one `--linker` chose,
-// `system` for the platform's own; left out, the fastest found is used.
-export type Target = { triple: string; compile: string[]; link: string[]; ar: string; sanitize?: string; linker?: string };
+// `system` for the platform's own; left out, the fastest found is used. `size` optimizes a release
+// build for size rather than speed.
+export type Target = { triple: string; compile: string[]; link: string[]; ar: string; sanitize?: string; linker?: string; size?: boolean };
 
 export const HOST_TARGET: Target = { triple: "", compile: [], link: [], ar: "ar" };
 
@@ -24,7 +25,7 @@ export function hostTarget(): Target {
 
 // A copy of `target` for a caller to own.
 export function copyTarget(target: Ref<Target>): Target {
-  return { triple: target.triple, compile: [...target.compile], link: [...target.link], ar: target.ar, sanitize: target.sanitize, linker: target.linker };
+  return { triple: target.triple, compile: [...target.compile], link: [...target.link], ar: target.ar, sanitize: target.sanitize, linker: target.linker, size: target.size };
 }
 
 export const LINKERS = ["system", "lld", "mold"];
@@ -255,6 +256,15 @@ export function findOpenSsl(target: Ref<Target>): OpenSsl {
 // default.profraw in its working directory. Fish hands clang IR, so the instrumentation is
 // LLVM's IR-level kind; clang's front-end kind would find no source to count.
 export const PGO_INSTRUMENT = ["-fprofile-generate", "-Xclang", "-fprofile-instrument-path=default.profraw"];
+
+// `target` tuned for a small binary: whole-program LTO, every function and global in a section of
+// its own so the link drops the ones nothing reaches, and the symbol table stripped. Backtraces
+// name frames from the runtime's own records, so stripping keeps them.
+export function sizeTarget(target: Target): Target {
+  const apple = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
+  const strip = apple ? ["-Wl,-dead_strip", "-Wl,-x", "-Wl,-S"] : ["-Wl,--gc-sections", "-Wl,-s"];
+  return { ...target, compile: [...target.compile, "-flto", "-ffunction-sections", "-fdata-sections"], link: [...target.link, ...strip], size: true };
+}
 
 // `target` with `flags` added to every clang call it makes, the runtime's and the link's included.
 export function withFlags(target: Target, flags: string[]): Target {
