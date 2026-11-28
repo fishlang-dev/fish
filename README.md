@@ -120,6 +120,11 @@ build/fishc build hello.fsh -o hello
 The first build compiles the `Math` runtime once into `~/.cache/fish` (or `$FISH_CACHE_DIR`).
 Its functions are correctly rounded, so a program prints the same numbers on every platform.
 
+`FISH_SHARED_CACHE` shares compiled objects between machines: a directory, or an `http://` or
+`https://` base URL answering GET and PUT. An object the local cache lacks is fetched from it and
+used only if it matches the SHA-256 stored beside it (`<name>.sha256`); an object built here is
+written back.
+
 ## Tests
 
 ```sh
