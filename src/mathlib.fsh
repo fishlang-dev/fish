@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { newSession, type Session } from "./compilation.fsh";
@@ -137,6 +137,97 @@ export function objectPath(session: Mut<BuildSession>, u: Ref<Unit>): string {
 export function partial(out: string): string {
   mkdirSync(dirname(out), { recursive: true });
   return `${out}.${randomUUID()}`;
+}
+
+// FISH_SHARED_CACHE: objects shared between machines, in a directory or under an http(s) base URL
+// that answers GET and PUT. The local cache stays first: the store is read for an object the local
+// cache lacks, and written with each object built here. Each object sits beside `<name>.sha256`,
+// its SHA-256 in hex, which a fetched object must match before it is used, so a torn upload or a
+// corrupted file is built again rather than linked. The digest catches corruption, not a store
+// that rewrites both files.
+function sharedStore(): string | undefined {
+  const given = process.env.FISH_SHARED_CACHE;
+  return given === undefined || given === "" ? undefined : given.replace(/\/+$/, "");
+}
+
+const isHttp = (store: string): boolean => store.startsWith("http://") || store.startsWith("https://");
+
+// What a fetch from the store found: the object, none, or a store that can't be reached, which a
+// build stops asking.
+export type Shared = "hit" | "miss" | "down";
+
+// `curl` with the user's ~/.curlrc kept out, giving the HTTP status, "000" when nothing answered.
+/** @throws {Error | IoError} */
+function curl(args: string[]): string {
+  if (Bun.which("curl") === null) throw new Error("FISH_SHARED_CACHE names a URL, which needs the curl command; install curl");
+  const got = Bun.spawnSync(["curl", "-q", "--silent", "--proto", "=https,http", "--max-time", "120", "--write-out", "%{http_code}", ...args], { stdout: "pipe", stderr: "pipe" });
+  const code = new TextDecoder().decode(got.stdout).trim();
+  return code === "" ? "000" : code;
+}
+
+// The store's object for `out`, put in place there if its digest matches.
+/** @throws {Error | IoError} */
+export function fromShared(out: string): Shared {
+  const store = sharedStore();
+  if (store === undefined) return "miss";
+  const name = basename(out);
+  const temp = partial(out);
+  try {
+    let digest = "";
+    if (isHttp(store!)) {
+      const code = curl(["-o", temp, "--", `${store!}/${name}`]);
+      if (code === "404") return "miss";
+      if (code !== "200") {
+        console.error(`warning: the shared cache at ${store!} answered ${code} for ${name}; building without it`);
+        return "down";
+      }
+      if (curl(["-o", `${temp}.sha256`, "--", `${store!}/${name}.sha256`]) !== "200") return "miss";
+      digest = readFileSync(`${temp}.sha256`, "utf8");
+    } else {
+      const from = join(store!, name);
+      if (!existsSync(from) || !existsSync(`${from}.sha256`)) return "miss";
+      digest = readFileSync(`${from}.sha256`, "utf8");
+      copyFileSync(from, temp);
+    }
+    if (createHash("sha256").update(readFileSync(temp)).digest("hex") !== digest.trim()) {
+      console.error(`warning: the shared cache's ${name} doesn't match its digest; building it here`);
+      return "miss";
+    }
+    renameSync(temp, out);
+    return "hit";
+  } finally {
+    rmSync(temp, { force: true });
+    rmSync(`${temp}.sha256`, { force: true });
+  }
+}
+
+// `out`, built here, written to the store: its digest first, so a reader never finds the object
+// without one. A store that can't be written warns, and the build goes on.
+/** @throws {Error | IoError} */
+export function toShared(out: string): void {
+  const store = sharedStore();
+  if (store === undefined) return;
+  const name = basename(out);
+  const digest = createHash("sha256").update(readFileSync(out)).digest("hex");
+  try {
+    if (isHttp(store!)) {
+      const temp = partial(out);
+      writeFileSync(temp, digest);
+      const first = curl(["--upload-file", temp, "--", `${store!}/${name}.sha256`]);
+      rmSync(temp, { force: true });
+      const code = first.startsWith("2") ? curl(["--upload-file", out, "--", `${store!}/${name}`]) : first;
+      if (!code.startsWith("2")) console.error(`warning: the shared cache at ${store!} answered ${code} storing ${name}`);
+      return;
+    }
+    mkdirSync(store!, { recursive: true });
+    const temp = join(store!, `${name}.${randomUUID()}`);
+    writeFileSync(temp, digest);
+    renameSync(temp, join(store!, `${name}.sha256`));
+    copyFileSync(out, temp);
+    renameSync(temp, join(store!, name));
+  } catch (e) {
+    console.error(`warning: can't write ${name} to the shared cache at ${store!}: ${e.message}`);
+  }
 }
 
 /** @throws {Error | IoError} */
@@ -278,8 +369,10 @@ const CLANG_MEMORY: i64 = 4_000_000_000;
 export function cachedObjects(session: Mut<BuildSession>, units: Ref<Unit[]>): string[] {
   let outs: string[] = [];
   let missing: usize[] = [];
+  let shared: Shared = "miss";
   for (let i: usize = 0; i < units.length; i++) {
     const out = objectPath(session, units[i]!);
+    if (!existsSync(out)) shared = shared === "down" ? "down" : fromShared(out);
     if (!existsSync(out)) missing.push(i);
     else if (session.timings !== undefined) session.timings!.objects.cached++;
     outs.push(out);
@@ -302,6 +395,7 @@ export function cachedObjects(session: Mut<BuildSession>, units: Ref<Unit[]>): s
   }
   const half = machineMemory() / 2;
   compiledTogether(units, outs, wanted, costs, half < CLANG_MEMORY ? half : CLANG_MEMORY, availableParallelism() as usize);
+  if (shared !== "down") for (const i of wanted) toShared(outs[i]!);
   return outs;
 }
 
@@ -332,7 +426,10 @@ export async function objectAsync(u: Ref<Unit>, out: string): Promise<string> {
       continue;
     }
     try {
-      if (!existsSync(out)) await compiledAsync(u, out);
+      if (!existsSync(out) && fromShared(out) !== "hit") {
+        await compiledAsync(u, out);
+        toShared(out);
+      }
     } catch (e) {
       rmSync(lock, { force: true });
       throw e;
