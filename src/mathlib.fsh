@@ -65,11 +65,18 @@ export function files(dir: string): string[] {
 // when the input is `-`, and `inputs` the other files its text depends on, such as headers.
 export type Unit = { name: string; args: string[]; stdin?: string; inputs: string[] };
 
+// A unit whose args are this alone is IR for the native backend, `fishc native-object`, rather
+// than for clang.
+export const NATIVE_UNIT = "--fish-native";
+
+const isNative = (u: Ref<Unit>): boolean => u.args.length === 1 && u.args[0]! === NATIVE_UNIT;
+
 // A session that builds objects as well as compiling, with the caches only building reads.
 // `clang`: `clang --version`, which names the target as well as the compiler.
 // `digests`: each source a cached object depends on, hashed, by path, size and modification time.
 // `mathUnits`: the Math runtime's objects to compile.
-export type BuildSession = Session & { clang?: string; digests: Map<string, string>; mathUnits?: Unit[] };
+// `backend`: what compiles a dev build's IR, `native` or `llvm`, when one was chosen.
+export type BuildSession = Session & { clang?: string; digests: Map<string, string>; mathUnits?: Unit[]; backend?: string };
 
 // `session` given the caches building needs, keeping any it already has.
 export function buildSession(session: Session & { clang?: string; digests?: Map<string, string>; mathUnits?: Unit[] }): BuildSession {
@@ -112,6 +119,11 @@ export function objectPath(session: Mut<BuildSession>, u: Ref<Unit>): string {
   const version = clangVersion(session);
   let hash = createHash("sha256");
   hash.update(version).update(u.args.join("\0")).update("\0").update(u.stdin ?? "").update("\0");
+  // A native object is this fishc's, so a fishc built again makes its objects again.
+  if (isNative(u)) {
+    const { size, mtimeMs } = statSync(process.execPath);
+    hash.update(`${process.execPath}:${size}:${mtimeMs}`).update("\0");
+  }
   for (const f of u.inputs) {
     const digest = digestOf(session, f);
     hash.update(f).update(digest);
@@ -131,12 +143,12 @@ export function partial(out: string): string {
 function finish(u: Ref<Unit>, code: i64 | null, stderr: string, temp: string, out: string) {
   if (code !== 0) {
     rmSync(temp, { force: true });
-    throw new Error(`clang failed building ${u.name}:\n${stderr}`);
+    throw new Error(`${isNative(u) ? "the native backend" : "clang"} failed building ${u.name}:\n${stderr}`);
   }
   renameSync(temp, out);
 }
 
-const command = (u: Ref<Unit>, temp: string): string[] => ["clang", ...u.args, "-c", "-o", temp];
+const command = (u: Ref<Unit>, temp: string): string[] => (isNative(u) ? [process.execPath, "native-object", "-o", temp] : ["clang", ...u.args, "-c", "-o", temp]);
 const input = (u: Ref<Unit>): Uint8Array | undefined => (u.stdin === undefined ? undefined : new TextEncoder().encode(u.stdin));
 
 // Clang runs in an empty directory of its own, since a quoted include in source read from stdin
@@ -155,8 +167,14 @@ const CLANG_PER_BYTE = 50;
 const CLANG_PER_SCALAR = 400;
 const I64_MAX: i64 = 9_223_372_036_854_775_807;
 
+// The native backend holds a unit's text and one function's arrays at a time: about 65 MB for
+// the compiler's largest unit, of 3.6 MB.
+const NATIVE_BASE = 20_000_000;
+const NATIVE_PER_BYTE = 20;
+
 function clangBytes(u: Ref<Unit>): i64 {
   const text = u.stdin ?? "";
+  if (isNative(u)) return NATIVE_BASE + (text.length as i64) * NATIVE_PER_BYTE;
   return CLANG_BASE + (text.length as i64) * CLANG_PER_BYTE + scalarUses(text) * CLANG_PER_SCALAR;
 }
 
@@ -240,7 +258,7 @@ function compiledTogether(units: Ref<Unit[]>, outs: Ref<string[]>, wanted: Ref<u
       }
       rmSync(temps[k]!, { force: true });
       const stderr = existsSync(`${at}.err`) ? readFileSync(`${at}.err`, "utf8") : "";
-      if (failed === undefined) failed = `clang failed building ${units[wanted[k]!]!.name}:\n${stderr}`;
+      if (failed === undefined) failed = `${isNative(units[wanted[k]!]!) ? "the native backend" : "clang"} failed building ${units[wanted[k]!]!.name}:\n${stderr}`;
     }
     if (failed !== undefined) throw new Error(failed!);
   } finally {
