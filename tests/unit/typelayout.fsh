@@ -1,9 +1,9 @@
 // `fishc layout`: a type named in a program, laid out as codegen lays it out.
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CompileError } from "../../src/diag.fsh";
 import { formatLayouts, layoutsOf, type Layout } from "../../src/typelayout.fsh";
+import { removed, scratch } from "./support.fsh";
 
 const PROGRAM = `type Shape = { kind: "circle"; r: f64 } | { kind: "rect"; w: f64; h: f64; tag: u8 };
 interface Area { area(): f64 }
@@ -20,21 +20,19 @@ function main() {
 
 // The layouts `named` gives in PROGRAM, or the message of the error it raises, a compile error
 // prefixed `compile: `.
-/** @throws {IoError} */
 function laidOut(named: string): Layout[] | string {
-  const dir = mkdtempSync(join(tmpdir(), "fish-layout-"));
+  const dir = scratch("fish-layout-");
   const file = join(dir, "main.fsh");
-  writeFileSync(file, PROGRAM);
   try {
+    writeFileSync(file, PROGRAM);
     return layoutsOf(file, PROGRAM, named);
   } catch (e) {
     return e instanceof CompileError ? `compile: ${e.message}` : (e as { message: string }).message;
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removed(dir);
   }
 }
 
-/** @throws {IoError} */
 function layouts(named: string): Layout[] {
   const got = laidOut(named);
   if (typeof got === "string") {

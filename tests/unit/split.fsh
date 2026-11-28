@@ -135,7 +135,8 @@ test("instances whose text differs stay apart, and so do their callers", () => {
 
 test("std's instances are left as they are", () => {
   const halves = split([instances(false)], ['@"fsh.walk#aaaaaa"', '@"fsh.walk#bbbbbb"'], ['@"fsh.visit#aaaaaa"', '@"fsh.visit#bbbbbb"', '@"fsh.main"'], new Map<string, string[]>());
-  assert(defined(halves.std) === '@"fsh.walk#aaaaaa" @"fsh.walk#bbbbbb"', defined(halves.std));
+  const std = halves.std.join("\n");
+  assert(defined(std) === '@"fsh.walk#aaaaaa" @"fsh.walk#bbbbbb"', defined(std));
   assert(defined(halves.program) === '@"fsh.visit#bbbbbb" @"fsh.visit#aaaaaa" @"fsh.main"', defined(halves.program));
 });
 
