@@ -15365,7 +15365,7 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
   tables.typing.structColors = named.colors;
   tables.typing.structSignatures = named.signatures;
   partEnd(tables.session, "codegen names", naming);
-  const prior = options.prior;
+  let prior = options.prior;
   options.prior = undefined;
   const keep = options.keep === true;
   const setup = partStart(tables.session);
@@ -15386,13 +15386,17 @@ export function codegenChecked(checked: Checked, options: Options): { ir: string
   let lines: string[] = [];
   for (const piece of ir) for (const line of piece.split("\n")) lines.push(line);
   const defines = definesIn(lines);
-  // What each define names, read again only from a define whose text this build changed.
+  // What each define names, read again only from a define whose text this build changed. The last
+  // build's lists are taken over in place rather than copied, then dropped with the rest of it.
   let uses = new Map<string, string[]>();
-  for (const [name, text] of defines) {
-    const before = prior !== undefined ? prior!.defines.get(name) : undefined;
-    if (before !== undefined && before === text && prior!.uses.has(name)) uses.set(name, [...prior!.uses.get(name)!]);
-    else uses.set(name, namesIn(text));
+  let was = new Map<string, string>();
+  if (prior !== undefined) {
+    let { defines: d, uses: u } = prior;
+    was = d;
+    uses = u;
   }
+  for (const [name, text] of defines) if (was.get(name) !== text || !uses.has(name)) uses.set(name, namesIn(text));
+  for (const name of [...uses.keys()]) if (!defines.has(name)) uses.delete(name);
   const emitted: Emitted = { defines, uses, items: itemsOf(generator), made, count: generator.tables.arenas.instanceCount() as usize, reemitted: generator.reemitted, refusals: new Map<string, usize>([...generator.refusals]), helpers: new Map<string, string>([...generator.helperTypes]) };
   partEnd(generator.tables.session, "codegen kept", keeping);
   return { ir, checked: { instances: generator.instances, tables: generator.tables, warnings }, emitted, helpers: generator.helperTypes };
