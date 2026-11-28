@@ -27,8 +27,10 @@ export const isBareMetal = (triple: string) => triple === "thumbv7em-none-eabihf
 // own target has both empty, so its builds and cache keys are what they were before targets.
 // `ar` archives a static library: the host's own can't index another OS's objects. `sanitize`
 // names the sanitizer a build is instrumented with, if any. `cc` is the clang a target is built
-// with, when it isn't the one on PATH.
-export type Target = { triple: string; compile: string[]; link: string[]; ar: string; sanitize?: string; cc?: string };
+// with, when it isn't the one on PATH. `linker` is the one `--linker` chose, `system` for the
+// platform's own; left out, the fastest found is used. `size` optimizes a release build for size
+// rather than speed.
+export type Target = { triple: string; compile: string[]; link: string[]; ar: string; sanitize?: string; cc?: string; linker?: string; size?: boolean };
 
 export const HOST_TARGET: Target = { triple: "", compile: [], link: [], ar: "ar" };
 
@@ -39,7 +41,38 @@ export function hostTarget(): Target {
 
 // A copy of `target` for a caller to own.
 export function copyTarget(target: Ref<Target>): Target {
-  return { triple: target.triple, compile: [...target.compile], link: [...target.link], ar: target.ar, sanitize: target.sanitize, cc: target.cc };
+  return { triple: target.triple, compile: [...target.compile], link: [...target.link], ar: target.ar, sanitize: target.sanitize, cc: target.cc, linker: target.linker, size: target.size };
+}
+
+export const LINKERS = ["system", "lld", "mold"];
+
+// The linkers searched for when none is chosen, fastest first, by OS. On macOS Apple's own links
+// faster than lld, so none is.
+const faster = (os: string): string[] => (os === "Linux" ? ["mold", "lld"] : []);
+
+// The flags choosing the linker for `target`'s final link: nothing when its own link flags already
+// pick one or the platform's is chosen; for a linker chosen, the flag, or an Error when it isn't on
+// PATH; for none chosen, the first of the faster ones on PATH, else nothing.
+/** @throws {Error} */
+export function linkerFlags(target: Ref<Target>, given?: string, which?: (tool: string) => string | null): string[] {
+  const none: string[] = [];
+  if (target.linker === "system" || target.link.some((f) => f.startsWith("-fuse-ld="))) return none;
+  const host = given ?? hostTriple();
+  const triple = target.triple !== "" ? target.triple : host;
+  // A target with a clang or a link of its own, such as WebAssembly's or a microcontroller's, keeps
+  // the linker that link names.
+  const own = target.cc !== undefined || (triple !== undefined && (isWasm(triple) || isWindows(triple) || isBareMetal(triple) || isLambda(triple)));
+  if (target.linker === undefined && own) return none;
+  const os = triple === undefined ? "Linux" : osOf(triple);
+  const binary = (l: string) => (os === "macOS" ? `ld64.${l}` : `ld.${l}`);
+  const found = (l: string) => (which === undefined ? Bun.which(binary(l)) : which(binary(l))) !== null;
+  if (target.linker !== undefined) {
+    if (!LINKERS.includes(target.linker)) throw new Error(`fishc: unknown linker '${target.linker}'; use one of ${LINKERS.join(", ")}`);
+    if (!found(target.linker)) throw new Error(`fishc: '--linker ${target.linker}' links with '${binary(target.linker)}', which isn't on PATH; install ${target.linker}, or leave out '--linker' to use the fastest linker found`);
+    return [`-fuse-ld=${target.linker}`];
+  }
+  for (const l of faster(os)) if (found(l)) return [`-fuse-ld=${l}`];
+  return none;
 }
 
 const osOf = (triple: string) => (triple.includes("-apple-") ? "macOS" : "Linux");
@@ -423,6 +456,15 @@ export function findBrotli(target: Ref<Target>): OpenSsl {
 // default.profraw in its working directory. Fish hands clang IR, so the instrumentation is
 // LLVM's IR-level kind; clang's front-end kind would find no source to count.
 export const PGO_INSTRUMENT = ["-fprofile-generate", "-Xclang", "-fprofile-instrument-path=default.profraw"];
+
+// `target` tuned for a small binary: whole-program LTO, every function and global in a section of
+// its own so the link drops the ones nothing reaches, and the symbol table stripped. Backtraces
+// name frames from the runtime's own records, so stripping keeps them.
+export function sizeTarget(target: Target): Target {
+  const apple = target.triple === "" ? process.platform === "darwin" : target.triple.includes("-apple-");
+  const strip = apple ? ["-Wl,-dead_strip", "-Wl,-x", "-Wl,-S"] : ["-Wl,--gc-sections", "-Wl,-s"];
+  return { ...target, compile: [...target.compile, "-flto", "-ffunction-sections", "-fdata-sections"], link: [...target.link, ...strip], size: true };
+}
 
 // `target` with `flags` added to every clang call it makes, the runtime's and the link's included.
 export function withFlags(target: Target, flags: string[]): Target {

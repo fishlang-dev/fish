@@ -55,10 +55,9 @@ test("the halves of a surrogate pair join into one character", () => {
   const got = run(
     `
     fsh_str *high = fsh_str_of("\\xED\\xA0\\xBD", 3), *low = fsh_str_of("\\xED\\xB8\\x80", 3);
-    high->units = 1; low->units = 1;
     fsh_str *pair = fsh_rt_str_concat(high, low);
     fsh_str *emoji = fsh_str_of("\\xF0\\x9F\\x98\\x80", 4);
-    printf("%lld %lld %d\\n", (long long)pair->length, (long long)pair->units, fsh_rt_str_compare(pair, emoji));
+    printf("%lld %lld %d\\n", (long long)fsh_len(pair), (long long)fsh_rt_str_units(pair), fsh_rt_str_compare(pair, emoji));
     fsh_rt_str_print(1, high);
     printf("\\n");
     fsh_rt_str_release(high); fsh_rt_str_release(low); fsh_rt_str_release(pair); fsh_rt_str_release(emoji);`,
@@ -140,8 +139,9 @@ test("case mapping matches JavaScript for every code point", () => {
       char bytes[4];
       fsh_str *s = fsh_str_of(bytes, fsh_put_cp(bytes, cp) - bytes);
       for (int upper = 1; upper >= 0; upper--) {
-        fsh_str *mapped = fsh_rt_str_case(s, upper);
-        fwrite(mapped->bytes, 1, mapped->length, stdout);
+        fsh_str *mapped = fsh_rt_str_case(s, upper), *shown = mapped;
+        FSH_OPEN(shown);
+        fwrite(shown->bytes, 1, shown->length, stdout);
         fputc('\\n', stdout);
         fsh_rt_str_release(mapped);
       }

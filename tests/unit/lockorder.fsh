@@ -25,7 +25,7 @@ function irOf(tmp: string, release: boolean): string {
 
 function checking(ir: string, release: boolean): boolean {
   try {
-    return runtimeUnits(ir, release).some((u) => (u.stdin ?? "").startsWith("#define FSH_LOCK_ORDER"));
+    return runtimeUnits([ir], release).some((u) => (u.stdin ?? "").startsWith("#define FSH_LOCK_ORDER"));
   } catch (e) {
     assert(false, `runtimeUnits: ${e.message}`);
     return false;

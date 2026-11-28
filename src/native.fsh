@@ -904,19 +904,67 @@ typedef struct fsh_str {
   char own[];
 } fsh_str;
 
+// A string of FSH_SMALL bytes or fewer is held in its pointer word, with no block and no count:
+// the low bit set, its length in bits 1 to 3, and its bytes in the word's upper seven bytes,
+// unused ones zero, so two small strings are equal exactly when their words are. A block is at
+// least 8-byte aligned, so its address never has the low bit set. Code reading a string's fields
+// opens it first: a small string is copied into a block on the caller's stack, a view, which
+// counts as a literal and lives as long as the caller's frame, so nothing may keep it.
+#define FSH_SMALL 7
+
+static inline int fsh_small(const fsh_str *s) {
+  return ((uintptr_t)s & 1) != 0;
+}
+
+static fsh_str *fsh_small_of(const char *bytes, int64_t length) {
+  uint64_t w = 1 | (uint64_t)length << 1;
+  for (int64_t i = 0; i < length; i++) w |= (uint64_t)(unsigned char)bytes[i] << (8 * (i + 1));
+  return (fsh_str *)(uintptr_t)w;
+}
+
+typedef struct {
+  char own[8];
+  fsh_str s;
+} fsh_view;
+
+static fsh_str *fsh_open(fsh_str *s, fsh_view *v) {
+  if (!fsh_small(s)) return s;
+  uint64_t w = (uint64_t)(uintptr_t)s;
+  int64_t n = (int64_t)(w >> 1 & 7);
+  for (int64_t i = 0; i < 8; i++) v->own[i] = i < n ? (char)(w >> (8 * (i + 1))) : 0;
+  v->s.count = -1;
+  v->s.length = n;
+  v->s.bytes = v->own;
+  v->s.base = NULL;
+  v->s.units = -1;
+  v->s.crumbs = NULL;
+  return &v->s;
+}
+
+// Rebinds s to a string whose fields can be read, for the rest of the enclosing block.
+#define FSH_OPEN(s) fsh_view s##_view; s = fsh_open(s, &s##_view)
+
+static inline int64_t fsh_len(const fsh_str *s) {
+  return fsh_small(s) ? (int64_t)((uintptr_t)s >> 1 & 7) : s->length;
+}
+
+// A string's UTF-16 length when it is known without counting, or -1.
+static int64_t fsh_known_units(fsh_str *s);
+
 // A string may be shared between tasks on different threads, so its count changes atomically.
 void fsh_rt_str_retain(fsh_str *s) {
-  if (s && __atomic_load_n(&s->count, __ATOMIC_RELAXED) >= 0) __atomic_fetch_add(&s->count, 1, __ATOMIC_RELAXED);
+  if (s && !fsh_small(s) && __atomic_load_n(&s->count, __ATOMIC_RELAXED) >= 0) __atomic_fetch_add(&s->count, 1, __ATOMIC_RELAXED);
 }
 
 void fsh_rt_str_release(fsh_str *s) {
-  if (!s || __atomic_load_n(&s->count, __ATOMIC_RELAXED) < 0 || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
+  if (!s || fsh_small(s) || __atomic_load_n(&s->count, __ATOMIC_RELAXED) < 0 || __atomic_sub_fetch(&s->count, 1, __ATOMIC_ACQ_REL) > 0) return;
   fsh_rt_str_release(s->base);
   fsh_rt_free(s->crumbs);
   fsh_rt_free(s);
 }
 
-// A new block holding room for length bytes of its own, its UTF-16 length not yet known.
+// A new block holding room for length bytes of its own, its UTF-16 length not yet known. Code
+// that fills it may leave a short string in a block; fsh_str_done makes that small.
 static fsh_str *fsh_str_new(int64_t length) {
   fsh_str *s = fsh_rt_alloc(sizeof(fsh_str) + length);
   s->count = 1;
@@ -929,9 +977,18 @@ static fsh_str *fsh_str_new(int64_t length) {
 }
 
 static fsh_str *fsh_str_of(const char *bytes, int64_t length) {
+  if (length <= FSH_SMALL) return fsh_small_of(bytes, length);
   fsh_str *s = fsh_str_new(length);
   memcpy(s->own, bytes, length);
   return s;
+}
+
+// A block just filled, made small when it is short enough.
+static fsh_str *fsh_str_done(fsh_str *s) {
+  if (s->length > FSH_SMALL) return s;
+  fsh_str *small = fsh_small_of(s->bytes, s->length);
+  fsh_rt_free(s);
+  return small;
 }
 
 // Text is WTF-8: UTF-8, plus a lone surrogate in its 3-byte form, as JavaScript strings may
@@ -943,6 +1000,7 @@ static uint32_t fsh_three(const unsigned char *p) { return (p[0] & 0x0F) << 12 |
 // The code point at byte at in s, as a new string, moving at past it; NULL past the end. A
 // lone surrogate's 3-byte form is a code point of its own, as JavaScript's iterator gives one.
 fsh_str *fsh_rt_str_next(fsh_str *s, int64_t *at) {
+  FSH_OPEN(s);
   if (*at >= s->length) return NULL;
   const unsigned char *p = (const unsigned char *)s->bytes + *at;
   int64_t n = p[0] < 0x80 ? 1 : p[0] < 0xE0 ? 2 : p[0] < 0xF0 ? 3 : 4;
@@ -956,16 +1014,21 @@ fsh_str *fsh_rt_str_next(fsh_str *s, int64_t *at) {
 fsh_str *fsh_rt_str_join(fsh_str **parts, int64_t n) {
   int64_t length = 0, units = 0;
   for (int64_t i = 0; i < n; i++) {
-    length += parts[i]->length;
-    int64_t known = __atomic_load_n(&parts[i]->units, __ATOMIC_ACQUIRE);
+    length += fsh_len(parts[i]);
+    int64_t known = fsh_known_units(parts[i]);
     units = units < 0 || known < 0 ? -1 : units + known;
   }
-  fsh_str *s = fsh_str_new(length);
-  unsigned char *at = (unsigned char *)s->own;
+  // Joining only ever shortens at a pair, so a short total is built on the stack.
+  char small[FSH_SMALL + 1];
+  fsh_str *s = length <= FSH_SMALL ? NULL : fsh_str_new(length);
+  unsigned char *own = s ? (unsigned char *)s->own : (unsigned char *)small;
+  unsigned char *at = own;
   for (int64_t i = 0; i < n; i++) {
-    const unsigned char *from = (const unsigned char *)parts[i]->bytes;
-    int64_t size = parts[i]->length;
-    if (size >= 3 && at - (unsigned char *)s->own >= 3 && fsh_high_at(at - 3) && fsh_low_at(from)) {
+    fsh_str *part = parts[i];
+    FSH_OPEN(part);
+    const unsigned char *from = (const unsigned char *)part->bytes;
+    int64_t size = part->length;
+    if (size >= 3 && at - own >= 3 && fsh_high_at(at - 3) && fsh_low_at(from)) {
       uint32_t code = 0x10000 + ((fsh_three(at - 3) - 0xD800) << 10) + (fsh_three(from) - 0xDC00);
       at -= 3;
       *at++ = 0xF0 | code >> 18;
@@ -978,9 +1041,10 @@ fsh_str *fsh_rt_str_join(fsh_str **parts, int64_t n) {
     memcpy(at, from, size);
     at += size;
   }
-  s->length = at - (unsigned char *)s->own;
+  if (!s) return fsh_small_of(small, at - own);
+  s->length = at - own;
   s->units = units;
-  return s;
+  return fsh_str_done(s);
 }
 
 fsh_str *fsh_rt_str_concat(fsh_str *a, fsh_str *b) {
@@ -1027,8 +1091,11 @@ static uint32_t fsh_next(const unsigned char *s, int64_t *at, int *half) {
   return 0xDC00 + ((code - 0x10000) & 0x3FF);
 }
 
-// The UTF-16 length, counted once and kept.
+// The UTF-16 length, counted once and kept; a small string's is counted each time.
 int64_t fsh_rt_str_units(fsh_str *s) {
+  // A small string of ASCII bytes, the usual one, has a unit per byte.
+  if (fsh_small(s) && ((uint64_t)(uintptr_t)s & 0x8080808080808000ull) == 0) return fsh_len(s);
+  FSH_OPEN(s);
   int64_t known = __atomic_load_n(&s->units, __ATOMIC_ACQUIRE);
   if (known >= 0) return known;
   int64_t at = 0, n = 0;
@@ -1039,6 +1106,10 @@ int64_t fsh_rt_str_units(fsh_str *s) {
   }
   __atomic_store_n(&s->units, n, __ATOMIC_RELEASE);
   return n;
+}
+
+static int64_t fsh_known_units(fsh_str *s) {
+  return fsh_small(s) ? fsh_rt_str_units(s) : __atomic_load_n(&s->units, __ATOMIC_ACQUIRE);
 }
 
 // Breadcrumbs: where every 64th UTF-16 unit is, as its character's byte offset times two, plus
@@ -1063,6 +1134,7 @@ static void fsh_crumbs(fsh_str *s, int64_t units) {
 // of a pair. All-ASCII text is indexed directly; other text walks on from the breadcrumb at
 // or before i, at most 63 units.
 static int64_t fsh_seek(fsh_str *s, int64_t i, int *half) {
+  FSH_OPEN(s);
   *half = 0;
   int64_t units = fsh_rt_str_units(s);
   if (units == s->length) return i;
@@ -1084,6 +1156,7 @@ static int64_t fsh_seek(fsh_str *s, int64_t i, int *half) {
 }
 
 uint16_t fsh_rt_str_unit(fsh_str *s, int64_t i) {
+  FSH_OPEN(s);
   int half;
   int64_t at = fsh_seek(s, i, &half);
   return fsh_next((const unsigned char *)s->bytes, &at, &half);
@@ -1104,9 +1177,7 @@ fsh_str *fsh_rt_str_at(fsh_str *s, int64_t i) {
     bytes[n++] = 0x80 | (u >> 6 & 0x3F);
     bytes[n++] = 0x80 | (u & 0x3F);
   }
-  fsh_str *one = fsh_str_of(bytes, n);
-  one->units = 1;
-  return one;
+  return fsh_str_of(bytes, n);
 }
 
 // s.at(i): the one-unit string, a negative i counting from the end, or NULL past either end.
@@ -1137,6 +1208,7 @@ int64_t fsh_rt_str_code_point_at(fsh_str *s, int64_t i) {
 // Searching. A search with no lone surrogate matches whole characters, so it compares bytes;
 // one holding a lone surrogate may match half of a pair, so it compares UTF-16 units.
 static int fsh_has_lone(fsh_str *s) {
+  FSH_OPEN(s);
   const unsigned char *p = (const unsigned char *)s->bytes;
   for (int64_t i = 0; i + 1 < s->length; i++) if (p[i] == 0xED && p[i + 1] >= 0xA0) return 1;
   return 0;
@@ -1144,6 +1216,7 @@ static int fsh_has_lone(fsh_str *s) {
 
 // The UTF-16 units of s, in a buffer the caller frees.
 static uint16_t *fsh_utf16(fsh_str *s) {
+  FSH_OPEN(s);
   uint16_t *units = fsh_rt_alloc((fsh_rt_str_units(s) + 1) * sizeof(uint16_t));
   int64_t at = 0, n = 0;
   int half = 0;
@@ -1177,6 +1250,8 @@ static int64_t fsh_start_at(fsh_str *s, int64_t i) {
 // A match's unit is counted from where the search started, whose unit is known, so repeated
 // searches along a string take linear time.
 int64_t fsh_rt_str_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
+  FSH_OPEN(s);
+  FSH_OPEN(needle);
   int64_t n = fsh_rt_str_units(s);
   from = fsh_clamp(from, n);
   if (needle->length == 0) return from;
@@ -1189,6 +1264,9 @@ int64_t fsh_rt_str_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
     unit++;
   }
   for (int64_t at = start; at + needle->length <= s->length; at++) {
+    const char *first = memchr(s->bytes + at, needle->bytes[0], s->length - needle->length + 1 - at);
+    if (!first) break;
+    at = first - s->bytes;
     if (memcmp(s->bytes + at, needle->bytes, needle->length) != 0) continue;
     if (n == s->length) return at;
     int h = 0;
@@ -1200,6 +1278,8 @@ int64_t fsh_rt_str_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
 
 // Where needle last occurs in s starting at or before unit from, by units, or -1.
 int64_t fsh_rt_str_last_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
+  FSH_OPEN(s);
+  FSH_OPEN(needle);
   int64_t n = fsh_rt_str_units(s), m = fsh_rt_str_units(needle);
   from = fsh_clamp(from, n);
   if (m > n) return -1;
@@ -1235,6 +1315,8 @@ int64_t fsh_rt_str_last_index_of(fsh_str *s, fsh_str *needle, int64_t from) {
 }
 
 int32_t fsh_rt_str_starts_with(fsh_str *s, fsh_str *needle, int64_t position) {
+  FSH_OPEN(s);
+  FSH_OPEN(needle);
   int64_t n = fsh_rt_str_units(s), m = fsh_rt_str_units(needle);
   position = fsh_clamp(position, n);
   if (m == 0) return 1;
@@ -1246,6 +1328,8 @@ int32_t fsh_rt_str_starts_with(fsh_str *s, fsh_str *needle, int64_t position) {
 }
 
 int32_t fsh_rt_str_ends_with(fsh_str *s, fsh_str *needle, int64_t end) {
+  FSH_OPEN(s);
+  FSH_OPEN(needle);
   int64_t n = fsh_rt_str_units(s), m = fsh_rt_str_units(needle);
   end = fsh_clamp(end, n);
   if (m == 0) return 1;
@@ -1275,6 +1359,7 @@ static int fsh_put(char *out, uint32_t u) {
 
 // Bytes [a, b) of s, starting and ending at characters, sharing the block they live in.
 static fsh_str *fsh_share(fsh_str *s, int64_t a, int64_t b) {
+  if (b - a <= FSH_SMALL) return fsh_small_of(s->bytes + a, b - a);
   fsh_str *slice = fsh_rt_alloc(sizeof(fsh_str));
   slice->count = 1;
   slice->length = b - a;
@@ -1292,11 +1377,8 @@ static fsh_str *fsh_share(fsh_str *s, int64_t a, int64_t b) {
 // ponytail: a slice keeps its whole base alive, as a Swift substring does; copy small slices
 // if pinned memory shows up.
 static fsh_str *fsh_sub(fsh_str *s, int64_t from, int64_t to) {
-  if (from == to) {
-    fsh_str *empty = fsh_str_new(0);
-    empty->units = 0;
-    return empty;
-  }
+  if (from == to) return fsh_small_of("", 0);
+  FSH_OPEN(s);
   int cut_start, cut_end;
   int64_t a = fsh_seek(s, from, &cut_start), b = fsh_seek(s, to, &cut_end);
   const unsigned char *bytes = (const unsigned char *)s->bytes;
@@ -1316,8 +1398,9 @@ static fsh_str *fsh_sub(fsh_str *s, int64_t from, int64_t to) {
     at = b;
     if (cut_end) out += fsh_put(out, fsh_next(bytes, &at, &half));
     slice->length = out - slice->own;
+    slice = fsh_str_done(slice);
   }
-  slice->units = to - from;
+  if (!fsh_small(slice)) slice->units = to - from;
   return slice;
 }
 
@@ -1987,25 +2070,6 @@ void fsh_rt_array_reverse(fsh_array *a, int64_t size) {
   }
 }
 
-// A stable merge sort of n elements of size bytes each, by the sign of cmp(env, a, b), using a
-// buffer of n elements. Each pair of runs merges into the buffer and is copied back before the
-// next, so the array holds every element exactly once whenever a comparator runs, and a panic
-// in one leaves it whole for its drop.
-void fsh_rt_sort(char *data, int64_t n, int64_t size, int32_t (*cmp)(void *, void *, void *), void *env, char *buffer) {
-  for (int64_t width = 1; width < n; width *= 2) {
-    for (int64_t low = 0; low + width < n; low += 2 * width) {
-      int64_t mid = low + width, high = low + 2 * width < n ? low + 2 * width : n;
-      int64_t i = low, j = mid, k = low;
-      // The right run's element goes first only when it orders strictly before, which keeps
-      // equal elements in their order.
-      while (i < mid && j < high) memcpy(buffer + size * k++, data + size * (cmp(env, data + size * j, data + size * i) < 0 ? j++ : i++), size);
-      if (i < mid) memcpy(buffer + size * k, data + size * i, size * (mid - i)), k += mid - i;
-      if (j < high) memcpy(buffer + size * k, data + size * j, size * (high - j));
-      memcpy(data + size * low, buffer + size * low, size * (high - low));
-    }
-  }
-}
-
 // An array's buffer for this many bytes, or none for no elements.
 void *fsh_rt_array_alloc(int64_t bytes) {
   return bytes == 0 ? NULL : fsh_rt_alloc(bytes);
@@ -2170,9 +2234,26 @@ __attribute__((constructor)) static void fsh_map_seeding(void) {
 static uint64_t fsh_map_hash(fsh_map *m, int64_t bits) {
   uint64_t h = fsh_map_seed;
   if (m->strings) {
+    // The bytes eight at a time, the last word padded with zeros, then the length, so a small
+    // string hashes from its word as the same text in a block does.
     fsh_str *s = (fsh_str *)(intptr_t)bits;
-    h ^= 0xcbf29ce484222325ull;
-    for (int64_t i = 0; i < s->length; i++) h = (h ^ (unsigned char)s->bytes[i]) * 0x100000001b3ull;
+    int64_t length = fsh_len(s);
+    if (fsh_small(s)) {
+      if (length > 0) h = (h ^ (uint64_t)bits >> 8) * 0x9e3779b97f4a7c15ull;
+    } else {
+      int64_t i = 0;
+      for (; i + 8 <= length; i += 8) {
+        uint64_t w;
+        memcpy(&w, s->bytes + i, 8);
+        h = (h ^ w) * 0x9e3779b97f4a7c15ull;
+      }
+      if (i < length) {
+        uint64_t w = 0;
+        memcpy(&w, s->bytes + i, length - i);
+        h = (h ^ w) * 0x9e3779b97f4a7c15ull;
+      }
+    }
+    h ^= (uint64_t)length;
   } else {
     h ^= (uint64_t)bits;
   }
@@ -2191,7 +2272,11 @@ uint64_t fsh_rt_key_hash(int64_t bits, int32_t strings) {
 
 static int fsh_map_same(fsh_map *m, int64_t a, int64_t b) {
   if (!m->strings) return a == b;
+  if (a == b) return 1;
   fsh_str *x = (fsh_str *)(intptr_t)a, *y = (fsh_str *)(intptr_t)b;
+  if (fsh_small(x) && fsh_small(y)) return 0;
+  FSH_OPEN(x);
+  FSH_OPEN(y);
   return x->length == y->length && memcmp(x->bytes, y->bytes, x->length) == 0;
 }
 
@@ -2294,6 +2379,7 @@ static int fsh_dict_index_cmp(const void *a, const void *b) {
 
 // Whether a key is an array index: a canonical decimal integer below 2^32 - 1.
 static int fsh_dict_numeric(fsh_str *s, uint64_t *n) {
+  FSH_OPEN(s);
   if (s->length == 0 || s->length > 10 || (s->length > 1 && s->bytes[0] == '0')) return 0;
   uint64_t v = 0;
   for (int64_t i = 0; i < s->length; i++) {
@@ -2433,6 +2519,7 @@ static int fsh_space(uint32_t c) {
 
 // Trims whitespace from the start (1), the end (2) or both (3), sharing what is left.
 fsh_str *fsh_rt_str_trim(fsh_str *s, int32_t sides) {
+  FSH_OPEN(s);
   const unsigned char *p = (const unsigned char *)s->bytes;
   int64_t a = 0, b = s->length;
   int half = 0;
@@ -2487,6 +2574,7 @@ static fsh_str *fsh_parts_join(fsh_parts *p) {
 // $& the match, $ and a backtick (0x60) what comes before it, and $' what comes after, as
 // JavaScript's replace and replaceAll with a string pattern read it.
 static void fsh_replacement(fsh_parts *p, fsh_str *s, fsh_str *replacement, int64_t at, int64_t end, int64_t n) {
+  FSH_OPEN(replacement);
   const char *r = replacement->bytes;
   int64_t from = 0;
   for (int64_t i = 0; i + 1 < replacement->length; i++) {
@@ -2558,7 +2646,7 @@ static fsh_str *fsh_from_points(const uint32_t *points, int64_t n) {
   }
   s->length = at - (char *)s->own;
   s->units = units;
-  return s;
+  return fsh_str_done(s);
 }
 
 // String.fromCharCode: UTF-16 units.
@@ -2593,11 +2681,8 @@ static void fsh_too_long(const char *at) {
 
 fsh_str *fsh_rt_str_repeat(fsh_str *s, int64_t count, const char *at) {
   if (count < 0) fsh_too_long(at);
-  if (count == 0 || s->length == 0) {
-    fsh_str *empty = fsh_str_new(0);
-    empty->units = 0;
-    return empty;
-  }
+  FSH_OPEN(s);
+  if (count == 0 || s->length == 0) return fsh_small_of("", 0);
   if (count > FSH_MAX_BYTES / s->length) fsh_too_long(at);
   const unsigned char *b = (const unsigned char *)s->bytes;
   // A string ending in a lone high surrogate and starting with a lone low one joins a pair at
@@ -2616,7 +2701,7 @@ fsh_str *fsh_rt_str_repeat(fsh_str *s, int64_t count, const char *at) {
   for (int64_t i = 0; i < count; i++) memcpy(result->own + i * s->length, s->bytes, s->length);
   int64_t known = __atomic_load_n(&s->units, __ATOMIC_ACQUIRE);
   result->units = known >= 0 ? known * count : -1;
-  return result;
+  return fsh_str_done(result);
 }
 
 // JavaScript's padStart (start) or padEnd: the fill, a space by default, repeated and cut to
@@ -2628,7 +2713,7 @@ fsh_str *fsh_rt_str_pad(fsh_str *s, int64_t length, fsh_str *fill, int32_t start
   int64_t m = fsh_rt_str_units(fill);
   // An empty fill leaves the string as it is, however long it was asked to be. A length too
   // long to make panics before anything is held, so the unwind has nothing here to drop.
-  if (m > 0 && (length < 0 || (length > n && (length - n) / m > FSH_MAX_BYTES / fill->length))) {
+  if (m > 0 && (length < 0 || (length > n && (length - n) / m > FSH_MAX_BYTES / fsh_len(fill)))) {
     fsh_rt_str_release(space);
     fsh_too_long(at);
   }
@@ -2670,10 +2755,12 @@ void fsh_rt_panic_index(const char *at, int64_t length, int64_t index) {
 // An assertion's panic, its message the reason; at is the "panicked at" line. The message is
 // released here, as the panic unwinds past the statement that would release it.
 void fsh_rt_panic_assert(const char *at, fsh_str *message) {
-  size_t length = message ? message->length : 0;
+  fsh_str *text = message ? message : fsh_small_of("", 0);
+  FSH_OPEN(text);
+  size_t length = text->length;
   fsh_panic_at(at);
-  if (length > 0) fwrite(message->bytes, 1, length, stderr);
-  fsh_panic_reason(length > 0 ? message->bytes : "", length);
+  if (length > 0) fwrite(text->bytes, 1, length, stderr);
+  fsh_panic_reason(length > 0 ? text->bytes : "", length);
   fsh_rt_str_release(message);
   fsh_rt_panic("\n");
 }
@@ -2701,7 +2788,8 @@ void fsh_rt_panic_rust(const char *at, fsh_rust_message *reason) {
   fsh_rt_panic("\n");
 }
 
-// A Fish string's bytes for Rust to read, WTF-8, a lone surrogate in its 3-byte form.
+// A Fish string's bytes for Rust to read, WTF-8, a lone surrogate in its 3-byte form. Rust reads
+// a small string's bytes from its word itself, so s is a block.
 const char *fsh_rt_rust_str_bytes(fsh_str *s, int64_t *length) {
   *length = s ? s->length : 0;
   return s ? s->bytes : "";
@@ -2720,6 +2808,9 @@ void fsh_rt_rust_dropped(fsh_rust_message **caught, const char *at) {
 // a < b, a === b and a > b as -1, 0 and 1, by UTF-16 code units as JavaScript orders strings.
 // Past the bytes they share, both are read unit by unit from the character they differ in.
 int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {
+  if (a == b) return 0;
+  FSH_OPEN(a);
+  FSH_OPEN(b);
   int64_t n = a->length < b->length ? a->length : b->length;
   int64_t i = 0;
   while (i < n && a->bytes[i] == b->bytes[i]) i++;
@@ -2736,6 +2827,7 @@ int32_t fsh_rt_str_compare(fsh_str *a, fsh_str *b) {
 // FNV-1a over the first 16 UTF-16 units from seed, as the compiler's stringHash computes it for
 // the strings a many-armed switch or match tests.
 uint32_t fsh_rt_str_hash(fsh_str *s, uint32_t seed) {
+  FSH_OPEN(s);
   uint32_t h = 2166136261u ^ seed;
   int64_t at = 0;
   int half = 0;
@@ -2746,6 +2838,7 @@ uint32_t fsh_rt_str_hash(fsh_str *s, uint32_t seed) {
 // A lone surrogate prints as U+FFFD, as a terminal shows one JavaScript prints.
 void fsh_rt_str_print(int32_t stream, fsh_str *s) {
   FILE *out = stream == 2 ? stderr : stdout;
+  FSH_OPEN(s);
   const unsigned char *p = (const unsigned char *)s->bytes, *end = p + s->length, *from = p;
   for (; p + 2 < end; p++) {
     if (!fsh_high_at(p) && !fsh_low_at(p)) continue;
@@ -2760,6 +2853,7 @@ void fsh_rt_str_print(int32_t stream, fsh_str *s) {
 // A NUL-terminated copy of a string's bytes for C, freed with fsh_rt_free; NULL when the string
 // holds a NUL, which C would take for its end.
 char *fsh_rt_str_cstring(fsh_str *s) {
+  FSH_OPEN(s);
   if (memchr(s->bytes, 0, s->length)) return NULL;
   char *c = fsh_rt_alloc(s->length + 1);
   memcpy(c, s->bytes, s->length);
@@ -2770,6 +2864,11 @@ char *fsh_rt_str_cstring(fsh_str *s) {
 // A string of n bytes of UTF-8, decoded as the web's TextDecoder does: each byte that can't
 // start a sequence, and each longest start of one that is cut short or broken, becomes U+FFFD.
 static fsh_str *fsh_from_utf8(const unsigned char *p, size_t n) {
+  if (n <= FSH_SMALL) {
+    size_t ascii = 0;
+    while (ascii < n && p[ascii] < 0x80) ascii++;
+    if (ascii == n) return fsh_small_of((const char *)p, n);
+  }
   fsh_str *s = fsh_str_new(n * 3);
   unsigned char *at = (unsigned char *)s->own;
   for (size_t i = 0; i < n;) {
@@ -2791,7 +2890,7 @@ static fsh_str *fsh_from_utf8(const unsigned char *p, size_t n) {
     }
   }
   s->length = at - (unsigned char *)s->own;
-  return s;
+  return fsh_str_done(s);
 }
 
 // A string of a C string's bytes up to its NUL.
@@ -2851,6 +2950,7 @@ fsh_str *fsh_rt_http_date(void) {
 // 'new TextEncoder().encode(s)': its UTF-8 bytes, a lone surrogate becoming U+FFFD, whose
 // encoding is as long.
 void fsh_rt_utf8_encode(fsh_array *out, fsh_str *s) {
+  FSH_OPEN(s);
   out->data = fsh_rt_array_alloc(s->length);
   out->length = out->capacity = s->length;
   if (!s->length) return;
@@ -2866,16 +2966,22 @@ void fsh_rt_utf8_encode(fsh_array *out, fsh_str *s) {
   }
 }
 
+// A number's decimal digits, written back from the end of text, with a minus when negative.
+static char *fsh_decimal(uint64_t v, int negative, char *end) {
+  char *at = end;
+  do *--at = (char)('0' + v % 10); while ((v /= 10) != 0);
+  if (negative) *--at = '-';
+  return at;
+}
+
 fsh_str *fsh_rt_str_from_i64(int64_t v) {
-  char text[24];
-  int n = snprintf(text, sizeof text, "%lld", (long long)v);
-  return fsh_str_of(text, n);
+  char text[24], *at = fsh_decimal(v < 0 ? 0 - (uint64_t)v : (uint64_t)v, v < 0, text + sizeof text);
+  return fsh_str_of(at, text + sizeof text - at);
 }
 
 fsh_str *fsh_rt_str_from_u64(uint64_t v) {
-  char text[24];
-  int n = snprintf(text, sizeof text, "%llu", (unsigned long long)v);
-  return fsh_str_of(text, n);
+  char text[24], *at = fsh_decimal(v, 0, text + sizeof text);
+  return fsh_str_of(at, text + sizeof text - at);
 }
 
 static char *fsh_format(double x, int single, char *out) {
@@ -2958,6 +3064,7 @@ static int fsh_digit(unsigned char c) {
 // JavaScript's parseInt, its NaN as a false result: white space, a sign, '0x' when the radix is
 // 16 or not given (0), then the longest run of digits. A value past the i64 range is false too.
 int fsh_rt_parse_int(fsh_str *s, int64_t radix, int64_t *out) {
+  FSH_OPEN(s);
   const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
   int64_t n = s ? s->length : 0, i = fsh_js_skip(p, n);
   int negative = i < n && p[i] == '-';
@@ -3015,6 +3122,7 @@ static double fsh_js_strtod(const unsigned char *p, int64_t length) {
 // JavaScript's parseFloat, its NaN as a false result: white space, then the longest decimal
 // literal with an optional sign.
 int fsh_rt_parse_float(fsh_str *s, double *out) {
+  FSH_OPEN(s);
   const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
   int64_t n = s ? s->length : 0, i = fsh_js_skip(p, n);
   int64_t sign = i < n && (p[i] == '-' || p[i] == '+');
@@ -3027,6 +3135,7 @@ int fsh_rt_parse_float(fsh_str *s, double *out) {
 // JavaScript's Number of a string, its NaN as a false result: the whole string less white space
 // at both ends is empty, giving 0, a '0x', '0o' or '0b' integer, or a decimal literal.
 int fsh_rt_parse_number(fsh_str *s, double *out) {
+  FSH_OPEN(s);
   const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
   int64_t n = s ? s->length : 0, i = fsh_js_skip(p, n);
   for (int64_t k = 1; n > i && k <= 3 && k <= n - i;) {
@@ -3121,7 +3230,7 @@ fsh_str *fsh_rt_int_to_fixed(int64_t v, int32_t is_signed, int64_t f) {
     s->own[n] = '.';
     memset(s->own + n + 1, '0', f);
   }
-  return s;
+  return fsh_str_done(s);
 }
 fsh_str *fsh_rt_str_from_f32(float x);
 
@@ -3644,6 +3753,7 @@ unsigned __int128 fsh_rt_big_low(const fsh_big *a) {
 // The nearest double, as Number(x) gives.
 double fsh_rt_big_f64(const fsh_big *a) {
   fsh_str *text = fsh_rt_big_text(a, 10);
+  FSH_OPEN(text);
   double x = fsh_js_strtod((const unsigned char *)text->bytes, text->length);
   fsh_rt_str_release(text);
   return x;
@@ -3683,6 +3793,7 @@ void fsh_rt_json_f64(fsh_json_out *w, double x, int32_t single) {
 // A string as JSON.stringify writes it: quotes, backslashes and control characters escaped, and
 // a lone surrogate as its escape of four hex digits, so the text is well-formed UTF-8.
 void fsh_rt_json_string(fsh_json_out *w, fsh_str *s) {
+  FSH_OPEN(s);
   const unsigned char *p = (const unsigned char *)s->bytes;
   int64_t n = s->length, from = 0, i = 0;
   fsh_rt_json_raw(w, "\"", 1);
@@ -3731,6 +3842,7 @@ fsh_str *fsh_rt_json_done(fsh_json_out *w) {
 // when a union tries its members in turn.
 typedef struct fsh_json_in {
   const unsigned char *p;
+  char small[8];
   int64_t n, at, depth;
   char *path;
   int64_t path_length, path_room;
@@ -3745,7 +3857,10 @@ typedef struct fsh_json_in {
 
 fsh_json_in *fsh_rt_json_in(fsh_str *s) {
   fsh_json_in *r = fsh_rt_alloc(sizeof(fsh_json_in));
-  r->p = (const unsigned char *)s->bytes;
+  // A small string's view ends with this call, so the reader keeps its own copy of the bytes.
+  FSH_OPEN(s);
+  if (s == &s_view.s) memcpy(r->small, s_view.own, sizeof r->small);
+  r->p = s == &s_view.s ? (const unsigned char *)r->small : (const unsigned char *)s->bytes;
   r->n = s->length;
   r->at = 0;
   r->depth = 0;
@@ -3784,6 +3899,7 @@ static void fsh_json_path(fsh_json_in *r, const char *p, int64_t n) {
 
 // The path's length before a field's name or an element's index goes on it, to go back to.
 int64_t fsh_rt_json_field_path(fsh_json_in *r, fsh_str *key) {
+  FSH_OPEN(key);
   int64_t mark = r->path_length;
   fsh_json_path(r, ".", 1);
   fsh_json_path(r, key->bytes, key->length);
@@ -4073,6 +4189,7 @@ int32_t fsh_rt_json_text(fsh_json_in *r, fsh_str **out, const char *what) {
 
 // Whether a string read is the given text, as a key or an enum member's name.
 int32_t fsh_rt_json_same(fsh_str *s, const char *text, int64_t n) {
+  FSH_OPEN(s);
   return s->length == n && memcmp(s->bytes, text, n) == 0;
 }
 
@@ -4644,6 +4761,7 @@ fsh_insp *fsh_rt_insp_text(const char *text) {
 // A bigint as console.log shows one, its digits then 'n'.
 fsh_insp *fsh_rt_insp_bigint(const struct fsh_big *n) {
   fsh_str *digits = fsh_rt_big_text(n, 10);
+  FSH_OPEN(digits);
   char *text = fsh_rt_alloc(digits->length + 2);
   memcpy(text, digits->bytes, digits->length);
   text[digits->length] = 'n';
@@ -4693,11 +4811,13 @@ fsh_insp *fsh_rt_insp_f64(double x, int32_t single) {
 }
 
 fsh_insp *fsh_rt_insp_string(fsh_str *s) {
+  FSH_OPEN(s);
   return fsh_insp_new(FSH_INSP_STRING, s->bytes, s->length);
 }
 
 // Text printed as it is, unquoted, which it takes over.
 fsh_insp *fsh_rt_insp_raw(fsh_str *s) {
+  FSH_OPEN(s);
   fsh_insp *v = fsh_insp_new(FSH_INSP_TEXT, s->bytes, s->length);
   fsh_rt_str_release(s);
   return v;
@@ -4713,6 +4833,7 @@ void fsh_rt_insp_field(fsh_insp *object, const char *key, fsh_insp *value) {
 
 // A dictionary's entry, its key known only at run time.
 void fsh_rt_insp_entry(fsh_insp *object, fsh_str *key, fsh_insp *value) {
+  FSH_OPEN(key);
   fsh_insp_add_n(object, value, key->bytes, key->length);
 }
 
@@ -4833,6 +4954,8 @@ fsh_insp *fsh_rt_insp_node_buffer(const uint8_t *data, int64_t length) {
 // An Error with no stack lines: its name and message, the class's name when
 // it differs and the error's name ends in Error, bracketed.
 fsh_insp *fsh_rt_insp_error(const char *cls, fsh_str *name, fsh_str *message) {
+  FSH_OPEN(name);
+  FSH_OPEN(message);
   fsh_sb b = {0};
   fsh_sb_str(&b, "[");
   int64_t n = name->length;
@@ -5326,7 +5449,10 @@ fsh_sb *fsh_rt_text_new(void) {
   return b;
 }
 
-void fsh_rt_text_add(fsh_sb *b, fsh_str *s) { fsh_sb_put(b, s->bytes, s->length); }
+void fsh_rt_text_add(fsh_sb *b, fsh_str *s) {
+  FSH_OPEN(s);
+  fsh_sb_put(b, s->bytes, s->length);
+}
 
 void fsh_rt_text_raw(fsh_sb *b, const char *s) { fsh_sb_str(b, s); }
 
@@ -5394,8 +5520,10 @@ static void fsh_farg_number(fsh_sb *b, double x) {
 // A scalar as console.log prints it on its own.
 static void fsh_farg_plain(fsh_sb *b, fsh_farg *a) {
   char t[32];
+  fsh_str *text = a->text;
+  FSH_OPEN(text);
   switch (a->kind) {
-    case FSH_FARG_STRING: fsh_sb_put(b, a->text->bytes, a->text->length); break;
+    case FSH_FARG_STRING: fsh_sb_put(b, text->bytes, text->length); break;
     case FSH_FARG_INT: snprintf(t, sizeof t, "%lld", (long long)a->whole); fsh_sb_str(b, t); break;
     case FSH_FARG_UINT: snprintf(t, sizeof t, "%llu", (unsigned long long)a->whole); fsh_sb_str(b, t); break;
     case FSH_FARG_FLOAT:
@@ -5403,8 +5531,8 @@ static void fsh_farg_plain(fsh_sb *b, fsh_farg *a) {
       else fsh_farg_number(b, a->number);
       break;
     case FSH_FARG_BOOL: fsh_sb_str(b, a->whole ? "true" : "false"); break;
-    case FSH_FARG_DIGITS: fsh_sb_put(b, a->text->bytes, a->text->length); break;
-    case FSH_FARG_BIGINT: fsh_sb_put(b, a->text->bytes, a->text->length); fsh_sb_str(b, "n"); break;
+    case FSH_FARG_DIGITS: fsh_sb_put(b, text->bytes, text->length); break;
+    case FSH_FARG_BIGINT: fsh_sb_put(b, text->bytes, text->length); fsh_sb_str(b, "n"); break;
     default: fsh_sb_str(b, "null"); break;
   }
 }
@@ -5441,6 +5569,7 @@ static fsh_str *fsh_farg_string(fsh_farg *a) {
 // JavaScript's parseInt with no radix, as a double: digits after white space, a sign and '0x',
 // NaN when none start the text, -0 for a negative zero.
 static double fsh_js_parse_int(fsh_str *s) {
+  FSH_OPEN(s);
   const unsigned char *p = (const unsigned char *)s->bytes;
   int64_t n = s->length, i = fsh_js_skip(p, n);
   int negative = i < n && p[i] == '-';
@@ -5513,9 +5642,11 @@ fsh_str *fsh_rt_format(fsh_farg *args, int64_t n, const char *where) {
   fsh_sb b = {0};
   int64_t a = 0;
   const char *join = "";
-  if (n > 1 && args[0].kind == FSH_FARG_STRING) {
-    const char *f = args[0].text->bytes;
-    int64_t length = args[0].text->length, last = 0;
+  fsh_str *format = n > 1 && args[0].kind == FSH_FARG_STRING ? args[0].text : NULL;
+  FSH_OPEN(format);
+  if (format) {
+    const char *f = format->bytes;
+    int64_t length = format->length, last = 0;
     for (int64_t i = 0; i < length - 1; i++) {
       if (f[i] != '%') continue;
       char next = f[++i];
@@ -5586,6 +5717,7 @@ static int fsh_in(const uint32_t (*ranges)[2], int64_t n, uint32_t cp) {
 
 // The code points of WTF-8 text, a lone surrogate as itself, in a buffer the caller frees.
 static uint32_t *fsh_code_points(fsh_str *s, int64_t *n) {
+  FSH_OPEN(s);
   uint32_t *cps = fsh_rt_alloc((s->length + 1) * sizeof(uint32_t));
   const unsigned char *p = (const unsigned char *)s->bytes;
   *n = 0;
@@ -5623,6 +5755,7 @@ static int fsh_final_sigma(const uint32_t *cps, int64_t n, int64_t i) {
 // JavaScript's toUpperCase (upper) or toLowerCase, code point by code point. A code point may
 // become up to three, each at most three times its bytes, so three times the length is room.
 fsh_str *fsh_rt_str_case(fsh_str *s, int32_t upper) {
+  FSH_OPEN(s);
   int64_t n;
   uint32_t *cps = fsh_code_points(s, &n);
   fsh_str *out = fsh_str_new(s->length * 3);
@@ -5657,7 +5790,7 @@ fsh_str *fsh_rt_str_case(fsh_str *s, int32_t upper) {
   }
   out->length = at - out->own;
   fsh_rt_free(cps);
-  return out;
+  return fsh_str_done(out);
 }
 
 // The async runtime: tasks polled by one worker thread per core.
@@ -5733,21 +5866,28 @@ static void fsh_task_wait(fsh_task *t, const char *what, int64_t target) {
 }
 
 // A worker's queue: a ring of tasks, guarded by its own lock, which other workers steal from.
+// The lock is a spin lock, held for a few loads and stores: a mutex that a thief contends for
+// sleeps in the kernel, which costs more than the work it guards.
 typedef struct {
-  pthread_mutex_t lock;
+  int32_t lock;
   fsh_task **ring;
   int64_t head, count, capacity;
 } fsh_queue;
 
 static int64_t fsh_workers = 0;
 static fsh_queue *fsh_queues = NULL;
-static fsh_queue fsh_injected = { PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0, 0 };
+static fsh_queue fsh_injected = { 0, NULL, 0, 0, 0 };
 static pthread_t *fsh_threads = NULL;
 static _Thread_local int64_t fsh_worker = -1;
 // Workers with nothing to do wait here until a task is queued or the runtime stops.
 static pthread_mutex_t fsh_park = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fsh_parked = PTHREAD_COND_INITIALIZER;
 static int64_t fsh_queued = 0;
+// Workers waiting on fsh_parked, and workers awake with nothing to run that are looking for a
+// task. Queuing one wakes a parked worker only when none is looking, so on a busy runtime a wake
+// costs no lock and no system call, as Go's and tokio's schedulers do.
+static int64_t fsh_idle = 0;
+static int64_t fsh_searching = 0;
 static int64_t fsh_stopped = 0;
 static pthread_cond_t fsh_left = PTHREAD_COND_INITIALIZER;
 // The tasks not yet done, dropped when the runtime stops; and how the program ends.
@@ -5773,10 +5913,26 @@ static int64_t fsh_blocking_live = 0;
 // these, or the blocks that thread is about to free would be counted as leaks.
 static int64_t fsh_blocking_ending = 0;
 
+static void fsh_relax(void);
+
+static void fsh_queue_lock(fsh_queue *q) {
+  for (int spins = 0; __atomic_exchange_n(&q->lock, 1, __ATOMIC_ACQUIRE); spins++) {
+    // Its holder may have been preempted, so a long wait gives up the processor.
+    while (__atomic_load_n(&q->lock, __ATOMIC_RELAXED)) {
+      if (++spins > 100) sched_yield();
+      else fsh_relax();
+    }
+  }
+}
+
+static void fsh_queue_unlock(fsh_queue *q) {
+  __atomic_store_n(&q->lock, 0, __ATOMIC_RELEASE);
+}
+
 static int fsh_push_checked(fsh_queue *q, fsh_task *t, int check_stopping) {
-  pthread_mutex_lock(&q->lock);
+  fsh_queue_lock(q);
   if (check_stopping && __atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) {
-    pthread_mutex_unlock(&q->lock);
+    fsh_queue_unlock(q);
     return 0;
   }
   if (q->count == q->capacity) {
@@ -5789,8 +5945,8 @@ static int fsh_push_checked(fsh_queue *q, fsh_task *t, int check_stopping) {
     q->capacity = capacity;
   }
   q->ring[(q->head + q->count) % q->capacity] = t;
-  q->count++;
-  pthread_mutex_unlock(&q->lock);
+  __atomic_store_n(&q->count, q->count + 1, __ATOMIC_RELAXED);
+  fsh_queue_unlock(q);
   return 1;
 }
 
@@ -5798,19 +5954,33 @@ static void fsh_push(fsh_queue *q, fsh_task *t) {
   (void)fsh_push_checked(q, t, 0);
 }
 
-static fsh_task *fsh_pop(fsh_queue *q) {
-  pthread_mutex_lock(&q->lock);
+// A queue holding fewer than least tasks is passed over without its lock.
+static fsh_task *fsh_pop(fsh_queue *q, int64_t least) {
+  if (__atomic_load_n(&q->count, __ATOMIC_RELAXED) < least) return NULL;
+  fsh_queue_lock(q);
   fsh_task *t = NULL;
-  if (q->count > 0) {
+  if (q->count >= least) {
     t = q->ring[q->head];
     q->head = (q->head + 1) % q->capacity;
-    q->count--;
+    __atomic_store_n(&q->count, q->count - 1, __ATOMIC_RELAXED);
   }
-  pthread_mutex_unlock(&q->lock);
+  fsh_queue_unlock(q);
   return t;
 }
 
 static void fsh_pool_task(fsh_task *t);
+
+// Wakes a parked worker unless one is already looking for a task. The counts are sequentially
+// consistent against a parking worker's, which counts itself idle before it reads fsh_queued:
+// either this sees it idle, or it sees the task queued and doesn't wait.
+static void fsh_notify(void) {
+  if (__atomic_load_n(&fsh_searching, __ATOMIC_SEQ_CST) > 0 || __atomic_load_n(&fsh_idle, __ATOMIC_SEQ_CST) == 0) return;
+  // Taking the lock waits out a worker between counting itself idle and waiting; the signal is
+  // sent after, so the worker it wakes doesn't then wait for the lock.
+  pthread_mutex_lock(&fsh_park);
+  pthread_mutex_unlock(&fsh_park);
+  pthread_cond_signal(&fsh_parked);
+}
 
 static fsh_task **fsh_sim_ready = NULL;
 static int64_t fsh_sim_ready_count = 0, fsh_sim_ready_cap = 0;
@@ -5834,10 +6004,8 @@ static void fsh_schedule(fsh_task *t) {
   if (t->blocking) return fsh_pool_task(t);
   if (fsh_worker >= 0) fsh_push(&fsh_queues[fsh_worker], t);
   else if (!fsh_push_checked(&fsh_injected, t, 1)) return;
-  pthread_mutex_lock(&fsh_park);
-  __atomic_fetch_add(&fsh_queued, 1, __ATOMIC_RELAXED);
-  pthread_cond_signal(&fsh_parked);
-  pthread_mutex_unlock(&fsh_park);
+  __atomic_fetch_add(&fsh_queued, 1, __ATOMIC_SEQ_CST);
+  fsh_notify();
 }
 
 struct fsh_group;
@@ -5938,30 +6106,76 @@ static void fsh_run(fsh_task *t) {
   if (blocking) __atomic_sub_fetch(&fsh_blocking_ending, 1, __ATOMIC_RELEASE);
 }
 
-static fsh_task *fsh_next_task(int64_t me) {
-  fsh_task *t = fsh_pop(&fsh_queues[me]);
-  if (!t) t = fsh_pop(&fsh_injected);
-  for (int64_t i = 1; !t && i < fsh_workers; i++) t = fsh_pop(&fsh_queues[(me + i) % fsh_workers]);
-  if (t) __atomic_fetch_sub(&fsh_queued, 1, __ATOMIC_RELAXED);
+// The next task for a worker: its own queue's first, else the shared queue's, else one taken
+// from another worker's queue holding at least least tasks.
+static fsh_task *fsh_next_task(int64_t me, int64_t least) {
+  fsh_task *t = fsh_pop(&fsh_queues[me], 1);
+  if (!t) t = fsh_pop(&fsh_injected, 1);
+  for (int64_t i = 1; !t && i < fsh_workers; i++) t = fsh_pop(&fsh_queues[(me + i) % fsh_workers], least);
+  if (t) __atomic_fetch_sub(&fsh_queued, 1, __ATOMIC_SEQ_CST);
   return t;
+}
+
+static int64_t fsh_now(void);
+
+static void fsh_relax(void) {
+#if defined(__x86_64__)
+  __builtin_ia32_pause();
+#elif defined(__aarch64__)
+  __asm__ volatile("yield");
+#endif
+}
+
+// A worker that ran out of tasks looks for one a while before it parks, since on a busy
+// runtime another is likely queued within microseconds and parking and waking cost system
+// calls. A worker's only task is left to it at first: it is likely queued by the task that
+// worker is polling, which will soon end its poll and run it there, warm in its cache, as Go
+// leaves a running worker's next goroutine.
+static fsh_task *fsh_search(int64_t me) {
+  int64_t start = fsh_now();
+  for (int64_t spins = 0;; spins++) {
+    int64_t waited = spins % 64 == 63 ? fsh_now() - start : 0;
+    if (waited > 50000 || __atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) return NULL;
+    fsh_task *t = fsh_next_task(me, waited > 10000 ? 1 : 2);
+    if (t) return t;
+    for (int i = 0; i < 8; i++) fsh_relax();
+  }
 }
 
 static void *fsh_work(void *arg) {
   fsh_worker = (int64_t)arg;
+  int32_t searching = 0;
 #ifdef FSH_PROFILE
   int prof_slot = fsh_prof_register();
 #endif
   // A stopping runtime runs nothing more, however much is queued.
   while (!__atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) {
-    fsh_task *t = fsh_next_task(fsh_worker);
+    fsh_task *t = fsh_next_task(fsh_worker, 2);
+    // At most two workers look at once; the rest park.
+    if (!t && (searching || __atomic_load_n(&fsh_searching, __ATOMIC_SEQ_CST) < 2)) {
+      if (!searching) __atomic_fetch_add(&fsh_searching, 1, __ATOMIC_SEQ_CST);
+      searching = 1;
+      t = fsh_search(fsh_worker);
+    }
+    if (searching) {
+      searching = 0;
+      // The last looker to find a task hands the looking on, for whatever else is queued.
+      if (__atomic_sub_fetch(&fsh_searching, 1, __ATOMIC_SEQ_CST) == 0 && t && __atomic_load_n(&fsh_queued, __ATOMIC_SEQ_CST) > 0) fsh_notify();
+    }
     if (t) {
       fsh_run(t);
       continue;
     }
     pthread_mutex_lock(&fsh_park);
-    while (__atomic_load_n(&fsh_queued, __ATOMIC_RELAXED) <= 0 && !__atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) pthread_cond_wait(&fsh_parked, &fsh_park);
+    __atomic_fetch_add(&fsh_idle, 1, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&fsh_queued, __ATOMIC_SEQ_CST) <= 0 && !__atomic_load_n(&fsh_stopping, __ATOMIC_ACQUIRE)) pthread_cond_wait(&fsh_parked, &fsh_park);
+    __atomic_fetch_sub(&fsh_idle, 1, __ATOMIC_SEQ_CST);
     pthread_mutex_unlock(&fsh_park);
+    // Woken, it looks for the task it was woken for.
+    searching = 1;
+    __atomic_fetch_add(&fsh_searching, 1, __ATOMIC_SEQ_CST);
   }
+  if (searching) __atomic_fetch_sub(&fsh_searching, 1, __ATOMIC_SEQ_CST);
 #ifdef FSH_PROFILE
   fsh_prof_unregister(prof_slot);
 #endif
@@ -6085,7 +6299,9 @@ int32_t fsh_rt_join(fsh_task *t, fsh_task *waiter, void *out, const char *at, fs
     }
     if (outcome == 3) {
       char reason[1100];
-      int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)t->panic->length, t->panic->bytes);
+      fsh_str *panic = t->panic;
+      FSH_OPEN(panic);
+      int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)panic->length, panic->bytes);
       fsh_panic_at(at);
       fputs(reason, stderr);
       fsh_panic_reason(reason, n < (int)sizeof reason ? (size_t)n : sizeof reason - 1);
@@ -6150,7 +6366,8 @@ static void fsh_timer_add(int64_t deadline, fsh_task *task, struct fsh_signal *s
     fsh_timer_swap(at, (at - 1) / 2);
     at = (at - 1) / 2;
   }
-  if (!fsh_sim_active) pthread_cond_signal(&fsh_timer_changed);
+  // The timer thread waits for the earliest deadline, so only a new earliest one changes its wait.
+  if (at == 0 && !fsh_sim_active) pthread_cond_signal(&fsh_timer_changed);
   pthread_mutex_unlock(&fsh_timer_lock);
 }
 
@@ -7494,7 +7711,9 @@ int32_t fsh_rt_group_wait(fsh_group *g, fsh_task *waiter, void *out, const char 
   if (old) fsh_task_release(old);
   if (panic) {
     char reason[1100];
-    int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)panic->length, panic->bytes);
+    fsh_str *text = panic;
+    FSH_OPEN(text);
+    int n = snprintf(reason, sizeof reason, "a task this awaited panicked: %.*s", (int)text->length, text->bytes);
     fsh_rt_str_release(panic);
     fsh_panic_at(at);
     fputs(reason, stderr);
@@ -7778,8 +7997,16 @@ static void fsh_io_wait(int fd, int32_t writing, fsh_task *task) {
     __atomic_fetch_add(&task->refs, 1, __ATOMIC_RELAXED);
     fsh_interests[fsh_interest_count++] = (fsh_interest){ fd, writing, task };
   }
+#ifdef __APPLE__
+  // A kqueue filter is armed for the socket alone, whoever else waits on it, so the system call
+  // is made outside the lock. Arming one already taken, or a descriptor closed and reused since,
+  // at worst wakes a waiter early, which finds nothing to read and waits again.
+  pthread_mutex_unlock(&fsh_io_lock);
+  fsh_io_arm(fd, writing);
+#else
   fsh_io_arm(fd, writing);
   pthread_mutex_unlock(&fsh_io_lock);
+#endif
 }
 
 // Takes out the interests in a socket that are ready, or all of them when it is closing, and
@@ -12259,7 +12486,6 @@ static void fsh_background_start(void) {
   fsh_workers = cores > 0 ? cores : 1;
   fsh_queue *queues = calloc(fsh_workers, sizeof(fsh_queue));
   fsh_threads = calloc(fsh_workers, sizeof(pthread_t));
-  for (int64_t i = 0; i < fsh_workers; i++) pthread_mutex_init(&queues[i].lock, NULL);
   fsh_queues = queues;
   fsh_io_start();
   pthread_attr_t attr;
@@ -12287,7 +12513,6 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   fsh_workers = cores > 0 ? cores : 1;
   fsh_queues = calloc(fsh_workers, sizeof(fsh_queue));
   fsh_threads = calloc(fsh_workers, sizeof(pthread_t));
-  for (int64_t i = 0; i < fsh_workers; i++) pthread_mutex_init(&fsh_queues[i].lock, NULL);
   fsh_main_task = fsh_rt_spawn(poll, drop, drop_output, frame, frame_size, output_size, name, site);
   // The reactor is ready before any task can wait on a socket.
   fsh_io_start();
@@ -12387,11 +12612,11 @@ int32_t fsh_rt_run(fsh_poll_fn poll, fsh_drop_fn drop, fsh_drop_fn drop_output, 
   if (fsh_timeouts_task) fsh_task_release(fsh_timeouts_task);
   fsh_timeouts_waiter = fsh_timeouts_task = NULL;
   for (int64_t i = 0; i < fsh_workers; i++) free(fsh_queues[i].ring);
-  pthread_mutex_lock(&fsh_injected.lock);
+  fsh_queue_lock(&fsh_injected);
   free(fsh_injected.ring);
   fsh_injected.ring = NULL;
   fsh_injected.head = fsh_injected.count = fsh_injected.capacity = 0;
-  pthread_mutex_unlock(&fsh_injected.lock);
+  fsh_queue_unlock(&fsh_injected);
   free(fsh_queues);
   free(fsh_threads);
   if (fsh_panicked) {
@@ -12807,6 +13032,7 @@ static int fsh_rx_backtrack(fsh_rx *r, int64_t from, int anchored, int64_t *out)
 
 // A string's UTF-16 code units, which matching and match positions count in.
 static uint16_t *fsh_rx_units(fsh_str *s, int64_t *count) {
+  FSH_OPEN(s);
   const unsigned char *p = s ? (const unsigned char *)s->bytes : NULL;
   int64_t n = s ? s->length : 0, k = 0;
   uint16_t *out = fsh_rt_alloc((n + 1) * sizeof(uint16_t));
@@ -12921,6 +13147,7 @@ static void fsh_rx_append(fsh_rx_iter *it, const char *bytes, int64_t n) {
 }
 
 static void fsh_rx_append_str(fsh_rx_iter *it, fsh_str *s) {
+  FSH_OPEN(s);
   if (s) fsh_rx_append(it, s->bytes, s->length);
 }
 
@@ -12960,6 +13187,7 @@ static int64_t fsh_rx_named(const fsh_rx_iter *it, const unsigned char *name, in
 // before and after the match,
 // $n and $nn for an existing group, and $<name> when the pattern names groups.
 void fsh_rt_regex_put_pattern(fsh_rx_iter *it, fsh_str *pattern) {
+  FSH_OPEN(pattern);
   fsh_rx_append_units(it, it->last, it->out[0]);
   const unsigned char *p = pattern ? (const unsigned char *)pattern->bytes : NULL;
   int64_t n = pattern ? pattern->length : 0, groups = it->r.code[0] - 1;
@@ -13338,7 +13566,7 @@ fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca, fsh_str *a
     return fsh_tls_said("the server name to verify is empty or holds a NUL byte");
   }
   SSL_CTX *ctx;
-  if (ca->length == 0) {
+  if (fsh_len(ca) == 0) {
     pthread_once(&fsh_tls_system_once, fsh_tls_system_load);
     ctx = fsh_tls_system;
     if (ctx) SSL_CTX_up_ref(ctx);
@@ -13392,7 +13620,7 @@ fsh_str *fsh_rt_tls_client(fsh_socket *s, fsh_str *name, fsh_str *ca, fsh_str *a
   }
   fsh_rt_free(host);
   // The protocols offered, as "h2,http/1.1", in the wire form ALPN sends: each name after its length.
-  if (alpn->length > 0) {
+  if (fsh_len(alpn) > 0) {
     char *list = fsh_rt_str_cstring(alpn);
     unsigned char wire[256];
     size_t at = 0, from = 0, n = list ? strlen(list) : 0;

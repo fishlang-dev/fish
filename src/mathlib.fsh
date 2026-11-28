@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { newSession, type Session } from "./compilation.fsh";
+import { scalarUses } from "./layout.fsh";
 
 // The runtime's `Math` functions: src/runtime/math.cpp over LLVM libc's correctly rounded ones,
 // and CORE-MATH's hyperbolic ones, both vendored. Compiling them takes seconds, so each clang
@@ -64,11 +65,18 @@ export function files(dir: string): string[] {
 // when the input is `-`, and `inputs` the other files its text depends on, such as headers.
 export type Unit = { name: string; args: string[]; stdin?: string; inputs: string[] };
 
+// A unit whose args are this alone is IR for the native backend, `fishc native-object`, rather
+// than for clang.
+export const NATIVE_UNIT = "--fish-native";
+
+const isNative = (u: Ref<Unit>): boolean => u.args.length === 1 && u.args[0]! === NATIVE_UNIT;
+
 // A session that builds objects as well as compiling, with the caches only building reads.
 // `clang`: `clang --version`, which names the target as well as the compiler.
 // `digests`: each source a cached object depends on, hashed, by path, size and modification time.
 // `mathUnits`: the Math runtime's objects to compile.
-export type BuildSession = Session & { clang?: string; clangCc?: string; cc?: string; digests: Map<string, string>; mathUnits?: Unit[] };
+// `backend`: what compiles a dev build's IR, `native` or `llvm`, when one was chosen.
+export type BuildSession = Session & { clang?: string; clangCc?: string; cc?: string; digests: Map<string, string>; mathUnits?: Unit[]; backend?: string };
 
 // `session` given the caches building needs, keeping any it already has.
 export function buildSession(session: Session & { clang?: string; clangCc?: string; cc?: string; digests?: Map<string, string>; mathUnits?: Unit[] }): BuildSession {
@@ -113,6 +121,11 @@ export function objectPath(session: Mut<BuildSession>, u: Ref<Unit>): string {
   const version = clangVersion(session);
   let hash = createHash("sha256");
   hash.update(version).update(u.args.join("\0")).update("\0").update(u.stdin ?? "").update("\0");
+  // A native object is this fishc's, so a fishc built again makes its objects again.
+  if (isNative(u)) {
+    const { size, mtimeMs } = statSync(process.execPath);
+    hash.update(`${process.execPath}:${size}:${mtimeMs}`).update("\0");
+  }
   for (const f of u.inputs) {
     const digest = digestOf(session, f);
     hash.update(f).update(digest);
@@ -128,16 +141,107 @@ export function partial(out: string): string {
   return `${out}.${randomUUID()}`;
 }
 
+// FISH_SHARED_CACHE: objects shared between machines, in a directory or under an http(s) base URL
+// that answers GET and PUT. The local cache stays first: the store is read for an object the local
+// cache lacks, and written with each object built here. Each object sits beside `<name>.sha256`,
+// its SHA-256 in hex, which a fetched object must match before it is used, so a torn upload or a
+// corrupted file is built again rather than linked. The digest catches corruption, not a store
+// that rewrites both files.
+function sharedStore(): string | undefined {
+  const given = process.env.FISH_SHARED_CACHE;
+  return given === undefined || given === "" ? undefined : given.replace(/\/+$/, "");
+}
+
+const isHttp = (store: string): boolean => store.startsWith("http://") || store.startsWith("https://");
+
+// What a fetch from the store found: the object, none, or a store that can't be reached, which a
+// build stops asking.
+export type Shared = "hit" | "miss" | "down";
+
+// `curl` with the user's ~/.curlrc kept out, giving the HTTP status, "000" when nothing answered.
+/** @throws {Error | IoError} */
+function curl(args: string[]): string {
+  if (Bun.which("curl") === null) throw new Error("FISH_SHARED_CACHE names a URL, which needs the curl command; install curl");
+  const got = Bun.spawnSync(["curl", "-q", "--silent", "--proto", "=https,http", "--max-time", "120", "--write-out", "%{http_code}", ...args], { stdout: "pipe", stderr: "pipe" });
+  const code = new TextDecoder().decode(got.stdout).trim();
+  return code === "" ? "000" : code;
+}
+
+// The store's object for `out`, put in place there if its digest matches.
+/** @throws {Error | IoError} */
+export function fromShared(out: string): Shared {
+  const store = sharedStore();
+  if (store === undefined) return "miss";
+  const name = basename(out);
+  const temp = partial(out);
+  try {
+    let digest = "";
+    if (isHttp(store!)) {
+      const code = curl(["-o", temp, "--", `${store!}/${name}`]);
+      if (code === "404") return "miss";
+      if (code !== "200") {
+        console.error(`warning: the shared cache at ${store!} answered ${code} for ${name}; building without it`);
+        return "down";
+      }
+      if (curl(["-o", `${temp}.sha256`, "--", `${store!}/${name}.sha256`]) !== "200") return "miss";
+      digest = readFileSync(`${temp}.sha256`, "utf8");
+    } else {
+      const from = join(store!, name);
+      if (!existsSync(from) || !existsSync(`${from}.sha256`)) return "miss";
+      digest = readFileSync(`${from}.sha256`, "utf8");
+      copyFileSync(from, temp);
+    }
+    if (createHash("sha256").update(readFileSync(temp)).digest("hex") !== digest.trim()) {
+      console.error(`warning: the shared cache's ${name} doesn't match its digest; building it here`);
+      return "miss";
+    }
+    renameSync(temp, out);
+    return "hit";
+  } finally {
+    rmSync(temp, { force: true });
+    rmSync(`${temp}.sha256`, { force: true });
+  }
+}
+
+// `out`, built here, written to the store: its digest first, so a reader never finds the object
+// without one. A store that can't be written warns, and the build goes on.
+/** @throws {Error | IoError} */
+export function toShared(out: string): void {
+  const store = sharedStore();
+  if (store === undefined) return;
+  const name = basename(out);
+  const digest = createHash("sha256").update(readFileSync(out)).digest("hex");
+  try {
+    if (isHttp(store!)) {
+      const temp = partial(out);
+      writeFileSync(temp, digest);
+      const first = curl(["--upload-file", temp, "--", `${store!}/${name}.sha256`]);
+      rmSync(temp, { force: true });
+      const code = first.startsWith("2") ? curl(["--upload-file", out, "--", `${store!}/${name}`]) : first;
+      if (!code.startsWith("2")) console.error(`warning: the shared cache at ${store!} answered ${code} storing ${name}`);
+      return;
+    }
+    mkdirSync(store!, { recursive: true });
+    const temp = join(store!, `${name}.${randomUUID()}`);
+    writeFileSync(temp, digest);
+    renameSync(temp, join(store!, `${name}.sha256`));
+    copyFileSync(out, temp);
+    renameSync(temp, join(store!, name));
+  } catch (e) {
+    console.error(`warning: can't write ${name} to the shared cache at ${store!}: ${e.message}`);
+  }
+}
+
 /** @throws {Error | IoError} */
 function finish(u: Ref<Unit>, code: i64 | null, stderr: string, temp: string, out: string) {
   if (code !== 0) {
     rmSync(temp, { force: true });
-    throw new Error(`clang failed building ${u.name}:\n${stderr}`);
+    throw new Error(`${isNative(u) ? "the native backend" : "clang"} failed building ${u.name}:\n${stderr}`);
   }
   renameSync(temp, out);
 }
 
-const command = (cc: string, u: Ref<Unit>, temp: string): string[] => [cc, ...u.args, "-c", "-o", temp];
+const command = (cc: string, u: Ref<Unit>, temp: string): string[] => (isNative(u) ? [process.execPath, "native-object", "-o", temp] : [cc, ...u.args, "-c", "-o", temp]);
 const input = (u: Ref<Unit>): Uint8Array | undefined => (u.stdin === undefined ? undefined : new TextEncoder().encode(u.stdin));
 
 // Clang runs in an empty directory of its own, since a quoted include in source read from stdin
@@ -147,14 +251,24 @@ function emptyDir(): string {
   return mkdtempSync(join(tmpdir(), "fish-cc-"));
 }
 
-// What a clang compiling `u` is taken to hold at its peak: clang itself, and its source many times
-// over once it is parsed and optimized. The compiler's own units measured 50 to 100 bytes for each
-// byte of IR, the most where a few very large functions fill a unit.
+// What a clang compiling `u` is taken to hold at its peak, which is also how long it takes, near
+// enough to order the units by: clang itself, its source, and above all each use of a large
+// struct, which clang expands into an operation per scalar. Fitted to the compiler's own units,
+// whose peaks follow their scalar uses far more closely than their length.
 const CLANG_BASE = 100_000_000;
-const CLANG_PER_BYTE = 100;
+const CLANG_PER_BYTE = 50;
+const CLANG_PER_SCALAR = 400;
+const I64_MAX: i64 = 9_223_372_036_854_775_807;
+
+// The native backend holds a unit's text and one function's arrays at a time: about 65 MB for
+// the compiler's largest unit, of 3.6 MB.
+const NATIVE_BASE = 20_000_000;
+const NATIVE_PER_BYTE = 20;
 
 function clangBytes(u: Ref<Unit>): i64 {
-  return CLANG_BASE + ((u.stdin ?? "").length as i64) * CLANG_PER_BYTE;
+  const text = u.stdin ?? "";
+  if (isNative(u)) return NATIVE_BASE + (text.length as i64) * NATIVE_PER_BYTE;
+  return CLANG_BASE + (text.length as i64) * CLANG_PER_BYTE + scalarUses(text) * CLANG_PER_SCALAR;
 }
 
 // This machine's memory in bytes, or 0 when it can't be read.
@@ -173,12 +287,36 @@ function machineMemory(): i64 {
 
 const quoted = (s: string): string => "'" + s.replaceAll("'", "'\\''") + "'";
 
-// The units at `wanted` compiled into their places in `outs`, in that order and `jobs` at a time:
-// xargs runs a shell script for each, which gives clang the unit's source and keeps its errors
-// and exit code in files of the unit's own, and starts the next as one ends. Throws the first
-// failure once every object that did compile is in the cache.
+// Starts each unit's script in the order listed, once those running leave room for it: no more
+// than `cores` at once, and none while the clangs running are taken to hold so much that its own
+// estimate would pass `budget`, unless nothing runs. A unit is done once its exit code is written.
+const SCHEDULER = `budget=$1; cores=$2; list=$3; held=0; running=""
+reap() {
+  left=""; freed=0
+  for r in $running; do
+    if [ -e "\${r%:*}.code" ]; then held=$((held - \${r#*:})); freed=1; else left="$left $r"; fi
+  done
+  running=$left
+  [ $freed = 1 ] || sleep 0.05
+}
+while read -r k e; do
+  while [ -n "$running" ]; do
+    n=0; for r in $running; do n=$((n + 1)); done
+    [ $n -lt $cores ] && [ $((held + e)) -le $budget ] && break
+    reap
+  done
+  sh "$k.sh" &
+  running="$running $k:$e"; held=$((held + e))
+done < "$list"
+wait
+`;
+
+// The units at `wanted` compiled into their places in `outs`, in that order, as many at a time as
+// `SCHEDULER` lets `budget` and `cores` hold: a shell script for each gives clang the unit's
+// source and keeps its errors and exit code in files of the unit's own. Throws the first failure
+// once every object that did compile is in the cache.
 /** @throws {Error | IoError} */
-function compiledTogether(cc: string, units: Ref<Unit[]>, outs: Ref<string[]>, wanted: Ref<usize[]>, jobs: usize): void {
+function compiledTogether(cc: string, units: Ref<Unit[]>, outs: Ref<string[]>, wanted: Ref<usize[]>, costs: Ref<i64[]>, budget: i64, cores: usize): void {
   const work = mkdtempSync(join(tmpdir(), "fish-cc-"));
   const cwd = join(work, "empty");
   mkdirSync(cwd);
@@ -197,10 +335,12 @@ function compiledTogether(cc: string, units: Ref<Unit[]>, outs: Ref<string[]>, w
       }
       let words: string[] = [];
       for (const word of command(cc, u, temp)) words.push(quoted(word));
-      writeFileSync(`${at}.sh`, `cd ${quoted(cwd)} && ${words.join(" ")} < ${quoted(from)} 2> ${quoted(`${at}.err`)}\necho $? > ${quoted(`${at}.code`)}\n`);
-      scripts.push(`${at}.sh`);
+      writeFileSync(`${at}.sh`, `cd ${quoted(cwd)} && ${words.join(" ")} < ${quoted(from)} 2> ${quoted(`${at}.err`)}\necho $? > ${quoted(`${at}.code.part`)} && mv ${quoted(`${at}.code.part`)} ${quoted(`${at}.code`)}\n`);
+      scripts.push(`${at} ${costs[k]!}\n`);
     }
-    Bun.spawnSync(["xargs", "-0", "-n", "1", "-P", `${jobs}`, "sh"], { stdin: new TextEncoder().encode(scripts.join("\0")) });
+    writeFileSync(join(work, "units"), scripts.join(""));
+    writeFileSync(join(work, "run.sh"), SCHEDULER);
+    Bun.spawnSync(["sh", join(work, "run.sh"), `${budget}`, `${cores}`, join(work, "units")]);
     let failed: string | undefined = undefined;
     for (let k: usize = 0; k < wanted.length; k++) {
       const at = join(work, `${k}`);
@@ -211,7 +351,7 @@ function compiledTogether(cc: string, units: Ref<Unit[]>, outs: Ref<string[]>, w
       }
       rmSync(temps[k]!, { force: true });
       const stderr = existsSync(`${at}.err`) ? readFileSync(`${at}.err`, "utf8") : "";
-      if (failed === undefined) failed = `clang failed building ${units[wanted[k]!]!.name}:\n${stderr}`;
+      if (failed === undefined) failed = `${isNative(units[wanted[k]!]!) ? "the native backend" : "clang"} failed building ${units[wanted[k]!]!.name}:\n${stderr}`;
     }
     if (failed !== undefined) throw new Error(failed!);
   } finally {
@@ -219,33 +359,45 @@ function compiledTogether(cc: string, units: Ref<Unit[]>, outs: Ref<string[]>, w
   }
 }
 
+// What the clangs compiling a build's units side by side may hold together. Half of it leaves
+// `-O2` too few at once to keep the build from getting slower.
+const CLANG_MEMORY: i64 = 4_000_000_000;
+
 // The units' objects, in their order, those the cache has none of compiled first: largest first,
-// as many at a time as the machine has cores, and no more than the largest that many are taken to
-// fit in half its memory, since the first to run together are the largest there are. A build of
-// many small files uses every core, and one of a few huge ones stays in memory.
+// as many at a time as the machine has cores and the clangs running are taken to fit in
+// `CLANG_MEMORY`, or half the machine's memory if that is less. A build cut into small units uses
+// every core and stays in its budget, and a huge unit runs alone.
 /** @throws {Error | IoError} */
 export function cachedObjects(session: Mut<BuildSession>, units: Ref<Unit[]>): string[] {
   let outs: string[] = [];
   let missing: usize[] = [];
+  let shared: Shared = "miss";
   for (let i: usize = 0; i < units.length; i++) {
     const out = objectPath(session, units[i]!);
+    if (!existsSync(out)) shared = shared === "down" ? "down" : fromShared(out);
     if (!existsSync(out)) missing.push(i);
     else if (session.timings !== undefined) session.timings!.objects.cached++;
     outs.push(out);
   }
   if (missing.length === 0) return outs;
   if (session.timings !== undefined) for (const i of missing) session.timings!.objects.built.push(units[i]!.name);
-  missing.sort((a, b) => clangBytes(units[b]!) - clangBytes(units[a]!));
-  const cores = availableParallelism() as usize;
-  const budget = missing.length > 1 ? machineMemory() / 2 : 0;
-  let jobs: usize = 1;
-  let held = clangBytes(units[missing[0]!]!);
-  while (jobs < missing.length && jobs < cores) {
-    held += clangBytes(units[missing[jobs]!]!);
-    if (held > budget) break;
-    jobs++;
+  // Each unit's estimate and the key it is started by: the largest first, and a C source, whose
+  // cost can't be read from its text, before any of the IR.
+  let costed: [i64, i64, usize][] = [];
+  for (const i of missing) {
+    const cost = clangBytes(units[i]!);
+    costed.push([units[i]!.stdin === undefined ? I64_MAX : cost, cost, i]);
   }
-  compiledTogether(session.cc ?? "clang", units, outs, missing, jobs);
+  costed.sort((a, b) => (b[0] > a[0] ? 1 : b[0] < a[0] ? -1 : 0));
+  let wanted: usize[] = [];
+  let costs: i64[] = [];
+  for (const [_key, cost, i] of costed) {
+    wanted.push(i);
+    costs.push(cost);
+  }
+  const half = machineMemory() / 2;
+  compiledTogether(session.cc ?? "clang", units, outs, wanted, costs, half < CLANG_MEMORY ? half : CLANG_MEMORY, availableParallelism() as usize);
+  if (shared !== "down") for (const i of wanted) toShared(outs[i]!);
   return outs;
 }
 
@@ -276,7 +428,10 @@ export async function objectAsync(u: Ref<Unit>, out: string, cc = "clang"): Prom
       continue;
     }
     try {
-      if (!existsSync(out)) await compiledAsync(cc, u, out);
+      if (!existsSync(out) && fromShared(out) !== "hit") {
+        await compiledAsync(cc, u, out);
+        toShared(out);
+      }
     } catch (e) {
       rmSync(lock, { force: true });
       throw e;
@@ -333,12 +488,18 @@ function units(session: Mut<BuildSession>): Unit[] {
   return made;
 }
 
-// The objects to link, built first if this clang and target have none yet. `target` is the
-// clang flags of a target other than the host's.
-/** @throws {Error | IoError} */
-export function mathObjects(session: Mut<BuildSession>, target: string[] = []): string[] {
+// The units of the objects to link, for `target`, the clang flags of a target other than the host's.
+/** @throws {IoError} */
+export function mathUnits(session: Mut<BuildSession>, target: string[] = []): Unit[] {
   let all: Unit[] = [];
   for (const u of units(session)) all.push(target.length === 0 ? u : { ...u, args: [...target, ...u.args] });
+  return all;
+}
+
+// The objects to link, built first if this clang and target have none yet.
+/** @throws {Error | IoError} */
+export function mathObjects(session: Mut<BuildSession>, target: string[] = []): string[] {
+  const all = mathUnits(session, target);
   return cachedObjects(session, all);
 }
 

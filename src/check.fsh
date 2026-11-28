@@ -1,7 +1,7 @@
 import { memberKey, type Replaced } from "./edits.fsh";
 import { cloneBody, cloneSignature, declareClass, extend, inherited, instanceCopy, isLifetime, selfTyped, separatePrivateNames, shownName, type Body, type ClassInfo } from "./classes.fsh";
 import { crossingOf, rustClassOf } from "./rust.fsh";
-import { newDeclarations, newTables, timingEnd, timingStart, type Compilation, type Declarations, type Tables } from "./compilation.fsh";
+import { fileEnd, fileStart, newDeclarations, newTables, timingEnd, timingStart, type Compilation, type Declarations, type Tables } from "./compilation.fsh";
 import { copyNames, CompileError, compileErrors, named, withFixes, type Fix } from "./diag.fsh";
 import { warnings } from "./warnings.fsh";
 import { STD_BASE, STD_INTERNAL, stdFor } from "./std.fsh";
@@ -2397,6 +2397,11 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
               this.perInstanceSeen = false;
               const definition = this.definition(f);
               this.disposerMade(next, f, definition);
+              if (this.placeholderMember(definition)) {
+                this.definingGeneric = false;
+                this.tables.typing.openWithin = this.definingGeneric;
+                continue;
+              }
               this.checkBody(definition);
               this.definingGeneric = false;
               this.tables.typing.openWithin = this.definingGeneric;
@@ -2434,12 +2439,26 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
   // a call inside another definition. Nothing compiles it, and its body is the one its function's
   // definition was checked with, seen through the same bounds. A function taking a comptime
   // parameter is checked for each value it is given, which the definition doesn't know.
-  private onlyAsked(id: InstanceId): boolean {
+  private onlyAsked(this: Mut<this>, id: InstanceId): boolean {
+    if (this.placeholderMember(id)) return true;
     const instance = this.tables.arenas.instanceOf(id);
     if (instance.concrete) return false;
     const definition = this.instancingState.definitions.get(instance.body);
     if (definition === undefined || definition === id) return false;
     return !this.tables.arenas.bodyOf(instance.body).params.some((p) => p.comptime === true);
+  }
+
+  // Whether an instance is a member of a generic class's instance made with placeholder
+  // arguments, which is checked only when a caller asks, as `onlyAsked` has the queue do for
+  // functions: nothing compiles it, and its body is its class definition's member, which is
+  // checked, seen through the same bounds.
+  private placeholderMember(this: Mut<this>, id: InstanceId): boolean {
+    const instance = this.tables.arenas.instanceOf(id);
+    if (instance.concrete) return false;
+    const f = bodyOf(this.tables.arenas, instance);
+    if (f.owner === undefined || f.params.some((p) => p.comptime === true)) return false;
+    const c = this.registryState.infoOf.get(f.owner!);
+    return c !== undefined && !this.declaredClasses.has(c);
   }
 
   // Records a class's own disposer, once it is an instance to compile, for the class's drop to
@@ -4048,8 +4067,20 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
     return closure !== undefined && this.within(closure.parent, root);
   }
 
+  // `instanceChecked`, its time given to the file holding the body when timing.
   /** @throws {CompileError} */
   checkInstance(this: Mut<this>, id: InstanceId, outer: Mut<BodyState> | undefined, outerSt: Mut<ContextState> | undefined, outerExprs: Mut<ExpressionsState> | undefined): void {
+    const timing = fileStart(this.tables.session);
+    const at = timing.timing ? bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(id)).start : 0;
+    try {
+      this.instanceChecked(id, outer, outerSt, outerExprs);
+    } finally {
+      fileEnd(this.tables.session, at, "check", timing);
+    }
+  }
+
+  /** @throws {CompileError} */
+  private instanceChecked(this: Mut<this>, id: InstanceId, outer: Mut<BodyState> | undefined, outerSt: Mut<ContextState> | undefined, outerExprs: Mut<ExpressionsState> | undefined): void {
     this.tables.counts.checks++;
     const f = bodyOf(this.tables.arenas, this.tables.arenas.instanceOf(id));
     // A comptime parameter's value is the instance's own; one called from C, or kept in an async
@@ -4435,7 +4466,7 @@ class BodyChecker implements Context, GuardHost {
       const concrete = this.instance().concrete;
       const name = this.f().name;
       const async = this.f().async === true;
-      const generator = this.cx.tables.typing.generatorType(name, concrete, async);
+      const generator = this.cx.tables.typing.generatorType(name, concrete, async, symbol);
       const made = madeBy(this.cx.tables.typing, generator, symbol);
       this.instance().generator = made;
     }
@@ -4460,7 +4491,7 @@ class BodyChecker implements Context, GuardHost {
       const symbol = this.instance().symbol;
       const concrete = this.instance().concrete;
       const name = this.f().name;
-      const future = this.cx.tables.typing.futureType(name, concrete);
+      const future = this.cx.tables.typing.futureType(name, concrete, symbol);
       const made = madeBy(this.cx.tables.typing, future, symbol);
       this.instance().future = made;
     }
@@ -6986,7 +7017,8 @@ class BodyChecker implements Context, GuardHost {
           if (passing) this.raiseAt(at, span, from, "this", throwing);
           else this.raised(at, { from, to: caught });
         }
-        this.instance().caught.set(cloneStmt(s), caught);
+        if (this.cx.tables.session.plain === true) this.instance().caught.setId(s.id, caught);
+        else this.instance().caught.set(cloneStmt(s), caught);
         this.pushScope(new Map<string, LocalId>());
         if (s.param !== undefined) {
           if (s.param.kind !== "ident") throw unsupported("destructuring patterns", s.param);

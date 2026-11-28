@@ -1006,6 +1006,61 @@ function main() {
   });
   console.log(qs.length);
 }
+// case: array_sort_long
+// expect: true true 1000
+// expect: true true
+// expect: 0 999 499500
+// expect: true
+// Sorting past the first runs of 16 and their merges keeps equal elements in order, whether the
+// input is shuffled, sorted or reversed, and orders strings held in blocks.
+class P { n: i64; tag: i64; constructor(n: i64, tag: i64) { this.n = n; this.tag = tag; } }
+function main() {
+  let ps: P[] = [];
+  for (let i = 0; i < 1000; i++) ps.push(new P((i * 7919) % 7, i));
+  ps.sort((a, b) => a.n - b.n);
+  let ordered = true;
+  let stable = true;
+  for (let i = 1; i < ps.length; i++) {
+    if (ps[i - 1].n > ps[i].n) ordered = false;
+    if (ps[i - 1].n === ps[i].n && ps[i - 1].tag > ps[i].tag) stable = false;
+  }
+  console.log(ordered, stable, ps.length);
+  let up: i64[] = [];
+  let down: i64[] = [];
+  for (let i = 0; i < 1000; i++) {
+    up.push(i);
+    down.push(999 - i);
+  }
+  up.sort((a, b) => a - b);
+  down.sort((a, b) => a - b);
+  let same = true;
+  for (let i = 0; i < 1000; i++) if (up[i] !== (i as i64) || down[i] !== (i as i64)) same = false;
+  console.log(same, up.length === down.length);
+  let sum = 0;
+  for (const x of down) sum += x;
+  console.log(down[0], down[999], sum);
+  let names: string[] = [];
+  for (let i = 0; i < 300; i++) names.push(`name-held-in-a-block-${(i * 31) % 300}`);
+  names.sort();
+  let sorted = true;
+  for (let i = 1; i < names.length; i++) if (names[i - 1] > names[i]) sorted = false;
+  console.log(sorted);
+}
+// case: array_sort_merge_panic
+// panic: attempt to divide by zero
+// A comparator panicking in a merge after the first runs leaves every element in the array, once,
+// for its drop.
+class P { n: i64; name: string; constructor(n: i64, name: string) { this.n = n; this.name = name; } }
+function main() {
+  let qs: P[] = [];
+  for (let i = 0; i < 100; i++) qs.push(new P(99 - i, `a name held in a block ${i}`));
+  qs.sort((a, b) => {
+    const bad = (a.n === 68 && b.n === 84) || (a.n === 84 && b.n === 68);
+    const z = 10 / (bad ? 0 : 1);
+    return a.n - b.n;
+  });
+  console.log(qs.length);
+}
 // case: array_sort_result
 // error: 'sort', which sorts its array in place, does not return a value
 function main() { let xs = [2, 1]; const r = xs.sort(); }

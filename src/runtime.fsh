@@ -87,7 +87,6 @@ export const RUNTIME = [
   "declare void @fsh_rt_array_open(ptr, i64, i64, i64)",
   "declare void @fsh_rt_array_take(ptr, i64, i64, i64, ptr)",
   "declare void @fsh_rt_array_reverse(ptr, i64)",
-  "declare void @fsh_rt_sort(ptr, i64, i64, ptr, ptr, ptr)",
   "declare ptr @fsh_rt_alloc(i64)",
   // fishc dev's handlers library: the state the host kept under a key, and keeping a block there.
   "declare ptr @fishdev_state(ptr)",

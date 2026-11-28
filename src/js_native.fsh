@@ -155,6 +155,7 @@ static void fsh_js_throw(JSContext *cx, const char *where) {
 
 // Whether typeof gives name for the value, or for "null", whether it is null.
 int32_t fsh_rt_js_typeof(fsh_js *b, fsh_str *name) {
+  FSH_OPEN(name);
   if (name->length == 4 && memcmp(name->bytes, "null", 4) == 0) return JS_IsNull(b->value);
   JSContext *cx = fsh_js_enter();
   JSValue v = b->value;
@@ -197,6 +198,7 @@ int32_t fsh_rt_js_boolean(fsh_js *b) {
 // A property, an element, or whether there is a property, as JS reads them; reading one of
 // undefined or null throws, as a getter may.
 fsh_js *fsh_rt_js_get(fsh_js *b, fsh_str *key, const char *where) {
+  FSH_OPEN(key);
   JSContext *cx = fsh_js_enter_at(where);
   JSAtom name = JS_NewAtomLen(cx, key->bytes, key->length);
   JSValue v = JS_GetProperty(cx, b->value, name);
@@ -215,6 +217,7 @@ fsh_js *fsh_rt_js_at(fsh_js *b, int64_t i, const char *where) {
 }
 
 int32_t fsh_rt_js_has(fsh_js *b, fsh_str *key, const char *where) {
+  FSH_OPEN(key);
   JSContext *cx = fsh_js_enter_at(where);
   if (!JS_IsObject(b->value)) {
     JS_ThrowTypeError(cx, "cannot use 'in' operator to search for a key in a value that isn't an object");
@@ -256,6 +259,7 @@ static JSValue fsh_js_run(JSContext *cx, const char *text, size_t length, const 
 
 // Runs a module's source and gives its default export.
 fsh_js *fsh_rt_js_evaluate(fsh_str *source, const char *where) {
+  FSH_OPEN(source);
   // The engine reads source up to a NUL; this copy outlives a panic in it, uncounted.
   char *text = malloc(source->length + 1);
   if (!text) {
@@ -361,6 +365,7 @@ int32_t fsh_rt_js_as_boolean(fsh_js *b, const char *what, const char *declared, 
 // Fish values as new JS values, each in a box of its own; an empty one is undefined when
 // undefined is set, and null otherwise.
 fsh_js *fsh_rt_js_of_string(fsh_str *s) {
+  FSH_OPEN(s);
   JSContext *cx = fsh_js_enter();
   JSValue v = JS_NewStringLen(cx, s->bytes, s->length);
   fsh_js_leave();
@@ -413,6 +418,7 @@ fsh_js *fsh_rt_js_call(fsh_js *fn, fsh_js *self, int64_t argc, fsh_js **argv, co
 // string, 3 a number, 4 a boolean, 5 the string text, 6 false, 7 true, 8 the number number, 9
 // an object that isn't an array, 10 an array, 11 anything but undefined. Inside the engine.
 static int32_t fsh_js_is(JSContext *cx, JSValue v, int32_t kind, fsh_str *text, double number) {
+  FSH_OPEN(text);
   switch (kind) {
     case 0: return 1;
     case 1: return JS_IsNull(v) || JS_IsUndefined(v);
@@ -524,6 +530,7 @@ int64_t fsh_rt_js_length(fsh_js *b, const char *what, const char *declared, cons
 }
 // Writes a property of a JS object, giving up the value's box.
 void fsh_rt_js_set(fsh_js *object, fsh_str *key, fsh_js *part, const char *where) {
+  FSH_OPEN(key);
   JSContext *cx = fsh_js_enter_at(where);
   JSAtom name = JS_NewAtomLen(cx, key->bytes, key->length);
   int done = JS_SetProperty(cx, object->value, name, JS_DupValue(cx, part->value));
@@ -863,7 +870,9 @@ static JSValue fsh_js_file_error(JSContext *cx, fsh_str **parts) {
   const char *names[] = {"message", "code", "syscall", "path"};
   for (int i = 0; i < 4; i++) {
     if (!parts[i]) continue;
-    JS_SetPropertyStr(cx, error, names[i], JS_NewStringLen(cx, parts[i]->bytes, parts[i]->length));
+    fsh_str *part = parts[i];
+    FSH_OPEN(part);
+    JS_SetPropertyStr(cx, error, names[i], JS_NewStringLen(cx, part->bytes, part->length));
     fsh_rt_str_release(parts[i]);
   }
   return error;

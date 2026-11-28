@@ -117,7 +117,7 @@ function compiledFrom(entry: string, kept: Kept | undefined): { made: Made | Com
   let looked: string[] = [];
   try {
     let c = compiledKept(cachedSession(), entry, false, "unwind", false, false, looked, kept, undefined);
-    const made: Made | CompileError = { ir: c.ir, warnings: c.warnings };
+    const made: Made | CompileError = { ir: c.ir.join("\n"), warnings: c.warnings };
     return { made, kept: c.kept };
   } catch (e) {
     if (e instanceof CompileError) return { made: e, kept: undefined };
@@ -204,7 +204,7 @@ test("a build keeps each function's define by its symbol, as its IR has it", () 
   write(entry, USES);
   write(join(dir, "lib.fsh"), LIB);
   let looked: string[] = [];
-  let made: { ir: string; warnings: CompileError[]; kept: Kept } | undefined = undefined;
+  let made: { ir: string[]; warnings: CompileError[]; kept: Kept } | undefined = undefined;
   try {
     made = compiledKept(cachedSession(), entry, false, "unwind", false, false, looked, undefined, undefined);
   } catch (e) {
@@ -212,9 +212,10 @@ test("a build keeps each function's define by its symbol, as its IR has it", () 
   }
   const built = made!;
   const emitted = built.kept.emitted!;
-  const defines = built.ir.split("\n").filter((line) => line.startsWith("define ")).length;
+  const ir = built.ir.join("\n");
+  const defines = ir.split("\n").filter((line) => line.startsWith("define ")).length;
   assert(emitted.defines.size === defines, `${emitted.defines.size} defines kept of ${defines}`);
-  for (const [name, text] of emitted.defines) assert(built.ir.includes(`${text}\n`), `the define of ${name} isn't the IR's`);
+  for (const [name, text] of emitted.defines) assert(ir.includes(`${text}\n`), `the define of ${name} isn't the IR's`);
   assert(emitted.defines.has(`@"fsh.main"`), "main's define isn't kept by its symbol");
   removed(dir);
 }, { timeout: 120_000 });
@@ -246,8 +247,8 @@ test("a build with debug info emits every function again, as its lines are all m
   write(entry, USES);
   write(join(dir, "lib.fsh"), LIB);
   let looked: string[] = [];
-  let first: { ir: string; warnings: CompileError[]; kept: Kept } | undefined = undefined;
-  let second: { ir: string; warnings: CompileError[]; kept: Kept } | undefined = undefined;
+  let first: { ir: string[]; warnings: CompileError[]; kept: Kept } | undefined = undefined;
+  let second: { ir: string[]; warnings: CompileError[]; kept: Kept } | undefined = undefined;
   try {
     first = compiledKept(cachedSession(), entry, false, "unwind", false, true, looked, undefined, undefined);
     write(join(dir, "lib.fsh"), LIB.replace("return n * 2;", "return n * 3;"));

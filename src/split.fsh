@@ -22,25 +22,50 @@ type Item = { kind: "define" | "declare" | "global"; name: string; key: string; 
 const key = (name: string) => name.replace(/^"(.*)"$/, "$1");
 
 
-function items(lines: Ref<string[]>): Item[] {
+// The IR's items, its named structs' definitions by name, and its debug metadata, read from its
+// pieces, whose text joined by newlines is the module's. A piece holding one function whole, as
+// codegen gives most, is that function's text as it is; any other is read a line at a time, a
+// function running on to the line closing it.
+function items(pieces: Ref<string[]>): { found: Item[]; types: Map<string, string>; metadata: string } {
   let found: Item[] = [];
-  for (let i: usize = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (line === "") continue;
-    // A comment is the C a build compiles beside the module, which it reads before splitting.
-    if (line.startsWith("!") || line.startsWith('%"<') || line.startsWith(";")) continue;
-    const name = firstNameIn(line) ?? "";
-    if (line.startsWith("define ")) {
-      let end = i;
-      while (lines[end]! !== "}") end++;
-      const text = lines.slice(i as i64, (end + 1) as i64).join("\n");
-      found.push({ kind: "define", name, key: key(name), text, refs: references(text), copied: false });
-      i = end;
-    } else if (line.startsWith("declare ")) found.push({ kind: "declare", name, key: key(name), text: line, refs: references(line), copied: false });
-    else if (line.startsWith("@")) found.push({ kind: "global", name, key: key(name), text: line, refs: references(line), copied: / = private unnamed_addr constant /.test(line) });
-    else assert(false, `can't split the IR at '${line}'`);
+  let types = new Map<string, string>();
+  let metadata = "";
+  let open: string[] = [];
+  for (const piece of pieces) {
+    if (open.length === 0 && whole(piece)) {
+      found.push(defined(piece));
+      continue;
+    }
+    for (const line of piece.split("\n")) {
+      if (open.length > 0) {
+        open.push(line);
+        if (line !== "}") continue;
+        found.push(defined(open.join("\n")));
+        open = [];
+        continue;
+      }
+      // A comment is the C a build compiles beside the module, which it reads before splitting.
+      if (line === "" || line.startsWith(";")) continue;
+      if (line.startsWith("!")) metadata += `${line}\n`;
+      else if (line.startsWith('%"<')) types.set(line.slice(0, line.indexOf(" = type ")), line);
+      else if (line.startsWith("define ")) open.push(line);
+      else if (line.startsWith("declare ")) found.push(item("declare", line, false));
+      else if (line.startsWith("@")) found.push(item("global", line, / = private unnamed_addr constant /.test(line)));
+      else assert(false, `can't split the IR at '${line}'`);
+    }
   }
-  return found;
+  assert(open.length === 0, "the IR ends inside a function");
+  return { found, types, metadata };
+}
+
+// Whether a piece is one function, from its `define` line to the line closing it and no further.
+const whole = (piece: string) => piece.startsWith("define ") && piece.endsWith("\n}") && piece.indexOf("\n}\n") < 0;
+
+const defined = (text: string) => item("define", text, false);
+
+function item(kind: "define" | "declare" | "global", text: string, copied: boolean): Item {
+  const name = firstNameIn(text) ?? "";
+  return { kind, name, key: key(name), text, refs: references(text), copied };
 }
 
 // The names an item refers to, its own included. String constants' bytes are left out, since an
@@ -206,18 +231,19 @@ function shared(found: Item[], own: Ref<Set<string>>): Item[] {
 // the program's functions, which leave the program's part for one of their own.
 // A group whose functions' text is longer than `limit`, when one is given, is divided in the IR's
 // order into parts of at most that much, the first under the group's name and the rest under
-// `<group>#2` and on, so no one file's part is the longest thing clang is given.
+// `<group>#2` and on, so no one file's part is the longest thing clang is given; std's part is
+// divided the same way, its parts in `std` in order, and so is the program's, whose first part,
+// holding its globals and debug metadata, is `program` and the rest `rest`. A `-g` build's
+// functions all refer to that metadata, so it is split with no limit.
 // `times` is how long its reading, reaching and writing took, for `--timings`.
-export function split(ir: string, stdSymbols: string[], ownSymbols: string[], groups: Ref<Map<string, string[]>>, limit: usize = 0): { std: string; groups: Map<string, string>; program: string; times: [string, f64][] } {
+export function split(ir: Ref<string[]>, stdSymbols: string[], ownSymbols: string[], groups: Ref<Map<string, string[]>>, limit: usize = 0): { std: string[]; groups: Map<string, string>; program: string; rest: string[]; times: [string, f64][] } {
   const began = performance.now();
   const std = keysOf(stdSymbols);
   const own = keysOf(ownSymbols);
-  const lines = ir.split("\n");
-  const all = shared(items(lines), own);
-  const read = performance.now();
   // Each named struct's definition, by its name, for the parts that use it.
-  let types = new Map<string, string>();
-  for (const l of lines) if (l.startsWith('%"<')) types.set(l.slice(0, l.indexOf(" = type ")), l);
+  let { found, types, metadata } = items(ir);
+  const all = shared(found, own);
+  const read = performance.now();
   // Where each key's item sits in `all`; of two items with one key, the later.
   let byName = new Map<string, usize>();
   for (let i: usize = 0; i < all.length; i++) byName.set(all[i]!.key, i);
@@ -276,8 +302,8 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
     let filled = new Map<string, usize>();
     for (const item of all) {
       if (item.kind !== "define") continue;
-      const group = where.get(item.key);
-      if (group === undefined || group === STD || !groups.has(group)) continue;
+      const group = where.get(item.key) ?? "";
+      if (group !== "" && group !== STD && !groups.has(group)) continue;
       let n = divided.get(group) ?? 1;
       let size = filled.get(group) ?? 0;
       if (size > 0 && size + item.text.length > limit) {
@@ -290,18 +316,19 @@ export function split(ir: string, stdSymbols: string[], ownSymbols: string[], gr
     }
   }
   const reachedAt = performance.now();
-  let metadata = "";
-  for (const line of lines) if (line.startsWith("!")) metadata += `${line}\n`;
   let out = new Map<string, string>();
   for (const group of groups.keys()) {
     out.set(group, typed(types, part(all, byName, where, group)));
     const n = divided.get(group) ?? 1;
     for (let more: i64 = 2; more <= n; more++) out.set(`${group}#${more}`, typed(types, part(all, byName, where, `${group}#${more}`)));
   }
-  const stdPart = typed(types, part(all, byName, where, STD));
+  let stdParts = [typed(types, part(all, byName, where, STD))];
+  for (let more: i64 = 2; more <= (divided.get(STD) ?? 1); more++) stdParts.push(typed(types, part(all, byName, where, `${STD}#${more}`)));
   const programPart = typed(types, part(all, byName, where, "")) + metadata;
+  let rest: string[] = [];
+  for (let more: i64 = 2; more <= (divided.get("") ?? 1); more++) rest.push(typed(types, part(all, byName, where, `#${more}`)));
   const done = performance.now();
-  return { std: stdPart, groups: out, program: programPart, times: [["split items", read - began], ["split reach", reachedAt - read], ["split parts", done - reachedAt]] };
+  return { std: stdParts, groups: out, program: programPart, rest, times: [["split items", read - began], ["split reach", reachedAt - read], ["split parts", done - reachedAt]] };
 }
 
 // Std's part's name in `where`, which no group of the program's can have, since groups are named

@@ -92,7 +92,7 @@ export type Watching = { entry: string; binary: string; args: string[]; manifest
 // rather than counters, since a listener owns what it captures and can't change it.
 export type Signals = { interrupt: AbortSignal; interruptAgain: AbortSignal; terminate: AbortSignal; terminateAgain: AbortSignal };
 
-function received(s: Ref<Signals>): i64 {
+export function received(s: Ref<Signals>): i64 {
   let n = 0;
   if (s.interrupt.aborted) n++;
   if (s.interruptAgain.aborted) n++;
@@ -215,6 +215,36 @@ export function listening(): Signals {
     terminate.abort();
   });
   return s;
+}
+
+// Every file whose contents differ from those in `before`.
+/** @throws {IoError} */
+export function allChanged(before: Ref<Map<string, string | undefined>>): string[] {
+  let found: string[] = [];
+  for (const [f, text] of before) if (contentsOf(f) !== text) found.push(f);
+  return found;
+}
+
+// The files of `before` that change next, once a burst of saves has settled, or undefined when a
+// signal arrives first.
+// ponytail: one settle per burst, so saves spread over more than SETTLE_MS can make two runs
+/** @throws {IoError} */
+export async function nextChanges(before: Ref<Map<string, string | undefined>>, s: Ref<Signals>): Promise<string[] | undefined> {
+  let files: string[] = [];
+  for (const f of before.keys()) files.push(f);
+  while (received(s) === 0) {
+    if (changed(before) !== undefined) {
+      await Bun.sleep(SETTLE_MS);
+      const found = allChanged(before);
+      if (found.length > 0) return found;
+    }
+    const round = new AbortController();
+    const ending = round.signal;
+    const event = await Promise.race([changes(files, s, round), signalled(s, 1, ending)]);
+    round.abort();
+    if (event.kind === "signal") return undefined;
+  }
+  return undefined;
 }
 
 // Builds and runs the program, then rebuilds and restarts it each time a file it was built from

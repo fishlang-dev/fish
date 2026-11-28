@@ -226,7 +226,7 @@ function fitsAll(e: Ref<IndexEntry>, ranges: Ref<Range[]>): boolean {
 }
 
 function messageOf(e: unknown): string {
-  return e instanceof Error ? e.message : "it failed";
+  return e instanceof Error ? e.message : e instanceof IoError ? e.message : "it failed";
 }
 
 /** @throws {Error | IoError | Unresolved} */

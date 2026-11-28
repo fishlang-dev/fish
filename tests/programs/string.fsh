@@ -1194,6 +1194,137 @@ function main(): void { console.log(String.nope("a")); }
 // error: 'i64' has no method 'fromCharCode'
 const String: i64 = 5;
 function main(): void { console.log(String.fromCharCode(65)); }
+// case: string_lent_params
+class Box {
+  name: string;
+  constructor(name: string) {
+    this.name = name;
+  }
+  rename(this: Mut<this>, n: string): string {
+    const old = this.name;
+    this.name = n + "";
+    return old + n;
+  }
+}
+
+function shout(s: string): string {
+  return s.toUpperCase() + "!";
+}
+
+function keep(s: string): string {
+  return s;
+}
+
+function reassigned(s: string): string {
+  s = s + "?";
+  return s;
+}
+
+function grow(s: Mut<string>) {
+  s += "+";
+}
+
+function after(s: string, f: () => void): string {
+  f();
+  return s + ".";
+}
+
+function long(s: string): i64 throws Error {
+  if (s.length > 2) throw new Error(`long ${s}`);
+  return s.length as i64;
+}
+
+function double(n: bigint): bigint {
+  return n * 2n;
+}
+
+function main() {
+  let a = "ab" + 1;
+  console.log(shout(a), keep(a), reassigned(a), shout("x" + 1), a);
+  let b = new Box("x" + 2);
+  console.log(b.rename(b.name), b.name);
+  let c = "c" + 3;
+  console.log(after(c, () => {}), (c = "d" + 4), after(c, () => {}));
+  let g = "g" + 5;
+  grow(g);
+  console.log(shout(g));
+  const f = shout;
+  console.log(f(a), ["p", a].map(shout).join(" "));
+  try {
+    console.log(long("y" + 1));
+    console.log(long(a));
+  } catch (e) {
+    console.log(e.message);
+  }
+  let m = new Map<string, i64>();
+  m.set(a, 1);
+  console.log(m.get(a), m.has(b.name), m.has(a), m.delete(a), m.size);
+  let n = 10n ** 20n;
+  console.log(double(n), n);
+}
+// expect: AB1! ab1 ab1? X1! ab1
+// expect: x2x2 x2
+// expect: c3. d4 d4.
+// expect: G5+!
+// expect: AB1! P! AB1!
+// expect: 2
+// expect: long ab1
+// expect: 1 false true true 0
+// expect: 200000000000000000000n 100000000000000000000n
+// case: string_lent_param_panics
+function at(s: string): i64 {
+  const xs: i64[] = [];
+  return xs[s.length]!;
+}
+
+function main() {
+  const a = "ab" + 1;
+  console.log(at(a + "c"));
+}
+// panic: index out of bounds: the len is 0 but the index is 4
+// case: string_lent_param_panics_through_a_value
+function at(s: string): i64 {
+  const xs: i64[] = [];
+  return xs[s.length]!;
+}
+
+function main() {
+  const a = "ab" + 1;
+  const f = at;
+  console.log(f(a));
+}
+// panic: index out of bounds: the len is 0 but the index is 3
+// case: string_small
+function main(): void throws JsonError {
+  const n = 42;
+  const a = "ab" + n;
+  const b = "abcdefg" + "";
+  const c = b + "h";
+  console.log(a, a.length, b.length, c.length);
+  console.log(c.slice(0, 7) === b, c.slice(1), c.slice(0, 7).length, c.slice(3, 3).length);
+  let m = new Map<string, i64>();
+  m.set(a, 1);
+  m.set(c.slice(0, 7), 2);
+  console.log(m.get("ab42")!, m.get("abcdefg")!, m.has("ab4"), m.get(c.slice(0, 7))!);
+  const e = "é" + "ü";
+  console.log(e, e.length, e.toUpperCase(), e.charAt(1), e.indexOf("ü"));
+  const hi = "\uD83D";
+  const lo = "\uDE00";
+  const pair = hi + lo;
+  console.log(pair.length, pair === "😀", (pair + pair).length);
+  const parts = "a,bb,ccc,dddddddd".split(",");
+  console.log(parts.length, parts[3], parts[2].length);
+  console.log(`${n}` < "5", "abc" < "abd", ("x" + 1).padStart(5, "-"), "ab".repeat(3), " ab ".trim() + "|");
+  console.log(JSON.stringify(a), JSON.parse<i64>("7" + ""), parseInt("12" + "3") ?? 0, String(123456) + "7");
+}
+// expect: ab42 4 7 8
+// expect: true bcdefgh 7 0
+// expect: 1 2 false 2
+// expect: éü 2 ÉÜ ü 1
+// expect: 2 true 4
+// expect: 4 dddddddd 3
+// expect: true true ---x1 ababab ab|
+// expect: "ab42" 7 123 1234567
 // case: string_multi_arg_mutated
 // expect: hello replaced!
 // expect: Z!-b-Z!

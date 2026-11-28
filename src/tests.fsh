@@ -1,10 +1,11 @@
+import { readFileSync, realpathSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import type { Subprocess } from "bun";
 import { relative } from "node:path";
 import type { Compilation } from "./compilation.fsh";
 import { CompileError } from "./diag.fsh";
 import { examplesIn, exampleTest, type Example } from "./docs.fsh";
-import { renameIn, shiftError, type Loaded, type Module } from "./modules.fsh";
+import { renameIn, resolveSpecifier, shiftError, specifierOf, type Loaded, type Module } from "./modules.fsh";
 import { nextId, respanFunc, shiftSpansStmts, type Ids } from "./nodes.fsh";
 import { parse, parseWithComments, type Expr, type Func, type ObjectProp, type Param, type Span, type Stmt, type TypeNode } from "./parser.fsh";
 
@@ -76,6 +77,69 @@ function bare(e: Ref<Expr>): boolean {
   if (e.kind === "arrow") return e.params.length === 0 && e.typeParams.length === 0;
   if (e.kind === "function") return !e.generator && e.params.length === 0 && e.typeParams.length === 0;
   return false;
+}
+
+// The names of the tests the file at `path` declares, from its parse alone, so a run can build only
+// the files it needs; undefined when it can't be read, doesn't parse or holds a malformed test,
+// which its build reports.
+export function testNamesIn(path: string): string[] | undefined {
+  let ids: Ids = { last: 0 };
+  let names: string[] = [];
+  try {
+    for (const s of parse(readFileSync(path, "utf8"), ids)) {
+      const found = testOf(s);
+      if (found !== undefined) names.push(found.name);
+    }
+  } catch (e) {
+    return undefined;
+  }
+  return names;
+}
+
+// The files `path` imports or re-exports from by a relative path, as real paths: none when it can't
+// be read or doesn't parse, and none for an import that names no file.
+export function importsIn(path: string): string[] {
+  let ids: Ids = { last: 0 };
+  let statements: Stmt[] = [];
+  try {
+    statements = parse(readFileSync(path, "utf8"), ids);
+  } catch (_e) {
+    return [];
+  }
+  let found: string[] = [];
+  for (const s of statements) {
+    const specifier = specifierOf(s);
+    if (specifier === undefined || !/^\.\.?(\/|$)/.test(specifier)) continue;
+    let looked: string[] = [];
+    let file: string | undefined = undefined;
+    try {
+      file = realpathSync(resolveSpecifier(path, specifier, { start: s.start, end: s.end }, looked));
+    } catch (_e) {}
+    if (file !== undefined) found.push(file);
+  }
+  return found;
+}
+
+// Each of `roots` with the files it depends on: itself and every file it imports, directly or
+// through others, as real paths.
+/** @throws {IoError} */
+export function dependencies(roots: Ref<string[]>): Map<string, Set<string>> {
+  let imports = new Map<string, string[]>();
+  let closures = new Map<string, Set<string>>();
+  for (const root of roots) {
+    let seen = new Set<string>();
+    let pending = [realpathSync(root)];
+    while (pending.length > 0) {
+      const f = pending.pop()!;
+      if (seen.has(f)) continue;
+      seen.add(f);
+      if (!imports.has(f)) imports.set(f, importsIn(f));
+      const next = imports.get(f)!;
+      for (const g of next) if (!seen.has(g)) pending.push(g);
+    }
+    closures.set(root, seen);
+  }
+  return closures;
 }
 
 // Leaves every file's tests out, as a build does before checking.
@@ -412,6 +476,7 @@ export function harnessImports(dir: string, files: string[]): string {
 // is reached as `name-fsh<n>`, the name file n declares, which no program can write.
 /** @throws {CompileError} */
 export function harnessMain(ids: Mut<Ids>, tests: Ref<Test[]>, modules: Ref<Module[]>): Stmt[] {
+  const functions = testFunctions(tests, modules);
   const call = (t: Ref<Test>) => `__test${t.index}`;
   const runs = tests.map((t) => `  if (which === "${t.index}") {\n    ${t.async ? "await " : ""}${call(t)}();\n    return;\n  }\n`);
   const text = `async function main(): Promise<void> throws Error {
@@ -425,9 +490,14 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
 `;
   let made = parse(text, ids);
   let named = new Map<string, string>();
-  for (const t of tests) named.set(call(t), `${testSymbol(t.name)}-fsh${modules.findIndex((m) => m.path === t.module.path)}`);
+  for (const t of tests) named.set(call(t), functions[t.index]!);
   renameIn(ids, made, (name) => named.get(name));
   return made;
+}
+
+// The name each of `tests` is linked as, in their order: the name file n declares, as `name-fsh<n>`.
+export function testFunctions(tests: Ref<Test[]>, modules: Ref<Module[]>): string[] {
+  return tests.map((t) => `${testSymbol(t.name)}-fsh${modules.findIndex((m) => m.path === t.module.path)}`);
 }
 
 // Gives the `main` of each file but the first, std's aside, a name no program can write, since
@@ -447,10 +517,11 @@ export const LIMIT: usize = 10_000;
 // How a run goes: the limit for a test that names none, how many tests run at once, and whether
 // deterministic simulation mode is enabled with its starting seed and seed count.
 // `propSeed`, given with `--seed` and no `--sim`, is the seed every property draws its inputs from.
-// `docs` runs the examples in doc comments as tests too.
-export type RunOptions = { timeout: usize; jobs: usize; sim: boolean; seed: u64; seeds: usize; propSeed?: u64; docs: boolean };
+// `docs` runs the examples in doc comments as tests too. With `interpret`, tests are tried in the
+// comptime interpreter before their native build.
+export type RunOptions = { timeout: usize; jobs: usize; sim: boolean; seed: u64; seeds: usize; propSeed?: u64; docs: boolean; interpret: boolean };
 
-type Outcome = { passed: boolean; output: string };
+export type Outcome = { passed: boolean; output: string };
 
 type RunCase = { testAt: usize; seed: u64 | undefined };
 
@@ -544,7 +615,7 @@ function shownLimit(ms: usize): string {
 
 // The run's defaults: the standard limit, and a test per core.
 export function runDefaults(): RunOptions {
-  return { timeout: LIMIT, jobs: availableParallelism() as usize, sim: false, seed: 1 as u64, seeds: 1, docs: true };
+  return { timeout: LIMIT, jobs: availableParallelism() as usize, sim: false, seed: 1 as u64, seeds: 1, docs: true, interpret: false };
 }
 
 // A test fails when it exits with anything but 0 or runs past the limit.
@@ -559,9 +630,10 @@ function outcome(text: string, code: i64, late: boolean, signal: string | null, 
 // in order: `ok` or `FAIL`, the file and the name, a failed test's output, then the counts, noting
 // each test's process group in `running` while it runs. A test past its own limit, or the run's, has
 // its group killed; once a test exits, the rest of its group is killed, as a child it left behind
-// would otherwise hold its output open, and the verdict is the test's own. Gives the exit code, 1
-// when any failed.
-export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Ref<Test[]>, cwd: string, options: Ref<RunOptions>): Promise<i64> {
+// would otherwise hold its output open, and the verdict is the test's own. A test `known` holds by
+// its index already ran in the interpreter and isn't started, outside simulation; with
+// `options.interpret` each line says which way its test ran. Gives the exit code, 1 when any failed.
+export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Ref<Test[]>, cwd: string, options: Ref<RunOptions>, known: Ref<Map<usize, Outcome>>): Promise<i64> {
   let cases: RunCase[] = [];
   if (options.sim) {
     for (let ti: usize = 0; ti < tests.length; ti++) {
@@ -575,7 +647,10 @@ export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Re
   const width = Math.min(options.jobs as i64, cases.length as i64);
   let flight: Running[] = [];
   let done: (Outcome | undefined)[] = [];
-  for (let at: usize = 0; at < cases.length; at++) done.push(undefined);
+  for (let at: usize = 0; at < cases.length; at++) {
+    const o = cases[at]!.seed === undefined ? known.get(tests[cases[at]!.testAt]!.index) : undefined;
+    done.push(o === undefined ? undefined : { passed: o.passed, output: o.output });
+  }
   let next: usize = 0;
   let shown: usize = 0;
   let failed = 0;
@@ -584,6 +659,7 @@ export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Re
       const at = next;
       next++;
       const c: Ref<RunCase> = cases[at]!;
+      if (done[at] !== undefined) continue;
       try {
         // Started before the push, so `flight` is lent to it only once nothing can throw.
         const r = started(running, binary, tests[c.testAt]!, cwd, at, options.timeout, c.seed, options.propSeed);
@@ -599,7 +675,8 @@ export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Re
       const test: Ref<Test> = tests[c.testAt]!;
       if (!o.passed) failed++;
       const seedTag = c.seed !== undefined ? ` (seed ${c.seed!})` : "";
-      process.stdout.write(`${o.passed ? "ok" : "FAIL"} ${test.module.file} > ${test.name}${seedTag}\n${o.passed ? "" : o.output}`);
+      const way = !options.interpret ? "" : c.seed === undefined && known.has(test.index) ? " (interpreted)" : " (native)";
+      process.stdout.write(`${o.passed ? "ok" : "FAIL"} ${test.module.file} > ${test.name}${seedTag}${way}\n${o.passed ? "" : o.output}`);
       shown++;
     }
     if (shown === cases.length) break;

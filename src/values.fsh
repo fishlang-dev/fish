@@ -1439,7 +1439,15 @@ export class Expressions<C extends Context> implements Union<C> {
 
   // Records what a match pattern tests, for codegen.
   private recordPattern(this: Mut<this>, p: Ref<Pattern>, type: Type, test: PatternTest): void {
-    this.ctx.patterns().set(clonePattern(p), infoOf(type, test));
+    if (this.ctx.tables().session.plain === true) this.ctx.patterns().setId(p.id, infoOf(type, test));
+    else this.ctx.patterns().set(clonePattern(p), infoOf(type, test));
+  }
+
+  // Records what `e`'s value borrows from. A plain build keeps no copy of `e`, which is only
+  // looked up.
+  private borrowsAt(this: Mut<this>, e: Ref<Expr>, from: Expr[]): void {
+    if (this.ctx.tables().session.plain === true) this.ctx.borrowsFrom().setId(e.id, from);
+    else this.ctx.borrowsFrom().set(cloneExpr(e), from);
   }
   private neverMatches(this: Mut<this>, p: Ref<Pattern>, type: Type): CompileError {
     return new CompileError("E0607", `this pattern can never match a '${this.ctx.typing().show(type)}'`, p.start, p.end);
@@ -1941,7 +1949,7 @@ export class Expressions<C extends Context> implements Union<C> {
       // `this`: the collection is its first field, so a pointer to one points at the other.
       const holder = callee.object.kind === "member" && callee.object.name === EMBEDDED ? cloneExpr(callee.object.object) : undefined;
       if (holder === undefined || (callee.name !== "set" && callee.name !== "add")) return result;
-      this.ctx.borrowsFrom().set(cloneExpr(e), [cloneExpr(holder)]);
+      this.borrowsAt(e, [cloneExpr(holder)]);
       const held = this.ctx.held().types.get(holder)!;
       const embedding = this.isRefType(held) ? this.ctx.typing().rec(held).to : held;
       return { type: this.ctx.tables().typing.refType(embedding, true), what: result.what };
@@ -2432,7 +2440,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const selfBody = this.inst(instance).body;
       const self = this.ctx.view().arenas.bodyOf(selfBody).self !== undefined;
       const sources = e.callee.kind === "member" && self ? this.ctx.sourcesOf(instance, e.args, e.callee.object, e, lent) : this.ctx.sourcesOf(instance, e.args, undefined, e, lent);
-      this.ctx.borrowsFrom().set(cloneExpr(e), sources);
+      this.borrowsAt(e, sources);
     }
     return { type, what: `'${target.name}'` };
   }
@@ -3051,7 +3059,7 @@ export class Expressions<C extends Context> implements Union<C> {
     // Where the signature says `Promise<T>`, the call gives the future of the closure it was given.
     const returns = run?.kind === "closure" && this.ctx.typing().promiseElement(declaredReturns) !== undefined ? run.returns : declaredReturns;
     // An async arrow's future holds a copy of what it captured, references too.
-    if (this.kindOf(returns) === "future" && this.ctx.typing().holdsRef(returns)) this.ctx.borrowsFrom().set(cloneExpr(e), [cloneExpr(callee)]);
+    if (this.kindOf(returns) === "future" && this.ctx.typing().holdsRef(returns)) this.borrowsAt(e, [cloneExpr(callee)]);
     return { type: returns, what: name };
   }
 
@@ -5239,7 +5247,7 @@ export class Expressions<C extends Context> implements Union<C> {
           const value = this.ctx.typing().rec(t).value;
           this.argumentTo(e.args[1]!, value);
         }
-        this.ctx.borrowsFrom().set(cloneExpr(e), [cloneExpr(callee.object)]);
+        this.borrowsAt(e, [cloneExpr(callee.object)]);
         return { type: this.ctx.tables().typing.refType(t, true), what: `'${name}'` };
       case "get":
         const arg4710_1 = this.ctx.typing().rec(t).value;
@@ -7547,7 +7555,7 @@ export class Expressions<C extends Context> implements Union<C> {
     // A generator runs once, through its frame, so there is no second one to make.
     if (this.kindOf(stored) === "generator") throw new CompileError("E0213", "a generator can't be cloned: it runs once, and a copy would share its place in the run", e.start, e.end);
     // A copy of a value holding references borrows what it does.
-    if (this.ctx.typing().holdsRef(receiver)) this.ctx.borrowsFrom().set(cloneExpr(e), [cloneExpr(callee.object)]);
+    if (this.ctx.typing().holdsRef(receiver)) this.borrowsAt(e, [cloneExpr(callee.object)]);
     if (stored !== receiver && this.isClassType(stored) && this.cls(stored).methods.has("clone")) {
       return { type: this.concreteMethod(e, callee, stored, receiver), what: "'clone'" };
     }
@@ -7700,7 +7708,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (this.ctx.typing().holdsRef(returns) || promised !== undefined) {
       let lent: Expr[] = [cloneExpr(callee.object)];
       for (const a of e.args) if (this.lends(a)) lent.push(cloneExpr(a));
-      this.ctx.borrowsFrom().set(cloneExpr(e), lent);
+      this.borrowsAt(e, lent);
     }
     if (concrete !== undefined) return { type: this.concreteMethod(e, callee, concrete, returns, throws), what };
     if (!absent && throws !== undefined && promised === undefined) this.ctx.raise(e, throws, what);
@@ -9024,7 +9032,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const run = this.ctx.instanceOf(returnsFrom, undefined);
       const returns = this.ctx.returnOf(run, e);
       // A getter's reference borrows from its object.
-      if (this.ctx.typing().holdsRef(returns)) this.ctx.borrowsFrom().set(cloneExpr(e), [cloneExpr(e.object)]);
+      if (this.ctx.typing().holdsRef(returns)) this.borrowsAt(e, [cloneExpr(e.object)]);
       return this.linked(e) ? this.optional(returns, { start: e.start, end: e.end }) : returns;
     }
     if (found === undefined && classId !== undefined && this.inheritedIn(classId, "methods", e.name) !== undefined) throw new CompileError("E0801", "methods can't be used as values yet; call it", e.start, e.end);
@@ -11303,7 +11311,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (this.ctx.typing().holdsRef(made)) {
       let lent: Expr[] = [];
       for (const a of list) if (this.lends(a)) lent.push(cloneExpr(a));
-      this.ctx.borrowsFrom().set(cloneExpr(e), lent);
+      this.borrowsAt(e, lent);
     }
     return made;
   }
@@ -11368,7 +11376,7 @@ export class Expressions<C extends Context> implements Union<C> {
     // A reference it gives borrows the Dyn, unless the call frees the Dyn's block.
     if (this.ctx.typing().holdsRef(m.returns)) {
       if (m.owned === true) throw new CompileError("E0209", `'${m.name}' takes its object over and frees it, so the reference it gives would point at nothing`, callee.start, callee.end);
-      this.ctx.borrowsFrom().set(cloneExpr(e), [cloneExpr(callee.object)]);
+      this.borrowsAt(e, [cloneExpr(callee.object)]);
     }
     // A boxed async generator's `next()` runs it on, changing it.
     const mutable = m.mutable === true || this.ctx.typing().generatorElement(this.ctx.typing().rec(t).of, true) !== undefined;
@@ -11386,7 +11394,7 @@ export class Expressions<C extends Context> implements Union<C> {
     if (async !== undefined) {
       let lent: Expr[] = [cloneExpr(callee.object)];
       for (const a of e.args) if (this.lends(a)) lent.push(cloneExpr(a));
-      this.ctx.borrowsFrom().set(cloneExpr(e), lent);
+      this.borrowsAt(e, lent);
       return { type: this.ctx.tables().typing.lentPromise(async), what: `'${m.name}'` };
     }
     if (m.throws !== undefined) this.ctx.raise(e, m.throws, `'${m.name}'`);
@@ -11439,7 +11447,7 @@ export class Expressions<C extends Context> implements Union<C> {
       const arg10434_1 = `argument of type '${this.ctx.typing().show(given)}' is not assignable to parameter of type '${this.ctx.typing().show(want)}'`;
       this.coerce(e.args[i]!, given, want, arg10434_1);
     }
-    if (this.ctx.typing().holdsRef(this.ctx.typing().rec(fn).returns)) this.ctx.borrowsFrom().set(cloneExpr(e), [cloneExpr(callee)]);
+    if (this.ctx.typing().holdsRef(this.ctx.typing().rec(fn).returns)) this.borrowsAt(e, [cloneExpr(callee)]);
     const tables = this.ctx.tables();
     tables.dynCalls.set(cloneExpr(e), { index: 0, mutable: false, owned: false, callable: cloneExpr(callee) });
     const thrown = this.ctx.typing().rec(fn).throws;

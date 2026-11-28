@@ -225,6 +225,28 @@ export function comptimeCall<H extends ComptimeHost>(host: Mut<H>, instance: Ins
   }
 }
 
+// What running a test's function while compiling came to: it returned; it failed, panicking,
+// failing an `assert` or throwing an error it didn't catch, with the error saying where and how
+// the report labels it; or it did what comptime code refuses, such as I/O, and has to run natively.
+export type TestRun = { kind: "passed" } | { kind: "failed"; label: string; error: CompileError } | { kind: "refused"; reason: string };
+
+// Runs the test function `instance`, which takes no arguments, as `fishc test --interpret` does.
+export function comptimeTest<H extends ComptimeHost>(host: Mut<H>, instance: InstanceId, site: Ref<Span>): TestRun {
+  let run = new Interpreter(host);
+  try {
+    run.call(instance, [], undefined, site);
+    return { kind: "passed" };
+  } catch (e) {
+    if (e instanceof Thrown) return { kind: "failed", label: "threw", error: new CompileError("E1101", described(run.host.tables.typing, e.value), e.at.start, e.at.end) };
+    if (e instanceof Stop && (e.panic || e.assertion)) return { kind: "failed", label: "panicked", error: new CompileError("E1101", e.message, e.at.start, e.at.end) };
+    if (e instanceof Stop) return { kind: "refused", reason: e.message };
+    if (e instanceof CompileError) return { kind: "refused", reason: e.message };
+    return { kind: "refused", reason: "a return or a jump left the test" };
+  } finally {
+    run.finish();
+  }
+}
+
 // How a quoted tree, or a declaration a macro takes, becomes a value while compiling: each
 // splice is its hole's value, of the type its hole was written as. A hole made by quotes names
 // what they leave free, `frees`, in nodes they made at `spans`.

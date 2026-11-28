@@ -1,6 +1,7 @@
 // What stage 0 is: the commit stage0.toml pins and the digest its binary is checked against.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 // stage0.toml: the release stage 0 is, the commit it was cut from, where releases are downloaded
@@ -30,6 +31,15 @@ export function pinned(root: string): Pinned throws IoError | Error {
   }
   if (p.commit === "") throw new Error("stage0.toml names no commit");
   return p;
+}
+
+// Where fishc keeps what it caches, as the compiler's own cacheDir finds it.
+export function cacheDir(): string {
+  const given = process.env.FISH_CACHE_DIR ?? "";
+  if (given !== "") return given;
+  const xdg = process.env.XDG_CACHE_HOME ?? "";
+  const home = homedir();
+  return join(xdg !== "" ? xdg : home !== "" ? join(home, ".cache") : tmpdir(), "fish");
 }
 
 // This machine's target as stage0.toml names it.
