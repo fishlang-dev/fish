@@ -321,7 +321,7 @@ test("the JSON lists every rule, with zero counts", () => {
   try {
     const r = JSON.parse<Report>(run.out);
     same(JSON.stringify(r), JSON.stringify(survey(sample())), "the report");
-    assert(r.rules.length + r.waiting.length === 58, `${r.rules.length + r.waiting.length} rules`);
+    assert(r.rules.length + r.waiting.length === 59, `${r.rules.length + r.waiting.length} rules`);
   } catch (e) {
     assert(false, `the JSON doesn't parse as a report: ${e.message}\n${run.out}${run.err}`);
   }

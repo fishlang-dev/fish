@@ -943,7 +943,7 @@ function pair<A, B = A[]>(a: A, b: B): B {
 
 function main() {
   print(id(3), id<boolean>(true))
-  const e = empty()
+  let e = empty()
   e.push("x")
   print(e.length, e[0])
   print(pair<i64>(1, [2, 3]).length)
@@ -969,7 +969,7 @@ class Keyed<K, V = K> {
 }
 
 function size(s: Stack): i64 {
-  return s.items.length
+  return s.items.length as i64
 }
 
 function main() {
@@ -978,7 +978,7 @@ function main() {
   s.push(5)
   let t: Stack<string> = new Stack<string>()
   t.push("a")
-  const k: Keyed<string> = new Keyed("a", "b")
+  const k: Keyed<string> = new Keyed<string>("a", "b")
   print(size(s), s.items[1], t.items[0], k.value)
 }
 // expect: 2 5 a b

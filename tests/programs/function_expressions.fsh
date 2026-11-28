@@ -31,7 +31,8 @@ function main() {
 // expect: 5
 async function main() {
   const later = async function (x: i64): Promise<i64> { return x; };
-  console.log(await later(5));
+  const x = await later(5);
+  console.log(x);
 }
 // case: function_expression_recursive
 // expect: 120 55

@@ -3,9 +3,9 @@
 // expect: 426 websocket
 // expect: 426 13
 // expect: 400
-// expect: 404
+// expect: 405
 // A WebSocket route answers the upgrade with RFC 6455's accept key, and refuses a request that
-// isn't one. It is a GET route, so another method finds no route.
+// isn't one. It is a GET route, so another method gets the router's 405.
 function upgrade(version: string, key: string): Headers {
   let h = new Headers();
   h.set("upgrade", "websocket");

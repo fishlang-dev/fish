@@ -853,7 +853,7 @@ async function main(): Promise<void> {
 async function show(app: Ref<Router>, method: string, path: string): Promise<void> {
   const res = await app.handle(new Request("http://h" + path, { method: method }));
   const body = await res.text();
-  console.log(method, path, res.status, "[" + (res.headers.get("allow") ?? "-") + "]", body.trim());
+  console.log(`${method} ${path} ${res.status} [${res.headers.get("allow") ?? "-"}] ${body.trim()}`.trimEnd());
 }
 
 async function main(): Promise<void> {
@@ -909,6 +909,7 @@ async function main(): Promise<void> {
 // expect: 404 application/json {"error":"no route for /gone"}
 // expect: seen /a
 // expect: 405 text/plain;charset=UTF-8 Method Not Allowed
+// expect: seen /a
 // expect: 200 text/plain;charset=UTF-8 a
 // notFound's handler answers what no route takes, inside the middleware, after a re-route too,
 // and the last set wins; a 405 is still the router's own.
