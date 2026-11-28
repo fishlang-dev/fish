@@ -51,14 +51,49 @@ import { type Kept } from "./incremental.fsh";
 import { checkedProgram, checkedSource, Queries } from "./queries.fsh";
 import { fileAt } from "./program.fsh";
 import { STD_BASE } from "./std.fsh";
+import { serveDaemon, viaDaemon, type DaemonRequest, type Served } from "./daemon.fsh";
+import { compilerDigest } from "./checkcache.fsh";
 
 export type Panic = "unwind" | "abort";
 
 // `formatError` for stderr, painted on a terminal unless NO_COLOR is set, or whenever FORCE_COLOR is.
 function painted(e: Ref<CompileError>, path: string, program: string, kind = "error"): string {
+  return formatError(e, path, program, kind, colourOn());
+}
+
+function colourOn(): boolean {
   const forced = process.env.FORCE_COLOR;
-  const colour = forced !== undefined && forced !== "0" ? true : process.stderr.isTTY === true && (process.env.NO_COLOR ?? "") === "";
-  return formatError(e, path, program, kind, colour);
+  return forced !== undefined && forced !== "0" ? true : process.stderr.isTTY === true && (process.env.NO_COLOR ?? "") === "";
+}
+
+// A build or check `fishc daemon` was handed, from what its last one kept, its errors and warnings
+// written for the client's stderr. A check is the build without linking, so the two share one kept
+// state and neither leaves the other's codegen reuse stale.
+function daemonBuild(r: Ref<DaemonRequest>, kept: Kept | undefined): Served {
+  let looked: string[] = [];
+  let shown = "";
+  try {
+    process.chdir(r.cwd);
+    const manifest = findManifest(dirname(resolve(r.file)));
+    const panic: Panic = r.panic === "abort" ? "abort" : "unwind";
+    let warnings: CompileError[] = [];
+    let next: Kept;
+    if (r.command === "check") {
+      let made = compiledKept(sessionWith(r.locked, false), r.file, false, panic, false, false, looked, kept, manifest);
+      warnings = made.warnings;
+      next = made.kept;
+    } else {
+      let made = builtKept(sessionWith(r.locked, false), r.file, r.out, r.release, panic, [...r.links], hostTarget(), r.leaks, r.debug, looked, kept, manifest);
+      warnings = made.warnings;
+      next = made.kept;
+    }
+    for (const w of warnings) shown += formatError(w, r.file, textOf(r.file), "warning", r.colour) + "\n";
+    return { reply: { code: 0, stderr: shown, stale: false }, kept: next };
+  } catch (e) {
+    if (e instanceof CompileError) shown += formatError(e, r.file, textOf(r.file), "error", r.colour) + "\n";
+    else shown += `${(e as { message: string }).message}\n`;
+    return { reply: { code: 1, stderr: shown, stale: false }, kept: undefined };
+  }
 }
 // A library C can call: an archive to link, or a shared library to load.
 export type Library = "static" | "shared";
@@ -1792,6 +1827,7 @@ async function main(): Promise<void> {
   const sessionFor = (): BuildSession => sessionWith(locked, timed, checking, json, values.backend);
   // `fishc run` and `fishc watch` take the program's arguments after the file, or all of them with no file.
   const command = positionals.length > 0 ? positionals[0] : undefined;
+  if (command === "daemon" && positionals.length === 1) await serveDaemon(daemonBuild);
   const named = positionals.length > 1 ? positionals[1] : undefined;
   const file = (command === "run" || command === "watch") && named !== undefined && !named.endsWith(".fsh") ? undefined : named;
   const programArgs = positionals.slice(file === undefined ? 1 : 2);
@@ -2044,6 +2080,17 @@ async function main(): Promise<void> {
     }
   }
   const llvm = values["emit-llvm"] === true;
+  // A plain build or check goes to a running `fishc daemon`, which builds from what it kept.
+  const plainFlags = ["out", "release", "panic", "link", "debug", "leaks", "locked"];
+  const delegable = (command === "build" || (command === "check" && values.out === undefined && !release)) && target !== undefined && (panicName === "unwind" || panicName === "abort") && flags.every((k) => plainFlags.includes(k)) && process.env.FISH_BACKEND === undefined;
+  if (delegable) {
+    const request: DaemonRequest = { fishc: compilerDigest(), cwd: process.cwd(), command: command!, file: target!, out: out ?? basename(target!, ".fsh"), release, panic: panic, links: [...links], debug: values.debug === true, leaks, locked, colour: colourOn() };
+    const reply = await viaDaemon(request);
+    if (reply !== undefined) {
+      process.stderr.write(reply.stderr);
+      process.exit(reply.code);
+    }
+  }
   if (command === "check" && target !== undefined && values.out === undefined && !release && !llvm && lib === undefined) {
     try {
       const start = performance.now();
@@ -2105,7 +2152,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release[=size]] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--linker system|lld|mold] [--backend native|llvm] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--backend native|llvm] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release[=size]] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--linker system|lld|mold] [--backend native|llvm] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--backend native|llvm] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<filter>] [--release]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp\n       fishc daemon");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
