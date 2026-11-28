@@ -310,7 +310,7 @@ test("a diagnostic names a test as the test, and --panic=abort is refused", () =
   assert(named.err.includes("which isn't the 'Error' that the test 'throws its own' throws"), `stderr:\n${named.err}`);
   const aborting = fishcTest(dir, ["--panic=abort"]);
   assert(aborting.code === 2, `--panic=abort exited with ${aborting.code}`);
-  same(aborting.err, "usage: fishc test [<file> | <filter>] [--release] [--timeout <ms>] [--jobs <n>] [--watch]\n", "--panic=abort's stderr");
+  same(aborting.err, "usage: fishc test [<file> | <filter>] [--release] [--timeout <ms>] [--jobs <n>] [--watch | --interpret]\n", "--panic=abort's stderr");
   removed(root);
 }, { timeout: 30_000 });
 

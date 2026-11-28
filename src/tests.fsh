@@ -231,6 +231,7 @@ export function harnessImports(dir: string, files: string[]): string {
 // is reached as `name-fsh<n>`, the name file n declares, which no program can write.
 /** @throws {CompileError} */
 export function harnessMain(ids: Mut<Ids>, tests: Ref<Test[]>, modules: Ref<Module[]>): Stmt[] {
+  const functions = testFunctions(tests, modules);
   const call = (t: Ref<Test>) => `__test${t.index}`;
   const runs = tests.map((t) => `  if (which === "${t.index}") {\n    ${t.async ? "await " : ""}${call(t)}();\n    return;\n  }\n`);
   const text = `async function main(): Promise<void> throws Error {
@@ -244,9 +245,14 @@ ${runs.join("")}  console.error(\`no test numbered '\${which}'; run one by its i
 `;
   let made = parse(text, ids);
   let named = new Map<string, string>();
-  for (const t of tests) named.set(call(t), `${testSymbol(t.name)}-fsh${modules.findIndex((m) => m.path === t.module.path)}`);
+  for (const t of tests) named.set(call(t), functions[t.index]!);
   renameIn(ids, made, (name) => named.get(name));
   return made;
+}
+
+// The name each of `tests` is linked as, in their order: the name file n declares, as `name-fsh<n>`.
+export function testFunctions(tests: Ref<Test[]>, modules: Ref<Module[]>): string[] {
+  return tests.map((t) => `${testSymbol(t.name)}-fsh${modules.findIndex((m) => m.path === t.module.path)}`);
 }
 
 // Gives the `main` of each file but the first, std's aside, a name no program can write, since
@@ -263,10 +269,11 @@ export function hideMains(compilation: Mut<Compilation>, modules: Mut<Module[]>)
 // How long a test may run when neither it nor the run names a limit, in milliseconds.
 export const LIMIT: usize = 10_000;
 
-// How a run goes: the limit for a test that names none, and how many tests run at once.
-export type RunOptions = { timeout: usize; jobs: usize };
+// How a run goes: the limit for a test that names none, how many tests run at once, and whether
+// tests are tried in the comptime interpreter before their native build.
+export type RunOptions = { timeout: usize; jobs: usize; interpret: boolean };
 
-type Outcome = { passed: boolean; output: string };
+export type Outcome = { passed: boolean; output: string };
 
 // Ends every test running now, along with anything it started: `running` holds the process
 // groups of a run's tests while they run.
@@ -343,7 +350,7 @@ function shownLimit(ms: usize): string {
 
 // The run's defaults: the standard limit, and a test per core.
 export function runDefaults(): RunOptions {
-  return { timeout: LIMIT, jobs: availableParallelism() as usize };
+  return { timeout: LIMIT, jobs: availableParallelism() as usize, interpret: false };
 }
 
 // A test fails when it exits with anything but 0 or runs past the limit.
@@ -358,13 +365,17 @@ function outcome(text: string, code: i64, late: boolean, signal: string | null, 
 // in order: `ok` or `FAIL`, the file and the name, a failed test's output, then the counts, noting
 // each test's process group in `running` while it runs. A test past its own limit, or the run's, has
 // its group killed; once a test exits, the rest of its group is killed, as a child it left behind
-// would otherwise hold its output open, and the verdict is the test's own. Gives the exit code, 1
-// when any failed.
-export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Ref<Test[]>, cwd: string, options: Ref<RunOptions>): Promise<i64> {
+// would otherwise hold its output open, and the verdict is the test's own. A test `known` holds by
+// its index already ran in the interpreter and isn't started; with `options.interpret` each line
+// says which way its test ran. Gives the exit code, 1 when any failed.
+export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Ref<Test[]>, cwd: string, options: Ref<RunOptions>, known: Ref<Map<usize, Outcome>>): Promise<i64> {
   const width = Math.min(options.jobs as i64, tests.length as i64);
   let flight: Running[] = [];
   let done: (Outcome | undefined)[] = [];
-  for (let at: usize = 0; at < tests.length; at++) done.push(undefined);
+  for (let at: usize = 0; at < tests.length; at++) {
+    const o = known.get(tests[at]!.index);
+    done.push(o === undefined ? undefined : { passed: o.passed, output: o.output });
+  }
   let next: usize = 0;
   let shown: usize = 0;
   let failed = 0;
@@ -372,6 +383,7 @@ export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Re
     while (next < tests.length && (flight.length as i64) < width) {
       const at = next;
       next++;
+      if (known.has(tests[at]!.index)) continue;
       try {
         // Started before the push, so `flight` is lent to it only once nothing can throw.
         const r = started(running, binary, tests[at]!, cwd, at, options.timeout);
@@ -385,7 +397,8 @@ export async function runTests(running: Mut<Set<i32>>, binary: string, tests: Re
       if (o === undefined) break;
       const test: Ref<Test> = tests[shown]!;
       if (!o.passed) failed++;
-      process.stdout.write(`${o.passed ? "ok" : "FAIL"} ${test.module.file} > ${test.name}\n${o.passed ? "" : o.output}`);
+      const way = !options.interpret ? "" : known.has(test.index) ? " (interpreted)" : " (native)";
+      process.stdout.write(`${o.passed ? "ok" : "FAIL"} ${test.module.file} > ${test.name}${way}\n${o.passed ? "" : o.output}`);
       shown++;
     }
     if (shown === tests.length) break;
