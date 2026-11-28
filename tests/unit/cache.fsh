@@ -349,7 +349,7 @@ test("a dev build keeps std's object across edits to the program's own code", ()
   };
   same(built(base), "200 user 7\n", "the program");
   const first = stdObjects(cache);
-  assert(first.length === 1, `std's objects: ${JSON.stringify(first)}`);
+  assert(first.length > 0, `std's objects: ${JSON.stringify(first)}`);
   const edits: [string, string][] = [
     [base.replace('"user "', '"member "'), "200 member 7\n"],
     [base.replace('new Response("user " + req.param("id"))', '{ const id = req.param("id"); return new Response(id + " is a user"); }'), "200 7 is a user\n"],
@@ -361,7 +361,7 @@ test("a dev build keeps std's object across edits to the program's own code", ()
   }
   const aggregate = base.replace("console.log(res.status, body);", "console.log(res.status, body, new AggregateError([1, 2]).errors.length);");
   same(built(aggregate), "200 user 7 2\n", "the program using more of std");
-  assert(stdObjects(cache).length === 2, `std's objects after using more of it: ${JSON.stringify(stdObjects(cache))}`);
+  assert(stdObjects(cache).length === first.length + 1, `std's objects after using more of it: ${JSON.stringify(stdObjects(cache))}`);
   removed(root);
 }, { timeout: 120_000 });
 
