@@ -994,6 +994,59 @@ async function watchTests(fresh: () => BuildSession, dir: string, arg: string | 
   return s.interrupt.aborted ? 130 : 143;
 }
 
+// `fishc watch --check`: checks the program whose entry is `entry`, then, each time a file the
+// check read changes, checks it again from what the last check kept, so an edit to one body
+// rechecks that body, printing the warnings and the error or that it checks cleanly, until SIGINT
+// or SIGTERM, giving the exit code. Nothing is generated, built or run. Each check takes a session
+// of its own from `fresh`, since a check uses up the one it is given.
+/** @throws {IoError} */
+async function watchCheck(fresh: () => BuildSession, entry: string, manifest: string | undefined): Promise<i64> {
+  const s = listened();
+  const note = (text: string) => console.error(`[fishc] ${text}`);
+  let files = watchedFiles([entry], manifest);
+  let kept: Kept | undefined = undefined;
+  while (received(s) === 0) {
+    // Read before checking, so a save during the check still differs afterwards.
+    const before = snapshot(files);
+    let looked: string[] = [];
+    let summary = "waiting for changes";
+    let clean = false;
+    try {
+      const start = performance.now();
+      const reusing = kept !== undefined;
+      let queries = new Queries(entry, manifest, new Map<string, string>());
+      let made = queries.checked(fresh(), looked, kept);
+      reportTimings(made.checked.tables.session, [...FRONT_END, "reload compare", "reload read", "reload classify"], start);
+      let warnings = [...made.checked.warnings];
+      if (reusing) {
+        const placed: Ref<Source[]> = made.loaded.sources;
+        warnings.sort((a, b) => (realOffset(a.start, placed) as i64) - (realOffset(b.start, placed) as i64));
+      }
+      for (const w of warnings) console.error(painted(w, entry, textOf(entry), "warning"));
+      const counted = warnings.length === 0 ? "" : ` with ${warnings.length} warning${warnings.length === 1 ? "" : "s"}`;
+      summary = `${fromHere(entry)} checks cleanly${counted}; waiting for changes`;
+      clean = true;
+      kept = made;
+    } catch (e) {
+      if (e instanceof CompileError) console.error(painted(e, entry, textOf(entry)));
+      else console.error(`fishc: ${(e as { message: string }).message}`);
+      kept = undefined;
+    }
+    // A check that failed may not have reached every import, so the files watched only grow then.
+    let wanted: string[] = clean ? [] : [...files];
+    for (const f of looked) wanted.push(f);
+    wanted.push(entry);
+    files = watchedFiles(wanted, manifest);
+    let contents = snapshot(files);
+    for (const [f, text] of before) if (contents.has(f)) contents.set(f, text);
+    note(summary);
+    const found = await nextChanges(contents, s);
+    if (found === undefined) break;
+    note(`checking: ${found.map((f) => fromHere(f)).join(", ")} changed`);
+  }
+  return s.interrupt.aborted ? 130 : 143;
+}
+
 // Which of the package's files `all` a run builds, and the name filter left for its tests: the one
 // file `arg` names, every test of it run; or, with `arg` a filter, the files a test whose name
 // holds it may be in, a file that doesn't parse kept for its build to report; or why none is.
@@ -2215,7 +2268,7 @@ async function main(): Promise<void> {
       if (holder !== undefined && realpathSync(holder) !== realpathSync(found!)) throw fieldError(found, "entry", `the entry '${manifest.entry}' is a file inside the package '${loadManifest(holder).name}'; a package's entry is one of its own files`);
       target = relative(process.cwd(), join(manifest.dir, manifest.entry));
       if (out === undefined) out = join(manifest.dir, "target", release ? "release" : "debug", manifest.name);
-      if (values["emit-llvm"] !== true && command !== "check") mkdirSync(dirname(out), { recursive: true });
+      if (values["emit-llvm"] !== true && command !== "check" && values.check !== true) mkdirSync(dirname(out), { recursive: true });
     } catch (e) {
       if (!(e instanceof CompileError)) throw e;
       console.error(painted(e, relative(process.cwd(), found!), readFileSync(found!, "utf8")));
@@ -2272,6 +2325,11 @@ async function main(): Promise<void> {
     }
     process.exit(code);
   }
+  if (command === "watch" && values.check === true && target !== undefined && values.out === undefined && !llvm && lib === undefined) {
+    if (release || values.debug === true || leaks || links.length > 0 || programArgs.length > 0) fail("fishc watch --check: only checks, building and running nothing, so it takes no '--release', '-g', '--leaks', '--link' or program arguments");
+    const watched = await watchCheck(sessionFor, target, findManifest(dirname(resolve(target))));
+    process.exit(watched);
+  }
   if (command === "watch" && target !== undefined && values.out === undefined && !llvm && lib === undefined) {
     const entry = target;
     const scratch = out === undefined ? mkdtempSync(join(tmpdir(), "fishc-watch-")) : undefined;
@@ -2295,7 +2353,7 @@ async function main(): Promise<void> {
     });
   }
   if (command !== "build" || target === undefined || values.fix === true || values.json === true || values.rank === true || values.self !== undefined || values.plan !== undefined || values.compare !== undefined || (panicName !== "unwind" && panicName !== "abort") || links.some((l) => l.trim() === "") || (libName !== undefined && libName !== "static" && libName !== "shared")) {
-    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release[=size]] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--linker system|lld|mold] [--backend native|llvm] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--backend native|llvm] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<file> | <filter>] [--release] [--watch]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp\n       fishc daemon");
+    console.error("usage: fishc build [<file.fsh>] [-o <out>] [--release[=size]] [-g] [--locked] [--panic=unwind|abort] [--link <library>]... [--lib[=static|shared]] [--target <triple>] [--sysroot <dir>] [--static [--dockerfile]] [--leaks] [--timings] [--emit-llvm] [--sanitize address|thread] [--pgo-instrument | --pgo <profile>...] [--linker system|lld|mold] [--backend native|llvm] [--timings-json <path>]\n       fishc check [<file.fsh>] [--timings] [--timings-json <path>] [--no-check-cache]\n       fishc run [<file.fsh>] [--release] [-g] [--leaks] [--linker system|lld|mold] [--backend native|llvm] [--timings] [--timings-json <path>] [-- <args>...]\n       fishc watch [<file.fsh>] [--release] [-g] [--leaks] [--timings] [-- <args>...]\n       fishc watch [<file.fsh>] --check [--timings]\n       fishc new <name>\n       fishc init [<name>]\n       fishc add <name>[@<range>]\n       fishc update [<name>]\n       fishc publish [--dry-run] [--allow-dirty] [--submit [--fork <url>] [--yes]]\n       fishc fmt [<path>...] [--check]\n       fishc fmt - [--check]\n       fishc test [<file> | <filter>] [--release] [--watch]\n       fishc lint [<path>...] [--fix]\n       fishc survey <dir> [--compare <old.json>] [--json]\n       fishc survey --rank <dir>... [--self <dir>] [--plan <build-plan.md>] [--json]\n       fishc bloat <file.fsh|binary> [--release] [--top <n>] [--json]\n       fishc allocs <file.fsh> [--release] [--top <n>] [--json]\n       fishc layout <file.fsh> <type> [--json]\n       fishc demangle [<binary>] [--names <file.fshnames>]\n       fishc explain <code>\n       fishc explain-borrows <file.fsh> [--fn <name>]\n       fishc openapi <file.fsh> [-o <out>]\n       fishc parse <file.fsh>\n       fishc lsp\n       fishc daemon");
     process.exit(2);
   }
   // A library keeps no frames to name sites with, and its host's exit isn't the library's to report.
