@@ -111,7 +111,7 @@ function planOf(path: string): Plan {
 test("each rule counts what the sample shows", () => {
   list(nonzero(survey(sample())), sorted([
     "parse: 1", "R1: 1", "R2: 1", "R3: 1", "declarators: 1",
-    "forIn: 1", "decorators: 1",
+    "decorators: 1",
     "G1: 3", "G6: 1", "G7: 1", "G8: 1", "G10: 1", "A1: 1", "A2: 1", "A3: 1", "A4: 1", "A8: 1", "A9: 1",
   ]), "counts");
 });
@@ -186,6 +186,7 @@ test("forms that look alike are told apart", () => {
   countsAre("const Bun = { spawn() {} };\nfunction f() {\n  Bun.spawn();\n}\n", []);
   countsAre('import { which, sleep, serve } from "bun";\nimport { password } from "bun";\n', ["bunModules: 1"]);
   countsAre("type F = (x: number) => void;\nconst g = function () { return 1; };\n", ["A9: 1"]);
+  countsAre("const g = function* () { yield 1; };\n", ["generatorExpressions: 1"]);
   countsAre("declare const DEV: boolean;\nlet a = 1;\nexport let b = 2;\nfor (const x of [1]) {}\n", ["A4: 2"]);
   countsAre("export function f(): i64 { return 1; }\nexport const x = 1;\nexport interface I {}\n", []);
   countsAre('"use strict";\nsetup();\n', ["G7: 1"]);
@@ -320,7 +321,7 @@ test("the JSON lists every rule, with zero counts", () => {
   try {
     const r = JSON.parse<Report>(run.out);
     same(JSON.stringify(r), JSON.stringify(survey(sample())), "the report");
-    assert(r.rules.length + r.waiting.length === 58, `${r.rules.length + r.waiting.length} rules`);
+    assert(r.rules.length + r.waiting.length === 59, `${r.rules.length + r.waiting.length} rules`);
   } catch (e) {
     assert(false, `the JSON doesn't parse as a report: ${e.message}\n${run.out}${run.err}`);
   }
@@ -360,7 +361,7 @@ function steps(r: Ref<Ranking>): string[] {
 }
 
 test("the curve picks the feature freeing the most lines first, and frees a file only once all it needs exist", () => {
-  const one = project([["a.ts", big()], ["b.ts", "for (const k in o) {}\n"], ["c.ts", "namespace N {}\nfor (const k in o) {}\n"]]);
+  const one = project([["a.ts", big()], ["b.ts", "for (k in o) {}\n"], ["c.ts", "namespace N {}\nfor (k in o) {}\n"]]);
   const two = project([["d.ts", "function main(): void {}\n"]]);
   const r = ranked([one, two]);
   same(`${r.curve.start.files} ${r.curve.start.lines} ${r.curve.start.share}`, "1 1 7.1", "the start");
@@ -392,7 +393,7 @@ function selfSteps(r: Ref<Ranking>): string[] {
 
 test("unread files are left out of the steps but not the shares, and the self curve stands alone", () => {
   const repo = project([["a.ts", big()], ["bad.ts", "const = ;\n"], ["v.tsx", "const v = <div>;\nconst w = 1;\n"]]);
-  const self = project([["s.ts", "for (const k in o) {}\n"]]);
+  const self = project([["s.ts", "for (k in o) {}\n"]]);
   const r = ranked([repo], self);
   same(`${r.repos[0]!.unread.files} ${r.repos[0]!.unread.lines}`, "2 3", "unread");
   list(r.curve.steps.map((s) => `${s.feature} ${s.portable.share}`), ["The rest of console 76.9"], "the steps");
@@ -450,7 +451,7 @@ function planShown(s: Ref<Step>): string {
 }
 
 test("a plan names each feature's item and whether it is done", () => {
-  const dir = project([["a.ts", big() + "for (const k in o) {}\nnamespace N {}\n"], ["plan.md", "## Plan\n\n- [ ] 7. **The rest of console** - console.debug\n  - [x] 9b. **for...in** - keys\n"]]);
+  const dir = project([["a.ts", big() + "for (k in o) {}\nnamespace N {}\n"], ["plan.md", "## Plan\n\n- [ ] 7. **The rest of console** - console.debug\n  - [x] 9b. **for...in** - keys\n"]]);
   const r = ranked([dir], undefined, planOf(join(dir, "plan.md")));
   list(sorted(r.curve.steps.map((s) => planShown(s))), sorted(["The rest of console: 7 false", "for...in: 9b true", "Namespaces: null"]), "the plan items");
   assert(formatRanking(r, true).includes("(plan item 9b, done)"), formatRanking(r, true));

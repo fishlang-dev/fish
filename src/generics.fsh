@@ -33,9 +33,11 @@ export interface BoundResolver {
 /** @throws {CompileError} */
 export function placeholders<R extends BoundResolver>(r: Mut<R>, params: Ref<TypeParam[]>, around: Map<string, Type> | undefined, concrete: Map<string, Type> | undefined): Map<string, Type> {
   let scope = new Map<string, Type>();
+  let defaulted = false;
   for (const p of params) {
     if (p.modifiers.length > 0) throw new CompileError("E0801", `'${p.modifiers[0]}' type parameters are not supported yet`, p.start, p.end);
-    if (p.default !== undefined) throw new CompileError("E0801", "default type arguments are not supported yet", p.default.start, p.default.end);
+    if (p.default !== undefined) defaulted = true;
+    else if (defaulted) throw new CompileError("E0106", `required type parameter '${p.name}' can't follow one with a default`, p.start, p.end);
     let bound: ObjectType | InterfaceType | undefined = undefined;
     let within: Type | undefined = undefined;
     if (p.constraint !== undefined) {
@@ -69,6 +71,27 @@ export function placeholders<R extends BoundResolver>(r: Mut<R>, params: Ref<Typ
     scope.set(p.name, stands !== undefined ? r.tables.typing.wrapped(p.name, bound, stands) : r.tables.typing.typeParameter(p.name, bound, within));
   }
   return scope;
+}
+
+// Type arguments left off the end take their parameters' defaults, each resolved with the
+// parameters before it bound, as `<T, U = T[]>` reads. Unchanged when one left off has none, so
+// the caller reports the count.
+/** @throws {CompileError} */
+export function withDefaults<R extends BoundResolver>(r: Mut<R>, params: Ref<TypeParam[]>, args: Ref<Type[]>, around: Ref<Map<string, Type>> | undefined): Type[] {
+  let out: Type[] = [];
+  for (const a of args) out.push(a);
+  if (args.length >= params.length) return out;
+  for (let i = args.length; i < params.length; i++) if (params[i]!.default === undefined) return out;
+  let scope = new Map<string, Type>();
+  if (around !== undefined) for (const [n, t] of around) scope.set(n, t);
+  for (let i: usize = 0; i < params.length; i++) {
+    if (i >= out.length) {
+      const d = r.resolveIn(scope, params[i]!.default!);
+      out.push(r.tables.typing.heldArgument(d));
+    }
+    scope.set(params[i]!.name, out[i]!);
+  }
+  return out;
 }
 
 // Whether a type holds the placeholder `t`, directly or in a function-typed parameter's bound.
@@ -466,7 +489,7 @@ function literalIs(v: Ref<Expr>, value: string | bigint | boolean): boolean {
 // parameters given.
 // The copy is renumbered before its names are replaced, so what the replacing records is the
 // copy's, never the alias's own nodes.
-function substituted(ids: Mut<Ids>, node: Ref<TypeNode>, given: Ref<Map<string, TypeNode>>): TypeNode {
+export function substituted(ids: Mut<Ids>, node: Ref<TypeNode>, given: Ref<Map<string, TypeNode>>): TypeNode {
   const copy = renumberTypeNode(cloneTypeNode(node), () => nextId(ids));
   let rewrites = new Rewrites();
   walkWhile({ of: "typeNode", node: copy }, (n) => {
@@ -887,8 +910,10 @@ export class Instancing<H extends InstancingHost> {
     const signature = { start: f.start, end: firstStatementAt(this.host.tables.arenas.bodyOf(f.bodyId)) };
     if (failed !== undefined && (f.returnType === undefined || (failed.start >= signature.start && failed.end <= signature.end))) throw failed;
     const params = typeParamsOf(f);
-    if (typeArgs.length > 0 && typeArgs.length !== params.length) {
-      throw new CompileError("E0106", `expected ${params.length} type argument${params.length === 1 ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
+    const least = params.filter((p) => p.default === undefined).length;
+    if (typeArgs.length > 0 && (typeArgs.length < least || typeArgs.length > params.length)) {
+      const expected = least === params.length ? `${least}` : `${least}-${params.length}`;
+      throw new CompileError("E0106", `expected ${expected} type argument${expected === "1" ? "" : "s"}, but got ${typeArgs.length}`, at.start, at.end);
     }
     if (!this.generic(f.bodyId)) return this.instanceOf(f);
     // Optional parameters may be left out at the end.
@@ -899,7 +924,7 @@ export class Instancing<H extends InstancingHost> {
     }
     let bindings = new Map<string, Type>();
     if (typeArgs.length > 0) {
-      for (let i: usize = 0; i < params.length; i++) {
+      for (let i: usize = 0; i < typeArgs.length; i++) {
         const resolved = this.host.resolveType(cloneTypeNode(typeArgs[i]!));
         bindings.set(params[i]!.name, this.host.tables.typing.heldArgument(resolved));
       }
@@ -915,6 +940,15 @@ export class Instancing<H extends InstancingHost> {
         const yields = bindings.has(p.name) ? this.host.tables.typing.yieldsOf(bindings.get(p.name)!) : undefined;
         if (p.constraint !== undefined && p.constraint.kind === "ref" && p.constraint.name === "Generator" && p.constraint.args.length === 1 && yields !== undefined) infer(this.host.tables, this.host.decls, p.constraint.args[0]!, yields, names, bindings, at);
       }
+    }
+    // A parameter neither written nor inferred takes its default, seeing those before it.
+    for (const p of params) {
+      if (bindings.has(p.name) || p.default === undefined) continue;
+      let seen = new Map<string, Type>();
+      if (f.scope !== undefined) for (const [n, t] of f.scope) seen.set(n, t);
+      for (const [n, t] of bindings) seen.set(n, t);
+      const d = this.host.resolveIn(seen, p.default);
+      bindings.set(p.name, this.host.tables.typing.heldArgument(d));
     }
     for (const p of params) {
       const type = bindings.get(p.name);
@@ -1534,8 +1568,9 @@ export class GenericClasses<H extends GenericClassesHost> {
       if ((r.kind === "function" || r.kind === "closure") && r.generic !== undefined) throw unsupported("generic function types as type arguments", at);
     }
     for (const a of given) unboxedClosure(this.host.tables.typing, a, at);
-    let args: Type[] = [];
-    for (const t of given) args.push(this.host.tables.typing.heldArgument(t));
+    let held: Type[] = [];
+    for (const t of given) held.push(this.host.tables.typing.heldArgument(t));
+    const args = withDefaults(this.host, template.typeParams, held, undefined);
     const count = template.typeParams.length;
     if (args.length !== count) {
       throw new CompileError("E0106", `type '${template.name}' expects ${count} type argument${count === 1 ? "" : "s"}, but got ${args.length}`, at.start, at.end);
@@ -1623,9 +1658,13 @@ export class GenericClasses<H extends GenericClassesHost> {
       const made = this.classInstance(named(template), args, { start: at.start, end: at.end }, false);
       return this.host.tables.arenas.classOf(made);
     }
-    const bindings = this.inferred(named(template), argTypes, { start: at.start, end: at.end }, new NodeSet<ClassNode>());
+    let bindings = this.inferred(named(template), argTypes, { start: at.start, end: at.end }, new NodeSet<ClassNode>());
     let args: Type[] = [];
     for (const p of template.typeParams) {
+      if (!bindings.has(p.name) && p.default !== undefined) {
+        const d = this.host.resolveIn(bindings, p.default);
+        bindings.set(p.name, this.host.tables.typing.heldArgument(d));
+      }
       const type = bindings.get(p.name);
       if (type === undefined) throw new CompileError("E0104", `can't infer a type for '${p.name}'; pass the type arguments explicitly`, at.start, at.end);
       args.push(type);

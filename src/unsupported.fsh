@@ -16,7 +16,7 @@ export const EXPRESSION_FORMS: Record<Exclude<Expr["kind"], "int" | "bigint" | "
   import: "dynamic imports",
   topic: "topic references",
   comptime: "comptime expressions",
-  sequence: "comma expressions",
+  sequence: "comma expressions used as values",
   assertion: "type assertions",
   tagged: "tagged templates",
 };

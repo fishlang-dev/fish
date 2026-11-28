@@ -1649,8 +1649,9 @@ class Request {
   // A body given as a stream, at most one, read into #body when the request is sent or read.
   // Shared, so a request still clones, its copies sharing the one stream. The stream's
   // generator is held rather than the stream, since a class field naming a ReadableStream
-  // instance makes it before its type parameter is bound.
-  #bytes: shared<{ s: Lock<Dyn<AsyncGenerator<u8[]>>[]> }>;
+  // instance makes it before its type parameter is bound. Once the request is cloned, the copy
+  // that reads the stream to its end keeps the bytes in read for the others.
+  #bytes: shared<{ s: Lock<Dyn<AsyncGenerator<u8[]>>[]>; read: Lock<u8[][]>; cloned: Atomic<i64> }>;
   signal: AbortSignal;
   // The :params a Router's route took from the path, as name then value.
   params: string[] = [];
@@ -1677,8 +1678,35 @@ class Request {
     this.method = method;
     this.headers = headers;
     this.#body = bytes;
-    this.#bytes = shared({ s: new Lock(streams) });
+    const read: u8[][] = [];
+    this.#bytes = shared({ s: new Lock(streams), read: new Lock(read), cloned: new Atomic(0) });
     this.signal = signal;
+  }
+
+  // A copy of the request, as it is now: its path as a middleware may have rewritten it, its
+  // :params, and a body each copy can read in full.
+  // ponytail: a streamed body read through body, or by two copies at once, reaches only one of
+  // them; tee the stream if a program needs that.
+  clone(): Request {
+    this.#bytes.cloned.store(1);
+    let copy = new Request(this.url, { method: this.method, headers: this.headers.clone(), signal: this.signal.clone() });
+    copy.path = this.path;
+    copy.params = this.params.clone();
+    copy.#body = this.#body.clone();
+    copy.#bytes = this.#bytes.clone();
+    return copy;
+  }
+
+  // The bytes a copy of this request read from the stream they share, or null.
+  private kept(this: Ref<this>): u8[] | null {
+    return this.#bytes.read.update((r) => r.length > 0 ? r[0].clone() : null);
+  }
+
+  // Keeps a streamed body's bytes for the other copies, when there are any.
+  private keep(this: Ref<this>, bytes: Ref<u8[]>) {
+    if (this.#bytes.cloned.load() === 0) return;
+    const held = bytes.clone();
+    this.#bytes.read.update((r) => { r.push(held); });
   }
 
   __setBody(this: Mut<this>, body: string | u8[] | ReadableStream<u8[]>) {
@@ -1699,8 +1727,13 @@ class Request {
   // A body given as a stream, read to its end into the bytes, as fetch sends it with a length.
   async __drain(this: Mut<this>) {
     const given = this.#bytes.s.update((s) => s.pop());
-    if (given === null) return;
+    if (given === null) {
+      const kept = this.kept();
+      if (kept !== null) this.#body = kept;
+      return;
+    }
     const bytes = await __streamBytes(ReadableStream.from(__streamDyn(given)));
+    this.keep(bytes);
     this.#body = bytes;
   }
 
@@ -1721,7 +1754,13 @@ class Request {
   // The body's bytes as they were sent; a streamed one's read to its end, once.
   async bytes(): Promise<u8[]> {
     const given = this.#bytes.s.update((s) => s.pop());
-    if (given !== null) return await __streamBytes(ReadableStream.from(__streamDyn(given)));
+    if (given !== null) {
+      const bytes = await __streamBytes(ReadableStream.from(__streamDyn(given)));
+      this.keep(bytes);
+      return bytes;
+    }
+    const kept = this.kept();
+    if (kept !== null) return kept;
     return this.#body.clone();
   }
 
@@ -1854,6 +1893,21 @@ class Response {
     if (!res.headers.has("content-type")) res.headers.set("content-type", "text/event-stream");
     if (!res.headers.has("cache-control")) res.headers.set("cache-control", "no-cache");
     return new Response(__sseFrames(events), { status: res.status, statusText: res.statusText, headers: res.headers });
+  }
+
+  // A redirect to url, as given, with no body. Fetch throws a RangeError for a status that isn't a
+  // redirect; here it panics.
+  static redirect(url: string, status?: i64): Response {
+    const code = status ?? 302;
+    assert(code === 301 || code === 302 || code === 303 || code === 307 || code === 308, "Response.redirect's status must be 301, 302, 303, 307 or 308");
+    let res = new Response(null, { status: code });
+    res.headers.set("location", url);
+    return res;
+  }
+
+  // A network error, as Fetch's: status 0 and no body. serve answers it with a 500.
+  static error(): Response {
+    return new Response(null, { status: 0 });
   }
 
   get ok(): boolean {
@@ -2036,8 +2090,9 @@ type __routerMiddleware = (req: Request, next: __routerNext) => Promise<Response
 // Each route's method, split path, handler, whether it takes every path below its own, and the
 // middleware of the routers mounted around it, outermost first, added together under one lock.
 type __routerRoutes = { methods: string[]; paths: string[][]; handlers: ServeHandler[]; prefixes: boolean[]; groups: __routerMiddleware[][] };
-// A router's routes and middleware, shared so each middleware's next can hold them.
-type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]> };
+// A router's routes and middleware, shared so each middleware's next can hold them, and the
+// handler notFound set, when one was.
+type __routerTable = { routes: Lock<__routerRoutes>; middleware: Lock<__routerMiddleware[]>; notFound: Lock<ServeHandler[]> };
 
 // A value a route's handler gives or throws that makes its own response, as axum's trait does.
 // A Response is given as it is, a thrown string as a 500's text, and any other error a handler
@@ -2322,7 +2377,9 @@ async function serveConnection(conn: TcpStream, handler: ServeHandler, host: str
 }
 
 // Routes requests by method and path, as Hono and Express do: the first route matching both
-// runs, ':name' segments match any one segment, and a request no route matches gets a 404.
+// runs, ':name' segments match any one segment, a last '*' segment matches the rest, a path
+// routed only for other methods gets a 405 with Allow, or a 204 for OPTIONS, and a request no
+// route matches gets a 404 or what notFound's handler gives.
 // ponytail: each request walks every route in order; a tree of segments would scale further.
 class Router {
   private table: shared<__routerTable>;
@@ -2336,7 +2393,8 @@ class Router {
     const groups: __routerMiddleware[][] = [];
     const routes: __routerRoutes = { methods: [], paths: [], handlers: handlers, prefixes: [], groups: groups };
     const middleware: __routerMiddleware[] = [];
-    const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware) });
+    const missing: ServeHandler[] = [];
+    const table = shared<__routerTable>({ routes: new Lock<__routerRoutes>(routes), middleware: new Lock<__routerMiddleware[]>(middleware), notFound: new Lock<ServeHandler[]>(missing) });
     const held = table.clone();
     this.table = table;
     this.inner = Router.routing(held, 1);
@@ -2353,6 +2411,14 @@ class Router {
 
   // Wraps every route and the 404, whenever it is added; the first added runs outermost.
   use(this: Mut<this>, middleware: __routerMiddleware) { this.table.middleware.update((m) => { m.push(middleware); }); }
+
+  // The handler answering what no route takes, in place of the plain 404, as Hono's app.notFound.
+  notFound(this: Mut<this>, handler: ServeHandler) {
+    this.table.notFound.update((n) => {
+      n.splice(0);
+      n.push(handler);
+    });
+  }
 
   get(this: Mut<this>, path: string, handler: ServeHandler) { this.add("GET", path, handler); }
   post(this: Mut<this>, path: string, handler: ServeHandler) { this.add("POST", path, handler); }
@@ -2473,7 +2539,11 @@ class Router {
     const method = req.method.clone();
     const have = path.split("/");
     const found = this.table.routes.update((t) => Router.find(t, method, have, 0));
-    let handler: ServeHandler = async (r: Request) => new Response("Not Found\\n", { status: 404 });
+    const missed = this.table.clone();
+    let handler: ServeHandler = async (r: Request) => {
+      const res = await Router.missed(missed.clone(), r);
+      return res;
+    };
     let params: string[] = [];
     let prefix = false;
     let after: usize = 0;
@@ -2530,7 +2600,10 @@ class Router {
     while (true) {
       const at = from;
       const found = table.routes.update((t) => Router.find(t, method, have, at));
-      if (found === null) return new Response("Not Found\\n", { status: 404 });
+      if (found === null) {
+        const res = await Router.missed(table.clone(), req);
+        return res;
+      }
       const params = Router.decoded(found.params);
       if (params === null) return new Response("Bad Request\\n", { status: 400 });
       const again = Router.routing(table.clone(), depth + 1);
@@ -2570,6 +2643,37 @@ class Router {
     }
     const res = await next(req);
     return res;
+  }
+
+  // The answer for a request no route takes: a 405 naming the methods its path is routed for, a
+  // 204 for OPTIONS there, else notFound's handler or a 404.
+  private static async missed(table: shared<__routerTable>, req: Request): Promise<Response> {
+    const have = req.path.split("/");
+    let allowed = table.routes.update((t) => Router.allowed(t, have));
+    if (allowed.length > 0) {
+      allowed.push("OPTIONS");
+      let res = req.method === "OPTIONS" ? new Response(null, { status: 204 }) : new Response("Method Not Allowed\\n", { status: 405 });
+      res.headers.set("allow", allowed.join(", "));
+      return res;
+    }
+    let own = table.notFound.update((n) => n.map((h) => h.clone()));
+    if (own.length === 0) return new Response("Not Found\\n", { status: 404 });
+    const handler = own.pop()!;
+    const res = await handler(req);
+    return res;
+  }
+
+  // The methods of the routes taking a path, in the order they were added, HEAD after GET. A
+  // static route's path is a prefix it may pass on, so it names none.
+  private static allowed(t: Ref<__routerRoutes>, have: Ref<string[]>): string[] {
+    let out: string[] = [];
+    for (let i = 0; i < t.paths.length; i++) {
+      if (t.prefixes[i] || Router.match(t.paths[i], have, false) === null) continue;
+      const m = t.methods[i].clone();
+      if (!out.includes(m)) out.push(m.clone());
+      if (m === "GET" && !out.includes("HEAD")) out.push("HEAD");
+    }
+    return out;
   }
 
   // The first route from index start taking a method and path, its handler cloned, with the
@@ -2613,16 +2717,23 @@ class Router {
   }
 
   // The :params a route's segments take from a path's, or null when they don't match. A prefix
-  // route matches a path with more segments than its own.
+  // route matches a path with more segments than its own, and a last '*' segment takes the rest
+  // of the path, none included, as the param '*'.
   static match(want: Ref<string[]>, have: Ref<string[]>, prefix: boolean): string[] | null {
-    if (prefix ? have.length < want.length : want.length !== have.length) return null;
+    const rest = want.length > 1 && want[want.length - 1] === "*";
+    const fixed = rest ? want.length - 1 : want.length;
+    if (prefix || rest ? have.length < fixed : want.length !== have.length) return null;
     let params: string[] = [];
-    for (let i = 0; i < want.length; i++) {
+    for (let i = 0; i < fixed; i++) {
       if (want[i].startsWith(":")) {
         if (have[i].length === 0) return null;
         params.push(want[i].slice(1));
         params.push(have[i]);
       } else if (want[i] !== have[i]) return null;
+    }
+    if (rest) {
+      params.push("*");
+      params.push(have.slice(fixed as i64).join("/"));
     }
     return params;
   }
@@ -2659,6 +2770,8 @@ class StateRouter<S> {
   delete(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.delete(path, this.bound(handler)); }
   all(this: Mut<this>, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.all(path, this.bound(handler)); }
   route(this: Mut<this>, method: string, path: string, handler: (req: Request, state: S) => Promise<Response>) { this.router.route(method, path, this.bound(handler)); }
+
+  notFound(this: Mut<this>, handler: (req: Request, state: S) => Promise<Response>) { this.router.notFound(this.bound(handler)); }
 
   // A plain router's routes under a prefix, as Router.route mounts one.
   mount(this: Mut<this>, prefix: string, child: Router) { this.router.route(prefix, child); }
@@ -9381,6 +9494,51 @@ export function compress(options: CompressOptions = {}): (req: Request, next: (r
   };
 }
 `,
+  // CORS for a Router, imported as std:cors, as Hono's cors middleware.
+  cors: String.raw`
+// origins are the origins allowed, "*" for any; methods are those a preflight allows; credentials
+// lets a browser send cookies and read the response.
+export type CorsOptions = { origins?: string[]; methods?: string[]; credentials?: boolean };
+
+// The Access-Control-Allow-Origin a request from origin gets, or "" for none. With credentials a
+// "*" can't be sent, so the origin itself is.
+export function allowedOrigin(origins: Ref<string[]>, origin: string, credentials: boolean): string {
+  if (origins.includes("*")) return credentials ? origin : "*";
+  return origins.includes(origin) ? origin : "";
+}
+
+// A Router middleware answering preflight requests itself and adding the Access-Control headers
+// to every other response, the router's 404 and 405 included.
+export function cors(options: CorsOptions = {}): (req: Request, next: (req: Request) => Promise<Response>) => Promise<Response> {
+  const origins = options.origins ?? ["*"];
+  const methods = (options.methods ?? ["GET", "HEAD", "PUT", "POST", "DELETE", "PATCH"]).join(", ");
+  const credentials = options.credentials ?? false;
+  const varies = credentials || !origins.includes("*");
+  return async (req, next) => {
+    const allow = allowedOrigin(origins, req.headers.get("origin") ?? "", credentials);
+    let res: Response;
+    if (req.method === "OPTIONS" && req.headers.has("access-control-request-method")) {
+      res = new Response(null, { status: 204 });
+      if (allow !== "") {
+        res.headers.set("access-control-allow-methods", methods.clone());
+        const asked = req.headers.get("access-control-request-headers");
+        if (asked !== null) res.headers.set("access-control-allow-headers", asked);
+      }
+    } else {
+      res = await next(req);
+    }
+    if (allow !== "") {
+      res.headers.set("access-control-allow-origin", allow);
+      if (credentials) res.headers.set("access-control-allow-credentials", "true");
+    }
+    if (varies) {
+      const had = res.headers.get("vary");
+      res.headers.set("vary", had === null ? "Origin" : had + ", Origin");
+    }
+    return res;
+  };
+}
+`,
   child_process: String.raw`
 declare function fsh_rt_signal_name(n: i64): Ptr<u8>;
 declare function write(fd: i32, data: Ptr<u8>, length: usize): isize;
@@ -13111,7 +13269,7 @@ export function evaluate(module: string): JsValue {
 `;
 
 // Std's modules that have no Node name: only `std:` reaches them, so npm keeps the bare ones.
-export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "query", "s3", "log", "durable", "mcu", "comptime"]);
+export const STD_ONLY = new Set<string>(["tar", "zip", "trace", "inspect", "sim", "grpc", "redis", "auth", "build", "compress", "cors", "query", "s3", "log", "durable", "mcu", "comptime"]);
 
 // The std module a specifier names, if any. `std:os` is the name; `node:os` and `os` name it too,
 // for code ported from Node, as `bun` names Bun's module.

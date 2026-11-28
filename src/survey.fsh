@@ -78,7 +78,7 @@ const RULES: Rule[] = [
   { id: "dynamicRegex", action: "reject", title: "regexes built while the program runs: Fish compiles every regex while compiling" },
   { id: "regexStrings", action: "guided", title: "match, matchAll and search given a string, and next() on matchAll: Fish takes a regex literal there, and matchAll gives an array" },
   { id: "regexState", action: "guided", title: "exec or test on a g or y regex, and lastIndex: a Fish regex keeps no state; use matchAll, or drop the flag" },
-  { id: "forIn", action: "unsupported", title: "for...in loops over an object's keys", feature: "for...in" },
+  { id: "forIn", action: "unsupported", title: "for...in loops assigning a variable declared outside them; declare it in the loop's head", feature: "for...in" },
   { id: "decorators", action: "unsupported", title: "decorators, which Fish runs as macros, so a framework's decorators need a Fish macro of the same name" },
   { id: "namespaces", action: "unsupported", title: "namespaces and module declarations", feature: "Namespaces" },
   { id: "genericFunctionsHeld", action: "unsupported", title: "generic function types held in class fields, arrays or unions, which would box a family of functions" },
@@ -91,6 +91,7 @@ const RULES: Rule[] = [
   { id: "console", action: "unsupported", title: "console methods besides log, error and warn", feature: "The rest of console" },
   { id: "json", action: "unsupported", title: "JSON.parse revivers, and JSON.stringify's replacer and indent arguments" },
   { id: "nestedFunctions", action: "unsupported", title: "generic or generator function declarations inside a function" },
+  { id: "generatorExpressions", action: "unsupported", title: "generator function expressions, as in 'function* () {}': declare the generator at the top level" },
 ];
 
 // A rejected construct has no Fish equivalent and needs a redesign; a guided one, a rewrite.
@@ -568,7 +569,7 @@ function exprRules(e: Ref<Expr>, s: Mut<Scan>) {
     const index: Ref<Expr> = e.index;
     if (object.kind === "meta" && index.kind === "string" && IMPORT_META_MEMBERS.includes(index.value)) s.metaRead.add(object.id);
   } else if (e.kind === "function") {
-    note(s, "A9", e.start);
+    note(s, e.generator ? "generatorExpressions" : "A9", e.start);
     params(s, e.params, false);
   } else if (e.kind === "arrow") params(s, e.params, true);
   // A destructuring assignment ports as a statement of its own.
@@ -651,7 +652,7 @@ function stmtRules(st: Ref<Stmt>, s: Mut<Scan>, depth: usize, ambient: boolean) 
       break;
     case "forIn":
       s.heads.add(st.left.id);
-      note(s, "forIn", st.start);
+      if (st.left.kind !== "let" || st.left.keyword === "var") note(s, "forIn", st.start);
       break;
     case "namespace":
       note(s, "namespaces", st.start);

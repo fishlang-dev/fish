@@ -723,6 +723,7 @@ class MoveChecker<T extends Tables, B extends Body, I extends Instance> {
       // however it left the body; a `for` loop's initializer outlives every pass.
       for (const local of s.kind === "for" ? this.insideList(cx, s.body) : this.inside(cx, s)) this.release(cx, local);
       if (bodyFirst) leaving = this.loopTest(cx, s);
+      else if (s.kind === "for" && s.update !== undefined && s.update.kind === "sequence") for (const part of s.update.exprs) this.expr(cx, part, undefined, true);
       else if (s.kind === "for" && s.update !== undefined) this.expr(cx, s.update, undefined, true);
       leaving = join(leaving, (this.exits.get(s.id) ?? null));
       const after = join(this.state, null);
@@ -3392,7 +3393,8 @@ function stmtUses(tables: Ref<Tables>, instance: Ref<Instance>, st: Mut<LastUseS
       if (s.init !== undefined) stmtUses(tables, instance, st, s.init);
       st.loops.push({ id: s.id, end: s.end });
       if (s.test !== undefined) exprUses(tables, instance, st, s.test);
-      if (s.update !== undefined) exprUses(tables, instance, st, s.update);
+      if (s.update !== undefined && s.update.kind === "sequence") for (const part of s.update.exprs) exprUses(tables, instance, st, part);
+      else if (s.update !== undefined) exprUses(tables, instance, st, s.update);
       for (const x of s.body) stmtUses(tables, instance, st, x);
       st.loops.pop();
       return;

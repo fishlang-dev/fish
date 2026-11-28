@@ -26,7 +26,7 @@ import { openParam, perInstance, PER_INSTANCE } from "./typefns.fsh";
 import { lowerDefaults, writtenName } from "./defaults.fsh";
 import { ASYNC_DISPOSE, DISPOSE, LIVE, idOf, TypeSet, TypeMap, ANY_REGEX, type InterfaceType, type UnionType, type ObjectType, YIELD_NOW, type FutureType, type Field, type GeneratorType, isInteger, isNumeric, type ClassType, type ClosureType, type FunctionType, type Integer, type RefType, type Type, type Typing, type VariantType, type Bound, type LiteralType } from "./typing.fsh";
 import { unsupported, unsupportedDeclaration } from "./unsupported.fsh";
-import { hoistLocals } from "./locals.fsh";
+import { hoistLocals, lowerObjectMethods, OBJECT_CLASS } from "./locals.fsh";
 import { localKeys, lowerKeys, lowerKeysWith, numberKey, topKeys } from "./keys.fsh";
 import { lowerOverloads } from "./overloads.fsh";
 import { checkMoves } from "./moves.fsh";
@@ -734,6 +734,95 @@ function arrowFunction(ids: Mut<Ids>, name: string, arrow: Extract<Expr, { kind:
   return f;
 }
 
+// Function expressions, lowered before checking into the arrows they amount to, so they capture
+// and are typed as arrows are. A named one calling itself needs a const to hold it: its uses of
+// its name become the const's, and it calls itself as a nested function does.
+/** @throws {CompileError} */
+function lowerFunctionExpressions(tables: Mut<Tables>, program: Mut<Stmt[]>) {
+  let rewrites = new Rewrites();
+  let failure: CompileError | undefined = undefined;
+  let held = new Map<usize, string>();
+  walk({ of: "stmts", node: program }, (n) => {
+    if (failure !== undefined) return;
+    if (n.of === "stmt" && n.node.kind === "let" && n.node.keyword === "const") {
+      for (const d of n.node.declarations) if (d.target.kind === "ident" && d.init !== undefined && d.init.kind === "function") held.set(d.init.id, d.target.name);
+      return;
+    }
+    if (n.of !== "expr" || n.node.kind !== "function") return;
+    try {
+      const e = n.node;
+      if (e.generator) throw unsupported("generator function expressions", e);
+      if (e.params.length > 0 && e.params[0]!.pattern.kind === "ident" && (e.params[0]!.pattern as Extract<Pattern, { kind: "ident" }>).name === "this") throw unsupported("'this' parameters", e.params[0]!);
+      const own = ownThis(e.body);
+      // TypeScript's noImplicitThis refuses it too; as an arrow it would read the `this` around it.
+      if (own !== undefined) throw new CompileError("E0708", "a function expression has a 'this' of its own, which Fish doesn't give it; use an arrow to read the 'this' around it, or pass what it needs as a parameter", own.start, own.end);
+      const name = e.name;
+      const holder = held.get(e.id);
+      const recursive = name !== undefined && freeNames(e.params, e.body).has(name);
+      if (recursive && holder === undefined) throw unsupported("named function expressions calling themselves anywhere but a const's value", e);
+      if (recursive) {
+        const declared = declaredIn(e);
+        if (declared.has(name!) || declared.has(holder!)) throw unsupported("named function expressions whose body declares their own or their const's name", e);
+        walk({ of: "stmts", node: e.body }, (m) => {
+          if (m.of === "expr" && m.node.kind === "ident" && m.node.name === name) rewrites.replace(m.node, { ...m.node, name: holder! });
+        });
+      }
+      let params: Param[] = [];
+      for (const p of e.params) params.push(cloneParam(p));
+      let typeParams: TypeParam[] = [];
+      for (const p of e.typeParams) typeParams.push(cloneTypeParam(p));
+      const arrow: Expr = { id: 0, kind: "arrow", move: false, async: e.async, typeParams, params, returnType: e.returnType === undefined ? undefined : cloneTypeNode(e.returnType), body: cloneStmts(e.body), start: e.start, end: e.end };
+      const made = rewrites.replace(e, arrow);
+      if (recursive) tables.nestedFunctions.set(cloneExpr(made), holder!);
+    } catch (err) {
+      if (err instanceof CompileError) failure = err;
+    }
+  });
+  if (failure !== undefined) throw failure!;
+  rebuiltStmts(program, rewrites);
+}
+
+// The first `this` a function's body reads as its own, outside the functions, classes and
+// object methods inside it, which have their own.
+function ownThis(body: Ref<Stmt[]>): Span | undefined {
+  let found: Span[] = [];
+  walkWhile({ of: "stmts", node: body }, (n) => {
+    if (found.length > 0) return false;
+    if (n.of === "expr" && n.node.kind === "this") {
+      found.push({ start: n.node.start, end: n.node.end });
+      return false;
+    }
+    if (n.of === "expr" && (n.node.kind === "function" || n.node.kind === "class")) return false;
+    if (n.of === "stmt" && (n.node.kind === "function" || n.node.kind === "class")) return false;
+    if (n.of === "objectProp" && (n.node.kind === "method" || n.node.kind === "get" || n.node.kind === "set")) return false;
+    return true;
+  });
+  return found.pop();
+}
+
+// Comma expressions written as statements, a `for` loop's initializer included, lowered before
+// checking into a block of one statement per part, run in order. One in a `for` loop's update is
+// run part by part where the update is; one used as a value is refused while checking.
+function lowerSequenceStatements(tables: Mut<Tables>, program: Mut<Stmt[]>) {
+  let rewrites = new Rewrites();
+  walk({ of: "stmts", node: program }, (n) => {
+    if (n.of !== "stmt" || n.node.kind !== "expr" || n.node.expr.kind !== "sequence") return;
+    const s = n.node;
+    let parts: Expr[] = [];
+    sequenceParts(s.expr, parts);
+    let body: Stmt[] = [];
+    for (const part of parts) body.push({ id: nextId(tables.ids), kind: "expr", expr: cloneExpr(part), start: part.start, end: part.end });
+    rewrites.replaceStmt(s, { id: 0, kind: "block", body, start: s.start, end: s.end });
+  });
+  rebuiltStmts(program, rewrites);
+}
+
+// The parts of a comma expression in order, a parenthesized one inside it opened too.
+function sequenceParts(e: Ref<Expr>, out: Mut<Expr[]>): void {
+  if (e.kind !== "sequence") out.push(cloneExpr(e));
+  else for (const x of e.exprs) sequenceParts(x, out);
+}
+
 // A const's function type gives the arrow it holds the parameter, result and error types the
 // arrow leaves unwritten, as TypeScript's contextual typing does.
 /** @throws {CompileError} */
@@ -913,6 +1002,7 @@ export function loweredFile(tables: Mut<Tables>, given: Stmt[], library: boolean
   if (holdsNode({ of: "stmts", node: written }, (n) => (n.of === "expr" && n.node.kind === "ident" && TIMER_GLOBALS.has(n.node.name)) || (n.of === "classMember" && privateMember(n.node)) || (n.of === "expr" && n.node.kind === "member" && typeof n.node.name === "string" && n.node.name.startsWith("#")))) return { statements: [], fallback: "the file uses a timer or a private name" };
   if (tables.timerMains.size > 0 && !library) return { statements: [], fallback: "the program's main runs timers" };
   localKeys(written);
+  if (holdsNode({ of: "stmts", node: written }, (n) => n.of === "objectProp" && (n.node.kind === "method" || n.node.kind === "get" || n.node.kind === "set"))) return { statements: [], fallback: "the file has methods in object literals" };
   if (hoistLocals(tables, written).hoisted.length > 0) return { statements: [], fallback: "the file declares local types" };
   if (tables.topKeys === undefined) return { statements: [], fallback: "the program's keys weren't kept" };
   lowerKeysWith(written, tables.topKeys!);
@@ -921,6 +1011,8 @@ export function loweredFile(tables: Mut<Tables>, given: Stmt[], library: boolean
     if (n.of === "objectProp" && n.node.kind === "get" && typeof n.node.key === "string") tables.getterNames.add(n.node.key);
     return false;
   });
+  lowerFunctionExpressions(tables, written);
+  lowerSequenceStatements(tables, written);
   lowerDefaults(tables, written);
   return { statements: written, fallback: undefined };
 }
@@ -949,6 +1041,7 @@ function lowered(tables: Mut<Tables>, given: Stmt[], library: boolean): Stmt[] {
   if (misplaced.length > 0) throw new CompileError("E1103", misplaced[0]!.message, misplaced[0]!.start, misplaced[0]!.end);
   written = lowerOverloads(tables.ids, written);
   localKeys(written);
+  written = lowerObjectMethods(tables.ids, written);
   const hoisted = hoistLocals(tables, written).hoisted;
   written = [...written, ...hoisted];
   lowerKeys(written);
@@ -958,6 +1051,8 @@ function lowered(tables: Mut<Tables>, given: Stmt[], library: boolean): Stmt[] {
     if (n.of === "objectProp" && n.node.kind === "get" && typeof n.node.key === "string") tables.getterNames.add(n.node.key);
     return false;
   });
+  lowerFunctionExpressions(tables, written);
+  lowerSequenceStatements(tables, written);
   lowerDefaults(tables, written);
   if (!library) timersRunAsync(tables.ids, written, tables.timerMains);
   let std = stdFor(tables, written);
@@ -2288,8 +2383,14 @@ class Checker implements RegistryHost, GenericClassesHost, InstancingHost, Resol
           // instance of it made with a definition's placeholders.
           const placeholder = !this.instancingState.concreteness.concrete(this.tables.typing, this.tables.arenas.classOf(next).type);
           const defining = placeholder || [...this.genericClassesState.defined.values()].includes(next);
+          const literal = this.tables.typing.rec(this.tables.arenas.classOf(next).type).name.startsWith(OBJECT_CLASS);
           for (const f of this.registry().settle(next)) {
             const reported = this.errors.length;
+            // An object literal's class has a field type only in each instance.
+            if (defining && literal) {
+              this.perInstanceOnly(f, reported);
+              continue;
+            }
             try {
               this.definingGeneric = defining || this.instancing().generic(f);
               this.tables.typing.openWithin = this.definingGeneric;
@@ -6573,14 +6674,27 @@ class BodyChecker implements Context, GuardHost {
         this.pushScope(new Map<string, LocalId>());
         if (s.init !== undefined) this.statement(s.init);
         if (s.test !== undefined) this.exprs().condition(s.test);
-        if (s.update !== undefined) this.exprs().effect(s.update);
+        if (s.update !== undefined && s.update.kind === "sequence") for (const part of s.update.exprs) this.exprs().effect(part);
+        else if (s.update !== undefined) this.exprs().effect(s.update);
         this.enterTarget({ stmt: standIn(s), kind: "loop" as const });
         this.scoped(s.id, "body", s.body);
         this.leaveTarget();
         this.popScope();
         return undefined;
-      case "forIn":
-        throw unsupported("'for...in' loops", s);
+      // `for (const k in o)` loops over what `Object.keys(o)` gives, each key a string.
+      case "forIn": {
+        if (s.await) throw new CompileError("E0004", "'for await' loops over values with 'of', not 'in'", s.start, s.end);
+        const left: Ref<Stmt | Pattern> = s.left;
+        if (left.kind !== "let" || left.keyword === "var") throw unsupported("'for...in' loops over a variable declared outside them", left);
+        const d: Ref<Declarator> = left.declarations[0]!;
+        if (left.declarations.length > 1 || d.target.kind !== "ident") throw new CompileError("E0004", "a 'for...in' variable can't be a destructuring pattern; it holds each key, a string", d.target.start, d.target.end);
+        if (d.type !== undefined) throw new CompileError("E0004", "a 'for...in' variable can't have a type annotation; it holds each key, a string", d.type.start, d.type.end);
+        const at = { start: s.right.start, end: s.right.end };
+        const keys: Expr = { id: nextId(this.cx.tables.ids), kind: "member", object: { id: nextId(this.cx.tables.ids), kind: "ident", name: "Object", ...at }, name: "keys", optional: false, ...at };
+        const right: Expr = { id: nextId(this.cx.tables.ids), kind: "call", callee: keys, args: [cloneExpr(s.right)], typeArgs: [], optional: false, ...at };
+        const lowered = this.cx.tables.rewrites.replaceStmt(s, { id: 0, kind: "forOf", await: false, left: cloneStmt(left), right, body: s.body.slice(), start: s.start, end: s.end });
+        return this.statement(lowered);
+      }
       // `for (const x of arr)` borrows each element, shared, or copies a Copy one.
       case "forOf": {
         if (s.await) {

@@ -837,3 +837,117 @@ async function main(): Promise<void> {
   let app = new Router();
   app.get("/search", async (_req, body: Query): Promise<Query> => body);
 }
+// case: router_method_not_allowed
+// expect: GET /users 200 [-] list
+// expect: DELETE /users 405 [GET, HEAD, POST, OPTIONS] Method Not Allowed
+// expect: OPTIONS /users 204 [GET, HEAD, POST, OPTIONS]
+// expect: PUT /items/3 405 [PATCH, OPTIONS] Method Not Allowed
+// expect: OPTIONS /custom 200 [-] own options
+// expect: PUT /any 200 [-] any
+// expect: GET /nowhere 404 [-] Not Found
+// expect: OPTIONS /nowhere 404 [-] Not Found
+// expect: POST /files/a.txt 404 [-] Not Found
+// A path routed only for other methods gets a 405 naming each once, OPTIONS there a 204 naming them,
+// and an OPTIONS or 'all' route of the program's own still answers first; static routes and
+// paths no route takes stay 404.
+async function show(app: Ref<Router>, method: string, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method: method }));
+  const body = await res.text();
+  console.log(`${method} ${path} ${res.status} [${res.headers.get("allow") ?? "-"}] ${body.trim()}`.trimEnd());
+}
+
+async function main(): Promise<void> {
+  let app = new Router();
+  app.get("/users", async (_req) => new Response("list"));
+  app.post("/users", async (_req) => new Response("made", { status: 201 }));
+  app.patch("/items/:id", async (_req) => new Response("patched"));
+  app.patch("/items/:n", async (_req) => new Response("patched again"));
+  app.route("OPTIONS", "/custom", async (_req) => new Response("own options"));
+  app.get("/custom", async (_req) => new Response("custom"));
+  app.all("/any", async (_req) => new Response("any"));
+  app.static("/files", ".");
+  await show(app, "GET", "/users");
+  await show(app, "DELETE", "/users");
+  await show(app, "OPTIONS", "/users");
+  await show(app, "PUT", "/items/3");
+  await show(app, "OPTIONS", "/custom");
+  await show(app, "PUT", "/any");
+  await show(app, "GET", "/nowhere");
+  await show(app, "OPTIONS", "/nowhere");
+  await show(app, "POST", "/files/a.txt");
+}
+// case: router_wildcard
+// expect: /files 200 files []
+// expect: /files/ 200 files []
+// expect: /files/a.txt 200 files [a.txt]
+// expect: /files/docs/a%20b.txt 200 files [docs/a b.txt]
+// expect: /filesx 404 Not Found
+// expect: /users/7/x/y 200 user 7 [x/y]
+// expect: /api/v1/anything 200 api [v1/anything]
+// expect: /api 200 api []
+// A last '*' segment takes the rest of the path, none included, read percent-decoded as the
+// param '*'; it works after :params and in a mounted router.
+async function show(app: Ref<Router>, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path));
+  const body = await res.text();
+  console.log(path, res.status, body.trim());
+}
+
+async function main(): Promise<void> {
+  let api = new Router();
+  api.get("/*", async (req) => new Response("api [" + req.param("*") + "]"));
+  let app = new Router();
+  app.get("/files/*", async (req) => new Response("files [" + req.param("*") + "]"));
+  app.get("/users/:id/*", async (req) => new Response("user " + req.param("id") + " [" + req.param("*") + "]"));
+  app.route("/api", api);
+  for (const p of ["/files", "/files/", "/files/a.txt", "/files/docs/a%20b.txt", "/filesx", "/users/7/x/y", "/api/v1/anything", "/api"]) await show(app, p);
+}
+// case: router_not_found
+// expect: seen /nowhere
+// expect: 404 application/json {"error":"no route for /nowhere"}
+// expect: seen /old
+// expect: 404 application/json {"error":"no route for /gone"}
+// expect: seen /a
+// expect: 405 text/plain;charset=UTF-8 Method Not Allowed
+// expect: seen /a
+// expect: 200 text/plain;charset=UTF-8 a
+// notFound's handler answers what no route takes, inside the middleware, after a re-route too,
+// and the last set wins; a 405 is still the router's own.
+async function show(app: Ref<Router>, method: string, path: string): Promise<void> {
+  const res = await app.handle(new Request("http://h" + path, { method: method }));
+  const body = await res.text();
+  console.log(res.status, res.headers.get("content-type") ?? "-", body.trim());
+}
+
+async function main(): Promise<void> {
+  let app = new Router();
+  app.use(async (req, next) => {
+    console.log("seen", req.path);
+    let moved = req;
+    if (moved.path === "/old") moved.path = "/gone";
+    const res = await next(moved);
+    return res;
+  });
+  app.get("/a", async (_req) => new Response("a"));
+  app.notFound(async (_req) => new Response("first"));
+  app.notFound(async (req) => {
+    let res = new Response("{\"error\":\"no route for " + req.path + "\"}", { status: 404 });
+    res.headers.set("content-type", "application/json");
+    return res;
+  });
+  await show(app, "GET", "/nowhere");
+  await show(app, "GET", "/old");
+  await show(app, "POST", "/a");
+  await show(app, "GET", "/a");
+}
+// case: router_state_not_found
+// expect: 404 missing, 3 routes
+// A StateRouter's notFound handler is given the state.
+async function main(): Promise<void> {
+  let app = new Router().state({ routes: 3 });
+  app.get("/a", async (_req, _state) => new Response("a"));
+  app.notFound(async (_req, state) => new Response("missing, " + String(state.routes) + " routes", { status: 404 }));
+  const res = await app.handle(new Request("http://h/b"));
+  const body = await res.text();
+  console.log(res.status, body);
+}
